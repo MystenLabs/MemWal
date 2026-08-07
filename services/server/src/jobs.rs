@@ -107,6 +107,13 @@ pub enum WalletOperation {
         account_id: Option<String>,
         #[serde(default)]
         policy_package_id: Option<String>,
+        /// Walrus epoch the storage lease ends at (WALM-296), carried from
+        /// the `UploadBlobError::MetadataTransferFailed` that triggered this
+        /// recovery job. `#[serde(default)]` so in-flight jobs enqueued
+        /// before this field existed deserialize as `None` (the prior
+        /// behavior) rather than failing.
+        #[serde(default)]
+        end_epoch: Option<i32>,
     },
     /// Finish a partially recovered upload after metadata+transfer has already
     /// succeeded. This keeps DB/vector retries from repeating an on-chain
@@ -133,6 +140,13 @@ pub enum WalletOperation {
         agent_id: Option<String>,
         #[serde(default)]
         package_id: Option<String>,
+        /// Carried from the originating SetMetadataAndTransfer job so the
+        /// eventual insert_vector call can persist it (WALM-296), the same
+        /// way agent_id/package_id already are. `#[serde(default)]` so
+        /// in-flight jobs enqueued before this field existed deserialize as
+        /// `None` rather than failing.
+        #[serde(default)]
+        end_epoch: Option<i32>,
     },
 }
 
@@ -517,6 +531,7 @@ pub(crate) async fn execute_wallet_job(
             encrypted_b64,
             account_id,
             policy_package_id,
+            end_epoch,
         } => {
             let result = execute_set_metadata_and_transfer(
                 state,
@@ -547,7 +562,7 @@ pub(crate) async fn execute_wallet_job(
                             enqueued_wallet_index,
                             agent_id.as_deref(),
                             package_id.as_deref(),
-                            None,
+                            end_epoch,
                         )
                         .await
                         {
@@ -564,6 +579,7 @@ pub(crate) async fn execute_wallet_job(
                                 importance,
                                 agent_id.clone(),
                                 package_id.clone(),
+                                end_epoch,
                             )
                             .await
                             {
@@ -641,6 +657,7 @@ pub(crate) async fn execute_wallet_job(
             importance,
             agent_id,
             package_id,
+            end_epoch,
         } => {
             insert_vector_and_mark_remember_done(
                 state,
@@ -654,7 +671,7 @@ pub(crate) async fn execute_wallet_job(
                 enqueued_wallet_index,
                 agent_id.as_deref(),
                 package_id.as_deref(),
-                None,
+                end_epoch,
             )
             .await
         }
@@ -845,6 +862,7 @@ async fn enqueue_finalize_uploaded_blob(
     importance: f32,
     agent_id: Option<String>,
     package_id: Option<String>,
+    end_epoch: Option<i32>,
 ) -> Result<(), WalletJobError> {
     let mut storage = state.wallet_storage.clone();
     storage
@@ -861,6 +879,7 @@ async fn enqueue_finalize_uploaded_blob(
                 importance,
                 agent_id,
                 package_id,
+                end_epoch,
             },
         }))
         .await
@@ -962,6 +981,7 @@ async fn execute_upload_and_transfer(
             blob_id,
             object_id,
             message,
+            end_epoch,
         }) => {
             tracing::warn!(
                 "[wallet-job:upload] job_id={} upload succeeded but metadata/transfer failed: {}",
@@ -1002,6 +1022,7 @@ async fn execute_upload_and_transfer(
                         encrypted_b64: Some(encrypted_b64.clone()),
                         account_id: Some(account_id.clone()),
                         policy_package_id: Some(state.config.seal_policy_package_id.clone()),
+                        end_epoch,
                     },
                 }))
                 .await
@@ -2155,6 +2176,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 importance: 0.5,
                 agent_id: None,
                 package_id: None,
+                end_epoch: None,
             },
         };
         let mut value = serde_json::to_value(&job).expect("serialize");
@@ -2562,6 +2584,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 importance: crate::services::extractor::IMPORTANCE_STANDARD,
                 agent_id: None,
                 package_id: None,
+                end_epoch: None,
             },
         });
 

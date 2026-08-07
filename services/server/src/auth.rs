@@ -162,6 +162,17 @@ pub async fn verify_signature(
     let verifying_key =
         VerifyingKey::from_bytes(&pk_array).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
+    // Canonicalize to lowercase hex derived from the decoded bytes, not the
+    // caller-supplied header string: `hex::decode` above accepts mixed-case
+    // input, so without this the same delegate key could vary casing across
+    // requests to obtain independent identities for account-resolution
+    // caching and — most importantly — the read-API rate limiter's per-key
+    // Redis bucket (`rate:read:dk:{public_key}` in rate_limit.rs), trivially
+    // defeating that abuse-prevention control. Every downstream use of
+    // `public_key_hex` (cache keys, `AuthInfo.public_key`, logging) must see
+    // this canonical form, not the raw header value.
+    let public_key_hex = hex::encode(pk_array);
+
     // Decode signature
     let sig_bytes = hex::decode(&signature_hex).map_err(|_| StatusCode::UNAUTHORIZED)?;
     let sig_array: [u8; 64] = sig_bytes.try_into().map_err(|_| StatusCode::UNAUTHORIZED)?;
@@ -737,6 +748,47 @@ mod tests {
             0x1d, 0x1e, 0x1f, 0x20,
         ];
         ed25519_dalek::SigningKey::from_bytes(&secret)
+    }
+
+    // ── WALM-297 review (Henry): public-key casing must canonicalize ────
+    //
+    // `hex::decode` accepts mixed-case input, but `AuthInfo.public_key` (and
+    // everything keyed by it downstream: account-resolution cache lookups,
+    // and — the actual security-relevant one — read_api_rate_limit_middleware's
+    // per-key Redis bucket `rate:read:dk:{public_key}`) must see one
+    // canonical string per key, or the same delegate key could vary casing
+    // to get a fresh rate-limit bucket on every request. The fix re-encodes
+    // from the decoded bytes (`hex::encode(pk_array)`) rather than trusting
+    // the caller-supplied header string — this pins that invariant directly,
+    // independent of the full request pipeline.
+    #[test]
+    fn public_key_hex_canonicalizes_regardless_of_input_casing() {
+        let lower = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(lower.len(), 64, "fixture must be exactly 32 bytes of hex");
+        let upper = lower.to_ascii_uppercase();
+        let mixed = "0123456789ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef";
+
+        let canon_from = |s: &str| {
+            let bytes = hex::decode(s).unwrap();
+            let array: [u8; 32] = bytes.try_into().unwrap();
+            hex::encode(array)
+        };
+
+        let canonical = canon_from(lower);
+        assert_eq!(
+            canonical, lower,
+            "lowercase input should already be canonical"
+        );
+        assert_eq!(
+            canon_from(&upper),
+            canonical,
+            "uppercase input must canonicalize to the same string as lowercase"
+        );
+        assert_eq!(
+            canon_from(mixed),
+            canonical,
+            "mixed-case input must canonicalize to the same string as lowercase"
+        );
     }
 
     #[test]

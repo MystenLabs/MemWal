@@ -231,6 +231,15 @@ otherwise — including when `end_epoch`/`expires_at` are still `null` (not
 yet synced; a background sweep populates them within roughly 5 minutes of
 a memory being written, sooner for the primary upload path).
 
+The first time the sweep resolves a row's `end_epoch`/`expires_at` from
+`null` to a real value, that row's `updated_at` advances too — so a client
+that already synced the row while it was still unsynced will see the
+populated values on its next incremental poll, rather than being stuck
+with `null` forever. A later routine re-verification that reconfirms an
+unchanged value does *not* advance `updated_at` (this would otherwise make
+every synced memory reappear roughly once a day regardless of whether
+anything changed); only a genuine change does.
+
 ### Cursor semantics (both paginated endpoints)
 
 `next_cursor` is **always** returned for a non-empty page — including the

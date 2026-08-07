@@ -124,15 +124,25 @@ struct NamespacesCursor {
     snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// `snapshot_at: None` resets the walk boundary — pass `None` when encoding
+/// the *terminal* cursor of a walk (alongside `has_more: false`) so the
+/// client's next incremental poll (which starts a brand-new walk from that
+/// checkpoint) gets a fresh snapshot captured at that later time, instead of
+/// permanently reusing the original walk's snapshot forever. See the
+/// `has_more`-gated call site in `query_owner_namespaces` and the doc
+/// comment on `NamespacesCursor::snapshot_at` below for why an unconditional
+/// `Some(snapshot_at)` here would silently freeze incremental sync after the
+/// first full walk (a row updated after that walk's snapshot would then
+/// never pass `updated_at <= snapshot_at` on any later poll).
 fn encode_namespaces_cursor(
     updated_at: chrono::DateTime<chrono::Utc>,
     namespace: &str,
-    snapshot_at: chrono::DateTime<chrono::Utc>,
+    snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> String {
     let json = serde_json::to_vec(&NamespacesCursor {
         updated_at,
         namespace: namespace.to_string(),
-        snapshot_at: Some(snapshot_at),
+        snapshot_at,
     })
     .expect("cursor serializes");
     // Same URL_SAFE_NO_PAD rationale as `encode_cursor` below — this value is
@@ -172,7 +182,10 @@ pub(crate) async fn query_owner_namespaces(
     limit: i64,
 ) -> Result<NamespacesResponse, AppError> {
     let limit = limit.clamp(1, MAX_NAMESPACES_LIMIT);
-    let cursor_after = cursor.as_deref().map(decode_namespaces_cursor).transpose()?;
+    let cursor_after = cursor
+        .as_deref()
+        .map(decode_namespaces_cursor)
+        .transpose()?;
 
     // See the doc comment on `NamespacesCursor::snapshot_at` (mirroring
     // `MemoriesCursor::snapshot_at` below): bind this whole walk to one
@@ -237,9 +250,15 @@ pub(crate) async fn query_owner_namespaces(
     // the entire point of the cursor. The only cursor-less case is an empty
     // page: there is no row to take a watermark from, so the client keeps
     // the one it already has.
-    let next_cursor = rows
-        .last()
-        .map(|(name, _, _, last_updated_at)| encode_namespaces_cursor(*last_updated_at, name, snapshot_at));
+    // `Some(snapshot_at)` while the walk continues (has_more) so later pages
+    // stay bound to the same point-in-time filter; `None` on the terminal
+    // page so the client's *next* incremental poll — which starts a new
+    // walk from this checkpoint — captures a fresh snapshot instead of
+    // reusing this walk's, which would otherwise never advance again (see
+    // `encode_namespaces_cursor`'s doc comment).
+    let next_cursor = rows.last().map(|(name, _, _, last_updated_at)| {
+        encode_namespaces_cursor(*last_updated_at, name, has_more.then_some(snapshot_at))
+    });
 
     let namespaces = rows
         .into_iter()
@@ -307,15 +326,21 @@ struct MemoriesCursor {
     snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// `snapshot_at: None` resets the walk boundary — see
+/// `encode_namespaces_cursor`'s doc comment (the `memories` and
+/// `namespaces` cursors share this exact contract): pass `None` only for
+/// the terminal cursor of a walk, so the client's next incremental poll
+/// gets a fresh snapshot rather than being permanently frozen at the first
+/// walk's boundary.
 fn encode_cursor(
     updated_at: chrono::DateTime<chrono::Utc>,
     id: &str,
-    snapshot_at: chrono::DateTime<chrono::Utc>,
+    snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> String {
     let json = serde_json::to_vec(&MemoriesCursor {
         updated_at,
         id: id.to_string(),
-        snapshot_at: Some(snapshot_at),
+        snapshot_at,
     })
     .expect("cursor serializes");
     // URL_SAFE_NO_PAD (not STANDARD): next_cursor is used verbatim in a URL
@@ -408,7 +433,11 @@ pub(crate) async fn query_owner_memories(
     // the final (or only) page still checkpoints the client for its next
     // incremental poll. Only an empty page has no cursor, because it has no
     // row to build one from.
-    let next_cursor = rows.last().map(|r| encode_cursor(r.4, &r.0, snapshot_at));
+    // `Some(snapshot_at)` while the walk continues, `None` on the terminal
+    // page — see `encode_cursor`'s doc comment.
+    let next_cursor = rows
+        .last()
+        .map(|r| encode_cursor(r.4, &r.0, has_more.then_some(snapshot_at)));
 
     let memories = rows
         .into_iter()
@@ -639,7 +668,7 @@ mod tests {
                 found_standard_unsafe_case = true;
             }
 
-            let encoded = encode_cursor(updated_at, &id, snapshot_at);
+            let encoded = encode_cursor(updated_at, &id, Some(snapshot_at));
             assert!(
                 !encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='),
                 "encoded cursor must be URL-safe with no padding, got: {}",
@@ -784,7 +813,10 @@ mod tests {
             vec!["alpha", "zulu"],
         );
         let watermark = first.next_cursor.expect("first page must checkpoint");
-        assert_eq!(decode_namespaces_cursor(&watermark).unwrap().namespace, "zulu");
+        assert_eq!(
+            decode_namespaces_cursor(&watermark).unwrap().namespace,
+            "zulu"
+        );
 
         // Now `alpha` — already synced, and alphabetically *before* the
         // cursor's namespace — grows a second memory after that checkpoint.
@@ -832,10 +864,9 @@ mod tests {
             let namespace = format!("ns/{i}+{}", uuid::Uuid::new_v4());
             let updated_at =
                 chrono::DateTime::from_timestamp(1_700_000_000 + i, (i as u32) * 137).unwrap();
-            let snapshot_at =
-                chrono::DateTime::from_timestamp(1_700_000_100 + i, 0).unwrap();
+            let snapshot_at = chrono::DateTime::from_timestamp(1_700_000_100 + i, 0).unwrap();
 
-            let encoded = encode_namespaces_cursor(updated_at, &namespace, snapshot_at);
+            let encoded = encode_namespaces_cursor(updated_at, &namespace, Some(snapshot_at));
             assert!(
                 !encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='),
                 "encoded cursor must be URL-safe with no padding, got: {}",
@@ -935,7 +966,9 @@ mod tests {
         seed_entry(&pool, &owner, "n1", "one", 10, ts(0)).await;
         seed_entry(&pool, &owner, "n2", "two", 10, ts(60)).await;
 
-        let page = query_owner_namespaces(&pool, &owner, None, 2).await.unwrap();
+        let page = query_owner_namespaces(&pool, &owner, None, 2)
+            .await
+            .unwrap();
         assert_eq!(page.namespaces.len(), 2);
         let cursor = page
             .next_cursor
@@ -1070,8 +1103,7 @@ mod tests {
         let page2 = query_owner_namespaces(&pool, &owner, Some(cursor1), 10)
             .await
             .unwrap();
-        let page2_names: Vec<String> =
-            page2.namespaces.iter().map(|n| n.name.clone()).collect();
+        let page2_names: Vec<String> = page2.namespaces.iter().map(|n| n.name.clone()).collect();
         assert_eq!(
             page2_names,
             vec!["charlie"],
@@ -1086,9 +1118,46 @@ mod tests {
         // doc comment.
         assert!(!page2.has_more, "walk must terminate");
 
-        // A fresh walk (cursor = None) is a new snapshot and must pick up
-        // "alpha" — this is what actually rules out the old permanent-drop
-        // bug: nothing is lost forever, only deferred to the next walk.
+        // The terminal cursor (has_more: false) must have its snapshot_at
+        // reset to None — this is the actual mechanism the fix relies on:
+        // a real incremental-sync client polls again with THIS cursor, not
+        // with None, so if snapshot_at survived here the next poll would be
+        // permanently frozen at this walk's boundary.
+        let terminal_cursor = page2
+            .next_cursor
+            .clone()
+            .expect("terminal page still checkpoints");
+        assert_eq!(
+            decode_namespaces_cursor(&terminal_cursor)
+                .unwrap()
+                .snapshot_at,
+            None,
+            "terminal cursor must reset snapshot_at so the next poll captures a fresh one"
+        );
+
+        // The realistic incremental-sync client behavior: poll again using
+        // the terminal cursor from the previous walk (never `None` — a real
+        // client never "starts over"). This must now see "alpha", proving
+        // the fix, not just that a from-scratch resync would eventually see
+        // it (which the old, broken code also satisfied trivially).
+        let next_poll = query_owner_namespaces(&pool, &owner, Some(terminal_cursor), 10)
+            .await
+            .unwrap();
+        let next_poll_names: Vec<String> = next_poll
+            .namespaces
+            .iter()
+            .map(|n| n.name.clone())
+            .collect();
+        assert_eq!(
+            next_poll_names,
+            vec!["alpha"],
+            "an incremental poll using the previous walk's terminal cursor must surface a \
+             namespace created after that walk's snapshot, got {:?}",
+            next_poll_names
+        );
+
+        // A fresh walk (cursor = None) is a new snapshot and must also pick
+        // up "alpha" — the from-scratch-resync case.
         let fresh = query_owner_namespaces(&pool, &owner, None, 10)
             .await
             .unwrap();
@@ -1196,8 +1265,7 @@ mod tests {
         let page2 = query_owner_namespaces(&pool, &owner, Some(cursor1), 10)
             .await
             .unwrap();
-        let page2_names: Vec<String> =
-            page2.namespaces.iter().map(|n| n.name.clone()).collect();
+        let page2_names: Vec<String> = page2.namespaces.iter().map(|n| n.name.clone()).collect();
         assert_eq!(
             page2_names,
             vec!["charlie"],
@@ -1528,8 +1596,40 @@ mod tests {
             "walk must terminate even though `s1` was excluded"
         );
 
+        // The terminal cursor must reset snapshot_at — see the identical
+        // assertion in query_owner_namespaces_surfaces_namespace_created_mid_walk_on_next_walk
+        // for why this matters: a real client polls again with this exact
+        // cursor, never with None.
+        let terminal_cursor = page2
+            .next_cursor
+            .clone()
+            .expect("terminal page still checkpoints");
+        assert_eq!(
+            decode_cursor(&terminal_cursor).unwrap().snapshot_at,
+            None,
+            "terminal cursor must reset snapshot_at so the next poll captures a fresh one"
+        );
+
+        // The realistic incremental-sync client behavior: poll again using
+        // the terminal cursor, not None. Must now see the mutated row.
+        let next_poll = query_owner_memories(&pool, &owner, Some(terminal_cursor), 10)
+            .await
+            .unwrap();
+        let next_poll_ids: Vec<String> = next_poll
+            .memories
+            .iter()
+            .map(|m| m.memory_id.clone())
+            .collect();
+        assert_eq!(
+            next_poll_ids,
+            vec![format!("{}-s1", owner)],
+            "an incremental poll using the previous walk's terminal cursor must surface a row \
+             mutated after that walk's snapshot, got {:?}",
+            next_poll_ids
+        );
+
         // A fresh walk (cursor = None) captures a new, later snapshot
-        // boundary and picks the mutated row back up.
+        // boundary and also picks the mutated row back up.
         let fresh = query_owner_memories(&pool, &owner, None, 10).await.unwrap();
         let fresh_ids: Vec<String> = fresh.memories.iter().map(|m| m.memory_id.clone()).collect();
         assert!(

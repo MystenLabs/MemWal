@@ -100,9 +100,7 @@ mod tests {
     #[tokio::test]
     async fn full_migration_pipeline_runs_end_to_end() {
         let Ok(database_url) = std::env::var("MIGRATION_PIPELINE_TEST_DATABASE_URL") else {
-            eprintln!(
-                "skipping: MIGRATION_PIPELINE_TEST_DATABASE_URL is not configured"
-            );
+            eprintln!("skipping: MIGRATION_PIPELINE_TEST_DATABASE_URL is not configured");
             return;
         };
 
@@ -115,7 +113,10 @@ mod tests {
                 .fetch_one(&db.pool)
                 .await
                 .unwrap();
-        assert_eq!(remaining_nulls, 0, "backfill should have cleared every NULL updated_at row");
+        assert_eq!(
+            remaining_nulls, 0,
+            "backfill should have cleared every NULL updated_at row"
+        );
 
         let index_valid: Option<bool> = sqlx::query_scalar(
             "SELECT indisvalid FROM pg_index JOIN pg_class ON pg_class.oid = pg_index.indexrelid \
@@ -124,7 +125,11 @@ mod tests {
         .fetch_optional(&db.pool)
         .await
         .unwrap();
-        assert_eq!(index_valid, Some(true), "pagination index should exist and be valid");
+        assert_eq!(
+            index_valid,
+            Some(true),
+            "pagination index should exist and be valid"
+        );
 
         let constraint_dropped: Option<String> = sqlx::query_scalar(
             "SELECT conname FROM pg_constraint WHERE conname = 'vector_entries_updated_at_not_null'",
@@ -435,16 +440,16 @@ mod tests {
     /// case). Regression-protects the negative case for both new
     /// write-paths the sweep uses.
     #[tokio::test]
-    async fn expiry_methods_never_touch_updated_at() {
+    async fn mark_expiry_scheduled_never_touches_updated_at() {
         let Some(db) = test_db().await else {
             eprintln!("skipping DB integration test: DATABASE_URL is not configured");
             return;
         };
-        let id = format!("test-expiry-updated-at-{}", uuid::Uuid::new_v4());
+        let id = format!("test-expiry-scheduled-updated-at-{}", uuid::Uuid::new_v4());
 
         db.insert_vector(
             &id,
-            "0xtest-owner-expiry-updated-at",
+            "0xtest-owner-expiry-scheduled-updated-at",
             "test-ns",
             "blob-1",
             &[0.1_f32; 1536],
@@ -469,10 +474,10 @@ mod tests {
         // couldn't accidentally pass — updated_at must genuinely not move.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
+        // Pure bookkeeping (no API-visible field changes) — must never bump
+        // updated_at, or every read that schedules a staleness check would
+        // spuriously reappear in Console's incremental sync.
         db.mark_expiry_scheduled(&[id.clone()]).await.unwrap();
-        db.set_memory_expiry(&id, 457, chrono::Utc::now())
-            .await
-            .unwrap();
 
         let after_updated_at: chrono::DateTime<chrono::Utc> =
             sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
@@ -484,7 +489,107 @@ mod tests {
 
         assert_eq!(
             original_updated_at, after_updated_at,
-            "mark_expiry_scheduled/set_memory_expiry must never touch updated_at"
+            "mark_expiry_scheduled must never touch updated_at"
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
+    }
+
+    /// WALM-297 review (Henry): `set_memory_expiry` previously never bumped
+    /// `updated_at` at all — deliberately, to avoid the ~24h re-verification
+    /// sweep making every synced row reappear in Console's incremental
+    /// sync — but that also meant the *first* real write (a row's expiry
+    /// resolving from unknown to known) was invisible to a client that had
+    /// already synced that row, silently breaking WALM-296 for exactly the
+    /// rows synced before their expiry was known. The fix conditions the
+    /// bump on the value actually changing (`IS DISTINCT FROM`, null-safe).
+    /// This test pins all three cases: first real write bumps, an unchanged
+    /// re-verification does not, and a genuine later change bumps again.
+    #[tokio::test]
+    async fn set_memory_expiry_bumps_updated_at_only_when_value_changes() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-expiry-set-updated-at-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &id,
+            "0xtest-owner-expiry-set-updated-at",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let fetch_updated_at = |id: String, pool: sqlx::PgPool| async move {
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap()
+        };
+
+        let before_first_write = fetch_updated_at(id.clone(), db.pool().clone()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // First real write: NULL -> a real value. Must bump updated_at so a
+        // client that already synced this row's still-unknown expiry sees
+        // the populated value on its next incremental poll.
+        let first_expires_at = chrono::Utc::now();
+        db.set_memory_expiry(&id, 500, first_expires_at)
+            .await
+            .unwrap();
+        let after_first_write = fetch_updated_at(id.clone(), db.pool().clone()).await;
+        assert!(
+            after_first_write > before_first_write,
+            "the first real expiry write must bump updated_at (unsynced -> synced is a real \
+             API-visible change), got before={:?} after={:?}",
+            before_first_write,
+            after_first_write
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Routine re-verification with the SAME value (the ~24h sweep
+        // re-checking a row that hasn't changed) must NOT bump updated_at,
+        // or every synced row would spam Console's incremental sync roughly
+        // once a day regardless of whether anything actually changed.
+        db.set_memory_expiry(&id, 500, first_expires_at)
+            .await
+            .unwrap();
+        let after_reverify = fetch_updated_at(id.clone(), db.pool().clone()).await;
+        assert_eq!(
+            after_first_write, after_reverify,
+            "re-verifying with an unchanged end_epoch/expires_at must not bump updated_at"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // A genuine later change (e.g. a corrected epoch-duration recompute)
+        // must bump updated_at again — this is a real content change, not
+        // routine housekeeping.
+        let second_expires_at = first_expires_at + chrono::Duration::hours(1);
+        db.set_memory_expiry(&id, 501, second_expires_at)
+            .await
+            .unwrap();
+        let after_real_change = fetch_updated_at(id.clone(), db.pool().clone()).await;
+        assert!(
+            after_real_change > after_reverify,
+            "a genuine end_epoch/expires_at change must bump updated_at, got prior={:?} \
+             after={:?}",
+            after_reverify,
+            after_real_change
         );
 
         let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
@@ -1385,21 +1490,48 @@ impl VectorDb {
         Ok(())
     }
 
-    /// Write back a resolved end_epoch/expires_at for one row. Never
-    /// touches updated_at — see this plan's Global Constraints.
+    /// Write back a resolved end_epoch/expires_at for one row.
+    ///
+    /// `updated_at` only advances when `end_epoch`/`expires_at` actually
+    /// change (via `IS DISTINCT FROM`, which is null-safe — the first sync
+    /// from `NULL` to a real value counts as a change). This was originally
+    /// unconditional-never: the sweep that calls this re-verifies every
+    /// row on a ~24h cadence even after it already has a value, and an
+    /// unconditional `updated_at = NOW()` on every one of those routine
+    /// re-checks would make effectively every memory reappear in Console's
+    /// `updated_after` incremental sync roughly once a day regardless of
+    /// whether anything actually changed. But that guard was too broad: it
+    /// also suppressed the *one* write that must be cursor-visible — the
+    /// first time a row's expiry resolves from `NULL` to a real value. A
+    /// client that already synced that row before the sweep ran would then
+    /// never see the populated `end_epoch`/`expires_at` on any later poll,
+    /// silently breaking WALM-296 for exactly the rows synced before their
+    /// expiry was known. Conditioning on an actual value change satisfies
+    /// both: the first real write bumps `updated_at` (visible to sync);
+    /// unchanged re-verifications don't (no spam).
     pub async fn set_memory_expiry(
         &self,
         id: &str,
         end_epoch: i32,
         expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), AppError> {
-        sqlx::query("UPDATE vector_entries SET end_epoch = $1, expires_at = $2 WHERE id = $3")
-            .bind(end_epoch)
-            .bind(expires_at)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to set memory expiry: {}", e)))?;
+        sqlx::query(
+            "UPDATE vector_entries
+             SET end_epoch = $1,
+                 expires_at = $2,
+                 updated_at = CASE
+                     WHEN end_epoch IS DISTINCT FROM $1 OR expires_at IS DISTINCT FROM $2
+                     THEN NOW()
+                     ELSE updated_at
+                 END
+             WHERE id = $3",
+        )
+        .bind(end_epoch)
+        .bind(expires_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to set memory expiry: {}", e)))?;
         Ok(())
     }
 

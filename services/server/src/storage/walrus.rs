@@ -24,6 +24,13 @@ pub enum UploadBlobError {
         blob_id: String,
         object_id: String,
         message: String,
+        /// Walrus epoch the storage lease ends at (WALM-296) — carried from
+        /// whichever response surfaced the failure (the sidecar includes it
+        /// on both the success shape and the metadata-transfer failure
+        /// shape) so the eventual recovery/finalize path doesn't have to
+        /// insert with `end_epoch = None` for a value that was actually
+        /// known at upload time.
+        end_epoch: Option<i32>,
     },
 }
 
@@ -168,6 +175,12 @@ struct WalrusUploadErrorResponse {
     object_id: Option<String>,
     #[serde(default)]
     transfer_status: Option<String>,
+    /// The sidecar includes this on the metadata-transfer failure response
+    /// too (not just the success shape) — see `walrus-upload.ts`'s 500
+    /// response for the "failed" transfer_status case. Previously absent
+    /// here, so serde silently dropped it despite the sidecar sending it.
+    #[serde(default)]
+    end_epoch: Option<i32>,
 }
 
 #[derive(serde::Serialize)]
@@ -351,6 +364,7 @@ async fn upload_blob_inner(
                         blob_id,
                         object_id,
                         message: err.error,
+                        end_epoch: err.end_epoch,
                     });
                 }
             }
@@ -383,6 +397,7 @@ async fn upload_blob_inner(
                 blob_id: result.blob_id.clone(),
                 object_id,
                 message: "walrus upload completed but metadata/transfer failed".into(),
+                end_epoch: result.end_epoch,
             });
         }
         return Err(UploadBlobError::App(AppError::Internal(
@@ -920,8 +935,43 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 
 #[cfg(test)]
 mod tests {
-    use super::{aggregate_download_errors, is_valid_blob_id};
+    use super::{aggregate_download_errors, is_valid_blob_id, WalrusUploadErrorResponse};
     use crate::types::AppError;
+
+    // WALM-297 review (Henry): the sidecar's metadata-transfer failure
+    // response includes `endEpoch` (see walrus-upload.ts's 500 response for
+    // the "failed" transfer_status case), but `WalrusUploadErrorResponse`
+    // didn't declare the field, so serde silently dropped it despite the
+    // sidecar sending it. This pins the deserialize directly against the
+    // sidecar's real response shape, without needing a live sidecar.
+    #[test]
+    fn walrus_upload_error_response_captures_end_epoch() {
+        let body = r#"{
+            "error": "Blob uploaded but metadata/transfer to owner failed",
+            "jobId": "job-123",
+            "blobId": "blob-abc",
+            "objectId": "0xobject",
+            "transferStatus": "failed",
+            "endEpoch": 500
+        }"#;
+        let parsed: WalrusUploadErrorResponse = serde_json::from_str(body).expect("deserializes");
+        assert_eq!(parsed.end_epoch, Some(500));
+    }
+
+    #[test]
+    fn walrus_upload_error_response_end_epoch_defaults_to_none_when_absent() {
+        // Backward compat: a response shape without endEpoch (or an older
+        // sidecar version) must still deserialize, not fail.
+        let body = r#"{
+            "error": "some other failure",
+            "blobId": null,
+            "objectId": null,
+            "transferStatus": null
+        }"#;
+        let parsed: WalrusUploadErrorResponse =
+            serde_json::from_str(body).expect("deserializes without end_epoch");
+        assert_eq!(parsed.end_epoch, None);
+    }
 
     #[test]
     fn valid_blob_ids_pass_charset_check() {
