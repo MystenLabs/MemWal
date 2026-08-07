@@ -364,7 +364,11 @@ async function runBatch(
       console.log(`ok ${ms(result.latencyMs)} ${formatOk(result)}`);
     } else {
       failCount++;
-      const errMsg = result.error ?? `HTTP ${result.statusCode}`;
+      // `result.error` can be an empty string (server returns non-2xx with
+      // no body, e.g. the auth middleware's constant_time_reject) — `??`
+      // doesn't fall back on "", which used to print a blank "FAILED: "
+      // and hide the actual HTTP status.
+      const errMsg = result.error || (result.statusCode ? `HTTP ${result.statusCode}` : "unknown error");
       errors.push(errMsg);
       console.log(`FAILED: ${errMsg.slice(0, 120)}`);
     }

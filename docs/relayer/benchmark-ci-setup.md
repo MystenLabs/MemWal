@@ -79,8 +79,17 @@ Secrets or another secret manager.
 
 | Target | `BENCH_ACCOUNT_ID` | Public key |
 | --- | --- | --- |
-| dev/staging | `0x7fce97b1f4a72fff7b9457617234ddc251416a76382c44be7bc7652c84d06a1b` | `c36f131232950d7cc9f97846e368106c7a4b30864f560c2e518e3e7ea8c823f7` |
+| dev/staging | `0x1b3293a312f27a0122d739b05a390660f650d4d314033ac67706b87244f7a429` | `1b176b0d290300ff4dceae282333d999998d5543f89e9c53dd2c59ca2955df0e` |
 | production | `0x57eb9feddfd98f98a5719e2a194431b63d24950acd138c52366bf02370ac6287` | `1477a32677be9ba81f86b96583beda4b0eec2dc953080961cefd9cbece41c448` |
+
+Rotated 2026-08-07: the previous dev/staging test account (`0x7fce97b1...`,
+created 2026-05-04) was minted under a package that predates the dev/staging
+contract redeploy (see `docs/contract/overview.md`'s current package/registry
+IDs) and was never migrated, so `verify_delegate_key_onchain`'s type-origin
+check (#398) rejected every request with a bodyless `401`. If this happens
+again, mint a fresh account with `createAccount`/`addDelegateKey` from
+`packages/sdk/src/account.ts` against the *current* package/registry, not the
+IDs in an old copy of this doc.
 
 ## GitHub Environment Setup
 
