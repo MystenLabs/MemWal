@@ -1,11 +1,5 @@
 # memwal
 
-## Unreleased
-
-### Fixed
-
-- `with_memwal_openai`/`with_memwal_langchain` auto-save ran fire-and-forget with no strong reference kept on the asyncio Task (or the daemon Thread, for sync callers) and no way to await it — a short-lived process could have its save cancelled or killed before it reached Walrus, silently, with no error and no log. Pending saves are now tracked and drainable via `client.memwal_flush()` (async) / `client.memwal_flush_sync()` (sync), and a cancelled save now logs a warning instead of vanishing. (GH #413, WALM-306)
-
 ## 0.1.5
 
 ### Added
