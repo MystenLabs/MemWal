@@ -794,16 +794,20 @@ class MemWal:
                 hierarchy semantics (see SKILL.md "Namespace Semantics").
             limit: Max blobs the relayer will *inspect* this call (default:
                 10, matches the server-side default and the TypeScript SDK).
-                The relayer fetches blobs newest-first and caps the work at
-                this number; it does **not** cap ``restored`` separately.
+                The relayer selects up to this many missing blobs from the
+                candidates it sees, in unspecified order; it does **not** cap
+                ``restored`` separately.
 
         Returns:
             :class:`RestoreResult`.
 
         Notes:
-            * **No pagination cursor** — restore is single-shot. To rebuild a
-              large namespace, call repeatedly with a growing ``limit`` or
-              prune the local index first.
+            * **No pagination cursor** — restore is single-shot. A larger
+              ``limit`` may help when ``truncated`` is caused by the request
+              limit, but candidate discovery also has a per-owner source cap
+              shared across namespaces. Hitting that cap requires cursor/
+              pagination support for guaranteed full recovery; increasing
+              ``limit`` or retrying cannot guarantee it.
             * **Performance** scales linearly in ``limit``: up to 10 Walrus
               downloads in parallel, then 3 SEAL decrypts in parallel, then
               embeddings. Expect seconds-per-blob on cold caches.

@@ -777,13 +777,16 @@ export class MemWal {
      * - `total` — on-chain blobs the relayer saw for `(owner, namespace)`
      *   before the limit was applied.
      *
-     * **`limit`** caps the *number of blobs the relayer inspects*, newest
-     * first. It is not a cap on `restored` directly. The server default is
-     * `10` (matches the SDK default).
+     * **`limit`** caps the *number of missing blobs the relayer selects* from
+     * the candidates it sees, in unspecified order. It is not a cap on
+     * `restored` directly. The server default is `10` (matches the SDK
+     * default).
      *
-     * **No pagination cursor** — restore is single-shot. To rebuild a large
-     * namespace, call repeatedly with a growing `limit` or prune the local
-     * index first.
+     * **No pagination cursor** — restore is single-shot. A larger `limit` may
+     * help when `truncated` is caused by the request limit, but candidate
+     * discovery also has a per-owner source cap shared across namespaces.
+     * Hitting that cap requires cursor/pagination support for guaranteed full
+     * recovery; increasing `limit` or retrying cannot guarantee it.
      *
      * **Performance** scales linearly in `limit`: up to 10 Walrus downloads
      * in parallel, then 3 SEAL decrypts in parallel, then embeddings.
