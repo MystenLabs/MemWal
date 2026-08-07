@@ -45,6 +45,11 @@ mod tests {
             include_str!("../../migrations/003_rate_limiter.sql"),
             include_str!("../../migrations/008_benchmark_plaintext.sql"),
             include_str!("../../migrations/009_importance_signal.sql"),
+            include_str!("../../migrations/010_memory_read_api_columns.sql"),
+            include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql"),
+            include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql"),
+            include_str!("../../migrations/013_memory_read_api_index.sql"),
+            include_str!("../../migrations/014_memory_deleted_at.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -73,6 +78,8 @@ mod tests {
             &vector,
             1,
             0.5,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -84,6 +91,8 @@ mod tests {
             &vector,
             1,
             0.5,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -98,12 +107,22 @@ mod tests {
             1
         );
 
-        let remaining: Vec<(String, String)> = sqlx::query_as(
+        // Soft delete: the queried-namespace row still physically exists
+        // (tombstoned via deleted_at), it just should not count as "live".
+        let live: Vec<(String, String)> = sqlx::query_as(
             "SELECT namespace, blob_id FROM vector_entries
-             WHERE owner = $1 ORDER BY namespace",
+             WHERE owner = $1 AND deleted_at IS NULL ORDER BY namespace",
         )
         .bind(&owner)
         .fetch_all(db.pool())
+        .await
+        .unwrap();
+        let queried_row_deleted_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT deleted_at FROM vector_entries WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(&owner)
+        .bind(&queried_namespace)
+        .fetch_one(db.pool())
         .await
         .unwrap();
         sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
@@ -113,10 +132,275 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            remaining,
+            live,
             vec![(other_namespace, blob_id)],
-            "the cleanup must not delete an identical blob_id in another namespace"
+            "the cleanup must not soft-delete an identical blob_id in another namespace"
         );
+        assert!(
+            queried_row_deleted_at.is_some(),
+            "the cleaned-up row must be tombstoned (deleted_at set), not hard-deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_vector_persists_agent_and_package_id() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &id,
+            "0xtest-owner",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            Some("agent-abc"),
+            Some("0xpkg-123"),
+        )
+        .await
+        .unwrap();
+
+        let row: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT agent_id, package_id FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(row.0.as_deref(), Some("agent-abc"));
+        assert_eq!(row.1.as_deref(), Some("0xpkg-123"));
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
+    }
+
+    /// Reproduces an Apalis retry re-entering `insert_vector` with the same
+    /// primary key (`jobs.rs` sets `vector_id = remember_job_id`): the second
+    /// call takes the `ON CONFLICT (id) DO UPDATE` branch. Console's
+    /// `updated_after` incremental sync depends on `updated_at` actually
+    /// advancing on that branch, not just the insert succeeding.
+    #[tokio::test]
+    async fn insert_vector_bumps_updated_at_on_conflict() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-conflict-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &id,
+            "0xtest-owner-conflict",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            Some("agent-abc"),
+            Some("0xpkg-123"),
+        )
+        .await
+        .unwrap();
+
+        let first_updated_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap();
+
+        // Force a measurable time gap so a naive "insert succeeded" assertion
+        // couldn't accidentally pass — the row must actually move forward.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Simulate the Apalis retry: same id, same conflict branch.
+        db.insert_vector(
+            &id,
+            "0xtest-owner-conflict",
+            "test-ns",
+            "blob-1-retried",
+            &[0.2_f32; 1536],
+            43,
+            0.5,
+            Some("agent-abc"),
+            Some("0xpkg-123"),
+        )
+        .await
+        .unwrap();
+
+        let second_updated_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(db.pool())
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap();
+
+        assert!(
+            second_updated_at > first_updated_at,
+            "updated_at must advance on ON CONFLICT DO UPDATE (first={:?}, second={:?})",
+            first_updated_at,
+            second_updated_at
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
+    }
+
+    /// `delete_by_namespace` (reachable via `POST /api/forget`) used to be a
+    /// hard `DELETE`; a client that had already synced a memory via the
+    /// read API had no way to learn it was gone except a full resync. It
+    /// now soft-deletes (tombstones), and `namespace_stats` must exclude
+    /// tombstoned rows so a forgotten memory stops counting toward quota.
+    #[tokio::test]
+    async fn delete_by_namespace_soft_deletes_and_excludes_from_stats() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let owner = format!("0xforget-owner-{}", uuid::Uuid::new_v4());
+        let namespace = format!("forget-ns-{}", uuid::Uuid::new_v4());
+
+        db.insert_vector(
+            &format!("forget-row-{}", uuid::Uuid::new_v4()),
+            &owner,
+            &namespace,
+            "blob-forget-1",
+            &[0.1_f32; 1536],
+            100,
+            0.5,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (count_before, bytes_before) = db.namespace_stats(&owner, &namespace).await.unwrap();
+        assert_eq!((count_before, bytes_before), (1, 100));
+
+        let deleted = db.delete_by_namespace(&owner, &namespace).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        let (count_after, bytes_after) = db.namespace_stats(&owner, &namespace).await.unwrap();
+        assert_eq!(
+            (count_after, bytes_after),
+            (0, 0),
+            "a soft-deleted row must not count toward namespace_stats"
+        );
+
+        let still_present: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM vector_entries WHERE owner = $1 AND namespace = $2")
+                .bind(&owner)
+                .bind(&namespace)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            still_present, 1,
+            "the row must still physically exist (tombstoned), not be hard-deleted"
+        );
+
+        // Idempotent: forgetting an already-forgotten namespace matches
+        // nothing (deleted_at IS NULL guard), not a re-affected row.
+        let deleted_again = db.delete_by_namespace(&owner, &namespace).await.unwrap();
+        assert_eq!(deleted_again, 0);
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await;
+    }
+
+    /// Security regression (WALM-295 review): before this fix,
+    /// `search_similar`/`fetch_plaintext_by_blob_id`/`get_blobs_by_namespace`
+    /// had no `deleted_at` filter, so a memory `forget()`'d via
+    /// `POST /api/forget` (soft-deleted, not hard-deleted, since WALM-295's
+    /// deletion-propagation follow-up) remained fully recallable and
+    /// decryptable through `/api/recall`, `/api/recall/manual`, and
+    /// `/api/ask` despite the read API reporting it as `status: "deleted"`.
+    /// Pin that a soft-deleted row is excluded from all three.
+    #[tokio::test]
+    async fn soft_deleted_rows_are_excluded_from_search_and_lookup() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let owner = format!("0xforget-owner-{}", uuid::Uuid::new_v4());
+        let namespace = format!("forget-ns-{}", uuid::Uuid::new_v4());
+        let vector = [0.1_f32; 1536];
+
+        db.insert_vector_plaintext(
+            &format!("forget-row-{}", uuid::Uuid::new_v4()),
+            &owner,
+            &namespace,
+            "blob-forget-recall",
+            &vector,
+            "sensitive content that must not survive forget()",
+            100,
+            0.5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            db.search_similar(&vector, &owner, &namespace, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "sanity check: the row is searchable before it's forgotten"
+        );
+        assert!(
+            db.fetch_plaintext_by_blob_id("blob-forget-recall", &owner, &namespace)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            db.get_blobs_by_namespace(&owner, &namespace)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let deleted = db.delete_by_namespace(&owner, &namespace).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        assert!(
+            db.search_similar(&vector, &owner, &namespace, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a forgotten (soft-deleted) memory must not surface in similarity search"
+        );
+        assert!(
+            db.fetch_plaintext_by_blob_id("blob-forget-recall", &owner, &namespace)
+                .await
+                .unwrap()
+                .is_none(),
+            "a forgotten memory's plaintext must not be fetchable by blob_id"
+        );
+        assert!(
+            db.get_blobs_by_namespace(&owner, &namespace)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a forgotten memory must not be listed for restore"
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await;
     }
 
     // ── find_account_by_owner (backs GET /api/accounts/{owner}/exists) ──
@@ -302,6 +586,37 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
+        // owner-scoped read API: updated_at cursor column + agent_id/package_id
+        // (WALM-295). Split across 010-012 (see each file's header) to avoid
+        // holding ACCESS EXCLUSIVE across the full-table backfill.
+        let migration_010 = include_str!("../../migrations/010_memory_read_api_columns.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+
+        let migration_011 =
+            include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql");
+        sqlx::raw_sql(migration_011)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 011: {}", e)))?;
+
+        let migration_012 =
+            include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql");
+        sqlx::raw_sql(migration_012)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 012: {}", e)))?;
+
+        // keyset-pagination index for the memories listing endpoint (WALM-295).
+        // Must stay in its own file/transaction — see 013's header comment.
+        let migration_013 = include_str!("../../migrations/013_memory_read_api_index.sql");
+        sqlx::raw_sql(migration_013)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 013: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -331,20 +646,25 @@ impl VectorDb {
         vector: &[f32],
         blob_size_bytes: i64,
         importance: f32,
+        agent_id: Option<&str>,
+        package_id: Option<&str>,
     ) -> Result<(), AppError> {
         let embedding = Vector::from(vector.to_vec());
 
         let started = std::time::Instant::now();
         let result = sqlx::query(
-            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance, agent_id, package_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (id) DO UPDATE SET
                 owner = EXCLUDED.owner,
                 namespace = EXCLUDED.namespace,
                 blob_id = EXCLUDED.blob_id,
                 embedding = EXCLUDED.embedding,
                 blob_size_bytes = EXCLUDED.blob_size_bytes,
-                importance = EXCLUDED.importance",
+                importance = EXCLUDED.importance,
+                agent_id = EXCLUDED.agent_id,
+                package_id = EXCLUDED.package_id,
+                updated_at = NOW()",
         )
         .bind(id)
         .bind(owner)
@@ -353,6 +673,8 @@ impl VectorDb {
         .bind(embedding)
         .bind(blob_size_bytes)
         .bind(importance)
+        .bind(agent_id)
+        .bind(package_id)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
@@ -401,7 +723,8 @@ impl VectorDb {
                 embedding = EXCLUDED.embedding,
                 blob_size_bytes = EXCLUDED.blob_size_bytes,
                 plaintext = EXCLUDED.plaintext,
-                importance = EXCLUDED.importance",
+                importance = EXCLUDED.importance,
+                updated_at = NOW()",
         )
         .bind(id)
         .bind(owner)
@@ -451,7 +774,7 @@ impl VectorDb {
         let started = std::time::Instant::now();
         let result: Result<Option<(Option<String>,)>, AppError> = sqlx::query_as(
             "SELECT plaintext FROM vector_entries
-             WHERE blob_id = $1 AND owner = $2 AND namespace = $3
+             WHERE blob_id = $1 AND owner = $2 AND namespace = $3 AND deleted_at IS NULL
              LIMIT 1",
         )
         .bind(blob_id)
@@ -471,7 +794,11 @@ impl VectorDb {
     }
 
     /// Search for similar vectors using pgvector cosine distance (<=>)
-    /// Returns blob_id and distance for each match
+    /// Returns blob_id and distance for each match. Excludes soft-deleted
+    /// rows (`deleted_at IS NULL`) — otherwise a memory `forget()`'d via
+    /// `POST /api/forget` would still surface here, get its Walrus blob
+    /// fetched and SEAL-decrypted, and be returned as a live recall/ask
+    /// hit despite the read API reporting it as `status: "deleted"`.
     pub async fn search_similar(
         &self,
         query_vector: &[f32],
@@ -494,7 +821,7 @@ impl VectorDb {
         > = sqlx::query_as(
             "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
              FROM vector_entries
-             WHERE owner = $2 AND namespace = $3
+             WHERE owner = $2 AND namespace = $3 AND deleted_at IS NULL
              ORDER BY embedding <=> $1
              LIMIT $4",
         )
@@ -534,7 +861,7 @@ impl VectorDb {
         let started = std::time::Instant::now();
         let result: Result<Vec<(String,)>, AppError> = sqlx::query_as(
             "SELECT DISTINCT blob_id FROM vector_entries
-             WHERE owner = $1 AND namespace = $2",
+             WHERE owner = $1 AND namespace = $2 AND deleted_at IS NULL",
         )
         .bind(owner)
         .bind(namespace)
@@ -551,7 +878,9 @@ impl VectorDb {
         Ok(rows.into_iter().map(|(blob_id,)| blob_id).collect())
     }
 
-    /// Count + total stored bytes for a given owner + namespace.
+    /// Count + total stored bytes for a given owner + namespace, excluding
+    /// soft-deleted rows (`deleted_at IS NULL`) — a forgotten memory must
+    /// not keep counting toward storage quota or the reported memory count.
     /// Used by `POST /api/stats` for harness verification. Returns
     /// `(memory_count, storage_bytes)`; both 0 if the namespace is empty.
     pub async fn namespace_stats(
@@ -562,7 +891,7 @@ impl VectorDb {
         let started = std::time::Instant::now();
         let result: Result<(i64, i64), AppError> = sqlx::query_as(
             "SELECT COUNT(*)::BIGINT, COALESCE(SUM(blob_size_bytes)::BIGINT, 0)
-             FROM vector_entries WHERE owner = $1 AND namespace = $2",
+             FROM vector_entries WHERE owner = $1 AND namespace = $2 AND deleted_at IS NULL",
         )
         .bind(owner)
         .bind(namespace)
@@ -579,19 +908,40 @@ impl VectorDb {
         Ok(row)
     }
 
-    /// Hard-delete all vector index rows for a given owner + namespace.
+    /// Soft-delete all vector index rows for a given owner + namespace:
+    /// stamps `deleted_at` (and bumps `updated_at`, since a deletion is a
+    /// change like any other) instead of removing the row outright.
     /// (Walrus blobs themselves persist — Walrus has no delete; this only
-    /// removes the local `vector_entries` rows, so the memories stop being
-    /// retrievable and stop counting toward storage quota.) Reachable via
-    /// `POST /api/forget` — authed, owner-scoped.
+    /// marks the local `vector_entries` rows, so the memories stop being
+    /// retrievable and stop counting toward storage quota via
+    /// `namespace_stats`.) Reachable via `POST /api/forget` — authed,
+    /// owner-scoped.
+    ///
+    /// This used to be a hard `DELETE`. Under `DELETE`, a memory a client
+    /// had already synced via `GET /v1/owners/{owner}/memories` simply
+    /// vanished from `vector_entries` — a later `updated_after` poll has
+    /// nothing to tell it the row is gone, so the client's local copy goes
+    /// stale forever unless it happens to do a full (cursor-less) resync.
+    /// Soft-deleting keeps the row (and its `updated_at` watermark)
+    /// resolvable so `query_owner_memories` can report `status: "deleted"`
+    /// on the next poll, and so the owning namespace's own rollup watermark
+    /// still advances (see `query_owner_namespaces`'s `MAX(updated_at)`),
+    /// which is what makes the namespace resurface at all.
+    ///
+    /// `deleted_at IS NULL` in the `WHERE` clause makes this idempotent:
+    /// re-forgetting an already-forgotten namespace matches 0 rows (and
+    /// does not re-bump `updated_at` on rows that didn't actually change).
     pub async fn delete_by_namespace(&self, owner: &str, namespace: &str) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
-        let result = sqlx::query("DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2")
-            .bind(owner)
-            .bind(namespace)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)));
+        let result = sqlx::query(
+            "UPDATE vector_entries SET deleted_at = NOW(), updated_at = NOW()
+             WHERE owner = $1 AND namespace = $2 AND deleted_at IS NULL",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)));
         crate::observability::observe_db(
             "vector.delete_by_namespace",
             db_status(&result),
@@ -601,7 +951,7 @@ impl VectorDb {
 
         let rows = result.rows_affected();
         tracing::info!(
-            "deleted {} entries for owner={}, ns={}",
+            "soft-deleted {} entries for owner={}, ns={}",
             rows,
             owner,
             namespace
@@ -609,10 +959,14 @@ impl VectorDb {
         Ok(rows)
     }
 
-    /// Delete vector entries for one expired blob within an owner + namespace.
-    /// Called reactively when Walrus returns 404 during blob download.
-    /// Both owner and namespace are required so cleanup cannot cross either
-    /// isolation boundary when ciphertext is reused in multiple rows.
+    /// Soft-delete vector entries for one expired blob within an owner +
+    /// namespace. Called reactively when Walrus returns 404 during blob
+    /// download. Both owner and namespace are required so cleanup cannot
+    /// cross either isolation boundary when ciphertext is reused in
+    /// multiple rows. See `delete_by_namespace`'s doc comment for why this
+    /// is a soft delete (`deleted_at`/`updated_at` stamp) rather than a
+    /// hard `DELETE` — the read API needs a live row to report
+    /// `status: "deleted"` from.
     pub async fn delete_by_blob_id(
         &self,
         blob_id: &str,
@@ -621,8 +975,8 @@ impl VectorDb {
     ) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
         let result = sqlx::query(
-            "DELETE FROM vector_entries
-             WHERE blob_id = $1 AND owner = $2 AND namespace = $3",
+            "UPDATE vector_entries SET deleted_at = NOW(), updated_at = NOW()
+             WHERE blob_id = $1 AND owner = $2 AND namespace = $3 AND deleted_at IS NULL",
         )
         .bind(blob_id)
         .bind(owner)
@@ -640,7 +994,7 @@ impl VectorDb {
         let rows = result.rows_affected();
         if rows > 0 {
             tracing::info!(
-                "deleted expired blob from DB: blob_id={}, owner={}, namespace={}, rows={}",
+                "soft-deleted expired blob from DB: blob_id={}, owner={}, namespace={}, rows={}",
                 blob_id,
                 owner,
                 namespace,

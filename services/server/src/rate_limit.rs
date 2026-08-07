@@ -146,7 +146,13 @@ fn endpoint_weight(path: &str) -> i64 {
         "/api/remember/manual" => 3, // Walrus upload only (client did embed/encrypt)
         "/api/restore" => 3,         // download + decrypt + re-embed
         "/api/ask" => 2,             // recall + LLM
-        _ => 1,                      // recall, recall/manual, etc.
+        // WALM-295 owner-scoped read API — {owner} is a variable path
+        // segment, so match by prefix/suffix like the observability
+        // route_label() normalization does for the same three routes.
+        _ if path.starts_with("/v1/owners/") && path.ends_with("/agents") => 2, // live sui_getObject RPC call, weighted like /api/ask's recall+LLM call
+        _ if path.starts_with("/v1/owners/") && path.ends_with("/namespaces") => 1, // DB read only
+        _ if path.starts_with("/v1/owners/") && path.ends_with("/memories") => 1, // DB read only
+        _ => 1, // recall, recall/manual, etc.
     }
 }
 
@@ -387,7 +393,9 @@ fn rate_limiter_unavailable_response() -> Response {
 /// 3. Per-account sustained: 500 weighted-req/hour (prevents slow-burn)
 ///
 /// Endpoints are cost-weighted:
-///   analyze=10, remember=5, remember/manual=3, restore=3, ask=2, recall=1
+///   analyze=10, remember=5, remember/manual=3, restore=3, ask=2, recall=1,
+///   owners/{owner}/agents=2 (live on-chain RPC read), owners/{owner}/memories=1,
+///   owners/{owner}/namespaces=1 (both DB-only reads)
 ///
 /// Returns 429 Too Many Requests with JSON body if any layer exceeds its limit.
 ///
@@ -1227,6 +1235,22 @@ mod tests {
     fn test_endpoint_weight_no_regression() {
         // Double trailing slash should also normalize
         assert_eq!(endpoint_weight("/api/analyze//"), 5);
+    }
+
+    #[test]
+    fn test_endpoint_weight_owner_scoped_read_api_routes() {
+        // WALM-295: previously these three fell through to the default `1`
+        // implicitly (no explicit entry) — now explicit, and /agents is
+        // weighted higher since it makes a live on-chain RPC call per request.
+        assert_eq!(endpoint_weight("/v1/owners/0xabc123/namespaces"), 1);
+        assert_eq!(endpoint_weight("/v1/owners/0xabc123/memories"), 1);
+        assert_eq!(
+            endpoint_weight("/v1/owners/0xabc123/agents"),
+            2,
+            "agents does a live on-chain RPC call and must outweigh plain DB reads"
+        );
+        // Trailing slash must not bypass the explicit weight.
+        assert_eq!(endpoint_weight("/v1/owners/0xabc123/agents/"), 2);
     }
 
     // ---- stable_hash_i64 ----

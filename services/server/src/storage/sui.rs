@@ -157,6 +157,216 @@ pub async fn verify_delegate_key_onchain(
     )))
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DelegateKeyInfo {
+    pub sui_address: String,
+    pub label: String,
+    pub created_at: u64,
+}
+
+// ============================================================
+// Delegate keys — short-TTL in-memory cache (WALM-295 `/agents`)
+// ============================================================
+//
+// Mirrors `sui/client.rs`'s `Timed<WalrusEpoch>` pattern used by
+// `walrus_epoch()` — a value + fetch timestamp, refreshed once stale —
+// per the design spec: "Cached with the same short TTL pattern as
+// walrus_epoch() ... rather than left uncached". This is deliberately
+// NOT the DB-backed `delegate_key_cache` table (`storage/db.rs`): that
+// table caches a single verified public-key -> account mapping on the
+// hot per-request auth path; this caches the full delegate-key *list*
+// per account for a page-load-triggered read (`GET /v1/owners/{owner}/agents`),
+// which has no existing cache at all today.
+
+/// Same window `walrus_epoch()` uses (`sui/client.rs::walrus_epoch`, 30s).
+pub const DELEGATE_KEYS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Clone)]
+pub struct TimedDelegateKeys {
+    pub value: Vec<DelegateKeyInfo>,
+    pub fetched_at: std::time::Instant,
+}
+
+/// Keyed by `account_object_id` so different accounts' delegate lists don't
+/// collide. `AppState` owns one `Arc` of this (see `types.rs`), shared across
+/// all `/agents` requests the same way `SuiClient`'s `Timed` caches are
+/// shared via its own `Arc<RwLock<..>>` fields.
+pub type DelegateKeysCache =
+    std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, TimedDelegateKeys>>>;
+
+pub fn new_delegate_keys_cache() -> DelegateKeysCache {
+    std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Cached wrapper around `list_delegate_keys_onchain`: returns the cached
+/// list if it was fetched within `DELEGATE_KEYS_CACHE_TTL`, otherwise fetches
+/// live and refreshes the cache. Keeps repeated `/agents` calls for the same
+/// account within the TTL window from re-hitting the chain.
+pub async fn list_delegate_keys_cached(
+    cache: &DelegateKeysCache,
+    http_client: &reqwest::Client,
+    rpc_url: &str,
+    grpc_client: Option<&sui_rpc::Client>,
+    account_object_id: &str,
+    expected_type_origin_package_id: &str,
+) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
+    if let Some(cached) = cache
+        .read()
+        .await
+        .get(account_object_id)
+        .filter(|c| c.fetched_at.elapsed() < DELEGATE_KEYS_CACHE_TTL)
+    {
+        return Ok(cached.value.clone());
+    }
+
+    let keys = list_delegate_keys_onchain(
+        http_client,
+        rpc_url,
+        grpc_client,
+        account_object_id,
+        expected_type_origin_package_id,
+    )
+    .await?;
+
+    cache.write().await.insert(
+        account_object_id.to_string(),
+        TimedDelegateKeys {
+            value: keys.clone(),
+            fetched_at: std::time::Instant::now(),
+        },
+    );
+
+    Ok(keys)
+}
+
+/// Parse the `delegate_keys` array out of a MemWalAccount's `fields` map.
+/// Pure function — no I/O — so it's unit-testable without a live chain.
+pub fn parse_delegate_keys(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
+    let delegate_keys = fields
+        .get("delegate_keys")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
+
+    let mut out = Vec::with_capacity(delegate_keys.len());
+    for dk in delegate_keys {
+        let dk_fields = dk.get("fields").or(Some(dk));
+        let sui_address = dk_fields
+            .and_then(|f| f.get("sui_address"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| OnchainVerifyError::RpcError("delegate key missing sui_address".into()))?
+            .to_string();
+        let label = dk_fields
+            .and_then(|f| f.get("label"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let created_at = dk_fields
+            .and_then(|f| f.get("created_at"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| {
+                dk_fields
+                    .and_then(|f| f.get("created_at"))
+                    .and_then(|v| v.as_u64())
+            })
+            .unwrap_or(0);
+        out.push(DelegateKeyInfo {
+            sui_address,
+            label,
+            created_at,
+        });
+    }
+    Ok(out)
+}
+
+/// List all delegate keys on a MemWalAccount object. JSON-RPC only (mirrors
+/// verify_delegate_key_onchain's non-gRPC path) — WALM-295 Phase 1 does not
+/// need the gRPC variant since this endpoint is not on the hot signature-
+/// verification path.
+/// Routes through gRPC when `grpc_client` is provided, mirroring
+/// `verify_delegate_key_onchain`'s same JSON-RPC-sunset rationale — this
+/// was the one remaining `/agents`-only call site still hardcoded to
+/// JSON-RPC after that migration.
+pub async fn list_delegate_keys_onchain(
+    http_client: &reqwest::Client,
+    rpc_url: &str,
+    grpc_client: Option<&sui_rpc::Client>,
+    account_object_id: &str,
+    expected_type_origin_package_id: &str,
+) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
+    if let Some(grpc_client) = grpc_client {
+        return list_delegate_keys_onchain_grpc(
+            grpc_client.clone(),
+            account_object_id,
+            expected_type_origin_package_id,
+        )
+        .await;
+    }
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sui_getObject",
+        "params": [account_object_id, { "showContent": true }]
+    });
+
+    let request = http_client
+        .post(rpc_url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .json(&body);
+    let request = crate::observability::apply_request_id_header(request);
+    // Mirror verify_delegate_key_onchain's instrumentation exactly so this
+    // call is visible in the same `sui_rpc` external-call metrics (final
+    // review, WALM-295 Fix 4) instead of being an invisible RPC cost.
+    let started = std::time::Instant::now();
+    let response = request.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sui_rpc",
+            "sui_getObject",
+            "transport_error",
+            started.elapsed(),
+        );
+        OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e))
+    })?;
+    let status_label = response.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sui_rpc",
+        "sui_getObject",
+        &status_label,
+        started.elapsed(),
+    );
+
+    let rpc_response: RpcResponse = parse_json_rpc_response(response, "sui_getObject").await?;
+    if let Some(error) = rpc_response.error {
+        return Err(OnchainVerifyError::RpcError(format!(
+            "RPC error {}: {}",
+            error.code, error.message
+        )));
+    }
+
+    let result = rpc_response
+        .result
+        .ok_or_else(|| OnchainVerifyError::RpcError("No result in RPC response".into()))?;
+    let content = result
+        .data
+        .and_then(|d| d.content)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no content".into()))?;
+
+    ensure_memwal_account_type(
+        content.object_type.as_deref(),
+        expected_type_origin_package_id,
+        account_object_id,
+    )?;
+
+    let fields = content
+        .fields
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no fields".into()))?;
+
+    parse_delegate_keys(&fields)
+}
+
 // ── gRPC value helpers ──
 // google.protobuf.Value (via prost-types) is a dynamic JSON-like tree, not
 // serde_json::Value — these navigate it the same way `fields.get(...)` reads
@@ -203,6 +413,18 @@ fn grpc_account_active(fields: &prost_types::Struct) -> Result<bool, OnchainVeri
 fn grpc_value_as_list(v: &prost_types::Value) -> Option<&[prost_types::Value]> {
     match &v.kind {
         Some(prost_types::value::Kind::ListValue(l)) => Some(&l.values),
+        _ => None,
+    }
+}
+
+/// `created_at` (a Move `u64`) round-trips through gRPC's JSON-like
+/// `google.protobuf.Value` the same way it does through JSON-RPC — usually
+/// as a string (to avoid f64 precision loss), occasionally as a number —
+/// so try both, mirroring `parse_delegate_keys`'s JSON-RPC dual-path.
+fn grpc_value_as_u64(v: &prost_types::Value) -> Option<u64> {
+    match &v.kind {
+        Some(prost_types::value::Kind::StringValue(s)) => s.parse::<u64>().ok(),
+        Some(prost_types::value::Kind::NumberValue(n)) => Some(*n as u64),
         _ => None,
     }
 }
@@ -311,6 +533,94 @@ async fn verify_delegate_key_onchain_grpc(
         delegate_keys.len(),
         account_object_id
     )))
+}
+
+/// gRPC counterpart of `list_delegate_keys_onchain`'s JSON-RPC body — same
+/// shape as `verify_delegate_key_onchain_grpc` above (GetObject, type check,
+/// struct navigation), but returns every delegate key rather than searching
+/// for one match. Public key bytes are base64-encoded in the gRPC json
+/// representation (unlike JSON-RPC's array-of-numbers), but `/agents`
+/// doesn't need the key bytes at all — only `sui_address`/`label`/`created_at`.
+async fn list_delegate_keys_onchain_grpc(
+    mut client: sui_rpc::Client,
+    account_object_id: &str,
+    expected_type_origin_package_id: &str,
+) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
+    let address: sui_sdk_types::Address = account_object_id
+        .parse()
+        .map_err(|e| OnchainVerifyError::RpcError(format!("invalid object id: {}", e)))?;
+    let mut request = sui_rpc::proto::sui::rpc::v2::GetObjectRequest::new(&address);
+    request.read_mask = Some(prost_types::FieldMask {
+        paths: vec!["json".to_string(), "object_type".to_string()],
+    });
+
+    let started = std::time::Instant::now();
+    let response = client.ledger_client().get_object(request).await;
+    let status_label = match &response {
+        Ok(_) => "200".to_string(),
+        Err(status) => status.code().to_string(),
+    };
+    crate::observability::observe_external(
+        "sui_grpc",
+        "GetObject",
+        &status_label,
+        started.elapsed(),
+    );
+
+    let object = response
+        .map_err(|e| OnchainVerifyError::RpcError(format!("gRPC GetObject failed: {}", e)))?
+        .into_inner()
+        .object
+        .ok_or_else(|| OnchainVerifyError::RpcError("gRPC response missing object".into()))?;
+
+    ensure_memwal_account_type(
+        object.object_type.as_deref(),
+        expected_type_origin_package_id,
+        account_object_id,
+    )?;
+
+    let json = object
+        .json
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no json content".into()))?;
+    let fields = grpc_value_as_struct(&json)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object json is not a struct".into()))?;
+
+    let delegate_keys = fields
+        .fields
+        .get("delegate_keys")
+        .and_then(grpc_value_as_list)
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
+
+    let mut out = Vec::with_capacity(delegate_keys.len());
+    for dk in delegate_keys {
+        let Some(dk_fields) = grpc_value_as_struct(dk) else {
+            continue;
+        };
+        let sui_address = dk_fields
+            .fields
+            .get("sui_address")
+            .and_then(grpc_value_as_str)
+            .ok_or_else(|| OnchainVerifyError::RpcError("delegate key missing sui_address".into()))?
+            .to_string();
+        let label = dk_fields
+            .fields
+            .get("label")
+            .and_then(grpc_value_as_str)
+            .unwrap_or("")
+            .to_string();
+        let created_at = dk_fields
+            .fields
+            .get("created_at")
+            .and_then(grpc_value_as_u64)
+            .unwrap_or(0);
+        out.push(DelegateKeyInfo {
+            sui_address,
+            label,
+            created_at,
+        });
+    }
+
+    Ok(out)
 }
 
 /// Scan the AccountRegistry to find which account holds a given delegate key.
@@ -1068,6 +1378,152 @@ mod tests {
         let wrong_key = serde_json::json!([10, 20, 31]);
         let wrong_arr = wrong_key.as_array().unwrap();
         assert_ne!(*wrong_arr, pk_as_numbers, "different key should NOT match");
+    }
+
+    // ── parse_delegate_keys (Task 7 — pure JSON parsing, no I/O) ────────
+
+    #[test]
+    fn parse_delegate_keys_extracts_all_fields() {
+        let fields: serde_json::Map<String, serde_json::Value> = serde_json::json!({
+            "owner": "0xowner",
+            "active": true,
+            "delegate_keys": [
+                {
+                    "fields": {
+                        "public_key": [1, 2, 3],
+                        "sui_address": "0xdelegate1",
+                        "label": "cli",
+                        "created_at": "1700000000000"
+                    }
+                },
+                {
+                    "fields": {
+                        "public_key": [4, 5, 6],
+                        "sui_address": "0xdelegate2",
+                        "label": "mobile",
+                        "created_at": "1700000001000"
+                    }
+                }
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let parsed = parse_delegate_keys(&fields).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].label, "cli");
+        assert_eq!(parsed[0].sui_address, "0xdelegate1");
+        assert_eq!(parsed[0].created_at, 1700000000000);
+        assert_eq!(parsed[1].label, "mobile");
+    }
+
+    // ── list_delegate_keys_cached (WALM-295 Fix 4 — short-TTL cache) ────
+    //
+    // No mock-HTTP crate exists in this codebase's dependency tree, so these
+    // tests prove the cache-hit / TTL-expiry branches without a live chain
+    // call: they point at an unreachable RPC URL and rely on the fact that a
+    // cache HIT returns before ever attempting the HTTP request (so it
+    // succeeds despite the bad URL), while a cache MISS/expiry falls through
+    // to the real request path (so it fails against the bad URL). This
+    // exercises the exact branch the fix depends on.
+
+    fn unreachable_rpc_url() -> &'static str {
+        // Port 1 is a reserved/unassigned TCP port — connection is refused
+        // immediately rather than hanging, so the test stays fast.
+        "http://127.0.0.1:1/"
+    }
+
+    fn sample_delegate_keys() -> Vec<DelegateKeyInfo> {
+        vec![DelegateKeyInfo {
+            sui_address: "0xdelegate1".to_string(),
+            label: "cli".to_string(),
+            created_at: 1_700_000_000,
+        }]
+    }
+
+    #[tokio::test]
+    async fn list_delegate_keys_cached_returns_cached_value_within_ttl() {
+        let cache = new_delegate_keys_cache();
+        let account_id = "0xaccount-fresh";
+        cache.write().await.insert(
+            account_id.to_string(),
+            TimedDelegateKeys {
+                value: sample_delegate_keys(),
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+
+        let client = reqwest::Client::new();
+        let result = list_delegate_keys_cached(
+            &cache,
+            &client,
+            unreachable_rpc_url(),
+            None,
+            account_id,
+            "0xpkg",
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "a fresh cache entry must be served without attempting the RPC call, got {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap(), sample_delegate_keys());
+    }
+
+    #[tokio::test]
+    async fn list_delegate_keys_cached_refetches_after_ttl_expiry() {
+        let cache = new_delegate_keys_cache();
+        let account_id = "0xaccount-stale";
+        cache.write().await.insert(
+            account_id.to_string(),
+            TimedDelegateKeys {
+                value: sample_delegate_keys(),
+                fetched_at: std::time::Instant::now()
+                    - DELEGATE_KEYS_CACHE_TTL
+                    - std::time::Duration::from_secs(1),
+            },
+        );
+
+        let client = reqwest::Client::new();
+        let result = list_delegate_keys_cached(
+            &cache,
+            &client,
+            unreachable_rpc_url(),
+            None,
+            account_id,
+            "0xpkg",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an expired cache entry must trigger a real re-fetch attempt, which should fail \
+             against the unreachable RPC URL used in this test — got Ok, meaning the stale \
+             entry was served instead"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_delegate_keys_cached_misses_for_unknown_account() {
+        let cache = new_delegate_keys_cache();
+        let client = reqwest::Client::new();
+        let result = list_delegate_keys_cached(
+            &cache,
+            &client,
+            unreachable_rpc_url(),
+            None,
+            "0xnever-cached",
+            "0xpkg",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "no cache entry exists yet, so this must attempt (and fail) the real RPC call"
+        );
     }
 
     #[test]

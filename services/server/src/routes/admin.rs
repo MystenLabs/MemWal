@@ -491,6 +491,20 @@ pub async fn restore(
     let all_blob_ids: Vec<String> = on_chain_blobs.iter().map(|b| b.blob_id.clone()).collect();
     let total = all_blob_ids.len();
 
+    // Preserve on-chain provenance (agent_id/package_id) so restored rows
+    // keep the same owner-scoped read API metadata as freshly-remembered
+    // ones (WALM-295).
+    let blob_provenance: std::collections::HashMap<String, (Option<String>, String)> =
+        on_chain_blobs
+            .iter()
+            .map(|b| {
+                (
+                    b.blob_id.clone(),
+                    (b.agent_id.clone(), b.package_id.clone()),
+                )
+            })
+            .collect();
+
     if total == 0 {
         // source_capped, not unconditionally false: the raw candidate fetch
         // can hit its cap fulfilling OTHER namespaces before this one is
@@ -711,6 +725,16 @@ pub async fn restore(
             );
             0
         });
+        let (agent_id, package_id) = blob_provenance
+            .get(blob_id)
+            .cloned()
+            .unwrap_or((None, String::new()));
+        // The sidecar sends "agentId" as a present-but-empty string when no
+        // delegate key was recorded (the common case) — #[serde(default)]
+        // only fires on a MISSING key, so an empty string deserializes to
+        // Some(""), not None. Normalize both provenance fields the same way
+        // so a blob with no known agent gets a real SQL NULL, not "".
+        let agent_id = agent_id.filter(|s| !s.is_empty());
         state
             .db
             .insert_vector(
@@ -726,6 +750,12 @@ pub async fn restore(
                 // neutral "standard" bucket so restored memories rank as
                 // average — neither boosted nor penalized.
                 crate::services::extractor::IMPORTANCE_STANDARD,
+                agent_id.as_deref(),
+                if package_id.is_empty() {
+                    None
+                } else {
+                    Some(package_id.as_str())
+                },
             )
             .await?;
     }

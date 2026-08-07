@@ -125,6 +125,14 @@ pub enum WalletOperation {
         /// recovery jobs enqueued before this field existed.
         #[serde(default = "default_importance")]
         importance: f32,
+        /// Carried from the originating SetMetadataAndTransfer job so the
+        /// eventual insert_vector call can persist them (WALM-295).
+        /// `#[serde(default)]` so in-flight jobs enqueued before this field
+        /// existed deserialize as None rather than failing.
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default)]
+        package_id: Option<String>,
     },
 }
 
@@ -537,6 +545,8 @@ pub(crate) async fn execute_wallet_job(
                             blob_size_bytes,
                             importance,
                             enqueued_wallet_index,
+                            agent_id.as_deref(),
+                            package_id.as_deref(),
                         )
                         .await
                         {
@@ -551,6 +561,8 @@ pub(crate) async fn execute_wallet_job(
                                 vector,
                                 blob_size_bytes,
                                 importance,
+                                agent_id.clone(),
+                                package_id.clone(),
                             )
                             .await
                             {
@@ -626,6 +638,8 @@ pub(crate) async fn execute_wallet_job(
             vector,
             blob_size_bytes,
             importance,
+            agent_id,
+            package_id,
         } => {
             insert_vector_and_mark_remember_done(
                 state,
@@ -637,6 +651,8 @@ pub(crate) async fn execute_wallet_job(
                 blob_size_bytes,
                 importance,
                 enqueued_wallet_index,
+                agent_id.as_deref(),
+                package_id.as_deref(),
             )
             .await
         }
@@ -756,6 +772,8 @@ async fn insert_vector_and_mark_remember_done(
     blob_size_bytes: i64,
     importance: f32,
     wallet_index: usize,
+    agent_id: Option<&str>,
+    package_id: Option<&str>,
 ) -> Result<(), WalletJobError> {
     let vector_id = remember_job_id
         .map(str::to_owned)
@@ -771,6 +789,8 @@ async fn insert_vector_and_mark_remember_done(
             vector,
             blob_size_bytes,
             importance,
+            agent_id,
+            package_id,
         )
         .await
     {
@@ -819,6 +839,8 @@ async fn enqueue_finalize_uploaded_blob(
     vector: Vec<f32>,
     blob_size_bytes: i64,
     importance: f32,
+    agent_id: Option<String>,
+    package_id: Option<String>,
 ) -> Result<(), WalletJobError> {
     let mut storage = state.wallet_storage.clone();
     storage
@@ -833,6 +855,8 @@ async fn enqueue_finalize_uploaded_blob(
                 vector,
                 blob_size_bytes,
                 importance,
+                agent_id,
+                package_id,
             },
         }))
         .await
@@ -1178,6 +1202,8 @@ async fn execute_upload_and_transfer(
         encrypted.len() as i64,
         importance,
         wallet_index,
+        agent_public_key.as_deref(),
+        Some(&package_id),
     )
     .await
 }
@@ -2122,6 +2148,8 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 vector: vec![0.1],
                 blob_size_bytes: 1,
                 importance: 0.5,
+                agent_id: None,
+                package_id: None,
             },
         };
         let mut value = serde_json::to_value(&job).expect("serialize");
@@ -2527,6 +2555,8 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 vector: vec![],
                 blob_size_bytes: 0,
                 importance: crate::services::extractor::IMPORTANCE_STANDARD,
+                agent_id: None,
+                package_id: None,
             },
         });
 

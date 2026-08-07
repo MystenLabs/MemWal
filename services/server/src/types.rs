@@ -132,6 +132,12 @@ pub struct AppState {
     /// once at startup. This client is intentionally independent of security
     /// deletion's quota gate.
     pub sui_grpc_client: Option<sui_rpc::Client>,
+    /// Short-TTL (`storage::sui::DELEGATE_KEYS_CACHE_TTL`, mirrors
+    /// `sui/client.rs`'s `Timed<WalrusEpoch>` window) in-memory cache of
+    /// each account's on-chain delegate-key list, keyed by account object
+    /// id. Backs `GET /v1/owners/{owner}/agents` so repeated calls within
+    /// the TTL window don't re-hit the chain (WALM-295).
+    pub delegate_keys_cache: crate::storage::sui::DelegateKeysCache,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
     pub alerts: Arc<AlertManager>,
@@ -1549,6 +1555,9 @@ pub enum AppError {
     Internal(String),
     /// Walrus blob not found (expired or deleted) — triggers cleanup
     BlobNotFound(String),
+    /// Caller authenticated successfully but the path's {owner} does not
+    /// match the authenticated identity (HTTP 403).
+    Forbidden(String),
     /// Rate limit exceeded (HTTP 429)
     #[allow(dead_code)]
     RateLimited(String),
@@ -1571,6 +1580,7 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
             AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
+            AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
             AppError::QuotaExceeded(msg) => write!(f, "Quota Exceeded: {}", msg),
             AppError::UpstreamUnavailable(msg) => write!(f, "Upstream Unavailable: {}", msg),
@@ -1601,6 +1611,7 @@ impl axum::response::IntoResponse for AppError {
                 )
             }
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
+            AppError::Forbidden(msg) => (axum::http::StatusCode::FORBIDDEN, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
             AppError::UpstreamUnavailable(msg) => {
@@ -1635,6 +1646,7 @@ impl AppError {
             AppError::Unauthorized(_) => "unauthorized",
             AppError::Internal(_) => "internal",
             AppError::BlobNotFound(_) => "blob_not_found",
+            AppError::Forbidden(_) => "forbidden",
             AppError::RateLimited(_) => "rate_limited",
             AppError::QuotaExceeded(_) => "quota_exceeded",
             AppError::UpstreamUnavailable(_) => "upstream_unavailable",
@@ -2197,6 +2209,30 @@ mod tests {
             "upstream_unavailable",
             "observability label must be stable for grafana/loki queries"
         );
+    }
+
+    #[tokio::test]
+    async fn forbidden_maps_to_403() {
+        // `IntoResponse` isn't otherwise imported in this module (other
+        // status-mapping tests call it via the fully-qualified
+        // `axum::response::IntoResponse::into_response(err)` form instead),
+        // so bring it into scope locally for the method-call syntax below.
+        use axum::response::IntoResponse;
+        let err = AppError::Forbidden("owner mismatch".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn forbidden_display_format() {
+        let err = AppError::Forbidden("owner mismatch".to_string());
+        assert_eq!(err.to_string(), "Forbidden: owner mismatch");
+    }
+
+    #[test]
+    fn forbidden_kind() {
+        let err = AppError::Forbidden("owner mismatch".to_string());
+        assert_eq!(err.kind(), "forbidden");
     }
 
     // ── KeyPool: round-robin selection ─────────────────────────────────

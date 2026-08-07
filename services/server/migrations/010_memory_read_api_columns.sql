@@ -1,0 +1,50 @@
+-- services/server/migrations/010_memory_read_api_columns.sql
+--
+-- WALM-295: owner-scoped read API needs a real "what changed since X"
+-- cursor. vector_entries had no updated_at (only created_at, set once at
+-- insert) — add it. agent_id/package_id are needed per-memory by the same
+-- read API (WALM-295 acceptance criteria).
+--
+-- All three columns are added NULLable here (a plain ADD COLUMN with no
+-- non-volatile default is a metadata-only change in Postgres — no table
+-- rewrite, no long lock). Backfill and the NOT NULL constraint are
+-- deliberately split into separate migrations (011, 012) so the
+-- expensive parts don't run under the ACCESS EXCLUSIVE lock this
+-- statement briefly holds — see 011/012's header comments. Do not
+-- re-merge these into one file/transaction.
+--
+-- No DB trigger: vector_entries has zero UPDATE statements in this
+-- codebase today, and every other updated_at column here (remember_jobs,
+-- delete_blobs_tracking) is bumped with an explicit `SET updated_at =
+-- NOW()` in application code, not a trigger. Matching that convention
+-- also avoids introducing this codebase's first CREATE TRIGGER, which
+-- would need to be idempotent across every server boot (migrations
+-- re-run unconditionally) — Postgres has no CREATE TRIGGER IF NOT EXISTS.
+--
+-- updated_at's DEFAULT is set as a SEPARATE statement from ADD COLUMN,
+-- deliberately — NOT `ADD COLUMN ... DEFAULT NOW()` inline. In Postgres
+-- 11+, an inline non-null DEFAULT on ADD COLUMN uses the "fast default"
+-- path (attmissingval): every EXISTING row would read back the ALTER's
+-- own execution timestamp, not NULL. That silently defeats 011's `WHERE
+-- updated_at IS NULL` backfill (matches nothing) and destroys the
+-- natural chronological ordering 011 exists to preserve — proven against
+-- a real server during review. `ALTER COLUMN ... SET DEFAULT`, run as
+-- its own statement, only writes `pg_attrdef` catalog metadata and never
+-- touches existing rows, so existing rows stay genuinely NULL for 011 to
+-- backfill, while every INSERT from the moment this transaction commits
+-- — including from code unaware `updated_at` exists at all — gets a real
+-- timestamp instead of NULL. That closes the rolling-deploy race where an
+-- old-code replica's INSERT lands between 011's backfill and 012's `SET
+-- NOT NULL`, which would otherwise crash-loop every replica still
+-- applying migrations. `VectorDb::insert_vector` never sets `updated_at`
+-- explicitly — it relies entirely on this column-level default.
+--
+-- Because `SET DEFAULT` isn't gated by `IF NOT EXISTS`, this statement
+-- also unconditionally repairs any environment that already ran an
+-- earlier, default-less version of this migration — no separate
+-- retroactive-fix migration is needed.
+
+ALTER TABLE vector_entries ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+ALTER TABLE vector_entries ALTER COLUMN updated_at SET DEFAULT NOW();
+ALTER TABLE vector_entries ADD COLUMN IF NOT EXISTS agent_id TEXT NULL;
+ALTER TABLE vector_entries ADD COLUMN IF NOT EXISTS package_id TEXT NULL;

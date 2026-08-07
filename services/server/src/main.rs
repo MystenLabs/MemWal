@@ -730,6 +730,7 @@ async fn main() {
         config: Arc::clone(&config),
         http_client,
         sui_grpc_client,
+        delegate_keys_cache: crate::storage::sui::new_delegate_keys_cache(),
         key_pool,
         alerts,
         engine,
@@ -1012,6 +1013,15 @@ async fn main() {
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
+        .route(
+            "/v1/owners/{owner}/namespaces",
+            get(routes::list_owner_namespaces),
+        )
+        .route(
+            "/v1/owners/{owner}/memories",
+            get(routes::list_owner_memories),
+        )
+        .route("/v1/owners/{owner}/agents", get(routes::list_owner_agents))
         // admin/harness endpoints — namespace delete + stats.
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))
