@@ -130,14 +130,124 @@ def _format_memories(
     ])
 
 
-def _fire_and_forget(coro: Any) -> None:
-    """Schedule an async coroutine as fire-and-forget.
+class _PendingSaves:
+    """Tracks in-flight fire-and-forget auto-save work (asyncio Tasks and
+    background Threads) so a caller can drain it deterministically via
+    :meth:`flush`/:meth:`flush_sync` instead of losing it silently when the
+    process exits before it completes. Tasks scheduled via
+    ``loop.create_task()`` with no other reference are only weakly held by
+    the event loop and can be cancelled or garbage-collected before they
+    run — this keeps a strong reference until each one is done.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: "set[asyncio.Task[Any]]" = set()
+        self._threads: List[threading.Thread] = []
+        self._lock = threading.Lock()
+
+    def track_task(self, task: "asyncio.Task[Any]") -> None:
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def spawn_thread(self, target: Callable[[], None]) -> None:
+        """Run `target` in a new daemon thread, tracked until it completes.
+        The thread untracks itself on completion -- a long-lived client
+        that keeps using fire-and-forget saves but never calls flush()
+        would otherwise accumulate one Thread object per save, forever.
+        """
+        def _run_and_untrack() -> None:
+            try:
+                target()
+            finally:
+                with self._lock:
+                    if thread in self._threads:
+                        self._threads.remove(thread)
+
+        thread = threading.Thread(target=_run_and_untrack, daemon=True)
+        with self._lock:
+            self._threads.append(thread)
+        thread.start()
+
+    async def flush(self) -> None:
+        """Await every pending task, then join every pending thread."""
+        if self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        self._join_threads()
+
+    def flush_sync(self) -> None:
+        """Join every pending thread. A pending Task belongs to the loop
+        that created it (e.g. an earlier `await llm.ainvoke(...)` call) and
+        cannot be awaited from a different one -- if any are still pending
+        here, the caller mixed sync and async entry points on the same
+        wrapped client, and this cleanup path can't safely drain them. Log
+        and continue draining threads rather than raise out of what's
+        usually shutdown code."""
+        if self._tasks:
+            async def _drain(tasks: "list[asyncio.Task[Any]]") -> None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            try:
+                asyncio.run(_drain(list(self._tasks)))
+            except RuntimeError:
+                logger.warning(
+                    "Walrus Memory flush_sync() could not await %d pending "
+                    "task(s) bound to a different event loop (mixing sync "
+                    "and async calls on the same wrapped client?) — those "
+                    "saves may be lost.",
+                    len(self._tasks),
+                )
+        self._join_threads()
+
+    def _join_threads(self) -> None:
+        with self._lock:
+            threads, self._threads = self._threads, []
+        for thread in threads:
+            thread.join()
+
+
+def _expose_memwal_controls(obj: Any, memwal: MemWal, pending: _PendingSaves) -> None:
+    """Attach the underlying client and a way to drain pending auto-saves —
+    without this, a short-lived process has no way to avoid silently
+    losing writes still in flight when it exits.
+
+    Uses object.__setattr__ rather than plain attribute assignment: a
+    LangChain BaseChatModel is a Pydantic model, and Pydantic's __setattr__
+    rejects assignment to any name that isn't a declared field (or a
+    leading-underscore private attribute) — memwal_flush/memwal_flush_sync
+    are neither, so plain `obj.memwal_flush = ...` raises ValueError on a
+    real LangChain model (masked by tests using MagicMock, which doesn't
+    enforce this). object.__setattr__ bypasses that check and writes
+    straight into the instance's __dict__, where normal attribute lookup
+    (obj.memwal_flush) still finds it — OpenAI clients aren't Pydantic
+    models and work the same way either way.
+    """
+    object.__setattr__(obj, "_memwal", memwal)
+    object.__setattr__(obj, "memwal_flush", pending.flush)
+    object.__setattr__(obj, "memwal_flush_sync", pending.flush_sync)
+
+
+async def _warn_if_cancelled(coro: Any, label: str) -> None:
+    try:
+        await coro
+    except asyncio.CancelledError:
+        logger.warning(
+            "Walrus Memory %s was cancelled before it completed — the process "
+            "likely exited without draining pending saves. Call flush()/"
+            "flush_sync() before exiting to avoid silent data loss.",
+            label,
+        )
+        raise
+
+
+def _fire_and_forget(coro: Any, pending: _PendingSaves, label: str = "auto-save") -> None:
+    """Schedule an async coroutine as fire-and-forget, tracked in `pending`.
 
     Works whether or not an event loop is already running.
     """
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(coro)
+        task = loop.create_task(_warn_if_cancelled(coro, label))
+        pending.track_task(task)
     except RuntimeError:
         # No running loop -- run in a background thread
         def _run() -> None:
@@ -146,8 +256,7 @@ def _fire_and_forget(coro: Any) -> None:
             except Exception:
                 logger.debug("Fire-and-forget analyze() failed", exc_info=True)
 
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
+        pending.spawn_thread(_run)
 
 
 def _run_blocking(coro_factory: Callable[[], Any]) -> Any:
@@ -226,6 +335,7 @@ def with_memwal_langchain(
     )
 
     log = logger.debug if not debug else logger.warning
+    pending = _PendingSaves()
 
     original_agenerate = llm._agenerate
     original_generate = llm._generate
@@ -289,7 +399,7 @@ def with_memwal_langchain(
         result = await original_agenerate(enriched, *args, **kwargs)
 
         for msg_list in messages:
-            _fire_and_forget(_post_analyze(msg_list))
+            _fire_and_forget(_post_analyze(msg_list), pending)
 
         return result
 
@@ -315,13 +425,15 @@ def with_memwal_langchain(
         result = original_generate(enriched, *args, **kwargs)
 
         for msg_list in messages:
-            _fire_and_forget(_post_analyze(msg_list))
+            _fire_and_forget(_post_analyze(msg_list), pending)
 
         return result
 
     # Monkey-patch the LLM instance
     llm._agenerate = patched_agenerate  # type: ignore[assignment]
     llm._generate = patched_generate  # type: ignore[assignment]
+
+    _expose_memwal_controls(llm, memwal, pending)
 
     return llm
 
@@ -379,13 +491,20 @@ def with_memwal_openai(
     )
 
     log = logger.debug if not debug else logger.warning
+    pending = _PendingSaves()
 
     is_async = hasattr(client, "_async_client") or type(client).__name__ == "AsyncOpenAI"
 
     if is_async:
-        _wrap_async_openai(client, memwal, namespace, max_memories, auto_save, min_relevance, log)
+        _wrap_async_openai(
+            client, memwal, namespace, max_memories, auto_save, min_relevance, log, pending
+        )
     else:
-        _wrap_sync_openai(client, memwal, namespace, max_memories, auto_save, min_relevance, log)
+        _wrap_sync_openai(
+            client, memwal, namespace, max_memories, auto_save, min_relevance, log, pending
+        )
+
+    _expose_memwal_controls(client, memwal, pending)
 
     return client
 
@@ -398,6 +517,7 @@ def _wrap_async_openai(
     auto_save: bool,
     min_relevance: float,
     log: Callable[..., Any],
+    pending: _PendingSaves,
 ) -> None:
     """Wrap an async OpenAI client's chat.completions.create."""
     original_create = client.chat.completions.create
@@ -437,7 +557,7 @@ def _wrap_async_openai(
                 except Exception as e:
                     log(f"[Walrus Memory] Auto-save failed: {e}")
 
-            _fire_and_forget(_analyze())
+            _fire_and_forget(_analyze(), pending)
 
         return result
 
@@ -452,6 +572,7 @@ def _wrap_sync_openai(
     auto_save: bool,
     min_relevance: float,
     log: Callable[..., Any],
+    pending: _PendingSaves,
 ) -> None:
     """Wrap a sync OpenAI client's chat.completions.create."""
     original_create = client.chat.completions.create
@@ -498,8 +619,7 @@ def _wrap_sync_openai(
                 except Exception as e:
                     log(f"[Walrus Memory] Auto-save failed: {e}")
 
-            thread = threading.Thread(target=_analyze, daemon=True)
-            thread.start()
+            pending.spawn_thread(_analyze)
 
         return result
 

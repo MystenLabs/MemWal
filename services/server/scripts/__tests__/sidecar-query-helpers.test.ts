@@ -9,6 +9,7 @@ import {
     blobIdMatchesRequested,
     blobObjectMatchesRegistration,
     chainBlobIdFromRaw,
+    isSourceCapped,
     isWalrusBlobObjectType,
     isVerifiedNonexistentSource,
     ownerMatchesRecipient,
@@ -408,6 +409,20 @@ test("source lease epochs accept only u32 numbers", () => {
     for (const invalid of [-1, 1.5, 0x1_0000_0000, "460", null, undefined]) {
         assert.throws(() => strictWalrusEpoch(invalid, "epoch"), /epoch must be a u32/);
     }
+});
+
+test("isSourceCapped flags only when the raw candidate fetch proved more than cap exist (WALM-319)", () => {
+    // The call site now probes with `cap + 1` and slices back down to `cap`,
+    // so `fetchedCount` here is the probe fetch's raw count compared against
+    // the real (non-probe) cap. Exactly `cap` fetched means discovery
+    // completed within the cap — not capped. Only strictly more than `cap`
+    // proves the source had more candidates than the cap allowed (Henry's
+    // review on PR #538: exact-cap results must not read as truncated).
+    assert.equal(isSourceCapped(3, 5), false, "fewer fetched than cap: not capped");
+    assert.equal(isSourceCapped(5, 5), false, "fetched exactly cap: discovery completed, not capped");
+    assert.equal(isSourceCapped(6, 5), true, "fetched more than cap (probe proved more exist): capped");
+    assert.equal(isSourceCapped(0, 5), false, "nothing fetched: not capped");
+    assert.equal(isSourceCapped(5, Infinity), false, "unbounded cap can never be hit");
 });
 
 test("registration reconciliation requires matching size and deletability", () => {

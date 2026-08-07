@@ -157,7 +157,8 @@ export function sanitizeServerError(
         return {
             message:
                 "401 from relayer: typically wrong private key, key not registered on this account, " +
-                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials.",
+                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+                "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
         };
