@@ -205,7 +205,7 @@ pub(crate) async fn query_owner_namespaces(
     // caller that asked for more than the cap and got exactly the cap back
     // would otherwise wrongly conclude it was done.
     let mut rows: Vec<(String, i64, i64, chrono::DateTime<chrono::Utc>)> =
-        if let Some((cursor_updated_at, cursor_namespace)) = after {
+        if let Some((cursor_updated_at, cursor_namespace)) = after.clone() {
             sqlx::query_as(
                 "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated_at
                  FROM vector_entries
@@ -247,18 +247,42 @@ pub(crate) async fn query_owner_namespaces(
     // the peeked extra row above), whether or not more pages follow.
     // Returning `None` on the final page left a client that had just
     // finished syncing with no checkpoint to poll from next time — which is
-    // the entire point of the cursor. The only cursor-less case is an empty
-    // page: there is no row to take a watermark from, so the client keeps
-    // the one it already has.
+    // the entire point of the cursor.
     // `Some(snapshot_at)` while the walk continues (has_more) so later pages
     // stay bound to the same point-in-time filter; `None` on the terminal
     // page so the client's *next* incremental poll — which starts a new
     // walk from this checkpoint — captures a fresh snapshot instead of
     // reusing this walk's, which would otherwise never advance again (see
     // `encode_namespaces_cursor`'s doc comment).
-    let next_cursor = rows.last().map(|(name, _, _, last_updated_at)| {
-        encode_namespaces_cursor(*last_updated_at, name, has_more.then_some(snapshot_at))
-    });
+    //
+    // WALM-297 review (Henry): an EMPTY page needs the same reset, not just
+    // a populated terminal one. A continuation page (the previous page had
+    // `has_more: true`) can come back with zero rows if every remaining row
+    // raced past `snapshot_at` between pages — `rows.last()` is `None`
+    // either way, so without this branch `next_cursor` collapsed to plain
+    // `None` too. Per this API's own contract, an empty page's `None`
+    // cursor means "keep whatever cursor you already have" — but the
+    // client's already-held cursor is the *previous* page's continuation
+    // cursor, which still carries this walk's now-stale `snapshot_at`.
+    // That would freeze incremental sync exactly the way the terminal-page
+    // case did, just triggered one page later. Fix: an empty page still
+    // re-encodes the incoming cursor's own watermark position (no row was
+    // consumed, so the position hasn't moved) but always with `snapshot_at`
+    // reset — `has_more` is always `false` here (zero rows can never
+    // exceed `limit`), so the reset is unconditional. `after` is `None`
+    // only when this is the very first page of a walk that found nothing
+    // at all, where there is no prior cursor to reset and `None` is still
+    // correct.
+    let next_cursor = match rows.last() {
+        Some((name, _, _, last_updated_at)) => Some(encode_namespaces_cursor(
+            *last_updated_at,
+            name,
+            has_more.then_some(snapshot_at),
+        )),
+        None => after.map(|(cursor_updated_at, cursor_namespace)| {
+            encode_namespaces_cursor(cursor_updated_at, &cursor_namespace, None)
+        }),
+    };
 
     let namespaces = rows
         .into_iter()
@@ -394,7 +418,7 @@ pub(crate) async fn query_owner_memories(
         Option<String>,
         Option<i32>,
         Option<chrono::DateTime<chrono::Utc>>,
-    )> = if let Some((cursor_updated_at, cursor_id)) = after {
+    )> = if let Some((cursor_updated_at, cursor_id)) = after.clone() {
         sqlx::query_as(
             "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id, end_epoch, expires_at
              FROM vector_entries
@@ -431,13 +455,17 @@ pub(crate) async fn query_owner_memories(
     // Same watermark rule as `query_owner_namespaces`: the cursor always
     // comes from the last row emitted (never the peeked extra row above), so
     // the final (or only) page still checkpoints the client for its next
-    // incremental poll. Only an empty page has no cursor, because it has no
-    // row to build one from.
+    // incremental poll.
     // `Some(snapshot_at)` while the walk continues, `None` on the terminal
-    // page — see `encode_cursor`'s doc comment.
-    let next_cursor = rows
-        .last()
-        .map(|r| encode_cursor(r.4, &r.0, has_more.then_some(snapshot_at)));
+    // page — see `encode_cursor`'s doc comment. WALM-297 review (Henry): an
+    // empty continuation page needs the same reset — see the identical
+    // branch and its full rationale in `query_owner_namespaces`.
+    let next_cursor = match rows.last() {
+        Some(r) => Some(encode_cursor(r.4, &r.0, has_more.then_some(snapshot_at))),
+        None => after.map(|(cursor_updated_at, cursor_id)| {
+            encode_cursor(cursor_updated_at, &cursor_id, None)
+        }),
+    };
 
     let memories = rows
         .into_iter()
@@ -848,12 +876,22 @@ mod tests {
         assert_eq!(decoded.updated_at, ts(120));
 
         // And polling from that fresh watermark with nothing else changed
-        // yields an empty page — the one and only cursor-less case.
+        // yields an empty page. WALM-297 review (Henry,
+        // discussion_r3734942009): this still returns a cursor (the same
+        // watermark position, snapshot_at reset) rather than None, so the
+        // next poll doesn't inherit a stale pinned snapshot — see
+        // query_owner_namespaces_empty_continuation_page_resets_snapshot.
         let third = query_owner_namespaces(&pool, &owner, Some(next), 100)
             .await
             .unwrap();
         assert!(third.namespaces.is_empty());
-        assert!(third.next_cursor.is_none());
+        let reset_cursor = third
+            .next_cursor
+            .expect("an empty page reached via a real cursor must still return one");
+        assert_eq!(
+            decode_namespaces_cursor(&reset_cursor).unwrap().snapshot_at,
+            None
+        );
 
         cleanup(&pool, &owner).await;
     }
@@ -932,9 +970,20 @@ mod tests {
                 .unwrap();
             assert!(page.namespaces.len() <= 2);
             if page.namespaces.is_empty() {
-                assert!(
-                    page.next_cursor.is_none(),
-                    "an empty page is the only case with no watermark"
+                // WALM-297 review (Henry, discussion_r3734942009): an empty
+                // page reached from a real incoming cursor still returns
+                // that cursor's own position with snapshot_at reset (not
+                // None) — see
+                // query_owner_namespaces_empty_continuation_page_resets_snapshot.
+                // This walk always seeds data, so the terminating empty
+                // page here is reached with `cursor.is_some()`.
+                let reset_cursor = page
+                    .next_cursor
+                    .expect("an empty page reached via a real cursor must still return one");
+                assert_eq!(
+                    decode_namespaces_cursor(&reset_cursor).unwrap().snapshot_at,
+                    None,
+                    "the empty page's cursor must have snapshot_at reset"
                 );
                 break;
             }
@@ -979,7 +1028,16 @@ mod tests {
             .await
             .unwrap();
         assert!(empty.namespaces.is_empty());
-        assert!(empty.next_cursor.is_none());
+        // WALM-297 review (Henry, discussion_r3734942009): still returns a
+        // cursor (same watermark, snapshot_at reset), not None — see
+        // query_owner_namespaces_empty_continuation_page_resets_snapshot.
+        let reset_cursor = empty
+            .next_cursor
+            .expect("an empty page reached via a real cursor must still return one");
+        assert_eq!(
+            decode_namespaces_cursor(&reset_cursor).unwrap().snapshot_at,
+            None
+        );
 
         cleanup(&pool, &owner).await;
     }
@@ -1177,6 +1235,124 @@ mod tests {
             .await;
     }
 
+    /// PR #554 review (Henry, discussion_r3734942009): the terminal-cursor
+    /// reset above only fires when the terminal page still has rows. If a
+    /// *continuation* page (the previous page had `has_more: true`) comes
+    /// back with zero rows — because every row that would have appeared
+    /// raced past `snapshot_at` between pages — `rows.last()` is `None`,
+    /// so `next_cursor` collapsed to plain `None` too. Per this API's own
+    /// contract an empty page's `None` cursor means "keep the cursor you
+    /// already have" — but the client's already-held cursor is the
+    /// *previous* page's continuation cursor, which still carries this
+    /// walk's now-stale `snapshot_at`, freezing sync exactly like the
+    /// terminal-page bug did, just one page later.
+    ///
+    /// Seeds "alpha" (delivered on page 1) and "bravo" (peeked, giving page
+    /// 1 `has_more: true`), then bumps bravo's `updated_at` past page 1's
+    /// snapshot before requesting page 2 — so page 2 legitimately has zero
+    /// rows to return.
+    #[tokio::test]
+    async fn query_owner_namespaces_empty_continuation_page_resets_snapshot() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        let base = chrono::Utc::now() - chrono::Duration::seconds(60);
+        for (ns, offset) in [("alpha", 0), ("bravo", 1)] {
+            sqlx::query(
+                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(format!("{}-{}", owner, ns))
+            .bind(&owner)
+            .bind(ns)
+            .bind(format!("blob-{}", ns))
+            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .bind(10_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE id = $2")
+                .bind(base + chrono::Duration::seconds(offset))
+                .bind(format!("{}-{}", owner, ns))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Page 1: delivers "alpha", peeks "bravo" -> has_more: true. Its
+        // cursor keeps snapshot_at pinned (continuation, not terminal).
+        let page1 = query_owner_namespaces(&pool, &owner, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(page1.namespaces.len(), 1);
+        assert_eq!(page1.namespaces[0].name, "alpha");
+        assert!(page1.has_more, "bravo must still be pending");
+        let cursor1 = page1.next_cursor.clone().expect("continuation checkpoint");
+        assert!(
+            decode_namespaces_cursor(&cursor1)
+                .unwrap()
+                .snapshot_at
+                .is_some(),
+            "a continuation cursor (has_more: true) must keep snapshot_at pinned"
+        );
+
+        // Race "bravo" past page 1's snapshot before page 2 is requested —
+        // the exact scenario Henry's finding describes.
+        let snapshot_at = decode_namespaces_cursor(&cursor1)
+            .unwrap()
+            .snapshot_at
+            .unwrap();
+        sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE id = $2")
+            .bind(snapshot_at + chrono::Duration::microseconds(1))
+            .bind(format!("{}-bravo", owner))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Page 2 legitimately has zero rows: "bravo" is excluded by the
+        // still-pinned snapshot, and there is nothing else left.
+        let page2 = query_owner_namespaces(&pool, &owner, Some(cursor1), 10)
+            .await
+            .unwrap();
+        assert!(
+            page2.namespaces.is_empty(),
+            "bravo must be excluded from this walk"
+        );
+        assert!(!page2.has_more, "nothing else remains in this walk");
+
+        // The actual fix: even though page 2 is empty, it must still return
+        // a real cursor (not None) with snapshot_at reset — not the bare
+        // `None` the old code produced, which would have left the client
+        // holding page 1's still-pinned continuation cursor forever.
+        let page2_cursor = page2
+            .next_cursor
+            .clone()
+            .expect("an empty continuation page must still return a reset cursor, not None");
+        assert_eq!(
+            decode_namespaces_cursor(&page2_cursor).unwrap().snapshot_at,
+            None,
+            "the empty page's cursor must reset snapshot_at so the next poll is fresh"
+        );
+
+        // Polling again with that reset cursor must now see "bravo".
+        let page3 = query_owner_namespaces(&pool, &owner, Some(page2_cursor), 10)
+            .await
+            .unwrap();
+        let page3_names: Vec<String> = page3.namespaces.iter().map(|n| n.name.clone()).collect();
+        assert_eq!(
+            page3_names,
+            vec!["bravo"],
+            "a poll using the reset cursor from an empty continuation page must surface the \
+             row that raced past the previous snapshot, got {:?}",
+            page3_names
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
     /// Regression test for the namespace snapshot-boundary fix: because
     /// `MAX(updated_at)` for a namespace can advance after that namespace
     /// has already been delivered to the client (any new/updated row
@@ -1338,13 +1514,19 @@ mod tests {
         assert_eq!(decoded.id, page3.memories[0].memory_id);
         assert_eq!(decoded.updated_at, page3.memories[0].updated_at);
 
-        // Polling again from that watermark with nothing new written is the
-        // only case that legitimately has no cursor.
+        // Polling again from that watermark with nothing new written comes
+        // back empty. WALM-297 review (Henry, discussion_r3734942009): it
+        // still returns a cursor (the same watermark, snapshot_at reset),
+        // not None — see
+        // query_owner_memories_empty_continuation_page_resets_snapshot.
         let page4 = query_owner_memories(&pool, &owner, Some(terminal), 2)
             .await
             .unwrap();
         assert!(page4.memories.is_empty());
-        assert!(page4.next_cursor.is_none());
+        let reset_cursor = page4
+            .next_cursor
+            .expect("an empty page reached via a real cursor must still return one");
+        assert_eq!(decode_cursor(&reset_cursor).unwrap().snapshot_at, None);
 
         let mut all_ids: Vec<String> = page1
             .memories
@@ -1399,7 +1581,13 @@ mod tests {
             .await
             .unwrap();
         assert!(empty.memories.is_empty());
-        assert!(empty.next_cursor.is_none());
+        // WALM-297 review (Henry, discussion_r3734942009): still returns a
+        // cursor (same watermark, snapshot_at reset), not None — see
+        // query_owner_memories_empty_continuation_page_resets_snapshot.
+        let reset_cursor = empty
+            .next_cursor
+            .expect("an empty page reached via a real cursor must still return one");
+        assert_eq!(decode_cursor(&reset_cursor).unwrap().snapshot_at, None);
 
         cleanup(&pool, &owner).await;
     }
@@ -1636,6 +1824,96 @@ mod tests {
             fresh_ids.contains(&format!("{}-s1", owner)),
             "a fresh walk must see the row once its update has settled, got {:?}",
             fresh_ids
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    /// PR #554 review (Henry, discussion_r3734942009): the memories path has
+    /// the identical empty-continuation-page failure mode as
+    /// `query_owner_namespaces_empty_continuation_page_resets_snapshot` —
+    /// see that test's doc comment for the full scenario. Seeds `s0`
+    /// (delivered on page 1) and `s1` (peeked, giving page 1
+    /// `has_more: true`), bumps `s1`'s `updated_at` past page 1's snapshot
+    /// before requesting page 2, so page 2 legitimately has zero rows.
+    #[tokio::test]
+    async fn query_owner_memories_empty_continuation_page_resets_snapshot() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        let base = chrono::Utc::now() - chrono::Duration::seconds(60);
+        for i in 0..2 {
+            sqlx::query(
+                "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes)
+                 VALUES ($1, $2, 'default', $3, $4, $5)",
+            )
+            .bind(format!("{}-s{}", owner, i))
+            .bind(&owner)
+            .bind(format!("blob-s{}", i))
+            .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+            .bind(10_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE id = $2")
+                .bind(base + chrono::Duration::seconds(i))
+                .bind(format!("{}-s{}", owner, i))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Page 1: delivers s0, peeks s1 -> has_more: true.
+        let page1 = query_owner_memories(&pool, &owner, None, 1).await.unwrap();
+        assert_eq!(page1.memories.len(), 1);
+        assert_eq!(page1.memories[0].memory_id, format!("{}-s0", owner));
+        assert!(page1.has_more, "s1 must still be pending");
+        let cursor1 = page1.next_cursor.clone().expect("continuation checkpoint");
+        let snapshot_at = decode_cursor(&cursor1).unwrap().snapshot_at.unwrap();
+
+        // Race s1 past page 1's snapshot before page 2 is requested.
+        sqlx::query("UPDATE vector_entries SET updated_at = $1 WHERE id = $2")
+            .bind(snapshot_at + chrono::Duration::microseconds(1))
+            .bind(format!("{}-s1", owner))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Page 2 legitimately has zero rows.
+        let page2 = query_owner_memories(&pool, &owner, Some(cursor1), 10)
+            .await
+            .unwrap();
+        assert!(
+            page2.memories.is_empty(),
+            "s1 must be excluded from this walk"
+        );
+        assert!(!page2.has_more, "nothing else remains in this walk");
+
+        // The fix: the empty page must still return a reset cursor, not None.
+        let page2_cursor = page2
+            .next_cursor
+            .clone()
+            .expect("an empty continuation page must still return a reset cursor, not None");
+        assert_eq!(
+            decode_cursor(&page2_cursor).unwrap().snapshot_at,
+            None,
+            "the empty page's cursor must reset snapshot_at so the next poll is fresh"
+        );
+
+        // Polling again with that reset cursor must now see s1.
+        let page3 = query_owner_memories(&pool, &owner, Some(page2_cursor), 10)
+            .await
+            .unwrap();
+        let page3_ids: Vec<String> = page3.memories.iter().map(|m| m.memory_id.clone()).collect();
+        assert_eq!(
+            page3_ids,
+            vec![format!("{}-s1", owner)],
+            "a poll using the reset cursor from an empty continuation page must surface the \
+             row that raced past the previous snapshot, got {:?}",
+            page3_ids
         );
 
         let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
