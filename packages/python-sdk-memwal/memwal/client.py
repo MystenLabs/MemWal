@@ -83,7 +83,8 @@ SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
 AUTH_REJECTED_MESSAGE = (
     "401 from relayer: typically wrong private key, key not registered on this "
     "account, account ID mismatch, or staging/mainnet mismatch. Check .env.local "
-    "and dashboard credentials."
+    "and dashboard credentials. Full troubleshooting: "
+    "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
 
 

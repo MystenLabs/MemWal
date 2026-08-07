@@ -121,6 +121,13 @@ pub async fn stats(
 // ============================================================
 
 /// GET /health
+///
+/// Public and unauthenticated by design (registered under `public_routes`
+/// in `main.rs`) — it does not accept or validate credentials, so a `200`
+/// here means only "the server process is up," not "your delegate
+/// key/account ID are valid." A caller preflighting credentials before a
+/// signed call should not treat this as a substitute for that call
+/// succeeding (WALM-318).
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
