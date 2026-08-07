@@ -253,7 +253,7 @@ components:
 
     NamespaceSummary:
       type: object
-      required: [id, name, memory_count, storage_used]
+      required: [id, name, memory_count, storage_used, updated_at]
       properties:
         id:
           type: string
@@ -266,10 +266,16 @@ components:
           type: integer
           format: int64
           description: Sum of blob_size_bytes across the namespace's memories.
+        updated_at:
+          type: string
+          format: date-time
+          description: >-
+            MAX(updated_at) across the namespace's memories — the same value
+            this page's cursor is built from.
 
     NamespacesResponse:
       type: object
-      required: [namespaces, next_cursor, snapshot_version]
+      required: [namespaces, next_cursor, has_more, snapshot_version]
       properties:
         namespaces:
           type: array
@@ -278,13 +284,24 @@ components:
         next_cursor:
           type: string
           nullable: true
-          description: Opaque continuation token; null on the last page.
+          description: >-
+            Always returned for a non-empty page — including the final page
+            of a traversal. Null only for an empty page, which has no row to
+            take a watermark from. Do not treat null as "end of data"; use
+            `has_more` for that instead.
+        has_more:
+          type: boolean
+          description: >-
+            The only correct end-of-data signal — keep paginating while
+            true. `limit` is silently clamped to this endpoint's max, so a
+            page shorter than the requested `limit` does not reliably mean
+            no more data remains.
         snapshot_version:
           type: integer
 
     MemoryItem:
       type: object
-      required: [memory_id, namespace_id, blob_id, created_at, size, agent_id, package_id, status]
+      required: [memory_id, namespace_id, blob_id, created_at, updated_at, size, agent_id, package_id, status, end_epoch, expires_at]
       properties:
         memory_id:
           type: string
@@ -295,6 +312,12 @@ components:
         created_at:
           type: string
           format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          description: >-
+            The row's own last-modified time — the same value this page's
+            cursor is built from.
         size:
           type: integer
           format: int64
@@ -311,14 +334,32 @@ components:
           nullable: true
         status:
           type: string
-          enum: [active]
+          enum: [active, expired]
           description: >-
-            Always "active" in this Phase 1 response — deactivation status
-            is out of scope (see docs/api/memory-read-api.md).
+            "expired" if `expires_at` is in the past, "active" otherwise —
+            including while `end_epoch`/`expires_at` are still null (not yet
+            synced).
+        end_epoch:
+          type: integer
+          format: int32
+          nullable: true
+          description: >-
+            On-chain Walrus storage lease end epoch (WALM-296). Null until a
+            background sweep syncs it, typically within ~5 minutes of the
+            memory being written. Nullable independently of `expires_at` —
+            the two are not guaranteed to become non-null in the same pass.
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Computed absolute expiry timestamp derived from `end_epoch`
+            (WALM-296). Null until synced, independently of `end_epoch` —
+            do not assume the two arrive together.
 
     MemoriesResponse:
       type: object
-      required: [memories, next_cursor, snapshot_version]
+      required: [memories, next_cursor, has_more, snapshot_version]
       properties:
         memories:
           type: array
@@ -327,6 +368,18 @@ components:
         next_cursor:
           type: string
           nullable: true
+          description: >-
+            Always returned for a non-empty page — including the final page
+            of a traversal. Null only for an empty page, which has no row to
+            take a watermark from. Do not treat null as "end of data"; use
+            `has_more` for that instead.
+        has_more:
+          type: boolean
+          description: >-
+            The only correct end-of-data signal — keep paginating while
+            true. `limit` is silently clamped to this endpoint's max, so a
+            page shorter than the requested `limit` does not reliably mean
+            no more data remains.
         snapshot_version:
           type: integer
 
