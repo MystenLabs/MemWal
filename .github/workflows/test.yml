@@ -32,6 +32,26 @@ jobs:
       - name: Check compatibility contract
         run: node scripts/check-compatibility-contract.mjs
 
+  mcp-docs-sync:
+    name: Docs / MCP snippets match packages/mcp
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The MCP config blocks in docs/mcp/ are copies of the canonical server
+      # entry in packages/mcp/README.md (Mintlify cannot import code from
+      # repository files at build time). Fails when any copy drifts.
+      - name: Check MCP docs snippets against the package README
+        run: node scripts/check-mcp-docs-sync.mjs
+
   mcp-tests:
     name: MCP / Integration (login handoff)
     runs-on: ubuntu-latest

@@ -67,7 +67,7 @@ After any of these, restart the client (MCP servers load at startup) and ask the
 
 ### JSON clients
 
-Claude Desktop, Cursor, and Antigravity's MCP config all take the same shape:
+Claude Desktop, Cursor, and Antigravity's MCP config all take the same shape. The server entry is the canonical configuration from the [`packages/mcp` README](https://github.com/MystenLabs/MemWal/tree/main/packages/mcp), and a CI check keeps every copy in these docs in sync with it:
 
 ```json
 {
