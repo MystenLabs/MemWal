@@ -784,22 +784,30 @@ class MemWal:
           do **not** count as either restored or skipped.
         * ``total`` — count of on-chain blobs the relayer saw for
           ``(owner, namespace)`` before the limit was applied.
+        * ``truncated`` — True when this restore is known-incomplete (limit
+          truncation or an upstream on-chain candidate-fetch cap; see
+          :class:`~memwal.types.RestoreResult`). Defaults to ``False`` when
+          talking to a relayer older than WALM-319 that omits the field.
 
         Args:
             namespace: Namespace to restore. Exact match — no prefix or
                 hierarchy semantics (see SKILL.md "Namespace Semantics").
             limit: Max blobs the relayer will *inspect* this call (default:
                 10, matches the server-side default and the TypeScript SDK).
-                The relayer fetches blobs newest-first and caps the work at
-                this number; it does **not** cap ``restored`` separately.
+                The relayer selects up to this many missing blobs from the
+                candidates it sees, in unspecified order; it does **not** cap
+                ``restored`` separately.
 
         Returns:
             :class:`RestoreResult`.
 
         Notes:
-            * **No pagination cursor** — restore is single-shot. To rebuild a
-              large namespace, call repeatedly with a growing ``limit`` or
-              prune the local index first.
+            * **No pagination cursor** — restore is single-shot. A larger
+              ``limit`` may help when ``truncated`` is caused by the request
+              limit, but candidate discovery also has a per-owner source cap
+              shared across namespaces. Hitting that cap requires cursor/
+              pagination support for guaranteed full recovery; increasing
+              ``limit`` or retrying cannot guarantee it.
             * **Performance** scales linearly in ``limit``: up to 10 Walrus
               downloads in parallel, then 3 SEAL decrypts in parallel, then
               embeddings. Expect seconds-per-blob on cold caches.
@@ -814,6 +822,10 @@ class MemWal:
             total=data["total"],
             namespace=data["namespace"],
             owner=data["owner"],
+            # Relayers older than WALM-319 omit `truncated` entirely --
+            # treat "not present" as "not known to be truncated" rather
+            # than require every relayer version to send it.
+            truncated=data.get("truncated", False),
         )
 
     async def health(self) -> HealthResult:
