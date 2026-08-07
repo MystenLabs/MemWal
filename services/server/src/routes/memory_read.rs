@@ -142,11 +142,21 @@ pub(crate) async fn query_owner_namespaces(
     // own, because `limit` is silently clamped to MAX_NAMESPACES_LIMIT: a
     // caller that asked for more than the cap and got exactly the cap back
     // would otherwise wrongly conclude it was done.
+    // `memory_count`/`storage_used` are FILTERed to live rows only — a
+    // forgotten memory must not keep counting toward the namespace's
+    // rollup. `MAX(updated_at)` deliberately stays UNfiltered: it is the
+    // sync watermark, and a deletion (which bumps `updated_at` — see
+    // `VectorDb::delete_by_namespace`) must still be able to advance it,
+    // or a namespace whose only change since the client's last poll was a
+    // deletion would never resurface.
     let mut rows: Vec<(String, i64, i64, chrono::DateTime<chrono::Utc>)> =
         if let Some(raw_cursor) = cursor {
             let c = decode_namespaces_cursor(&raw_cursor)?;
             sqlx::query_as(
-                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated_at
+                "SELECT namespace,
+                        COUNT(*) FILTER (WHERE deleted_at IS NULL) AS memory_count,
+                        COALESCE(SUM(blob_size_bytes) FILTER (WHERE deleted_at IS NULL), 0)::BIGINT AS storage_used,
+                        MAX(updated_at) AS last_updated_at
                  FROM vector_entries
                  WHERE owner = $1
                  GROUP BY namespace
@@ -162,7 +172,10 @@ pub(crate) async fn query_owner_namespaces(
             .await
         } else {
             sqlx::query_as(
-                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated_at
+                "SELECT namespace,
+                        COUNT(*) FILTER (WHERE deleted_at IS NULL) AS memory_count,
+                        COALESCE(SUM(blob_size_bytes) FILTER (WHERE deleted_at IS NULL), 0)::BIGINT AS storage_used,
+                        MAX(updated_at) AS last_updated_at
                  FROM vector_entries
                  WHERE owner = $1
                  GROUP BY namespace
@@ -269,6 +282,10 @@ pub(crate) async fn query_owner_memories(
     // Peek one row past `limit` for an explicit has_more signal — see
     // query_owner_namespaces's identical comment on why page-length alone
     // (vs. the clamped limit) isn't a reliable end-of-data signal.
+    // `deleted_at` is selected (not filtered out) deliberately: a
+    // soft-deleted row must still surface via `updated_after` so Console
+    // learns the memory is gone, per PRD §6.6 ("a memory is deleted in WM
+    // -> reflected on next incremental sync"). See `VectorDb::delete_by_namespace`.
     #[allow(clippy::type_complexity)]
     let mut rows: Vec<(
         String,
@@ -279,10 +296,11 @@ pub(crate) async fn query_owner_memories(
         i64,
         Option<String>,
         Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
     )> = if let Some(raw_cursor) = cursor {
         let c = decode_cursor(&raw_cursor)?;
         sqlx::query_as(
-            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id
+            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id, deleted_at
              FROM vector_entries
              WHERE owner = $1 AND (updated_at, id) > ($2, $3)
              ORDER BY updated_at, id
@@ -296,7 +314,7 @@ pub(crate) async fn query_owner_memories(
         .await
     } else {
         sqlx::query_as(
-            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id
+            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id, deleted_at
              FROM vector_entries
              WHERE owner = $1
              ORDER BY updated_at, id
@@ -322,7 +340,7 @@ pub(crate) async fn query_owner_memories(
     let memories = rows
         .into_iter()
         .map(
-            |(id, namespace, blob_id, created_at, updated_at, size, agent_id, package_id)| {
+            |(id, namespace, blob_id, created_at, updated_at, size, agent_id, package_id, deleted_at)| {
                 MemoryItem {
                     memory_id: id,
                     namespace_id: namespace,
@@ -332,9 +350,11 @@ pub(crate) async fn query_owner_memories(
                     size,
                     agent_id,
                     package_id,
-                    // Always "active" until Plan B (WALM-296) adds expires_at
-                    // and derives this from it.
-                    status: "active",
+                    // "deleted" takes priority: a forgotten memory is
+                    // reported as deleted regardless of expiry state.
+                    // Otherwise always "active" until Plan B (WALM-296)
+                    // adds expires_at and derives active/expired from it.
+                    status: if deleted_at.is_some() { "deleted" } else { "active" },
                 }
             },
         )
@@ -489,6 +509,7 @@ mod tests {
             include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql"),
             include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql"),
             include_str!("../../migrations/013_memory_read_api_index.sql"),
+            include_str!("../../migrations/014_memory_deleted_at.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -1046,5 +1067,182 @@ mod tests {
             .bind(&owner)
             .execute(&pool)
             .await;
+    }
+
+    /// Deletion propagation (WALM-295 review, ducnmm): a hard `DELETE`
+    /// leaves nothing for a client's `updated_after` poll to find, so a
+    /// memory it already synced silently goes stale. `VectorDb::delete_by_namespace`
+    /// / `delete_by_blob_id` now soft-delete instead (stamp `deleted_at`
+    /// and bump `updated_at`, simulated here via a direct `UPDATE` since
+    /// this module doesn't depend on `storage::db::VectorDb`). This test
+    /// pins that a client polling from a checkpoint taken BEFORE the
+    /// deletion sees the row again with `status: "deleted"`.
+    #[tokio::test]
+    async fn query_owner_memories_reports_deleted_status_and_resurfaces_via_watermark() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        seed_entry(&pool, &owner, "d1", "default", 10, ts(0)).await;
+
+        let first = query_owner_memories(&pool, &owner, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(first.memories[0].status, "active");
+        let checkpoint = first
+            .next_cursor
+            .clone()
+            .expect("first sync must checkpoint");
+
+        // Forget it: soft delete, mirroring VectorDb::delete_by_namespace.
+        sqlx::query(
+            "UPDATE vector_entries SET deleted_at = $1, updated_at = $1 WHERE owner = $2",
+        )
+        .bind(ts(60))
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let second = query_owner_memories(&pool, &owner, Some(checkpoint), 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.memories.len(),
+            1,
+            "the tombstoned row must resurface via updated_after, not vanish"
+        );
+        assert_eq!(second.memories[0].status, "deleted");
+        assert_eq!(second.memories[0].updated_at, ts(60));
+
+        cleanup(&pool, &owner).await;
+    }
+
+    /// A namespace whose only change since a client's last sync was a
+    /// deletion must still resurface (its `updated_at` watermark moved),
+    /// but the deleted memory must not keep counting toward the
+    /// namespace's `memory_count`/`storage_used` rollup.
+    #[tokio::test]
+    async fn query_owner_namespaces_excludes_deleted_from_rollup_but_still_resurfaces() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        seed_entry(&pool, &owner, "n1", "work", 100, ts(0)).await;
+        seed_entry(&pool, &owner, "n2", "work", 50, ts(10)).await;
+
+        let first = query_owner_namespaces(&pool, &owner, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(first.namespaces[0].memory_count, 2);
+        assert_eq!(first.namespaces[0].storage_used, 150);
+        let checkpoint = first
+            .next_cursor
+            .clone()
+            .expect("first sync must checkpoint");
+
+        sqlx::query(
+            "UPDATE vector_entries SET deleted_at = $1, updated_at = $1
+             WHERE owner = $2 AND blob_id = $3",
+        )
+        .bind(ts(60))
+        .bind(&owner)
+        .bind("blob-n1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let second = query_owner_namespaces(&pool, &owner, Some(checkpoint), 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.namespaces.len(),
+            1,
+            "namespace must resurface since a deletion inside it advanced its watermark"
+        );
+        assert_eq!(
+            second.namespaces[0].memory_count, 1,
+            "deleted memory must not count toward memory_count"
+        );
+        assert_eq!(
+            second.namespaces[0].storage_used, 50,
+            "deleted memory's bytes must not count toward storage_used"
+        );
+        assert_eq!(second.namespaces[0].updated_at, ts(60));
+
+        cleanup(&pool, &owner).await;
+    }
+
+    /// Contract clarification (Henry/WALM-295 review): an empty incremental
+    /// sync — polling a valid, previously-completed-sync checkpoint with no
+    /// new/updated/deleted rows since — must give the client a usable
+    /// checkpoint to keep polling with, and `snapshot_version` must stay
+    /// stable so the client knows NOT to discard its cursor and full-resync.
+    /// Per the "Cursor semantics" doc: an empty page returns `next_cursor:
+    /// null` and the client is expected to keep the cursor it already has;
+    /// this test pins that `snapshot_version` on that empty response still
+    /// matches what a full resync would have returned, i.e. it does not
+    /// spuriously change just because a page happened to be empty.
+    #[tokio::test]
+    async fn empty_incremental_sync_preserves_snapshot_version_for_both_endpoints() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+
+        seed_entry(&pool, &owner, "e1", "default", 10, ts(0)).await;
+
+        let first_memories = query_owner_memories(&pool, &owner, None, 100)
+            .await
+            .unwrap();
+        let first_namespaces = query_owner_namespaces(&pool, &owner, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(first_memories.snapshot_version, SNAPSHOT_VERSION);
+        assert_eq!(first_namespaces.snapshot_version, SNAPSHOT_VERSION);
+        let memories_checkpoint = first_memories
+            .next_cursor
+            .clone()
+            .expect("completed sync must checkpoint");
+        let namespaces_checkpoint = first_namespaces
+            .next_cursor
+            .clone()
+            .expect("completed sync must checkpoint");
+
+        // Nothing changed since the checkpoint: poll again with no new data.
+        let second_memories =
+            query_owner_memories(&pool, &owner, Some(memories_checkpoint.clone()), 100)
+                .await
+                .unwrap();
+        let second_namespaces =
+            query_owner_namespaces(&pool, &owner, Some(namespaces_checkpoint.clone()), 100)
+                .await
+                .unwrap();
+
+        assert!(second_memories.memories.is_empty());
+        assert!(!second_memories.has_more);
+        assert_eq!(
+            second_memories.next_cursor, None,
+            "an empty page has no row to build a fresher watermark from — client keeps its existing cursor"
+        );
+        assert_eq!(
+            second_memories.snapshot_version, SNAPSHOT_VERSION,
+            "snapshot_version must not change on an empty poll, or the client would wrongly discard a still-valid cursor and full-resync"
+        );
+
+        assert!(second_namespaces.namespaces.is_empty());
+        assert!(!second_namespaces.has_more);
+        assert_eq!(second_namespaces.next_cursor, None);
+        assert_eq!(second_namespaces.snapshot_version, SNAPSHOT_VERSION);
+
+        // The client's original checkpoint is still the correct one to poll
+        // with going forward (it was never invalidated by the empty page).
+        seed_entry(&pool, &owner, "e2", "default", 20, ts(60)).await;
+        let third_memories = query_owner_memories(&pool, &owner, Some(memories_checkpoint), 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            third_memories.memories.len(),
+            1,
+            "the preserved checkpoint must still find rows inserted after it"
+        );
+
+        cleanup(&pool, &owner).await;
     }
 }

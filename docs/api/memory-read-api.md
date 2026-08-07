@@ -128,14 +128,17 @@ next poll if any of its memories were **created or updated** after that
 watermark, however early its name sorts. Namespaces untouched since the
 watermark are not re-sent.
 
-**Deletions are not currently reflected.** Forgetting a memory (or its
-Walrus blob expiring/being cleaned up) removes its row outright — the
-namespace's rollup shrinks, but that shrink does not advance the
-namespace's `updated_at` watermark the way a create/update does, so a
-namespace whose only change since your last sync was a deletion will not
-be resurfaced. Until this is addressed, clients that need to detect
-deletions should periodically do a full (cursor-less) resync rather than
-relying on `updated_after` alone.
+**Deletions are reflected via soft delete.** Forgetting a memory
+(`POST /api/forget`) or the reactive Walrus-404 cleanup no longer removes
+the row outright — it stamps `deleted_at` and bumps `updated_at` like any
+other change. That means: the namespace's `updated_at` watermark still
+advances on a deletion, so a namespace whose only change since your last
+sync was a deletion **is** resurfaced by `updated_after` — but
+`memory_count`/`storage_used` exclude deleted memories, so the rollup you
+see reflects only what's still live. The individual deleted memory itself
+also resurfaces in `GET /v1/owners/{owner}/memories` with
+`status: "deleted"` (see below) — that is your positive signal to drop it
+from your local index, rather than the row simply disappearing.
 
 Response:
 ```json
@@ -188,8 +191,12 @@ Response:
 `updated_at` is the row's own last-modified time — the same value this
 page's cursor is built from.
 
-`end_epoch`/`expires_at` fields are added by WALM-296 (see that plan) —
-not present yet in this Phase 1 response.
+`status` is `"deleted"` if the memory was forgotten (or its blob was
+reactively cleaned up after a Walrus 404) — treat this as a tombstone and
+remove the memory from your local index. Otherwise `"active"` for Phase 1.
+(`end_epoch`/`expires_at` fields, and the `active`/`expired` split, are
+added by WALM-296 — see that plan — and are not present yet in this
+Phase 1 response.)
 
 ### Cursor semantics (both paginated endpoints)
 
@@ -211,6 +218,41 @@ match exactly 500 real rows returns a page exactly as long as the (clamped)
 `limit`, and a request for more than the actual remaining data returns a
 page shorter than `limit` while more data still exists elsewhere for that
 owner. `has_more` is correct in both cases; page-length heuristics are not.
+
+### `snapshot_version` and full reconciliation
+
+`snapshot_version` is a small integer describing the *wire contract* these
+endpoints currently speak — the cursor's binary/JSON format and the set of
+fields on each item. It is not per-account or per-sync state; it changes
+only when we ship a breaking contract change (e.g. `1 -> 2` here, when the
+`/namespaces` cursor changed from a bare name to a `(updated_at,
+namespace)` watermark and both endpoints gained `updated_at`/`has_more`).
+
+**Client contract:** store the `snapshot_version` you last saw alongside
+your cursor. On every response, compare it to the stored value:
+
+- **Unchanged** — your stored cursor is still valid; keep polling with it
+  as normal.
+- **Different (including "you have none stored yet")** — treat your
+  existing cursor as unusable. Discard it, perform one full (cursor-less)
+  sync of everything from the start, and store the new `snapshot_version`
+  alongside the fresh cursor you get back.
+
+You do not need to inspect the value itself (e.g. detect "did it go up or
+down") — any difference from what you have stored means "do a full
+resync," full stop.
+
+**In practice, a version bump is self-enforcing for cursors specifically:**
+a cursor encoded under an old contract version is not valid JSON/shape
+under the new one and is rejected with `400 { "error": "invalid cursor" }`
+rather than silently mis-decoded — see `decode_namespaces_cursor`'s
+rejection of a pre-`snapshot_version: 2` bare-name cursor
+(`encode_namespaces_cursor_is_url_safe_and_round_trips` in
+`memory_read.rs`'s test module). Comparing `snapshot_version` remains the
+right thing to do regardless, since not every contract change necessarily
+breaks cursor decoding (e.g. a version bump purely for a new response
+field would decode an old cursor just fine while still meaning "your
+locally cached item shapes are stale").
 
 ## GET /v1/owners/{owner}/agents
 
