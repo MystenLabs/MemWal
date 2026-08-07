@@ -1262,9 +1262,15 @@ async fn main() {
     // per-delegate-key budget (that budget exists to bound Walrus
     // upload/LLM/gas spend-risk; plain reads carry none of that risk and a
     // routine pagination loop could trip it under completely normal use).
-    // Same auth layer as `protected_routes` (`auth::verify_signature`), but
-    // `read_api_rate_limit_middleware` instead of the shared
-    // `rate_limit_middleware`, so this budget can never contend with writes.
+    // Auth is `auth::verify_read_api_auth` (WALM-297): a combined dispatcher
+    // that accepts either the existing Ed25519 signed-request scheme
+    // (SDK/dashboard delegate-key callers, unmodified) or a WALM-297
+    // owner-scoped bearer token (Console, which structurally can never
+    // produce an Ed25519 signature — see `owner_token_auth`'s module doc).
+    // Both paths populate the same `AuthInfo` extension, so the handlers
+    // themselves don't need to know which scheme authenticated the request.
+    // `read_api_rate_limit_middleware` (not the shared `rate_limit_middleware`)
+    // so this budget can never contend with writes.
     let read_api_routes = Router::new()
         .route(
             "/v1/owners/{owner}/namespaces",
@@ -1281,7 +1287,7 @@ async fn main() {
         ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::verify_signature,
+            auth::verify_read_api_auth,
         ))
         .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
 

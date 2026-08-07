@@ -105,11 +105,16 @@ GET /v1/owners/{owner}/memories
 Authorization: Bearer <token>
 ```
 
-(This branch also exposes `GET /v1/owners/{owner}/_token_probe` as a
-development-only stand-in for WALM-295's real read routes, which do not exist
-on this branch yet — see that handler's doc comment. Wiring the same
-extractor into the real `namespaces`/`memories`/`agents` handlers is the
-follow-up once this branch merges with WALM-295.)
+`GET /v1/owners/{owner}/namespaces`, `.../memories`, and `.../agents` (WALM-295)
+all accept this same bearer token via `auth::verify_read_api_auth`
+(`services/server/src/auth.rs`), which dispatches between it and the
+existing Ed25519 signed-request scheme based on whether the request carries
+an `Authorization` header — see `docs/api/memory-read-api.md`'s
+Authentication section for the combined contract. `GET
+/v1/owners/{owner}/_token_probe` still exists alongside them as the
+original dev-only smoke-test route this mechanism was proven against before
+the real handlers existed; it is redundant now and a candidate for removal
+in a follow-up, not something Console should call.
 
 `{owner}` in the path must exactly equal the token's `owner_address` claim
 (canonical-address comparison, not raw string equality) or the request is

@@ -11,12 +11,15 @@
 //! token scoped to `Y`. Console then presents that token as `Authorization:
 //! Bearer <token>` to WM's owner-scoped read routes.
 //!
-//! `token_probe` is a minimal token-gated route added SPECIFICALLY so this
-//! feature is testable end-to-end in this branch: PR #537 (WALM-295)'s real
-//! `GET /v1/owners/{owner}/{namespaces,memories,agents}` handlers do not
-//! exist here yet (this is a fresh branch off `dev`). Wiring the
-//! `OwnerToken` extractor into those real handlers is the small follow-up
-//! once this branch merges with / rebases onto PR #537's branch.
+//! `token_probe` was originally added as a minimal token-gated route so this
+//! feature could be tested end-to-end before PR #537 (WALM-295)'s real
+//! `GET /v1/owners/{owner}/{namespaces,memories,agents}` handlers existed on
+//! this branch. That wiring is now done: those handlers accept this same
+//! bearer token via `auth::verify_read_api_auth` (`services/server/src/auth.rs`),
+//! which dispatches between it and the existing Ed25519 signed-request
+//! scheme based on whether the request carries an `Authorization` header.
+//! `token_probe` itself is now redundant and left in place only as a
+//! smoke-test artifact — a candidate for removal in a follow-up.
 
 use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
@@ -230,17 +233,16 @@ pub struct TokenProbeResponse {
 
 /// `GET /v1/owners/{owner}/_token_probe` — minimal token-gated route.
 ///
-/// This route exists SPECIFICALLY so owner-token auth is testable
-/// end-to-end in this branch even though PR #537 (WALM-295)'s real
-/// `GET /v1/owners/{owner}/{namespaces,memories,agents}` handlers aren't
-/// present here (this is a fresh branch off `dev`). It is not itself a
-/// WALM-295 read endpoint. Wiring the `OwnerToken` extractor into the real
-/// handlers is the small follow-up once this branch merges with / rebases
-/// onto PR #537's branch — this handler is the template for that: extract
-/// `OwnerToken`, compare the `{owner}` path segment against
-/// `claims.owner_address` via `same_owner` (403 on mismatch), and check the
-/// required permission string is present in `claims.permissions` (403
-/// "insufficient scope" if not).
+/// This route was originally added so owner-token auth was testable
+/// end-to-end before PR #537 (WALM-295)'s real
+/// `GET /v1/owners/{owner}/{namespaces,memories,agents}` handlers existed on
+/// this branch. It is not itself a WALM-295 read endpoint. Its authorization
+/// logic — extract `OwnerToken`, compare the `{owner}` path segment against
+/// `claims.owner_address` via `same_owner` (403 on mismatch), check the
+/// required permission string is present in `claims.permissions` (403 if
+/// not) — has since been carried over into `auth::verify_read_api_auth`,
+/// which the real handlers now use. This route is redundant and left in
+/// place only as a smoke-test artifact.
 ///
 /// No separate rate-limit / auth middleware needed here — `OwnerToken` is a
 /// pure `FromRequestParts` extractor, so axum resolves it (and rejects

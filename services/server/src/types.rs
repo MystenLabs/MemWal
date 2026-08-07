@@ -1710,6 +1710,12 @@ pub struct SponsorExecuteRequest {
 /// Headers required for authenticated requests
 #[derive(Clone)]
 pub struct AuthInfo {
+    /// Hex-encoded Ed25519 public key for a signed-request caller. For a
+    /// WALM-297 owner-token-authenticated read-API request (no delegate key
+    /// involved), `auth::verify_read_api_auth` populates this instead with
+    /// the synthetic sentinel `"ownertoken:{owner_address}"` — never a real
+    /// key — solely so `read_api_rate_limit_middleware`'s per-key budget
+    /// stays isolated per owner. Do not assume this is always valid hex.
     #[allow(dead_code)]
     pub public_key: String,
     /// Owner address from the onchain MemWalAccount (set after onchain verification)

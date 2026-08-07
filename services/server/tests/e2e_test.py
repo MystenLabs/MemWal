@@ -9,6 +9,9 @@ What this covers:
   4. Expired timestamps are rejected (401)
   5. Opt-in: signed /api/remember + /api/recall happy path with a
      pre-registered delegate key (requires TEST_DELEGATE_KEY + real backend)
+  6. Opt-in: WALM-297 owner-scoped bearer token auth against the real
+     `GET /v1/owners/{owner}/{namespaces,memories,agents}` handlers
+     (requires TEST_OWNER_ADDRESS + OWNER_TOKEN_SERVICE_CREDENTIAL)
 
 The happy-path flow needs a pre-registered on-chain MemWalAccount delegate
 key, a real Walrus publisher, SEAL key servers, Sui RPC, and a funded
@@ -25,6 +28,18 @@ Env vars:
   TEST_ACCOUNT_ID      Walrus Memory account object ID (0x... Sui address). Only
                        used informationally; auth middleware resolves the
                        account from the delegate key.
+  TEST_OWNER_ADDRESS   The WM owner (Sui) address of the same MemWalAccount
+                       TEST_DELEGATE_KEY/TEST_ACCOUNT_ID identify — i.e. the
+                       address that created it, not the account object id.
+                       Required (server-side) for POST /v1/owner-tokens to
+                       find an account to mint against. If unset, the
+                       owner-token bearer-auth checks are skipped.
+  OWNER_TOKEN_SERVICE_CREDENTIAL
+                       Same shared secret the server was started with
+                       (Config::owner_token_service_credential) — the test
+                       process authenticates to POST /v1/owner-tokens the
+                       same way Console would. If unset, the owner-token
+                       bearer-auth checks are skipped.
 
 Exit status: 0 if all *executed* checks pass, 1 on any failure. Skipped
 checks do not cause failure.
@@ -134,6 +149,97 @@ def _load_delegate_key() -> SigningKey | None:
         print(f"[warn] TEST_DELEGATE_KEY must be 32 bytes (got {len(raw)}); skipping happy-path checks")
         return None
     return SigningKey(raw, encoder=RawEncoder)
+
+
+def _mint_owner_token(owner: str) -> dict:
+    """POST /v1/owner-tokens the same way Console does: service credential
+    header, no signature. Raises urllib.error.HTTPError on non-2xx.
+    """
+    body_bytes = json.dumps({"owner": owner}).encode()
+    req = urllib.request.Request(
+        f"{BASE_URL}/v1/owner-tokens",
+        data=body_bytes,
+        headers={
+            "Content-Type": "application/json",
+            "x-service-credential": os.environ["OWNER_TOKEN_SERVICE_CREDENTIAL"],
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
+
+
+def _get_with_bearer(path: str, token: str) -> tuple[int, str]:
+    req = urllib.request.Request(
+        f"{BASE_URL}{path}", headers={"Authorization": f"Bearer {token}"}, method="GET"
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", errors="replace")
+
+
+def test_owner_token_bearer_auth_succeeds_on_namespaces(owner: str) -> None:
+    token = _mint_owner_token(owner)["token"]
+    status, body = _get_with_bearer(f"/v1/owners/{owner}/namespaces", token)
+    assert status == 200, f"expected 200, got {status}: {body[:200]}"
+    data = json.loads(body)
+    assert "namespaces" in data and "snapshot_version" in data, f"unexpected shape: {data}"
+    print(f"[pass] GET /v1/owners/{{owner}}/namespaces with owner-token bearer → 200")
+
+
+def test_owner_token_bearer_auth_succeeds_on_memories(owner: str) -> None:
+    token = _mint_owner_token(owner)["token"]
+    status, body = _get_with_bearer(f"/v1/owners/{owner}/memories", token)
+    assert status == 200, f"expected 200, got {status}: {body[:200]}"
+    data = json.loads(body)
+    assert "memories" in data and "snapshot_version" in data, f"unexpected shape: {data}"
+    print(f"[pass] GET /v1/owners/{{owner}}/memories with owner-token bearer → 200")
+
+
+def test_owner_token_bearer_auth_succeeds_on_agents(owner: str) -> None:
+    token = _mint_owner_token(owner)["token"]
+    status, body = _get_with_bearer(f"/v1/owners/{owner}/agents", token)
+    assert status == 200, f"expected 200, got {status}: {body[:200]}"
+    data = json.loads(body)
+    assert "agents" in data and "snapshot_version" in data, f"unexpected shape: {data}"
+    print(f"[pass] GET /v1/owners/{{owner}}/agents with owner-token bearer → 200")
+
+
+def test_owner_token_bearer_auth_owner_mismatch_403(owner: str) -> None:
+    token = _mint_owner_token(owner)["token"]
+    # A well-formed but different Sui address — same_owner() must reject the
+    # path/claim mismatch regardless of whether this address itself exists.
+    other_owner = "0x" + "1" * 64
+    status, body = _get_with_bearer(f"/v1/owners/{other_owner}/memories", token)
+    assert status == 403, f"expected 403 on owner mismatch, got {status}: {body[:200]}"
+    print(f"[pass] owner-token bearer for a different {{owner}} path → 403")
+
+
+def test_owner_token_bearer_auth_invalid_token_401(owner: str) -> None:
+    # A tampered token exercises the same verify_token() failure -> bare 401
+    # path an expired/wrong-audience/wrong-secret token would also hit; this
+    # avoids waiting out OWNER_TOKEN_TTL_SECS for a real expiry in an e2e run.
+    token = _mint_owner_token(owner)["token"] + "x"
+    status, body = _get_with_bearer(f"/v1/owners/{owner}/memories", token)
+    assert status == 401, f"expected 401 on tampered token, got {status}: {body[:200]}"
+    print(f"[pass] tampered owner-token bearer on /v1/owners/{{owner}}/memories → 401")
+
+
+def test_ed25519_signed_request_still_works_on_read_routes(
+    signing_key: SigningKey, account_id: str | None, owner: str
+) -> None:
+    """Regression guard: swapping read_api_routes' auth layer for the WALM-297
+    dispatcher must not affect ordinary signed requests (no Authorization
+    header) — this is the additive/non-replacing guarantee the design docs
+    promise for the existing Ed25519 SDK/dashboard path.
+    """
+    result = make_signed_request(
+        "GET", f"/v1/owners/{owner}/agents", None, signing_key, account_id=account_id
+    )
+    assert "agents" in result and "snapshot_version" in result, f"unexpected shape: {result}"
+    print(f"[pass] Ed25519-signed GET /v1/owners/{{owner}}/agents (no Authorization header) → 200")
 
 
 def test_health() -> None:
@@ -384,10 +490,16 @@ def main() -> int:
     print(f"  memwal Server E2E — target {BASE_URL}")
     delegate_key = _load_delegate_key()
     account_id = os.environ.get("TEST_ACCOUNT_ID") or None
+    owner_address = os.environ.get("TEST_OWNER_ADDRESS") or None
+    owner_token_enabled = bool(owner_address and os.environ.get("OWNER_TOKEN_SERVICE_CREDENTIAL"))
     if delegate_key:
         print("  happy-path: enabled (TEST_DELEGATE_KEY provided)")
     else:
         print("  happy-path: skipped (set TEST_DELEGATE_KEY to enable)")
+    if owner_token_enabled:
+        print("  owner-token bearer auth: enabled (TEST_OWNER_ADDRESS + OWNER_TOKEN_SERVICE_CREDENTIAL provided)")
+    else:
+        print("  owner-token bearer auth: skipped (set TEST_OWNER_ADDRESS + OWNER_TOKEN_SERVICE_CREDENTIAL to enable)")
     print("=" * 60)
 
     failures: list[str] = []
@@ -430,6 +542,34 @@ def main() -> int:
     else:
         print("[skip] remember_recall_happy_path (no TEST_DELEGATE_KEY)")
         print("[skip] size_*_test (no TEST_DELEGATE_KEY)")
+
+    if owner_token_enabled:
+        owner_token_checks = (
+            ("owner_token_bearer_auth_succeeds_on_namespaces", test_owner_token_bearer_auth_succeeds_on_namespaces),
+            ("owner_token_bearer_auth_succeeds_on_memories", test_owner_token_bearer_auth_succeeds_on_memories),
+            ("owner_token_bearer_auth_succeeds_on_agents", test_owner_token_bearer_auth_succeeds_on_agents),
+            ("owner_token_bearer_auth_owner_mismatch_403", test_owner_token_bearer_auth_owner_mismatch_403),
+            ("owner_token_bearer_auth_invalid_token_401", test_owner_token_bearer_auth_invalid_token_401),
+        )
+        for name, fn in owner_token_checks:
+            try:
+                fn(owner_address)
+            except (AssertionError, urllib.error.URLError, urllib.error.HTTPError) as e:
+                failures.append(f"{name}: {e}")
+                print(f"[FAIL] {name}: {e}")
+
+        if delegate_key:
+            try:
+                test_ed25519_signed_request_still_works_on_read_routes(
+                    delegate_key, account_id, owner_address
+                )
+            except (AssertionError, urllib.error.URLError, urllib.error.HTTPError) as e:
+                failures.append(f"ed25519_signed_request_still_works_on_read_routes: {e}")
+                print(f"[FAIL] ed25519_signed_request_still_works_on_read_routes: {e}")
+        else:
+            print("[skip] ed25519_signed_request_still_works_on_read_routes (no TEST_DELEGATE_KEY)")
+    else:
+        print("[skip] owner_token_bearer_auth_* (no TEST_OWNER_ADDRESS + OWNER_TOKEN_SERVICE_CREDENTIAL)")
 
     print()
     print("=" * 60)

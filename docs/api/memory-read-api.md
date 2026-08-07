@@ -1,9 +1,9 @@
 # Memory Read API (WALM-295)
 
-Owner-scoped, cursor-based, read-only. All three endpoints require the
-same signature-verified auth `/api/restore` uses; the `{owner}` path
-segment must equal the authenticated identity or the request is rejected
-with 403.
+Owner-scoped, cursor-based, read-only. All three endpoints accept either of
+two auth mechanisms (see Authentication below); either way, the `{owner}`
+path segment must equal the authenticated identity or the request is
+rejected with 403.
 
 > This document covers response shapes, auth mechanics, and error/rate-limit
 > behavior for the three endpoints below. A formal OpenAPI/JSON-Schema spec
@@ -11,11 +11,25 @@ with 403.
 
 ## Authentication
 
-Every request must carry an Ed25519-signed set of headers — the same
-`verify_signature` middleware `/api/restore` and every other protected route
-use (`services/server/src/auth.rs`). There is no separate token model for
-this API (see the design spec's open question about a future owner-scoped
-token ticket).
+These three routes accept **either** of two independent, parallel auth
+mechanisms, dispatched by `auth::verify_read_api_auth`
+(`services/server/src/auth.rs`) based on whether the request carries an
+`Authorization` header:
+
+1. **Ed25519 signed headers** — the same `verify_signature` middleware
+   `/api/restore` and every other protected route use. This is the
+   mechanism direct SDK/dashboard delegate-key callers use; see "Required
+   headers" and "Canonical signing string" below.
+2. **Owner-scoped bearer token** (`Authorization: Bearer <token>`) — WALM-297's
+   mechanism for Console, which structurally never holds a delegate key and
+   so can never produce an Ed25519 signature. See `docs/api/owner-token-auth.md`
+   for how Console obtains a token; once obtained, a request here is just
+   `Authorization: Bearer <token>` with no other auth headers. The token's
+   `permissions` must include `memories.read` (the only scope WALM-297 Phase 1
+   ever mints) or the request is rejected `403`.
+
+Presence of an `Authorization` header selects the bearer-token path; its
+absence selects the Ed25519 path. A request cannot use both.
 
 ### Required headers
 
@@ -57,9 +71,10 @@ that account's on-chain `MemWalAccount.delegate_keys` (cached in
 
 ### 401 responses
 
-Any of the following returns a bare `401 Unauthorized` (no JSON body,
-constant ~100ms delay on signature/timestamp/nonce failures to prevent
-timing side-channels distinguishing failure reasons):
+**Ed25519 path** (no `Authorization` header on the request) — any of the
+following returns a bare `401 Unauthorized` (no JSON body, constant ~100ms
+delay on signature/timestamp/nonce failures to prevent timing side-channels
+distinguishing failure reasons):
 
 - Missing/malformed `x-public-key`, `x-signature`, or `x-timestamp`.
 - `x-timestamp` outside the ±300s window.
@@ -74,8 +89,18 @@ A request missing `x-nonce` entirely gets `426 Upgrade Required` instead of
 `401` — signaling an unsupported legacy SDK version rather than an auth
 failure.
 
-Once authenticated, the three endpoints below additionally return `403`
-if the `{owner}` path segment does not equal the resolved `auth.owner`.
+**Bearer-token path** (`Authorization: Bearer <token>` present) — also a
+bare `401`, with no distinction in the response between causes, for:
+
+- An expired, tampered, wrongly-signed, or wrong-audience token.
+- `OWNER_TOKEN_SECRET` unconfigured on this deployment.
+- The token's `owner_address` no longer resolves to a `MemWalAccount`
+  (e.g. deleted between mint and use).
+
+Once authenticated (either path), the three endpoints below additionally
+return `403` if the `{owner}` path segment does not equal the resolved
+identity, or — bearer-token path only — if the token's `permissions` don't
+include `memories.read`.
 
 ## Rate limiting
 
@@ -252,8 +277,8 @@ Authentication and Rate limiting above) use the envelope
 
 | Status | Cause |
 |---|---|
-| `401` | Auth failed (see Authentication) |
-| `403` | `{owner}` path segment does not match the authenticated identity |
+| `401` | Auth failed — either an invalid/expired Ed25519 signature/nonce/timestamp, or (bearer-token path) an invalid/expired/unresolvable owner token (see Authentication) |
+| `403` | `{owner}` path segment does not match the authenticated identity, or (bearer-token path) the token's `permissions` lack `memories.read` |
 | `400` | Invalid/malformed cursor, or non-positive/non-integer `limit` |
 | `429` | Rate limit exceeded (see Rate limiting) |
 | `500` | Internal error, including an on-chain RPC failure on `/agents` |

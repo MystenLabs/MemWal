@@ -10,10 +10,14 @@
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
 //! - `accounts` — `/api/accounts/{owner}/exists` (public MemWalAccount
 //!   existence check)
+//! - `memory_read` — WALM-295 `GET /v1/owners/{owner}/{namespaces,memories,agents}`
+//!   (owner-scoped, cursor-paginated reads; accepts either the Ed25519
+//!   signed-request scheme or a WALM-297 owner-scoped bearer token — see
+//!   `auth::verify_read_api_auth`)
 //! - `owner_token` — WALM-297 `POST /v1/owner-tokens` (owner-scoped bearer
-//!   token issuance) + `GET /v1/owners/{owner}/_token_probe` (a minimal
-//!   token-gated route standing in for PR #537/WALM-295's real
-//!   `/v1/owners/{owner}/...` handlers, not present in this branch)
+//!   token issuance) + `GET /v1/owners/{owner}/_token_probe` (the original
+//!   dev-only smoke-test route this mechanism was proven against before
+//!   `memory_read`'s real handlers existed; now redundant with them)
 //!
 //! Shared route-level helpers (`enqueue_wallet_job`, `truncate_str`,
 //! `collect_bounded_results`, `cleanup_expired_blob`) live here in `mod.rs`.

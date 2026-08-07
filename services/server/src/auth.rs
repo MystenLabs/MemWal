@@ -1,6 +1,6 @@
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -9,6 +9,7 @@ use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+use crate::owner_token_auth;
 use crate::storage::sui::{
     find_account_by_delegate_key, verify_delegate_key_onchain, OnchainVerifyError,
 };
@@ -428,6 +429,99 @@ async fn resolve_account(
     Err("no account found: not in cache, exact account id, or registry".to_string())
 }
 
+/// Combined auth dispatcher for `read_api_routes`: tries WALM-297's owner-scoped
+/// bearer token (Console) when `Authorization: Bearer` is present, otherwise falls
+/// back to the unmodified Ed25519 signed-request scheme (SDK/dashboard delegate-key
+/// callers). The two calling populations are disjoint by construction — Console never
+/// holds a delegate key, the SDK never sends `Authorization` — so presence of that
+/// header alone is a safe, unambiguous dispatch key.
+///
+/// NOTE: if a request ever carried both a full Ed25519 header set AND an
+/// `Authorization: Bearer` header, the bearer branch wins unconditionally; the
+/// Ed25519 headers are never consulted. This is fine while the two populations stay
+/// disjoint — flagging here so a future proxy/gateway that auto-attaches
+/// `Authorization` doesn't silently break signed requests on this router only.
+#[tracing::instrument(name = "auth.verify_read_api_auth", skip_all)]
+pub async fn verify_read_api_auth(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let bearer = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_owned);
+
+    let Some(token) = bearer else {
+        return verify_signature(State(state), request, next).await;
+    };
+
+    if state.config.owner_token_secret.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let claims = owner_token_auth::verify_token(
+        state.config.owner_token_secret.as_bytes(),
+        &token,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    if !owner_token_has_scope(&claims, owner_token_auth::PERMISSION_MEMORIES_READ) {
+        tracing::warn!(owner = %claims.owner_address, "owner token missing memories.read");
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // claims.owner_address is already canonical lowercase (issue_token validated +
+    // lowercased before minting) — do not re-lowercase.
+    let account_id = match state.db.find_account_by_owner(&claims.owner_address).await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            // Valid token, but the backing account no longer resolves (e.g. deleted
+            // between mint and use). Mirrors verify_signature's own "account not
+            // found" resolution failure: bare 401, not 403 — this codebase reserves
+            // 403 (AppError::Forbidden) strictly for "identity resolved but doesn't
+            // own this path", never for "doesn't exist".
+            tracing::warn!(owner = %claims.owner_address, "owner token account no longer resolves");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(e) => {
+            tracing::warn!("owner token account lookup failed: {}", e);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
+
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(owner_token_to_auth_info(claims, account_id));
+    Ok(next.run(request).await)
+}
+
+fn owner_token_has_scope(claims: &owner_token_auth::OwnerTokenClaims, required: &str) -> bool {
+    claims.permissions.iter().any(|p| p == required)
+}
+
+fn owner_token_to_auth_info(
+    claims: owner_token_auth::OwnerTokenClaims,
+    account_id: String,
+) -> AuthInfo {
+    AuthInfo {
+        // Not a real hex Ed25519 key. read_api_rate_limit_middleware keys its Redis
+        // bucket solely on `public_key` (`rate:read:dk:{public_key}`) — an
+        // empty/constant value here would collapse every Console-proxied owner into
+        // one shared bucket. The `ownertoken:` prefix keeps buckets isolated per
+        // owner and can never collide with a real 64-hex-char key (hex has no `:`).
+        public_key: format!("ownertoken:{}", claims.owner_address),
+        owner: claims.owner_address,
+        account_id,
+        delegate_key: None,
+        seal_session: None,
+    }
+}
+
 // ============================================================
 // Unit Tests
 // ============================================================
@@ -728,5 +822,80 @@ mod tests {
         let debug_str = format!("{:?}", auth);
         assert!(debug_str.contains("None"));
         assert!(!debug_str.contains("<redacted>"));
+    }
+
+    // ── WALM-297: owner-token → AuthInfo bridge for read_api_routes ──────
+
+    fn owner_token_claims(permissions: &[&str]) -> owner_token_auth::OwnerTokenClaims {
+        owner_token_auth::OwnerTokenClaims {
+            subject: "console".to_string(),
+            owner_address: "0xabc".to_string(),
+            audience: owner_token_auth::OWNER_TOKEN_AUDIENCE.to_string(),
+            issued_at: 0,
+            expires_at: i64::MAX,
+            nonce: "00000000-0000-0000-0000-000000000000".to_string(),
+            permissions: permissions.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn owner_token_to_auth_info_sets_ownertoken_prefixed_public_key() {
+        let claims = owner_token_claims(&[owner_token_auth::PERMISSION_MEMORIES_READ]);
+        let auth = owner_token_to_auth_info(claims, "0xaccount".to_string());
+        assert_eq!(auth.public_key, "ownertoken:0xabc");
+    }
+
+    #[test]
+    fn owner_token_to_auth_info_preserves_owner_and_account_id() {
+        let claims = owner_token_claims(&[owner_token_auth::PERMISSION_MEMORIES_READ]);
+        let auth = owner_token_to_auth_info(claims, "0xaccount".to_string());
+        assert_eq!(auth.owner, "0xabc");
+        assert_eq!(auth.account_id, "0xaccount");
+    }
+
+    #[test]
+    fn owner_token_to_auth_info_never_sets_delegate_key_or_seal_session() {
+        let claims = owner_token_claims(&[owner_token_auth::PERMISSION_MEMORIES_READ]);
+        let auth = owner_token_to_auth_info(claims, "0xaccount".to_string());
+        assert!(auth.delegate_key.is_none());
+        assert!(auth.seal_session.is_none());
+    }
+
+    #[test]
+    fn owner_token_has_scope_true_when_present() {
+        let claims = owner_token_claims(&[owner_token_auth::PERMISSION_MEMORIES_READ]);
+        assert!(owner_token_has_scope(
+            &claims,
+            owner_token_auth::PERMISSION_MEMORIES_READ
+        ));
+    }
+
+    #[test]
+    fn owner_token_has_scope_false_when_missing() {
+        let claims = owner_token_claims(&["some.other.scope"]);
+        assert!(!owner_token_has_scope(
+            &claims,
+            owner_token_auth::PERMISSION_MEMORIES_READ
+        ));
+    }
+
+    #[test]
+    fn owner_token_has_scope_false_when_empty() {
+        let claims = owner_token_claims(&[]);
+        assert!(!owner_token_has_scope(
+            &claims,
+            owner_token_auth::PERMISSION_MEMORIES_READ
+        ));
+    }
+
+    #[test]
+    fn ownertoken_prefix_cannot_collide_with_hex_ed25519_pubkey() {
+        // Ed25519 public keys on the wire are 64 lowercase hex chars
+        // (`x-public-key`, decoded via `hex::decode` above) — `[0-9a-f]` only,
+        // no `:`. The synthetic sentinel this module mints always contains a
+        // `:`, so it can never be mistaken for (or collide with) a real key.
+        let synthetic = format!("ownertoken:{}", "0".repeat(64));
+        assert!(synthetic.contains(':'));
+        assert!(!synthetic.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
