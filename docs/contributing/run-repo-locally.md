@@ -54,6 +54,14 @@ cd MemWal
 pnpm install
 ```
 
+If `pnpm install` fails while downloading Chrome for Puppeteer (HTTP 403 — common in CI, sandboxes, or corporate networks), skip the browser download:
+
+```bash
+PUPPETEER_SKIP_DOWNLOAD=true pnpm install
+```
+
+You only need the Chrome download when running Puppeteer-dependent tests or packages.
+
 ## Step 2 — Build the SDK First
 
 <Warning>
@@ -151,6 +159,7 @@ MemWal/
 | `Cannot find module '@mysten-incubation/memwal'` | SDK not built | Run `pnpm build:sdk` first |
 | `ERR_MODULE_NOT_FOUND` in apps | Stale SDK build | Run `pnpm build:sdk` again |
 | `pnpm install` fails | Wrong pnpm version | Use pnpm ≥ 9.12: `corepack enable && corepack prepare pnpm@9.12.3 --activate` |
+| `pnpm install` fails on Puppeteer Chrome download (403) | Network blocks Chrome download | `PUPPETEER_SKIP_DOWNLOAD=true pnpm install` |
 | Docs site won't start | Missing Mintlify | Run `pnpm install` from the root |
 | Relayer crashes on boot | Missing pgvector | Install the `pgvector` PostgreSQL extension |
 | Sidecar timeout | Missing sidecar deps | Run `cd services/server/scripts && npm ci` |
