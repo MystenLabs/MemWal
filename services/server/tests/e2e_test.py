@@ -329,7 +329,7 @@ def _send_remember_raw(
 def test_remember_size_64kb_summarized(
     signing_key: SigningKey, account_id: str | None
 ) -> None:
-    """64 KiB plaintext: must succeed via the new summarize path (ENG-1407).
+    """64 KiB plaintext: must succeed via the new summarize path.
 
     On the pre-PR baseline this size errors out at the embedding API token
     limit. PR routes text > SUMMARIZE_THRESHOLD_BYTES through gpt-4o-mini
@@ -413,7 +413,7 @@ def main() -> int:
             failures.append(f"remember_recall_happy_path: {e}")
             print(f"[FAIL] remember_recall_happy_path: {e}")
 
-        # ENG-1407: parametric size cases that the prior tiny-payload tests
+        # parametric size cases that the prior tiny-payload tests
         # missed. Share the same Walrus + SEAL prerequisites as the happy
         # path, so they run together.
         size_checks = (

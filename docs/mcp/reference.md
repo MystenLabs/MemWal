@@ -1,13 +1,43 @@
 ---
-title: "Reference"
-description: "Complete reference for MemWal MCP tools, CLI flags, environment presets, transport routes, and self-hosting."
+title: Reference
+description: >-
+  Complete reference for Walrus Memory MCP tools, CLI flags, environment presets, transport routes, and self-hosting.
+  Covers all eight tools, credential management, stdio and HTTP transports, and runtime safety details.
+keywords:
+  - MCP
+  - Walrus Memory
+  - MemWal
+  - reference
+  - CLI
+  - transports
+  - self-hosting
+goal:
+  description: Look up the exact CLI flags, transport options, tool parameters, and configuration schema for the @mysten-incubation/memwal-mcp package.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What are the parameters for the MemWal MCP tools?
+  - How do I configure the MemWal MCP CLI flags and environment variables?
+  - How do I set up Streamable HTTP transport for Walrus Memory MCP?
+answer: >-
+  The MemWal MCP reference documents eight tools (memwal_remember, memwal_remember_bulk, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, memwal_logout) with full parameter details. It covers CLI flags (--relayer, --namespace, --label, etc.), environment presets (prod, staging, local), two transport modes (stdio and Streamable HTTP), credential file format, default namespace precedence, self-hosting configuration, and runtime safety notes for 401 handling and relayer overrides.
 ---
 
-This page documents every tool, flag, environment variable, and transport route the MemWal MCP package exposes. For a guided walkthrough, start with the [Quick Start](/mcp/quick-start).
+This page documents every tool, flag, environment variable, and transport route the Walrus Memory MCP package exposes. For per-client setup, start with the [MCP overview](/mcp/overview).
 
 ## Tools
 
-The MCP server exposes **six tools** — four **memory tools** that round-trip to the relayer, and two **session tools** served locally by the stdio package.
+The MCP server exposes **eight tools**: six **relayer tools** (memory operations plus a health check) and two **session tools** served locally by the stdio package. For the lifecycle hooks that drive these tools automatically, see [Claude Code](/mcp/claude-code) or [Codex](/mcp/codex).
 
 ## First-run behavior
 
@@ -23,16 +53,25 @@ This is why many first-run sessions show `memwal_login` before the other tools a
 
 ### memwal_remember
 
-Save a fact to the user's MemWal personal memory. Call only when the user explicitly asks to remember or save something. Pass the full statement — do not summarize.
+Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** whenever it learns something worth remembering across sessions (preference, decision, constraint, correction, identity), not only when the user explicitly asks. Pass the full statement; do not summarize.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `text` | string | yes | The complete fact to save. |
 | `namespace` | string | no | Namespace bucket. Defaults to the session namespace. |
 
+### memwal_remember_bulk
+
+Save several durable facts in one batched call. Prefer this over repeated `memwal_remember` calls when the agent learns multiple distinct facts at once.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `facts` | string[] (1–20) | yes | Array of complete fact statements, one full fact per entry, no summarizing. |
+| `namespace` | string | no | Namespace bucket applied to every fact. Defaults to the session namespace. |
+
 ### memwal_recall
 
-Search the user's MemWal memory for facts relevant to a query. Returns matches ranked by relevance.
+Search the user's Walrus Memory for facts relevant to a query. The agent calls this **proactively** at the start of a task or when the user references past work, decisions, or preferences. Returns matches ranked by relevance.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -58,6 +97,10 @@ Re-index a namespace from Walrus blobs back into the relayer's search index. Ret
 | `namespace` | string | yes | Namespace bucket to restore. |
 | `limit` | integer (1–500) | no | Max memories to re-index. Default `10`. |
 
+### memwal_health
+
+Lightweight connectivity check. Calls the relayer's public `/health` endpoint (no request signing, no search or decryption) and returns its `status` and `version`. Use this to confirm the server is reachable instead of `memwal_recall`, which is a full retrieval round-trip. Takes no parameters.
+
 ### memwal_login
 
 Open a browser to sign in (or re-sign in) with your Sui wallet. Use to switch wallets, refresh credentials, or sign in for the first time inline. Takes no parameters.
@@ -69,7 +112,7 @@ Returns a one-time URL valid for **5 minutes**. If it expires, call the tool aga
 Remove the saved credentials from this machine (`~/.memwal/credentials.json`). Takes no parameters.
 
 <Warning>
-The on-chain delegate key registration is **not** revoked by `memwal_logout` — only the local file is wiped. Visit the [MemWal dashboard](https://memwal.ai) to remove the delegate key from your account.
+The on-chain delegate key registration is **not** revoked by `memwal_logout` — only the local file is wiped. Visit the [Walrus Memory dashboard](https://memory.walrus.xyz) to remove the delegate key from your account.
 </Warning>
 
 <Note>
@@ -84,7 +127,7 @@ The stdio package accepts CLI flags and environment variables. **CLI takes prece
 | --- | --- | --- |
 | `--relayer <url>` | `MEMWAL_SERVER_URL` | Override the relayer base URL. |
 | `--web-url <url>` | `MEMWAL_WEB_URL` | Override the dashboard URL used during login. |
-| `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in the MemWal dashboard. |
+| `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in the Walrus Memory dashboard. |
 | `--namespace <name>` (alias `--ns`) | `MEMWAL_NAMESPACE` | Default memory namespace injected into memory tool calls that omit one. See [Default namespace](#default-namespace). |
 | `--login` (or `login` subcommand) | — | Force a re-login even when credentials exist. |
 | `--logout` | — | Wipe `~/.memwal/credentials.json` and exit. |
@@ -171,21 +214,20 @@ Shortcut flags that set both the relayer and the dashboard URL in one switch:
 
 | Flag | Relayer | Dashboard |
 | --- | --- | --- |
-| `--prod` | `https://relayer.memwal.ai` | `https://memwal.ai` |
-| `--dev` | `https://relayer.dev.memwal.ai` | `https://dev.memwal.ai` |
-| `--staging` | `https://relayer.staging.memwal.ai` | `https://staging.memwal.ai` |
+| `--prod` | `https://relayer.memory.walrus.xyz` | `https://memory.walrus.xyz` |
+| `--staging` | `https://relayer-staging.memory.walrus.xyz` | `https://staging.memory.walrus.xyz` |
 | `--local` | `http://127.0.0.1:8000` | `http://localhost:5173` |
 
 Explicit `--relayer` and `--web-url` override the preset. You can also pass either flag without a preset to point at a custom URL.
 
 ## Transports
 
-MemWal supports two MCP connection modes.
+Walrus Memory supports two MCP connection modes.
 
 | Mode | Best for | Configured via |
 | --- | --- | --- |
 | **stdio package** | Clients that run local MCP commands (most clients today) | `npx -y @mysten-incubation/memwal-mcp` in the client config |
-| **Streamable HTTP** | Clients that support remote HTTP MCP servers | `url: "https://relayer.memwal.ai/api/mcp"` + auth headers |
+| **Streamable HTTP** | Clients that support remote HTTP MCP servers | `url: "https://relayer.memory.walrus.xyz/api/mcp"` + auth headers |
 
 ### Streamable HTTP
 
@@ -195,7 +237,7 @@ Use HTTP transport when your client supports remote MCP servers natively. Authen
 {
   "mcpServers": {
     "memwal": {
-      "url": "https://relayer.memwal.ai/api/mcp",
+      "url": "https://relayer.memory.walrus.xyz/api/mcp",
       "headers": {
         "Authorization": "Bearer <YOUR_DELEGATE_PRIVATE_KEY>",
         "x-memwal-account-id": "<YOUR_ACCOUNT_ID>"
@@ -214,7 +256,7 @@ The bearer token is a long-lived credential equivalent to an API key. **Never co
 For Claude Code, the equivalent registration command is:
 
 ```bash
-claude mcp add --transport http memwal https://relayer.memwal.ai/api/mcp
+claude mcp add --transport http memwal https://relayer.memory.walrus.xyz/api/mcp
 ```
 
 If your client cannot attach headers from the CLI, edit the generated MCP config file to add them manually.
@@ -245,7 +287,7 @@ The hosted relayer (and any self-hosted relayer) exposes the same MCP routes:
 | `POST /api/mcp` | Streamable HTTP JSON-RPC messages |
 | `DELETE /api/mcp` | Close a Streamable HTTP session |
 
-The Rust relayer auto-starts a TypeScript sidecar and forwards MCP traffic to it over loopback. The sidecar resolves MCP bearer credentials into normal MemWal SDK sessions, so MCP tool calls go through the **same SEAL, Walrus, and pgvector paths** as direct SDK calls.
+The Rust relayer auto-starts a TypeScript sidecar and forwards MCP traffic to it over loopback. The sidecar resolves MCP bearer credentials into normal Walrus Memory SDK sessions, so MCP tool calls go through the **same SEAL, Walrus, and pgvector paths** as direct SDK calls.
 
 ## Runtime safety notes
 
@@ -271,6 +313,7 @@ Self-hosted relayers expose the same public MCP routes as the hosted relayer. Th
 | `MCP_MAX_TOTAL_SESSIONS` | `1000` | Cap on concurrent MCP sessions across SSE and Streamable HTTP |
 | `MCP_MAX_SESSIONS_PER_IP` | `16` | Cap on concurrent sessions from one source IP |
 | `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Rate cap on new sessions per source IP per minute |
+| `TRUSTED_PROXY_HOPS` | `0` | Trusted reverse-proxy hops used to resolve the canonical client IP; keep `0` for direct deployments |
 
 See [Environment Variables](/reference/environment-variables) for the full list including SEAL, Walrus, embeddings, and database settings.
 
@@ -281,7 +324,7 @@ See [Environment Variables](/reference/environment-variables) for the full list 
 They do **not**:
 
 - revoke the on-chain delegate key
-- remove the delegate from the MemWal dashboard
+- remove the delegate from the Walrus Memory dashboard
 
 If the delegate itself should stop working, revoke it from the dashboard too.
 
@@ -301,7 +344,7 @@ The URL is valid for **5 minutes**. Call the tool again to mint a fresh one. Mak
 
 ### Recall returns "No matching memories found" right after a remember
 
-`memwal_remember` enqueues an async upload to Walrus. Embedding generation, SEAL encryption, blob upload, and DB indexing typically take 5–15 seconds. Wait, then retry the recall.
+`memwal_remember` waits for the Walrus upload to finish before returning, but under load the embedding/indexing step can lag a few seconds behind. Wait briefly, then retry the recall.
 
 ### 401 Unauthorized from the relayer
 

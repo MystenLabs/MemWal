@@ -23,7 +23,7 @@
  * await memwal.waitForRememberJob(accepted.job_id)
  *
  * // Recall — server: verify → embed query → search → download → decrypt
- * const result = await memwal.recall("food allergies")
+ * const result = await memwal.recall({ query: "food allergies" })
  * console.log(result.results[0].text) // "I'm allergic to peanuts"
  * ```
  */
@@ -34,7 +34,9 @@ import type {
     RecallResult,
     RecallMemory,
     RecallOptions,
+    RecallParams,
     EmbedResult,
+    AnalyzeOptions,
     AnalyzeResult,
     AnalyzeWaitResult,
     HealthResult,
@@ -96,7 +98,9 @@ interface SessionCacheEntry {
 interface ServerConfig {
     packageId: string;
     network: string;
-    suiRpcUrl: string;
+    suiRpcUrl?: string;
+    suiGrpcUrl?: string;
+    suiTransport: "grpc" | "jsonrpc";
 }
 
 const SEAL_SESSION_TTL_MIN = 5;
@@ -120,6 +124,49 @@ function pollingDelayMs(baseMs: number, attempt: number): number {
 
 function isTransientPollingStatus(status: number): boolean {
     return status === 0 || status === 429 || status >= 500;
+}
+
+/**
+ * Normalise the legacy `(text, namespace)` and new `(text, options)`
+ * overloads of `analyze()` / `analyzeAndWait()` into a single
+ * `AnalyzeOptions` object. Preserves backwards compatibility — a plain
+ * string is treated as the namespace.
+ */
+function normalizeAnalyzeOptions(
+    namespaceOrOptions?: string | AnalyzeOptions,
+): AnalyzeOptions {
+    if (namespaceOrOptions == null) return {};
+    if (typeof namespaceOrOptions === "string") return { namespace: namespaceOrOptions };
+    return namespaceOrOptions;
+}
+
+/**
+ * Render an `occurredAt` argument to the wire format the server
+ * expects: RFC-3339 UTC with trailing `Z` and millisecond precision
+ * (e.g. `"2023-05-25T17:50:00.000Z"`). `Date` objects are normalised
+ * via `toISOString()` (which always emits this exact shape); strings
+ * are passed through verbatim — the caller is trusted to have given
+ * us a valid RFC-3339 timestamp. Invalid `Date` instances (constructed
+ * from garbage input — `Date` silently produces "Invalid Date" rather
+ * than throwing) are rejected at the SDK boundary with a diagnostic
+ * `TypeError`, so a bad timestamp doesn't surface as an opaque
+ * `RangeError: Invalid time value` from `.toISOString()` later.
+ * Returns `undefined` when no anchor is supplied so the field is
+ * omitted from the request body.
+ */
+function occurredAtToWire(occurredAt?: string | Date): string | undefined {
+    if (occurredAt == null) return undefined;
+    if (occurredAt instanceof Date) {
+        if (Number.isNaN(occurredAt.getTime())) {
+            throw new TypeError(
+                "occurredAt is an Invalid Date — likely constructed from a " +
+                "malformed string. `Date` accepts garbage silently; check " +
+                "the source value before passing it as occurredAt.",
+            );
+        }
+        return occurredAt.toISOString();
+    }
+    return occurredAt;
 }
 
 function normalizeSuiNetworkForGrpc(network: string): string {
@@ -476,32 +523,72 @@ export class MemWal {
 
     /**
      * Recall memories similar to a query — server handles:
-     * verify → embed query → search → Walrus download → decrypt → return plaintext
+     * verify → embed query → search → Walrus download → decrypt → return plaintext.
      *
-     * @param query - Search query
-     * @param limitOrOptions - Max number of results (default: 10), or recall options
+     * **Preferred call style**: pass a single `RecallParams` object
+     * so call sites read self-describingly:
+     * ```ts
+     * memwal.recall({ query: "food allergies", limit: 5, namespace: "profile" })
+     * ```
+     *
+     * The legacy positional forms remain supported for backwards compatibility:
+     * - `recall(query)`
+     * - `recall(query, limit)`
+     * - `recall(query, limit, namespace)`
+     * - `recall(query, { limit, namespace, maxDistance, topK })`
+     *
+     * `topK` and `limit` are aliases; if both are set, `topK` wins.
+     *
      * @returns RecallResult with decrypted text results
      *
      * @example
      * ```typescript
-     * const result = await memwal.recall("food allergies")
+     * // Object style — recommended
+     * const result = await memwal.recall({
+     *     query: "food allergies",
+     *     limit: 5,
+     *     namespace: "profile",
+     * });
      * for (const memory of result.results) {
-     *     console.log(memory.text, memory.distance)
+     *     console.log(memory.text, memory.distance);
      * }
+     *
+     * // Positional style — still works
+     * const result2 = await memwal.recall("food allergies", 5, "profile");
      * ```
+     */
+    async recall(params: RecallParams): Promise<RecallResult>;
+    /**
+     * @deprecated Positional `recall(query, limit, namespace)` is easy to
+     * misread as `recall(query, namespace)`. Prefer the object form
+     * `recall({ query, limit, namespace })`. Positional will be removed in a
+     * future major version of the SDK.
      */
     async recall(
         query: string,
+        limitOrOptions?: number | RecallOptions,
+        namespace?: string,
+    ): Promise<RecallResult>;
+    async recall(
+        queryOrParams: string | RecallParams,
         limitOrOptions: number | RecallOptions | undefined = 10,
         namespace?: string,
     ): Promise<RecallResult> {
+        let query: string;
         let options: RecallOptions;
-        if (limitOrOptions == null) {
-            options = { limit: 10, namespace };
-        } else if (typeof limitOrOptions === "number") {
-            options = { limit: limitOrOptions, namespace };
+        if (typeof queryOrParams === "object") {
+            const { query: q, ...rest } = queryOrParams;
+            query = q;
+            options = rest;
         } else {
-            options = limitOrOptions;
+            query = queryOrParams;
+            if (limitOrOptions == null) {
+                options = { limit: 10, namespace };
+            } else if (typeof limitOrOptions === "number") {
+                options = { limit: limitOrOptions, namespace };
+            } else {
+                options = limitOrOptions;
+            }
         }
         const limit = options.topK ?? options.limit ?? 10;
         const resolvedNamespace = options.namespace ?? this.namespace;
@@ -640,11 +727,18 @@ export class MemWal {
      * console.log(result.job_ids)
      * ```
      */
-    async analyze(text: string, namespace?: string): Promise<AnalyzeResult> {
-        return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", {
+    async analyze(
+        text: string,
+        namespaceOrOptions?: string | AnalyzeOptions,
+    ): Promise<AnalyzeResult> {
+        const options = normalizeAnalyzeOptions(namespaceOrOptions);
+        const body: Record<string, unknown> = {
             text,
-            namespace: namespace ?? this.namespace,
-        }, [200, 202]);
+            namespace: options.namespace ?? this.namespace,
+        };
+        const wireOccurredAt = occurredAtToWire(options.occurredAt);
+        if (wireOccurredAt !== undefined) body.occurred_at = wireOccurredAt;
+        return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", body, [200, 202]);
     }
 
     /**
@@ -652,11 +746,13 @@ export class MemWal {
      */
     async analyzeAndWait(
         text: string,
-        namespace?: string,
+        namespaceOrOptions?: string | AnalyzeOptions,
         opts: RememberBulkOptions = {},
     ): Promise<AnalyzeWaitResult> {
-        const accepted = await this.analyze(text, namespace);
-        const namespaces = accepted.job_ids.map(() => namespace ?? this.namespace);
+        const options = normalizeAnalyzeOptions(namespaceOrOptions);
+        const namespace = options.namespace ?? this.namespace;
+        const accepted = await this.analyze(text, options);
+        const namespaces = accepted.job_ids.map(() => namespace);
         const completed = await this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
         return {
             ...completed,
@@ -666,23 +762,55 @@ export class MemWal {
     }
 
     /**
-     * Restore a namespace — server downloads all blobs from Walrus,
-     * decrypts with delegate key, re-embeds, and re-indexes.
+     * Rebuild missing local index entries for `namespace` from Walrus.
      *
-     * @param namespace - Namespace to restore
-     * @returns RestoreResult with count of restored entries
+     * The relayer queries Walrus for blobs the caller owns in `namespace`,
+     * ignores blobs already indexed locally, downloads the missing ones,
+     * SEAL-decrypts them with the delegate key, re-embeds the plaintext,
+     * and inserts a fresh vector row per blob.
+     *
+     * **Response semantics**:
+     * - `restored` — blobs that completed the full
+     *   download → decrypt → embed → DB insert pipeline this call.
+     * - `skipped` — on-chain blobs already in the local index (no work needed).
+     *   Decrypt / embed failures are dropped silently and count as neither.
+     * - `total` — on-chain blobs the relayer saw for `(owner, namespace)`
+     *   before the limit was applied.
+     *
+     * **`limit`** caps the *number of missing blobs the relayer selects* from
+     * the candidates it sees, in unspecified order. It is not a cap on
+     * `restored` directly. The server default is `10` (matches the SDK
+     * default).
+     *
+     * **No pagination cursor** — restore is single-shot. A larger `limit` may
+     * help when `truncated` is caused by the request limit, but candidate
+     * discovery also has a per-owner source cap shared across namespaces.
+     * Hitting that cap requires cursor/pagination support for guaranteed full
+     * recovery; increasing `limit` or retrying cannot guarantee it.
+     *
+     * **Performance** scales linearly in `limit`: up to 10 Walrus downloads
+     * in parallel, then 3 SEAL decrypts in parallel, then embeddings.
+     * Expect seconds-per-blob on cold caches.
+     *
+     * @param namespace - Namespace to restore (exact match; no prefix/hierarchy)
+     * @param limit - Max blobs to inspect this call (default: 10)
+     * @returns RestoreResult with restored / skipped / total counts
      *
      * @example
      * ```typescript
-     * const result = await memwal.restore("my-app")
-     * console.log(`Restored ${result.restored} memories`)
+     * const result = await memwal.restore("my-app");
+     * console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
      * ```
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
-        return this.signedRequest<RestoreResult>("POST", "/api/restore", {
+        const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,
         });
+        // Relayers older than WALM-319 omit `truncated` entirely — treat
+        // "not present" as "not known to be truncated" rather than drop
+        // the field or require every relayer version to send it.
+        return { ...result, truncated: result.truncated ?? false };
     }
 
     /**
@@ -787,14 +915,37 @@ export class MemWal {
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
         }
-        const body = (await res.json()) as Partial<ServerConfig>;
-        if (!body.packageId || !body.network || !body.suiRpcUrl) {
-            throw new Error("GET /config response missing packageId / network / suiRpcUrl");
+        const body = (await res.json()) as Record<string, unknown>;
+        if (typeof body.packageId !== "string" || !body.packageId ||
+            typeof body.network !== "string" || !body.network) {
+            throw new Error("GET /config response missing packageId / network");
+        }
+        if (body.suiTransport !== undefined &&
+            body.suiTransport !== "grpc" && body.suiTransport !== "jsonrpc") {
+            throw new Error("GET /config response has invalid suiTransport");
+        }
+        for (const field of ["suiGrpcUrl", "suiRpcUrl"] as const) {
+            if (body[field] !== undefined && (typeof body[field] !== "string" || !body[field])) {
+                throw new Error(`GET /config response has invalid ${field}`);
+            }
+        }
+        const transport = body.network === "testnet"
+            ? "grpc"
+            : (body.suiTransport as "grpc" | "jsonrpc" | undefined) ?? (body.suiGrpcUrl ? "grpc" : "jsonrpc");
+        if (transport === "grpc" && !body.suiGrpcUrl && !body.suiRpcUrl) {
+            throw new Error(
+                `GET /config requires suiGrpcUrl or suiRpcUrl for ${body.network} ${transport} transport`,
+            );
+        }
+        if (transport === "jsonrpc" && !body.suiRpcUrl) {
+            throw new Error("GET /config requires suiRpcUrl for explicit non-testnet JSON-RPC transport");
         }
         this.serverConfig = {
             packageId: body.packageId,
             network: body.network,
-            suiRpcUrl: body.suiRpcUrl,
+            suiRpcUrl: body.suiRpcUrl as string | undefined,
+            suiGrpcUrl: body.suiGrpcUrl as string | undefined,
+            suiTransport: transport,
         };
         return this.serverConfig;
     }
@@ -808,58 +959,63 @@ export class MemWal {
 
         const clientCandidates: Array<{ name: string; client: any }> = [];
 
-        // Prefer Sui's gRPC client on modern @mysten/sui versions. Keep the
-        // JSON-RPC probes as compatibility fallbacks for older peer installs.
-        try {
-            const mod = (await import("@mysten/sui/grpc")) as any;
-            if (typeof mod.SuiGrpcClient === "function") {
-                clientCandidates.push({
-                    name: "SuiGrpcClient",
-                    client: new mod.SuiGrpcClient({
-                        network: normalizeSuiNetworkForGrpc(cfg.network),
-                        baseUrl: cfg.suiRpcUrl,
-                    }),
-                });
+        if (cfg.suiTransport === "grpc" && cfg.suiGrpcUrl) {
+            try {
+                const mod = (await import("@mysten/sui/grpc")) as any;
+                if (typeof mod.SuiGrpcClient === "function") {
+                    clientCandidates.push({
+                        name: "SuiGrpcClient",
+                        client: new mod.SuiGrpcClient({
+                            network: normalizeSuiNetworkForGrpc(cfg.network),
+                            baseUrl: cfg.suiGrpcUrl,
+                        }),
+                    });
+                }
+            } catch {
+                /* Try the legacy JSON-RPC client below. */
             }
-        } catch {
-            /* @mysten/sui/grpc is not present on this version */
         }
 
-        let SuiClient: any = undefined;
-        try {
-            const mod = (await import("@mysten/sui/client")) as any;
-            SuiClient = mod.SuiClient;
-        } catch {
-            /* not present on this version */
-        }
-        if (typeof SuiClient !== "function") {
+        // Keep JSON-RPC as a runtime fallback when gRPC is preferred. This is
+        // required for rolling SDK/server deployments and prevents a transient
+        // gRPC outage from breaking every relayer-mode request while the
+        // advertised JSON-RPC endpoint remains healthy.
+        if (cfg.suiRpcUrl) {
+            let SuiClient: any = undefined;
             try {
-                const mod = (await import("@mysten/sui/jsonRpc")) as any;
-                SuiClient = mod.SuiJsonRpcClient ?? mod.SuiClient;
+                const mod = (await import("@mysten/sui/client")) as any;
+                SuiClient = mod.SuiClient;
             } catch {
-                /* not present on this version either */
+                /* not present on this version */
             }
-        }
-        if (typeof SuiClient === "function") {
-            clientCandidates.push({
-                name: "SuiClient",
-                client: new SuiClient({ url: cfg.suiRpcUrl }),
-            });
+            if (typeof SuiClient !== "function") {
+                try {
+                    const mod = (await import("@mysten/sui/jsonRpc")) as any;
+                    SuiClient = mod.SuiJsonRpcClient ?? mod.SuiClient;
+                } catch {
+                    /* not present on this version either */
+                }
+            }
+            if (typeof SuiClient === "function") {
+                clientCandidates.push({
+                    name: "SuiClient",
+                    client: new SuiClient({ url: cfg.suiRpcUrl }),
+                });
+            }
         }
 
         if (clientCandidates.length === 0 || typeof Ed25519Keypair !== "function") {
             throw new Error(
-                "SuiGrpcClient/SuiClient or Ed25519Keypair not found in @mysten/sui. " +
+                `Required ${cfg.suiTransport} Sui client or Ed25519Keypair not found in @mysten/sui. ` +
                 "Ensure @mysten/sui >=2.5.0 and @mysten/seal >=1.1.0 are installed."
             );
         }
 
         const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
 
-        // gRPC getObject returns { object } whereas legacy JSON-RPC returns
-        // { data }. SessionKey accepts either through the shared core client
-        // interface. If the relayer still serves a JSON-RPC URL in config,
-        // the legacy client remains a runtime fallback.
+        // SessionKey accepts either transport through the shared core client
+        // interface. Candidates are ordered by the server's preferred
+        // transport, with JSON-RPC retained as a compatibility fallback.
         let session: any = undefined;
         let lastClientError: unknown;
         for (const candidate of clientCandidates) {

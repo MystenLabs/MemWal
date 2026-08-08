@@ -4,7 +4,7 @@
 
 interface ToolResultLike {
     [x: string]: unknown;
-    content: Array<{ type: "text"; text: string; [x: string]: unknown }>;
+    content: Array<{ type: "text"; text: string;[x: string]: unknown }>;
     isError?: boolean;
 }
 
@@ -24,6 +24,24 @@ interface ToolResultLike {
  * failed")`) is logged to sidecar stderr for operators and appended to the
  * client-facing message so the agent has enough context to act.
  */
+/**
+ * Canonical Walruscan explorer URL for a blob. Built server-side so agents
+ * cite the real domain (walruscan.com) instead of guessing one.
+ */
+export function walruscanBlobUrl(blobId: string): string {
+    const network =
+        process.env.SUI_NETWORK === "testnet" ? "testnet" : "mainnet";
+    return `https://walruscan.com/${network}/blob/${blobId}`;
+}
+
+/**
+ * One-line footer for write-tool results. A function (not a module const) so
+ * SUI_NETWORK is read at call time, after the sidecar's env loading.
+ */
+export function explorerFooter(): string {
+    return `Explorer: ${walruscanBlobUrl("<blob_id>")} for any blob_id above.`;
+}
+
 export function wrapTool<Args>(
     handler: (args: Args) => Promise<ToolResultLike>
 ): (args: Args) => Promise<ToolResultLike> {
@@ -41,9 +59,9 @@ export function wrapTool<Args>(
             // Operator-side diagnostic — full chain to sidecar stderr.
             console.error(
                 `[mcp.tool.error] name=${name} msg=${msg}` +
-                    (cause
-                        ? ` cause_name=${cause?.constructor?.name} cause_msg=${cause?.message} cause_code=${cause?.code}`
-                        : "")
+                (cause
+                    ? ` cause_name=${cause?.constructor?.name} cause_msg=${cause?.message} cause_code=${cause?.code}`
+                    : "")
             );
 
             let prefix = "Tool error";

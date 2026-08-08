@@ -1,13 +1,19 @@
+mod alerts;
 mod auth;
+mod client_ip;
 mod compatibility;
 mod engine;
 mod jobs;
+mod jobs_security_delete;
 mod mcp_proxy;
 mod observability;
 mod rate_limit;
 mod routes;
+mod security_delete_auth;
+mod security_delete_error;
 mod services;
 mod storage;
+mod sui;
 mod types;
 
 use axum::http::{header, HeaderValue, Method};
@@ -25,6 +31,7 @@ use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
 use sqlx::postgres::PgPoolOptions;
 
+use alerts::AlertManager;
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
 use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
@@ -32,6 +39,7 @@ use jobs::{
 };
 use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
+use storage::legacy_db::LegacyDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
     DEFAULT_EMBEDDING_CACHE_TTL_SECS,
@@ -39,19 +47,244 @@ use types::{
 
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+const DEFAULT_APALIS_STARTUP_TIMEOUT_SECS: u64 = 45;
+
+fn security_delete_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn security_delete_cors_is_public_and_route_scoped() {
+        let restricted_cors =
+            CorsLayer::new().allow_origin(AllowOrigin::list(["https://app.memwal.test"
+                .parse()
+                .unwrap()]));
+        let app = Router::new()
+            .route("/restricted", get(|| async {}))
+            .layer(restricted_cors)
+            .merge(
+                Router::new()
+                    .route("/security-delete", post(|| async {}))
+                    .layer(security_delete_cors()),
+            );
+
+        let public_preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/security-delete")
+            .header(header::ORIGIN, "https://third-party.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(
+                header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization,content-type",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let public_response = app.clone().oneshot(public_preflight).await.unwrap();
+
+        assert_eq!(
+            public_response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "*"
+        );
+        let allowed_methods = public_response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for method in ["GET", "POST", "DELETE", "OPTIONS"] {
+            assert!(allowed_methods.split(',').any(|allowed| allowed == method));
+        }
+        let allowed_headers = public_response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for name in ["authorization", "content-type"] {
+            assert!(allowed_headers
+                .split(',')
+                .any(|allowed| allowed.eq_ignore_ascii_case(name)));
+        }
+
+        let restricted_preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/restricted")
+            .header(header::ORIGIN, "https://third-party.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .body(Body::empty())
+            .unwrap();
+        let restricted_response = app.oneshot(restricted_preflight).await.unwrap();
+
+        assert_eq!(
+            restricted_response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            None
+        );
+    }
+}
+
+fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
+    let Ok(raw) = std::env::var(name) else {
+        return fallback;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return fallback;
+    }
+    let Ok(parsed) = raw.parse::<u64>() else {
+        tracing::warn!("ignoring invalid {}={}; using {}", name, raw, fallback);
+        return fallback;
+    };
+    if parsed < min {
+        tracing::warn!("ignoring too-small {}={}; using {}", name, parsed, fallback);
+        return fallback;
+    }
+    if parsed > max {
+        tracing::warn!("clamping {}={} to {}", name, parsed, max);
+        return max;
+    }
+    parsed
+}
+
+fn parse_env_u32(name: &str, fallback: u32, min: u32, max: u32) -> u32 {
+    parse_env_u64(name, fallback as u64, min as u64, max as u64) as u32
+}
+
+async fn init_apalis_pool(
+    database_url: &str,
+    startup_timeout: std::time::Duration,
+) -> Result<sqlx::PgPool, String> {
+    let statement_timeout = format!("{}ms", startup_timeout.as_millis().min(300_000));
+    let lock_timeout_ms = (startup_timeout.as_millis() / 3).clamp(1_000, 30_000);
+    let lock_timeout = format!("{}ms", lock_timeout_ms);
+
+    tracing::info!(
+        "  Apalis: connecting to PostgreSQL (startup_timeout={}s)",
+        startup_timeout.as_secs()
+    );
+    let pool_future = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(startup_timeout)
+        .after_connect(move |conn, _meta| {
+            let statement_timeout = statement_timeout.clone();
+            let lock_timeout = lock_timeout.clone();
+            Box::pin(async move {
+                sqlx::query(
+                    "SELECT set_config('statement_timeout', $1, false), \
+                            set_config('lock_timeout', $2, false), \
+                            set_config('idle_in_transaction_session_timeout', $1, false)",
+                )
+                .bind(statement_timeout)
+                .bind(lock_timeout)
+                .execute(conn)
+                .await?;
+                Ok(())
+            })
+        })
+        .connect(database_url);
+
+    let pool = match tokio::time::timeout(startup_timeout, pool_future).await {
+        Ok(Ok(pool)) => pool,
+        Ok(Err(err)) => return Err(format!("connect to PostgreSQL for Apalis: {err}")),
+        Err(_) => {
+            return Err(format!(
+                "timed out after {}s connecting to PostgreSQL for Apalis",
+                startup_timeout.as_secs()
+            ))
+        }
+    };
+    tracing::info!("  Apalis: PostgreSQL connected");
+
+    let schema_ready = match tokio::time::timeout(startup_timeout, apalis_schema_ready(&pool)).await
+    {
+        Ok(Ok(ready)) => ready,
+        Ok(Err(err)) => return Err(format!("check Apalis schema readiness: {err}")),
+        Err(_) => {
+            return Err(format!(
+                "timed out after {}s checking Apalis schema readiness",
+                startup_timeout.as_secs()
+            ))
+        }
+    };
+    if schema_ready {
+        tracing::info!("  Apalis: PostgreSQL schema already current");
+        return Ok(pool);
+    }
+
+    tracing::info!("  Apalis: running PostgreSQL migrations");
+    match tokio::time::timeout(startup_timeout, PostgresStorage::<()>::setup(&pool)).await {
+        Ok(Ok(())) => {
+            tracing::info!("  Apalis: PostgreSQL migrations applied");
+            Ok(pool)
+        }
+        Ok(Err(err)) => Err(format!("run Apalis PostgreSQL migrations: {err}")),
+        Err(_) => Err(format!(
+            "timed out after {}s running Apalis PostgreSQL migrations",
+            startup_timeout.as_secs()
+        )),
+    }
+}
+
+async fn apalis_schema_ready(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'apalis'
+              AND table_name = 'jobs'
+              AND column_name = 'priority'
+        ) AND EXISTS (
+            SELECT 1
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'apalis'
+              AND p.proname = 'get_jobs'
+        )",
+    )
+    .fetch_one(pool)
+    .await
+}
 
 #[tokio::main]
 async fn main() {
+    #[cfg(all(feature = "ci-offline-onchain", debug_assertions))]
+    assert_eq!(
+        std::env::var("CI").as_deref(),
+        Ok("true"),
+        "ci-offline-onchain is restricted to CI test processes"
+    );
+
     // Load .env file (optional, won't error if missing)
     dotenvy::dotenv().ok();
 
-    observability::init_tracing();
+    let telemetry = observability::init_tracing();
 
     // Load config
     let config = Config::from_env();
+    if let Err(error) = crate::types::validate_security_delete_config(&config) {
+        tracing::error!("boot guard: {}", error);
+        std::process::exit(1);
+    }
     tracing::info!("starting memwal server on port {}", config.port);
     tracing::info!("  Sui RPC: {}", config.sui_rpc_url);
-    tracing::info!("  package id: {}", config.package_id);
+    tracing::info!("  package type-origin id: {}", config.package_id);
+    tracing::info!(
+        "  SEAL policy package id: {}",
+        config.seal_policy_package_id
+    );
     tracing::info!("  registry id: {}", config.registry_id);
     tracing::info!(
         "  memwal account: {}",
@@ -68,9 +301,18 @@ async fn main() {
         config.rate_limit.max_storage_bytes / 1_048_576
     );
     tracing::info!(
-        "  sponsor rate limit: {}/min, {}/hr per IP+sender",
+        "  sponsor rate limit: {}/min, {}/hr per IP; {}/min, {}/hr global",
         config.sponsor_rate_limit.per_minute,
         config.sponsor_rate_limit.per_hour,
+        config.sponsor_rate_limit.global_per_minute,
+        config.sponsor_rate_limit.global_per_hour,
+    );
+    tracing::info!(
+        "  accounts rate limit: {}/min, {}/hr per IP; {}/min, {}/hr global",
+        config.accounts_rate_limit.per_minute,
+        config.accounts_rate_limit.per_hour,
+        config.accounts_rate_limit.global_per_minute,
+        config.accounts_rate_limit.global_per_hour,
     );
     tracing::info!(
         "  app auth public client registration: {}",
@@ -108,7 +350,7 @@ async fn main() {
         .expect("Failed to start TS sidecar. Is Node.js installed?");
 
     // Wait for sidecar to be ready (health check with retry)
-    // LOW-9: Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
+    // Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -137,16 +379,28 @@ async fn main() {
 
     // Keep a cheap heartbeat in the Rust logs so operators can distinguish
     // Enoki/Walrus failures from the sidecar process becoming unavailable.
+    // If the sidecar remains unhealthy, exit the relayer so Railway restarts
+    // the whole container and brings up a fresh sidecar process.
+    let sidecar_watch_interval_secs = parse_env_u64("SIDECAR_WATCHDOG_INTERVAL_SECS", 30, 5, 300);
+    let sidecar_watch_timeout_secs = parse_env_u64("SIDECAR_WATCHDOG_TIMEOUT_SECS", 2, 1, 30);
+    let sidecar_watch_max_failures = parse_env_u32("SIDECAR_WATCHDOG_MAX_FAILURES", 6, 1, 100);
+    tracing::info!(
+        "  sidecar watchdog: interval={}s timeout={}s max_failures={}",
+        sidecar_watch_interval_secs,
+        sidecar_watch_timeout_secs,
+        sidecar_watch_max_failures
+    );
     let sidecar_watch_client = http_client.clone();
     let sidecar_watch_url = health_url.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(sidecar_watch_interval_secs));
         let mut consecutive_failures = 0u32;
         loop {
             interval.tick().await;
             match sidecar_watch_client
                 .get(&sidecar_watch_url)
-                .timeout(std::time::Duration::from_secs(2))
+                .timeout(std::time::Duration::from_secs(sidecar_watch_timeout_secs))
                 .send()
                 .await
             {
@@ -176,6 +430,13 @@ async fn main() {
                     );
                 }
             }
+            if consecutive_failures >= sidecar_watch_max_failures {
+                tracing::error!(
+                    "  sidecar: unhealthy for {} consecutive check(s); exiting relayer for supervisor restart",
+                    consecutive_failures
+                );
+                std::process::exit(1);
+            }
         }
     });
 
@@ -186,36 +447,40 @@ async fn main() {
             .await
             .expect("Failed to connect to PostgreSQL"),
     );
+    let security_delete_component_enabled = config.enable_security_delete
+        || config.deletion_reconciler_enabled
+        || config.deletion_object_resolver_enabled;
+    let legacy_db = if security_delete_component_enabled {
+        Some(Arc::new(
+            LegacyDb::new(
+                config
+                    .legacy_db_url
+                    .as_deref()
+                    .expect("boot guard requires LEGACY_DB_URL"),
+            )
+            .await
+            .expect("Failed to initialize legacy security-delete database"),
+        ))
+    } else {
+        None
+    };
 
-    // Setup Apalis job queue — auto-creates `apalis_jobs` table if not present
-    // Uses the same DATABASE_URL as the main DB; no extra infrastructure needed.
-    let apalis_pool = PgPoolOptions::new()
-        .max_connections(10)
-        .acquire_timeout(std::time::Duration::from_secs(10))
-        .connect(&config.database_url)
-        .await
-        .expect("Failed to connect to PostgreSQL for Apalis");
-    // setup() is defined only on PostgresStorage<()> — creates schema tables.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        PostgresStorage::<()>::setup(&apalis_pool),
+    let apalis_startup_timeout_secs = parse_env_u64(
+        "APALIS_STARTUP_TIMEOUT_SECS",
+        DEFAULT_APALIS_STARTUP_TIMEOUT_SECS,
+        5,
+        300,
+    );
+    let apalis_pool = init_apalis_pool(
+        &config.database_url,
+        std::time::Duration::from_secs(apalis_startup_timeout_secs),
     )
     .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            panic!("Apalis postgres migration failed: {}", err);
-        }
-        Err(_) => {
-            tracing::error!(
-                "Apalis postgres migration timed out after 15s; continuing with existing tables"
-            );
-        }
-    }
+    .unwrap_or_else(|err| panic!("Failed to initialize Apalis job queue: {err}"));
     let job_storage: PostgresStorage<MetaTransferJob> = PostgresStorage::new(apalis_pool.clone());
     let remember_job_storage: PostgresStorage<RememberJob> =
         PostgresStorage::new(apalis_pool.clone());
-    // ENG-1408: BulkRememberJob storage
+    // BulkRememberJob storage
     let bulk_job_storage: PostgresStorage<BulkRememberJob> =
         PostgresStorage::new(apalis_pool.clone());
 
@@ -273,8 +538,10 @@ async fn main() {
         .await
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
+    let security_delete_nonce_store: Arc<dyn security_delete_auth::NonceStore> =
+        Arc::new(security_delete_auth::RedisNonceStore::new(redis.clone()));
 
-    // ENG-1405: Redis Walrus blob ciphertext cache skips Walrus fetch on warm recall.
+    // Redis Walrus blob ciphertext cache skips Walrus fetch on warm recall.
     let blob_cache_ttl_secs = std::env::var("BLOB_CACHE_TTL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -353,18 +620,135 @@ async fn main() {
     // CompositeRanker is stateless — one shared instance is fine.
     let ranker: Arc<dyn Ranker> = Arc::new(CompositeRanker);
 
+    let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
+
+    // General delegate-key verification and the boot-time SEAL policy check
+    // share this independent gRPC client; security deletion owns a separate
+    // quota-gated client below.
+    let sui_grpc_client = config.sui_grpc_url.as_deref().map(|url| {
+        sui_rpc::Client::new(url)
+            .unwrap_or_else(|e| panic!("SUI_GRPC_URL {url} is not a valid gRPC endpoint: {e}"))
+    });
+    if let Some(url) = config.sui_grpc_url.as_deref() {
+        tracing::info!("  Sui gRPC: {}", url);
+    }
+
+    #[cfg(not(all(feature = "ci-offline-onchain", debug_assertions)))]
+    {
+        let policy_client = sui_grpc_client.as_ref().unwrap_or_else(|| {
+            panic!("SUI_GRPC_URL is required to validate MEMWAL_SEAL_POLICY_PACKAGE_ID")
+        });
+        storage::sui::verify_seal_policy_package(
+            policy_client,
+            &config.package_id,
+            &config.seal_policy_package_id,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("invalid SEAL policy package configuration: {error}"));
+        tracing::info!("  SEAL policy package lineage and ABI verified");
+
+        // Fail closed if MEMWAL_PACKAGE_ID is an upgraded/current package rather
+        // than the immutable type-origin encoded in AccountRegistry. Delegate-key
+        // verification uses this id to reject foreign lookalike Move objects.
+        storage::sui::verify_registry_type_origin(
+            &http_client,
+            &config.sui_rpc_url,
+            sui_grpc_client.as_ref(),
+            &config.registry_id,
+            &config.package_id,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "MEMWAL_PACKAGE_ID must be the immutable type-origin package id for registry {}: {}",
+                config.registry_id, error
+            )
+        });
+        tracing::info!("  package type-origin invariant verified from AccountRegistry");
+    }
+    #[cfg(all(feature = "ci-offline-onchain", debug_assertions))]
+    {
+        tracing::warn!("  CI-only build: onchain startup validation is disabled");
+    }
+
+    type SecurityDeleteSui = Option<Arc<dyn sui::SuiApi>>;
+    type SecurityDeleteVerifier = Arc<dyn security_delete_auth::WalletSignatureVerifier>;
+    let (security_delete_sui, security_delete_background_sui, security_delete_wallet_verifier): (
+        SecurityDeleteSui,
+        SecurityDeleteSui,
+        SecurityDeleteVerifier,
+    ) = if security_delete_component_enabled {
+        let client = sui::SuiClient::new(
+            config
+                .sui_grpc_url
+                .as_deref()
+                .expect("boot guard requires SUI_GRPC_URL"),
+            config.sui_rpc_requests_per_window,
+            config.sui_rpc_window,
+        )
+        .expect("failed to initialize security-delete Sui client")
+        .with_rpc_limits(config.sui_rpc_attempt_timeout, config.sui_rpc_max_in_flight)
+        .expect("invalid security-delete Sui RPC controls")
+        .with_walrus_config(
+            config.walrus_package_id.clone(),
+            config.walrus_system_object_id.clone(),
+        );
+        (
+            Some(Arc::new(client.clone())),
+            Some(Arc::new(client.background())),
+            Arc::new(sui::verifier::GrpcWalletSignatureVerifier::new(client)),
+        )
+    } else if let Some(url) = config.sui_grpc_url.as_deref() {
+        // Sponsor authorization also uses this verifier. Keep zkLogin and
+        // multisig verification available even when security deletion itself
+        // is disabled by delegating JWK handling to the fullnode.
+        let client = sui::SuiClient::new(
+            url,
+            config.sui_rpc_requests_per_window,
+            config.sui_rpc_window,
+        )
+        .expect("failed to initialize sponsor signature verifier")
+        .with_rpc_limits(config.sui_rpc_attempt_timeout, config.sui_rpc_max_in_flight)
+        .expect("invalid sponsor signature RPC controls");
+        (
+            None,
+            None,
+            Arc::new(sui::verifier::GrpcWalletSignatureVerifier::new(client)),
+        )
+    } else {
+        (
+            None,
+            None,
+            Arc::new(security_delete_auth::NativeWalletSignatureVerifier),
+        )
+    };
+    let security_delete_execution_gate = Arc::new(types::SecurityDeleteExecutionGate::new(
+        config.security_delete_execute_max_in_flight,
+    ));
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
+        legacy_db,
+        security_delete_nonce_store,
+        security_delete_wallet_verifier,
+        security_delete_sui,
+        security_delete_background_sui,
+        security_delete_execution_gate,
         config: Arc::clone(&config),
         http_client,
+        sui_grpc_client,
         key_pool,
+        alerts,
         engine,
         embedder,
         extractor,
         ranker,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
+        registry_scan_semaphore: tokio::sync::Semaphore::new(
+            crate::types::REGISTRY_SCAN_MAX_CONCURRENT,
+        ),
         remember_job_storage: remember_job_storage.clone(),
         wallet_storage: wallet_storage.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
@@ -373,7 +757,113 @@ async fn main() {
         embedding_cache_ttl,
     });
 
-    // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)
+    jobs_security_delete::spawn_reconciler(Arc::clone(&state));
+    jobs_security_delete::spawn_object_resolver(Arc::clone(&state));
+
+    tracing::info!(
+        "  alerts: Slack {} via ALERT_TO_SLACK",
+        if state.alerts.slack_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+
+    // Sidecar upload-queue saturation monitor. The watchdog above only
+    // checks that /health answers; during the 2026-06-10 congestion incident
+    // it stayed green while 120 uploads queued and jobs burned their retry
+    // budgets. This monitor reads the queue counters that /health already
+    // exposes and alerts ops while there is still time to act (add wallets /
+    // throttle the burst) — before queued requests outlive the sidecar's
+    // 120s acquire timeout and start failing.
+    let saturation_threshold = parse_env_u64("SIDECAR_QUEUE_SATURATION_THRESHOLD", 20, 1, 10_000);
+    let saturation_consecutive = parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
+    let saturation_interval_secs =
+        parse_env_u64("SIDECAR_QUEUE_SATURATION_INTERVAL_SECS", 30, 5, 300);
+    tracing::info!(
+        "  sidecar saturation monitor: threshold={} consecutive={} interval={}s",
+        saturation_threshold,
+        saturation_consecutive,
+        saturation_interval_secs
+    );
+    {
+        let monitor_client = state.http_client.clone();
+        let monitor_url = health_url.clone();
+        let monitor_alerts = Arc::clone(&state.alerts);
+        let monitor_network = config.sui_network.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(saturation_interval_secs));
+            let mut consecutive_saturated = 0u32;
+            loop {
+                interval.tick().await;
+                let body = match monitor_client
+                    .get(&monitor_url)
+                    .timeout(std::time::Duration::from_secs(2))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.json::<serde_json::Value>().await {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        }
+                    }
+                    // Liveness problems are the watchdog's job; only the
+                    // healthy-but-saturated case belongs here.
+                    _ => continue,
+                };
+
+                let queued = body["queuedWalrusUploads"].as_u64().unwrap_or(0);
+                let active = body["activeWalrusUploads"].as_u64().unwrap_or(0);
+                let global_capacity = body["walrusUploadLimits"]["globalCapacity"]
+                    .as_u64()
+                    .unwrap_or(0);
+
+                if queued > saturation_threshold {
+                    consecutive_saturated = consecutive_saturated.saturating_add(1);
+                    tracing::warn!(
+                        "  sidecar: upload queue saturated queued={} active={} capacity={} consecutive={}/{}",
+                        queued,
+                        active,
+                        global_capacity,
+                        consecutive_saturated,
+                        saturation_consecutive,
+                    );
+                } else {
+                    if consecutive_saturated >= saturation_consecutive {
+                        tracing::info!(
+                            "  sidecar: upload queue drained (queued={} <= threshold {})",
+                            queued,
+                            saturation_threshold,
+                        );
+                    }
+                    consecutive_saturated = 0;
+                }
+
+                // Alert once per crossing; the AlertManager dedup window
+                // handles re-alerting if the backlog persists.
+                if consecutive_saturated >= saturation_consecutive {
+                    let alert = crate::alerts::WalrusUploadQueueSaturatedAlert {
+                        sui_network: monitor_network.clone(),
+                        queued,
+                        active,
+                        global_capacity,
+                        threshold: saturation_threshold,
+                        consecutive_checks: consecutive_saturated,
+                    };
+                    if let Err(err) = monitor_alerts
+                        .notify_walrus_upload_queue_saturated(alert)
+                        .await
+                    {
+                        tracing::warn!("  sidecar: saturation alert delivery failed: {}", err);
+                    }
+                }
+            }
+        });
+    }
+
+    // Worker 1: deserialize legacy rows and fail them closed for reconciliation.
     {
         let worker_state = state.clone();
         let storage = job_storage.clone();
@@ -394,7 +884,7 @@ async fn main() {
         tracing::info!("  Apalis: worker 'meta-transfer' spawned (concurrency=2)");
     }
 
-    // Worker 2: RememberJob (legacy full pipeline)
+    // Worker 2: deserialize legacy rows and fail them closed before upload.
     {
         let worker_state = state.clone();
         let storage = remember_job_storage.clone();
@@ -415,7 +905,7 @@ async fn main() {
         tracing::info!("  Apalis: worker 'remember' spawned (concurrency=3)");
     }
 
-    // Worker 3: BulkRememberJob (ENG-1408)
+    // Worker 3: BulkRememberJob
     {
         let worker_state = state.clone();
         let storage = bulk_job_storage.clone();
@@ -503,7 +993,7 @@ async fn main() {
 
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)
-    // HIGH-13 / ENG-1407 / ENG-1408: 2 MiB covers the largest realistic JSON
+    // 2 MiB covers the largest realistic JSON
     // body — single remember at 1 MiB plaintext + framing, and bulk remember
     // batches up to ~1.5 MB. Blocks abusive uploads before auth + rate-limit
     // middleware see them. Must equal auth::PROTECTED_BODY_LIMIT_BYTES — these
@@ -522,7 +1012,7 @@ async fn main() {
         .route("/api/recall", post(routes::recall))
         .route("/api/remember/manual", post(routes::remember_manual))
         .route("/api/recall/manual", post(routes::recall_manual))
-        // ENG-1408: Bulk remember — higher body limit (20 items × max 64 KiB each ≈ 1.5 MB)
+        // Bulk remember — higher body limit (20 items × max 64 KiB each ≈ 1.5 MB)
         .route(
             "/api/remember/bulk",
             post(routes::remember_bulk).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
@@ -530,7 +1020,7 @@ async fn main() {
         .route("/api/analyze", post(routes::analyze))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
-        // ENG-1747: admin/harness endpoints — namespace delete + stats.
+        // admin/harness endpoints — namespace delete + stats.
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))
         .route("/api/stats", post(routes::stats))
@@ -546,7 +1036,8 @@ async fn main() {
         ))
         .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
 
-    // Sponsor routes — body limits + IP rate limit middleware
+    // Security-delete has its own server-side sponsor and does not use these
+    // routes.
     let sponsor_routes = Router::new()
         .route(
             "/sponsor",
@@ -560,6 +1051,57 @@ async fn main() {
             state.clone(),
             rate_limit::sponsor_rate_limit_middleware,
         ));
+
+    let security_delete_auth_routes = Router::new()
+        .route(
+            "/api/security-delete-auth/challenge",
+            post(security_delete_auth::challenge).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
+            "/api/security-delete-auth/verify",
+            post(security_delete_auth::verify).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::security_delete::security_delete_auth_rate_limit,
+        ))
+        // Last layer executes first: hide disabled deployments before rate
+        // limiting or JSON extraction can reveal the route contract.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::security_delete::security_delete_feature_gate,
+        ));
+
+    let security_delete_bearer_routes = Router::new()
+        .route(
+            "/api/security-deletable-blobs",
+            get(routes::security_delete::list_deletable_blobs),
+        )
+        .route(
+            "/api/security-deletions",
+            post(routes::security_delete::prepare_deletion)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/api/security-deletions/{batch_id}/submit",
+            post(routes::security_delete::submit_deletion).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/security-deletions/{batch_id}",
+            get(routes::security_delete::deletion_status)
+                .delete(routes::security_delete::cancel_deletion),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::security_delete::security_delete_feature_gate,
+        ));
+
+    // The deletion API is intentionally consumable by public browser clients.
+    // Keep its CORS policy route-scoped so the rest of the API still uses the
+    // deployment's ALLOWED_ORIGINS allowlist.
+    let security_delete_routes = security_delete_auth_routes
+        .merge(security_delete_bearer_routes)
+        .layer(security_delete_cors());
 
     // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
     // No signed-request auth here: MCP clients ship a single Bearer at SSE
@@ -663,9 +1205,9 @@ async fn main() {
         );
 
     // Public routes
-    // HIGH-13: /health and /config accept no body — cap at 16 KiB to reject
+    // /health and /config accept no body — cap at 16 KiB to reject
     // oversized unauthenticated requests before they reach any handler.
-    // ENG-1697: /config exposes non-secret deployment parameters (packageId,
+    // /config exposes non-secret deployment parameters (packageId,
     // network, sui_rpc_url) so the SDK can build SEAL SessionKey without
     // the user adding packageId to MemWalConfig.
     let public_routes = Router::new()
@@ -680,6 +1222,17 @@ async fn main() {
         .route(
             "/config",
             get(routes::get_config).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/accounts/{owner}/exists",
+            get(routes::account_exists)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                // Only route in `public_routes` that hits the DB pool — see
+                // `rate_limit::accounts_rate_limit_middleware` doc comment.
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::accounts_rate_limit_middleware,
+                )),
         )
         .route(
             "/metrics",
@@ -713,7 +1266,13 @@ async fn main() {
             tracing::info!("  CORS origins: {}", config.allowed_origins);
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
-                .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::OPTIONS])
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PATCH,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
                 .allow_headers([
                     header::CONTENT_TYPE,
                     header::AUTHORIZATION,
@@ -727,7 +1286,7 @@ async fn main() {
                     "x-request-id".parse::<header::HeaderName>().unwrap(),
                     "x-correlation-id".parse::<header::HeaderName>().unwrap(),
                     "x-admin-token".parse::<header::HeaderName>().unwrap(),
-                    // ENG-1697: SessionKey envelope replacing x-delegate-key
+                    // SessionKey envelope replacing x-delegate-key
                     "x-seal-session".parse::<header::HeaderName>().unwrap(),
                     // MCP headers — caller's Walrus Memory account id + optional default namespace.
                     "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
@@ -739,14 +1298,20 @@ async fn main() {
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
-        .with_state(state)
         .layer(cors)
+        // Merge after applying the deployment-wide CORS layer so its
+        // preflight handler cannot shadow the deletion API's public policy.
+        .merge(security_delete_routes)
+        .with_state(state)
         .layer(middleware::from_fn(
             observability::request_context_middleware,
         ));
 
-    // Start server
-    let addr = format!("0.0.0.0:{}", config.port);
+    // Start server. Bind the IPv6 unspecified address (dual-stack: still
+    // accepts IPv4 via mapped addresses) so the relayer is reachable over
+    // Railway's private network, which is IPv6-only — e.g. for the
+    // observability collector scraping /metrics at relayer.railway.internal.
+    let addr = format!("[::]:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("Failed to bind address");
@@ -776,4 +1341,5 @@ async fn main() {
     // Cleanup sidecar after shutdown
     sidecar_child.kill().await.ok();
     tracing::info!("sidecar stopped");
+    telemetry.shutdown();
 }

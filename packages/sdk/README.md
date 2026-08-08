@@ -6,7 +6,7 @@ Walrus Memory SDK for storing encrypted AI memories on Walrus and retrieving the
 
 ## Documentation
 
-For full documentation, visit [docs.memwal.ai](https://docs.memwal.ai).
+For full documentation, visit [memory.walrus.xyz](https://memory.walrus.xyz).
 
 ## Install
 
@@ -20,6 +20,18 @@ Peer dependencies (install as needed):
 pnpm add @mysten/sui @mysten/seal @mysten/walrus ai zod
 ```
 
+### Version compatibility
+
+`@mysten/seal` and `@mysten/walrus` must both resolve to versions that accept the same `@mysten/sui` major. Known-good matrix:
+
+| Package | Version |
+| --- | --- |
+| `@mysten/sui` | `^2.16.2` |
+| `@mysten/seal` | `^1.1.3` |
+| `@mysten/walrus` | `^1.1.7` |
+
+`@mysten/walrus@0.x` bundles `@mysten/sui@1.x` and cannot coexist with `@mysten/seal@1.x`, which requires `@mysten/sui@^2.x`. If `npm install` fails with `ERESOLVE` mentioning `@mysten/sui@^1.x`, upgrade `@mysten/walrus` to `^1.1.7`, refresh your lockfile, and run `npm why @mysten/sui` to find any remaining dependency that pins sui v1.
+
 ## Quick Start
 
 ```ts
@@ -28,7 +40,7 @@ import { MemWal } from "@mysten-incubation/memwal";
 const memwal = MemWal.create({
   key: process.env.MEMWAL_PRIVATE_KEY!,
   accountId: process.env.MEMWAL_ACCOUNT_ID!,
-  serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
+  serverUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
   namespace: "demo",
 });
 
@@ -37,7 +49,8 @@ await memwal.rememberAndWait(
   undefined,
   { timeoutMs: 30_000 },
 );
-const memories = await memwal.recall("What are the user's preferences?", {
+const memories = await memwal.recall({
+  query: "What are the user's preferences?",
   topK: 10,
   maxDistance: 0.7,
 });

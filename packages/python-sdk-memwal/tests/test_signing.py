@@ -206,9 +206,9 @@ class TestBuildSignatureMessage:
 class TestDelegateKeyUtils:
     """Tests for delegate_key_to_sui_address and delegate_key_to_public_key."""
 
-    # Known test key used throughout this session
-    _KEY = "944aa24c09d8b6d6cc6a8fbedc6dc0942a46e49db7d36596e1b6af6061ec9261"
-    _EXPECTED_PUB = "d5b76c57ad1b78438ab9df984b65aa6e2692045a9f3ba642773edd46f3b987b9"
+    # Deterministic dummy key; never use a live delegate key in fixtures.
+    _KEY = "aa" * 32
+    _EXPECTED_PUB = "e734ea6c2b6257de72355e472aa05a4c487e6b463c029ed306df2f01b5636b58"
 
     def test_public_key_matches_known(self):
         from memwal.utils import delegate_key_to_public_key

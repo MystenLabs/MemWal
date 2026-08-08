@@ -62,7 +62,7 @@ export const register = async (
 
     const [user] = await getUser(validatedData.email);
 
-    // HIGH-11: Return generic failure — do not reveal whether the email is registered.
+    // Return generic failure — do not reveal whether the email is registered.
     // Distinct "user_exists" status enables account enumeration.
     if (user) {
       return { status: "failed" };

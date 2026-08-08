@@ -3,20 +3,26 @@ name = "memwal-server"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Lets the HTTP-only GitHub Actions E2E boot before the new contract is
+# published. It only changes debug builds; release builds stay fail-closed.
+ci-offline-onchain = []
+
 [dependencies]
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Database (PostgreSQL + pgvector)
-sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "chrono", "uuid"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "chrono", "uuid", "migrate", "macros"] }
 pgvector = { version = "0.4", features = ["sqlx"] }
 
 # Auth
 ed25519-dalek = { version = "2", features = ["serde"] }
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 aes-gcm = "0.10"
 blake2 = "0.10"
@@ -25,7 +31,7 @@ rand = "0.8"
 # SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
 # (no Rust crypto deps needed)
 
-# Background job queue — persistent metadata+transfer tasks (ENG-1406)
+# Background job queue — persistent metadata+transfer tasks
 apalis     = { version = "0.7", default-features = false, features = ["tracing"] }
 apalis-sql = { version = "0.7", features = ["postgres", "migrate"] }
 
@@ -36,13 +42,29 @@ serde_json = "1"
 # Config
 dotenvy = "0.15"
 
-# Logging
+# Logging / observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 prometheus = "0.13"
+opentelemetry = { version = "0.31", features = ["logs", "trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["logs", "rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-json", "logs", "reqwest-blocking-client", "trace"] }
+opentelemetry-appender-tracing = "0.31"
+tracing-opentelemetry = "0.32"
 
-# HTTP client (for Sui RPC onchain verification)
+# HTTP client (legacy Sui JSON-RPC — being phased out per the 2026-07-31 sunset)
 reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Sui gRPC client (for onchain account/delegate-key verification, migrating
+# off the JSON-RPC calls above — testnet's public JSON-RPC endpoint already
+# returns 404, ahead of the documented sunset)
+sui-rpc = "=0.3.1"
+sui-sdk-types = { version = "=0.3.1", features = ["hash", "serde"] }
+sui-transaction-builder = { version = "=0.3.1", default-features = false }
+sui-crypto = { version = "=0.3.0", features = ["ed25519", "secp256k1", "secp256r1", "passkey", "zklogin"] }
+prost-types = "0.14"
+tonic = "0.14"
+httpdate = "1"
 
 # Async utilities
 futures = "0.3"
@@ -52,7 +74,8 @@ async-trait = "0.1"
 redis = { version = "0.27", features = ["tokio-comp"] }
 
 # Utils
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 chrono = "0.4"
 base64 = "0.22"
+bcs = "0.1"
 percent-encoding = "2"

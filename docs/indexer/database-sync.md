@@ -1,5 +1,38 @@
 ---
 title: "Database Sync"
+description: >-
+  How the Walrus Memory indexer syncs account data into PostgreSQL with pgvector,
+  including table schemas, indexes, and similarity search for recall queries.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - indexer
+  - PostgreSQL
+  - pgvector
+  - database sync
+goal:
+  description: Identify the PostgreSQL tables and indexes that power the indexer and relayer, explain how pgvector HNSW enables cosine similarity search, and locate relevant tables when debugging lookup failures.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What database tables does the Walrus Memory indexer use?"
+  - "How does MemWal perform similarity search with pgvector?"
+  - "How does the MemWal indexer sync onchain data to PostgreSQL?"
+answer: >-
+  The indexer syncs account data into PostgreSQL so the relayer can resolve ownership
+  without hitting the blockchain. Key tables include vector_entries (stores embeddings
+  linked to encrypted Walrus blobs), delegate_key_cache, accounts, and indexer_state.
+  Recall queries use pgvector's HNSW cosine distance index for fast similarity search.
 ---
 
 The indexer syncs account data into PostgreSQL so the relayer can resolve ownership quickly without hitting the blockchain on every request.

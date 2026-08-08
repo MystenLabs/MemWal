@@ -4,18 +4,26 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+	"prebuild": "node scripts/verify-walrus-wasm-version.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "postbuild": "node scripts/verify-dist-assets.mjs",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "preview": "vite preview",
+    "serve:dist": "node server.mjs",
+    "verify:static-server": "node scripts/verify-static-server.mjs",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@mysten-incubation/memwal": "workspace:*",
     "@mysten/dapp-kit": "^1.0.3",
     "@mysten/enoki": "^1.0.4",
-    "@mysten-incubation/memwal": "workspace:*",
     "@mysten/seal": "^1.1.0",
     "@mysten/sui": "^2.6.0",
     "@mysten/walrus": "^1.0.3",
+		"@mysten/walrus-wasm": "0.2.0",
     "@noble/ed25519": "^3.0.0",
     "@noble/hashes": "^2.0.1",
     "@radix-ui/react-slot": "^1.2.4",
@@ -37,20 +45,28 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@mysten-incubation/dev-wallet": "^0.5.1",
+    "@playwright/test": "^1.50.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^5.1.1",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
+    "jsdom": "^29.1.1",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.48.0",
     "vite": "^7.3.1",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.5.0",
-    "vitepress": "^1.6.4"
+    "vitepress": "^1.6.4",
+    "vitest": "^4.1.10"
   }
 }

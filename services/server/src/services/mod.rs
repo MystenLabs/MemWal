@@ -28,8 +28,8 @@ pub mod extractor;
 pub mod llm_chat;
 pub mod ranker;
 
-// Placeholder module — reserved namespace for the consolidator (Mem0 v3
-// linked-memory-ids + supersede logic). Doc-only until a real caller
+// Placeholder module — reserved namespace for the consolidator
+// (linked-memory-ids + supersede logic). Doc-only until a real caller
 // exists; inventing a trait without one would be premature design.
 pub mod consolidator;
 

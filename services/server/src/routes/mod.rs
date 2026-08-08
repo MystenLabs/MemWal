@@ -1,4 +1,4 @@
-//! HTTP route handlers, split by endpoint family (ENG-1747 phase 4.2).
+//! HTTP route handlers, split by endpoint family (phase 4.2).
 //!
 //! Each submodule owns a related group of handlers:
 //! - `remember` — `/api/remember`, `/api/remember/manual`, `/api/remember/bulk`
@@ -8,21 +8,26 @@
 //! - `admin` — `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`,
 //!   `/health`, `/version`, `/config`
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
+//! - `accounts` — `/api/accounts/{owner}/exists` (public MemWalAccount
+//!   existence check)
 //!
 //! Shared route-level helpers (`enqueue_wallet_job`, `truncate_str`,
 //! `collect_bounded_results`, `cleanup_expired_blob`) live here in `mod.rs`.
 //! Capability-level code (embedding, extraction, OpenAI chat wire types,
 //! prompt assets) lives in `crate::services` per the Phase 2/3 refactor.
 
+mod accounts;
 mod admin;
 mod analyze;
 mod app_auth;
 mod recall;
 mod remember;
+pub mod security_delete;
 mod sponsor;
 
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
 // without having to know which submodule each handler lives in.
+pub use accounts::account_exists;
 pub use admin::{ask, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
 pub use app_auth::{
@@ -39,7 +44,7 @@ pub use sponsor::{sponsor_execute_proxy, sponsor_proxy};
 
 use futures::stream::{self, StreamExt};
 
-use crate::jobs::{WalletJob, WalletOperation};
+use crate::jobs::{wallet_job_request, WalletJob, WalletOperation};
 use crate::storage::db::VectorDb;
 use crate::types::*;
 
@@ -61,10 +66,11 @@ pub async fn enqueue_wallet_job(
 ) -> Result<usize, AppError> {
     let mut storage = state.wallet_storage.clone();
     storage
-        .push(WalletJob {
+        .push_request(wallet_job_request(WalletJob {
             wallet_index,
+            congestion_requeues: 0,
             operation,
-        })
+        }))
         .await
         .map_err(|e| AppError::Internal(format!("Failed to enqueue WalletJob: {}", e)))?;
     Ok(wallet_index)
@@ -123,25 +129,32 @@ where
 /// Called when Walrus returns 404 (blob expired / not found).
 /// Errors are logged but not propagated — cleanup is best-effort.
 ///
-/// LOW-10: `owner` is required so the DELETE is scoped to the caller's rows.
-/// The DB layer enforces `WHERE blob_id = $1 AND owner = $2`, so an expired
-/// blob discovered via one user's recall cannot delete another user's entry
-/// even if blob_ids collided.
-pub(super) async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &str) {
-    match db.delete_by_blob_id(blob_id, owner).await {
+/// `owner` and `namespace` are required so the DELETE is scoped to the
+/// caller's isolated rows. The DB layer enforces all three predicates, so an
+/// expired blob discovered in one namespace cannot delete another entry even
+/// if the owner and blob_id are identical.
+pub(super) async fn cleanup_expired_blob(
+    db: &VectorDb,
+    blob_id: &str,
+    owner: &str,
+    namespace: &str,
+) {
+    match db.delete_by_blob_id(blob_id, owner, namespace).await {
         Ok(rows) => {
             tracing::info!(
-                "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={}",
+                "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={} namespace={}",
                 rows,
                 blob_id,
-                owner
+                owner,
+                namespace
             );
         }
         Err(e) => {
             tracing::error!(
-                "reactive cleanup failed for blob_id={} owner={}: {}",
+                "reactive cleanup failed for blob_id={} owner={} namespace={}: {}",
                 blob_id,
                 owner,
+                namespace,
                 e
             );
         }
@@ -153,7 +166,7 @@ pub(super) async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &s
 // HydratedMemory
 // ============================================================
 
-/// Zip the `created_at` timestamp **and** (MEM-54) the `importance` score
+/// Zip the `created_at` timestamp **and** the `importance` score
 /// from a slice of `SearchHit`s onto a mutable slice of `HydratedMemory`s
 /// by `blob_id`. The storage engines deliberately leave both fields as
 /// `None` (they don't fetch them as part of the cache → Walrus → SEAL
@@ -165,7 +178,7 @@ pub(super) async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &s
 /// Same pattern is used by both `/api/recall` and `/api/ask` — extracting
 /// it here keeps the two call sites in sync.
 ///
-/// Renamed from `zip_created_at_onto_hydrated` in MEM-54 once importance
+/// Renamed from `zip_created_at_onto_hydrated` in once importance
 /// joined the zip. Single function (rather than two separate ones) because
 /// both fields come from the same `SearchHit` and we don't want to walk
 /// the hits vector twice for what's a hot path.

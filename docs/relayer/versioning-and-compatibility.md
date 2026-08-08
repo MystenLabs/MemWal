@@ -1,8 +1,37 @@
 ---
 title: "Versioning and Compatibility"
+description: >-
+  Versioning policy and compatibility matrix for the Walrus Memory relayer API, covering SemVer conventions, SDK compatibility, runtime metadata endpoints, the deprecation process, and CI contract checks.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - versioning
+  - API compatibility
+  - SemVer
+  - deprecation policy
+goal:
+  description: Verify that your SDK version is compatible with your relayer, interpret versioning headers, and follow the deprecation timeline when upgrading across breaking changes.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What is the Walrus Memory relayer versioning policy?"
+  - "Which SDK versions are compatible with the MemWal relayer API?"
+  - "How does the Walrus Memory relayer handle deprecation of API surfaces?"
+answer: >-
+  The Walrus Memory relayer follows SemVer for its package version and exposes a separate apiVersion for the public API contract. SDKs and MCP clients check the /version endpoint for compatibility before making protected requests. Breaking changes follow a deprecation process that adds a notice to /version.deprecations, documents the replacement, and removes the surface only in the next API major version.
 ---
 
-The MemWal relayer is the public protocol/API layer for SDKs, MCP clients, and self-hosted deployments. Treat every route, signed header, response field, runtime config field, and documented environment variable on this page as a versioned contract.
+The Walrus Memory relayer is the public protocol/API layer for SDKs, MCP clients, and self-hosted deployments. Treat every route, signed header, response field, runtime config field, and documented environment variable on this page as a versioned contract.
 
 ## Relayer SemVer
 

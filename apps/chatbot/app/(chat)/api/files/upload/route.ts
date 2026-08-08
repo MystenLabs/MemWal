@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import { auth } from "@/app/(auth)/auth";
 
-// LOW-34: Per-user sliding-window rate limit for uploads to prevent abuse
+// Per-user sliding-window rate limit for uploads to prevent abuse
 // (e.g. storage exhaustion, runaway costs). Kept in-memory since the chatbot
 // app does not currently require a distributed limiter for this endpoint.
 const UPLOAD_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
@@ -36,7 +36,7 @@ function checkUploadRateLimit(userId: string): {
   return { allowed: true, retryAfterSeconds: 0 };
 }
 
-// HIGH-9: Sanitize uploaded filename — strip path separators, restrict characters,
+// Sanitize uploaded filename — strip path separators, restrict characters,
 // and cap length to prevent path traversal via crafted filenames.
 function sanitizeFilename(raw: string): string {
   return raw
@@ -66,7 +66,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // LOW-34: Enforce per-user upload rate limit.
+  // Enforce per-user upload rate limit.
   const userId = session.user?.id;
   if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -107,7 +107,7 @@ export async function POST(request: Request) {
 
     // Get filename from formData since Blob doesn't have name property
     const rawFilename = (formData.get("file") as File).name;
-    // HIGH-9: Prefix with user-scoped namespace + random suffix to prevent
+    // Prefix with user-scoped namespace + random suffix to prevent
     // path traversal and cross-user key collisions in shared blob storage.
     const sanitized = sanitizeFilename(rawFilename);
     const blobKey = `users/${userId}/${crypto.randomUUID()}-${sanitized}`;

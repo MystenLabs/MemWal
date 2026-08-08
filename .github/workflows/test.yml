@@ -32,6 +32,34 @@ jobs:
       - name: Check compatibility contract
         run: node scripts/check-compatibility-contract.mjs
 
+  mcp-tests:
+    name: MCP / Integration (login handoff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      # Builds the package (tsc) then runs the node:test integration suite:
+      # spawns the real stdio MCP with empty creds, writes credentials
+      # mid-process, and asserts memwal_recall is served against a mock relayer
+      # without a restart (auth-required -> bridge hot-handoff).
+      - name: MCP integration tests
+        run: pnpm --filter @mysten-incubation/memwal-mcp test
+
   chatbot-e2e:
     name: Chatbot / Playwright E2E
     runs-on: ubuntu-latest
@@ -83,8 +111,8 @@ jobs:
       - name: Install deps
         run: pnpm install --frozen-lockfile
 
-      - name: Build SDK (workspace dep of chatbot)
-        run: pnpm build:sdk
+      - name: Test and build SDK (workspace dep of chatbot)
+        run: pnpm --filter @mysten-incubation/memwal test
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
@@ -142,11 +170,14 @@ jobs:
       PORT: "8000"
       TEST_BASE_URL: http://localhost:8000
       RUST_LOG: info
-      # Public testnet IDs — documented in docs/contract/overview.md. Required
-      # by Config::from_env() so the server boots. The CI-scoped tests here
-      # hit /health + auth-contract paths only; they don't reach onchain
-      # verification, so no real-wallet secrets are needed.
+      # Required by Config::from_env(). This HTTP-only job uses the compile-time
+      # ci-offline-onchain feature below until the new contract is published;
+      # release builds remain on the strict onchain-validation path.
       SUI_NETWORK: testnet
+      # Testnet no longer serves JSON-RPC, so the server and the sidecar both
+      # refuse to start on testnet without a gRPC endpoint. Boot-only here: the
+      # CI-scoped tests never issue an onchain call through it.
+      SUI_GRPC_URL: "https://fullnode.testnet.sui.io:443"
       MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
       MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
       # Dummy token — sidecar (scripts/sidecar-server.ts) refuses to start
@@ -197,17 +228,19 @@ jobs:
       - name: Install Python deps
         run: pip install -r services/server/tests/requirements.txt
 
-      - name: Build server (release)
+      - name: Build HTTP-only CI server
         working-directory: services/server
-        run: cargo build --release --bin memwal-server || cargo build --release
+        run: |
+          cargo build --features ci-offline-onchain --bin memwal-server || \
+            cargo build --features ci-offline-onchain
 
       - name: Start server in background
         working-directory: services/server
         run: |
           # Prefer the named binary; fall back to the only produced bin.
-          BIN=$(ls -1 target/release/memwal-server target/release/memwal 2>/dev/null | head -n1)
+          BIN=$(ls -1 target/debug/memwal-server target/debug/memwal 2>/dev/null | head -n1)
           if [ -z "$BIN" ]; then
-            BIN=$(find target/release -maxdepth 1 -type f -perm -u+x -not -name '*.d' | head -n1)
+            BIN=$(find target/debug -maxdepth 1 -type f -perm -u+x -not -name '*.d' | head -n1)
           fi
           echo "Starting $BIN"
           nohup "$BIN" > server.log 2>&1 &
@@ -276,6 +309,13 @@ jobs:
       - name: Lint (biome/ultracite)
         continue-on-error: true
         run: pnpm --filter @memwal/chatbot lint
+
+      # Fast unit tests (vitest, no DB/browser). Includes the document-tool
+      # ownership regression test. This step fails the job on a regression, so
+      # the signal surfaces on the PR; note it is not yet wired as a required
+      # status check in branch protection, so it does not by itself block merge.
+      - name: Unit tests (vitest)
+        run: pnpm --filter @memwal/chatbot test:unit
 
       - name: Build (Next.js, type-check inclusive)
         working-directory: apps/chatbot
@@ -352,9 +392,9 @@ jobs:
     timeout-minutes: 15
 
     env:
-      # Keep pinned so CI is reproducible. Matches Published.toml toolchain.
+      # Keep pinned so CI is reproducible for the contract package.
       # Bump this together with any Move feature that requires a newer CLI.
-      SUI_VERSION: testnet-v1.67.1
+      SUI_VERSION: testnet-v1.74.0
 
     steps:
       - name: Checkout

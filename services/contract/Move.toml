@@ -1,5 +1,6 @@
 [package]
 name = "memwal"
+version = "3.0.0"
 edition = "2024"
 authors = ["CommandOSS"]
 

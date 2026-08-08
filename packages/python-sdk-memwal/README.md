@@ -1,6 +1,6 @@
 # Walrus Memory Python SDK
 
-Python SDK for [Walrus Memory](https://memwal.ai) — Privacy-first AI memory with Ed25519 signing.
+Python SDK for [Walrus Memory](https://memory.walrus.xyz) — Privacy-first AI memory with Ed25519 signing.
 
 All data processing (encryption, embedding, Walrus storage) happens server-side in a TEE. The SDK signs requests with your Ed25519 delegate key and sends text over HTTPS.
 
@@ -18,6 +18,10 @@ pip install memwal[openai]      # OpenAI SDK support
 pip install memwal[all]         # Everything
 ```
 
+## Try It In Colab
+
+Open the runnable [Walrus Memory Python SDK Colab](https://colab.research.google.com/drive/1SaKjkSp0DXnM_nktWSiEC-l9qGtVr6ph) for a notebook walkthrough covering installation, secure `staging` configuration, optional `prod`, health checks, `remember`, `remember_async`, async job waiting, `recall`, bulk remember, `remember_bulk_async`, `remember_bulk_and_wait`, optional SDK utilities, OpenAI/LangChain middleware, OpenAI-compatible provider settings such as `OPENAI_BASE_URL`, and troubleshooting.
+
 ## Quick Start
 
 Set your environment variables first:
@@ -25,7 +29,7 @@ Set your environment variables first:
 ```bash
 export MEMWAL_PRIVATE_KEY="your-ed25519-delegate-private-key-hex"
 export MEMWAL_ACCOUNT_ID="0x-your-walrus-memory-account-id"
-export MEMWAL_SERVER_URL="https://relayer.memwal.ai"
+export MEMWAL_SERVER_URL="https://relayer.memory.walrus.xyz"
 ```
 
 `MEMWAL_PRIVATE_KEY` is the delegate private key from the Walrus Memory dashboard and
@@ -36,26 +40,26 @@ must stay server-side.
 ```python
 import asyncio
 import os
-from memwal import MemWal
+from memwal import MemWal, RecallParams
 
 async def main():
     memwal = MemWal.create(
         key=os.environ["MEMWAL_PRIVATE_KEY"],
         account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-        server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
+        server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memory.walrus.xyz"),
     )
 
-    # Store a memory
-    result = await memwal.remember("I'm allergic to peanuts")
+    # Store a memory and wait until the background job is searchable
+    result = await memwal.remember_and_wait("I'm allergic to peanuts")
     print(result.blob_id)
 
     # Recall memories
-    matches = await memwal.recall("food allergies", limit=10, max_distance=0.7)
+    matches = await memwal.recall(RecallParams(query="food allergies", limit=10, max_distance=0.7))
     for memory in matches.results:
         print(f"{memory.text} (relevance: {1 - memory.distance:.2f})")
 
-    # Analyze conversation for facts
-    analysis = await memwal.analyze("I love coffee and live in Tokyo")
+    # Analyze conversation for facts and wait until extracted facts are searchable
+    analysis = await memwal.analyze_and_wait("I love coffee and live in Tokyo")
     for fact in analysis.facts:
         print(fact.text)
 
@@ -68,16 +72,16 @@ asyncio.run(main())
 
 ```python
 import os
-from memwal import MemWalSync
+from memwal import MemWalSync, RecallParams
 
 client = MemWalSync.create(
     key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
+    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memory.walrus.xyz"),
 )
 
-result = client.remember("I'm allergic to peanuts")
-matches = client.recall("food allergies")
+result = client.remember_and_wait("I'm allergic to peanuts")
+matches = client.recall(RecallParams(query="food allergies"))
 client.close()
 ```
 
@@ -91,7 +95,7 @@ async with MemWal.create(
     key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
 ) as memwal:
-    await memwal.remember("I prefer dark mode")
+    await memwal.remember_and_wait("I prefer dark mode")
 ```
 
 ## Environment Presets
@@ -105,16 +109,14 @@ from memwal import MemWal
 memwal = MemWal.create(
     key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-    env="prod",   # prod | dev | staging | local
+    env="staging",   # staging for testing, prod for production
 )
 ```
 
 | `env` | Relayer URL |
 |-------|-------------|
-| `prod` | `https://relayer.memwal.ai` |
-| `dev` | `https://relayer.dev.memwal.ai` |
-| `staging` | `https://relayer.staging.memwal.ai` |
-| `local` | `http://127.0.0.1:8000` |
+| `prod` | `https://relayer.memory.walrus.xyz` |
+| `staging` | `https://relayer-staging.memory.walrus.xyz` |
 
 Precedence: an explicit non-default **`server_url` wins over `env`**, which wins
 over the default. An unknown preset raises `ValueError`. `env` is also accepted
@@ -135,7 +137,7 @@ smart_llm = with_memwal_langchain(
     llm,
     key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
+    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memory.walrus.xyz"),
     max_memories=5,
     min_relevance=0.3,
 )
@@ -156,7 +158,7 @@ smart_client = with_memwal_openai(
     client,
     key=os.environ["MEMWAL_PRIVATE_KEY"],
     account_id=os.environ["MEMWAL_ACCOUNT_ID"],
-    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memwal.ai"),
+    server_url=os.environ.get("MEMWAL_SERVER_URL", "https://relayer.memory.walrus.xyz"),
 )
 
 # Memories are automatically recalled and injected
@@ -176,8 +178,13 @@ Create a new async client.
 
 | Method | Description |
 |--------|-------------|
-| `await remember(text, namespace?)` | Store a memory |
-| `await recall(query, limit?, namespace?, max_distance?)` | Search memories, optionally filtering by distance |
+| `await remember(text, namespace?)` | Accept a background remember job and return `job_id` |
+| `await wait_for_remember_job(job_id, ...)` | Poll one remember job until it is searchable |
+| `await remember_and_wait(text, namespace?, ...)` | Store a memory and wait until it is searchable |
+| `await remember_bulk(items)` | Accept several background remember jobs |
+| `await wait_for_remember_jobs(job_ids, opts?)` | Poll several remember jobs together |
+| `await remember_bulk_and_wait(items, opts?)` | Store several memories and wait for completion |
+| `await recall(RecallParams(query, limit?, namespace?, max_distance?))` | Search memories, optionally filtering by distance |
 | `await analyze(text, namespace?)` | Extract and store facts |
 | `await ask(question, limit?, namespace?)` | Ask a question answered using memories |
 | `await restore(namespace, limit?)` | Restore a namespace |

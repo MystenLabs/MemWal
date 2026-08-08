@@ -39,11 +39,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm --filter @mysten-incubation/memwal typecheck
-
-      - name: Build SDK
-        run: pnpm build:sdk
+      - name: Test and build SDK
+        run: pnpm --filter @mysten-incubation/memwal test
 
       # ── main branch → changeset version + stable release (latest) ──
       - name: Apply changesets (update version & CHANGELOG)
@@ -76,7 +73,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           npm view @mysten-incubation/memwal@$VERSION version 2>/dev/null \
             && echo "Version $VERSION already published, skipping" && echo "published=false" >> $GITHUB_OUTPUT && exit 0
-          cd packages/sdk && npm publish --provenance --access public
+          cd packages/sdk && pnpm publish --provenance --access public --no-git-checks
           echo "published=true" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
@@ -123,7 +120,7 @@ jobs:
           echo "Publishing @mysten-incubation/memwal@${NEW_VERSION}"
           cd packages/sdk
           node -e "const p=require('./package.json');p.version='${NEW_VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,4)+'\n')"
-          npm publish --tag rc --provenance --access public
+          pnpm publish --tag rc --provenance --access public --no-git-checks
 
       # ── dev branch → prerelease (dev tag, auto-increment) ──
       - name: Publish dev prerelease
@@ -144,4 +141,4 @@ jobs:
           echo "Publishing @mysten-incubation/memwal@${NEW_VERSION}"
           cd packages/sdk
           node -e "const p=require('./package.json');p.version='${NEW_VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,4)+'\n')"
-          npm publish --tag dev --provenance --access public
+          pnpm publish --tag dev --provenance --access public --no-git-checks

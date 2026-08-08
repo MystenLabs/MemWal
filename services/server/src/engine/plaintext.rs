@@ -38,15 +38,20 @@ impl PlaintextEngine {
     /// `HydratedMemory`. Shared by `fetch_one` and `fetch_batch`.
     /// Returns `Ok(None)` for a missing row or a NULL plaintext (a
     /// production row leaked into a benchmark DB — logged, handled).
-    /// LOW-S1 / MED-1: scoped to `owner` so cross-tenant lookups by
-    /// blob_id return None even if the row exists for a different owner.
+    /// Scoped to `owner` + `namespace` so cross-tenant lookups by blob_id
+    /// return None even if the row exists in a different namespace.
     async fn hydrate(
         &self,
         owner: &str,
+        namespace: &str,
         blob_id: &str,
         distance: f64,
     ) -> Result<Option<HydratedMemory>, AppError> {
-        match self.db.fetch_plaintext_by_blob_id(blob_id, owner).await {
+        match self
+            .db
+            .fetch_plaintext_by_blob_id(blob_id, owner, namespace)
+            .await
+        {
             Ok(Some(text)) => Ok(Some(HydratedMemory {
                 blob_id: blob_id.to_string(),
                 text,
@@ -80,6 +85,7 @@ impl MemoryEngine for PlaintextEngine {
     async fn store_blob(
         &self,
         owner: &str,
+        _account_id: &str,
         namespace: &str,
         bytes: &[u8],
         vector: &[f32],
@@ -118,11 +124,12 @@ impl MemoryEngine for PlaintextEngine {
     async fn fetch_one(
         &self,
         owner: &str,
+        namespace: &str,
         blob_id: &str,
         distance: f64,
         _auth: &AuthInfo,
     ) -> Result<Option<HydratedMemory>, AppError> {
-        self.hydrate(owner, blob_id, distance).await
+        self.hydrate(owner, namespace, blob_id, distance).await
     }
 
     #[tracing::instrument(
@@ -133,6 +140,7 @@ impl MemoryEngine for PlaintextEngine {
     async fn fetch_batch(
         &self,
         owner: &str,
+        namespace: &str,
         hits: &[(String, f64)],
         _auth: &AuthInfo,
     ) -> Result<(Vec<HydratedMemory>, usize, FetchTimings), AppError> {
@@ -140,7 +148,7 @@ impl MemoryEngine for PlaintextEngine {
         let mut results = Vec::with_capacity(hits.len());
         let mut dropped = 0usize;
         for (blob_id, distance) in hits {
-            match self.hydrate(owner, blob_id, *distance).await? {
+            match self.hydrate(owner, namespace, blob_id, *distance).await? {
                 Some(m) => results.push(m),
                 None => dropped += 1,
             }

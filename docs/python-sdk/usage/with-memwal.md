@@ -1,6 +1,39 @@
 ---
 title: "with_memwal"
-description: "Drop-in memory middleware for LangChain and the OpenAI SDK."
+description: >-
+  Drop-in memory middleware for LangChain and the OpenAI SDK. Automatically recalls
+  relevant memories before each LLM call and saves new facts after each response.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - LangChain
+  - OpenAI
+  - middleware
+  - with_memwal
+goal:
+  description: Wrap an existing LangChain or OpenAI client with with_memwal() to inject relevant memories before each LLM call and persist notable outputs after each response.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I add Walrus Memory to an existing LangChain or OpenAI client?
+  - What does with_memwal_langchain and with_memwal_openai do?
+  - How does the MemWal middleware automatically recall and save memories?
+answer: >-
+  The `with_memwal_langchain` and `with_memwal_openai` wrappers add automatic memory
+  to existing LLM clients. Before each call, relevant memories are recalled and injected
+  as a system message. After each call, the user message is analyzed for new facts and
+  stored asynchronously. Both support options like max_memories, min_relevance, and auto_save.
 ---
 
 `with_memwal_langchain` and `with_memwal_openai` wrap an existing LLM client with automatic memory management. Before each call relevant memories are recalled and injected; after each call the user message is analyzed for new facts (fire-and-forget).
@@ -73,7 +106,7 @@ response = await smart_client.chat.completions.create(
 **Before generation:**
 
 - Reads the last user message
-- Runs `recall()` against MemWal
+- Runs `recall()` against Walrus Memory
 - Filters by `min_relevance` (default `0.3`)
 - Injects matching memories as a system message before the last user message
 
@@ -89,7 +122,7 @@ Both wrappers accept the same keyword arguments:
 | Option | Default | Description |
 | --- | --- | --- |
 | `server_url` | `http://localhost:8000` | Explicit relayer URL (wins over `env`) |
-| `env` | — | Relayer preset: `prod` / `dev` / `staging` / `local` |
+| `env` | — | Hosted relayer preset: `staging` for testing or `prod` for production |
 | `namespace` | `"default"` | Memory namespace |
 | `max_memories` | `5` | Max memories injected per request |
 | `auto_save` | `True` | Auto-save new facts from the conversation |

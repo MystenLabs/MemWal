@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_at": "2026-05-06T14:22:27.843Z",
-  "generator": "hand-curated for ENG-1407 testing",
+  "generator": "hand-curated for remember-size testing",
   "sources": [
     {
       "id": "wikipedia-prose",
@@ -26,21 +26,21 @@
     },
     {
       "id": "synthetic-json",
-      "url": "n/a — synthetic, generated for ENG-1407 testing",
+      "url": "n/a — synthetic, generated for remember-size testing",
       "license": "n/a",
       "fetched_at": "2026-05-06T14:22:27.843Z",
       "description": "Deterministically-generated package-lock.json-shaped tree. Exercises BPE-unfriendly structured-data tokenization."
     },
     {
       "id": "synthetic-mixed",
-      "url": "n/a — synthetic, generated for ENG-1407 testing",
+      "url": "n/a — synthetic, generated for remember-size testing",
       "license": "n/a",
       "fetched_at": "2026-05-06T14:22:27.843Z",
       "description": "Deterministically-generated chat-log-shaped content with English prose, emoji, URLs, code snippets, and timestamps."
     },
     {
       "id": "synthetic-filler",
-      "url": "n/a — synthetic, generated for ENG-1407 testing",
+      "url": "n/a — synthetic, generated for remember-size testing",
       "license": "n/a",
       "fetched_at": "2026-05-06T14:22:27.843Z",
       "description": "Deterministic prose filler for the over-MAX boundary case."

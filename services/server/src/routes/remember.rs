@@ -1,15 +1,15 @@
 //! `/api/remember`, `/api/remember/manual`, `/api/remember/bulk` handlers.
 //!
-//! `remember` (ENG-1406 v3): validate → insert a `remember_jobs` row →
+//! `remember`: validate → insert a `remember_jobs` row →
 //! return HTTP 202; preparation (summarize-if-large → embed ∥ SEAL-encrypt →
 //! enqueue `UploadAndTransfer` WalletJob) runs in-process via
-//! `spawn_prepare_remember_job`. `remember/bulk` (ENG-1408): the same for up
+//! `spawn_prepare_remember_job`. `remember/bulk`: the same for up
 //! to `MAX_BULK_ITEMS` memories at once, batching metadata+transfer by wallet.
 //! `remember/manual`: client already embedded + SEAL-encrypted; server just
 //! uploads to Walrus and indexes (via `engine.store_blob`). `*/status`
 //! endpoints poll the `remember_jobs` table.
 //!
-//! Also home to the summarize-for-embedding helpers (ENG-1407): texts beyond
+//! Also home to the summarize-for-embedding helpers: texts beyond
 //! the embedder's context window are summarized (chunk → reduce) by
 //! gpt-4o-mini before embedding, while the original bytes are still what gets
 //! encrypted and stored.
@@ -29,7 +29,7 @@ use crate::types::*;
 
 use super::{collect_bounded_results, enqueue_wallet_job};
 
-// LOW-6 / ENG-1407: Upper bound on plaintext accepted by /api/remember.
+// Upper bound on plaintext accepted by /api/remember.
 // 1 MiB supports large markdown documents while staying within the auth
 // middleware's PROTECTED_BODY_LIMIT_BYTES (1.5 MiB) once JSON framing is
 // factored in. Text above SUMMARIZE_THRESHOLD_BYTES is summarized via
@@ -99,6 +99,7 @@ fn spawn_prepare_remember_job(
     job_id: String,
     text: String,
     owner: String,
+    account_id: String,
     namespace: String,
     agent_public_key: String,
 ) {
@@ -106,7 +107,7 @@ fn spawn_prepare_remember_job(
     tokio::spawn(async move {
         let work = async move {
             let result: Result<(), AppError> = async {
-                // ENG-1407: texts beyond the embedder's context window must be
+                // texts beyond the embedder's context window must be
                 // summarized first. Summarization runs sequentially before the
                 // embed/encrypt fan-out because the summary is the embedder's
                 // input — encrypt still uses the original `text`.
@@ -133,6 +134,7 @@ fn spawn_prepare_remember_job(
                     state.config.sidecar_secret.as_deref(),
                     text.as_bytes(),
                     &owner,
+                    &account_id,
                     &state.config.package_id,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
@@ -155,7 +157,7 @@ fn spawn_prepare_remember_job(
                     WalletOperation::UploadAndTransfer {
                         encrypted_b64,
                         vector,
-                        // MEM-54: manual /remember has no extractor → no
+                        // manual /remember has no extractor → no
                         // bucket signal. Use neutral "standard" so user-
                         // supplied text isn't artificially boosted or
                         // suppressed by the ranker's importance term.
@@ -163,6 +165,7 @@ fn spawn_prepare_remember_job(
                         owner: owner.clone(),
                         namespace: namespace.clone(),
                         package_id: state.config.package_id.clone(),
+                        account_id: account_id.clone(),
                         agent_public_key: Some(agent_public_key.clone()),
                         remember_job_id: Some(job_id.clone()),
                         epochs: state.config.walrus_storage_epochs,
@@ -200,6 +203,7 @@ fn spawn_prepare_remember_job(
 fn spawn_prepare_bulk_remember_job(
     state: Arc<AppState>,
     owner: String,
+    account_id: String,
     agent_public_key: String,
     pending_items: Vec<PendingBulkRememberItem>,
 ) {
@@ -216,8 +220,9 @@ fn spawn_prepare_bulk_remember_job(
                     .map(|item| {
                         let state = Arc::clone(&state);
                         let owner = owner.clone();
+                        let account_id = account_id.clone();
                         async move {
-                            // ENG-1407: bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
+                            // bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
                             // each, so the same summarize-before-embed rule applies here.
                             let needs_summary = item.text.len() > SUMMARIZE_THRESHOLD_BYTES
                                 && state.config.openai_api_key.is_some();
@@ -246,6 +251,7 @@ fn spawn_prepare_bulk_remember_job(
                                 state.config.sidecar_secret.as_deref(),
                                 item.text.as_bytes(),
                                 &owner,
+                                &account_id,
                                 &state.config.package_id,
                             );
                             let (vector_result, encrypted_result) =
@@ -286,7 +292,7 @@ fn spawn_prepare_bulk_remember_job(
                         job_id,
                         encrypted_b64,
                         vector,
-                        // MEM-54: bulk /remember mirrors single /remember —
+                        // bulk /remember mirrors single /remember —
                         // no extractor in this path, so we use the neutral
                         // standard bucket.
                         importance: crate::services::extractor::IMPORTANCE_STANDARD,
@@ -299,6 +305,7 @@ fn spawn_prepare_bulk_remember_job(
                 storage
                     .push(crate::jobs::BulkRememberJob {
                         owner: owner.clone(),
+                        account_id: account_id.clone(),
                         package_id: state.config.package_id.clone(),
                         agent_public_key: Some(agent_public_key.clone()),
                         items: bulk_items,
@@ -396,7 +403,7 @@ fn batch_summary_inputs(summaries: &[String], max_bytes: usize) -> Vec<String> {
 }
 
 // ============================================================
-// Summarize-for-embedding (ENG-1407)
+// Summarize-for-embedding
 // ============================================================
 
 async fn summarize_with_prompt(
@@ -464,10 +471,14 @@ async fn summarize_with_prompt(
         AppError::Internal(format!("Failed to parse summarization response: {}", e))
     })?;
 
+    // `content` is `Option<String>` — `None` on upstream null-content
+    // returns degrades to empty, which the existing is_empty() check below
+    // already handles as a summarisation failure.
     let summary = api_resp
         .choices
         .first()
-        .map(|c| c.message.content.trim().to_string())
+        .and_then(|c| c.message.content.as_deref())
+        .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
     if summary.is_empty() {
@@ -602,7 +613,7 @@ async fn summarize_for_embedding(
 // Handlers
 // ============================================================
 
-/// POST /api/remember  (ENG-1406 v3 — fully async)
+/// POST /api/remember (v3 — fully async)
 ///
 /// Validates the request, inserts a job row, and returns HTTP 202 before
 /// embed/encrypt/upload work starts. Preparation runs in-process (see
@@ -617,13 +628,14 @@ pub async fn remember(
     if body.text.is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
-    // LOW-6: Reject oversize plaintext before spending embed + encrypt compute.
+    // Reject oversize plaintext before spending embed + encrypt compute.
     if body.text.len() > MAX_REMEMBER_TEXT_BYTES {
         return Err(AppError::BadRequest(format!(
             "Text exceeds maximum length of {} bytes",
             MAX_REMEMBER_TEXT_BYTES
         )));
     }
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -648,6 +660,7 @@ pub async fn remember(
         job_id.clone(),
         text,
         owner_owned,
+        auth.account_id.clone(),
         namespace_owned,
         auth.public_key.clone(),
     );
@@ -712,7 +725,7 @@ pub async fn remember_status(
     }))
 }
 
-/// POST /api/remember/bulk  (ENG-1408)
+/// POST /api/remember/bulk
 ///
 /// Accepts up to MAX_BULK_ITEMS memories and returns HTTP 202 after creating
 /// status rows. Embed/encrypt runs in the background; the bulk worker batches
@@ -743,6 +756,18 @@ pub async fn remember_bulk(
             return Err(AppError::BadRequest(format!(
                 "items[{}].text exceeds {} bytes",
                 i, MAX_REMEMBER_TEXT_BYTES
+            )));
+        }
+        if item.namespace.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "items[{}].namespace cannot be empty",
+                i
+            )));
+        }
+        if item.namespace.len() > MAX_NAMESPACE_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "items[{}].namespace exceeds maximum length of {} bytes",
+                i, MAX_NAMESPACE_BYTES
             )));
         }
     }
@@ -783,6 +808,7 @@ pub async fn remember_bulk(
     spawn_prepare_bulk_remember_job(
         Arc::clone(&state),
         owner.clone(),
+        auth.account_id.clone(),
         auth.public_key.clone(),
         pending_items,
     );
@@ -887,9 +913,14 @@ pub async fn remember_manual(
             "encrypted_data cannot be empty".into(),
         ));
     }
-    if body.vector.is_empty() {
-        return Err(AppError::BadRequest("vector cannot be empty".into()));
-    }
+    // Validate the client-supplied embedding (width + finiteness) up front. The
+    // fact store's `embedding` column is a fixed-width pgvector that also refuses
+    // NaN/Inf, so a malformed vector can never be indexed — and store_blob pays
+    // for the (irreversible) Walrus upload before it reaches the insert. Rejecting
+    // here means a bad vector costs no gas and returns an actionable 400, instead
+    // of an opaque 500 after the paid upload.
+    validate_embedding_vector(&body.vector)?;
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -916,10 +947,11 @@ pub async fn remember_manual(
         .engine
         .store_blob(
             owner,
+            &auth.account_id,
             namespace,
             &encrypted_bytes,
             &body.vector,
-            // MEM-54: remember_manual is the user-supplied SDK path —
+            // remember_manual is the user-supplied SDK path —
             // the SDK doesn't run the extractor, so we have no bucket
             // signal. Use neutral standard so manual writes rank with
             // average importance.
@@ -994,7 +1026,7 @@ mod tests {
         assert_eq!(results[3].status, "failed");
     }
 
-    // ── LOW-6: Text size limit ──────────────────────────────────────────
+    // ── Text size limit ──────────────────────────────────────────
 
     #[test]
     fn max_remember_text_bytes_is_1mb() {
@@ -1053,6 +1085,7 @@ mod tests {
             port: 8000,
             database_url: "postgres://test".to_string(),
             sui_rpc_url: "http://localhost:9000".to_string(),
+            sui_grpc_url: None,
             sui_network: "testnet".to_string(),
             memwal_account_id: None,
             openai_api_key: Some("test-key".to_string()),
@@ -1066,11 +1099,15 @@ mod tests {
             sui_private_key: None,
             sui_private_keys: vec![],
             package_id: "0xpackage".to_string(),
+            seal_policy_package_id: "0xpackage".to_string(),
             registry_id: "0xregistry".to_string(),
+            registry_scan_max_pages: crate::types::DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9003".to_string(),
             sidecar_secret: None,
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
+            accounts_rate_limit: crate::types::AccountsRateLimitConfig::default(),
+            trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
             app_auth_clients: vec![],
@@ -1078,6 +1115,30 @@ mod tests {
             app_auth_admin_token: None,
             app_auth_enable_dev_localhost_wildcards: false,
             app_auth_delegate_secret: None,
+            enable_memory_deletion: false,
+            enable_security_delete: false,
+            legacy_db_url: None,
+            deletion_reconciler_enabled: false,
+            deletion_object_resolver_enabled: false,
+            delete_batch_max: 900,
+            max_active_batches_per_owner: 16,
+            security_delete_auth_requests_per_minute: 20,
+            security_delete_prepare_requests_per_minute: 10,
+            sui_rpc_requests_per_window: 3_000,
+            sui_rpc_window: std::time::Duration::from_secs(10),
+            sui_rpc_attempt_timeout: std::time::Duration::from_secs(5),
+            sui_rpc_max_in_flight: 64,
+            security_delete_execute_max_in_flight: 1,
+            security_delete_crash_test_secret: None,
+            sponsor_private_key: None,
+            sponsor_min_balance_alert: 0,
+            claim_ttl_secs: 600,
+            exec_grace_secs: 60,
+            deletion_token_secret: None,
+            deletion_token_ttl_secs: 2700,
+            expiry_margin_epochs: 1,
+            walrus_package_id: String::new(),
+            walrus_system_object_id: String::new(),
         }
     }
 

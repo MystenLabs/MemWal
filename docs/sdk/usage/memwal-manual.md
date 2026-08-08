@@ -1,20 +1,48 @@
 ---
 title: "MemWalManual"
-description: "Client-managed embeddings and local SEAL operations."
+description: >-
+  Client-managed embeddings and local SEAL operations with MemWalManual. The client handles embedding and encryption locally while the relayer manages upload, vector registration, and search. Ideal for Web3-native users who want to minimize trust in the relayer.
+keywords:
+  - MemWalManual
+  - client-side encryption
+  - SEAL
+  - agent state
+  - key management
+  - Walrus Memory
+goal:
+  description: Initialize MemWalManual for browser wallet signing or headless agents, call registerEntry() with a pre-uploaded blob and pre-computed embedding, and use search() to run a vector query without storage.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I use MemWalManual for client-side encryption?
+  - What is the difference between MemWal and MemWalManual?
+  - How do I integrate MemWalManual with a browser wallet?
+answer: >-
+  MemWalManual is the client-managed entry point where the client handles embedding calls and local SEAL operations while the relayer manages upload relay, vector registration, and search. It supports both suiPrivateKey for headless agents and walletSigner for browser integration, and is recommended for Web3-native users who want plaintext to never leave the client.
 ---
 
 Use when the client must handle embedding calls and local SEAL operations. The relayer still handles
 upload relay, vector registration, search, and restore.
 
-This is the recommended path for Web3-native users who want to minimize trust in the relayer — it never sees your plaintext data.
+This is the recommended path for Web3-native users who want to minimize trust in the relayer, because it never sees your plaintext data.
 
-## What the client handles vs. what the relayer handles
+## What the client handles versus what the relayer handles
 
 | Operation | Client (MemWalManual) | Relayer |
 |-----------|----------------------|---------|
 | Embedding | Client calls OpenAI/compatible API | — |
 | SEAL encryption | Client encrypts locally | — |
-| Walrus upload | — | Server uploads via sidecar (server pays gas) |
+| Walrus upload | — | Server uploads through a sidecar (server pays gas) |
 | Vector registration | — | Server stores `{blob_id, vector}` in PostgreSQL |
 | Recall search | — | Server searches vectors, returns `{blob_id, distance}` |
 | Walrus download | Client downloads from aggregator | — |
@@ -31,6 +59,7 @@ const manual = MemWalManual.create({
   suiPrivateKey: "<your-sui-private-key>",    // OR walletSigner
   embeddingApiKey: "<your-openai-api-key>",
   packageId: "<memwal-package-id>",
+  registryId: "<account-registry-id>",
   accountId: "<memwal-account-id>",
   namespace: "chatbot-prod",
 });
@@ -74,7 +103,7 @@ console.log(manual.isWalletMode);
 
 ## Browser Integration (wallet signer)
 
-Use `walletSigner` instead of `suiPrivateKey` when integrating with a connected wallet (e.g., `@mysten/dapp-kit`):
+Use `walletSigner` instead of `suiPrivateKey` when integrating with a connected wallet (for example, `@mysten/dapp-kit`):
 
 ```ts
 const manual = MemWalManual.create({
@@ -86,6 +115,7 @@ const manual = MemWalManual.create({
   },
   embeddingApiKey: "<your-openai-api-key>",
   packageId: "<memwal-package-id>",
+  registryId: "<account-registry-id>",
   accountId: "<memwal-account-id>",
 });
 ```
@@ -93,9 +123,53 @@ const manual = MemWalManual.create({
 ## Config Notes
 
 - `suiNetwork` defaults to `mainnet`
+- `packageId` is the immutable first-published package used by SEAL; after a
+  compatible upgrade, set `sealPolicyPackageId` to the current policy package
 - `sealServerConfigs` lets the client configure independent or committee SEAL servers; committee entries require `aggregatorUrl`
 - `sealKeyServers` remains supported as a legacy independent key server object ID override
 - Walrus publisher, aggregator, and upload relay defaults follow `suiNetwork`
 - `embeddingModel` defaults to `text-embedding-3-small` (or `openai/text-embedding-3-small` for OpenRouter)
 - `walrusEpochs` defaults to `50` (storage duration)
-- All `@mysten/*` peer dependencies are loaded dynamically — users who only use the default `MemWal` client don't need them installed
+- All `@mysten/*` peer dependencies are loaded dynamically, so users who only use the default `MemWal` client do not need them installed
+
+## Agent state: holding your own keys
+
+Every blob on Walrus is public, so you must encrypt private agent state before storing it. For an autonomous agent that has no human to approve a wallet popup, `MemWalManual` is the path that keeps the agent in control of its own key material: encryption happens client-side, and the relayer never receives plaintext.
+
+A headless agent signs Seal and Walrus operations with its own Sui key rather than a connected wallet. Provide `suiPrivateKey` instead of `walletSigner`, set `suiNetwork` for your environment, and load every secret from the environment:
+
+```ts
+import { MemWalManual } from "@mysten-incubation/memwal/manual";
+
+const manual = MemWalManual.create({
+  key: process.env.MEMWAL_KEY!,
+  accountId: process.env.MEMWAL_ACCOUNT_ID!,
+  packageId: process.env.MEMWAL_PACKAGE_ID!,
+  sealPolicyPackageId: process.env.MEMWAL_SEAL_POLICY_PACKAGE_ID,
+  registryId: process.env.MEMWAL_REGISTRY_ID!,
+  serverUrl: "https://relayer-staging.memory.walrus.xyz",
+  suiPrivateKey: process.env.SUI_PRIVATE_KEY!,
+  embeddingApiKey: process.env.OPENAI_API_KEY!,
+  suiNetwork: "testnet",
+  namespace: "agent-state",
+});
+
+// Encrypts locally, then relays only ciphertext to the server.
+await manual.rememberManual("Private: internal risk score for account 0xabc is 0.82.");
+
+const hits = await manual.recallManual("risk score for account 0xabc", 5);
+for (const memory of hits.results) {
+  console.log(memory.text, memory.distance);
+}
+```
+
+The agent holds two distinct secrets:
+
+- The **delegate key** (`key`) authenticates the agent to the relayer.
+- The **Sui key** (`suiPrivateKey`) signs the Seal and Walrus operations that encrypt and store the data.
+
+<Warning>
+With client-managed encryption the agent owns its key material. If the Sui key is lost, you cannot recover the encrypted memories, so treat it as a production secret and rotate the delegate key through the dashboard if it might be exposed.
+</Warning>
+
+For the full headless write, confirm, and recall loop that builds on this, see [Agent Storage Loop](/sdk/agent-storage-loop).

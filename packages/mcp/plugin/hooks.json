@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "memwal-session-start",
+            "type": "command",
+            "command": "node \"${extensionPath}/scripts/on_session_start.mjs\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "name": "memwal-user-prompt",
+            "type": "command",
+            "command": "node \"${extensionPath}/scripts/on_user_prompt.mjs\" 2>/dev/null || true",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "name": "memwal-post-tool",
+            "type": "command",
+            "command": "node \"${extensionPath}/scripts/on_post_tool.mjs\" 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

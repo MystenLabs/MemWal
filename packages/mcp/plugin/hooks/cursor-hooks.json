@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/scripts/on_session_start.mjs\"",
+        "matcher": "startup|resume|compact"
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/scripts/on_user_prompt.mjs\"",
+        "timeout": 8
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/scripts/on_post_tool.mjs\"",
+        "matcher": "Bash",
+        "timeout": 5
+      }
+    ]
+  }
+}

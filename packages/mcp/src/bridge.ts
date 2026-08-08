@@ -104,6 +104,22 @@ const LOCAL_TOOL_DEFINITIONS = [
 const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
 const URL_READY_TIMEOUT_MS = 5_000;
 
+/** Maximum silence we tolerate on the SSE stream before assuming the
+ * relayer-side session has gone dead. The relayer sends keepalive events
+ * roughly every 3s, so 30s ≈ 10 missed heartbeats — well past any plausible
+ * network blip but quick enough that a stuck tool call recovers on its own.
+ *
+ * Override via `MEMWAL_MCP_SSE_IDLE_MS` (mostly for tests). Values below 500ms
+ * are clamped — anything tighter races the heartbeat cadence and produces
+ * spurious reconnects. */
+function resolveSseIdleMs(): number {
+    const raw = process.env.MEMWAL_MCP_SSE_IDLE_MS;
+    if (!raw) return 30_000;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 500) return 30_000;
+    return n;
+}
+
 interface RpcMessage {
     jsonrpc: "2.0";
     id?: number | string | null;
@@ -122,6 +138,13 @@ interface SseHandshakeResult {
     abort: () => void;
 }
 
+function mcpAuthHeaders(creds: MemWalCredentials): Record<string, string> {
+    return {
+        authorization: `Bearer ${creds.delegatePrivateKey}`,
+        "x-memwal-account-id": creds.accountId,
+    };
+}
+
 async function openSseStream(
     relayerUrl: string,
     creds: MemWalCredentials,
@@ -134,8 +157,7 @@ async function openSseStream(
     const resp = await fetch(url, {
         method: "GET",
         headers: {
-            authorization: `Bearer ${creds.delegatePrivateKey}`,
-            "x-memwal-account-id": creds.accountId,
+            ...mcpAuthHeaders(creds),
             accept: "text/event-stream",
             "cache-control": "no-cache",
         },
@@ -200,12 +222,35 @@ async function openSseStream(
         wake();
     }
 
+    // Heartbeat watchdog: an alive SSE session emits keepalive events every
+    // few seconds. If reader.read() stops yielding chunks entirely, the
+    // server-side session has gone dead even though the TCP socket may still
+    // be open (observed in the wild: relayer session state silently dropped
+    // while the bridge waited forever for a response that never arrived,
+    // because the next POST landed in the void). Abort the controller — the
+    // catch block sets streamEnded=true and runBridge's serverPump triggers
+    // reconnect("server-pump-eof"), which replays any in-flight requests on
+    // the fresh session.
+    const idleTimeoutMs = resolveSseIdleMs();
+    const checkIntervalMs = Math.max(500, Math.floor(idleTimeoutMs / 3));
+    let lastChunkAt = Date.now();
+    const watchdog = setInterval(() => {
+        const idleMs = Date.now() - lastChunkAt;
+        if (idleMs > idleTimeoutMs && !controller.signal.aborted) {
+            log.warn("bridge.sse_idle_watchdog_fired", { idleMs, idleTimeoutMs });
+            controller.abort();
+        }
+    }, checkIntervalMs);
+    // unref so the watchdog never holds the event loop open during shutdown.
+    watchdog.unref?.();
+
     // Pump the SSE stream in the background.
     const pump = (async () => {
         try {
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
+                lastChunkAt = Date.now();
                 buf += decoder.decode(value, { stream: true });
                 let sep: number;
                 while ((sep = buf.indexOf("\n\n")) >= 0) {
@@ -251,6 +296,7 @@ async function openSseStream(
                 }
             }
         } finally {
+            clearInterval(watchdog);
             streamEnded = true;
             // Wake any waiter so they see EOF.
             wake();
@@ -295,10 +341,17 @@ async function openSseStream(
     };
 }
 
-async function postMessage(postUrl: string, msg: RpcMessage): Promise<number> {
+async function postMessage(
+    postUrl: string,
+    msg: RpcMessage,
+    creds: MemWalCredentials,
+): Promise<number> {
     const resp = await fetch(postUrl, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+            ...mcpAuthHeaders(creds),
+            "content-type": "application/json",
+        },
         body: JSON.stringify(msg),
     });
     if (!resp.ok && resp.status !== 202) {
@@ -438,7 +491,16 @@ function handleLocalLogout(): { text: string; isError: boolean } {
  * file directly. They appear in `tools/list` by splicing them into the
  * relayer's response on the way back to the client.
  */
-export async function runBridge(creds: MemWalCredentials, config: BridgeConfig): Promise<void> {
+export async function runBridge(
+    creds: MemWalCredentials,
+    config: BridgeConfig,
+    /** Requests the auth-required server already read off stdin before it
+     * detected fresh credentials and handed control here (e.g. the
+     * `memwal_recall` that triggered the hot-handoff). Replayed once the SSE
+     * stream is up so they're served for real instead of being lost in the
+     * mode switch — this is what removes the historical "second restart". */
+    pendingLines: string[] = [],
+): Promise<void> {
     note(`Connecting to ${creds.relayerUrl}...`);
     log.info("bridge.connecting", {
         relayer: creds.relayerUrl,
@@ -492,7 +554,7 @@ export async function runBridge(creds: MemWalCredentials, config: BridgeConfig):
             // start arriving on the new session.
             for (const [id, msg] of Array.from(inFlight.entries())) {
                 try {
-                    const status = await postMessage(sse.postUrl, msg);
+                    const status = await postMessage(sse.postUrl, msg, creds);
                     log.info("bridge.replayed", { id, status });
                 } catch (err) {
                     log.error("bridge.replay_failed", {
@@ -561,7 +623,7 @@ export async function runBridge(creds: MemWalCredentials, config: BridgeConfig):
     // Client → server: forward stdin lines as POST messages. On 404 (the
     // relayer doesn't know our sessionId — happens right after a reconnect
     // if the message races the new handshake), trigger another reconnect.
-    const clientPump = readStdinLines((line) => {
+    const handleClientLine = (line: string): void => {
         void (async () => {
             try {
                 const msg = JSON.parse(line) as RpcMessage;
@@ -619,7 +681,7 @@ export async function runBridge(creds: MemWalCredentials, config: BridgeConfig):
                 ) {
                     inFlight.set(msg.id, msg);
                 }
-                const status = await postMessage(sse.postUrl, msg);
+                const status = await postMessage(sse.postUrl, msg, creds);
                 if (status === 404) {
                     log.warn("bridge.session_stale", { sessionUrl: sse.postUrl });
                     // reconnect() itself replays in-flight against the fresh
@@ -630,7 +692,18 @@ export async function runBridge(creds: MemWalCredentials, config: BridgeConfig):
                 log.warn("bridge.stdin_parse_failed", { line: line.slice(0, 120) });
             }
         })();
-    }).then(() => {
+    };
+
+    // Replay anything the auth-required server handed off (the tool call that
+    // triggered the hot-handoff, plus anything buffered behind it) now that the
+    // SSE stream is connected. Without this the triggering request is dropped in
+    // the mode switch and the user has to retry / restart.
+    if (pendingLines.length > 0) {
+        log.info("bridge.replaying_handoff", { count: pendingLines.length });
+        for (const line of pendingLines) handleClientLine(line);
+    }
+
+    const clientPump = readStdinLines(handleClientLine).then(() => {
         stdinClosed = true;
         sse.abort();
     });

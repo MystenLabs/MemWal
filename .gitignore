@@ -22,6 +22,8 @@ pnpm-debug.log*
 # Environment variables
 .env
 .env*.local
+.env.local.*
+.env*.bak
 .env.production
 .env.test
 */.env.test
@@ -119,10 +121,15 @@ railway-*.md
 
 # Per-developer MCP client config (user paths)
 .mcp.json
+# ...but the marketplace plugin must ship its own MCP config
+!packages/mcp/plugin/.mcp.json
 
 # Personal/internal planning notes — never include in repo
 plans/
 .local-plans/
+
+# Local secrets, env, and dev state — never commit
+.local/
 
 # Benchmark archives + working analysis notes
 # Kept locally under
@@ -132,3 +139,10 @@ plans/
 # reviewable life in past PRs.
 services/server/review/
 claudedocs/
+
+# Temp File
+temp/
+
+
+# Devstack local state (private keys, docker/container state — never commit)
+.devstack/

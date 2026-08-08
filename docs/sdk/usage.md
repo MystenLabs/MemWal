@@ -1,9 +1,37 @@
 ---
 title: "Usage"
-description: "Detailed usage for all three MemWal clients — MemWal, MemWalManual, and withMemWal."
+description: >-
+  Detailed usage guide for all three Walrus Memory clients: MemWal, MemWalManual, and withMemWal. Covers namespace rules and when to use each entry point.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - usage
+  - namespace
+  - MemWalManual
+  - withMemWal
+goal:
+  description: Select the right Walrus Memory client (MemWal, MemWalManual, or withMemWal) for your use case, configure a namespace that scopes memory correctly, and avoid common setup mistakes.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 100
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - When should I use MemWal vs MemWalManual vs withMemWal?
+  - How do namespaces work in Walrus Memory?
+  - What are the namespace rules for the Walrus Memory SDK?
+answer: >-
+  Walrus Memory exposes three entry points: MemWal (recommended default with relayer-handled operations), MemWalManual (client-managed embeddings and SEAL), and withMemWal (Vercel AI SDK middleware). Namespaces can be set per client or per call, and fall back to "default" if omitted.
 ---
 
-MemWal exposes three entry points:
+Walrus Memory exposes three entry points:
 
 | Entry point | Import | When to use |
 | --- | --- | --- |

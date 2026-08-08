@@ -183,16 +183,21 @@ def stage_ingest(
 
     # Group (label, text) chunks by conversation so we can process each
     # conversation's chunks serially in one worker.
-    conv_tasks: list[tuple[str, str, list[tuple[str, str, str]]]] = []
-    # each entry: (conv_id, namespace, [(session_id, label, text), ...])
+    # chunk tuple is now (session_id, label, text, occurred_at)
+    # where occurred_at is an RFC 3339 UTC string or None. The adapter is
+    # responsible for normalising the source-dataset format to RFC 3339
+    # (see locomo._normalize_locomo_timestamp,
+    # longmemeval._parse_haystack_date).
+    conv_tasks: list[tuple[str, str, list[tuple[str, str, str, str | None]]]] = []
+    # each entry: (conv_id, namespace, [(session_id, label, text, occurred_at), ...])
     total_chunk_count = 0
     for conv in conversations:
         namespace = f"bench-{benchmark_name}-{conv.conversation_id}-{run_id}"
-        pairs = adapter.build_ingest_text(conv)
-        chunks: list[tuple[str, str, str]] = []
-        for label, text in pairs:
+        triples = adapter.build_ingest_text(conv)
+        chunks: list[tuple[str, str, str, str | None]] = []
+        for label, text, occurred_at in triples:
             session_id = _parse_label(label, conv.conversation_id)
-            chunks.append((session_id, label, text))
+            chunks.append((session_id, label, text, occurred_at))
         conv_tasks.append((conv.conversation_id, namespace, chunks))
         total_chunk_count += len(chunks)
 
@@ -212,9 +217,12 @@ def stage_ingest(
         conv_id, namespace, chunks = task
         local_memories: dict[str, list[str]] = {}
         local_stored = 0
-        for session_id, label, text in chunks:
+        for session_id, label, text, occurred_at in chunks:
             try:
-                result = client.analyze(text, namespace)
+                # pass occurred_at (RFC 3339 UTC string or None)
+                # to the server. When present, the server uses it as the
+                # temporal anchor for the extractor prompt.
+                result = client.analyze(text, namespace, occurred_at=occurred_at)
                 memory_ids = [fact.get("id", "") for fact in result.facts if fact.get("id")]
                 if memory_ids:
                     key = session_map_key(conv_id, session_id)
@@ -230,7 +238,7 @@ def stage_ingest(
     # turns/chunks are processed serially. This (a) mirrors real-time
     # message ordering that a chatbot would produce, (b) avoids advisory
     # lock contention because all serial calls share a namespace, and (c)
-    # is how Mem0's own LOCOMO evaluation replays conversations.
+    # mirrors the published LOCOMO evaluation replay protocol.
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = [pool.submit(ingest_one_conversation, t) for t in conv_tasks]
@@ -407,7 +415,7 @@ def stage_eval(
         overall = {}
         by_category = {}
 
-    # MEM-56: pin the server's prompt versions into the run artifact.
+    # pin the server's prompt versions into the run artifact.
     # The harness fails fast at startup if these are missing, so by the
     # time we get here `_server_prompt_versions` is guaranteed present
     # for any run kicked off via `main()`. The `or {}` guard is just for
@@ -650,10 +658,10 @@ def main():
     # with warning" rather than abort, so this check works against both
     # refactored and pre-refactor servers.
     #
-    # MEM-56: `prompt_versions` is the newer field. It's NOT optional — a
+    # `prompt_versions` is the newer field. It's NOT optional — a
     # server that doesn't expose it can't produce attributable run
     # artifacts, so we abort rather than silently recording empty
-    # versions. See the validation gate on MEM-56.
+    # versions. See the validation gate below.
     try:
         health = client.health()
         version = health.get("version", "?")
@@ -677,7 +685,7 @@ def main():
         if not isinstance(prompt_versions, dict) or "extract" not in prompt_versions or "ask" not in prompt_versions:
             print(
                 "ERROR: Server /health response missing `prompt_versions.extract` "
-                "and/or `prompt_versions.ask`. MEM-56 requires every run artifact "
+                "and/or `prompt_versions.ask`. Every run artifact "
                 "to pin the prompt versions; aborting rather than recording empty "
                 "metadata. Upgrade the server to a build that exposes these fields."
             )

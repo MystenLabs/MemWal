@@ -1,5 +1,34 @@
 ---
 title: "API Reference"
+description: >-
+  Complete API reference for the Walrus Memory SDK, including method signatures, config fields, and return types for MemWal, MemWalManual, withMemWal, account management, and utility functions.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - API reference
+  - method signatures
+  - SDK methods
+  - config
+goal:
+  description: Look up the exact method signature, parameter types, return type, and thrown errors for any Walrus Memory SDK method or config field before writing code that calls it.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What are the method signatures for the Walrus Memory SDK?
+  - What config options does MemWal.create accept?
+  - What does the recall method return in Walrus Memory?
+answer: >-
+  The Walrus Memory SDK API includes MemWal (remember, recall, analyze, restore, health, rememberBulk, and more), MemWalManual (rememberManual, recallManual, restore), withMemWal (AI SDK middleware), account management utilities (createAccount, addDelegateKey, removeDelegateKey, generateDelegateKey), and utility functions for delegate key operations.
 ---
 
 See also:
@@ -19,7 +48,7 @@ Config:
 | --- | --- | --- | --- | --- |
 | `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
 | `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
-| `serverUrl` | `string` | No | `https://relayer.memwal.ai` | Relayer URL |
+| `serverUrl` | `string` | No | `https://relayer.memory.walrus.xyz` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
 
 For the full config surface, see [Configuration](/reference/configuration).
@@ -77,12 +106,13 @@ Submit up to 20 memories in one request and return the accepted job IDs immediat
 
 Submit a bulk remember request and wait until every job reaches a terminal state.
 
-### `recall(query, limitOrOptions?, namespace?): Promise<RecallResult>`
+### `recall(params): Promise<RecallResult>`
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- `limitOrOptions` defaults to `10`
-- Pass a number for the legacy limit form, or `{ limit, topK, namespace, maxDistance }`
+- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance? })`
+- `limit` defaults to `10`; `topK` is an alias and wins when both are set
+- Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 
 **Returns:**
@@ -142,7 +172,7 @@ Rebuild missing indexed entries for one namespace from Walrus. Incremental — o
 
 ### `health(): Promise<HealthResult>`
 
-Check relayer health. Does not require authentication.
+Check relayer health. Does not require authentication — a successful response confirms the relayer is reachable, not that your `key`/`accountId` are valid. A signed call (e.g. `remember()`, `recall()`) can still fail with `401` immediately after a passing `health()`.
 
 **Returns:** `{ status: string, version: string, relayerVersion?: string, apiVersion?: string, minSupportedSdk?: ... }`
 
@@ -205,7 +235,7 @@ Wraps a Vercel AI SDK model with automatic memory recall and save.
 
 **Before generation:**
 - Reads the last user message
-- Runs `recall()` against MemWal
+- Runs `recall()` against Walrus Memory
 - Filters by minimum relevance (`minRelevance`, default `0.3`)
 - Injects matching memories into the prompt as a system message
 
@@ -241,6 +271,8 @@ import {
 | `createAccount(opts)` | Create a new MemWalAccount on-chain (one per Sui address) |
 | `addDelegateKey(opts)` | Add a delegate key to an account (owner only) |
 | `removeDelegateKey(opts)` | Remove a delegate key from an account (owner only) |
+
+`addDelegateKey` and `removeDelegateKey` require the shared `registryId` alongside the package and account IDs.
 
 ## Utility Functions
 

@@ -1,5 +1,54 @@
 # @mysten-incubation/memwal
 
+## 0.1.1
+
+### Added
+
+- Added `flush()` for pending `withMemWal` auto-saves.
+- Added `truncated` to restore results for incomplete recovery.
+
+### Fixed
+
+- Linked `AUTH_REJECTED` errors to troubleshooting guidance.
+
+## 0.1.0
+
+### Added
+
+- Added sponsor authorization helpers for sponsored transaction flows.
+- Added migration-aware account/manual configuration, including registry and current Sui transaction result support.
+
+### Security
+
+- Recalled AI memory is now nonce-delimited, explicitly untrusted data rather than content injected directly into the system role.
+
+### Fixed
+
+- Improved account transaction result handling and failure diagnostics across legacy and current Sui response shapes.
+
+## 0.0.7
+
+### Patch Changes
+
+- [#218](https://github.com/MystenLabs/MemWal/pull/218) [`333d327`](https://github.com/MystenLabs/MemWal/commit/333d3279f59c2a033225bc99238b7586474333fb) Thanks [@hungtranphamminh](https://github.com/hungtranphamminh)! - Add optional `occurredAt` to `analyze()` and `analyzeAndWait()` for temporal anchoring of extracted facts.
+
+  - New `AnalyzeOptions` overload: `analyze(text, { namespace, occurredAt })` accepts `Date` or RFC-3339 string. The legacy `analyze(text, namespace?)` signature still works unchanged.
+  - When `occurredAt` is supplied, the server resolves in-turn relative references ("last Friday", "yesterday") into absolute dates inside the extracted fact text before embedding and encryption.
+  - Wire format is RFC-3339 UTC with millisecond precision (e.g. `"2023-05-25T17:50:00.000Z"`).
+  - Invalid `Date` instances (constructed from malformed input) now throw a diagnostic `TypeError` from the SDK rather than an opaque `RangeError` from `toISOString()`.
+  - Field is omitted from the request body when not supplied — existing callers see byte-identical wire payloads.
+
+## 0.0.6
+
+### Added
+
+- Added `RecallParams` for object-style `recall(...)` calls.
+
+### Changed
+
+- Marked the positional `recall(...)` overload as deprecated in favor of `recall({ query, limit, namespace })`.
+- Documented `restore()` response fields, default limit, pagination behavior, and performance expectations.
+
 ## 0.0.5
 
 ### Added

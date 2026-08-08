@@ -1,4 +1,4 @@
--- ENG-1747 phase 1: a `plaintext` column on vector_entries so the
+-- Adds a `plaintext` column on vector_entries so the
 -- benchmark MemoryEngine (PlaintextEngine) can store memories directly in
 -- Postgres, bypassing SEAL encryption and Walrus upload.
 --

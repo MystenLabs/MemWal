@@ -1,41 +1,72 @@
 ---
-title: "What is MemWal?"
-description: "Persistent, verifiable memory for AI agents"
+title: What is Walrus Memory?
+description: >-
+  Walrus Memory enables AI agents to operate reliably across apps and sessions without losing context.
+  It provides portable, verifiable, and fully controlled memory that lets agents handle complex workflows
+  and coordinate using data they can trust.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - AI agent memory
+  - portable memory
+  - verifiable memory
+  - agent coordination
+goal:
+  description: Explain the core problem Walrus Memory solves, describe its key capabilities (portable, verifiable, permissioned), and assess whether it fits your agent's memory requirements.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is Walrus Memory?
+  - How does Walrus Memory help AI agents retain context across sessions?
+  - What are the core features of MemWal?
+answer: >-
+  Walrus Memory (MemWal) is a portable, verifiable memory layer for AI agents that persists context
+  across apps, sessions, and workflows. It provides programmable access control, agent coordination
+  through shared memory spaces, and memory integrity that can be independently verified without
+  centralized trust.
 ---
 
-<Note>
-MemWal is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
-</Note>
-
-MemWal introduces a long-term, verifiable memory layer on Walrus, allowing agents to remember, share, and reuse information reliably.
+Walrus Memory enables AI agents to operate reliably across apps and sessions, without losing context. Portable, verifiable, and fully controlled by you, it's the memory layer that lets agents handle complex workflows and coordinate using data they can trust.
 
 <CardGroup cols={2}>
-  <Card title="End-to-End Encrypted" icon="lock">
-    Client-side encryption — nobody sees your data but you
+  <Card title="Portable by Design" icon="shuffle">
+    Memory operates across agents, apps, and workflows without binding to a single runtime or provider
   </Card>
-  <Card title="Decentralized Storage" icon="globe">
-    Stored on Walrus — no single point of failure
+  <Card title="Fully Under Your Control" icon="key">
+    Programmable permissions and explicit ownership define how memory is shared, accessed, and updated
   </Card>
-  <Card title="AI-Agent Ready" icon="robot">
-    Give agents scoped access to memory via delegate keys
+  <Card title="Built for Agent Coordination" icon="robot">
+    Shared memory spaces help agents coordinate across long-running and multi-step workflows
   </Card>
-  <Card title="Onchain Ownership" icon="key">
-    Sui smart contracts enforce who can read and write
+  <Card title="Verifiable Integrity" icon="shield-check">
+    Anyone can independently verify memory integrity without centralized trust
   </Card>
 </CardGroup>
 
 ## Motivation
 
-AI agents today lose context between sessions — every conversation starts from scratch. When memory does exist, it's locked inside platform-specific databases that the user doesn't control. MemWal solves this by giving agents:
+AI agents today lose context between sessions: every conversation starts from scratch. When memory does exist, vendors lock it inside platform-specific databases that the user doesn't control. Walrus Memory solves this by giving agents:
 
-- **Persistent memory** — context that carries across sessions and apps
-- **Decentralized, highly available storage** — with end-to-end encryption baked in
-- **Provable ownership** — cryptographically enforced, not just a policy promise
-- **Fine-grained access control** — users decide who can read, write, or delegate access
+- **Portable memory:** Memory persists outside prompts and context windows, moving across agents, apps, and workflows.
+- **Full owner control:** Programmable access control and explicit ownership, with delegate access for agents and workflows.
+- **Agent coordination:** Shared memory spaces help agents coordinate across long-running and multi-step workflows.
+- **Verifiable integrity:** Anyone can independently verify memory integrity without centralized trust.
 
 ## Features
 
-### Memory Operations
+Walrus Memory groups its features into memory operations, ownership and access control, and infrastructure.
+
+### Memory operations
 
 <CardGroup cols={2}>
   <Card title="Remember" icon="floppy-disk">
@@ -45,27 +76,24 @@ AI agents today lose context between sessions — every conversation starts from
     Retrieve relevant memories using natural language queries. Finds the closest matches based on meaning, scoped to your memory space.
   </Card>
   <Card title="Analyze" icon="microscope">
-    Extract structured facts from text automatically. Each fact is stored as a separate memory for more precise recall later.
+    Extract structured facts from text automatically. Each fact lands as a separate memory for more precise recall later.
   </Card>
   <Card title="Ask" icon="comments">
     Query your memories and get an AI-generated answer with the relevant context attached. Combines recall with LLM reasoning.
   </Card>
 </CardGroup>
 
-### Security & Access Control
+### Ownership and access control
 
 <CardGroup cols={2}>
-  <Card title="End-to-End Encryption" icon="lock">
-    All content is encrypted via SEAL before it reaches Walrus. Only the owner and authorized delegates can decrypt it.
-  </Card>
   <Card title="Decentralized Storage" icon="globe">
-    Encrypted blobs stored on Walrus — no single point of failure, no central operator holding your data.
+    Walrus stores the blobs, with no single point of failure and no central operator holding your data.
   </Card>
-  <Card title="Onchain Ownership" icon="key">
-    Ownership and access enforced by Sui smart contracts. Cryptographic and tamper-proof.
+  <Card title="Programmable Permissions" icon="key">
+    Sui smart contracts enforce ownership and access rules, giving you explicit, programmable control over who can read and write.
   </Card>
   <Card title="Delegate Access" icon="user-group">
-    Grant scoped access to other users, agents, or services — all managed onchain by the owner.
+    Grant scoped access to other agents, users, or services. The owner manages every grant onchain, enabling agent coordination and cross-app workflows.
   </Card>
 </CardGroup>
 
@@ -80,38 +108,40 @@ AI agents today lose context between sessions — every conversation starts from
   </Card>
 </CardGroup>
 
-## What's Included
+## What's included
 
-- **TypeScript SDK**: integrate memory into any app with a few lines of code
-- **Relayer**: handles encryption, storage, and retrieval behind a simple API
-- **Smart Contract**: enforces ownership and delegate access onchain
-- **Indexer**: keeps onchain state synced for fast lookups
-- **Dashboard**: manage accounts, memory, and delegate keys visually
+- **TypeScript SDK:** Integrate memory into any app with a few lines of code.
+- **Relayer:** Handles storage and retrieval behind a basic API.
+- **Smart Contract:** Enforces ownership and delegate access onchain.
+- **Indexer:** Keeps onchain state synced for fast lookups.
+- **Dashboard:** Manage accounts, memory, and delegate keys visually.
 
-## Use Cases
+## Use cases
 
-MemWal fits any app that needs to store, retrieve, and update memory persistently:
+Walrus Memory fits any app where agents need memory that travels with them:
 
-- **AI chat apps** — capture valuable knowledge from conversations so agents remember context across sessions
-- **Note-taking and knowledge tools** — save user insights, summaries, and references as persistent, encrypted memory
-- **Multi-agent workflows** — share a common data layer between agents for task lists, knowledge bases, and coordination state
-- **Personal AI assistants** — build agents that learn and adapt over time without losing what they've learned
-- **Cross-app memory** — let users carry their memory between different apps and services, owned by them
+- **AI chat apps:** Capture valuable knowledge from conversations so agents remember context across sessions and apps.
+- **Multi-agent workflows:** Shared memory spaces let agents coordinate on task lists, knowledge bases, and coordination state.
+- **Personal AI assistants:** Build agents that learn and adapt over time, with memory the user fully controls.
+- **Cross-app memory:** Let users carry their memory between different apps and services instead of binding them to a single provider.
+- **Note-taking and knowledge tools:** Save user insights, summaries, and references as portable, verifiable memory.
 
-And many more — check out the example apps below to see MemWal in action.
+Check out the example apps below to see Walrus Memory in action.
 
-## Example Apps
+## Example apps
 
 The repo ships with ready-to-run apps in the [`/apps`](https://github.com/MystenLabs/MemWal/tree/main/apps) directory:
 
-- **Playground** — dashboard demo for MemWal
-- **Chatbot** — AI chat app with persistent memory across sessions
-- **Noter** — note-taking tool that stores knowledge as encrypted memory
-- **Researcher** — research assistant that builds and recalls a knowledge base
+- **Playground:** Dashboard demo for Walrus Memory.
+- **Chatbot:** AI chat app with portable memory across sessions.
+- **Noter:** Note-taking tool that stores knowledge as verifiable memory.
+- **Researcher:** Research assistant that builds and recalls a knowledge base.
 
 See [Example Apps](/examples/example-apps) for short code examples from each app.
 
-## Explore the Docs
+If Walrus Memory is useful to you, [a star on the GitHub repo ⭐](https://github.com/MystenLabs/MemWal) helps others find it.
+
+## Explore the docs
 
 <CardGroup cols={2}>
   <Card title="Concepts" icon="lightbulb" href="/fundamentals/concepts/memory-space">

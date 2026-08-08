@@ -28,7 +28,7 @@ Zep:
   scores:
     overall: 63.8
 
-Mem0:
+Published Memory Baseline:
   source: LongMemEval paper (arXiv:2410.10813)
   version: 2024
   notes: Reported in the LongMemEval paper's evaluation table.

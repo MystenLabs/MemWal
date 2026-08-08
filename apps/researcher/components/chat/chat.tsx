@@ -165,20 +165,16 @@ export function Chat({
 
   const searchParams = useSearchParams();
   const query = searchParams.get("query");
-
-  const [hasAppendedQuery, setHasAppendedQuery] = useState(false);
+  const hasPrefilledQueryRef = useRef(false);
 
   useEffect(() => {
-    if (query && !hasAppendedQuery) {
-      sendMessage({
-        role: "user" as const,
-        parts: [{ type: "text", text: query }],
-      });
-
-      setHasAppendedQuery(true);
+    if (query && !hasPrefilledQueryRef.current) {
+      // Deep links may suggest text, but only an explicit user action may send it.
+      setInput(query.slice(0, 8000));
+      hasPrefilledQueryRef.current = true;
       window.history.replaceState({}, "", `/chat/${id}`);
     }
-  }, [query, sendMessage, hasAppendedQuery, id]);
+  }, [query, id]);
 
   // Sprint chats now go directly to /chat/{id} after preparation — no URL cleanup needed
 

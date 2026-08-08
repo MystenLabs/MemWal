@@ -26,6 +26,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { config } from '../config'
+import { fetchAccountIdForOwner, fetchObjectJson } from '../utils/suiClientCompat'
 
 type Step = 'loading' | 'consent' | 'registering' | 'redirecting' | 'error'
 type Provider = 'wallet' | 'google'
@@ -73,42 +74,18 @@ async function resolveAccountId(
     ownerAddress: string,
 ): Promise<string | null> {
     try {
-        const registryObj = await suiClient.getObject({
-            id: config.memwalRegistryId,
-            options: { showContent: true },
-        })
-        if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
-            const fields = registryObj.data.content.fields as any
-            const tableId = fields?.accounts?.fields?.id?.id
-            if (tableId) {
-                const dynField = await suiClient.getDynamicFieldObject({
-                    parentId: tableId,
-                    name: { type: 'address', value: ownerAddress },
-                })
-                if (dynField?.data?.content && 'fields' in dynField.data.content) {
-                    return (dynField.data.content.fields as any).value as string
-                }
-            }
-        }
+        return await fetchAccountIdForOwner(suiClient, config.memwalRegistryId, ownerAddress)
     } catch {
         return null
     }
-    return null
 }
 
 async function fetchDelegateKeyCount(
     suiClient: ReturnType<typeof useSuiClient>,
     accountId: string,
 ): Promise<number> {
-    const accountObj = await suiClient.getObject({
-        id: accountId,
-        options: { showContent: true },
-    })
-    if (accountObj?.data?.content && 'fields' in accountObj.data.content) {
-        const fields = accountObj.data.content.fields as any
-        return Array.isArray(fields?.delegate_keys) ? fields.delegate_keys.length : 0
-    }
-    return 0
+    const json = await fetchObjectJson(suiClient, accountId) as { delegate_keys?: unknown[] } | null
+    return Array.isArray(json?.delegate_keys) ? json.delegate_keys.length : 0
 }
 
 async function apiPost<T>(path: string, body: unknown): Promise<T> {

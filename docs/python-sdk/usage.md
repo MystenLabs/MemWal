@@ -1,6 +1,39 @@
 ---
 title: "Usage"
-description: "Async vs sync clients, namespace rules, manual methods, and AI middleware for the MemWal Python SDK."
+description: >-
+  Async vs sync clients, namespace rules, manual methods, and AI middleware
+  for the Walrus Memory Python SDK. Covers MemWal, MemWalSync, and the async remember model.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - async
+  - sync
+  - namespace
+  - middleware
+goal:
+  description: Choose between the async MemWal and sync SyncMemWal clients, configure the correct namespace for your data scope, and wire up the client in your Python application.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is the difference between MemWal and MemWalSync in the Python SDK?
+  - How do namespaces work in the Walrus Memory Python SDK?
+  - How does the async remember model work in MemWal?
+answer: >-
+  The Python SDK provides MemWal (async-native) and MemWalSync (synchronous wrapper)
+  with identical APIs. Namespaces isolate memories and can be set per-client or per-call.
+  The async remember model returns immediately with a job ID, and you can poll to completion
+  with `remember_and_wait` or `wait_for_remember_job`.
 ---
 
 The Python SDK exposes one relayer-backed client in two forms, plus middleware:
@@ -13,7 +46,7 @@ The Python SDK exposes one relayer-backed client in two forms, plus middleware:
 
 Detailed pages:
 
-- [MemWal](/python-sdk/usage/memwal) — the default async/sync client and its core methods
+- [Walrus Memory](/python-sdk/usage/memwal) — the default async/sync client and its core methods
 - [Manual methods](/python-sdk/usage/memwal-manual) — lower-level `remember_manual` / `recall_manual` / `embed`
 - [with_memwal](/python-sdk/usage/with-memwal) — LangChain and OpenAI middleware
 
@@ -22,22 +55,22 @@ Detailed pages:
 `MemWal` is async-native. Every API method is a coroutine:
 
 ```python
-from memwal import MemWal
+from memwal import MemWal, RecallParams
 
 memwal = MemWal.create(key="...", account_id="0x...", env="prod")
-job = await memwal.remember("User prefers dark mode.")
-result = await memwal.recall("preferences")
+done = await memwal.remember_and_wait("User prefers dark mode.")
+result = await memwal.recall(RecallParams(query="preferences"))
 await memwal.close()
 ```
 
 `MemWalSync` wraps it through `asyncio.run()` — identical methods, no `await`. It is notebook-safe (detects a running loop and offloads to a worker thread):
 
 ```python
-from memwal import MemWalSync
+from memwal import MemWalSync, RecallParams
 
 client = MemWalSync.create(key="...", account_id="0x...", env="prod")
-client.remember("User prefers dark mode.")
-result = client.recall("preferences")
+client.remember_and_wait("User prefers dark mode.")
+result = client.recall(RecallParams(query="preferences"))
 client.close()
 ```
 

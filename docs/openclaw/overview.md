@@ -1,9 +1,38 @@
 ---
 title: "NemoClaw/OpenClaw Plugin"
-description: "Give your OpenClaw AI agents persistent, encrypted long-term memory powered by MemWal."
+description: >-
+  Give your OpenClaw AI agents portable, verifiable memory powered by Walrus Memory.
+  The plugin adds automatic recall and capture hooks alongside optional LLM tools and CLI commands.
+keywords:
+  - OpenClaw
+  - NemoClaw
+  - Walrus Memory
+  - MemWal
+  - agent memory
+  - plugin
+goal:
+  description: Assess whether the OpenClaw Walrus Memory plugin fits your agent's needs, identify its key features (automatic recall, encrypted storage, user-owned), and decide whether to install it or use MCP-only.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is the Walrus Memory plugin for OpenClaw?
+  - How does MemWal work with OpenClaw agents?
+  - What features does the OpenClaw memory plugin provide?
+answer: >-
+  The Walrus Memory plugin for OpenClaw adds portable, verifiable agent memory that works alongside OpenClaw's file-based memory. It automatically recalls relevant context and captures new facts in the background using hooks, with no user action needed. Features include SEAL-encrypted storage on Walrus, cross-app memory portability, multi-agent namespace isolation, prompt injection protection, optional LLM tools (memory_search, memory_store), and CLI commands for debugging.
 ---
 
-The MemWal memory plugin adds a **cloud-based, encrypted memory layer** to OpenClaw agents. It works alongside OpenClaw's existing file-based memory — automatically recalling relevant context and capturing new facts in the background, with no user action needed.
+The Walrus Memory plugin adds **portable, verifiable agent memory** to OpenClaw agents. It works alongside OpenClaw's existing file-based memory — automatically recalling relevant context and capturing new facts in the background, with no user action needed. Memory is not locked to a single runtime: it operates across agents, apps, and workflows.
 
 ## Features
 
@@ -14,11 +43,11 @@ The MemWal memory plugin adds a **cloud-based, encrypted memory layer** to OpenC
   <Card title="Automatic Capture" icon="floppy-disk">
     Facts are extracted from conversations and stored as encrypted memories after each turn
   </Card>
-  <Card title="Encrypted & User-Owned" icon="lock">
-    SEAL-encrypted, stored on Walrus, tied to your delegate key — you own your data
+  <Card title="Fully Under Your Control" icon="lock">
+    SEAL-encrypted, stored on Walrus — programmable permissions and explicit ownership over your data
   </Card>
-  <Card title="Cross-App Memory" icon="arrows-rotate">
-    Memories stored from any MemWal-connected app are accessible to your OpenClaw agent
+  <Card title="Portable Across Apps" icon="arrows-rotate">
+    Memories stored from any Walrus Memory-connected app are accessible to your OpenClaw agent — not locked to a single provider
   </Card>
   <Card title="Multi-Agent Isolation" icon="users">
     Each agent gets its own memory space via namespaces — no cross-contamination
@@ -38,7 +67,7 @@ The MemWal memory plugin adds a **cloud-based, encrypted memory layer** to OpenC
 
 - You want your OpenClaw agents to **remember across conversations** — preferences, decisions, context
 - You need **encrypted, user-owned memory** instead of plaintext files or platform-managed storage
-- You want **cross-app continuity** — memories from other MemWal-connected apps (chatbot, noter, researcher) surface in OpenClaw
+- You want **cross-app continuity** — memories from other Walrus Memory-connected apps (chatbot, noter, researcher) surface in OpenClaw
 - You're running **multiple agents** and need each to have its own isolated memory space
 
 ## Get started

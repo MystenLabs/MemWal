@@ -1,6 +1,38 @@
 ---
 title: "API Reference"
-description: "Full method signatures, result dataclasses, and utilities for the MemWal Python SDK."
+description: >-
+  Full method signatures, result dataclasses, exceptions, and utility functions for
+  the Walrus Memory Python SDK. Covers MemWal, MemWalSync, middleware, and authentication.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - API reference
+  - method signatures
+  - dataclasses
+goal:
+  description: Look up the exact method signature, parameter types, return value, and exception type for any MemWal Python SDK method before writing code that calls it.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What are the method signatures for the MemWal Python SDK?
+  - What exceptions does the MemWal Python SDK raise?
+  - How does Ed25519 authentication work in the MemWal Python SDK?
+answer: >-
+  The MemWal Python SDK API reference documents all methods on MemWal and MemWalSync
+  including remember, recall, analyze, ask, restore, health, and lower-level manual methods.
+  It also covers result dataclasses, exception hierarchy, middleware wrappers, utility
+  functions for delegate key derivation, and the Ed25519 request signing protocol.
 ---
 
 See also:
@@ -25,10 +57,10 @@ MemWal.create(
 | Argument | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `key` | `str` | Yes | — | Ed25519 delegate private key in hex |
-| `account_id` | `str` | Yes | — | MemWalAccount object ID on Sui |
+| `account_id` | `str` | Yes | — | Walrus Memory account object ID on Sui |
 | `server_url` | `str` | No | `http://localhost:8000` | Explicit relayer URL — wins over `env` |
 | `namespace` | `str` | No | `"default"` | Default namespace for memory isolation |
-| `env` | `str` | No | — | Preset: `prod` / `dev` / `staging` / `local`. Unknown → `ValueError` |
+| `env` | `str` | No | — | Hosted preset: `staging` for testing or `prod` for production. Unknown → `ValueError` |
 
 You may also build a `MemWalConfig` and call `MemWal(config)` directly; `env` resolution happens in `MemWalConfig.__post_init__`.
 
@@ -83,10 +115,22 @@ RememberBulkResult(
 
 `remember_bulk_async` + `wait_for_remember_jobs` in one call.
 
-### `recall(query, limit=10, namespace=None, max_distance=None) -> RecallResult`
+### `recall(RecallParams(...)) -> RecallResult`
 
 Search memories matching a natural-language query, scoped to `owner + namespace`.
 When `max_distance` is set, the client drops weak matches where `distance >= max_distance`.
+
+Preferred form:
+
+```python
+from memwal import RecallParams
+
+result = await memwal.recall(
+    RecallParams(query="food allergies", limit=10, namespace="profile")
+)
+```
+
+The legacy positional form `recall(query, limit=10, namespace=None, max_distance=None)` remains supported for backwards compatibility.
 
 ```python
 RecallResult(
@@ -125,9 +169,13 @@ AskResult(
 )
 ```
 
-### `restore(namespace, limit=50) -> RestoreResult`
+### `restore(namespace, limit=10) -> RestoreResult`
 
 Rebuild missing indexed entries for one namespace from Walrus. Incremental.
+
+- `limit` defaults to `10` and caps the inspected blob set, newest-first
+- `restored` counts blobs re-indexed in this call; `skipped` counts blobs already in the local index
+- There is no pagination cursor; use a larger `limit` for larger one-shot restores
 
 ```python
 RestoreResult(restored: int, skipped: int, total: int, namespace: str, owner: str)
@@ -135,7 +183,7 @@ RestoreResult(restored: int, skipped: int, total: int, namespace: str, owner: st
 
 ### `health() -> HealthResult`
 
-Check relayer health. No authentication. Raises `MemWalError` on non-200.
+Check relayer health. No authentication — a successful response confirms the relayer is reachable, not that your `key`/`account_id` are valid. A signed call (e.g. `remember()`, `recall()`) can still fail with `401` immediately after a passing `health()`. Raises `MemWalError` on non-200.
 
 ```python
 HealthResult(

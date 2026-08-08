@@ -85,11 +85,15 @@ Stable relayer/API compatibility metadata. No authentication required.
 
 ### `POST /sponsor`
 
-Proxy to the SEAL/Walrus sidecar's `/sponsor` endpoint for sponsored transactions. No authentication required.
+Proxy to the SEAL/Walrus sidecar's `/sponsor` endpoint. The request must include
+`authTimestamp`, a UUID-v4 `authNonce`, and `authSignature`: a Sui personal-message
+signature over the sender, transaction-kind hash, timestamp, and nonce. Only one
+allowlisted Walrus Memory `account` call may be sponsored.
 
 ### `POST /sponsor/execute`
 
-Proxy to the sidecar's `/sponsor/execute` endpoint. No authentication required.
+Proxy to the sidecar's `/sponsor/execute` endpoint. `sender` must match the
+short-lived, one-time Redis binding created by the authenticated `/sponsor` call.
 
 ## Protected Routes
 
@@ -106,7 +110,7 @@ Submit text as an encrypted memory job. The relayer returns after creating a bac
 }
 ```
 
-`namespace` defaults to `"default"` if omitted.
+`namespace` defaults to `"default"` if omitted and is limited to 255 UTF-8 bytes.
 
 **Response:** `202 Accepted`
 
@@ -348,6 +352,9 @@ Rebuild missing vector entries for one namespace. Queries onchain blobs by owner
   "skipped": 7,
   "total": 10,
   "namespace": "demo",
-  "owner": "0x..."
+  "owner": "0x...",
+  "truncated": false
 }
 ```
+
+`truncated` is `true` when this restore is known-incomplete: either more on-chain blobs were missing locally than `limit` allowed this call to restore, or the sidecar's raw on-chain candidate fetch (bounded per owner, shared across all of the owner's namespaces, hard-capped independent of `limit`) hit its own cap before this namespace's blobs were even filtered out of that set. The second case can produce `truncated: true` even when `total` is `0` for this namespace, since a cap hit elsewhere can starve this namespace's fetch entirely. Raising `limit` only helps with the first case — past the sidecar's cap, only a cursor/pagination-based restore would.

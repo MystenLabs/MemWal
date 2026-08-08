@@ -1,13 +1,47 @@
 ---
 title: "Ownership & Delegates"
-description: "How memory ownership works in MemWal and how delegates enable shared access."
+description: >-
+  Programmable permissions and explicit ownership in Walrus Memory. Covers how owners control
+  their memory through cryptographic keys, how delegates are granted access for agents and
+  services, and how access control is enforced onchain by Sui smart contracts.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - ownership
+  - delegates
+  - access control
+  - permissions
+  - Sui smart contract
+goal:
+  description: Distinguish account ownership from delegate access, determine the right key type for each use case, and apply the access model to restrict or share memory across agents and apps.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does ownership work in Walrus Memory?
+  - What are delegates in MemWal and how do they get access?
+  - How is access control enforced in Walrus Memory?
+answer: >-
+  In Walrus Memory, memory is cryptographically owned by a Sui wallet address derived from the
+  user's private key. Owners can grant delegate access to other users, agents, or services,
+  enabling shared access and service delegation. All access control is enforced onchain by Sui
+  smart contracts, making it tamper-proof and verifiable.
 ---
 
-MemWal enforces strong, cryptographic ownership over memories — and lets owners grant scoped access to others through delegates.
+Walrus Memory puts you in full control of your memory. Programmable permissions and explicit ownership define how memory is shared, accessed, and updated — with delegate access for agents and workflows.
 
 ## Ownership
 
-Memory content in MemWal is stored on Walrus and cryptographically owned by a user identified by their private key. When you pass a `key` to the SDK, it is translated into a Sui wallet address — this address is the owner.
+Memory content in Walrus Memory is stored on Walrus and cryptographically owned by a user identified by their private key. When you pass a `key` to the SDK, it is translated into a Sui wallet address — this address is the owner.
 
 ```ts
 const memwal = MemWal.create({
@@ -51,7 +85,7 @@ flowchart TD
 
 The relationship between owners and delegates is enforced on chain by the Sui smart contract system — not by application logic or database permissions.
 
-- The owner's wallet address is the root authority over a MemWal account
+- The owner's wallet address is the root authority over a Walrus Memory account
 - Delegate keys are registered onchain and verified on every request
 - The relayer checks delegate authorization against the contract before executing any operation
 

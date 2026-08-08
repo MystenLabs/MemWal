@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
-import { wrapTool } from "./util.js";
+import { wrapTool, walruscanBlobUrl } from "./util.js";
 
 const REMEMBER_INPUT = {
     text: z
@@ -19,11 +19,13 @@ const REMEMBER_INPUT = {
 } as const;
 
 /**
- * memwal_remember — persist a fact to MemWal and return only when the blob
- * is written end-to-end (embed → SEAL encrypt → Walrus upload → on-chain).
+ * memwal_remember — persist a durable fact to MemWal and return only when the
+ * blob is written end-to-end (embed → SEAL encrypt → Walrus upload → on-chain).
  *
- * Use ONLY when the user explicitly asks to save something. Agents should
- * not call this proactively on arbitrary chat content.
+ * Call this PROACTIVELY whenever the user reveals a durable fact about
+ * themselves or the project (preference, decision, constraint, correction,
+ * identity, recurring workflow) — you do not need to be explicitly asked.
+ * For several facts at once, prefer `memwal_remember_bulk`.
  */
 export function registerRememberTool(
     server: McpServer,
@@ -31,7 +33,7 @@ export function registerRememberTool(
 ): void {
     server.tool(
         "memwal_remember",
-        "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
+        "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever you learn something worth remembering across sessions — a stated preference, decision, constraint, correction, identity detail, or recurring workflow — even if the user did not explicitly say 'remember this'. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
         REMEMBER_INPUT,
         wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {
             const result = await session.memwal.rememberAndWait(
@@ -43,7 +45,7 @@ export function registerRememberTool(
                 content: [
                     {
                         type: "text",
-                        text: `Saved to MemWal. blob_id=${result.blob_id} namespace=${result.namespace}`,
+                        text: `Saved to Walrus Memory. blob_id=${result.blob_id} namespace=${result.namespace}\nExplorer: ${walruscanBlobUrl(result.blob_id)}`,
                     },
                 ],
             };

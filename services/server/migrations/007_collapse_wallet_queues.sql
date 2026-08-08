@@ -1,4 +1,4 @@
--- MEM-35: Collapse per-wallet Apalis queues into a single `wallet_jobs` queue.
+-- Collapse per-wallet Apalis queues into a single `wallet_jobs` queue.
 --
 -- Background: the server used to create N queues named `wallet-{i}` (one per
 -- pool key) to side-step Sui coin-object equivocation locks. Per Will Bradley

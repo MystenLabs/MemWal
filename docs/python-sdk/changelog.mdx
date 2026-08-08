@@ -1,11 +1,80 @@
 ---
 title: "Changelog"
-description: "Release history for the MemWal Python SDK."
+description: >-
+  Release history for the Walrus Memory Python SDK (memwal on PyPI). Tracks new features,
+  changes, and bug fixes across all versions.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - changelog
+  - release history
+  - PyPI
+goal:
+  description: Track breaking changes, new methods, and deprecations across Python SDK releases to plan safe version upgrades.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is new in the latest version of the MemWal Python SDK?
+  - What changes were made in memwal 0.1.4?
+  - Where can I find the release history for the Walrus Memory Python SDK?
+answer: >-
+  The memwal changelog tracks all releases of the Walrus Memory Python SDK. Key milestones
+  include the 0.1.0 initial release with async/sync clients and middleware, 0.1.2 adding
+  max_distance to recall, 0.1.3 introducing RecallParams, and 0.1.4 adding temporal
+  anchoring with occurred_at for analyze methods.
 ---
 
 Track what's new, changed, and fixed in `memwal` (Python).
 
 For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
+
+## 0.1.5
+
+### Added
+
+- Added a runnable [Walrus Memory Python SDK Colab](https://colab.research.google.com/drive/1SaKjkSp0DXnM_nktWSiEC-l9qGtVr6ph) covering installation, secure `staging` configuration, optional `prod`, `MemWalSync`, health/compatibility checks, delegate public-key/address derivation, `remember`, `remember_async`, async job waiting, `recall`, bulk remember, `remember_bulk_async`, `remember_bulk_and_wait`, optional `ask`, `analyze`, `analyze_and_wait`, `embed`, manual methods with scoring weights, `restore`, optional OpenAI/LangChain middleware, OpenAI-compatible provider settings such as `OPENAI_BASE_URL`, and troubleshooting.
+
+### Fixed
+
+- Fixed `MemWalSync` reuse inside notebooks so repeated calls do not reuse an HTTP transport from a closed event loop.
+
+### Security
+
+- Recalled AI memory is now nonce-delimited, explicitly untrusted JSON data with a fixed trust instruction instead of a system-role memory injection.
+
+## 0.1.4
+
+### Added
+
+- Added optional `occurred_at` to `analyze()` and `analyze_and_wait()` (both async and sync) for temporal anchoring of extracted facts. When supplied, the server resolves in-turn relative references ("last Friday", "yesterday") into absolute dates inside the extracted fact text before embedding and encryption.
+- Accepts `datetime` or RFC-3339 string. Wire format is RFC-3339 UTC with millisecond precision (e.g. `"2023-05-25T17:50:00.000Z"`) — byte-identical to the TypeScript SDK.
+- Field is omitted from the request body when not supplied.
+
+### Changed
+
+- `occurred_at` validates input at the SDK boundary rather than forwarding malformed values to the server: naive `datetime` instances raise `ValueError` (silently assuming UTC would mis-anchor by N hours for callers outside UTC), and malformed RFC-3339 strings raise `ValueError` with a diagnostic message instead of surfacing as opaque 400s.
+
+## 0.1.3
+
+### Added
+
+- Added `RecallParams` for object-style `recall(...)` calls.
+
+### Changed
+
+- Changed the default `restore()` limit from `50` to `10` to match the relayer and TypeScript SDK.
+- Documented `restore()` response fields, default limit, pagination behavior, and performance expectations.
 
 ## 0.1.2
 

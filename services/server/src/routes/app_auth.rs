@@ -619,8 +619,10 @@ pub async fn app_auth_complete(
     let verified_owner = verify_delegate_key_onchain(
         &state.http_client,
         &state.config.sui_rpc_url,
+        state.sui_grpc_client.as_ref(),
         &account_id,
         &public_key_bytes,
+        &state.config.package_id,
     )
     .await
     .map_err(|e| AppError::BadRequest(format!("delegate key is not registered on-chain: {}", e)))?;

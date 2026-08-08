@@ -3,10 +3,11 @@
 //! Two implementations live alongside this module:
 //!
 //! - [`walrus_seal::WalrusSealEngine`] — production. Uploads prepared
-//!   (SEAL-encrypted) bytes to Walrus, indexes the resulting `blob_id`
-//!   + vector in Postgres. On fetch: Redis blob-cache lookup → Walrus
+//!   (SEAL-encrypted) bytes to Walrus, indexes the resulting `blob_id` and
+//!   vector in Postgres. On fetch: Redis blob-cache lookup → Walrus
 //!   download → SEAL decrypt (batched for `recall`), with reactive
-//!   cleanup on Walrus 404s / permanent decrypt failures.
+//!   cleanup on Walrus 404s scoped to the requested owner + namespace
+//!   (decrypt failures are dropped, never deleted).
 //! - [`plaintext::PlaintextEngine`] — benchmark mode. Stores the bytes
 //!   directly in a Postgres `plaintext` column (added by migration 008),
 //!   bypassing Walrus and SEAL entirely. **Not for production** — it
@@ -75,7 +76,7 @@ pub struct HydratedMemory {
     pub text: String,
     pub distance: f64,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// MEM-54: per-fact importance set at extraction time (vital / standard
+    /// per-fact importance set at extraction time (vital / standard
     /// / trivial mapped to a float in [0.2, 0.9]). Threaded through from
     /// `SearchHit.importance` by the recall handler's zip helper, then
     /// consumed by `CompositeRanker` when `scoring_weights.importance` is
@@ -118,7 +119,7 @@ pub trait MemoryEngine: Send + Sync {
     /// ignores it. Used by `remember_manual` and the `jobs.rs` workers
     /// — the three current copies of the upload-then-index code.
     ///
-    /// MEM-54: `importance` is the per-fact score (0.0–1.0) assigned at
+    /// `importance` is the per-fact score (0.0–1.0) assigned at
     /// extraction time. Persisted on `vector_entries.importance` and
     /// consumed at recall-time composite scoring. Pass `0.5` (the
     /// "standard" bucket default) when no LLM-assigned score is
@@ -127,6 +128,7 @@ pub trait MemoryEngine: Send + Sync {
     async fn store_blob(
         &self,
         owner: &str,
+        account_id: &str,
         namespace: &str,
         bytes: &[u8],
         vector: &[f32],
@@ -139,7 +141,8 @@ pub trait MemoryEngine: Send + Sync {
     /// Production: Redis blob-cache lookup → on miss, Walrus download +
     /// cache write-back → SEAL decrypt → UTF-8. Returns `Ok(None)` (not
     /// an error) when the blob is gone (Walrus 404 → reactive cleanup of
-    /// the index row scoped to `owner`) or the decrypt permanently fails.
+    /// the index row scoped to `owner` + `namespace`) or the decrypt
+    /// permanently fails.
     /// Benchmark: reads the `plaintext` column, ignores `auth`.
     ///
     /// Used by `ask` and (Phase 1: left inline) `restore` per-hit, in
@@ -147,6 +150,7 @@ pub trait MemoryEngine: Send + Sync {
     async fn fetch_one(
         &self,
         owner: &str,
+        namespace: &str,
         blob_id: &str,
         distance: f64,
         auth: &AuthInfo,
@@ -159,8 +163,8 @@ pub trait MemoryEngine: Send + Sync {
     /// is the number of hits that couldn't be returned (download failure,
     /// permanent decrypt failure, invalid UTF-8) — surfaced to the
     /// client so "no matches" is distinguishable from "matches we
-    /// couldn't return". Reactive cleanup on Walrus 404s / permanent
-    /// decrypt failures, scoped to `owner`. `timings` carries the
+    /// couldn't return". Reactive cleanup on Walrus 404s is scoped to
+    /// `owner` + `namespace`; decrypt failures never delete. `timings` carries the
     /// `walrus_ms` / `seal_ms` split so the recall handler can log a
     /// per-stage breakdown (QE feedback — pre-refactor recall had this
     /// granularity).
@@ -170,6 +174,7 @@ pub trait MemoryEngine: Send + Sync {
     async fn fetch_batch(
         &self,
         owner: &str,
+        namespace: &str,
         hits: &[(String, f64)],
         auth: &AuthInfo,
     ) -> Result<(Vec<HydratedMemory>, usize, FetchTimings), AppError>;

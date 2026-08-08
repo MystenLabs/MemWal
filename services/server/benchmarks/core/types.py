@@ -117,7 +117,7 @@ class Judgment:
 
     @property
     def j_score(self) -> float:
-        """Normalized to 0-100, matching Mem0 paper methodology."""
+        """Normalized to 0-100 using the benchmark judge rubric."""
         raw = (
             self.factual_accuracy
             + self.relevance
@@ -172,7 +172,7 @@ class RunArtifact:
     benchmark: str
     preset: str
 
-    # MEM-56: the `extract.v*` / `ask.v*` versions the server was running
+    # the `extract.v*` / `ask.v*` versions the server was running
     # at the moment the run started. Captured from GET /health.
     # Empty-dict default only for legacy artifacts loaded by `compare`;
     # fresh runs always populate this — the harness fails fast at startup

@@ -1,14 +1,54 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.6
+
+### Security
+
+- Require a localhost preflight handshake proving the exact state, public key, and relayer before accepting a delegate-key login callback.
+
+### Fixed
+
+- Authenticate MCP SSE POST messages and replayed requests with the delegate credentials.
+- Keep the canonical login label from the verified local flow instead of trusting the browser callback.
+
+## 0.0.5
+
+### Added
+
+- Automatic memory plugin for Claude Code, Codex, Cursor, and Antigravity.
+- New `memwal_remember_bulk` and `memwal_health` tools.
+
+### Fixed
+
+- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
+
+### Changed
+
+- Memory tools are now proactive — agents recall and save context on their own.
+
+### Fixed
+
+- Plugin bundle now ships its `.mcp.json` so the MCP server registers on install.
+- Automatically recover from dropped relayer connections that could hang tool calls.
+
+## 0.0.4
+
+### Fixed
+
+- Accept HTTPS dashboard sign-in callbacks to the local `127.0.0.1` MCP listener.
+- Reload credentials after `memwal_login` so memory tools work without restarting the MCP client.
+
+## 0.0.3
+
+### Changed
+
+- Rebranded package metadata and documentation from MemWal to Walrus Memory.
+
 ## 0.0.2
 
 ### Added
 
 - Added relayer compatibility metadata checks before opening the MCP bridge.
-
-### Changed
-
-- Rebranded package metadata and documentation from MemWal to Walrus Memory.
 
 ## 0.0.1
 

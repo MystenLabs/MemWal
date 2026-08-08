@@ -1,7 +1,79 @@
 ---
-title: "Changelog"
-description: "Release history for the MemWal MCP package."
+title: Changelog
+description: >-
+  Release history for the Walrus Memory MCP package (@mysten-incubation/memwal-mcp).
+  Covers new features, bug fixes, and breaking changes across all versions.
+keywords:
+  - MCP
+  - Walrus Memory
+  - MemWal
+  - changelog
+  - releases
+goal:
+  description: Track breaking changes, new tools, and deprecations across MemWal MCP releases to plan safe upgrades.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 200
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is the latest version of the MemWal MCP package?
+  - What changed in the MemWal MCP changelog?
+  - When was the automatic memory plugin added to MemWal MCP?
+answer: >-
+  The MemWal MCP package (@mysten-incubation/memwal-mcp) changelog tracks releases from the initial 0.0.1 through 0.0.5. Key additions include the automatic memory plugin for Claude Code, Codex, Cursor, and Antigravity (0.0.5), proactive memory tools, memwal_remember_bulk and memwal_health tools, and fixes for plugin bundling and credential handling.
 ---
+
+## 0.0.6
+
+### Security
+
+- Require a localhost preflight handshake proving the exact state, public key, and relayer before accepting a delegate-key login callback.
+
+### Fixed
+
+- Authenticate MCP SSE POST messages and replayed requests with the delegate credentials.
+- Keep the canonical login label from the verified local flow instead of trusting the browser callback.
+
+## 0.0.5
+
+### Added
+
+- Automatic memory plugin for Claude Code, Codex, Cursor, and Antigravity.
+- New `memwal_remember_bulk` and `memwal_health` tools.
+
+### Fixed
+
+- Ship the plugin's `.mcp.json` in the marketplace bundle. A root gitignore rule excluded it, so plugin installs loaded the lifecycle hooks but never registered the MCP server.
+
+### Changed
+
+- Memory tools are now proactive — agents recall and save context on their own.
+
+### Fixed
+
+- Plugin bundle now ships its `.mcp.json` so the MCP server registers on install.
+- Automatically recover from dropped relayer connections that could hang tool calls.
+
+## 0.0.4
+
+### Fixed
+
+- Accept HTTPS dashboard sign-in callbacks to the local `127.0.0.1` MCP listener.
+- Reload credentials after `memwal_login` so memory tools work without restarting the MCP client.
+
+## 0.0.3
+
+### Changed
+
+- Rebranded package metadata and documentation from MemWal to Walrus Memory.
 
 ## 0.0.2
 
@@ -15,5 +87,5 @@ description: "Release history for the MemWal MCP package."
 
 - Stdio MCP server for MemWal with browser-based wallet login.
 - Inline `memwal_login` and `memwal_logout` session tools.
-- Memory tools for remember, recall, analyze, and restore through the MemWal relayer.
+- Memory tools for remember, recall, analyze, and restore through the Walrus Memory relayer.
 - Environment presets for production, dev, staging, and local relayers.

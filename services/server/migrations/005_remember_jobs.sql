@@ -1,4 +1,4 @@
--- ENG-1406 v3: Job status tracking for async remember pipeline
+-- Job status tracking for the async remember pipeline.
 -- Each row tracks one remember request from enqueue → done/failed.
 --
 -- Status transitions:

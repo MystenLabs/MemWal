@@ -1,4 +1,4 @@
--- MEM-54: per-fact importance score, set at extraction time and consumed
+-- Per-fact importance score, set at extraction time and consumed
 -- at recall-time composite scoring.
 --
 -- The extractor LLM categorises each extracted fact as vital / standard /

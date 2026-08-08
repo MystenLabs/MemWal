@@ -21,7 +21,7 @@
 //! Trust model: only the relayer can reach the sidecar (loopback). Forwarding
 //! the user's `Authorization` header into the sidecar is safe; the sidecar's
 //! own shared-secret auth middleware does not run on `/mcp/*` (mounted before
-//! it in `sidecar-server.ts`).
+//! it in `scripts/sidecar/app.ts`).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -34,7 +34,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::types::AppState;
+use crate::{client_ip::canonical_client_ip, types::AppState};
 
 /// Header names that we forward verbatim from the inbound client request to
 /// the sidecar. Anything else is dropped — we never proxy cookies, host, or
@@ -74,27 +74,17 @@ fn build_forwarded_headers(inbound: &HeaderMap) -> reqwest::header::HeaderMap {
     out
 }
 
-/// Inject the real client IP into the upstream request as `x-forwarded-for`
-/// so the sidecar's per-IP MCP rate limiter buckets per actual caller and
-/// not per loopback. We honor an inbound `x-forwarded-for` (if the relayer
-/// itself is behind a real proxy / load balancer) by appending the relayer's
-/// observed peer address; otherwise we set the header to that peer alone.
-fn inject_forwarded_for(
+/// Forward exactly one canonical, validated client IP to the loopback
+/// sidecar. Never pass the inbound XFF chain through: its left side may be
+/// attacker-controlled and the sidecar must not reinterpret proxy trust.
+fn set_forwarded_client_ip(
     headers: &mut reqwest::header::HeaderMap,
     inbound: &HeaderMap,
     peer: SocketAddr,
+    trusted_proxy_hops: usize,
 ) {
-    let peer_ip = peer.ip().to_string();
-    let value = match inbound
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        Some(existing) => format!("{}, {}", existing, peer_ip),
-        None => peer_ip,
-    };
-    if let Ok(v) = reqwest::header::HeaderValue::from_str(&value) {
+    let client_ip = canonical_client_ip(inbound, peer, trusted_proxy_hops);
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&client_ip.to_string()) {
         out_set(headers, "x-forwarded-for", v);
     }
 }
@@ -127,7 +117,12 @@ pub async fn sse_proxy(
     // open until the client itself closes it. `read_timeout` keeps a
     // per-chunk watchdog (heartbeats fire every 3s, so 60s is plenty).
     let mut forwarded = build_forwarded_headers(&headers);
-    inject_forwarded_for(&mut forwarded, &headers, peer);
+    set_forwarded_client_ip(
+        &mut forwarded,
+        &headers,
+        peer,
+        state.config.trusted_proxy_hops,
+    );
     let req = state
         .http_client
         .get(&url)
@@ -218,7 +213,12 @@ pub async fn messages_proxy(
     );
 
     let mut forwarded = build_forwarded_headers(&headers);
-    inject_forwarded_for(&mut forwarded, &headers, peer);
+    set_forwarded_client_ip(
+        &mut forwarded,
+        &headers,
+        peer,
+        state.config.trusted_proxy_hops,
+    );
     let upstream = state
         .http_client
         .post(&url)
@@ -274,7 +274,7 @@ pub async fn messages_proxy(
 /// and DELETE (close session). The MailGate / Linear / Figma MCP servers
 /// all use this newer transport — clients just configure a single URL:
 ///
-///     claude mcp add --transport http memwal https://relayer.memwal.ai/api/mcp
+///     claude mcp add --transport http memwal https://relayer.memory.walrus.xyz/api/mcp
 ///
 /// We proxy verbatim to the sidecar's `/mcp` endpoint (whose SDK
 /// `StreamableHTTPServerTransport` does all the protocol heavy-lifting).
@@ -316,7 +316,12 @@ pub async fn streamable_proxy(
         req = req.body(body.to_vec());
     }
     let mut forwarded = build_forwarded_headers(&headers);
-    inject_forwarded_for(&mut forwarded, &headers, peer);
+    set_forwarded_client_ip(
+        &mut forwarded,
+        &headers,
+        peer,
+        state.config.trusted_proxy_hops,
+    );
     req = req.headers(forwarded);
 
     // Same 24h request timeout as the SSE proxy — a streamable response
@@ -431,48 +436,45 @@ mod tests {
     }
 
     #[test]
-    fn inject_forwarded_for_sets_peer_when_inbound_missing() {
+    fn forwarded_client_ip_sets_peer_when_inbound_missing() {
         let mut out = reqwest::header::HeaderMap::new();
         let inbound = axum_headers(&[]);
         let peer: SocketAddr = "203.0.113.7:54321".parse().unwrap();
 
-        inject_forwarded_for(&mut out, &inbound, peer);
+        set_forwarded_client_ip(&mut out, &inbound, peer, 0);
 
         assert_eq!(xff(&out).as_deref(), Some("203.0.113.7"));
     }
 
     #[test]
-    fn inject_forwarded_for_appends_peer_to_existing_chain() {
+    fn forwarded_client_ip_default_ignores_inbound_chain() {
         let mut out = reqwest::header::HeaderMap::new();
         let inbound = axum_headers(&[("x-forwarded-for", "198.51.100.4, 10.0.0.1")]);
         let peer: SocketAddr = "127.0.0.1:9000".parse().unwrap();
 
-        inject_forwarded_for(&mut out, &inbound, peer);
+        set_forwarded_client_ip(&mut out, &inbound, peer, 0);
 
-        assert_eq!(
-            xff(&out).as_deref(),
-            Some("198.51.100.4, 10.0.0.1, 127.0.0.1")
-        );
+        assert_eq!(xff(&out).as_deref(), Some("127.0.0.1"));
     }
 
     #[test]
-    fn inject_forwarded_for_treats_whitespace_only_inbound_as_missing() {
+    fn forwarded_client_ip_uses_configured_trusted_hop() {
         let mut out = reqwest::header::HeaderMap::new();
-        let inbound = axum_headers(&[("x-forwarded-for", "   ")]);
-        let peer: SocketAddr = "203.0.113.7:1".parse().unwrap();
+        let inbound = axum_headers(&[("x-forwarded-for", "192.0.2.66, 203.0.113.7")]);
+        let peer: SocketAddr = "10.0.0.2:1".parse().unwrap();
 
-        inject_forwarded_for(&mut out, &inbound, peer);
+        set_forwarded_client_ip(&mut out, &inbound, peer, 1);
 
         assert_eq!(xff(&out).as_deref(), Some("203.0.113.7"));
     }
 
     #[test]
-    fn inject_forwarded_for_handles_ipv6_peer() {
+    fn forwarded_client_ip_handles_ipv6_peer() {
         let mut out = reqwest::header::HeaderMap::new();
         let inbound = axum_headers(&[]);
         let peer: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
 
-        inject_forwarded_for(&mut out, &inbound, peer);
+        set_forwarded_client_ip(&mut out, &inbound, peer, 0);
 
         assert_eq!(xff(&out).as_deref(), Some("2001:db8::1"));
     }

@@ -1,6 +1,40 @@
 ---
-title: "MemWal"
-description: "The recommended default Python client — relayer handles embeddings, SEAL, and storage."
+title: "Walrus Memory"
+description: >-
+  The recommended default Python client for Walrus Memory. The relayer handles embeddings,
+  SEAL encryption, and Walrus storage while the SDK signs requests and sends text.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Python SDK
+  - remember
+  - recall
+  - analyze
+  - ask
+  - restore
+goal:
+  description: Call remember(), recall(), analyze(), and ask() on the Python MemWal client and understand the parameters, return values, and async vs. sync variants for each.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I use the MemWal Python client to store and recall memories?
+  - What core methods does the MemWal Python client provide?
+  - How do I restore missing indexed entries from Walrus in Python?
+answer: >-
+  The MemWal Python client is the recommended default that delegates embeddings, SEAL
+  encryption, and Walrus storage to the relayer. Core methods include `remember`,
+  `recall`, `analyze`, `ask`, and `restore`. Each method accepts an optional namespace
+  override and works with both async MemWal and sync MemWalSync.
 ---
 
 The recommended default client. The relayer handles embeddings, SEAL encryption, Walrus upload, and vector indexing. The SDK only signs requests and sends text.
@@ -13,7 +47,7 @@ The recommended default client. The relayer handles embeddings, SEAL encryption,
 4. `recall` searches by namespace and returns decrypted matches
 
 ```python
-from memwal import MemWal
+from memwal import MemWal, RecallParams
 
 memwal = MemWal.create(
     key="<your-ed25519-private-key>",
@@ -33,7 +67,7 @@ done = await memwal.remember_and_wait("User prefers dark mode and works in Pytho
 print(done.blob_id)
 
 # Recall relevant memories
-result = await memwal.recall("What do we know about this user?", limit=5)
+result = await memwal.recall(RecallParams(query="What do we know about this user?", limit=5))
 for memory in result.results:
     print(memory.text, memory.distance)
 
@@ -58,7 +92,7 @@ Every memory method accepts an optional `namespace=` override that wins over the
 Rebuild missing indexed entries for one namespace from Walrus. Incremental and namespace-scoped — meant to repair PostgreSQL vector state from Walrus-backed memory.
 
 ```python
-result = await memwal.restore("chatbot-prod", limit=50)
+result = await memwal.restore("chatbot-prod", limit=10)
 print(result.restored, result.skipped, result.total)
 ```
 

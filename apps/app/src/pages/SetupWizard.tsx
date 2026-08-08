@@ -17,12 +17,14 @@ import {
 import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
+import { SecretValueInput } from '../components/SecretValueInput'
 import { Link, useNavigate } from 'react-router-dom'
-import { LogOut, Copy } from 'lucide-react'
+import { LogOut, Copy, TriangleAlert } from 'lucide-react'
 import { config } from '../config'
-import memwalLogo from '../assets/memwal-logo.svg'
+import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
 
-type Step = 'intro' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
+type Step = 'intro' | 'import-key' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_ERROR = `this wallet already has ${MAX_DELEGATE_KEYS} delegate keys. go to the dashboard, remove an old key, then create a new delegate key.`
@@ -54,56 +56,24 @@ function hexToBytes(hex: string): Uint8Array {
 
 async function getAccountObjectId(suiClient: ReturnType<typeof useSuiClient>, ownerAddress: string): Promise<string | null> {
     try {
-        const registryObj = await suiClient.getObject({
-            id: config.memwalRegistryId,
-            options: { showContent: true },
-        })
-        if (registryObj?.data?.content && 'fields' in registryObj.data.content) {
-            const fields = registryObj.data.content.fields as any
-            const tableId = fields?.accounts?.fields?.id?.id
-            if (tableId) {
-                const dynField = await suiClient.getDynamicFieldObject({
-                    parentId: tableId,
-                    name: { type: 'address', value: ownerAddress },
-                })
-                if (dynField?.data?.content && 'fields' in dynField.data.content) {
-                    return (dynField.data.content.fields as any).value as string
-                }
-            }
-        }
-    } catch {
+        return await fetchAccountIdForOwner(suiClient, config.memwalRegistryId, ownerAddress)
+    } catch (err) {
+        console.warn('[getAccountObjectId] lookup failed, treating as no-account', err)
         return null
     }
-
-    return null
 }
 
-async function getDelegateKeyCount(suiClient: ReturnType<typeof useSuiClient>, accountId: string): Promise<number> {
-    const obj = await suiClient.getObject({
-        id: accountId,
-        options: { showContent: true },
-    })
-    if (obj?.data?.content && 'fields' in obj.data.content) {
-        const fields = obj.data.content.fields as any
-        return (fields?.delegate_keys ?? []).length
-    }
+type AccountJson = { delegate_keys?: { public_key?: unknown }[] }
 
-    return 0
+async function getDelegateKeyCount(suiClient: ReturnType<typeof useSuiClient>, accountId: string): Promise<number> {
+    const json = await fetchObjectJson(suiClient, accountId) as AccountJson | null
+    return json?.delegate_keys?.length ?? 0
 }
 
 async function getRegisteredDelegatePublicKeys(suiClient: ReturnType<typeof useSuiClient>, accountId: string): Promise<string[]> {
-    const obj = await suiClient.getObject({
-        id: accountId,
-        options: { showContent: true },
-    })
-    if (obj?.data?.content && 'fields' in obj.data.content) {
-        const fields = obj.data.content.fields as any
-        const keys = fields?.delegate_keys ?? []
-        return keys.map((k: any) => {
-            const f = k.fields ?? k
-            const pkBytes: number[] = f.public_key ?? []
-            return bytesToHex(pkBytes)
-        })
+    const json = await fetchObjectJson(suiClient, accountId) as AccountJson | null
+    if (json?.delegate_keys) {
+        return json.delegate_keys.map((k) => publicKeyToHex(k.public_key))
     }
 
     return []
@@ -126,7 +96,6 @@ export default function SetupWizard() {
     const [error, setError] = useState('')
     const [importKeyHex, setImportKeyHex] = useState('')
     const [importingKey, setImportingKey] = useState(false)
-    const [suiAddress, setSuiAddress] = useState('')
 
     const setupRunningRef = useRef(false)
     const address = currentAccount?.address || ''
@@ -143,17 +112,10 @@ export default function SetupWizard() {
 
     const deriveDelegateKey = useCallback(async (privateKeyHexValue: string) => {
         const ed = await import('@noble/ed25519')
-        const { blake2b } = await import('@noble/hashes/blake2.js')
         const privateKey = hexToBytes(privateKeyHexValue)
         const publicKey = await ed.getPublicKeyAsync(privateKey)
 
-        const input = new Uint8Array(33)
-        input[0] = 0x00
-        input.set(publicKey, 1)
-        const addressBytes = blake2b(input, { dkLen: 32 })
-        const suiAddr = '0x' + bytesToHex(new Uint8Array(addressBytes))
-
-        return { privHex: privateKeyHexValue, pubHex: bytesToHex(publicKey), suiAddr }
+        return { privHex: privateKeyHexValue, pubHex: bytesToHex(publicKey) }
     }, [])
 
     // ── Generate Ed25519 keypair (shared) ──
@@ -167,7 +129,6 @@ export default function SetupWizard() {
     const registerOnchain = useCallback(async (
         ownerAddress: string,
         pubKeyHex: string,
-        delegateSuiAddress: string,
     ): Promise<string> => {
         let knownAccountId = await getAccountObjectId(suiClient, ownerAddress)
 
@@ -188,8 +149,9 @@ export default function SetupWizard() {
                 target: `${config.memwalPackageId}::account::add_delegate_key`,
                 arguments: [
                     tx.object(knownAccountId),
+                    tx.object(config.memwalRegistryId),
                     tx.pure('vector<u8>', pubKeyBytes),
-                    tx.pure('address', delegateSuiAddress),
+                    // v1_new derives the Sui address on-chain — no address arg.
                     tx.pure('string', 'Web App'),
                     tx.object('0x6'),
                 ],
@@ -209,21 +171,13 @@ export default function SetupWizard() {
             const createResult = await signAndExecute({ transaction: tx })
             await suiClient.waitForTransaction({ digest: createResult.digest })
 
-            const txDetails = await suiClient.getTransactionBlock({
-                digest: createResult.digest,
-                options: { showObjectChanges: true },
-            })
-            const createdObj = txDetails.objectChanges?.find(
-                (c) => c.type === 'created' &&
-                    'objectType' in c &&
-                    c.objectType.includes('MemWalAccount')
-            )
-            if (createdObj && 'objectId' in createdObj) {
-                knownAccountId = createdObj.objectId
-            }
+            // Resolve through AccountRegistry after finality. This works for
+            // both the app-wide gRPC client and the local JSON-RPC E2E client;
+            // getTransactionBlock() is JSON-RPC-only.
+            knownAccountId = await getAccountObjectId(suiClient, ownerAddress)
 
             if (!knownAccountId) {
-                throw new Error('Account created but object ID not found in transaction. Please try again.')
+                throw new Error('Account created but object ID was not found in the registry. Please try again.')
             }
 
             setTxStatus('adding delegate key...')
@@ -232,8 +186,9 @@ export default function SetupWizard() {
                 target: `${config.memwalPackageId}::account::add_delegate_key`,
                 arguments: [
                     tx2.object(knownAccountId),
+                    tx2.object(config.memwalRegistryId),
                     tx2.pure('vector<u8>', pubKeyBytes),
-                    tx2.pure('address', delegateSuiAddress),
+                    // v1_new derives the Sui address on-chain — no address arg.
                     tx2.pure('string', 'Web App'),
                     tx2.object('0x6'),
                 ],
@@ -250,20 +205,22 @@ export default function SetupWizard() {
         if (setupRunningRef.current) return
         setupRunningRef.current = true
 
+        trackEvent('delegate_key_generate_start', { location: 'setup' })
         setStep('generating')
         setError('')
 
         try {
-            const { privHex, pubHex, suiAddr } = await generateKeys()
+            const { privHex, pubHex } = await generateKeys()
             setPrivateKeyHex(privHex)
             setPublicKeyHex(pubHex)
-            setSuiAddress(suiAddr)
             setStep('show-key')
+            trackEvent('delegate_key_generated', { location: 'setup' })
         } catch (err) {
             console.error('Setup failed:', err)
             const message = err instanceof Error ? err.message : 'setup failed. please try again.'
             setError(message)
             setStep('error')
+            trackEvent('delegate_key_generate_failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setupRunningRef.current = false
         }
@@ -275,12 +232,14 @@ export default function SetupWizard() {
         const normalizedKey = normalizePrivateKeyHex(importKeyHex)
         if (!/^[0-9a-f]{64}$/.test(normalizedKey)) {
             setError('delegate key must be a 64-character hex private key.')
+            trackEvent('delegate_key_import_failed', { error_type: 'invalid_input' })
             return
         }
 
         setupRunningRef.current = true
         setImportingKey(true)
         setError('')
+        trackEvent('delegate_key_import_start', { location: 'setup' })
 
         try {
             const accountId = await getAccountObjectId(suiClient, address)
@@ -297,9 +256,11 @@ export default function SetupWizard() {
             setDelegateKeys(normalizedKey, pubHex, accountId)
             setImportKeyHex('')
             setStep('done')
+            trackEvent('delegate_key_import_complete', { location: 'setup' })
         } catch (err) {
             const message = err instanceof Error ? err.message : 'failed to import delegate key. please try again.'
             setError(message)
+            trackEvent('delegate_key_import_failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setImportingKey(false)
             setupRunningRef.current = false
@@ -311,24 +272,33 @@ export default function SetupWizard() {
         if (setupRunningRef.current) return
         setupRunningRef.current = true
 
+        trackEvent('delegate_key_register_start', {
+            auth_method: isEnoki ? 'enoki' : 'wallet',
+            location: 'setup',
+        })
         setStep('onchain')
         setError('')
         setTxStatus('checking existing account...')
 
         try {
-            const accountId = await registerOnchain(address, publicKeyHex, suiAddress)
+            const accountId = await registerOnchain(address, publicKeyHex)
             setTxStatus('delegate key registered onchain!')
             setDelegateKeys(privateKeyHex, publicKeyHex, accountId)
             setPrivateKeyHex('')
             setStep('done')
+            trackEvent('delegate_key_register_complete', {
+                auth_method: isEnoki ? 'enoki' : 'wallet',
+                location: 'setup',
+            })
         } catch (err: unknown) {
             console.error('Onchain operation failed:', err)
             setError((isMaxDelegateKeysError(err) || (err instanceof Error && err.message === MAX_DELEGATE_KEYS_ERROR)) ? MAX_DELEGATE_KEYS_ERROR : err instanceof Error ? err.message : 'transaction failed. please try again.')
             setStep('show-key')
+            trackEvent('delegate_key_register_failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setupRunningRef.current = false
         }
-    }, [address, publicKeyHex, privateKeyHex, suiAddress, registerOnchain, setDelegateKeys])
+    }, [address, publicKeyHex, privateKeyHex, registerOnchain, setDelegateKeys, isEnoki])
 
     const copyKey = useCallback(async () => {
         await navigator.clipboard.writeText(privateKeyHex)
@@ -342,75 +312,102 @@ export default function SetupWizard() {
     }, [])
 
     return (
-        <>
-            <nav className="nav">
+        <div className="setup-classic">
+            <nav className="nav setup-classic-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
+                        <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
                     </Link>
                     <div className="nav-user">
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
-                        <button className="lp-nav-cta" onClick={() => disconnect()}>
-                            <LogOut size={14} /> sign out
+                        <button
+                            className="lp-nav-cta"
+                            onClick={async () => {
+                                trackEvent('sign_out', { location: 'setup' })
+                                await disconnect()
+                                navigate('/')
+                            }}
+                        >
+                            Sign out <LogOut size={14} />
                         </button>
                     </div>
                 </div>
             </nav>
 
-            <div className="container">
-                <div style={{ maxWidth: 520, margin: '60px auto' }}>
-
+            <main className="container setup-classic-container">
+                <div className="setup-classic-panel">
                     {/* ===== Step 1: Intro ===== */}
                     {step === 'intro' && (
-                        <div style={{ textAlign: 'center' }}>
-
-                            <h2 style={{ fontSize: '1.6rem', fontWeight: 700, marginBottom: 12, letterSpacing: '-0.02em' }}>
-                                create your delegate key
+                        <div className="setup-classic-intro">
+                            <h2 className="setup-classic-title">
+                                Create your delegate key
                             </h2>
-                            <p style={{ color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 32 }}>
-                                a delegate key lets your AI apps access Walrus Memory on your behalf.
-                                it's a lightweight Ed25519 keypair — separate from your wallet.
+                            <p className="setup-classic-description">
+                                A delegate key lets your AI apps and agents access Walrus Memory on
+                                your behalf. It's a lightweight Ed25519 keypair that stays separate
+                                from your primary account credentials.
                             </p>
 
-                            <div className="card" style={{ textAlign: 'left', marginBottom: 24 }}>
-                                <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-
+                            <div className="card setup-classic-feature-card">
+                                <div className="setup-classic-feature">
                                     <div>
-                                        <strong style={{ fontSize: '0.9rem' }}>low risk</strong>
-                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
-                                            cannot access funds or sign Sui transactions
+                                        <strong>Low risk</strong>
+                                        <p>
+                                            Cannot access funds or approve transactions
                                         </p>
                                     </div>
                                 </div>
-                                <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+                                <div className="setup-classic-feature">
                                     <div>
-                                        <strong style={{ fontSize: '0.9rem' }}>revocable</strong>
-                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
-                                            remove anytime from your Walrus Memory dashboard
+                                        <strong>Revocable</strong>
+                                        <p>
+                                            Remove access anytime from your Walrus Memory Dashboard
                                         </p>
                                     </div>
                                 </div>
-                                <div style={{ display: 'flex', gap: 12 }}>
+                                <div className="setup-classic-feature">
                                     <div>
-                                        <strong style={{ fontSize: '0.9rem' }}>onchain registration</strong>
-                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '4px 0 0' }}>
-                                            key is verified on Sui blockchain for maximum security
+                                        <strong>Verified access</strong>
+                                        <p>
+                                            Delegate permissions are independently verified for
+                                            secure, tamper-resistant access control
                                         </p>
                                     </div>
                                 </div>
                             </div>
 
-                            <button className="lp-btn-yellow" onClick={handleGenerate}>
-                                generate delegate key
-                            </button>
-
-                            <div style={{ margin: '28px 0 18px', color: 'var(--text-muted)', fontSize: '0.78rem' }}>
-                                or
+                            <div className="setup-classic-actions">
+                                <button className="lp-btn-yellow setup-classic-generate" onClick={handleGenerate}>
+                                    Create delegate key
+                                </button>
+                                <button
+                                    type="button"
+                                    className="setup-classic-import-trigger"
+                                    onClick={() => {
+                                        setError('')
+                                        setStep('import-key')
+                                    }}
+                                >
+                                    Already have a delegate key?
+                                </button>
                             </div>
+                        </div>
+                    )}
 
-                            <div style={{ textAlign: 'left' }}>
+                    {/* ===== Import existing key ===== */}
+                    {step === 'import-key' && (
+                        <div className="setup-classic-import-screen">
+                            <h2 className="setup-classic-title">
+                                Use an existing delegate key
+                            </h2>
+                            <p className="setup-classic-description">
+                                Paste a delegate private key that is already registered on-chain for
+                                this wallet.
+                            </p>
+
+                            <div className="setup-classic-import">
                                 <div className="input-group">
                                     <textarea
                                         id="delegate-key-input"
@@ -418,134 +415,122 @@ export default function SetupWizard() {
                                         rows={3}
                                         value={importKeyHex}
                                         onChange={(e) => setImportKeyHex(e.target.value)}
-                                        placeholder="paste your delegate private key"
+                                        placeholder="Paste an existing delegate key"
                                         aria-label="existing delegate key"
                                         spellCheck={false}
-                                        style={{ fontFamily: 'var(--font-mono)', resize: 'vertical' }}
+                                        autoFocus
                                     />
                                 </div>
                                 {error && (
-                                    <div style={{
-                                        background: 'rgba(248,113,113,0.08)',
-                                        border: '1px solid rgba(248,113,113,0.2)',
-                                        borderRadius: 'var(--radius-md)',
-                                        padding: 12,
-                                        marginBottom: 12,
-                                        color: 'var(--danger)',
-                                        fontSize: '0.82rem',
-                                    }}>
+                                    <div className="setup-classic-error">
                                         {error}
                                     </div>
                                 )}
-                                <button
-                                    className="btn btn-secondary setup-import-button"
-                                    onClick={handleImportKey}
-                                    disabled={importingKey || !importKeyHex.trim()}
-                                >
-                                    {importingKey ? 'checking key...' : 'use delegate key'}
-                                </button>
+                                <div className="setup-classic-import-actions">
+                                    <button
+                                        className="btn btn-secondary setup-import-button"
+                                        onClick={handleImportKey}
+                                        disabled={importingKey || !importKeyHex.trim()}
+                                    >
+                                        {importingKey ? 'Checking key...' : 'Continue'}
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     )}
 
                     {/* ===== Generating ===== */}
                     {step === 'generating' && (
-                        <div style={{ textAlign: 'center', padding: '60px 0' }}>
-                            <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
-                            <p style={{ color: 'var(--text-secondary)' }}>generating keypair...</p>
+                        <div className="setup-classic-state">
+                            <div className="spinner setup-classic-spinner" />
+                            <p className="setup-classic-state-title">Generating keypair...</p>
                         </div>
                     )}
 
                     {/* ===== Step 2: Show Key ===== */}
                     {step === 'show-key' && (
-                        <div>
-                            <div style={{ textAlign: 'center', marginBottom: 24 }}>
+                        <div className="setup-classic-ready-screen">
+                            <h2 className="setup-classic-title">
+                                Your delegate key is ready
+                            </h2>
 
-                                <h2 style={{ fontSize: '1.4rem', fontWeight: 700, letterSpacing: '-0.02em' }}>
-                                    key generated!
-                                </h2>
-                            </div>
-
-                            <div className="warning-box">
+                            <div className="warning-box setup-classic-ready-warning">
+                                <TriangleAlert className="setup-classic-ready-warning-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                                 <p>
-                                    <strong>save this private key now!</strong> it will not be shown again.
-                                    store it securely — you'll need it to configure the Walrus Memory SDK.
+                                    <strong>Save this key now.</strong> For your security, we won't show it again.
+                                    You'll need it to configure the Walrus Memory SDK.
                                 </p>
                             </div>
 
-                            <div className="key-display" style={{ marginBottom: 16 }}>
-                                <div className="key-label">private key (keep secret)</div>
-                                <div className="key-value">{privateKeyHex}</div>
-                                <div className="key-actions">
-                                    <button className="btn btn-secondary btn-sm" onClick={copyKey}>
-                                        <Copy size={12} /> {copied ? 'copied!' : 'copy'}
-                                    </button>
+                            <div className="setup-key-panel" data-analytics-sensitive="setup-delegate-private-key">
+                                <div className="setup-key-row">
+                                    <div className="setup-key-main">
+                                        <div className="setup-key-label">Private key <span>keep secret</span></div>
+                                        <SecretValueInput
+                                            className="setup-key-value setup-secret-value"
+                                            value={privateKeyHex}
+                                            aria-label="Private key"
+                                        />
+                                    </div>
+                                    <div className="setup-key-actions">
+                                        <button
+                                            className={`setup-key-copy-button${copied ? ' setup-key-copy-button--copied' : ''}`}
+                                            onClick={copyKey}
+                                            aria-label={copied ? 'Copied private key' : 'Copy private key'}
+                                            title={copied ? 'Copied' : 'Copy private key'}
+                                        >
+                                            <Copy size={16} aria-hidden="true" />
+                                        </button>
+                                    </div>
                                 </div>
-                            </div>
-
-                            <div className="key-display" style={{ marginBottom: 24, borderColor: 'var(--border)' }}>
-                                <div className="key-label" style={{ color: 'var(--text-muted)' }}>
-                                    public key (shareable)
-                                </div>
-                                <div className="key-value" style={{ color: 'var(--text-secondary)' }}>
-                                    {publicKeyHex}
+                                <div className="setup-key-row">
+                                    <div className="setup-key-main">
+                                        <div className="setup-key-label">Public key <span>shareable</span></div>
+                                        <code className="setup-key-value">{publicKeyHex}</code>
+                                    </div>
                                 </div>
                             </div>
 
                             {error && (
-                                <div style={{
-                                    background: 'rgba(248,113,113,0.08)',
-                                    border: '1px solid rgba(248,113,113,0.2)',
-                                    borderRadius: 'var(--radius-md)',
-                                    padding: 16,
-                                    marginBottom: 20,
-                                    color: 'var(--danger)',
-                                    fontSize: '0.85rem',
-                                }}>
+                                <div className="setup-classic-error setup-classic-ready-error">
                                     <div>{error}</div>
                                     {error === MAX_DELEGATE_KEYS_ERROR && (
-                                        <Link to="/dashboard" className="btn btn-secondary btn-sm" style={{ marginTop: 12 }}>
-                                            manage keys in dashboard
+                                        <Link to="/dashboard" className="setup-classic-error-action">
+                                            Manage keys in Dashboard
                                         </Link>
                                     )}
                                 </div>
                             )}
 
-                            <div style={{ marginBottom: 24 }}>
-                                <label style={{
-                                    display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer',
-                                    fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5
-                                }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={confirmed}
-                                        onChange={(e) => setConfirmed(e.target.checked)}
-                                        style={{ marginTop: 3 }}
-                                    />
-                                    i have saved my private key securely. i understand it cannot be recovered.
-                                </label>
-                            </div>
+                            <label className="setup-classic-confirm">
+                                <input
+                                    type="checkbox"
+                                    checked={confirmed}
+                                    onChange={(e) => setConfirmed(e.target.checked)}
+                                />
+                                <span className="setup-classic-confirm-box" aria-hidden="true" />
+                                <span className="setup-classic-confirm-text">I've saved my private key. I understand Walrus Memory can't show it again.</span>
+                            </label>
 
                             <button
-                                className="lp-btn-yellow"
-                                style={{ width: '100%', justifyContent: 'center' }}
+                                className="setup-classic-register"
                                 disabled={!confirmed}
                                 onClick={executeOnchain}
                             >
-                                {isEnoki ? 'continue →' : 'register key onchain & continue →'}
+                                {isEnoki ? 'Continue →' : 'Register key onchain & continue →'}
                             </button>
                         </div>
                     )}
 
                     {/* ===== Onchain tx in progress ===== */}
                     {step === 'onchain' && (
-                        <div style={{ textAlign: 'center', padding: '60px 0' }}>
-                            <div className="spinner" style={{ margin: '0 auto 20px', width: 32, height: 32 }} />
-                            <p style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>{txStatus}</p>
-                            <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                        <div className="setup-classic-state">
+                            <div className="spinner setup-classic-spinner" />
+                            <p className="setup-classic-state-title">{txStatus}</p>
+                            <p className="setup-classic-state-subtitle">
                                 {isEnoki
-                                    ? 'this may take a few seconds...'
-                                    : 'please approve the transaction in your wallet'}
+                                    ? 'This may take a few seconds...'
+                                    : 'Please approve the transaction in your wallet'}
                             </p>
                         </div>
                     )}
@@ -554,31 +539,28 @@ export default function SetupWizard() {
                     {step === 'error' && (
                         <div style={{ textAlign: 'center', padding: '60px 0' }}>
                             <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: 8, color: 'var(--danger)' }}>
-                                setup failed
+                                Setup failed
                             </h2>
                             <p style={{ color: 'var(--text-secondary)', marginBottom: 16, fontSize: '0.85rem' }}>
                                 {error}
                             </p>
                             <button className="lp-btn-yellow" onClick={handleRetry}>
-                                try again
+                                Try again
                             </button>
                         </div>
                     )}
 
                     {/* ===== Done ===== */}
                     {step === 'done' && (
-                        <div style={{ textAlign: 'center', padding: '60px 0' }}>
-                            <h2 style={{ fontSize: '1.4rem', fontWeight: 700, marginBottom: 8 }}>
-                                all set!
-                            </h2>
-                            <p style={{ color: 'var(--text-secondary)', marginBottom: 24 }}>
-                                your delegate key has been registered onchain. loading dashboard...
+                        <div className="setup-classic-state">
+                            <h2 className="setup-classic-state-heading">All set</h2>
+                            <p className="setup-classic-state-subtitle">
+                                Your delegate key has been registered onchain. Loading dashboard...
                             </p>
                         </div>
                     )}
-
                 </div>
-            </div>
-        </>
+            </main>
+        </div>
     )
 }

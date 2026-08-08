@@ -11,9 +11,9 @@ What it does:
 3. print every observed status transition
 4. exit once the job becomes terminal
 
-Why it is useful for PR #180:
+Why it is useful:
 - On a healthy relayer, the expected result is still `done`
-- If the recovery enqueue failure path from PR #180 ever occurs, the
+- If the recovery enqueue failure path ever occurs, the
   important behavior is that polling returns terminal `failed` with an
   error instead of hanging forever in `running` / `uploaded`
 
@@ -125,7 +125,7 @@ async def main() -> int:
                         "ok": True,
                         "job_id": accepted.job_id,
                         "blob_id": terminal.get("blob_id"),
-                        "note": "Happy path completed. If PR #180's recovery enqueue failure occurs, this same poll path should return status=failed with error instead of hanging.",
+                        "note": "Happy path completed. If recovery enqueue failure occurs, this same poll path should return status=failed with error instead of hanging.",
                     }
                 ),
             )
@@ -138,7 +138,7 @@ async def main() -> int:
                     "ok": False,
                     "job_id": accepted.job_id,
                     "error": terminal.get("error"),
-                    "note": "Terminal failure surfaced to polling. This is the behavior PR #180 protects when recovery enqueue handoff fails.",
+                    "note": "Terminal failure surfaced to polling. This is the expected behavior when recovery enqueue handoff fails.",
                 }
             ),
         )

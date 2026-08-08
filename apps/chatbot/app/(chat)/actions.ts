@@ -17,7 +17,7 @@ import { isProductionEnvironment } from "@/lib/constants";
 
 export async function saveChatModelAsCookie(model: string) {
   const cookieStore = await cookies();
-  // LOW-33: Set Secure (in prod), SameSite=Lax, and constrain path so the
+  // Set Secure (in prod), SameSite=Lax, and constrain path so the
   // cookie is not sent cross-site and is protected in transit.
   cookieStore.set("chat-model", model, {
     path: "/",
@@ -43,7 +43,7 @@ export async function generateTitleFromUserMessage({
 }
 
 export async function deleteTrailingMessages({ id }: { id: string }) {
-  // HIGH-10: Verify the requesting user owns the chat before deleting messages.
+  // Verify the requesting user owns the chat before deleting messages.
   const session = await auth();
   if (!session?.user?.id) {
     throw new Error("Unauthorized");
@@ -72,7 +72,7 @@ export async function updateChatVisibility({
   chatId: string;
   visibility: VisibilityType;
 }) {
-  // HIGH-10: Verify the requesting user owns the chat before changing visibility.
+  // Verify the requesting user owns the chat before changing visibility.
   const session = await auth();
   if (!session?.user?.id) {
     throw new Error("Unauthorized");

@@ -1,15 +1,18 @@
 # Walrus Memory
 
-Privacy-first AI memory layer for storing encrypted memories on Walrus and
-retrieving them with semantic search.
+Portable agent memory — take your agent's memory anywhere.
+
+Walrus Memory enables AI agents to operate reliably across apps and sessions,
+without losing context. Portable, verifiable, and fully controlled by you, it's
+the memory layer that lets agents handle complex workflows and coordinate using
+data they can trust.
 
 > Walrus Memory is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
 ## For AI Agents
 
 - **Single-file guide**: Read [`SKILL.md`](SKILL.md) for a complete integration reference (install, configure, API surface, troubleshooting)
-- **LLM-friendly docs**: [`llms.txt`](https://docs.memwal.ai/llms.txt) — structured overview following the [llmstxt.org](https://llmstxt.org) standard
-- **Full context**: [`llms-full.txt`](https://docs.memwal.ai/llms-full.txt) — expanded version with inlined page content
+- **LLM-friendly docs**: [`llms.txt`](https://docs.wal.app/walrus-memory/llms.txt) — structured overview following the [llmstxt.org](https://llmstxt.org) standard
 
 ## Install
 
@@ -37,13 +40,13 @@ const memwal = MemWal.create({
 
 const job = await memwal.remember("User prefers dark mode and uses TypeScript.");
 await memwal.waitForRememberJob(job.job_id);
-const memories = await memwal.recall("What are the user's preferences?");
+const memories = await memwal.recall({ query: "What are the user's preferences?" });
 await memwal.restore("demo");
 ```
 
 ## Documentation
 
-- Full docs at [docs.memwal.ai](https://docs.memwal.ai)
+- Full docs at [memory.walrus.xyz](https://memory.walrus.xyz)
 - Docs source of truth: `docs/`
 - Docs site entry points:
   - [What is Walrus Memory?](docs/getting-started/what-is-memwal.md)
@@ -96,7 +99,7 @@ For the full step-by-step setup guide, see:
 
 ## OpenClaw / NemoClaw Plugin
 
-[`@mysten-incubation/oc-memwal`](packages/openclaw-memory-memwal) — a memory plugin for [OpenClaw](https://openclaw.ai) agents. It gives OpenClaw persistent, encrypted memory via Walrus Memory with automatic recall and capture hooks.
+[`@mysten-incubation/oc-memwal`](packages/openclaw-memory-memwal) — a memory plugin for [OpenClaw](https://openclaw.ai) agents. It gives OpenClaw agents portable, verifiable memory through Walrus Memory with automatic recall and capture hooks.
 
 ```bash
 openclaw plugins install @mysten-incubation/oc-memwal

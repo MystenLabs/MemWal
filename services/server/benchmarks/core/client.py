@@ -72,7 +72,7 @@ class MemWalClient:
             "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
         Headers sent: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id.
 
-        `nonce` is a fresh UUIDv4 per call (MED-1 replay protection — the server
+        `nonce` is a fresh UUIDv4 per call (replay protection — the server
         records it in Redis with a 600s TTL and rejects a re-seen nonce). Since
         `_post` re-signs on every retry attempt, each retry naturally gets a new
         nonce, so a retried request is not flagged as a replay.
@@ -150,7 +150,12 @@ class MemWalClient:
         resp.raise_for_status()
         return resp.json()
 
-    def analyze(self, text: str, namespace: str) -> AnalyzeResult:
+    def analyze(
+        self,
+        text: str,
+        namespace: str,
+        occurred_at: str | None = None,
+    ) -> AnalyzeResult:
         """
         POST /api/analyze — feed conversation text, extract and store memories.
 
@@ -161,14 +166,26 @@ class MemWalClient:
            synchronously — the response carries the stored ids and
            status "done"; production: SEAL-encrypt + Walrus upload, via an
            async job, status "pending").
+
+        `occurred_at` is an optional RFC 3339 UTC timestamp of
+        when this conversation turn took place. When passed, the server
+        threads it into the extractor's prompt as a `<context
+        occurred_at="..."/>` tag so the LLM can resolve relative-time
+        references ("last Friday", "yesterday") to absolute dates
+        *inside the extracted fact text* — making time-anchored facts
+        retrievable. Omit (or pass None) when no anchor is available;
+        the server does NOT default to now() — silence is honest.
         """
-        data = self._post("/api/analyze", {
+        body: dict = {
             "text": text,
             "namespace": namespace,
-        })
+        }
+        if occurred_at is not None:
+            body["occurred_at"] = occurred_at
+        data = self._post("/api/analyze", body)
         # Response shape varies between server versions:
         # - Synchronous (reference branch): {facts, total, owner}
-        # - Async / benchmark-mode (dev + ENG-1747): {facts, fact_count,
+        # Async / benchmark-mode (dev): {facts, fact_count,
         #   job_ids, status, owner} — "total" doesn't exist, "fact_count"
         #   is the count. In benchmark mode status == "done" and the
         #   memories are already stored and searchable when this returns.
@@ -191,7 +208,7 @@ class MemWalClient:
         Scoring weights are per-request parameters. The same stored memories
         can be recalled with different weight configurations without re-ingestion.
 
-        NOTE: the current dev / ENG-1747 server's `RecallRequest` is
+        NOTE: the current dev server's `RecallRequest` is
         `{query, limit, namespace}` only — it does NOT yet implement composite
         scoring, so `scoring_weights` / `memory_types` / `min_importance` sent
         below are silently ignored (no `deny_unknown_fields`), and recall is

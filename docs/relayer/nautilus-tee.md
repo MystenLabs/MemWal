@@ -1,9 +1,37 @@
 ---
 title: "TEE Deployment Pattern"
-description: "Run the MemWal relayer with a TEE deployment pattern and understand what remains for a full Sui Nautilus integration."
+description: >-
+  Run the Walrus Memory relayer inside a Trusted Execution Environment using the Sui Nautilus deployment pattern. Covers the architecture flow, reference template files, required runtime variables, and the steps needed for a full Nautilus integration.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - TEE
+  - Nautilus
+  - trusted execution environment
+  - enclave deployment
+goal:
+  description: Deploy the Walrus Memory relayer inside a Nautilus TEE using the reference template, understand the attestation steps still required, and assess the remaining trust surface.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "How do I deploy the Walrus Memory relayer in a TEE?"
+  - "What is the Nautilus deployment pattern for MemWal?"
+  - "What security guarantees does a TEE relayer deployment provide?"
+answer: >-
+  The TEE deployment pattern runs the existing Walrus Memory relayer and TypeScript sidecar inside a Trusted Execution Environment using Sui Nautilus. Clients still send plaintext to the relayer, but the relayer processes data inside the enclave and sends only SEAL-encrypted ciphertext to Walrus. A full Nautilus integration requires enclave attestation verification and Move-side identity checks beyond the reference template.
 ---
 
-Run the MemWal relayer with a TEE deployment pattern when you want the default
+Run the Walrus Memory relayer with a TEE deployment pattern when you want the default
 SDK flow without giving the host operator direct access to plaintext memory
 payloads. The goal is a tamper-resistant, hardware-attested deployment: incoming
 memories may still be plaintext at the relayer API boundary, but the relayer
@@ -17,7 +45,7 @@ plaintext boundary moves from a normal host process into the enclave.
 <Note>
 This is a deployment pattern, not a separate relayer implementation. Validate the
 manifest fields against the Nautilus version you deploy with, and use the
-reference files in `services/server/deploy/nautilus` as the MemWal-specific
+reference files in `services/server/deploy/nautilus` as the Walrus Memory-specific
 starting point.
 </Note>
 
@@ -116,7 +144,7 @@ That target first builds the existing `services/server/Dockerfile` runtime image
 then builds the TEE wrapper image from `Containerfile`. Use Nautilus to build and
 deploy the enclave image from that payload, then pin the image measurement or
 attestation identity produced by the deployment. The exact build/publish/run
-commands are Nautilus-version specific; the MemWal requirements are the runtime
+commands are Nautilus-version specific; the Walrus Memory requirements are the runtime
 variables and external endpoints listed below.
 
 For a local container smoke test with a filled env file:
@@ -138,7 +166,7 @@ These map directly to the existing self-hosted relayer config.
 | --- | --- | --- |
 | `DATABASE_URL` | yes | PostgreSQL connection string. `pgvector` must exist before boot |
 | `REDIS_URL` | yes | Required for rate limits and Redis-backed caches |
-| `MEMWAL_PACKAGE_ID` | no | MemWal package used for SEAL policy and blob metadata |
+| `MEMWAL_PACKAGE_ID` | no | Walrus Memory package used for SEAL policy and blob metadata |
 | `MEMWAL_REGISTRY_ID` | no | Account registry object ID |
 | `SUI_NETWORK` | no | `mainnet` or `testnet` |
 | `SUI_RPC_URL` | no | Sui fullnode endpoint reachable from the enclave |
@@ -188,7 +216,7 @@ env file and only starts optional outbound proxies when the matching
 To turn this template into a complete Nautilus deployment, the operator still
 needs to perform the platform-specific steps for the Nautilus version in use:
 
-1. Generate or adapt the Nautilus manifest using `nautilus.toml.example` as the MemWal-specific input.
+1. Generate or adapt the Nautilus manifest using `nautilus.toml.example` as the Walrus Memory-specific input.
 2. Build the enclave artifact with the installed Nautilus toolchain or CI workflow.
 3. Deploy the enclave artifact to the target TEE host or Nautilus provider.
 4. Record the enclave measurement, PCRs, or attestation identity produced by that build.
@@ -241,7 +269,7 @@ await memwal.health();
 const memory = `TEE smoke memory ${new Date().toISOString()}`;
 const job = await memwal.remember(memory);
 await memwal.waitForRememberJob(job.job_id);
-const recall = await memwal.recall("What smoke memory was stored?", 5);
+const recall = await memwal.recall({ query: "What smoke memory was stored?", limit: 5 });
 
 if (!recall.results.some((item) => item.text.includes("TEE smoke memory"))) {
   throw new Error("TEE remember/recall smoke test failed");

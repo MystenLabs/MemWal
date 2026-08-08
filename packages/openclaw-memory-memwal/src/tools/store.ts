@@ -3,7 +3,7 @@
  *
  * Uses analyze() instead of remember() so the server LLM extracts
  * individual facts from the text, producing cleaner, more searchable
- * memories (same approach as Mem0's memory_store).
+ * memories than storing the raw input verbatim.
  */
 
 import type { MemWal } from "@mysten-incubation/memwal";
@@ -33,9 +33,25 @@ export function registerStoreTool(api: any, client: MemWal, config: PluginConfig
             description: "Memory namespace to store in (use the namespace from system context)",
           }),
         ),
+        occurredAt: Type.Optional(
+          Type.String({
+            description:
+              "Optional RFC-3339 / ISO-8601 timestamp of when the source " +
+              "text or conversation actually occurred (e.g. " +
+              "'2024-03-15T14:30:00Z'). The server uses this as the " +
+              "temporal anchor for resolving in-turn relative references " +
+              "like 'last Friday' or 'yesterday' against. For real-time " +
+              "stores, pass the current time. For recounted past events " +
+              "where the user is talking about something that happened " +
+              "earlier (e.g. 'remember I called Alex last Friday'), OMIT " +
+              "this field — do NOT pass the recounted event date while " +
+              "leaving relative wording in the text; that produces wrong " +
+              "anchors. When unknown, omit; do not guess.",
+          }),
+        ),
       }),
       async execute(_id: string, params: any) {
-        const { text, namespace } = params;
+        const { text, namespace, occurredAt } = params;
         const ns = namespace || config.defaultNamespace;
 
         // Defence in depth: reject injection on write, not just on read.
@@ -66,7 +82,10 @@ export function registerStoreTool(api: any, client: MemWal, config: PluginConfig
         }
 
         try {
-          const result = await client.analyze(text.trim(), ns);
+          const result = await client.analyze(text.trim(), {
+            namespace: ns,
+            occurredAt,
+          });
 
           const factCount = result.facts?.length ?? 0;
           // Show first 3 extracted facts as confirmation, or raw text truncation as fallback

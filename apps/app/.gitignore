@@ -23,3 +23,9 @@ public/docs
 *.njsproj
 *.sln
 *.sw?
+
+# Playwright (e2e) — traces, screenshots, and reports from local runs.
+/e2e/.results
+/playwright-report
+/blob-report
+/playwright/.cache

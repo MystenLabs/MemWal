@@ -8,6 +8,218 @@ pub struct VectorDb {
     pool: PgPool,
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::VectorDb;
+
+    static VECTOR_SCHEMA_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    fn test_database_url() -> Option<String> {
+        std::env::var("DATABASE_URL").ok()
+    }
+
+    async fn test_db() -> Option<VectorDb> {
+        let database_url = test_database_url()?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&database_url)
+            .await
+            .expect("test database should be available");
+
+        // This test needs only the vector-entry schema. Avoid migrations for
+        // unrelated job tables, whose test setup runs concurrently in this
+        // binary and has a separate lock.
+        let _guard = VECTOR_SCHEMA_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        for migration in [
+            include_str!("../../migrations/001_init.sql"),
+            include_str!("../../migrations/002_add_namespace.sql"),
+            include_str!("../../migrations/003_rate_limiter.sql"),
+            include_str!("../../migrations/008_benchmark_plaintext.sql"),
+            include_str!("../../migrations/009_importance_signal.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+
+        Some(VectorDb { pool })
+    }
+
+    #[tokio::test]
+    async fn expired_blob_cleanup_is_namespace_scoped() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xexpired-cleanup-owner-{suffix}");
+        let blob_id = format!("expired-cleanup-blob-{suffix}");
+        let queried_namespace = format!("queried-{suffix}");
+        let other_namespace = format!("other-{suffix}");
+        let vector = vec![0.0; 1536];
+
+        db.insert_vector(
+            &format!("queried-row-{suffix}"),
+            &owner,
+            &queried_namespace,
+            &blob_id,
+            &vector,
+            1,
+            0.5,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("other-row-{suffix}"),
+            &owner,
+            &other_namespace,
+            &blob_id,
+            &vector,
+            1,
+            0.5,
+        )
+        .await
+        .unwrap();
+
+        // Models the reactive Walrus-404 cleanup triggered while reading
+        // `queried_namespace`. A reused ciphertext in another namespace must
+        // remain indexed.
+        assert_eq!(
+            db.delete_by_blob_id(&blob_id, &owner, &queried_namespace)
+                .await
+                .unwrap(),
+            1
+        );
+
+        let remaining: Vec<(String, String)> = sqlx::query_as(
+            "SELECT namespace, blob_id FROM vector_entries
+             WHERE owner = $1 ORDER BY namespace",
+        )
+        .bind(&owner)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            remaining,
+            vec![(other_namespace, blob_id)],
+            "the cleanup must not delete an identical blob_id in another namespace"
+        );
+    }
+
+    // ── find_account_by_owner (backs GET /api/accounts/{owner}/exists) ──
+    //
+    // `accounts` is populated by the v2-indexer from onchain
+    // `AccountCreated` events, not by this server. This test simulates
+    // that indexer write directly (a raw INSERT) rather than driving it
+    // through any server code path, since the indexer itself is a
+    // separate service/binary outside this crate.
+
+    #[tokio::test]
+    async fn find_account_by_owner_reflects_indexed_accounts_table() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xaccount-exists-owner-{suffix}");
+        let account_id = format!("account-{suffix}");
+
+        // No indexed row yet — an address that has never created a
+        // MemWalAccount (or whose AccountCreated event hasn't been
+        // indexed yet) must resolve to `None`.
+        assert_eq!(db.find_account_by_owner(&owner).await.unwrap(), None);
+
+        // Simulate the v2-indexer inserting a row after observing
+        // `AccountCreated` onchain.
+        sqlx::query("INSERT INTO accounts (account_id, owner) VALUES ($1, $2)")
+            .bind(&account_id)
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.find_account_by_owner(&owner).await.unwrap(),
+            Some(account_id.clone())
+        );
+
+        sqlx::query("DELETE FROM accounts WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    /// `find_account_by_owner` is an exact, case-sensitive match — it does
+    /// not itself lowercase the input. `accounts.owner` is always indexed
+    /// in lowercase hex by the v2-indexer (`hex::encode` in
+    /// `services/indexer/src/handler.rs`), so callers (the
+    /// `account_exists` route handler) are responsible for lowercasing the
+    /// caller-supplied address before calling this function. This test
+    /// pins down both halves of that contract: an uppercase/mixed-case
+    /// lookup against a lowercase-indexed row misses without
+    /// normalization, and hits once the same normalization the handler
+    /// applies (`to_ascii_lowercase`) is applied here too.
+    #[tokio::test]
+    async fn find_account_by_owner_is_case_sensitive_requiring_caller_normalization() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        // Indexed rows are always lowercase, mirroring the indexer's
+        // `hex::encode` output.
+        let owner_lower = format!("0xcase-owner-{suffix}").to_ascii_lowercase();
+        let owner_upper = owner_lower.to_ascii_uppercase();
+        let account_id = format!("account-case-{suffix}");
+
+        sqlx::query("INSERT INTO accounts (account_id, owner) VALUES ($1, $2)")
+            .bind(&account_id)
+            .bind(&owner_lower)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // Without normalization, an uppercase/mixed-case address for an
+        // account that DOES exist would false-negative — this is the bug
+        // the route handler's `to_ascii_lowercase()` fixes.
+        assert_eq!(
+            db.find_account_by_owner(&owner_upper).await.unwrap(),
+            None,
+            "find_account_by_owner must not silently case-fold internally \
+             (that would defeat the btree index via a query-side LOWER())"
+        );
+
+        // The handler's normalization step, applied here, must resolve to
+        // the same account as the canonical lowercase lookup.
+        assert_eq!(
+            db.find_account_by_owner(&owner_upper.to_ascii_lowercase())
+                .await
+                .unwrap(),
+            Some(account_id.clone())
+        );
+
+        sqlx::query("DELETE FROM accounts WHERE owner = $1")
+            .bind(&owner_lower)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+}
+
 fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
     if result.is_ok() {
         "ok"
@@ -56,14 +268,14 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
 
-        // ENG-1408: composite index on (owner, status, updated_at DESC) for bulk poll
+        // composite index on (owner, status, updated_at DESC) for bulk poll
         let migration_006 = include_str!("../../migrations/006_bulk_remember.sql");
         sqlx::raw_sql(migration_006)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
 
-        // MEM-35: collapse per-wallet Apalis queues to a single `wallet_jobs`
+        // collapse per-wallet Apalis queues to a single `wallet_jobs`
         // queue. Equivocation locks are no longer a practical concern on Sui
         // (per Will Bradley, Mysten, 2026-05-12); concurrent workers on one
         // wallet + retry handling is sufficient.
@@ -73,17 +285,17 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 007: {}", e)))?;
 
-        // ENG-1747: nullable `plaintext` column for benchmark-mode storage
+        // nullable `plaintext` column for benchmark-mode storage
         // (PlaintextEngine). NULL for all production rows — additive.
         // Renumbered from 007 → 008 during rebase onto dev to avoid collision
-        // with MEM-35's 007_collapse_wallet_queues.sql.
+        // with the wallet-queue collapse migration.
         let migration_008 = include_str!("../../migrations/008_benchmark_plaintext.sql");
         sqlx::raw_sql(migration_008)
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 008: {}", e)))?;
 
-        // MEM-54: importance signal column on vector_entries.
+        // importance signal column on vector_entries.
         let migration_009 = include_str!("../../migrations/009_importance_signal.sql");
         sqlx::raw_sql(migration_009)
             .execute(&pool)
@@ -370,12 +582,13 @@ impl VectorDb {
 
     /// Insert a vector entry (with blob size tracking for storage quota).
     ///
-    /// MEM-54: `importance` is the per-fact score set at extraction time
+    /// `importance` is the per-fact score set at extraction time
     /// (0.0–1.0, mapped from the extractor LLM's vital/standard/trivial
     /// bucket via `services::extractor::importance_for_bucket`). Stored
     /// on the new `importance` column (migration 009) so the recall
     /// `CompositeRanker` can weight it into the composite score when
     /// `scoring_weights.importance` is non-zero.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_vector(
         &self,
         id: &str,
@@ -430,6 +643,7 @@ impl VectorDb {
     ///
     /// BENCHMARK MODE IS NOT FOR PRODUCTION USE — storing plaintext
     /// memories defeats SEAL's confidentiality guarantee.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_vector_plaintext(
         &self,
         id: &str,
@@ -491,21 +705,25 @@ impl VectorDb {
     /// Returns `Ok(None)` when the row exists but `plaintext` is NULL (a
     /// production row in a benchmark DB — shouldn't happen, handled gracefully).
     ///
-    /// LOW-S1 / MED-1: scoped to `owner` so a recall hit on one user's
-    /// blob can't surface another user's plaintext. The upstream
-    /// `search_similar` already filters by owner; this is defence-in-depth
-    /// against a bug there.
+    /// Scoped to `owner` + `namespace` so a recall hit cannot surface a
+    /// different tenant's plaintext even when the same blob_id is reused.
+    /// The upstream `search_similar` already applies both filters; this is
+    /// defence-in-depth against a bug there.
     pub async fn fetch_plaintext_by_blob_id(
         &self,
         blob_id: &str,
         owner: &str,
+        namespace: &str,
     ) -> Result<Option<String>, AppError> {
         let started = std::time::Instant::now();
         let result: Result<Option<(Option<String>,)>, AppError> = sqlx::query_as(
-            "SELECT plaintext FROM vector_entries WHERE blob_id = $1 AND owner = $2 LIMIT 1",
+            "SELECT plaintext FROM vector_entries
+             WHERE blob_id = $1 AND owner = $2 AND namespace = $3
+             LIMIT 1",
         )
         .bind(blob_id)
         .bind(owner)
+        .bind(namespace)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to fetch plaintext: {}", e)));
@@ -536,21 +754,24 @@ impl VectorDb {
         // created_at, 009 for importance) so the row tuple types are
         // non-Option.
         let started = std::time::Instant::now();
-        let result: Result<Vec<(String, f64, chrono::DateTime<chrono::Utc>, f32)>, AppError> =
-            sqlx::query_as(
-                "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
+        #[allow(clippy::type_complexity)]
+        let result: Result<
+            Vec<(String, f64, chrono::DateTime<chrono::Utc>, f32)>,
+            AppError,
+        > = sqlx::query_as(
+            "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
              FROM vector_entries
              WHERE owner = $2 AND namespace = $3
              ORDER BY embedding <=> $1
              LIMIT $4",
-            )
-            .bind(embedding)
-            .bind(owner)
-            .bind(namespace)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
+        )
+        .bind(embedding)
+        .bind(owner)
+        .bind(namespace)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
         crate::observability::observe_db(
             "vector.search_similar",
             db_status(&result),
@@ -655,17 +876,27 @@ impl VectorDb {
         Ok(rows)
     }
 
-    /// Delete a vector entry by blob_id (used for expired blob cleanup).
+    /// Delete vector entries for one expired blob within an owner + namespace.
     /// Called reactively when Walrus returns 404 during blob download.
-    /// LOW-10: Requires owner to prevent cross-user blob deletion.
-    pub async fn delete_by_blob_id(&self, blob_id: &str, owner: &str) -> Result<u64, AppError> {
+    /// Both owner and namespace are required so cleanup cannot cross either
+    /// isolation boundary when ciphertext is reused in multiple rows.
+    pub async fn delete_by_blob_id(
+        &self,
+        blob_id: &str,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
-        let result = sqlx::query("DELETE FROM vector_entries WHERE blob_id = $1 AND owner = $2")
-            .bind(blob_id)
-            .bind(owner)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)));
+        let result = sqlx::query(
+            "DELETE FROM vector_entries
+             WHERE blob_id = $1 AND owner = $2 AND namespace = $3",
+        )
+        .bind(blob_id)
+        .bind(owner)
+        .bind(namespace)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)));
         crate::observability::observe_db(
             "vector.delete_by_blob_id",
             db_status(&result),
@@ -676,9 +907,10 @@ impl VectorDb {
         let rows = result.rows_affected();
         if rows > 0 {
             tracing::info!(
-                "deleted expired blob from DB: blob_id={}, owner={}, rows={}",
+                "deleted expired blob from DB: blob_id={}, owner={}, namespace={}, rows={}",
                 blob_id,
                 owner,
+                namespace,
                 rows
             );
         }
@@ -791,7 +1023,7 @@ impl VectorDb {
         Ok(rows)
     }
 
-    /// LOW-3 fix: Immediately remove a single stale/revoked delegate key from the cache.
+    /// Immediately remove a single stale/revoked delegate key from the cache.
     ///
     /// Called when `verify_delegate_key_onchain` returns `Err` for a cached entry,
     /// meaning the key has been revoked on-chain. Without this, every subsequent
@@ -807,7 +1039,7 @@ impl VectorDb {
         let rows = result.rows_affected();
         if rows > 0 {
             tracing::info!(
-                "LOW-3: evicted stale/revoked delegate key from cache: {}",
+                "evicted stale/revoked delegate key from cache: {}",
                 public_key_hex
             );
         }
@@ -820,7 +1052,7 @@ impl VectorDb {
 
     /// Acquire an advisory lock and get storage used within a single transaction.
     ///
-    /// MED-21 bugfix: using `pg_advisory_lock` with a connection pool causes deadlocks
+    /// Using `pg_advisory_lock` with a connection pool causes deadlocks
     /// because it's session-level. We use `pg_advisory_xact_lock` inside an explicit
     /// transaction so the lock is automatically released on commit/rollback.
     pub async fn get_storage_used_with_lock(
@@ -863,7 +1095,6 @@ impl VectorDb {
 
     /// Find an account by owner address (from indexed accounts table).
     /// Returns `Some(account_id)` if the owner has a registered account.
-    #[allow(dead_code)]
     pub async fn find_account_by_owner(&self, owner: &str) -> Result<Option<String>, AppError> {
         let result: Option<(String,)> =
             sqlx::query_as("SELECT account_id FROM accounts WHERE owner = $1")

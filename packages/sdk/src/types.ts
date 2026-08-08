@@ -76,6 +76,12 @@ export interface RecallOptions {
     maxDistance?: number;
 }
 
+/** Recommended object-style recall input — preferred over positional args. */
+export interface RecallParams extends RecallOptions {
+    /** Search query text. */
+    query: string;
+}
+
 /** Optional composite-scoring weights for recall ranking. */
 export interface ScoringWeights {
     /** Weight applied to semantic similarity (`1.0 - distance`). Default: 1. */
@@ -153,6 +159,30 @@ export interface RememberBulkResult {
 /** Result from embed() */
 export interface EmbedResult {
     vector: number[];
+}
+
+/** Options for analyze() / analyzeAndWait(). */
+export interface AnalyzeOptions {
+    /** Override the default namespace for this call. */
+    namespace?: string;
+    /**
+     * Optional valid-time timestamp for the analyzed input — when the
+     * conversation/event actually happened. When supplied, the server
+     * extractor uses it as a temporal anchor and resolves in-turn
+     * relative references ("last Friday", "yesterday") into absolute
+     * dates inside the resulting fact text (and the embedding) before
+     * encryption.
+     *
+     * Accepts a `Date` object (preferred) or an ISO-8601 / RFC-3339
+     * string. The wire format sent to the server is RFC-3339 UTC with
+     * a trailing `Z` (e.g. `"2023-05-25T17:50:00Z"`).
+     *
+     * Omit when no anchor is available — the server will not invent
+     * one (no `now()` fallback; silence is honest). The resolved date
+     * lives only inside the encrypted fact text + embedding; there is
+     * no server-readable metadata column for it (Architecture A).
+     */
+    occurredAt?: string | Date;
 }
 
 /** A fact extracted by analyze() and accepted for background storage. */
@@ -272,6 +302,19 @@ export interface RestoreResult {
     total: number;
     namespace: string;
     owner: string;
+    /**
+     * True when this restore is known-incomplete: either more on-chain
+     * blobs were missing locally than `limit` allowed this call to
+     * restore, or the sidecar's raw on-chain candidate fetch hit its own
+     * cap before this namespace's blobs were even filtered out of that
+     * set (WALM-319) — this can be `true` even when `total === 0`, since
+     * a cap hit elsewhere can starve this namespace's fetch entirely.
+     * Raising `limit` only helps with the first case.
+     *
+     * Relayers older than WALM-319 don't send this field at all; the SDK
+     * defaults it to `false` in that case rather than requiring it.
+     */
+    truncated: boolean;
 }
 
 // ============================================================
@@ -321,10 +364,14 @@ export interface MemWalManualConfig {
     embeddingApiBase?: string;
     /** Embedding model name (default: text-embedding-3-small) */
     embeddingModel?: string;
-    /** Walrus Memory contract package ID on Sui */
+    /** Immutable first-published package ID used by SEAL encryption and SessionKey */
     packageId: string;
+    /** Current package containing account::seal_approve (defaults to packageId) */
+    sealPolicyPackageId?: string;
     /** Walrus Memory account object ID (for SEAL seal_approve) */
     accountId: string;
+    /** AccountRegistry shared object ID passed to SEAL seal_approve */
+    registryId: string;
     /** Sui network (default: mainnet) */
     suiNetwork?: "testnet" | "mainnet";
     /**
@@ -361,10 +408,14 @@ export interface MemWalManualConfig {
 export interface WalletSigner {
     /** Wallet address (Sui address, 0x...) */
     address: string;
-    /** Sign and execute a transaction, returns the digest */
+    /** Sign and execute a transaction, returning either the legacy or v2 result shape */
     signAndExecuteTransaction: (input: {
         transaction: any;
-    }) => Promise<{ digest: string }>;
+    }) => Promise<
+        | { digest: string }
+        | { $kind: "Transaction"; Transaction: { digest: string }; FailedTransaction?: never }
+        | { $kind: "FailedTransaction"; Transaction?: never; FailedTransaction: { digest: string } }
+    >;
     /** Sign a personal message (for SEAL SessionKey) */
     signPersonalMessage: (input: {
         message: Uint8Array;
@@ -441,6 +492,8 @@ export interface CreateAccountResult {
 export interface AddDelegateKeyOpts extends AccountTxOpts {
     /** Walrus Memory account object ID */
     accountId: string;
+    /** AccountRegistry shared object ID */
+    registryId: string;
     /** Ed25519 public key (32 bytes Uint8Array or hex string) */
     publicKey: Uint8Array | string;
     /** Human-readable label (e.g. "MacBook Pro", "Production Server") */
@@ -461,6 +514,8 @@ export interface AddDelegateKeyResult {
 export interface RemoveDelegateKeyOpts extends AccountTxOpts {
     /** Walrus Memory account object ID */
     accountId: string;
+    /** AccountRegistry shared object ID */
+    registryId: string;
     /** Ed25519 public key to remove (32 bytes Uint8Array or hex string) */
     publicKey: Uint8Array | string;
 }

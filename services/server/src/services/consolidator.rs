@@ -9,7 +9,7 @@
 //! This module is intentionally empty in Phase 2. The trait, types, and
 //! implementations land when a real caller exists. Likely first uses:
 //!
-//! - **Mem0 v3-style `linked_memory_ids` resolution** — when ingesting a new
+//! - **`linked_memory_ids` resolution** — when ingesting a new
 //!   fact, fetch top-K semantically similar existing memories so the
 //!   extractor LLM can cross-reference them.
 //! - **Explicit supersede logic** — when a user contradicts earlier

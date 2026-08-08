@@ -1,5 +1,38 @@
 ---
 title: "Configuration"
+description: >-
+  Reference for all Walrus Memory SDK configuration shapes including MemWalConfig,
+  MemWalManualConfig, and WithMemWalOptions, with field descriptions and behavioral rules.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - configuration
+  - SDK
+  - MemWalConfig
+  - WithMemWalOptions
+goal:
+  description: Find the correct configuration object shape for your Walrus Memory integration path, understand each required and optional field, and apply the right defaults for your environment.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "What configuration options does the Walrus Memory SDK support?"
+  - "What is the difference between MemWalConfig and MemWalManualConfig?"
+  - "How do I configure withMemWal options for AI middleware?"
+answer: >-
+  The Walrus Memory SDK uses three configuration shapes: MemWalConfig for the standard
+  relayer-backed client, MemWalManualConfig for direct Sui signing and encryption, and
+  WithMemWalOptions for AI middleware. Each shape requires a delegate key and account ID,
+  with optional fields for server URL, namespace, SEAL, and Walrus settings.
 ---
 
 Use this page to pick the right config shape quickly.
@@ -15,7 +48,7 @@ Used by:
 | --- | --- | --- |
 | `key` | yes | Delegate private key in hex |
 | `accountId` | yes | MemWalAccount object ID on Sui |
-| `serverUrl` | no | Relayer URL. Default: `https://relayer.memwal.ai` |
+| `serverUrl` | no | Relayer URL. Default: `https://relayer.memory.walrus.xyz` |
 | `namespace` | no | Default memory boundary. Default: `"default"` |
 
 ## `MemWalManualConfig`
@@ -33,7 +66,8 @@ Core fields:
 | `embeddingApiKey` | yes | OpenAI/OpenRouter-compatible embedding key |
 | `embeddingApiBase` | no | Default: `https://api.openai.com/v1` |
 | `embeddingModel` | no | Default: `text-embedding-3-small` |
-| `packageId` | yes | MemWal package ID on Sui |
+| `packageId` | yes | Walrus Memory package ID on Sui |
+| `registryId` | yes | `AccountRegistry` shared object ID on Sui |
 | `accountId` | yes | `MemWalAccount` object ID |
 | `namespace` | no | Default namespace |
 
@@ -79,3 +113,9 @@ Walrus and network fields:
 - Relayer/sidecar SEAL defaults use Mysten's initial committee aggregator on `testnet`. `mainnet` keeps the legacy independent key server pair until an official mainnet committee aggregator is available.
 - `MemWalManual` keeps the legacy independent testnet default for compatibility. Pass `sealServerConfigs` to use a committee aggregator manually.
 - Use `sealServerConfigs` to override the built-in default with another committee by providing `objectId`, `weight`, and `aggregatorUrl`.
+
+## Relayer configuration
+
+The fields above configure the client SDKs. If you run your own relayer, its behavior is configured through environment variables rather than these config objects. One option to be aware of is the Sui RPC transport, `SUI_GRPC_URL`. Set this to a Sui gRPC fullnode URL to route the relayer's Sui calls through gRPC instead of JSON-RPC. It covers both the write path (Walrus register and certify, Seal, and Enoki build) and the blob query and restore path. It is empty by default, which keeps JSON-RPC. This option exists to migrate ahead of the Sui JSON-RPC sunset in July 2026.
+
+For the full list of relayer settings, see the [Environment Variables](/reference/environment-variables) reference and the [Self-Hosting](/relayer/self-hosting) guide.

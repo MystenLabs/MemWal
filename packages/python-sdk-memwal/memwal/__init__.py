@@ -13,13 +13,13 @@ Quick start::
     )
 
     # Async
-    result = await memwal.remember("I love coffee")
-    matches = await memwal.recall("beverage preferences")
+    result = await memwal.remember_and_wait("I love coffee")
+    matches = await memwal.recall(RecallParams(query="beverage preferences"))
 
     # Sync wrapper
     from memwal import MemWalSync
     client = MemWalSync.create(key="...", account_id="0x...")
-    result = client.remember("I love coffee")
+    result = client.remember_and_wait("I love coffee")
 """
 
 from .client import (
@@ -46,6 +46,7 @@ from .types import (
     RecallManualOptions,
     RecallManualResult,
     RecallMemory,
+    RecallParams,
     RecallResult,
     RememberAcceptedResult,
     RememberBulkAcceptedResult,
@@ -98,6 +99,7 @@ __all__ = [
     "RememberBulkStatusResult",
     "RememberBulkItemResult",
     "RememberBulkResult",
+    "RecallParams",
     "RecallResult",
     "RecallMemory",
     "EmbedResult",
@@ -114,4 +116,4 @@ __all__ = [
     "RecallManualResult",
 ]
 
-__version__ = "0.1.2"
+__version__ = "0.1.6"

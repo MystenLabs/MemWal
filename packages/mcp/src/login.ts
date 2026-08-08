@@ -5,10 +5,12 @@
  *   2. Start an HTTP listener on a random localhost port.
  *   3. Open the user's browser at the configured web URL with the public
  *      key + callback port in the query string.
- *   4. Web page asks user to connect Sui wallet → signs `add_delegate_key`
- *      on-chain → POSTs the resulting {accountId, walletAddress, packageId,
- *      txDigest, ...} to `http://localhost:<port>/callback`.
- *   5. Listener receives the callback, returns 200 + a friendly success
+ *   4. Web page proves the exact state/public-key tuple is backed by this
+ *      listener via `POST /preflight` before it offers an approval button.
+ *   5. User connects a Sui wallet → signs `add_delegate_key` on-chain → the
+ *      page POSTs {accountId, walletAddress, packageId, txDigest, ...} to
+ *      `http://localhost:<port>/callback`.
+ *   6. Listener receives the callback, returns 200 + a friendly success
  *      page, then shuts down. We resolve with `MemWalCredentials`.
  *
  * Timeout default is 5 minutes — long enough for a slow wallet popup but
@@ -46,8 +48,8 @@ export interface LoginOptions {
 }
 
 const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl">> & { label: string } = {
-    webUrl: process.env.MEMWAL_WEB_URL ?? "https://memwal.ai",
-    relayerUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memwal.ai",
+    webUrl: process.env.MEMWAL_WEB_URL ?? "https://memory.walrus.xyz",
+    relayerUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
     label: process.env.MEMWAL_CLIENT_LABEL ?? "Walrus Memory MCP",
     timeoutMs: 5 * 60_000,
     openBrowser: true,
@@ -68,6 +70,12 @@ interface CallbackPayload {
     label?: string;
 }
 
+interface PreflightPayload {
+    state: string;
+    publicKey: string;
+    relayer: string;
+}
+
 function isHexAddress(s: unknown): s is string {
     return typeof s === "string" && /^0x[0-9a-fA-F]{64}$/.test(s);
 }
@@ -82,6 +90,19 @@ function isCallback(obj: unknown): obj is CallbackPayload {
         typeof o.state === "string" &&
         // 32 random bytes → 64 hex chars. Constant width — anything else is wrong.
         /^[0-9a-f]{64}$/.test(o.state)
+    );
+}
+
+function isPreflight(obj: unknown): obj is PreflightPayload {
+    if (!obj || typeof obj !== "object") return false;
+    const o = obj as Record<string, unknown>;
+    return (
+        typeof o.state === "string" &&
+        /^[0-9a-f]{64}$/.test(o.state) &&
+        typeof o.publicKey === "string" &&
+        /^[0-9a-fA-F]{64}$/.test(o.publicKey) &&
+        typeof o.relayer === "string" &&
+        o.relayer.length > 0
     );
 }
 
@@ -100,10 +121,18 @@ function stateEquals(a: string, b: string): boolean {
 }
 
 /**
- * Strip trailing slashes so `https://memwal.ai/` and `https://memwal.ai`
+ * Strip trailing slashes so `https://memory.walrus.xyz/` and `https://memory.walrus.xyz`
  * compare equal. The `Origin` request header never carries a trailing slash.
  */
 function normalizeOrigin(url: string): string {
+    try {
+        return new URL(url).origin;
+    } catch {
+        return url.replace(/\/+$/, "");
+    }
+}
+
+function normalizeUrl(url: string): string {
     return url.replace(/\/+$/, "");
 }
 
@@ -191,7 +220,15 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
         `&delegateAddress=${encodeURIComponent(keypair.suiAddress)}` +
         `&label=${encodeURIComponent(cfg.label)}` +
         `&relayer=${encodeURIComponent(cfg.relayerUrl)}` +
-        `&state=${stateToken}`;
+        // NOTE: the query param is named `connectState`, NOT `state`. `state`
+        // is a reserved OAuth 2.0 response parameter — when the consent page
+        // kicks off Enoki/Google sign-in it reuses the current page URL as the
+        // OAuth `redirect_uri`, and Google rejects any redirect_uri that
+        // carries a reserved param (`Access blocked: invalid_request — Invalid
+        // redirect_uri contains reserved response param state`). See WALM-86.
+        // The callback POST *body* field stays `state` (localhost POST, never
+        // part of a redirect_uri, so no collision there).
+        `&connectState=${stateToken}`;
 
     note(`Opening browser to authorize this MCP client...`);
     note(`If your browser doesn't open, visit: ${connectUrl}`);
@@ -207,6 +244,11 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
 
     let creds: MemWalCredentials | null = null;
     let error: Error | null = null;
+    // The callback is accepted only after the dashboard has proved that it
+    // knows this listener's exact state/public-key/relayer tuple. Keeping this
+    // server-side prevents callers from bypassing the consent-page preflight
+    // and posting a valid-looking callback directly.
+    let preflightVerified = false;
 
     const done = new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
@@ -226,6 +268,18 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
             res.setHeader("access-control-allow-headers", "content-type");
             res.setHeader("vary", "origin");
             if (req.method === "OPTIONS") {
+                // Chrome Private Network Access (PNA): a request from a public
+                // HTTPS page (memory.walrus.xyz) to a private/loopback address
+                // (127.0.0.1) sends `Access-Control-Request-Private-Network: true`
+                // on the preflight and REQUIRES the response to echo
+                // `Access-Control-Allow-Private-Network: true` — otherwise the
+                // browser blocks the real POST and our `fetch` throws, so the
+                // callback never lands here (the on-chain tx still succeeds, but
+                // creds can't be saved locally). Only grant it for the preflight
+                // that actually asks for it.
+                if (req.headers["access-control-request-private-network"] === "true") {
+                    res.setHeader("access-control-allow-private-network", "true");
+                }
                 res.writeHead(204);
                 res.end();
                 return;
@@ -243,7 +297,10 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
             }
 
             const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
-            if (url.pathname !== "/callback" || req.method !== "POST") {
+            if (
+                req.method !== "POST" ||
+                (url.pathname !== "/preflight" && url.pathname !== "/callback")
+            ) {
                 res.writeHead(404, { "content-type": "text/plain" });
                 res.end("Not found");
                 return;
@@ -274,6 +331,47 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
             try {
                 const body = await readBody(req);
                 const parsed = JSON.parse(body);
+                if (url.pathname === "/preflight") {
+                    if (!isPreflight(parsed)) {
+                        res.writeHead(400, { "content-type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "invalid preflight payload" }));
+                        return;
+                    }
+                    const valid =
+                        stateEquals(parsed.state, stateToken) &&
+                        stateEquals(parsed.publicKey.toLowerCase(), keypair.publicKeyHex.toLowerCase()) &&
+                        normalizeUrl(parsed.relayer) === normalizeUrl(cfg.relayerUrl);
+                    if (!valid) {
+                        log.warn("login.preflight_mismatch", {});
+                        res.writeHead(403, { "content-type": "application/json" });
+                        res.end(JSON.stringify({ ok: false, error: "preflight mismatch" }));
+                        return;
+                    }
+                    preflightVerified = true;
+                    res.writeHead(200, {
+                        "content-type": "application/json",
+                        "cache-control": "no-store",
+                    });
+                    res.end(
+                        JSON.stringify({
+                            ok: true,
+                            publicKey: keypair.publicKeyHex,
+                            label: cfg.label,
+                            relayer: cfg.relayerUrl,
+                        }),
+                    );
+                    return;
+                }
+                if (!preflightVerified) {
+                    log.warn("login.callback_before_preflight", {});
+                    res.writeHead(428, { "content-type": "text/html" });
+                    res.end(
+                        FAIL_HTML_TEMPLATE(
+                            "Local MCP bridge verification is required before the callback.",
+                        ),
+                    );
+                    return;
+                }
                 if (!isCallback(parsed)) {
                     res.writeHead(400, { "content-type": "text/html" });
                     res.end(FAIL_HTML_TEMPLATE("Callback payload missing required fields."));
@@ -285,6 +383,10 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
                     res.end(FAIL_HTML_TEMPLATE("Callback state mismatch — refusing to save."));
                     return;
                 }
+                // Consume the verified preflight before saving. The server is
+                // closing after success, but this also rejects a duplicate
+                // callback that races during the response-flush window.
+                preflightVerified = false;
 
                 creds = {
                     delegatePrivateKey: keypair.privateKeyHex,
@@ -294,7 +396,10 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
                     accountId: parsed.accountId,
                     packageId: parsed.packageId,
                     relayerUrl: cfg.relayerUrl,
-                    label: parsed.label ?? cfg.label,
+                    // The browser callback must not be able to rename the
+                    // delegate locally; use the same canonical label that the
+                    // listener returned during verified preflight.
+                    label: cfg.label,
                     createdAt: new Date().toISOString(),
                     version: 1,
                 };

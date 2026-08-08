@@ -7,10 +7,9 @@
 
 import { useState, useCallback, useMemo, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { LogOut } from 'lucide-react'
+import { LayoutDashboard, LogOut } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
-import { githubGist } from 'react-syntax-highlighter/dist/esm/styles/hljs'
 
 SyntaxHighlighter.registerLanguage('javascript', js)
 import {
@@ -24,8 +23,49 @@ import { MemWal } from '@mysten-incubation/memwal'
 import type { RememberJobStatus } from '@mysten-incubation/memwal'
 import { MemWalManual } from '@mysten-incubation/memwal/manual'
 import { useDelegateKey } from '../App'
+import { Card } from '../components/Card'
 import { config } from '../config'
-import memwalLogo from '../assets/memwal-logo.svg'
+import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+
+const walrusCodeTheme = {
+    hljs: {
+        color: '#faf8f5',
+        background: '#050505',
+    },
+    'hljs-keyword': {
+        color: '#cab1ff',
+    },
+    'hljs-built_in': {
+        color: '#faf8f5',
+    },
+    'hljs-title': {
+        color: '#faf8f5',
+    },
+    'hljs-attr': {
+        color: '#e8ff75',
+    },
+    'hljs-property': {
+        color: '#e8ff75',
+    },
+    'hljs-variable': {
+        color: '#faf8f5',
+    },
+    'hljs-string': {
+        color: '#e8ff75',
+    },
+    'hljs-comment': {
+        color: '#8f9294',
+    },
+    'hljs-number': {
+        color: '#e8ff75',
+    },
+    'hljs-literal': {
+        color: '#e8ff75',
+    },
+    'hljs-params': {
+        color: '#faf8f5',
+    },
+}
 
 // ============================================================
 // Demo Step — reusable step card
@@ -45,6 +85,16 @@ interface DemoStepProps {
     children?: ReactNode
 }
 
+function trackPlaygroundOperation(
+    operation: string,
+    status: 'start' | 'complete' | 'failed',
+    params: Record<string, string | number | boolean> = {},
+) {
+    trackEvent(`playground_operation_${status}`, {
+        operation,
+        ...params,
+    })
+}
 
 function DemoStep({
     number,
@@ -61,30 +111,26 @@ function DemoStep({
 }: DemoStepProps) {
     const hasOutput = result || error
     return (
-        <div className="card demo-step">
-            <div className="card-header">
-                <div className="demo-step-header-row">
-                    <div className={`demo-step-badge${highlight ? ' demo-step-badge--highlight' : ''}`}>
-                        {number}
-                    </div>
-                    <div>
-                        <div className="card-title">{title}</div>
-                        <div className="card-subtitle">{description}</div>
-                    </div>
-                </div>
+        <Card
+            className="demo-step"
+            leading={<div className={`demo-step-badge${highlight ? ' demo-step-badge--highlight' : ''}`}>{number}</div>}
+            leadingRowClassName="demo-step-header-row"
+            title={title}
+            subtitle={description}
+            action={
                 <button
-                    className="btn btn-primary btn-sm"
+                    className={`btn btn-primary btn-sm${loading ? ' demo-run-button--loading' : ''}`}
                     onClick={onRun}
                     disabled={loading}
-                    style={{ minWidth: 80 }}
                 >
                     {loading ? (
-                        <span className="spinner" style={{ width: 14, height: 14 }} />
+                        <span className="spinner demo-button-spinner" />
                     ) : (
-                        '▶ run'
+                        'Run'
                     )}
                 </button>
-            </div>
+            }
+        >
 
             {/* Optional inputs (injected via children) */}
             {children}
@@ -93,7 +139,7 @@ function DemoStep({
             <div className={hasOutput ? 'demo-code-block--spaced' : ''}>
                 <SyntaxHighlighter
                     language="javascript"
-                    style={githubGist}
+                    style={walrusCodeTheme}
                     className="demo-code-block"
                     customStyle={{ margin: 0 }}
                 >
@@ -116,7 +162,7 @@ function DemoStep({
                     <pre className="demo-error-pre">{error}</pre>
                 </div>
             )}
-        </div>
+        </Card>
     )
 }
 
@@ -131,9 +177,7 @@ export default function Playground() {
 
     const address = currentAccount?.address || ''
     const serverUrl = config.memwalServerUrl
-    const keyPreview = delegateKey
-        ? `${delegateKey.slice(0, 8)}...${delegateKey.slice(-8)}`
-        : '...'
+    const keyStatus = delegateKey ? 'configured' : 'missing'
 
     // Wallet signing hooks (for full client-side mode)
     const { mutateAsync: signAndExecuteTransaction } = useSponsoredTransaction()
@@ -210,6 +254,7 @@ export default function Playground() {
 
 
     const handleLogout = useCallback(async () => {
+        trackEvent('sign_out', { location: 'playground' })
         clearDelegateKeys()
         await disconnect()
     }, [clearDelegateKeys, disconnect])
@@ -218,14 +263,17 @@ export default function Playground() {
 
     const runHealth = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('health', 'start')
         setHealthLoading(true)
         setHealthResult(null)
         setHealthError(null)
         try {
             const data = await memwal.health()
             setHealthResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('health', 'complete')
         } catch (err: unknown) {
             setHealthError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('health', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setHealthLoading(false)
         }
@@ -233,6 +281,7 @@ export default function Playground() {
 
     const runRemember = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('remember', 'start')
         setRememberLoading(true)
         setRememberResult(null)
         setRememberError(null)
@@ -347,6 +396,7 @@ export default function Playground() {
                     `// 3. terminal at T+${elapsed()}s\n` +
                     JSON.stringify(terminal, null, 2)
             )
+            trackPlaygroundOperation('remember', 'complete')
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err)
             const jobId = (err as { jobId?: string } | null)?.jobId
@@ -360,6 +410,7 @@ export default function Playground() {
             } else {
                 setRememberError(msg)
             }
+            trackPlaygroundOperation('remember', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setRememberLoading(false)
         }
@@ -367,14 +418,17 @@ export default function Playground() {
 
     const runRecall = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('recall', 'start')
         setRecallLoading(true)
         setRecallResult(null)
         setRecallError(null)
         try {
             const data = await memwal.recall(recallQuery, 5)
             setRecallResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('recall', 'complete')
         } catch (err: unknown) {
             setRecallError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('recall', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setRecallLoading(false)
         }
@@ -382,14 +436,17 @@ export default function Playground() {
 
     const runAnalyze = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('analyze', 'start')
         setAnalyzeLoading(true)
         setAnalyzeResult(null)
         setAnalyzeError(null)
         try {
             const data = await memwal.analyze(analyzeText)
             setAnalyzeResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('analyze', 'complete')
         } catch (err: unknown) {
             setAnalyzeError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('analyze', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setAnalyzeLoading(false)
         }
@@ -397,14 +454,17 @@ export default function Playground() {
 
     const runRestore = useCallback(async () => {
         if (!memwal) return
+        trackPlaygroundOperation('restore', 'start')
         setRestoreLoading(true)
         setRestoreResult(null)
         setRestoreError(null)
         try {
             const data = await memwal.restore(namespace || 'default')
             setRestoreResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('restore', 'complete')
         } catch (err: unknown) {
             setRestoreError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('restore', 'failed', { error_type: getAnalyticsErrorType(err) })
         } finally {
             setRestoreLoading(false)
         }
@@ -414,8 +474,10 @@ export default function Playground() {
         if (!memwal) return
         if (!askLlmKey.trim()) {
             setAskError('Please enter your LLM API key (OpenAI or OpenRouter)')
+            trackPlaygroundOperation('ask_ai', 'failed', { error_type: 'missing_llm_key' })
             return
         }
+        trackPlaygroundOperation('ask_ai', 'start', { llm_provider: askLlmProvider })
         setAskLoading(true)
         setAskResult(null)
         setAskError(null)
@@ -469,9 +531,17 @@ export default function Playground() {
 
             setAskPhase('')
             setAskResult({ answer, memories, systemPrompt })
+            trackPlaygroundOperation('ask_ai', 'complete', {
+                llm_provider: askLlmProvider,
+                memories_count: memories.length,
+            })
         } catch (err: unknown) {
             setAskPhase('')
             setAskError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('ask_ai', 'failed', {
+                llm_provider: askLlmProvider,
+                error_type: getAnalyticsErrorType(err),
+            })
         } finally {
             setAskLoading(false)
         }
@@ -498,16 +568,18 @@ export default function Playground() {
                 embeddingApiBase,
                 packageId: config.memwalPackageId,
                 accountId: accountObjectId || '',
+                registryId: config.memwalRegistryId,
                 suiNetwork: config.suiNetwork,
                 ...(config.sealKeyServers.length > 0 ? { sealKeyServers: [...config.sealKeyServers] } : {}),
             })
         } catch {
             return null
         }
-    }, [delegateKey, serverUrl, address, signAndExecuteTransaction, signPersonalMessage, suiClient, askLlmKey, askLlmProvider])
+    }, [delegateKey, serverUrl, address, signAndExecuteTransaction, signPersonalMessage, suiClient, askLlmKey, askLlmProvider, accountObjectId])
 
     const runFullRemember = useCallback(async () => {
         if (!memwalManual) return
+        trackPlaygroundOperation('manual_remember', 'start', { llm_provider: askLlmProvider })
         setFullRememberLoading(true)
         setFullRememberResult(null)
         setFullRememberError(null)
@@ -517,16 +589,22 @@ export default function Playground() {
             const data = await memwalManual.rememberManual(fullRememberText)
             setFullRememberPhase('')
             setFullRememberResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('manual_remember', 'complete', { llm_provider: askLlmProvider })
         } catch (err: unknown) {
             setFullRememberPhase('')
             setFullRememberError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('manual_remember', 'failed', {
+                llm_provider: askLlmProvider,
+                error_type: getAnalyticsErrorType(err),
+            })
         } finally {
             setFullRememberLoading(false)
         }
-    }, [memwalManual, fullRememberText])
+    }, [memwalManual, fullRememberText, askLlmProvider])
 
     const runFullRecall = useCallback(async () => {
         if (!memwalManual) return
+        trackPlaygroundOperation('manual_recall', 'start', { llm_provider: askLlmProvider })
         setFullRecallLoading(true)
         setFullRecallResult(null)
         setFullRecallError(null)
@@ -536,13 +614,18 @@ export default function Playground() {
 
             setFullRecallPhase('')
             setFullRecallResult(JSON.stringify(data, null, 2))
+            trackPlaygroundOperation('manual_recall', 'complete', { llm_provider: askLlmProvider })
         } catch (err: unknown) {
             setFullRecallPhase('')
             setFullRecallError(err instanceof Error ? err.message : String(err))
+            trackPlaygroundOperation('manual_recall', 'failed', {
+                llm_provider: askLlmProvider,
+                error_type: getAnalyticsErrorType(err),
+            })
         } finally {
             setFullRecallLoading(false)
         }
-    }, [memwalManual, fullRecallQuery])
+    }, [memwalManual, fullRecallQuery, askLlmProvider])
 
 
 
@@ -550,14 +633,15 @@ export default function Playground() {
 
     return (
         <>
-            <nav className="nav">
+            <nav className="nav playground-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img src={memwalLogo} alt="Walrus Memory" style={{ height: 22 }} />
+                        <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
                     </Link>
                     <div className="nav-user">
-                        <Link to="/dashboard" className="demo-nav-back">
-                            ← Dashboard
+                        <Link to="/dashboard" className="demo-nav-back" aria-label="Dashboard">
+                            <LayoutDashboard className="demo-nav-icon" size={18} aria-hidden="true" />
+                            <span className="demo-nav-label">Dashboard</span>
                         </Link>
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
@@ -566,22 +650,21 @@ export default function Playground() {
                             className="lp-nav-cta"
                             onClick={handleLogout}
                         >
-                            <LogOut size={14} /> sign out
+                            Sign out <LogOut size={14} />
                         </button>
                     </div>
                 </div>
             </nav>
 
-            <div className="container dashboard">
+            <div className="container dashboard playground-dashboard">
                 {/* Header */}
                 <div className="dashboard-header">
-                    <h2>interactive demo</h2>
+                    <h2>Developer Playground</h2>
                     <p>
-                        try each Walrus Memory SDK operation live. click{' '}
-                        <strong>▶ run</strong> to execute against your server
-                        using <code>@mysten-incubation/memwal</code>.
+                        Test Walrus Memory SDK operations with your current server and credentials.
+                        Run steps against your server using <code>@mysten-incubation/memwal</code>.
                         {config.docsUrl && (
-                            <> See the <a href={config.docsUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#000', fontWeight: 600 }}>documentation</a> for full API reference.</>
+                            <> See the <a className="demo-doc-link" href={config.docsUrl} target="_blank" rel="noopener noreferrer" onClick={() => trackEvent('outbound_link_click', { link: 'docs', location: 'playground' })}>documentation</a> for full API reference.</>
                         )}
                     </p>
                 </div>
@@ -592,19 +675,19 @@ export default function Playground() {
                         server: <span className="demo-tag-value demo-tag-value--server">{serverUrl}</span>
                     </div>
                     <div className="demo-server-tag">
-                        key: <span className="demo-tag-value demo-tag-value--key">{keyPreview}</span>
+                        key: <span className="demo-tag-value demo-tag-value--key">{keyStatus}</span>
                     </div>
                     <div className="demo-server-tag">
                         SDK: <span className="demo-tag-value demo-tag-value--sdk">@mysten-incubation/memwal</span>
                     </div>
-                    <div className="demo-server-tag" style={{ padding: 0, display: 'flex', alignItems: 'center' }}>
-                        <span style={{ padding: '8px 0 8px 16px', whiteSpace: 'nowrap' }}>namespace:</span>
+                    <div className="demo-server-tag demo-server-tag--namespace">
+                        <span>namespace:</span>
                         <input
+                            className="demo-namespace-input"
                             value={namespace}
                             onChange={(e) => setNamespace(e.target.value)}
                             placeholder="default"
                             size={Math.max(namespace.length, 7)}
-                            style={{ padding: '8px 12px 8px 6px', fontSize: '0.8rem', fontFamily: 'var(--font-mono)', background: 'transparent', border: 'none', outline: 'none', color: 'var(--text-primary)', fontWeight: 600, width: 'auto', minWidth: 0 }}
                         />
                     </div>
                 </div>
@@ -617,7 +700,7 @@ export default function Playground() {
                     code={`import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
-  key: "${keyPreview}",
+  key: delegateKeyHex,
   accountId: "${accountObjectId?.slice(0, 10)}...",
   serverUrl: "${serverUrl}",
   namespace: "${namespace || 'default'}",
@@ -658,14 +741,13 @@ while (true) {
                     error={rememberError}
                     loading={rememberLoading}
                 >
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>memory text:</label>
                         <textarea
                             className="input"
                             rows={3}
                             value={rememberText}
                             onChange={(e) => setRememberText(e.target.value)}
-                            style={{ resize: 'vertical' }}
                         />
                     </div>
                 </DemoStep>
@@ -685,7 +767,7 @@ while (true) {
                     error={recallError}
                     loading={recallLoading}
                 >
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>search query:</label>
                         <input
                             className="input"
@@ -711,14 +793,13 @@ while (true) {
                     error={analyzeError}
                     loading={analyzeLoading}
                 >
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>conversation text to analyze:</label>
                         <textarea
                             className="input"
                             rows={3}
                             value={analyzeText}
                             onChange={(e) => setAnalyzeText(e.target.value)}
-                            style={{ resize: 'vertical' }}
                         />
                     </div>
                 </DemoStep>
@@ -742,34 +823,30 @@ const result = await memwal.restore("${namespace || 'default'}")
                 />
 
                 {/* Step 5: Configure LLM API Key */}
-                <div className="card demo-step">
-                    <div className="card-header">
-                        <div className="demo-step-header-row">
-                            <div className={`demo-step-badge${askLlmKey.trim() ? ' demo-step-badge--highlight' : ''}`}>6</div>
-                            <div>
-                                <div className="card-title">configure your LLM</div>
-                                <div className="card-subtitle">
-                                    Walrus Memory is just the memory layer — you bring your own LLM
-                                </div>
-                            </div>
-                        </div>
-                        {askLlmKey.trim() && (
-                            <span style={{ fontSize: '0.78rem', color: 'var(--success)', fontWeight: 500 }}>
-                                ✓ ready
+                <Card
+                    className="demo-step"
+                    leading={<div className={`demo-step-badge${askLlmKey.trim() ? ' demo-step-badge--highlight' : ''}`}>6</div>}
+                    leadingRowClassName="demo-step-header-row"
+                    title="configure your LLM"
+                    subtitle="Walrus Memory is just the memory layer — you bring your own LLM"
+                    action={
+                        askLlmKey.trim() && (
+                            <span className="demo-ready-pill">
+                                Ready
                             </span>
-                        )}
-                    </div>
+                        )
+                    }
+                >
 
                     <div className="demo-info-panel">
                         <div className="demo-info-label">
                             your LLM API key (not stored, client-side only)
                         </div>
-                        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                        <div className="demo-llm-controls">
                             <select
                                 className="input"
                                 value={askLlmProvider}
                                 onChange={(e) => setAskLlmProvider(e.target.value as 'openai' | 'openrouter')}
-                                style={{ width: 140, flexShrink: 0 }}
                             >
                                 <option value="openai">OpenAI</option>
                                 <option value="openrouter">OpenRouter</option>
@@ -780,15 +857,14 @@ const result = await memwal.restore("${namespace || 'default'}")
                                 value={askLlmKey}
                                 onChange={(e) => setAskLlmKey(e.target.value)}
                                 placeholder={askLlmProvider === 'openai' ? 'sk-...' : 'sk-or-v1-...'}
-                                style={{ flex: 1 }}
                             />
                         </div>
-                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        <div className="demo-field-note">
                             required for steps 7–9. your key stays in this browser tab — never sent to Walrus Memory.
                         </div>
                     </div>
 
-                    <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+                    <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`// Walrus Memory doesn't include an LLM — you choose your own.
 // steps 7–9 use this key for:
 //   • ask AI: recalls memories → injects into your LLM prompt
@@ -796,35 +872,32 @@ const result = await memwal.restore("${namespace || 'default'}")
 //
 // your key is never sent to Walrus Memory servers.`}
                     </SyntaxHighlighter>
-                </div>
+                </Card>
 
                 {/* Step 6: Ask AI — true middleware pattern */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
-                    <div className="card-header">
-                        <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">7</div>
-                            <div>
-                                <div className="card-title">ask AI (with memory)</div>
-                                <div className="card-subtitle">
-                                    your LLM key + Walrus Memory layer — like Supermemory
-                                </div>
-                            </div>
-                        </div>
+                <Card
+                    className="demo-step"
+                    style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
+                    leading={<div className="demo-step-badge demo-step-badge--highlight">7</div>}
+                    leadingRowClassName="demo-step-header-row"
+                    title="ask AI (with memory)"
+                    subtitle="your LLM key + Walrus Memory layer — like Supermemory"
+                    action={
                         <button
-                            className="btn btn-primary btn-sm"
+                            className={`btn btn-primary btn-sm${askLoading ? ' demo-run-button--loading' : ''}`}
                             onClick={runAsk}
                             disabled={askLoading || !askLlmKey.trim()}
-                            style={{ minWidth: 80 }}
                         >
                             {askLoading ? (
-                                <span className="spinner" style={{ width: 14, height: 14 }} />
+                                <span className="spinner demo-button-spinner" />
                             ) : (
-                                '▶ ask'
+                                'Ask'
                             )}
                         </button>
-                    </div>
+                    }
+                >
 
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>your question:</label>
                         <input
                             className="input"
@@ -835,7 +908,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                     </div>
 
                     <div className={askResult || askError || askPhase ? 'demo-code-block--spaced' : ''}>
-                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+                        <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`import { withMemWal } from "@mysten-incubation/memwal/ai"
 import { openai } from "@ai-sdk/openai"
 import { generateText } from "ai"
@@ -859,7 +932,7 @@ const { text } = await generateText({
                     {/* Loading phase */}
                     {askPhase && (
                         <div className="demo-phase-indicator">
-                            <span className="spinner" style={{ width: 14, height: 14 }} />
+                            <span className="spinner demo-button-spinner" />
                             {askPhase}
                         </div>
                     )}
@@ -868,7 +941,7 @@ const { text } = await generateText({
                         <>
                             {/* AI Answer */}
                             <div className="demo-ai-panel">
-                                <div className="demo-info-label" style={{ marginBottom: 12 }}>
+                                <div className="demo-info-label">
                                     AI response (your LLM + Walrus Memory)
                                 </div>
                                 <div className="demo-ai-answer">
@@ -877,16 +950,16 @@ const { text } = await generateText({
                             </div>
 
                             {/* Memories Used */}
-                            <div className="demo-result-panel" style={{ marginBottom: 12 }}>
-                                <div className="demo-result-label" style={{ marginBottom: 10 }}>
+                            <div className="demo-result-panel">
+                                <div className="demo-result-label">
                                     {askResult.memories.length} memories injected as context
                                 </div>
                                 {askResult.memories.map((m, i) => (
                                     <div key={i} className="demo-memory-item">
-                                        <span style={{ color: 'var(--success)', flexShrink: 0 }}>
+                                        <span className="demo-memory-score">
                                             {((1 - m.distance) * 100).toFixed(0)}%
                                         </span>
-                                        <span style={{ color: 'var(--text-secondary)' }}>
+                                        <span>
                                             {m.text}
                                         </span>
                                     </div>
@@ -895,15 +968,10 @@ const { text } = await generateText({
 
                             {/* System Prompt Preview */}
                             <details>
-                                <summary style={{
-                                    fontSize: '0.72rem',
-                                    color: 'var(--text-muted)',
-                                    cursor: 'pointer',
-                                    marginBottom: 8,
-                                }}>
+                                <summary className="demo-details-summary">
                                     view system prompt sent to LLM
                                 </summary>
-                                <pre className="demo-code-block" style={{ fontSize: '0.72rem', lineHeight: 1.5, color: 'var(--text-muted)' }}>
+                                <pre className="demo-code-block demo-system-prompt">
                                     {askResult.systemPrompt}
                                 </pre>
                             </details>
@@ -915,59 +983,50 @@ const { text } = await generateText({
                             <pre className="demo-error-pre">{askError}</pre>
                         </div>
                     )}
+                </Card>
+
+                {/* Manual / Hybrid mode */}
+                <div className="demo-mode-divider">
+                    manual mode — client handles embedding & encryption, server handles storage.
+                    <br />
+                    your data never leaves your browser unencrypted. requires an LLM API key (step 6).
                 </div>
 
-
-
-                {/* Divider — Manual / Hybrid mode */}
-                <div style={{ margin: '40px 0 32px', textAlign: 'center' }}>
-                    <hr style={{ border: 'none', borderTop: '2px dashed var(--border-light)', margin: '0 0 16px' }} />
-                    <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                        <strong style={{ color: 'var(--text-primary)' }}>manual mode</strong> — client handles embedding & encryption, server handles storage.
-                        <br />
-                        your data never leaves your browser unencrypted. requires an LLM API key (step 6).
-                    </div>
-                </div>
-
-                {/* Step 7: Remember (full client-side) */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
-                    <div className="card-header">
-                        <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">8</div>
-                            <div>
-                                <div className="card-title">remember (hybrid)</div>
-                                <div className="card-subtitle">
-                                    client: embed → SEAL encrypt → send to server → server uploads Walrus
-                                </div>
-                            </div>
-                        </div>
+                {/* Step 8: Remember (hybrid) */}
+                <Card
+                    className="demo-step"
+                    style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
+                    leading={<div className="demo-step-badge demo-step-badge--highlight">8</div>}
+                    leadingRowClassName="demo-step-header-row"
+                    title="remember (hybrid)"
+                    subtitle="client: embed → SEAL encrypt → send to server → server uploads Walrus"
+                    action={
                         <button
-                            className="btn btn-primary btn-sm"
+                            className={`btn btn-primary btn-sm${fullRememberLoading ? ' demo-run-button--loading' : ''}`}
                             onClick={runFullRemember}
                             disabled={fullRememberLoading || !memwalManual}
-                            style={{ minWidth: 80 }}
                         >
                             {fullRememberLoading ? (
-                                <span className="spinner" style={{ width: 14, height: 14 }} />
+                                <span className="spinner demo-button-spinner" />
                             ) : (
-                                '▶ run'
+                                'Run'
                             )}
                         </button>
-                    </div>
+                    }
+                >
 
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>memory text:</label>
                         <textarea
                             className="input"
                             rows={2}
                             value={fullRememberText}
                             onChange={(e) => setFullRememberText(e.target.value)}
-                            style={{ resize: 'vertical' }}
                         />
                     </div>
 
                     <div className={fullRememberResult || fullRememberError || fullRememberPhase ? 'demo-code-block--spaced' : ''}>
-                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+                        <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`import { MemWalManual } from "@mysten-incubation/memwal/manual"
 
 const memwal = MemWalManual.create({
@@ -981,6 +1040,7 @@ const memwal = MemWalManual.create({
   embeddingApiBase: "https://openrouter.ai/api/v1",
   packageId: "${config.memwalPackageId.slice(0, 10)}...",
   accountId: "${(accountObjectId || '').slice(0, 10)}...",
+  registryId: "${config.memwalRegistryId.slice(0, 10)}...",
 })
 
 // client does:
@@ -995,7 +1055,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
 
                     {fullRememberPhase && (
                         <div className="demo-phase-indicator">
-                            <span className="spinner" style={{ width: 14, height: 14 }} />
+                            <span className="spinner demo-button-spinner" />
                             {fullRememberPhase}
                         </div>
                     )}
@@ -1012,35 +1072,32 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                             <pre className="demo-error-pre">{fullRememberError}</pre>
                         </div>
                     )}
-                </div>
+                </Card>
 
-                {/* Step 8: Recall (full client-side) */}
-                <div className="card demo-step" style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}>
-                    <div className="card-header">
-                        <div className="demo-step-header-row">
-                            <div className="demo-step-badge demo-step-badge--highlight">9</div>
-                            <div>
-                                <div className="card-title">recall (full client-side)</div>
-                                <div className="card-subtitle">
-                                    SDK: embed query → search → Walrus download → SEAL decrypt
-                                </div>
-                            </div>
-                        </div>
+                {/* Step 9: Recall (full client-side) */}
+                <Card
+                    className="demo-step"
+                    style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
+                    leading={<div className="demo-step-badge demo-step-badge--highlight">9</div>}
+                    leadingRowClassName="demo-step-header-row"
+                    title="recall (full client-side)"
+                    subtitle="SDK: embed query → search → Walrus download → SEAL decrypt"
+                    action={
                         <button
-                            className="btn btn-primary btn-sm"
+                            className={`btn btn-primary btn-sm${fullRecallLoading ? ' demo-run-button--loading' : ''}`}
                             onClick={runFullRecall}
                             disabled={fullRecallLoading || !memwalManual}
-                            style={{ minWidth: 80 }}
                         >
                             {fullRecallLoading ? (
-                                <span className="spinner" style={{ width: 14, height: 14 }} />
+                                <span className="spinner demo-button-spinner" />
                             ) : (
-                                '▶ run'
+                                'Run'
                             )}
                         </button>
-                    </div>
+                    }
+                >
 
-                    <div className="input-group" style={{ marginBottom: 12 }}>
+                    <div className="input-group">
                         <label>search query:</label>
                         <input
                             className="input"
@@ -1050,7 +1107,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                     </div>
 
                     <div className={fullRecallResult || fullRecallError || fullRecallPhase ? 'demo-code-block--spaced' : ''}>
-                        <SyntaxHighlighter language="javascript" style={githubGist} className="demo-code-block" customStyle={{ margin: 0 }}>
+                        <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`// client does:
 //   1. embed query via OpenAI
 //   2. SEAL decrypt each result (wallet popup)
@@ -1065,7 +1122,7 @@ const result = await memwal.recallManual("${fullRecallQuery}", 5)
 
                     {fullRecallPhase && (
                         <div className="demo-phase-indicator">
-                            <span className="spinner" style={{ width: 14, height: 14 }} />
+                            <span className="spinner demo-button-spinner" />
                             {fullRecallPhase}
                         </div>
                     )}
@@ -1082,7 +1139,7 @@ const result = await memwal.recallManual("${fullRecallQuery}", 5)
                             <pre className="demo-error-pre">{fullRecallError}</pre>
                         </div>
                     )}
-                </div>
+                </Card>
 
 
             </div>

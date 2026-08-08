@@ -3,20 +3,38 @@ name: Benchmark Smoke
 on:
   pull_request:
     paths:
-      - 'services/server/scripts/**'
-      - '.github/workflows/benchmark-live.yml'
-      - '.github/workflows/benchmark-smoke.yml'
-      - 'docs/relayer/benchmark-ci-setup.md'
+      - "scripts/**"
+      - "services/server/scripts/**"
+      - "services/contract/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/burn-cap-tx.yml"
+      - ".github/workflows/create-migration-caps-tx.yml"
+      - ".github/workflows/distribute-funds.yml"
+      - ".github/workflows/finalize-tx.yml"
+      - ".github/workflows/publish-tx.yml"
+      - ".github/workflows/benchmark-live.yml"
+      - ".github/workflows/benchmark-smoke.yml"
+      - "docs/relayer/benchmark-ci-setup.md"
   push:
     branches:
       - main
       - staging
       - dev
     paths:
-      - 'services/server/scripts/**'
-      - '.github/workflows/benchmark-live.yml'
-      - '.github/workflows/benchmark-smoke.yml'
-      - 'docs/relayer/benchmark-ci-setup.md'
+      - "scripts/**"
+      - "services/server/scripts/**"
+      - "services/contract/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/burn-cap-tx.yml"
+      - ".github/workflows/create-migration-caps-tx.yml"
+      - ".github/workflows/distribute-funds.yml"
+      - ".github/workflows/finalize-tx.yml"
+      - ".github/workflows/publish-tx.yml"
+      - ".github/workflows/benchmark-live.yml"
+      - ".github/workflows/benchmark-smoke.yml"
+      - "docs/relayer/benchmark-ci-setup.md"
   workflow_dispatch:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
@@ -32,6 +50,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -45,13 +65,71 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "24"
           cache: npm
           cache-dependency-path: services/server/scripts/package-lock.json
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install root script dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Migration governance script checks
+        run: |
+          pnpm exec tsc --noEmit --skipLibCheck \
+            --target ES2022 \
+            --module NodeNext \
+            --moduleResolution NodeNext \
+            scripts/assertions.ts \
+            scripts/build-publish-tx.ts \
+            scripts/build-finalize-tx.ts \
+            scripts/build-migration-caps-tx.ts \
+            scripts/build-burn-cap-tx.ts \
+            scripts/distribute-funds.ts
+          pnpm --silent tx:publish --self-test
+          pnpm --silent tx:create-caps --self-test
+          pnpm --silent tx:finalize --self-test
+          pnpm --silent tx:burn-cap --self-test
+          pnpm --silent distribute:funds --self-test
+          for binding in source_package_id source_registry_id db_cutover_rev walrus_package_id walrus_retention_epochs seal_encrypt_committee_identity source_inventory completion_evidence_download_url completion_evidence_sha256 manifest_sha256 SOURCE_PACKAGE_ID SOURCE_REGISTRY_ID DB_CUTOVER_REV WALRUS_PACKAGE_ID WALRUS_RETENTION_EPOCHS SEAL_ENCRYPT_COMMITTEE_IDENTITY SOURCE_INVENTORY_JSON COMPLETION_EVIDENCE_JSON COMPLETION_EVIDENCE_SHA256 MANIFEST_SHA256; do
+            grep -q "^[[:space:]]*$binding:" .github/workflows/finalize-tx.yml
+          done
+          pnpm exec prettier --check \
+            .github/workflows/benchmark-smoke.yml \
+            .github/workflows/burn-cap-tx.yml \
+            .github/workflows/create-migration-caps-tx.yml \
+            .github/workflows/distribute-funds.yml \
+            .github/workflows/finalize-tx.yml \
+            .github/workflows/publish-tx.yml \
+            scripts/assertions.ts \
+            scripts/build-publish-tx.ts \
+            scripts/build-migration-caps-tx.ts \
+            scripts/build-finalize-tx.ts \
+            scripts/build-burn-cap-tx.ts \
+            scripts/distribute-funds.ts \
+            scripts/distribute-funds.mainnet.json \
+            scripts/distribute-funds.testnet.json
 
       - name: Install sidecar script dependencies
         working-directory: services/server/scripts
         run: npm ci
+
+      - name: Sidecar tests and typecheck
+        working-directory: services/server/scripts
+        run: |
+          npm test
+          ./node_modules/.bin/tsc --noEmit --skipLibCheck \
+            --target ES2022 \
+            --module NodeNext \
+            --moduleResolution NodeNext \
+            sidecar-server.ts
+
+      - name: Writer address script checks
+        run: |
+          scripts/collect-live-writer-addresses.sh --self-test
+          bash -n scripts/collect-live-writer-addresses.sh
+          shellcheck scripts/collect-live-writer-addresses.sh
 
       - name: Typecheck benchmark scripts
         working-directory: services/server/scripts
@@ -66,3 +144,46 @@ jobs:
         working-directory: services/server/scripts
         run: |
           ./node_modules/.bin/tsx bench-recall-latency.ts --help
+
+  move-contract:
+    name: Move / Contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUI_VERSION: testnet-v1.74.0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Sui CLI
+        id: sui-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/sui
+          key: sui-${{ runner.os }}-${{ env.SUI_VERSION }}
+
+      - name: Install Sui CLI
+        if: steps.sui-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          tmpdir="$(mktemp -d)"
+          cd "$tmpdir"
+          curl -fsSL \
+            "https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz" \
+            -o sui.tgz
+          tar -xzf sui.tgz
+          sui_bin="$(find . -maxdepth 2 -type f -name sui -perm -u+x | head -n1)"
+          test -n "$sui_bin"
+          cp "$sui_bin" "$HOME/.local/bin/sui"
+          chmod +x "$HOME/.local/bin/sui"
+
+      - name: Verify Sui version
+        run: |
+          "$HOME/.local/bin/sui" --version
+
+      - name: Run Move unit tests
+        working-directory: services/contract
+        run: |
+          "$HOME/.local/bin/sui" move test

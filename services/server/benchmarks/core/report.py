@@ -35,7 +35,7 @@ def _load_reference_scores(benchmark: str) -> dict[str, dict]:
 
     Returns a dict shaped like:
         {
-          "Mem0 Base": {
+          "Published Baseline": {
               "scores": {"single_hop": 67.13, ...},
               "source": "...",
               "version": "...",
@@ -181,10 +181,10 @@ def generate_comparison_table(
         overall_row.append(f"**{score:.2f}**" if score is not None else "-")
     rows.append(overall_row)
 
-    # MEM-56: prompt-version provenance row. Renders `extract.vN/ask.vM`
+    # prompt-version provenance row. Renders `extract.vN/ask.vM`
     # per preset so a future "score jumped" delta is attributable to the
     # prompt change vs the weights change. Empty cells when an artifact
-    # predates MEM-56 (legacy comparisons stay readable).
+    # predates prompt-version tracking (legacy comparisons stay readable).
     pv_row = ["_prompt versions_"]
     for r in results:
         pv = r.get("prompt_versions", {}) or {}

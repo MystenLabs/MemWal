@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.types import Conversation, Session, Turn, Query, Evidence
@@ -137,7 +137,7 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
             # ~7% of oracle instances ship sessions out of date order (annotator
             # artefact, never >1 day off). Real users don't hand a memory system
             # turns out of sequence — sorting here keeps ingest-order realistic
-            # and matches what Mem0's own runner does. Sessions whose date
+            # and matches the published runner behavior. Sessions whose date
             # fails to parse fall back to their original position, sorted last.
             sess_indices = list(range(len(sessions_raw)))
             sess_indices.sort(
@@ -157,9 +157,20 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
                     if sess_idx < len(session_ids)
                     else f"{conv_id}-s{sess_idx:03d}"
                 )
-                session_date = (
+                session_date_raw = (
                     session_dates[sess_idx]
                     if sess_idx < len(session_dates)
+                    else None
+                )
+                # normalise to RFC 3339 UTC so the harness can
+                # pass occurred_at to /api/analyze. LME dates have no
+                # timezone in the source ("2023/04/10 (Mon) 17:50") — we
+                # treat them as UTC, a benchmark-mode convention. Falls
+                # back to None on unparseable strings.
+                session_date_dt = _parse_haystack_date(session_date_raw)
+                session_date_iso: str | None = (
+                    session_date_dt.replace(tzinfo=timezone.utc).isoformat()
+                    if session_date_dt is not None
                     else None
                 )
 
@@ -175,7 +186,7 @@ class LongMemEvalBenchmark(BenchmarkAdapter):
                         speaker=role,
                         text=content,
                         turn_id=f"{session_id}/t{turn_idx:03d}",
-                        timestamp=session_date,
+                        timestamp=session_date_iso,
                     ))
 
                 if turns:

@@ -6,8 +6,12 @@ use axum::{
 };
 use percent_encoding::percent_decode_str;
 use std::sync::Arc;
+use uuid::Uuid;
 
-use crate::types::{AppError, AppState, AuthInfo, SecretBytes};
+use crate::{
+    client_ip::canonical_client_ip,
+    types::{AppError, AppState, AuthInfo, SecretBytes},
+};
 
 // ============================================================
 // Sponsor Rate Limit Result
@@ -120,7 +124,7 @@ impl RateLimitConfig {
 /// Expensive endpoints (embedding + encrypt + Walrus upload + LLM)
 /// consume more of the rate limit budget than cheap read endpoints.
 ///
-/// MED-20 (full fix):
+/// Endpoint weight normalization:
 ///   1. Percent-decode the path to neutralise URL-encoded variants
 ///      (e.g. `/api/anal%79ze` → `/api/analyze`).
 ///   2. Strip any trailing slash so `/api/analyze/` == `/api/analyze`.
@@ -166,7 +170,7 @@ pub async fn create_redis_client(
 }
 
 // ============================================================
-// Sliding Window Helpers — MED-19: Atomic Lua Script
+// Sliding Window Helpers — Atomic Lua Script
 // ============================================================
 
 /// Lua script that atomically:
@@ -175,7 +179,7 @@ pub async fn create_redis_client(
 ///   3. If count < limit: adds `weight` new timestamped entries and refreshes TTL.
 ///   4. Returns 1 (allowed) or 0 (denied).
 ///
-/// MED-19 fix: This replaces the previous two-step check_window + record_in_window
+/// This replaces the previous two-step check_window + record_in_window
 /// pattern which had a TOCTOU race where concurrent requests could both pass the
 /// check then both record, collectively exceeding the limit.
 /// A Lua script runs atomically on the Redis server — no other command can execute
@@ -187,6 +191,7 @@ local now          = tonumber(ARGV[2])
 local limit        = tonumber(ARGV[3])
 local weight       = tonumber(ARGV[4])
 local ttl          = tonumber(ARGV[5])
+local request_id   = ARGV[6]
 
 -- 1. Prune entries outside the window
 redis.call('ZREMRANGEBYSCORE', key, '-inf', window_start)
@@ -200,8 +205,10 @@ if count + weight > limit then
 end
 
 for i = 0, weight - 1 do
-    local member = tostring(now + i * 0.001)
-    redis.call('ZADD', key, now + i * 0.001, member)
+    -- ZSET members, unlike scores, must be unique. A timestamp-only member
+    -- collapses concurrent requests that arrive in the same millisecond.
+    local member = request_id .. ':' .. tostring(i)
+    redis.call('ZADD', key, now, member)
 end
 redis.call('EXPIRE', key, ttl)
 
@@ -219,7 +226,7 @@ enum WindowCheckResult {
 
 /// Atomically check the sliding window and record entries if within limit.
 ///
-/// MED-19 fix: Replaces the separate check_window + record_in_window calls.
+/// Replaces the separate check_window + record_in_window calls.
 /// The Lua script executes as a single atomic Redis operation, preventing the
 /// TOCTOU race where two concurrent requests could both pass the check before
 /// either records, then both record and collectively exceed the limit.
@@ -232,6 +239,9 @@ async fn check_and_record_window(
     weight: i64,
     ttl_seconds: i64,
 ) -> Result<WindowCheckResult, redis::RedisError> {
+    // The UUID keeps members distinct across concurrent requests, processes,
+    // and replicas even when they share an identical millisecond timestamp.
+    let request_id = Uuid::new_v4().to_string();
     let result: i64 = redis::Script::new(SLIDING_WINDOW_LUA)
         .key(key)
         .arg(window_start)
@@ -239,6 +249,7 @@ async fn check_and_record_window(
         .arg(limit)
         .arg(weight)
         .arg(ttl_seconds)
+        .arg(request_id)
         .invoke_async(redis)
         .await?;
 
@@ -346,7 +357,7 @@ fn rate_limit_response(layer: &str, limit: i64, window: &str, retry_after: u64) 
 
 /// Build a 503 response when Redis is completely unreachable and the
 /// in-memory fallback also cannot be used (e.g., lock poisoned).
-/// HIGH-2 fix: previously Redis errors silently allowed requests through.
+/// previously Redis errors silently allowed requests through.
 fn rate_limiter_unavailable_response() -> Response {
     crate::observability::record_app_error("rate_limiter_unavailable");
     let body = serde_json::json!({
@@ -417,10 +428,10 @@ fn is_valid_app_auth_admin_token(headers: &HeaderMap, configured: Option<&Secret
 ///
 /// Returns 429 Too Many Requests with JSON body if any layer exceeds its limit.
 ///
-/// MED-19 fix: Returns 503 Service Unavailable (fail-closed) if Redis
+/// Returns 503 Service Unavailable (fail-closed) if Redis
 /// is unreachable — previously was fail-open (silently allowed all requests).
 ///
-/// MED-20 fix: Normalizes trailing slash in path before cost weight lookup.
+/// Normalizes trailing slash in path before cost weight lookup.
 pub async fn rate_limit_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -449,7 +460,7 @@ pub async fn rate_limit_middleware(
     let mut redis = state.redis.clone();
     let now = chrono::Utc::now().timestamp_millis() as f64;
 
-    // Determine cost weight based on endpoint (MED-20: path is normalized inside endpoint_weight)
+    // Determine cost weight based on endpoint; path is normalized inside endpoint_weight.
     let weight = endpoint_weight(request.uri().path());
 
     // --- Key definitions for all three rate-limit buckets ---
@@ -461,9 +472,9 @@ pub async fn rate_limit_middleware(
     let burst_window_start = now - 60_000.0; // 1-min window (ms)
     let hourly_window_start = now - 3_600_000.0; // 1-hr  window (ms)
 
-    // --- MED-19: Atomic check-and-record via Lua script for all 3 layers ---
+    // --- Atomic check-and-record via Lua script for all 3 layers ---
     // Each layer is checked+recorded atomically. If Redis is unavailable,
-    // we fall through to the in-memory token-bucket fallback (HIGH-2 fix).
+    // we fall through to the in-memory token-bucket fallback.
 
     let mut redis_down = false;
 
@@ -644,7 +655,7 @@ pub async fn rate_limit_middleware(
 /// Storage tracking still uses PostgreSQL (it's per-row in vector_entries).
 /// Returns `Ok(())` if within quota, `Err(AppError::QuotaExceeded)` if not.
 ///
-/// MED-21 fix: Uses PostgreSQL advisory lock per-owner to prevent
+/// Uses PostgreSQL advisory lock per-owner to prevent
 /// TOCTOU race where concurrent requests all pass quota check then
 /// all write, collectively exceeding the limit.
 pub async fn check_storage_quota(
@@ -659,7 +670,7 @@ pub async fn check_storage_quota(
         return Ok(());
     }
 
-    // MED-21 fix: Acquire a per-owner PostgreSQL advisory lock.
+    // Acquire a per-owner PostgreSQL advisory lock.
     // This serializes concurrent quota checks for the same owner,
     // preventing TOCTOU race conditions.
     // We use a stable hash of the owner string as the lock key.
@@ -703,37 +714,34 @@ fn stable_hash_i64(s: &str) -> i64 {
 }
 
 // ============================================================
-// Sponsor — per-sender rate limit (called from routes)
+// Sponsor — deployment-wide budget limit
 // ============================================================
 
-/// Check whether a sender (Sui address) has exceeded the sponsor rate limits.
+/// Check whether the deployment has exceeded its sponsor budget limits.
 ///
 /// Uses a sliding-window counter in Redis just like the authenticated route
-/// middleware, but keyed by sender address rather than owner/delegate-key.
+/// middleware, but keyed by fixed server-controlled identifiers. Unlike a
+/// caller-supplied sender address, these keys cannot be rotated by an attacker.
 ///
 /// Returns `SponsorRlResult::Allowed` when the request can proceed, or the
 /// appropriate `MinuteLimitExceeded` / `HourLimitExceeded` variant otherwise.
 ///
-/// HIGH-2 fix: On Redis error, falls back to the in-memory token-bucket
-/// fallback. Returns `Err(())` only if both Redis and the fallback are
-/// unavailable (lock poisoned), in which case callers should deny or log.
-pub async fn check_sender_rate_limit(
+/// Returns `Err(())` on Redis failure so callers can fail closed. A per-process
+/// fallback would not enforce a deployment-wide cap across replicas.
+pub async fn check_global_sponsor_rate_limit(
     state: &crate::types::AppState,
-    sender: &str,
     per_minute: i64,
     per_hour: i64,
 ) -> Result<SponsorRlResult, ()> {
     let now = chrono::Utc::now().timestamp_millis() as f64;
     let mut redis = state.redis.clone();
 
-    let min_key = format!("rate:sponsor:min:{}", sender);
-    let hr_key = format!("rate:sponsor:hr:{}", sender);
+    let min_key = "rate:sponsor:global:min";
+    let hr_key = "rate:sponsor:global:hr";
     let min_window_start = now - 60_000.0;
     let hr_window_start = now - 3_600_000.0;
 
-    let mut redis_down = false;
-
-    // --- MED-19: Atomic check-and-record for minute bucket ---
+    // --- Atomic check-and-record for minute bucket ---
     match check_and_record_window(
         &mut redis,
         &min_key,
@@ -746,56 +754,40 @@ pub async fn check_sender_rate_limit(
     .await
     {
         Ok(WindowCheckResult::Denied) => {
-            crate::observability::record_rate_limit_denial("sponsor_sender_burst");
+            crate::observability::record_rate_limit_denial("sponsor_global_burst");
             return Ok(SponsorRlResult::MinuteLimitExceeded);
         }
         Err(e) => {
-            tracing::warn!("check_sender_rate_limit: Redis error (minute): {} — switching to in-memory fallback", e);
-            redis_down = true;
+            tracing::error!(
+                "check_global_sponsor_rate_limit: Redis error (minute): {}",
+                e
+            );
+            return Err(());
         }
         Ok(WindowCheckResult::Allowed) => {}
     }
 
-    // --- MED-19: Atomic check-and-record for hour bucket ---
-    if !redis_down {
-        match check_and_record_window(
-            &mut redis,
-            &hr_key,
-            hr_window_start,
-            now + 0.1,
-            per_hour,
-            1, // weight = 1 per sponsor request
-            3700,
-        )
-        .await
-        {
-            Ok(WindowCheckResult::Denied) => {
-                crate::observability::record_rate_limit_denial("sponsor_sender_sustained");
-                return Ok(SponsorRlResult::HourLimitExceeded);
-            }
-            Err(e) => {
-                tracing::warn!("check_sender_rate_limit: Redis error (hour): {} — switching to in-memory fallback", e);
-                redis_down = true;
-            }
-            Ok(WindowCheckResult::Allowed) => {}
-        }
-    }
-
-    // --- In-memory fallback when Redis is down (HIGH-2 fix) ---
-    if redis_down {
-        crate::observability::record_rate_limit_fallback("sponsor_sender");
-        let mut fallback = state.fallback_rate_limit.lock().await;
-        if !fallback.can_consume(&min_key, 1.0, per_minute as f64, 60.0) {
-            crate::observability::record_rate_limit_denial("sponsor_sender_burst");
-            return Ok(SponsorRlResult::MinuteLimitExceeded);
-        }
-        if !fallback.can_consume(&hr_key, 1.0, per_hour as f64, 3600.0) {
-            crate::observability::record_rate_limit_denial("sponsor_sender_sustained");
+    // --- Atomic check-and-record for hour bucket ---
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        per_hour,
+        1, // weight = 1 per sponsor request
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("sponsor_global_sustained");
             return Ok(SponsorRlResult::HourLimitExceeded);
         }
-        fallback.consume(&min_key, 1.0, per_minute as f64, 60.0);
-        fallback.consume(&hr_key, 1.0, per_hour as f64, 3600.0);
-        return Ok(SponsorRlResult::Allowed);
+        Err(e) => {
+            tracing::error!("check_global_sponsor_rate_limit: Redis error (hour): {}", e);
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
     }
 
     Ok(SponsorRlResult::Allowed)
@@ -852,7 +844,7 @@ pub async fn charge_explicit_weight(
     let burst_key = format!("rate:{}", auth.owner);
     let hr_key = format!("rate:hr:{}", auth.owner);
 
-    // MED-19: Use the same atomic Lua script for explicit weight charges
+    // Use the same atomic Lua script for explicit weight charges
     // (called from /api/analyze after fact count is known).
     // Ignore WindowCheckResult here — this is a post-hoc charge after
     // the expensive work is done; we prefer not to block the response.
@@ -877,15 +869,13 @@ pub async fn charge_explicit_weight(
 // Sponsor Rate Limit Middleware (IP-based, unauthenticated)
 // ============================================================
 
-/// Rate limiting middleware for the unauthenticated `/sponsor` routes.
+/// Pre-authentication rate limiting middleware for the public `/sponsor` routes.
 ///
 /// Enforces a per-IP sliding-window limit using the same Redis counters as
 /// the authenticated middleware. Defaults: 10 req/min, 30 req/hr per IP.
 ///
-/// HIGH-2 fix: On Redis error, falls back to the in-memory token-bucket
-/// instead of failing open. If the fallback mutex is also unavailable,
-/// returns 503 (fail-closed). Per-sender limits in the route handler itself
-/// provide an additional backstop.
+/// Redis errors return 503. A local fallback cannot provide consistent abuse
+/// protection across replicas, so the sponsor path intentionally fails closed.
 pub async fn sponsor_rate_limit_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -897,23 +887,15 @@ pub async fn sponsor_rate_limit_middleware(
         return next.run(request).await;
     }
 
-    // Extract client IP from X-Forwarded-For (set by reverse proxy) or
-    // fall back to the direct connection address stored by axum.
-    let ip: Option<String> = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            request
-                .extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|ci| ci.0.ip().to_string())
-        });
-
-    let ip = match ip {
-        Some(ip) => ip,
+    // XFF is ignored by default. Only walk back through the explicitly
+    // configured number of trusted proxy hops, using the same resolver as
+    // the MCP proxy path.
+    let ip = match request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
+    {
+        Some(ip) => ip.to_string(),
         None => {
             // Cannot determine IP — fail-closed: deny rather than allow unknown callers.
             tracing::warn!("sponsor_rate_limit_middleware: cannot determine client IP, denying");
@@ -930,9 +912,7 @@ pub async fn sponsor_rate_limit_middleware(
     let min_window_start = now - 60_000.0;
     let hr_window_start = now - 3_600_000.0;
 
-    let mut redis_down = false;
-
-    // --- MED-19: Atomic check-and-record for minute bucket (IP-based) ---
+    // --- Atomic check-and-record for minute bucket (IP-based) ---
     match check_and_record_window(
         &mut redis,
         &min_key,
@@ -953,58 +933,290 @@ pub async fn sponsor_rate_limit_middleware(
             return rate_limit_response("sponsor_ip_burst", config.per_minute, "min", 60);
         }
         Err(e) => {
-            tracing::warn!("sponsor_rate_limit_middleware: Redis error (minute bucket): {} — switching to in-memory fallback", e);
-            redis_down = true;
+            tracing::error!(
+                "sponsor_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
         }
         Ok(WindowCheckResult::Allowed) => {}
     }
 
-    // --- MED-19: Atomic check-and-record for hour bucket (IP-based) ---
-    if !redis_down {
-        match check_and_record_window(
-            &mut redis,
-            &hr_key,
-            hr_window_start,
-            now + 0.1,
-            config.per_hour,
-            1,
-            3700,
-        )
-        .await
-        {
-            Ok(WindowCheckResult::Denied) => {
-                tracing::warn!(
-                    "sponsor rate limit [IP/hr]: ip={} denied (limit={})",
-                    ip,
-                    config.per_hour
-                );
-                return rate_limit_response("sponsor_ip_sustained", config.per_hour, "hour", 300);
-            }
-            Err(e) => {
-                tracing::warn!("sponsor_rate_limit_middleware: Redis error (hour bucket): {} — switching to in-memory fallback", e);
-                redis_down = true;
-            }
-            Ok(WindowCheckResult::Allowed) => {}
-        }
-    }
-
-    // --- In-memory fallback when Redis is down (HIGH-2 fix) ---
-    if redis_down {
-        tracing::warn!("sponsor_rate_limit_middleware: Redis is unreachable, using in-memory fallback for ip={}", ip);
-        crate::observability::record_rate_limit_fallback("sponsor_ip");
-        let mut fallback = state.fallback_rate_limit.lock().await;
-
-        if !fallback.can_consume(&min_key, 1.0, config.per_minute as f64, 60.0) {
-            return rate_limit_response("sponsor_ip_burst", config.per_minute, "min", 60);
-        }
-        if !fallback.can_consume(&hr_key, 1.0, config.per_hour as f64, 3600.0) {
+    // --- Atomic check-and-record for hour bucket (IP-based) ---
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "sponsor rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                config.per_hour
+            );
             return rate_limit_response("sponsor_ip_sustained", config.per_hour, "hour", 300);
         }
+        Err(e) => {
+            tracing::error!(
+                "sponsor_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
 
-        fallback.consume(&min_key, 1.0, config.per_minute as f64, 60.0);
-        fallback.consume(&hr_key, 1.0, config.per_hour as f64, 3600.0);
+    match check_global_sponsor_rate_limit(&state, config.global_per_minute, config.global_per_hour)
+        .await
+    {
+        Ok(SponsorRlResult::MinuteLimitExceeded) => {
+            return rate_limit_response(
+                "sponsor_global_burst",
+                config.global_per_minute,
+                "min",
+                60,
+            );
+        }
+        Ok(SponsorRlResult::HourLimitExceeded) => {
+            return rate_limit_response(
+                "sponsor_global_sustained",
+                config.global_per_hour,
+                "hour",
+                300,
+            );
+        }
+        Ok(SponsorRlResult::Allowed) => {}
+        Err(()) => return rate_limiter_unavailable_response(),
+    }
 
+    next.run(request).await
+}
+
+// ============================================================
+// Accounts — deployment-wide budget limit
+// ============================================================
+
+/// Check whether the deployment has exceeded its accounts-exists budget
+/// limits.
+///
+/// Uses a sliding-window counter in Redis just like
+/// `check_global_sponsor_rate_limit`, but keyed by fixed server-controlled
+/// identifiers so IP rotation cannot bypass an aggregate ceiling on this
+/// anonymous, enumeration-risk endpoint.
+///
+/// Returns `Err(())` on Redis failure so callers can fail closed. A
+/// per-process fallback would not enforce a deployment-wide cap across
+/// replicas.
+pub async fn check_global_accounts_rate_limit(
+    state: &crate::types::AppState,
+    per_minute: i64,
+    per_hour: i64,
+) -> Result<SponsorRlResult, ()> {
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let mut redis = state.redis.clone();
+
+    let min_key = "rate:accounts:global:min";
+    let hr_key = "rate:accounts:global:hr";
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    // --- Atomic check-and-record for minute bucket ---
+    match check_and_record_window(
+        &mut redis,
+        min_key,
+        min_window_start,
+        now,
+        per_minute,
+        1, // weight = 1 per accounts-exists request
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("accounts_global_burst");
+            return Ok(SponsorRlResult::MinuteLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_global_accounts_rate_limit: Redis error (minute): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    // --- Atomic check-and-record for hour bucket ---
+    match check_and_record_window(
+        &mut redis,
+        hr_key,
+        hr_window_start,
+        now + 0.1,
+        per_hour,
+        1, // weight = 1 per accounts-exists request
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("accounts_global_sustained");
+            return Ok(SponsorRlResult::HourLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_global_accounts_rate_limit: Redis error (hour): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    Ok(SponsorRlResult::Allowed)
+}
+
+// ============================================================
+// Accounts Rate Limit Middleware (IP-based, unauthenticated)
+// ============================================================
+
+/// Pre-authentication rate limiting middleware for the public
+/// `GET /api/accounts/{owner}/exists` route.
+///
+/// This is the only route in `public_routes` that reaches the DB pool
+/// (`max_connections(10)`) — `/health`, `/version`, `/config`, `/metrics`
+/// are all static/no-DB. Modeled directly on `sponsor_rate_limit_middleware`:
+/// enforces a per-IP sliding-window limit via `AccountsRateLimitConfig`
+/// (a dedicated, stricter budget than the general authenticated
+/// `RateLimitConfig` this middleware used to reuse — see that config's doc
+/// comment for the reasoning behind its numbers), plus a deployment-wide
+/// global cap via `check_global_accounts_rate_limit` so IP rotation alone
+/// cannot exceed an aggregate ceiling.
+///
+/// Redis errors return 503. A local fallback cannot provide consistent abuse
+/// protection across replicas, so — like `sponsor_rate_limit_middleware` —
+/// this path intentionally fails closed.
+pub async fn accounts_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // RATE_LIMIT_DISABLED=1 — see RateLimitConfig::bench_bypass_enabled.
+    if state.config.rate_limit.bench_bypass_enabled {
         return next.run(request).await;
+    }
+
+    // XFF is ignored by default. Only walk back through the explicitly
+    // configured number of trusted proxy hops, using the same resolver as
+    // the sponsor and MCP proxy paths.
+    let ip = match request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
+    {
+        Some(ip) => ip.to_string(),
+        None => {
+            // Cannot determine IP — fail-closed: deny rather than allow unknown callers.
+            tracing::warn!("accounts_rate_limit_middleware: cannot determine client IP, denying");
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let config = &state.config.accounts_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:accounts:ip:min:{}", ip);
+    let hr_key = format!("rate:accounts:ip:hr:{}", ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    // --- Atomic check-and-record for minute bucket (IP-based) ---
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "accounts rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                config.per_minute
+            );
+            return rate_limit_response("accounts_ip_burst", config.per_minute, "min", 60);
+        }
+        Err(e) => {
+            tracing::error!(
+                "accounts_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    // --- Atomic check-and-record for hour bucket (IP-based) ---
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "accounts rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                config.per_hour
+            );
+            return rate_limit_response("accounts_ip_sustained", config.per_hour, "hour", 300);
+        }
+        Err(e) => {
+            tracing::error!(
+                "accounts_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_global_accounts_rate_limit(&state, config.global_per_minute, config.global_per_hour)
+        .await
+    {
+        Ok(SponsorRlResult::MinuteLimitExceeded) => {
+            return rate_limit_response(
+                "accounts_global_burst",
+                config.global_per_minute,
+                "min",
+                60,
+            );
+        }
+        Ok(SponsorRlResult::HourLimitExceeded) => {
+            return rate_limit_response(
+                "accounts_global_sustained",
+                config.global_per_hour,
+                "hour",
+                300,
+            );
+        }
+        Ok(SponsorRlResult::Allowed) => {}
+        Err(()) => return rate_limiter_unavailable_response(),
     }
 
     next.run(request).await
@@ -1397,7 +1609,7 @@ pub async fn app_auth_admin_login_rate_limit_middleware(
 mod tests {
     use super::*;
 
-    // ---- MED-20: Path normalization ----
+    // ---- Path normalization ----
 
     #[test]
     fn test_endpoint_weight_trailing_slash_normalized() {
@@ -1408,7 +1620,7 @@ mod tests {
         assert_eq!(endpoint_weight("/api/restore"), 3);
         assert_eq!(endpoint_weight("/api/ask"), 2);
 
-        // With trailing slash — must return SAME weight (MED-20 fix)
+        // With trailing slash — must return SAME weight.
         assert_eq!(
             endpoint_weight("/api/analyze/"),
             5,
@@ -1457,7 +1669,7 @@ mod tests {
         let _ = h; // just verify no panic
     }
 
-    // ---- MED-19: fail-closed response ----
+    // ---- fail-closed response ----
 
     #[test]
     fn test_rate_limiter_unavailable_response_is_503() {
@@ -1509,7 +1721,7 @@ mod tests {
         assert!(!is_valid_app_auth_admin_token(&headers, None));
     }
 
-    // ---- MED-19: Atomic Lua script structure ----
+    // ---- Atomic Lua script structure ----
 
     /// Verify the Lua script constant is non-empty and contains the critical
     /// idempotency guard (`count + weight > limit`). If the guard disappears,
@@ -1536,6 +1748,87 @@ mod tests {
             SLIDING_WINDOW_LUA.contains("EXPIRE"),
             "Lua script must refresh TTL"
         );
+        assert!(
+            SLIDING_WINDOW_LUA.contains("request_id .. ':' .. tostring(i)"),
+            "Lua script must use a unique request ID for every ZSET member"
+        );
+    }
+
+    /// Regression test for same-millisecond concurrent requests. This talks to
+    /// a real Redis instance because Redis ZSET member de-duplication and Lua
+    /// atomicity cannot be faithfully covered by a mock.
+    ///
+    /// Run with:
+    /// TEST_REDIS_URL=redis://127.0.0.1:6379 \
+    ///   cargo test concurrent_same_millisecond_requests_respect_limit -- --ignored
+    #[tokio::test]
+    #[ignore = "requires TEST_REDIS_URL pointing to a real Redis instance"]
+    async fn concurrent_same_millisecond_requests_respect_limit() {
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .expect("TEST_REDIS_URL must be set when running Redis integration tests");
+        let client = redis::Client::open(redis_url).expect("valid TEST_REDIS_URL");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("connect to test Redis");
+        let key = format!("test:rate-limit:concurrent:{}", Uuid::new_v4());
+        let _: i64 = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut connection)
+            .await
+            .expect("clear test key");
+
+        const REQUESTS: usize = 32;
+        const LIMIT: i64 = 10;
+        let now = chrono::Utc::now().timestamp_millis() as f64;
+        let barrier = Arc::new(tokio::sync::Barrier::new(REQUESTS + 1));
+        let mut tasks = Vec::with_capacity(REQUESTS);
+
+        for _ in 0..REQUESTS {
+            let mut task_connection = connection.clone();
+            let task_key = key.clone();
+            let task_barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                task_barrier.wait().await;
+                check_and_record_window(
+                    &mut task_connection,
+                    &task_key,
+                    now - 60_000.0,
+                    now,
+                    LIMIT,
+                    1,
+                    120,
+                )
+                .await
+            }));
+        }
+
+        barrier.wait().await;
+        let mut allowed = 0;
+        for task in tasks {
+            if task
+                .await
+                .expect("rate-limit task panicked")
+                .expect("Redis script failed")
+                == WindowCheckResult::Allowed
+            {
+                allowed += 1;
+            }
+        }
+
+        let cardinality: i64 = redis::cmd("ZCARD")
+            .arg(&key)
+            .query_async(&mut connection)
+            .await
+            .expect("read test bucket cardinality");
+        let _: i64 = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut connection)
+            .await
+            .expect("clean test key");
+
+        assert_eq!(allowed, LIMIT);
+        assert_eq!(cardinality, LIMIT);
     }
 
     /// Verify that WindowCheckResult variants are correctly defined.
@@ -1548,7 +1841,7 @@ mod tests {
         assert_ne!(allowed, denied, "Allowed and Denied must be distinct");
     }
 
-    // ---- MED-20: Percent-encoded path normalization ----
+    // ---- Percent-encoded path normalization ----
 
     #[test]
     fn test_endpoint_weight_percent_encoded_analyze() {
@@ -1597,7 +1890,7 @@ mod tests {
         assert_eq!(endpoint_weight("/api/%ZZ/bad"), 1);
     }
 
-    // ---- HIGH-2: In-memory token bucket fallback ----
+    // ---- In-memory token bucket fallback ----
 
     #[test]
     fn test_fallback_token_bucket_new_starts_full() {
@@ -1683,7 +1976,7 @@ mod tests {
         assert!(fb.can_consume("k2", 1.0, 10.0, 60.0));
     }
 
-    // ---- MED-19: Analyze weight calculations ----
+    // ---- Analyze weight calculations ----
 
     #[test]
     fn test_analyze_additional_weight() {

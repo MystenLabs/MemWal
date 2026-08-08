@@ -21,6 +21,14 @@ export {
 
 // Delegate key utilities (no @mysten/sui dependency)
 export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
+export {
+    createSponsorAuthorization,
+    sponsorAuthorizationMessage,
+} from "./sponsor-auth.js";
+export type {
+    SponsorAuthorization,
+    SponsorPersonalMessageSigner,
+} from "./sponsor-auth.js";
 
 // Types for the default client, including its lightweight manual endpoints.
 export type {
@@ -31,8 +39,10 @@ export type {
     RecallResult,
     RecallMemory,
     RecallOptions,
+    RecallParams,
     ScoringWeights,
     EmbedResult,
+    AnalyzeOptions,
     AnalyzeResult,
     AnalyzeWaitResult,
     AnalyzedFact,

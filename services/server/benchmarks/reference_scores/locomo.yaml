@@ -11,8 +11,8 @@
 #
 # Loaded by core/report.py to generate comparison tables.
 
-Mem0 Base:
-  source: arXiv:2504.19413 (Mem0 paper)
+Published Memory Baseline:
+  source: arXiv:2504.19413
   version: v2 (April 2025)
   notes: LLM-as-Judge with GPT-4o, same methodology we use. J-score 0-100.
   scores:
@@ -21,10 +21,10 @@ Mem0 Base:
     temporal: 55.51
     open_domain: 72.93
 
-Mem0 Graph:
-  source: arXiv:2504.19413 (Mem0 paper)
+Published Graph Baseline:
+  source: arXiv:2504.19413
   version: v2 (April 2025)
-  notes: Graph-augmented variant of Mem0 (Mem0^g). Same evaluation protocol.
+  notes: Graph-augmented variant. Same evaluation protocol.
   scores:
     single_hop: 65.71
     multi_hop: 47.19

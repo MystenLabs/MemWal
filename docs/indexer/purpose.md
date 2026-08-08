@@ -1,5 +1,38 @@
 ---
 title: "Purpose"
+description: >-
+  Why the Walrus Memory indexer exists, how it eliminates expensive onchain RPC calls
+  by syncing account data to PostgreSQL, and the auth resolution priority flow.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - indexer
+  - purpose
+  - auth resolution
+  - PostgreSQL
+goal:
+  description: Explain why the indexer exists, trace the auth resolution priority chain the relayer uses to look up delegate key ownership, and predict what happens if the indexer falls behind.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "Why does Walrus Memory need an indexer?"
+  - "How does the MemWal relayer resolve delegate key ownership?"
+  - "How do I configure and run the MemWal indexer?"
+answer: >-
+  The indexer eliminates expensive onchain registry scans by listening to Sui events and
+  syncing account data into PostgreSQL. The relayer resolves delegate keys using a priority
+  chain: PostgreSQL cache, indexed accounts, onchain registry scan, header hint, and config
+  fallback. The indexer is recommended for production but optional for development.
 ---
 
 The indexer keeps the backend in sync with onchain state so the relayer can resolve accounts quickly.
@@ -16,7 +49,7 @@ The indexer is a standalone Rust service (`services/indexer`) that:
 
 1. Connects to the same PostgreSQL database as the relayer
 2. Polls Sui blockchain events using `suix_queryEvents`
-3. Filters for `AccountCreated` events from the MemWal package
+3. Filters for `AccountCreated` events from the Walrus Memory package
 4. Inserts `account_id → owner` mappings into the `accounts` table
 5. Stores its event cursor in `indexer_state` so it can resume after restarts
 
@@ -39,7 +72,7 @@ The indexer reads these environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | Yes | — | PostgreSQL connection string |
-| `MEMWAL_PACKAGE_ID` | Yes | — | MemWal contract package ID to filter events |
+| `MEMWAL_PACKAGE_ID` | Yes | — | Walrus Memory contract package ID to filter events |
 | `SUI_RPC_URL` | No | Mainnet fullnode | Sui RPC endpoint |
 | `POLL_INTERVAL_SECS` | No | `5` | Seconds between event poll cycles |
 

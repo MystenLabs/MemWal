@@ -17,6 +17,8 @@
 //! - [`sui`] — Sui RPC: delegate-key on-chain verification, account lookup.
 
 pub mod db;
+pub mod legacy_db;
 pub mod seal;
+pub mod security_delete_store;
 pub mod sui;
 pub mod walrus;

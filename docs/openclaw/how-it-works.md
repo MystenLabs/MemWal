@@ -1,9 +1,38 @@
 ---
 title: "How It Works"
-description: "Architecture, message flow, and the mechanics behind auto-recall and auto-capture."
+description: >-
+  Architecture, message flow, and the mechanics behind auto-recall and auto-capture in the OpenClaw Walrus Memory plugin.
+  Covers hooks vs tools, multi-agent isolation, and security model.
+keywords:
+  - OpenClaw
+  - Walrus Memory
+  - MemWal
+  - architecture
+  - auto-recall
+  - auto-capture
+goal:
+  description: Trace a conversation turn through the OpenClaw plugin's before/after hooks, explain how automatic recall and save work without explicit tool calls, and differentiate hook-driven memory from manual tool invocations.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does the OpenClaw Walrus Memory plugin work internally?
+  - What is the difference between hooks and tools in the OpenClaw memory plugin?
+  - How does multi-agent memory isolation work in OpenClaw?
+answer: >-
+  The OpenClaw Walrus Memory plugin operates through hooks (automatic callbacks on every conversation turn) and optional LLM-callable tools. The before_prompt_build hook searches Walrus Memory and injects relevant memories into the prompt context. The agent_end hook extracts facts from conversations after each turn and stores them as encrypted blobs on Walrus. Each agent gets its own memory namespace derived from its session key, with support for cryptographic isolation using separate Ed25519 keys.
 ---
 
-The plugin sits between OpenClaw's gateway and the MemWal server. It operates through **hooks** — automatic callbacks that run on every conversation turn — and optional **tools** the LLM can call explicitly.
+The plugin sits between OpenClaw's gateway and the Walrus Memory server. It operates through **hooks** — automatic callbacks that run on every conversation turn — and optional **tools** the LLM can call explicitly.
 
 ## Architecture
 
@@ -53,10 +82,10 @@ graph TB
 
 | Component | Layer | Description |
 |-----------|-------|-------------|
-| **Auto-recall hook** | Gateway (Node.js) | Searches MemWal before each turn, injects memories into prompt |
-| **Auto-capture hook** | Gateway (Node.js) | Extracts facts after each turn, stores via MemWal |
+| **Auto-recall hook** | Gateway (Node.js) | Searches Walrus Memory before each turn, injects memories into prompt |
+| **Auto-capture hook** | Gateway (Node.js) | Extracts facts after each turn, stores via Walrus Memory |
 | **Tool execution** | Gateway (Node.js) | Runs `memory_search` / `memory_store` when the LLM calls them |
-| **MemWal Relayer** | Remote | Handles vector search, LLM fact extraction, encrypted storage |
+| **Walrus Memory Relayer** | Remote | Handles vector search, LLM fact extraction, encrypted storage |
 | **Walrus** | Decentralized | Stores encrypted memory blobs |
 
 ## Message Flow
@@ -129,7 +158,7 @@ The `before_prompt_build` hook fires before the prompt is assembled for the LLM:
 
 1. **Skip trivial prompts** — messages under 10 characters (like "ok", "y") aren't worth a server round-trip
 2. **Resolve namespace** — parse the agent name from `ctx.sessionKey` to determine which memory space to search
-3. **Search MemWal** — `recall(prompt, maxResults, namespace)` returns memories ranked by vector distance
+3. **Search Walrus Memory** — `recall(prompt, maxResults, namespace)` returns memories ranked by vector distance
 4. **Filter results** — drop memories below the relevance threshold and any that match prompt injection patterns
 5. **HTML-escape** — prevent stored text containing `<system>` or similar tags from altering prompt structure
 6. **Inject into prompt** — return `prependContext` (the memories) and `appendSystemContext` (namespace instruction for tools)
@@ -148,7 +177,7 @@ The `agent_end` hook fires after the LLM's response is delivered to the user:
    - XML/system content
    - Emoji-heavy messages
    - Prompt injection attempts
-4. **Send to server** — `analyze(conversation, namespace)` sends the filtered text to the MemWal server
+4. **Send to server** — `analyze(conversation, namespace)` sends the filtered text to the Walrus Memory server
 5. **Server extracts facts** — the server-side LLM breaks the conversation into individual facts and stores each as an encrypted blob on Walrus
 
 Capture runs **after** the response is sent — the user never waits for it.
@@ -163,9 +192,9 @@ Session key: "agent:coder:uuid-789"      → namespace: "coder"
 Session key: "main:uuid-123"             → namespace: "default"
 ```
 
-All recall and capture operations are scoped to the current namespace. One agent's memories are invisible to another.
+All recall and capture operations are scoped to the current namespace by the plugin and server. Namespaces organize data; they are not an on-chain authorization boundary.
 
-The plugin also supports **cryptographic isolation** — assigning different Ed25519 keys to different agents. With separate keys, agents literally cannot decrypt each other's memories. This is stronger than namespace isolation (which uses the same key with server-side filtering) and is unique to MemWal.
+Delegate keys are authorized for the whole MemWal account, so assigning a different delegate to each agent does not prevent one delegate from requesting another namespace's SEAL key. Use separate MemWal accounts when agents require cryptographic isolation.
 
 ## Security Model
 

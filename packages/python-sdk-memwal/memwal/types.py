@@ -20,13 +20,10 @@ from typing import Any, Dict, List, Optional
 #: untouched default apart from an explicitly-passed custom URL.
 DEFAULT_SERVER_URL = "http://localhost:8000"
 
-#: Named relayer environments. Mirrors the TypeScript SDK / MCP package
-#: ``--prod`` / ``--dev`` / ``--staging`` / ``--local`` presets so the same
-#: shorthand works across every Walrus Memory client.
+#: Named relayer environments for the public Walrus Memory deployments.
 ENV_PRESETS = {
-    "prod": "https://relayer.memwal.ai",
-    "dev": "https://relayer.dev.memwal.ai",
-    "staging": "https://relayer.staging.memwal.ai",
+    "prod": "https://relayer.memory.walrus.xyz",
+    "staging": "https://relayer-staging.memory.walrus.xyz",
     "local": "http://127.0.0.1:8000",
 }
 
@@ -42,8 +39,8 @@ class MemWalConfig:
         server_url: Server URL (default: http://localhost:8000). An explicit
             non-default value always wins over ``env``.
         namespace: Default namespace for memory isolation (default: "default").
-        env: Optional relayer preset — one of ``"prod"``, ``"dev"``,
-            ``"staging"``, ``"local"``. Resolves ``server_url`` to the matching
+        env: Optional relayer preset — one of ``"prod"``, ``"staging"``,
+            ``"local"``. Resolves ``server_url`` to the matching
             hosted relayer when ``server_url`` is left at its default.
             Precedence: explicit ``server_url`` > ``env`` > default.
     """
@@ -90,6 +87,24 @@ class RecallMemory:
     blob_id: str
     text: str
     distance: float
+
+
+@dataclass
+class RecallParams:
+    """Object-style input for :meth:`MemWal.recall`.
+
+    Preferred over positional args because positional ``recall(query, limit,
+    namespace)`` is easy to mis-read as ``recall(query, namespace)`` at call
+    sites. Construct this dataclass and pass it as the sole argument:
+
+        client.recall(RecallParams(query="food allergies", limit=5,
+                                   namespace="profile"))
+    """
+
+    query: str
+    limit: int = 10
+    namespace: Optional[str] = None
+    max_distance: Optional[float] = None
 
 
 @dataclass
@@ -186,6 +201,17 @@ class RestoreResult:
     total: int
     namespace: str
     owner: str
+    #: True when this restore is known-incomplete: either more on-chain
+    #: blobs were missing locally than ``limit`` allowed this call to
+    #: restore, or the sidecar's raw on-chain candidate fetch hit its own
+    #: cap before this namespace's blobs were even filtered out of that
+    #: set (WALM-319) -- this can be ``True`` even when ``total == 0``,
+    #: since a cap hit elsewhere can starve this namespace's fetch
+    #: entirely. Raising ``limit`` only helps with the first case.
+    #:
+    #: Relayers older than WALM-319 don't send this field at all; the SDK
+    #: defaults it to ``False`` in that case rather than requiring it.
+    truncated: bool = False
 
 
 @dataclass

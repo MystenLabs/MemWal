@@ -3,26 +3,29 @@ name = "memwal-indexer"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "memwal-indexer"
+path = "src/main.rs"
+
 [dependencies]
-# Async runtime
 tokio = { version = "1", features = ["full"] }
-
-# Database (PostgreSQL)
-sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "chrono"] }
-
-# HTTP client (for Sui RPC)
-reqwest = { version = "0.12", features = ["json"] }
-
-# Serialization
+anyhow = "1"
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# Config
+bcs = "0.1"
+hex = "0.4"
 dotenvy = "0.15"
-
-# Logging
+url = "2"
+clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Utils
-chrono = "0.4"
+# Checkpoint-ingestion framework: reads static checkpoint files from a public bucket,
+# not the fullnode event API (testnet disabled ledger-history indexing). Same resolved
+# graph dopamint-arena uses (diesel-async 0.9 -> diesel 2.3). Pin the exact
+# testnet-v1.75.1 commit so a mutable branch update cannot change the build.
+sui-indexer-alt-framework = { git = "https://github.com/MystenLabs/sui.git", rev = "623521008f1c3afa3a1adbb6c3c44c39c46c5e17" }
+move-core-types = { git = "https://github.com/MystenLabs/sui.git", rev = "623521008f1c3afa3a1adbb6c3c44c39c46c5e17" }
+diesel = { version = "2.3", features = ["postgres"] }
+diesel-async = { version = "0.9", features = ["bb8", "postgres"] }
+diesel_migrations = "2.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

@@ -60,6 +60,8 @@ share/python-wheels/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+!notebooks/
+!notebooks/walrus_memory_python_sdk.ipynb
 
 # Docs build
 site/

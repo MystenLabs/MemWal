@@ -20,7 +20,7 @@ Example::
 
     # Async usage
     result = await memwal.remember("I'm allergic to peanuts")
-    matches = await memwal.recall("food allergies")
+    matches = await memwal.recall(RecallParams(query="food allergies"))
 """
 
 from __future__ import annotations
@@ -30,7 +30,8 @@ import base64
 import json
 import random
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
 import httpx
 import nacl.signing
@@ -49,6 +50,7 @@ from .types import (
     RecallManualOptions,
     RecallManualResult,
     RecallMemory,
+    RecallParams,
     RecallResult,
     RememberAcceptedResult,
     RememberBulkAcceptedResult,
@@ -81,7 +83,8 @@ SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
 AUTH_REJECTED_MESSAGE = (
     "401 from relayer: typically wrong private key, key not registered on this "
     "account, account ID mismatch, or staging/mainnet mismatch. Check .env.local "
-    "and dashboard credentials."
+    "and dashboard credentials. Full troubleshooting: "
+    "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
 
 
@@ -120,6 +123,85 @@ def _is_transient_polling_status(status: int) -> bool:
     """
 
     return status == 0 or status == 429 or status >= 500
+
+
+def _occurred_at_to_wire(
+    occurred_at: Optional[Union[str, datetime]],
+) -> Optional[str]:
+    """Render an ``occurred_at`` argument to the wire format.
+
+    The server's ``AnalyzeRequest.occurred_at`` field expects RFC-3339
+    UTC with a trailing ``Z``. Output precision matches the TS SDK's
+    ``Date.toISOString()`` (milliseconds), e.g.
+    ``"2023-05-25T17:50:00.000Z"`` — so the two SDKs produce
+    byte-identical wire payloads for the same instant.
+
+    Aware ``datetime`` objects are converted to UTC. **Naïve datetimes
+    are rejected** with ``ValueError``: silently assuming UTC would
+    produce timezone-off-by-N anchors for callers outside UTC and
+    undermine WALM-55's "honest temporal anchoring" guarantee. Callers
+    should pass ``datetime.now(timezone.utc)`` or attach a ``tzinfo``
+    explicitly.
+
+    String inputs are validated as RFC-3339 / ISO-8601 (accepting
+    trailing ``Z`` as a UTC shorthand, per RFC-3339 §4.2) and
+    re-formatted to canonical form. Invalid strings raise
+    ``ValueError`` at the SDK boundary rather than being forwarded as
+    a 400 from the server.
+
+    Returns ``None`` when no anchor is supplied so the field is
+    omitted from the request body.
+    """
+
+    if occurred_at is None:
+        return None
+    if isinstance(occurred_at, datetime):
+        if occurred_at.tzinfo is None:
+            raise ValueError(
+                "occurred_at datetime must be timezone-aware. Pass "
+                "datetime.now(timezone.utc), datetime(..., tzinfo=...), "
+                "or an RFC-3339 string. Naïve datetimes are rejected "
+                "because they would be silently mis-anchored for "
+                "callers outside UTC."
+            )
+        dt = occurred_at.astimezone(timezone.utc)
+        # Drop tzinfo before `isoformat` to suppress the "+00:00"
+        # suffix; we append "Z" manually to match the TS SDK + server
+        # canonical form. `timespec="milliseconds"` matches JS
+        # `Date.toISOString()` precision so the two SDKs are
+        # byte-identical for the same instant.
+        return dt.replace(tzinfo=None).isoformat(timespec="milliseconds") + "Z"
+    if isinstance(occurred_at, str):
+        # Validate at the SDK boundary so a bad timestamp doesn't
+        # bring down the whole analyze() call with an opaque 400 from
+        # the server's serde layer. RFC-3339 §4.2 allows "Z" as a UTC
+        # shorthand; `fromisoformat` only accepts it on Python 3.11+,
+        # so we normalise to "+00:00" before parsing for 3.9/3.10
+        # compatibility.
+        normalised = (
+            occurred_at.replace("Z", "+00:00", 1)
+            if occurred_at.endswith("Z")
+            else occurred_at
+        )
+        try:
+            parsed = datetime.fromisoformat(normalised)
+        except ValueError as exc:
+            raise ValueError(
+                f"occurred_at must be RFC-3339 / ISO-8601, got: {occurred_at!r}"
+            ) from exc
+        # Round-trip through the datetime branch so the wire format is
+        # canonical (UTC, milliseconds, trailing "Z"). Naïve inputs
+        # here are rare but possible; reuse the aware-required guard
+        # by attaching tzinfo if the string carried one.
+        if parsed.tzinfo is None:
+            raise ValueError(
+                f"occurred_at string must carry a UTC offset or 'Z' suffix, "
+                f"got: {occurred_at!r}"
+            )
+        return _occurred_at_to_wire(parsed)
+    raise TypeError(
+        f"occurred_at must be datetime, str, or None; got {type(occurred_at).__name__}"
+    )
 
 
 class MemWal:
@@ -473,7 +555,7 @@ class MemWal:
 
     async def recall(
         self,
-        query: str,
+        query: "str | RecallParams",
         limit: int = 10,
         namespace: Optional[str] = None,
         max_distance: Optional[float] = None,
@@ -482,18 +564,40 @@ class MemWal:
 
         Server handles: verify -> embed query -> search -> Walrus download -> decrypt.
 
+        **Preferred call style** is to pass a :class:`RecallParams`
+        object so the call site reads self-describingly:
+
+            await client.recall(RecallParams(
+                query="food allergies", limit=5, namespace="profile"))
+
+        The legacy positional call ``client.recall(query, limit, namespace)``
+        is still supported but is easy to mis-read as
+        ``recall(query, namespace)``. Prefer kwargs at minimum.
+
         Args:
-            query: Search query.
-            limit: Max number of results (default: 10).
-            namespace: Override the default namespace.
-            max_distance: Optional client-side relevance threshold. Memories with
-                ``distance >= max_distance`` are dropped.
+            query: Search query, or a :class:`RecallParams` carrying query +
+                limit + namespace + max_distance in one object.
+            limit: Max number of results (default: 10). Ignored when ``query``
+                is a :class:`RecallParams`.
+            namespace: Override the default namespace. Ignored when ``query``
+                is a :class:`RecallParams`.
+            max_distance: Optional client-side relevance threshold. Memories
+                with ``distance >= max_distance`` are dropped. Ignored when
+                ``query`` is a :class:`RecallParams`.
 
         Returns:
             :class:`RecallResult` with decrypted text results.
         """
+        if isinstance(query, RecallParams):
+            params = query
+            query_text = params.query
+            limit = params.limit
+            namespace = params.namespace
+            max_distance = params.max_distance
+        else:
+            query_text = query
         data = await self._signed_request("POST", "/api/recall", {
-            "query": query,
+            "query": query_text,
             "limit": limit,
             "namespace": namespace or self._namespace,
         })
@@ -510,7 +614,12 @@ class MemWal:
             return RecallResult(results=memories, total=len(memories))
         return RecallResult(results=memories, total=data.get("total", len(memories)))
 
-    async def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
+    async def analyze(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
+    ) -> AnalyzeResult:
         """Analyze conversation text and return as soon as facts are accepted.
 
         Per PR #121: server extracts atomic facts synchronously via LLM, then
@@ -523,15 +632,40 @@ class MemWal:
         Args:
             text: Conversation text to analyze.
             namespace: Override the default namespace.
+            occurred_at: Optional valid-time timestamp — when the
+                conversation/event actually happened. When supplied, the
+                server extractor uses it as a temporal anchor and
+                resolves in-turn relative references ("last Friday",
+                "yesterday") into absolute dates inside the fact text
+                before embedding/encryption. Accepts a
+                :class:`datetime.datetime` (preferred — **must be
+                timezone-aware**; naïve datetimes raise ``ValueError``
+                because silently assuming UTC would mis-anchor by N
+                hours for callers outside UTC) or an ISO-8601 / RFC-3339
+                string (must carry a ``Z`` suffix or UTC offset; raises
+                ``ValueError`` if malformed or naïve). Wire format is
+                RFC-3339 UTC with millisecond precision and trailing
+                ``Z`` (byte-identical to the TypeScript SDK). Omit when
+                no anchor is available — the server will not invent one
+                (no ``now()`` fallback). The resolved date lives only
+                inside the encrypted fact text + embedding; there is no
+                server-readable metadata column for it (Architecture A).
 
         Returns:
             :class:`AnalyzeResult` with extracted ``facts`` + per-fact
             ``job_ids`` for downstream polling.
         """
+        body: Dict[str, Any] = {
+            "text": text,
+            "namespace": namespace or self._namespace,
+        }
+        wire_occurred_at = _occurred_at_to_wire(occurred_at)
+        if wire_occurred_at is not None:
+            body["occurred_at"] = wire_occurred_at
         data = await self._signed_request(
             "POST",
             "/api/analyze",
-            {"text": text, "namespace": namespace or self._namespace},
+            body,
             accepted_statuses=(200, 202),
         )
         # Backward-compat: older server shape returned `facts[].id` and
@@ -560,6 +694,7 @@ class MemWal:
         text: str,
         namespace: Optional[str] = None,
         opts: Optional[RememberBulkOptions] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
     ) -> AnalyzeWaitResult:
         """Analyze + wait for every extracted fact to finish persisting.
 
@@ -567,9 +702,12 @@ class MemWal:
         :meth:`wait_for_remember_jobs` on the returned ``job_ids``. The
         result combines the analyze fact list with the bulk-style settled
         per-job results.
+
+        ``occurred_at`` carries the same temporal-anchor semantics as
+        :meth:`analyze` — see that method's docstring for details.
         """
 
-        accepted = await self.analyze(text, namespace)
+        accepted = await self.analyze(text, namespace, occurred_at=occurred_at)
         completed = await self.wait_for_remember_jobs(accepted.job_ids, opts)
         return AnalyzeWaitResult(
             results=completed.results,
@@ -630,18 +768,50 @@ class MemWal:
             memories=memories,
         )
 
-    async def restore(self, namespace: str, limit: int = 50) -> RestoreResult:
-        """Restore a namespace.
+    async def restore(self, namespace: str, limit: int = 10) -> RestoreResult:
+        """Rebuild missing local index entries for ``namespace`` from Walrus.
 
-        Server downloads all blobs from Walrus, decrypts with delegate key,
-        re-embeds, and re-indexes.
+        The relayer queries Walrus for blobs the caller owns in ``namespace``,
+        ignores blobs already indexed locally, downloads the missing ones,
+        SEAL-decrypts them with the delegate key, re-embeds the plaintext, and
+        inserts a fresh vector row per blob.
+
+        Response semantics:
+
+        * ``restored`` — blobs that completed the full
+          download → decrypt → embed → DB insert pipeline this call.
+        * ``skipped`` — on-chain blobs already present in the local index
+          (no work needed). Decrypt / embed failures are dropped silently and
+          do **not** count as either restored or skipped.
+        * ``total`` — count of on-chain blobs the relayer saw for
+          ``(owner, namespace)`` before the limit was applied.
+        * ``truncated`` — True when this restore is known-incomplete (limit
+          truncation or an upstream on-chain candidate-fetch cap; see
+          :class:`~memwal.types.RestoreResult`). Defaults to ``False`` when
+          talking to a relayer older than WALM-319 that omits the field.
 
         Args:
-            namespace: Namespace to restore.
-            limit: Max entries to restore (default: 50).
+            namespace: Namespace to restore. Exact match — no prefix or
+                hierarchy semantics (see SKILL.md "Namespace Semantics").
+            limit: Max blobs the relayer will *inspect* this call (default:
+                10, matches the server-side default and the TypeScript SDK).
+                The relayer selects up to this many missing blobs from the
+                candidates it sees, in unspecified order; it does **not** cap
+                ``restored`` separately.
 
         Returns:
-            :class:`RestoreResult` with count of restored entries.
+            :class:`RestoreResult`.
+
+        Notes:
+            * **No pagination cursor** — restore is single-shot. A larger
+              ``limit`` may help when ``truncated`` is caused by the request
+              limit, but candidate discovery also has a per-owner source cap
+              shared across namespaces. Hitting that cap requires cursor/
+              pagination support for guaranteed full recovery; increasing
+              ``limit`` or retrying cannot guarantee it.
+            * **Performance** scales linearly in ``limit``: up to 10 Walrus
+              downloads in parallel, then 3 SEAL decrypts in parallel, then
+              embeddings. Expect seconds-per-blob on cold caches.
         """
         data = await self._signed_request("POST", "/api/restore", {
             "namespace": namespace,
@@ -653,6 +823,10 @@ class MemWal:
             total=data["total"],
             namespace=data["namespace"],
             owner=data["owner"],
+            # Relayers older than WALM-319 omit `truncated` entirely --
+            # treat "not present" as "not known to be truncated" rather
+            # than require every relayer version to send it.
+            truncated=data.get("truncated", False),
         )
 
     async def health(self) -> HealthResult:
@@ -1053,11 +1227,11 @@ class MemWalSync:
 
     Example::
 
-        from memwal import MemWalSync
+        from memwal import MemWalSync, RecallParams
 
         client = MemWalSync.create(key="...", account_id="0x...")
         result = client.remember("I love coffee")
-        matches = client.recall("coffee preferences")
+        matches = client.recall(RecallParams(query="coffee preferences"))
     """
 
     def __init__(self, inner: MemWal) -> None:
@@ -1094,6 +1268,12 @@ class MemWalSync:
         except RuntimeError:
             loop = None
 
+        # Reset the httpx client before every asyncio.run() path so it is
+        # recreated inside the loop that will use it. This matters in
+        # notebooks/Jupyter where the sync wrapper runs coroutines in worker
+        # threads with short-lived event loops.
+        self._inner._client = None
+
         if loop is not None and loop.is_running():
             # Already inside an event loop (e.g. Jupyter).
             # Create a new loop in a thread.
@@ -1102,12 +1282,6 @@ class MemWalSync:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 return pool.submit(asyncio.run, coro).result()
         else:
-            # Reset the httpx client before each asyncio.run() so it is
-            # recreated fresh inside the new event loop.  Without this,
-            # reusing a MemWalSync instance across multiple calls raises
-            # "RuntimeError: Event loop is closed" because the client's
-            # transport is still bound to the previous (now-closed) loop.
-            self._inner._client = None
             return asyncio.run(coro)
 
     def remember(
@@ -1189,26 +1363,35 @@ class MemWalSync:
 
     def recall(
         self,
-        query: str,
+        query: "str | RecallParams",
         limit: int = 10,
         namespace: Optional[str] = None,
         max_distance: Optional[float] = None,
     ) -> RecallResult:
-        """Synchronous version of :meth:`MemWal.recall`."""
+        """Synchronous version of :meth:`MemWal.recall` (accepts
+        :class:`RecallParams` for the recommended object-style call)."""
         return self._run(self._inner.recall(query, limit, namespace, max_distance))
 
-    def analyze(self, text: str, namespace: Optional[str] = None) -> AnalyzeResult:
+    def analyze(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
+    ) -> AnalyzeResult:
         """Synchronous version of :meth:`MemWal.analyze`."""
-        return self._run(self._inner.analyze(text, namespace))
+        return self._run(self._inner.analyze(text, namespace, occurred_at=occurred_at))
 
     def analyze_and_wait(
         self,
         text: str,
         namespace: Optional[str] = None,
         opts: Optional[RememberBulkOptions] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
     ) -> AnalyzeWaitResult:
         """Synchronous version of :meth:`MemWal.analyze_and_wait`."""
-        return self._run(self._inner.analyze_and_wait(text, namespace, opts))
+        return self._run(
+            self._inner.analyze_and_wait(text, namespace, opts, occurred_at=occurred_at)
+        )
 
     def embed(self, text: str) -> EmbedResult:
         """Synchronous version of :meth:`MemWal.embed`."""
@@ -1218,8 +1401,9 @@ class MemWalSync:
         """Synchronous version of :meth:`MemWal.ask`."""
         return self._run(self._inner.ask(question, limit, namespace))
 
-    def restore(self, namespace: str, limit: int = 50) -> RestoreResult:
-        """Synchronous version of :meth:`MemWal.restore`."""
+    def restore(self, namespace: str, limit: int = 10) -> RestoreResult:
+        """Synchronous version of :meth:`MemWal.restore`. Default limit is 10
+        (matches server + TypeScript SDK)."""
         return self._run(self._inner.restore(namespace, limit))
 
     def health(self) -> HealthResult:

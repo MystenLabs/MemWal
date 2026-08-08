@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://docs.memwal.ai/openclaw/overview"><strong>Documentation</strong></a> ·
+  <a href="https://docs.wal.app/walrus-memory/openclaw/overview"><strong>Documentation</strong></a> ·
   <a href="#quick-start"><strong>Quick Start</strong></a> ·
   <a href="#verify"><strong>Verify</strong></a> ·
   <a href="#how-it-works"><strong>How It Works</strong></a>
@@ -44,14 +44,14 @@ The plugin needs three values:
 | **Account ID** | Your Walrus Memory account object ID on Sui (`0x...`) |
 | **Relayer URL** | The Walrus Memory relayer endpoint that handles search, storage, and encryption |
 
-Get your delegate key and account ID from the [Walrus Memory dashboard](https://memwal.ai), or see the [Quick Start guide](https://docs.memwal.ai/getting-started/quick-start) for detailed setup.
+Get your delegate key and account ID from the [Walrus Memory dashboard](https://memory.walrus.xyz), or see the [Quick Start guide](https://docs.wal.app/walrus-memory/getting-started/quick-start) for detailed setup.
 
-For the relayer, use a managed endpoint or [self-host your own](https://docs.memwal.ai/relayer/self-hosting):
+For the relayer, use a managed endpoint or [self-host your own](https://docs.wal.app/walrus-memory/relayer/self-hosting):
 
 | Environment | Relayer URL |
 |-------------|-------------|
-| **Production** (mainnet) | `https://relayer.memwal.ai` |
-| **Development** (testnet) | `https://relayer.dev.memwal.ai` |
+| **Production** (mainnet) | `https://relayer.memory.walrus.xyz` |
+| **Staging** (testnet) | `https://relayer-staging.memory.walrus.xyz` |
 
 ## Quick Start
 
@@ -84,7 +84,7 @@ Add the plugin config to `~/.openclaw/openclaw.json`:
         "config": {
           "privateKey": "${MEMWAL_PRIVATE_KEY}",             // References the env var
           "accountId": "0x3247e3da...",                    // Your account ID from the dashboard
-          "serverUrl": "https://relayer.dev.memwal.ai"    // Or your self-hosted relayer
+          "serverUrl": "https://relayer-staging.memory.walrus.xyz"    // Or your self-hosted relayer
         }
       }
     }
