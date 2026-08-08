@@ -244,8 +244,9 @@ export default function ConnectApp() {
             target: `${config.memwalPackageId}::account::add_delegate_key`,
             arguments: [
                 addTx.object(accountId),
+                addTx.object(config.memwalRegistryId),
                 addTx.pure('vector<u8>', publicKeyBytes),
-                addTx.pure('address', session.delegate.sui_address),
+                // v1_new derives the Sui address on-chain — no address arg.
                 addTx.pure('string', session.label),
                 addTx.object('0x6'),
             ],
