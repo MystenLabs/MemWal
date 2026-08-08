@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Copy, ChevronLeft, ChevronRight } from 'lucide-react'
+import DOMPurify from 'dompurify'
 import { Card } from './Card'
 import { fetchAdminErrors } from '../utils/admin-api'
 
@@ -205,7 +206,10 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
                 {new Date(expanded.timestamp).toLocaleString()}
               </p>
               <pre className="admin-error-modal-message">
-                {expanded.fullMessage}
+                {DOMPurify.sanitize(expanded.fullMessage, {
+                  ALLOWED_TAGS: [],
+                  ALLOWED_ATTR: []
+                })}
               </pre>
             </div>
             <div className="admin-error-modal-footer">

@@ -163,6 +163,121 @@ fn parse_env_u32(name: &str, fallback: u32, min: u32, max: u32) -> u32 {
     parse_env_u64(name, fallback as u64, min as u64, max as u64) as u32
 }
 
+/// Background task that periodically monitors wallet balances and alerts Slack
+/// when balances fall below configured thresholds. Fetches uploader pool balances
+/// from the sidecar and sponsor wallet balance from the RPC.
+#[tracing::instrument(name = "balance_monitor", skip_all)]
+async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+
+    loop {
+        interval.tick().await;
+
+        // Fetch uploader pool balance from sidecar
+        let sidecar_url = &state.config.sidecar_url;
+        let wallet_metrics_url = format!("{}/metrics/wallet", sidecar_url);
+
+        match state.http_client.get(&wallet_metrics_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(data) => {
+                        if let Some(wal_frost_str) = data
+                            .get("walletWalBalanceFrost")
+                            .and_then(|v| v.as_str())
+                        {
+                            if let Ok(wal_balance) = wal_frost_str.parse::<u64>() {
+                                if wal_balance < state.config.wallet_balance_low_threshold_wal {
+                                    tracing::warn!(
+                                        "balance_monitor: uploader pool WAL balance {} below threshold {}",
+                                        wal_balance,
+                                        state.config.wallet_balance_low_threshold_wal
+                                    );
+                                    // Use "pool" as a constant address for dedup
+                                    let alert = alerts::WalletBalanceLowAlert {
+                                        wallet_type: "uploader_pool".to_string(),
+                                        address: "pool".to_string(),
+                                        balance: wal_balance,
+                                        threshold: state.config.wallet_balance_low_threshold_wal,
+                                        token: "WAL".to_string(),
+                                    };
+                                    if let Err(err) =
+                                        state.alerts.notify_wallet_balance_low(alert).await
+                                    {
+                                        tracing::warn!("balance_monitor: failed to send uploader pool alert: {}", err);
+                                    }
+                                } else {
+                                    tracing::debug!(
+                                        "balance_monitor: uploader pool WAL balance {} ok",
+                                        wal_balance
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("balance_monitor: failed to parse sidecar wallet metrics: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("balance_monitor: failed to fetch sidecar wallet metrics: {}", e);
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "balance_monitor: sidecar wallet metrics returned status {}",
+                    resp.status()
+                );
+            }
+        }
+
+        // Fetch sponsor wallet balance if configured
+        if let Some(sponsor_key) = &state.config.sponsor_private_key {
+            // Derive sponsor address from the key
+            match sui::tx_build::sponsor_address(sponsor_key) {
+                Ok(sponsor_address) => {
+                    // Use the security_delete_background_sui client for balance checking if available
+                    if let Some(sui_client) = &state.security_delete_background_sui {
+                        match sui_client.address_balance(&sponsor_address).await {
+                            Ok(sponsor_balance) => {
+                                if sponsor_balance < state.config.sponsor_balance_low_threshold_sui {
+                                    tracing::warn!(
+                                        "balance_monitor: sponsor wallet SUI balance {} below threshold {}",
+                                        sponsor_balance,
+                                        state.config.sponsor_balance_low_threshold_sui
+                                    );
+                                    let alert = alerts::WalletBalanceLowAlert {
+                                        wallet_type: "sponsor".to_string(),
+                                        address: sponsor_address.clone(),
+                                        balance: sponsor_balance,
+                                        threshold: state.config.sponsor_balance_low_threshold_sui,
+                                        token: "SUI".to_string(),
+                                    };
+                                    if let Err(err) =
+                                        state.alerts.notify_wallet_balance_low(alert).await
+                                    {
+                                        tracing::warn!("balance_monitor: failed to send sponsor alert: {}", err);
+                                    }
+                                } else {
+                                    tracing::debug!(
+                                        "balance_monitor: sponsor wallet SUI balance {} ok",
+                                        sponsor_balance
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("balance_monitor: failed to fetch sponsor balance: {}", e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("balance_monitor: failed to derive sponsor address: {}", e);
+                }
+            }
+        }
+    }
+}
+
 async fn init_apalis_pool(
     database_url: &str,
     startup_timeout: std::time::Duration,
@@ -982,6 +1097,21 @@ async fn main() {
             }
         }
     });
+
+    // Spawn background task for proactive wallet balance monitoring
+    {
+        let balance_monitor_state = state.clone();
+        let balance_monitor_interval_secs = config.balance_monitor_interval_secs;
+        tracing::info!(
+            "  balance monitor: starting with interval={}s, wallet_threshold_wal={}, sponsor_threshold_sui={}",
+            balance_monitor_interval_secs,
+            config.wallet_balance_low_threshold_wal,
+            config.sponsor_balance_low_threshold_sui,
+        );
+        tokio::spawn(async move {
+            balance_monitor_task(balance_monitor_state, balance_monitor_interval_secs).await;
+        });
+    }
 
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)

@@ -11,7 +11,7 @@ export default function AdminDashboard() {
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   useEffect(() => {
-    const stored = localStorage.getItem(ADMIN_KEY_STORAGE)
+    const stored = sessionStorage.getItem(ADMIN_KEY_STORAGE)
     if (stored) {
       setAdminKey(stored)
     }
@@ -21,7 +21,7 @@ export default function AdminDashboard() {
     setIsSubmitting(true)
     try {
       const trimmedKey = key.trim()
-      localStorage.setItem(ADMIN_KEY_STORAGE, trimmedKey)
+      sessionStorage.setItem(ADMIN_KEY_STORAGE, trimmedKey)
       setAdminKey(trimmedKey)
     } finally {
       setIsSubmitting(false)
@@ -29,7 +29,7 @@ export default function AdminDashboard() {
   }
 
   const handleLogout = () => {
-    localStorage.removeItem(ADMIN_KEY_STORAGE)
+    sessionStorage.removeItem(ADMIN_KEY_STORAGE)
     setAdminKey(null)
   }
 

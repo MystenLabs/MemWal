@@ -345,6 +345,10 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Balance monitoring (proactive alerts)
+    pub balance_monitor_interval_secs: u64,
+    pub wallet_balance_low_threshold_wal: u64,
+    pub sponsor_balance_low_threshold_sui: u64,
 }
 
 impl Config {
@@ -478,6 +482,9 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            balance_monitor_interval_secs: env_number("BALANCE_MONITOR_INTERVAL_SECS", 900),
+            wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
+            sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
         }
     }
 }
@@ -1781,6 +1788,9 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
         }
     }
 
