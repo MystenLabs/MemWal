@@ -1120,6 +1120,25 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         );
 
+    // Admin dashboard routes (requires ADMIN_API_KEY)
+    let admin_dashboard_routes = Router::new()
+        .route(
+            "/api/admin/wallets",
+            get(routes::admin_dashboard::get_wallets).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/upload-errors",
+            get(routes::admin_dashboard::get_upload_errors).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/config",
+            get(routes::admin_dashboard::get_admin_config).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::verify_admin_key,
+        ));
+
     // Public routes
     // /health and /config accept no body — cap at 16 KiB to reject
     // oversized unauthenticated requests before they reach any handler.
@@ -1206,6 +1225,7 @@ async fn main() {
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
+        .merge(admin_dashboard_routes)
         .layer(cors)
         // Merge after applying the deployment-wide CORS layer so its
         // preflight handler cannot shadow the deletion API's public policy.
