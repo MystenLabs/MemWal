@@ -26,7 +26,6 @@ import { Card } from '../components/Card'
 import SecurityDeleteSection from '../components/SecurityDeleteSection'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
-import AppAuthClientManager from './AppAuthClientManager'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
 
@@ -1356,8 +1355,6 @@ const result = await generateText({
                         </button>
                     </div>
                 </Card>
-
-                <AppAuthClientManager />
 
                 {config.enableMemoryDeletion && (
                     config.securityDeleteEnabled

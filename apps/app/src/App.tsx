@@ -28,6 +28,7 @@ import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
 import Dashboard from './pages/Dashboard'
+import AdminDashboard from './pages/AdminDashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
@@ -387,6 +388,7 @@ function AppContent() {
           <Route path="/memwal/error" element={<LocalAppAuthCallback />} />
         </>
       )}
+      <Route path="/admin" element={<AdminDashboard />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

@@ -1,0 +1,79 @@
+import { useQuery } from '@tanstack/react-query'
+import { Card } from './Card'
+import { fetchAdminConfig } from '../utils/admin-api'
+
+interface AdminConfigProps {
+  adminKey: string
+}
+
+export function AdminConfig({ adminKey }: AdminConfigProps) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['adminConfig', adminKey],
+    queryFn: () => fetchAdminConfig(adminKey),
+    retry: (failureCount, error) => {
+      const err = error as Error
+      return err.message !== 'INVALID_KEY' && failureCount < 3
+    },
+  })
+
+  if (isLoading) {
+    return (
+      <Card title="Configuration" className="admin-config-card">
+        <div className="admin-loading">Loading configuration...</div>
+      </Card>
+    )
+  }
+
+  if (error) {
+    const err = error as Error
+    return (
+      <Card title="Configuration" className="admin-config-card">
+        <div className="admin-error">
+          {err.message === 'INVALID_KEY' ? 'Invalid API key' : 'Failed to load configuration'}
+        </div>
+      </Card>
+    )
+  }
+
+  if (!data) {
+    return (
+      <Card title="Configuration" className="admin-config-card">
+        <div className="admin-error">No configuration available</div>
+      </Card>
+    )
+  }
+
+  return (
+    <Card title="Configuration" className="admin-config-card">
+      <div className="admin-config-items">
+        <div className="admin-config-item">
+          <span className="admin-config-label">Balance Monitor Interval</span>
+          <code className="admin-config-value">
+            {data.balanceMonitorIntervalSecs} seconds
+          </code>
+        </div>
+
+        <div className="admin-config-item">
+          <span className="admin-config-label">Uploader WAL Low Threshold</span>
+          <code className="admin-config-value">
+            {data.uploaderWalLowThresholdFrost.toString()} frost
+          </code>
+        </div>
+
+        <div className="admin-config-item">
+          <span className="admin-config-label">Sponsor SUI Low Threshold</span>
+          <code className="admin-config-value">
+            {data.sponsorSuiLowThresholdMist.toString()} mist
+          </code>
+        </div>
+
+        <div className="admin-config-item">
+          <span className="admin-config-label">Admin API Key Set</span>
+          <span className={`admin-config-badge ${data.adminApiKeySet ? 'admin-config-badge-active' : 'admin-config-badge-inactive'}`}>
+            {data.adminApiKeySet ? 'Configured' : 'Not configured'}
+          </span>
+        </div>
+      </div>
+    </Card>
+  )
+}
