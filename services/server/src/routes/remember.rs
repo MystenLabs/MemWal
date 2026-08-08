@@ -1134,6 +1134,9 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: String::new(),
             walrus_system_object_id: String::new(),
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
         }
     }
 

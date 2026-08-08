@@ -22,12 +22,17 @@ pub struct WalletBalance {
 #[derive(Debug, Serialize)]
 pub struct UploaderPool {
     pub wallet: WalletBalance,
+    pub wal_threshold: String,
+    pub status: String,
     pub last_updated: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SponsorWallet {
+    pub address: Option<String>,
     pub sui: String,
+    pub sui_threshold: String,
+    pub status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,8 +62,9 @@ pub struct UploadErrorsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ConfigResponse {
-    pub sponsor_wallet_threshold_mist: u64,
-    pub uploader_pool_threshold_mist: u64,
+    pub balance_monitor_interval_secs: u64,
+    pub wallet_wal_low_threshold_frost: u64,
+    pub sponsor_sui_low_threshold_mist: u64,
     pub admin_api_key_set: bool,
 }
 
@@ -100,16 +106,49 @@ pub async fn get_wallets(
         .unwrap_or("0")
         .to_string();
 
+    let wal_threshold = state.config.wallet_balance_low_threshold_wal;
+    let uploader_status = match wallet_wal_frost.parse::<u64>() {
+        Ok(bal) if bal < wal_threshold => "low",
+        _ => "ok",
+    };
+
+    let sponsor_threshold = state.config.sponsor_balance_low_threshold_sui;
+    let mut sponsor_address: Option<String> = None;
+    let mut sponsor_sui_mist = "0".to_string();
+    let mut sponsor_status = "unknown";
+
+    if let Some(sponsor_key) = &state.config.sponsor_private_key {
+        if let Ok(address) = crate::sui::tx_build::sponsor_address(sponsor_key) {
+            if let Some(sui_client) = &state.security_delete_background_sui {
+                match sui_client.address_balance(&address).await {
+                    Ok(balance) => {
+                        sponsor_sui_mist = balance.to_string();
+                        sponsor_status = if balance < sponsor_threshold { "low" } else { "ok" };
+                    }
+                    Err(e) => {
+                        tracing::warn!("admin.wallets: failed to fetch sponsor balance: {}", e);
+                    }
+                }
+            }
+            sponsor_address = Some(address);
+        }
+    }
+
     Ok(Json(WalletsResponse {
         uploader_pool: UploaderPool {
             wallet: WalletBalance {
                 sui: wallet_sui_mist,
                 wal: wallet_wal_frost,
             },
+            wal_threshold: wal_threshold.to_string(),
+            status: uploader_status.to_string(),
             last_updated: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         },
         sponsor_wallet: SponsorWallet {
-            sui: "0".to_string(),
+            address: sponsor_address,
+            sui: sponsor_sui_mist,
+            sui_threshold: sponsor_threshold.to_string(),
+            status: sponsor_status.to_string(),
         },
     }))
 }
@@ -161,13 +200,14 @@ pub async fn get_upload_errors(
 
 #[tracing::instrument(name = "admin.config", skip_all)]
 pub async fn get_admin_config(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ConfigResponse>, AppError> {
     let admin_api_key_set = std::env::var("ADMIN_API_KEY").is_ok();
 
     Ok(Json(ConfigResponse {
-        sponsor_wallet_threshold_mist: 1_000_000_000,
-        uploader_pool_threshold_mist: 500_000_000,
+        balance_monitor_interval_secs: state.config.balance_monitor_interval_secs,
+        wallet_wal_low_threshold_frost: state.config.wallet_balance_low_threshold_wal,
+        sponsor_sui_low_threshold_mist: state.config.sponsor_balance_low_threshold_sui,
         admin_api_key_set,
     }))
 }
@@ -202,11 +242,14 @@ mod tests {
                 sui: "1000000".to_string(),
                 wal: "500000".to_string(),
             },
+            wal_threshold: "1000000".to_string(),
+            status: "ok".to_string(),
             last_updated: "2024-01-01T00:00:00Z".to_string(),
         };
 
         let json = serde_json::to_value(&uploader_pool).unwrap();
         assert_eq!(json["wallet"]["sui"], "1000000");
+        assert_eq!(json["status"], "ok");
         assert_eq!(json["last_updated"], "2024-01-01T00:00:00Z");
     }
 
@@ -218,10 +261,15 @@ mod tests {
                     sui: "1000000".to_string(),
                     wal: "500000".to_string(),
                 },
+                wal_threshold: "1000000".to_string(),
+                status: "ok".to_string(),
                 last_updated: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             },
             sponsor_wallet: SponsorWallet {
+                address: Some("0xsponsor".to_string()),
                 sui: "2000000".to_string(),
+                sui_threshold: "1000000000".to_string(),
+                status: "low".to_string(),
             },
         };
 
@@ -230,6 +278,7 @@ mod tests {
         assert!(json["sponsor_wallet"].is_object());
         assert_eq!(json["uploader_pool"]["wallet"]["sui"], "1000000");
         assert_eq!(json["sponsor_wallet"]["sui"], "2000000");
+        assert_eq!(json["sponsor_wallet"]["status"], "low");
     }
 
     #[test]
@@ -340,22 +389,25 @@ mod tests {
     #[test]
     fn config_response_serialization_with_key_set() {
         let config = ConfigResponse {
-            sponsor_wallet_threshold_mist: 1_000_000_000,
-            uploader_pool_threshold_mist: 500_000_000,
+            balance_monitor_interval_secs: 900,
+            wallet_wal_low_threshold_frost: 1_000_000,
+            sponsor_sui_low_threshold_mist: 1_000_000_000,
             admin_api_key_set: true,
         };
 
         let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["sponsor_wallet_threshold_mist"], 1_000_000_000u64);
-        assert_eq!(json["uploader_pool_threshold_mist"], 500_000_000u64);
+        assert_eq!(json["balance_monitor_interval_secs"], 900u64);
+        assert_eq!(json["wallet_wal_low_threshold_frost"], 1_000_000u64);
+        assert_eq!(json["sponsor_sui_low_threshold_mist"], 1_000_000_000u64);
         assert_eq!(json["admin_api_key_set"], true);
     }
 
     #[test]
     fn config_response_serialization_without_key_set() {
         let config = ConfigResponse {
-            sponsor_wallet_threshold_mist: 1_000_000_000,
-            uploader_pool_threshold_mist: 500_000_000,
+            balance_monitor_interval_secs: 900,
+            wallet_wal_low_threshold_frost: 1_000_000,
+            sponsor_sui_low_threshold_mist: 1_000_000_000,
             admin_api_key_set: false,
         };
 
