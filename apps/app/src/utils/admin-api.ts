@@ -1,3 +1,5 @@
+import { config } from '../config'
+
 export interface WalletBalance {
   address: string
   suiBalance: bigint
@@ -60,7 +62,8 @@ async function makeAdminRequest(
     opts.body = JSON.stringify(body)
   }
 
-  const resp = await fetch(`/api/admin${endpoint}`, opts)
+  const baseUrl = config.memwalServerUrl.replace(/\/$/, '')
+  const resp = await fetch(`${baseUrl}/api/admin${endpoint}`, opts)
 
   if (!resp.ok) {
     if (resp.status === 401 || resp.status === 403) {

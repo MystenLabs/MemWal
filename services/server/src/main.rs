@@ -1348,6 +1348,9 @@ async fn main() {
                     // MCP headers — caller's Walrus Memory account id + optional default namespace.
                     "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
                     "x-memwal-namespace".parse::<header::HeaderName>().unwrap(),
+                    // Admin dashboard auth (browser fetches from a different subdomain,
+                    // so this custom header must be preflight-allowed)
+                    "x-admin-api-key".parse::<header::HeaderName>().unwrap(),
                 ])
         }
     };
