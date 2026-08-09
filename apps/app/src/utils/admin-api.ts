@@ -42,6 +42,27 @@ export interface AdminErrorsResponse {
   offset: number
 }
 
+/**
+ * Format a raw base-unit amount (mist/frost, 9 decimals) as a human-readable
+ * token amount, e.g. 50026696048n -> "50.0267".
+ */
+export function formatTokenAmount(raw: bigint): string {
+  const decimals = 9n
+  const divisor = 10n ** decimals
+  const negative = raw < 0n
+  const abs = negative ? -raw : raw
+  const whole = abs / divisor
+  const frac = abs % divisor
+  const fracStr = frac
+    .toString()
+    .padStart(Number(decimals), '0')
+    .slice(0, 4)
+    .replace(/0+$/, '')
+  const wholeStr = whole.toLocaleString()
+  const sign = negative ? '-' : ''
+  return fracStr ? `${sign}${wholeStr}.${fracStr}` : `${sign}${wholeStr}`
+}
+
 async function makeAdminRequest(
   endpoint: string,
   adminKey: string,
@@ -84,15 +105,16 @@ async function makeAdminRequest(
 // camelCase UI-facing types above; the fetch* functions below map one to
 // the other at this API boundary.
 interface RawWalletBalance {
+  address: string
   sui: string
   wal: string
+  status: string
 }
 
 interface RawWalletsResponse {
   uploader_pool: {
-    wallet: RawWalletBalance
+    wallets: RawWalletBalance[]
     wal_threshold: string
-    status: string
     last_updated: string
   }
   sponsor_wallet: {
@@ -137,22 +159,17 @@ export async function fetchAdminWallets(
   adminKey: string,
 ): Promise<AdminWalletsResponse> {
   const raw = (await makeAdminRequest('/wallets', adminKey)) as RawWalletsResponse
+  const walThreshold = Number(raw.uploader_pool.wal_threshold)
 
   return {
-    uploaderPoolWallets: [
-      {
-        address: 'Uploader Pool',
-        suiBalance: BigInt(raw.uploader_pool.wallet.sui || '0'),
-        walBalance: BigInt(raw.uploader_pool.wallet.wal || '0'),
-        thresholdPercent:
-          Number(raw.uploader_pool.wal_threshold) > 0
-            ? (Number(raw.uploader_pool.wallet.wal) /
-                Number(raw.uploader_pool.wal_threshold)) *
-              100
-            : 0,
-        status: toBadgeStatus(raw.uploader_pool.status),
-      },
-    ],
+    uploaderPoolWallets: raw.uploader_pool.wallets.map((wallet) => ({
+      address: wallet.address,
+      suiBalance: BigInt(wallet.sui || '0'),
+      walBalance: BigInt(wallet.wal || '0'),
+      thresholdPercent:
+        walThreshold > 0 ? (Number(wallet.wal) / walThreshold) * 100 : 0,
+      status: toBadgeStatus(wallet.status),
+    })),
     sponsorWallet: {
       address: raw.sponsor_wallet.address ?? 'Not configured',
       suiBalance: BigInt(raw.sponsor_wallet.sui || '0'),

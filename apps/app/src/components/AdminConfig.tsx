@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Card } from './Card'
-import { fetchAdminConfig } from '../utils/admin-api'
+import { fetchAdminConfig, formatTokenAmount } from '../utils/admin-api'
 
 interface AdminConfigProps {
   adminKey: string
@@ -55,15 +55,15 @@ export function AdminConfig({ adminKey }: AdminConfigProps) {
 
         <div className="admin-config-item">
           <span className="admin-config-label">Uploader WAL Low Threshold</span>
-          <code className="admin-config-value">
-            {data.uploaderWalLowThresholdFrost.toString()} frost
+          <code className="admin-config-value" title={`${data.uploaderWalLowThresholdFrost} frost`}>
+            {formatTokenAmount(data.uploaderWalLowThresholdFrost)} WAL
           </code>
         </div>
 
         <div className="admin-config-item">
           <span className="admin-config-label">Sponsor SUI Low Threshold</span>
-          <code className="admin-config-value">
-            {data.sponsorSuiLowThresholdMist.toString()} mist
+          <code className="admin-config-value" title={`${data.sponsorSuiLowThresholdMist} mist`}>
+            {formatTokenAmount(data.sponsorSuiLowThresholdMist)} SUI
           </code>
         </div>
 

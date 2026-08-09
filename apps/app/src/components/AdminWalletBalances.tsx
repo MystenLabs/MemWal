@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { Card } from './Card'
-import { fetchAdminWallets, type AdminWalletsResponse } from '../utils/admin-api'
+import { fetchAdminWallets, formatTokenAmount, type AdminWalletsResponse } from '../utils/admin-api'
 
 interface AdminWalletBalancesProps {
   adminKey: string
@@ -25,9 +25,8 @@ function getStatusBadgeColor(status: string): string {
   }
 }
 
-function formatBalance(balance: bigint): string {
-  const num = Number(balance)
-  return num.toLocaleString()
+function formatBalance(balance: bigint, symbol: string): string {
+  return `${formatTokenAmount(balance)} ${symbol}`
 }
 
 export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
@@ -84,8 +83,8 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
             <thead>
               <tr>
                 <th scope="col">Address</th>
-                <th scope="col" style={{ textAlign: 'right' }}>SUI (mist)</th>
-                <th scope="col" style={{ textAlign: 'right' }}>WAL (frost)</th>
+                <th scope="col" style={{ textAlign: 'right' }}>SUI</th>
+                <th scope="col" style={{ textAlign: 'right' }}>WAL</th>
                 <th scope="col" style={{ textAlign: 'right' }}>% of Threshold</th>
                 <th scope="col">Status</th>
               </tr>
@@ -96,14 +95,14 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
                   <td title={wallet.address} className="admin-table-monospace">
                     {abbreviateAddress(wallet.address)}
                   </td>
-                  <td style={{ textAlign: 'right' }} className="admin-table-monospace">
-                    {formatBalance(wallet.suiBalance)}
+                  <td style={{ textAlign: 'right' }} className="admin-table-monospace" title={`${wallet.suiBalance} mist`}>
+                    {formatBalance(wallet.suiBalance, 'SUI')}
                   </td>
-                  <td style={{ textAlign: 'right' }} className="admin-table-monospace">
-                    {formatBalance(wallet.walBalance)}
+                  <td style={{ textAlign: 'right' }} className="admin-table-monospace" title={`${wallet.walBalance} frost`}>
+                    {formatBalance(wallet.walBalance, 'WAL')}
                   </td>
                   <td style={{ textAlign: 'right' }}>
-                    {wallet.thresholdPercent.toFixed(1)}%
+                    {wallet.thresholdPercent > 999 ? '999+' : wallet.thresholdPercent.toFixed(1)}%
                   </td>
                   <td>
                     <span
@@ -134,15 +133,15 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
 
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">SUI Balance</span>
-            <code className="admin-sponsor-value">
-              {formatBalance(response.sponsorWallet.suiBalance)} mist
+            <code className="admin-sponsor-value" title={`${response.sponsorWallet.suiBalance} mist`}>
+              {formatBalance(response.sponsorWallet.suiBalance, 'SUI')}
             </code>
           </div>
 
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">SUI Threshold</span>
-            <code className="admin-sponsor-value">
-              {formatBalance(response.sponsorWallet.suiThreshold)} mist
+            <code className="admin-sponsor-value" title={`${response.sponsorWallet.suiThreshold} mist`}>
+              {formatBalance(response.sponsorWallet.suiThreshold, 'SUI')}
             </code>
           </div>
 

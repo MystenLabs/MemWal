@@ -15,15 +15,16 @@ pub struct AdminQuery {
 
 #[derive(Debug, Serialize)]
 pub struct WalletBalance {
+    pub address: String,
     pub sui: String,
     pub wal: String,
+    pub status: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct UploaderPool {
-    pub wallet: WalletBalance,
+    pub wallets: Vec<WalletBalance>,
     pub wal_threshold: String,
-    pub status: String,
     pub last_updated: String,
 }
 
@@ -94,23 +95,44 @@ pub async fn get_wallets(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to parse sidecar response: {}", e)))?;
 
-    let wallet_sui_mist = sidecar_data
-        .get("walletSuiBalanceMist")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0")
-        .to_string();
-
-    let wallet_wal_frost = sidecar_data
-        .get("walletWalBalanceFrost")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0")
-        .to_string();
-
     let wal_threshold = state.config.wallet_balance_low_threshold_wal;
-    let uploader_status = match wallet_wal_frost.parse::<u64>() {
-        Ok(bal) if bal < wal_threshold => "low",
-        _ => "ok",
-    };
+
+    let wallets: Vec<WalletBalance> = sidecar_data
+        .get("perWallet")
+        .and_then(|v| v.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    let address = entry
+                        .get("address")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let sui = entry
+                        .get("suiMist")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0")
+                        .to_string();
+                    let wal = entry
+                        .get("walFrost")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0")
+                        .to_string();
+                    let status = match wal.parse::<u64>() {
+                        Ok(bal) if bal < wal_threshold => "low",
+                        _ => "ok",
+                    };
+                    WalletBalance {
+                        address,
+                        sui,
+                        wal,
+                        status: status.to_string(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let sponsor_threshold = state.config.sponsor_balance_low_threshold_sui;
     let mut sponsor_address: Option<String> = None;
@@ -136,12 +158,8 @@ pub async fn get_wallets(
 
     Ok(Json(WalletsResponse {
         uploader_pool: UploaderPool {
-            wallet: WalletBalance {
-                sui: wallet_sui_mist,
-                wal: wallet_wal_frost,
-            },
+            wallets,
             wal_threshold: wal_threshold.to_string(),
-            status: uploader_status.to_string(),
             last_updated: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         },
         sponsor_wallet: SponsorWallet {
@@ -226,30 +244,35 @@ mod tests {
     #[test]
     fn wallet_balance_serialization() {
         let wallet = WalletBalance {
+            address: "0xabc".to_string(),
             sui: "1000000".to_string(),
             wal: "500000".to_string(),
+            status: "ok".to_string(),
         };
 
         let json = serde_json::to_value(&wallet).unwrap();
+        assert_eq!(json["address"], "0xabc");
         assert_eq!(json["sui"], "1000000");
         assert_eq!(json["wal"], "500000");
+        assert_eq!(json["status"], "ok");
     }
 
     #[test]
     fn uploader_pool_serialization() {
         let uploader_pool = UploaderPool {
-            wallet: WalletBalance {
+            wallets: vec![WalletBalance {
+                address: "0xabc".to_string(),
                 sui: "1000000".to_string(),
                 wal: "500000".to_string(),
-            },
+                status: "ok".to_string(),
+            }],
             wal_threshold: "1000000".to_string(),
-            status: "ok".to_string(),
             last_updated: "2024-01-01T00:00:00Z".to_string(),
         };
 
         let json = serde_json::to_value(&uploader_pool).unwrap();
-        assert_eq!(json["wallet"]["sui"], "1000000");
-        assert_eq!(json["status"], "ok");
+        assert_eq!(json["wallets"][0]["sui"], "1000000");
+        assert_eq!(json["wallets"][0]["status"], "ok");
         assert_eq!(json["last_updated"], "2024-01-01T00:00:00Z");
     }
 
@@ -257,12 +280,21 @@ mod tests {
     fn wallets_response_structure() {
         let response = WalletsResponse {
             uploader_pool: UploaderPool {
-                wallet: WalletBalance {
-                    sui: "1000000".to_string(),
-                    wal: "500000".to_string(),
-                },
+                wallets: vec![
+                    WalletBalance {
+                        address: "0xabc".to_string(),
+                        sui: "1000000".to_string(),
+                        wal: "500000".to_string(),
+                        status: "ok".to_string(),
+                    },
+                    WalletBalance {
+                        address: "0xdef".to_string(),
+                        sui: "2000000".to_string(),
+                        wal: "100".to_string(),
+                        status: "low".to_string(),
+                    },
+                ],
                 wal_threshold: "1000000".to_string(),
-                status: "ok".to_string(),
                 last_updated: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             },
             sponsor_wallet: SponsorWallet {
@@ -276,7 +308,9 @@ mod tests {
         let json = serde_json::to_value(&response).unwrap();
         assert!(json["uploader_pool"].is_object());
         assert!(json["sponsor_wallet"].is_object());
-        assert_eq!(json["uploader_pool"]["wallet"]["sui"], "1000000");
+        assert_eq!(json["uploader_pool"]["wallets"].as_array().unwrap().len(), 2);
+        assert_eq!(json["uploader_pool"]["wallets"][0]["sui"], "1000000");
+        assert_eq!(json["uploader_pool"]["wallets"][1]["status"], "low");
         assert_eq!(json["sponsor_wallet"]["sui"], "2000000");
         assert_eq!(json["sponsor_wallet"]["status"], "low");
     }
