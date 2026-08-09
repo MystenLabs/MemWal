@@ -1,12 +1,14 @@
+import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Card } from './Card'
 import { fetchAdminConfig, formatTokenAmount } from '../utils/admin-api'
 
 interface AdminConfigProps {
   adminKey: string
+  onInvalidKey: () => void
 }
 
-export function AdminConfig({ adminKey }: AdminConfigProps) {
+export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
   const { data, isLoading, error } = useQuery({
     queryKey: ['adminConfig', adminKey],
     queryFn: () => fetchAdminConfig(adminKey),
@@ -15,6 +17,12 @@ export function AdminConfig({ adminKey }: AdminConfigProps) {
       return err.message !== 'INVALID_KEY' && failureCount < 3
     },
   })
+
+  const isInvalidKey = error instanceof Error && error.message === 'INVALID_KEY'
+
+  useEffect(() => {
+    if (isInvalidKey) onInvalidKey()
+  }, [isInvalidKey, onInvalidKey])
 
   if (isLoading) {
     return (
@@ -25,11 +33,10 @@ export function AdminConfig({ adminKey }: AdminConfigProps) {
   }
 
   if (error) {
-    const err = error as Error
     return (
       <Card title="Configuration" className="admin-config-card">
         <div className="admin-error">
-          {err.message === 'INVALID_KEY' ? 'Invalid API key' : 'Failed to load configuration'}
+          {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load configuration'}
         </div>
       </Card>
     )

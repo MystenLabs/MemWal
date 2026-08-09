@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Copy, ChevronLeft, ChevronRight } from 'lucide-react'
 import DOMPurify from 'dompurify'
@@ -7,6 +7,7 @@ import { fetchAdminErrors } from '../utils/admin-api'
 
 interface AdminUploadErrorsProps {
   adminKey: string
+  onInvalidKey: () => void
 }
 
 interface ExpandedError {
@@ -14,7 +15,7 @@ interface ExpandedError {
   fullMessage: string
 }
 
-export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
+export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsProps) {
   const [limit, setLimit] = useState(20)
   const [offset, setOffset] = useState(0)
   const [expanded, setExpanded] = useState<ExpandedError | null>(null)
@@ -28,6 +29,12 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
       return err.message !== 'INVALID_KEY' && failureCount < 3
     },
   })
+
+  const isInvalidKey = error instanceof Error && error.message === 'INVALID_KEY'
+
+  useEffect(() => {
+    if (isInvalidKey) onInvalidKey()
+  }, [isInvalidKey, onInvalidKey])
 
   const handleCopy = async (text: string) => {
     try {
@@ -68,11 +75,10 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
   }
 
   if (error) {
-    const err = error as Error
     return (
       <Card title="Upload Errors" className="admin-errors-card">
         <div className="admin-error">
-          {err.message === 'INVALID_KEY' ? 'Invalid API key' : 'Failed to load errors'}
+          {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load errors'}
         </div>
       </Card>
     )

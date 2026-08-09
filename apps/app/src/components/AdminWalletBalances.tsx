@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { Card } from './Card'
@@ -5,6 +6,7 @@ import { fetchAdminWallets, formatTokenAmount, type AdminWalletsResponse } from 
 
 interface AdminWalletBalancesProps {
   adminKey: string
+  onInvalidKey: () => void
 }
 
 function abbreviateAddress(address: string): string {
@@ -29,7 +31,7 @@ function formatBalance(balance: bigint, symbol: string): string {
   return `${formatTokenAmount(balance)} ${symbol}`
 }
 
-export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
+export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalancesProps) {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['adminWallets', adminKey],
     queryFn: () => fetchAdminWallets(adminKey),
@@ -40,6 +42,12 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
     },
   })
 
+  const isInvalidKey = error instanceof Error && error.message === 'INVALID_KEY'
+
+  useEffect(() => {
+    if (isInvalidKey) onInvalidKey()
+  }, [isInvalidKey, onInvalidKey])
+
   if (isLoading) {
     return (
       <Card title="Wallet Balances" className="admin-wallets-card">
@@ -49,11 +57,10 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
   }
 
   if (error) {
-    const err = error as Error
     return (
       <Card title="Wallet Balances" className="admin-wallets-card">
         <div className="admin-error">
-          {err.message === 'INVALID_KEY' ? 'Invalid API key' : 'Failed to load wallets'}
+          {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load wallets'}
         </div>
       </Card>
     )

@@ -11,6 +11,7 @@ export default function AdminDashboard() {
   const [adminKey, setAdminKey] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isRestoring, setIsRestoring] = useState(true)
+  const [banner, setBanner] = useState<string | undefined>(undefined)
 
   useEffect(() => {
     const stored = sessionStorage.getItem(ADMIN_KEY_STORAGE)
@@ -35,6 +36,7 @@ export default function AdminDashboard() {
       const trimmedKey = key.trim()
       await fetchAdminConfig(trimmedKey)
       sessionStorage.setItem(ADMIN_KEY_STORAGE, trimmedKey)
+      setBanner(undefined)
       setAdminKey(trimmedKey)
     } finally {
       setIsSubmitting(false)
@@ -43,7 +45,19 @@ export default function AdminDashboard() {
 
   const handleLogout = () => {
     sessionStorage.removeItem(ADMIN_KEY_STORAGE)
+    setBanner(undefined)
     setAdminKey(null)
+  }
+
+  // A panel's own query can 401 after a successful login — the key was
+  // rotated server-side, or (see the mount-time check above) it was never
+  // actually valid. Rather than leave three "Invalid API key" cards sitting
+  // on screen waiting for someone to notice and click Logout, drop straight
+  // back to the login form with an explicit reason.
+  const handleInvalidKey = () => {
+    sessionStorage.removeItem(ADMIN_KEY_STORAGE)
+    setAdminKey(null)
+    setBanner('Your admin API key is no longer valid. Please sign in again.')
   }
 
   return (
@@ -61,12 +75,13 @@ export default function AdminDashboard() {
             onKeySubmit={handleKeySubmit}
             onLogout={handleLogout}
             isLoading={isSubmitting}
+            banner={banner}
           />
         ) : (
           <div className="admin-panels">
-            <AdminWalletBalances adminKey={adminKey} />
-            <AdminUploadErrors adminKey={adminKey} />
-            <AdminConfig adminKey={adminKey} />
+            <AdminWalletBalances adminKey={adminKey} onInvalidKey={handleInvalidKey} />
+            <AdminUploadErrors adminKey={adminKey} onInvalidKey={handleInvalidKey} />
+            <AdminConfig adminKey={adminKey} onInvalidKey={handleInvalidKey} />
             <div className="admin-logout-section">
               <button
                 onClick={handleLogout}

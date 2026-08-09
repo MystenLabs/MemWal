@@ -11553,6 +11553,16 @@ h1, h2, h3 {
   margin-top: 6px;
 }
 
+.admin-key-banner {
+  font-size: 0.85rem;
+  color: var(--danger);
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+}
+
 .admin-key-submit-btn {
   width: 100%;
   padding: 10px 16px;

@@ -5,12 +5,14 @@ export interface AdminKeyEntryProps {
   onKeySubmit: (key: string) => Promise<void>
   onLogout: () => void
   isLoading?: boolean
+  banner?: string
 }
 
 export function AdminKeyEntry({
   onKeySubmit,
   onLogout,
   isLoading = false,
+  banner,
 }: AdminKeyEntryProps) {
   const [key, setKey] = useState('')
   const [error, setError] = useState('')
@@ -48,6 +50,8 @@ export function AdminKeyEntry({
           <h2>Admin Dashboard</h2>
           <p className="admin-key-entry-subtitle">Enter your admin API key to continue</p>
         </div>
+
+        {banner && <div className="admin-key-banner">{banner}</div>}
 
         <form onSubmit={handleSubmit} className="admin-key-entry-form">
           <div className="admin-key-entry-field">
