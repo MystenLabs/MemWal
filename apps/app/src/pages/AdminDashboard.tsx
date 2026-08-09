@@ -3,6 +3,7 @@ import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { AdminWalletBalances } from '../components/AdminWalletBalances'
 import { AdminUploadErrors } from '../components/AdminUploadErrors'
 import { AdminConfig } from '../components/AdminConfig'
+import { fetchAdminConfig } from '../utils/admin-api'
 
 const ADMIN_KEY_STORAGE = 'admin_api_key'
 
@@ -21,6 +22,7 @@ export default function AdminDashboard() {
     setIsSubmitting(true)
     try {
       const trimmedKey = key.trim()
+      await fetchAdminConfig(trimmedKey)
       sessionStorage.setItem(ADMIN_KEY_STORAGE, trimmedKey)
       setAdminKey(trimmedKey)
     } finally {
