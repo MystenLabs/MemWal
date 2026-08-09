@@ -85,7 +85,6 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
                 <th scope="col">Address</th>
                 <th scope="col" style={{ textAlign: 'right' }}>SUI</th>
                 <th scope="col" style={{ textAlign: 'right' }}>WAL</th>
-                <th scope="col" style={{ textAlign: 'right' }}>% of Threshold</th>
                 <th scope="col">Status</th>
               </tr>
             </thead>
@@ -100,9 +99,6 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
                   </td>
                   <td style={{ textAlign: 'right' }} className="admin-table-monospace" title={`${wallet.walBalance} frost`}>
                     {formatBalance(wallet.walBalance, 'WAL')}
-                  </td>
-                  <td style={{ textAlign: 'right' }}>
-                    {wallet.thresholdPercent > 999 ? '999+' : wallet.thresholdPercent.toFixed(1)}%
                   </td>
                   <td>
                     <span

@@ -10,12 +10,23 @@ const ADMIN_KEY_STORAGE = 'admin_api_key'
 export default function AdminDashboard() {
   const [adminKey, setAdminKey] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isRestoring, setIsRestoring] = useState(true)
 
   useEffect(() => {
     const stored = sessionStorage.getItem(ADMIN_KEY_STORAGE)
-    if (stored) {
-      setAdminKey(stored)
+    if (!stored) {
+      setIsRestoring(false)
+      return
     }
+    // A key restored from a previous session may since have been rotated
+    // or was never valid to begin with (e.g. left over from before this
+    // validation existed) — re-check it before trusting it, otherwise a
+    // stale key sits in sessionStorage across reloads (it only clears on
+    // tab close) and every panel fails with 401 on every future reload.
+    fetchAdminConfig(stored)
+      .then(() => setAdminKey(stored))
+      .catch(() => sessionStorage.removeItem(ADMIN_KEY_STORAGE))
+      .finally(() => setIsRestoring(false))
   }, [])
 
   const handleKeySubmit = async (key: string) => {
@@ -43,7 +54,9 @@ export default function AdminDashboard() {
           <p className="admin-page-subtitle">Monitor wallet balances, upload errors, and system configuration</p>
         </div>
 
-        {!adminKey ? (
+        {isRestoring ? (
+          <div className="admin-loading">Checking saved session...</div>
+        ) : !adminKey ? (
           <AdminKeyEntry
             onKeySubmit={handleKeySubmit}
             onLogout={handleLogout}

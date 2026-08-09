@@ -4,7 +4,6 @@ export interface WalletBalance {
   address: string
   suiBalance: bigint
   walBalance: bigint
-  thresholdPercent: number
   status: 'healthy' | 'warning' | 'critical'
 }
 
@@ -159,15 +158,12 @@ export async function fetchAdminWallets(
   adminKey: string,
 ): Promise<AdminWalletsResponse> {
   const raw = (await makeAdminRequest('/wallets', adminKey)) as RawWalletsResponse
-  const walThreshold = Number(raw.uploader_pool.wal_threshold)
 
   return {
     uploaderPoolWallets: raw.uploader_pool.wallets.map((wallet) => ({
       address: wallet.address,
       suiBalance: BigInt(wallet.sui || '0'),
       walBalance: BigInt(wallet.wal || '0'),
-      thresholdPercent:
-        walThreshold > 0 ? (Number(wallet.wal) / walThreshold) * 100 : 0,
       status: toBadgeStatus(wallet.status),
     })),
     sponsorWallet: {
