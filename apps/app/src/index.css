@@ -11572,6 +11572,12 @@ h1, h2, h3 {
   border-bottom: 0;
 }
 
+.dash-page .admin-table .admin-table-empty {
+  padding: 28px 18px;
+  color: #8f9294;
+  text-align: center;
+}
+
 .admin-table-monospace {
   font-family: var(--font-mono);
   font-size: 13px;

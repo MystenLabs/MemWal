@@ -32,6 +32,9 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
+/// Prevent an accidental low interval from continuously polling Sui and the sidecar.
+const MIN_BALANCE_MONITOR_INTERVAL_SECS: u64 = 30;
+
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
 pub const DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS: u32 = 5;
@@ -482,7 +485,10 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
-            balance_monitor_interval_secs: env_positive_u64("BALANCE_MONITOR_INTERVAL_SECS", 900),
+            balance_monitor_interval_secs: normalized_balance_monitor_interval(env_positive_u64(
+                "BALANCE_MONITOR_INTERVAL_SECS",
+                900,
+            )),
             wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
             sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
         }
@@ -510,6 +516,10 @@ fn env_positive_u64(name: &str, default: u64) -> u64 {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn normalized_balance_monitor_interval(interval_secs: u64) -> u64 {
+    interval_secs.max(MIN_BALANCE_MONITOR_INTERVAL_SECS)
 }
 
 fn sui_rpc_quota_from_env() -> (u32, std::time::Duration) {
@@ -1669,6 +1679,13 @@ mod tests {
     use std::sync::Mutex;
 
     static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn balance_monitor_interval_has_a_safe_minimum() {
+        assert_eq!(normalized_balance_monitor_interval(1), 30);
+        assert_eq!(normalized_balance_monitor_interval(30), 30);
+        assert_eq!(normalized_balance_monitor_interval(900), 900);
+    }
 
     // ── Client-supplied embedding vector validation ──────────────
 

@@ -19,7 +19,7 @@ function formatBalance(balance: bigint, symbol: string): string {
 }
 
 export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalancesProps) {
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ['admin', 'wallets'],
     queryFn: () => fetchAdminWallets(adminKey),
     refetchInterval: 30000,
@@ -66,7 +66,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
               onClick={() => refetch()}
               className="btn btn-secondary btn-sm dashboard-keys-refresh admin-refresh-btn"
               title="Refresh wallet data"
-              disabled={isLoading}
+              disabled={isFetching}
             >
               <RefreshCw size={12} />
               Refresh
@@ -85,7 +85,13 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
               </tr>
             </thead>
             <tbody>
-              {response.uploaderPoolWallets.map((wallet) => (
+              {response.uploaderPoolWallets.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="admin-table-empty">
+                    No uploader wallets reported
+                  </td>
+                </tr>
+              ) : response.uploaderPoolWallets.map((wallet) => (
                 <tr key={wallet.address} className="admin-table-row">
                   <td title={wallet.address} className="admin-table-monospace">
                     {abbreviateAddress(wallet.address)}

@@ -35,6 +35,15 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
     if (isInvalidKey) onInvalidKey()
   }, [isInvalidKey, onInvalidKey])
 
+  useEffect(() => {
+    if (!expanded) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(null)
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [expanded])
+
   const handleCopy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text)
@@ -129,17 +138,17 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
             <tbody>
               {data.errors.length === 0 ? (
                 <tr>
-                  <td colSpan={4} style={{ textAlign: 'center', color: '#999' }}>
+                  <td colSpan={4} className="admin-table-empty">
                     No errors to display
                   </td>
                 </tr>
               ) : (
-                data.errors.map((error, idx) => (
-                  <tr key={`${error.timestamp}-${idx}`} className="admin-table-row">
+                data.errors.map((error) => (
+                  <tr key={error.id} className="admin-table-row">
                     <td className="admin-table-monospace admin-error-timestamp">
                       {new Date(error.timestamp).toLocaleString()}
                     </td>
-                    <td className="admin-table-monospace">
+                    <td className="admin-table-monospace" title={error.owner}>
                       {error.owner.slice(0, 6)}
                     </td>
                     <td>{error.namespace}</td>
@@ -157,6 +166,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
                         className="admin-copy-btn"
                         onClick={() => handleCopy(error.errorMessage)}
                         title="Copy error message"
+                        aria-label="Copy error message"
                       >
                         <Copy size={14} />
                       </button>
@@ -178,6 +188,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
               disabled={offset === 0}
               className="admin-pagination-btn"
               title="Previous page"
+              aria-label="Previous page"
             >
               <ChevronLeft size={16} />
             </button>
@@ -186,6 +197,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
               disabled={offset + limit >= data.total}
               className="admin-pagination-btn"
               title="Next page"
+              aria-label="Next page"
             >
               <ChevronRight size={16} />
             </button>
@@ -195,9 +207,15 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
       {expanded && (
         <div className="admin-error-modal-overlay" onClick={closeError}>
-          <div className="admin-error-modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="admin-error-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="admin-error-dialog-title"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="admin-error-modal-header">
-              <h3>Error Details</h3>
+              <h3 id="admin-error-dialog-title">Error Details</h3>
               <button
                 onClick={closeError}
                 className="admin-error-modal-close"

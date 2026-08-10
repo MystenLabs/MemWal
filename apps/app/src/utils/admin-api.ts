@@ -15,6 +15,7 @@ export interface SponsorWallet {
 }
 
 export interface UploadError {
+  id: string
   timestamp: string
   owner: string
   namespace: string
@@ -191,6 +192,7 @@ export async function fetchAdminErrors(
 
   return {
     errors: raw.results.map((job) => ({
+      id: job.id,
       timestamp: job.updated_at,
       owner: job.owner,
       namespace: job.namespace,

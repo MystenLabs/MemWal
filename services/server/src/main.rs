@@ -169,6 +169,7 @@ fn parse_env_u32(name: &str, fallback: u32, min: u32, max: u32) -> u32 {
 #[tracing::instrument(name = "balance_monitor", skip_all)]
 async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         interval.tick().await;

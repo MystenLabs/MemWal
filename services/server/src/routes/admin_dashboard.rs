@@ -264,6 +264,25 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_wallet_metrics_require_the_per_wallet_contract() {
+        let valid = serde_json::json!({
+            "perWallet": [{
+                "address": "0x123",
+                "suiMist": "1000000000",
+                "walFrost": "2000000000"
+            }]
+        });
+        let parsed: SidecarWalletMetrics = serde_json::from_value(valid).unwrap();
+        assert_eq!(parsed.per_wallet.len(), 1);
+        assert!(
+            serde_json::from_value::<SidecarWalletMetrics>(serde_json::json!({
+                "walletWalBalanceFrost": "2000000000"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn pagination_defaults_and_clamps_untrusted_values() {
         assert_eq!(
             normalized_pagination(&AdminQuery {
