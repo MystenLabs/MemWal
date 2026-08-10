@@ -65,7 +65,6 @@ export default function AdminDashboard() {
       <div className="admin-dashboard-container">
         <div className="admin-page-header">
           <img className="admin-page-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
-          <p className="admin-page-subtitle">Admin Dashboard — wallet balances, upload errors, and system configuration</p>
         </div>
 
         {isRestoring ? (

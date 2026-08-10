@@ -11466,12 +11466,6 @@ h1, h2, h3 {
   display: block;
   height: 48px;
   width: auto;
-  margin-bottom: 14px;
-}
-
-.dash-page .admin-page-subtitle {
-  font-size: 1rem;
-  color: var(--dash-muted);
 }
 
 /* Admin Key Entry Modal */
