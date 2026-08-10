@@ -46,7 +46,6 @@ mod tests {
             include_str!("../../migrations/008_benchmark_plaintext.sql"),
             include_str!("../../migrations/009_importance_signal.sql"),
             include_str!("../../migrations/010_memory_read_api_columns.sql"),
-            include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -72,9 +71,6 @@ mod tests {
             include_str!("../../migrations/013_memory_read_api_index.sql"),
             include_str!("../../migrations/014_memory_expiry_columns.sql"),
             include_str!("../../migrations/015_memory_expiry_synced_at_index.sql"),
-            // Renamed from 014 to 016 during the WALM-295/296/297
-            // integration merge: WALM-296's expiry work independently
-            // claimed 014/015 on its own branch. Content unchanged.
             include_str!("../../migrations/016_memory_read_api_updated_at_set_not_null.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
@@ -83,16 +79,16 @@ mod tests {
         Some(VectorDb { pool })
     }
 
-    /// Regression test for the WALM-295 migration-order fixes: batched
-    /// Rust backfill (finding 1), the CHECK/VALIDATE NOT NULL fast path
-    /// split across migrations 012/014 (finding 2), and invalid-index
-    /// recovery ahead of migration 013 (finding 3).
+    /// Regression test for the migration-order fixes: batched Rust
+    /// backfill, the CHECK/VALIDATE NOT NULL fast path split across
+    /// migrations 012/016, and invalid-index recovery ahead of
+    /// migration 013.
     ///
     /// Gated on a dedicated env var (rather than `DATABASE_URL`, which
     /// `test_db()` above already uses for the lighter-weight vector-only
     /// schema) so it never runs as part of the normal suite by accident —
     /// it exercises the FULL `VectorDb::new()` migration pipeline
-    /// (001-014) end to end, which is disruptive to run against a
+    /// (001-016) end to end, which is disruptive to run against a
     /// database other tests share concurrently. Point
     /// `MIGRATION_PIPELINE_TEST_DATABASE_URL` at a throwaway local
     /// database to run it, e.g.:
@@ -139,7 +135,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             constraint_dropped, None,
-            "the temporary CHECK constraint should have been dropped by migration 014"
+            "the temporary CHECK constraint should have been dropped by migration 016"
         );
 
         // Running the whole pipeline a second time (simulating a restart)
@@ -498,12 +494,12 @@ mod tests {
             .await;
     }
 
-    /// WALM-297 review (Henry): `set_memory_expiry` previously never bumped
-    /// `updated_at` at all — deliberately, to avoid the ~24h re-verification
-    /// sweep making every synced row reappear in Console's incremental
-    /// sync — but that also meant the *first* real write (a row's expiry
-    /// resolving from unknown to known) was invisible to a client that had
-    /// already synced that row, silently breaking WALM-296 for exactly the
+    /// `set_memory_expiry` previously never bumped `updated_at` at all —
+    /// deliberately, to avoid the ~24h re-verification sweep making every
+    /// synced row reappear in Console's incremental sync — but that also
+    /// meant the *first* real write (a row's expiry resolving from unknown
+    /// to known) was invisible to a client that had already synced that
+    /// row, silently breaking per-memory expiry tracking for exactly the
     /// rows synced before their expiry was known. The fix conditions the
     /// bump on the value actually changing (`IS DISTINCT FROM`, null-safe).
     /// This test pins all three cases: first real write bumps, an unchanged
@@ -561,24 +557,29 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Routine re-verification with the SAME value (the ~24h sweep
-        // re-checking a row that hasn't changed) must NOT bump updated_at,
-        // or every synced row would spam Console's incremental sync roughly
-        // once a day regardless of whether anything actually changed.
-        db.set_memory_expiry(&id, 500, first_expires_at)
+        // Routine re-verification with the SAME end_epoch but a DIFFERENT
+        // expires_at (the real caller recomputes expires_at from a fresh
+        // `now()` on every sweep tick — see `expires_at_from_epoch` — so it
+        // never matches the previous write byte-for-byte even when nothing
+        // actually changed) must NOT bump updated_at, or every synced row
+        // would spam Console's incremental sync roughly once a day
+        // regardless of whether anything actually changed.
+        let reverify_expires_at = first_expires_at + chrono::Duration::seconds(7);
+        db.set_memory_expiry(&id, 500, reverify_expires_at)
             .await
             .unwrap();
         let after_reverify = fetch_updated_at(id.clone(), db.pool().clone()).await;
         assert_eq!(
             after_first_write, after_reverify,
-            "re-verifying with an unchanged end_epoch/expires_at must not bump updated_at"
+            "re-verifying with an unchanged end_epoch (even with a recomputed expires_at) \
+             must not bump updated_at"
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // A genuine later change (e.g. a corrected epoch-duration recompute)
-        // must bump updated_at again — this is a real content change, not
-        // routine housekeeping.
+        // A genuine later change (e.g. the on-chain lease was extended,
+        // moving end_epoch) must bump updated_at again — this is a real
+        // content change, not routine housekeeping.
         let second_expires_at = first_expires_at + chrono::Duration::hours(1);
         db.set_memory_expiry(&id, 501, second_expires_at)
             .await
@@ -714,10 +715,10 @@ fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
 const PAGINATION_INDEX_NAME: &str = "idx_vector_entries_owner_updated_id";
 
 /// Backfill `vector_entries.updated_at` from `created_at` in bounded
-/// batches (WALM-295).
+/// batches.
 ///
 /// This cannot be a plain migration file's `UPDATE ... WHERE
-/// updated_at IS NULL` (as migration 011 originally was) on a
+/// updated_at IS NULL` (the naive version this replaced) on a
 /// real-sized table: a single unbatched full-table UPDATE can run long
 /// enough to hit a statement/idle timeout. Postgres rolls back the
 /// ENTIRE update atomically on timeout -- there is no partial-UPDATE
@@ -777,8 +778,7 @@ async fn backfill_updated_at(pool: &PgPool) -> Result<(), AppError> {
 }
 
 /// Detect and recover from an INVALID `idx_vector_entries_owner_updated_id`
-/// left behind by an interrupted `CREATE INDEX CONCURRENTLY` build
-/// (WALM-295).
+/// left behind by an interrupted `CREATE INDEX CONCURRENTLY` build.
 ///
 /// Migration 013 runs `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, and
 /// `IF NOT EXISTS` matches by index NAME only -- it has no idea whether
@@ -909,8 +909,8 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
-        // owner-scoped read API: updated_at cursor column + agent_id/package_id
-        // (WALM-295). Split across 010-014 (see each file's header, and
+        // owner-scoped read API: updated_at cursor column + agent_id/package_id.
+        // Split across 010-016 (see each file's header, and
         // backfill_updated_at's / recover_invalid_pagination_index's doc
         // comments above) to avoid holding ACCESS EXCLUSIVE across the
         // full-table backfill or index build.
@@ -920,17 +920,13 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
 
-        // 011 is now a no-op file (kept for migration numbering/history —
-        // see its header). The actual backfill runs as batched Rust code
-        // right after it, since Postgres can't COMMIT mid-loop inside a
-        // plain migration statement.
-        let migration_011 =
-            include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql");
-        sqlx::raw_sql(migration_011)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 011: {}", e)))?;
-
+        // Backfill runs as batched Rust code, not a migration file, since
+        // Postgres can't COMMIT mid-loop inside a plain migration
+        // statement — see backfill_updated_at()'s doc comment. (There is
+        // no migration 011: an earlier version of the backfill lived
+        // there as a plain SQL UPDATE, which this function replaced; the
+        // number is left unused rather than renumbering every migration
+        // after it.)
         backfill_updated_at(&pool).await?;
 
         // Requires the backfill above to have already completed — this
@@ -948,7 +944,7 @@ impl VectorDb {
         // permanently INVALID index from an interrupted build.
         recover_invalid_pagination_index(&pool).await?;
 
-        // keyset-pagination index for the memories listing endpoint (WALM-295).
+        // keyset-pagination index for the memories listing endpoint.
         // Must stay in its own file/transaction — see 013's header comment.
         let migration_013 = include_str!("../../migrations/013_memory_read_api_index.sql");
         sqlx::raw_sql(migration_013)
@@ -956,7 +952,7 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 013: {}", e)))?;
 
-        // per-memory expiry columns (WALM-296).
+        // per-memory expiry columns.
         let migration_014 = include_str!("../../migrations/014_memory_expiry_columns.sql");
         sqlx::raw_sql(migration_014)
             .execute(&pool)
@@ -964,7 +960,7 @@ impl VectorDb {
             .map_err(|e| AppError::Internal(format!("Failed to run migration 014: {}", e)))?;
 
         // index on expiry_synced_at so the periodic expiry refresh sweep
-        // doesn't full-scan vector_entries every tick (WALM-296). Must stay
+        // doesn't full-scan vector_entries every tick. Must stay
         // in its own file/transaction — see 015's header comment.
         let migration_015 = include_str!("../../migrations/015_memory_expiry_synced_at_index.sql");
         sqlx::raw_sql(migration_015)
@@ -973,9 +969,7 @@ impl VectorDb {
             .map_err(|e| AppError::Internal(format!("Failed to run migration 015: {}", e)))?;
 
         // Finalizes updated_at NOT NULL cheaply using the validated CHECK
-        // constraint 012 set up — see 016's header. Renamed from 014 to 016
-        // during the WALM-295/296/297 integration merge: WALM-296's expiry
-        // work independently claimed 014/015 on its own branch.
+        // constraint 012 set up — see 016's header.
         let migration_016 =
             include_str!("../../migrations/016_memory_read_api_updated_at_set_not_null.sql");
         sqlx::raw_sql(migration_016)
@@ -1492,9 +1486,9 @@ impl VectorDb {
 
     /// Write back a resolved end_epoch/expires_at for one row.
     ///
-    /// `updated_at` only advances when `end_epoch`/`expires_at` actually
-    /// change (via `IS DISTINCT FROM`, which is null-safe — the first sync
-    /// from `NULL` to a real value counts as a change). This was originally
+    /// `updated_at` only advances when `end_epoch` actually changes (via
+    /// `IS DISTINCT FROM`, which is null-safe — the first sync from `NULL`
+    /// to a real value counts as a change). This was originally
     /// unconditional-never: the sweep that calls this re-verifies every
     /// row on a ~24h cadence even after it already has a value, and an
     /// unconditional `updated_at = NOW()` on every one of those routine
@@ -1505,10 +1499,21 @@ impl VectorDb {
     /// first time a row's expiry resolves from `NULL` to a real value. A
     /// client that already synced that row before the sweep ran would then
     /// never see the populated `end_epoch`/`expires_at` on any later poll,
-    /// silently breaking WALM-296 for exactly the rows synced before their
-    /// expiry was known. Conditioning on an actual value change satisfies
-    /// both: the first real write bumps `updated_at` (visible to sync);
-    /// unchanged re-verifications don't (no spam).
+    /// silently breaking expiry tracking for exactly the rows synced
+    /// before their expiry was known. Conditioning on an actual value
+    /// change satisfies both: the first real write bumps `updated_at`
+    /// (visible to sync); unchanged re-verifications don't (no spam).
+    ///
+    /// The change-check deliberately compares `end_epoch` only, not
+    /// `expires_at`. `expires_at` is derived from `end_epoch` plus
+    /// wall-clock `now` at sweep time (see `expires_at_from_epoch`), so it
+    /// recomputes to a slightly different instant on every routine
+    /// re-verification even when `end_epoch` hasn't moved at all — an
+    /// `expires_at IS DISTINCT FROM $2` condition would be true on
+    /// essentially every sweep tick and defeat the anti-spam guard this
+    /// comment describes. `expires_at` is still refreshed on every write
+    /// (it's deliberately approximate; keeping it current is harmless),
+    /// it just doesn't drive whether `updated_at` bumps.
     pub async fn set_memory_expiry(
         &self,
         id: &str,
@@ -1520,7 +1525,7 @@ impl VectorDb {
              SET end_epoch = $1,
                  expires_at = $2,
                  updated_at = CASE
-                     WHEN end_epoch IS DISTINCT FROM $1 OR expires_at IS DISTINCT FROM $2
+                     WHEN end_epoch IS DISTINCT FROM $1
                      THEN NOW()
                      ELSE updated_at
                  END

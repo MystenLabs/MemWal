@@ -1,4 +1,4 @@
-# Memory Read API (WALM-295)
+# Memory Read API
 
 Owner-scoped, cursor-based, read-only. All three endpoints accept either of
 two auth mechanisms (see Authentication below); either way, the `{owner}`
@@ -20,13 +20,13 @@ mechanisms, dispatched by `auth::verify_read_api_auth`
    `/api/restore` and every other protected route use. This is the
    mechanism direct SDK/dashboard delegate-key callers use; see "Required
    headers" and "Canonical signing string" below.
-2. **Owner-scoped bearer token** (`Authorization: Bearer <token>`) — WALM-297's
+2. **Owner-scoped bearer token** (`Authorization: Bearer <token>`) — the
    mechanism for Console, which structurally never holds a delegate key and
    so can never produce an Ed25519 signature. See `docs/api/owner-token-auth.md`
    for how Console obtains a token; once obtained, a request here is just
    `Authorization: Bearer <token>` with no other auth headers. The token's
-   `permissions` must include `memories.read` (the only scope WALM-297 Phase 1
-   ever mints) or the request is rejected `403`.
+   `permissions` must include `memories.read` (the only scope currently
+   minted) or the request is rejected `403`.
 
 Presence of an `Authorization` header selects the bearer-token path; its
 absence selects the Ed25519 path. A request cannot use both.
@@ -245,9 +245,18 @@ anything changed); only a genuine change does.
 `next_cursor` is **always** returned for a non-empty page — including the
 final page of a traversal and a result that fits entirely in one page. It
 is the watermark of the last row in that page, and it is what you pass as
-`updated_after` on your next poll. It is `null` only for an empty page,
-which has no row to take a watermark from; in that case keep the cursor you
-already had.
+`updated_after` on your next poll.
+
+An empty page returns `next_cursor: null` in exactly one case: the very
+first page of a fresh walk (no `updated_after` on the request) that
+matches nothing at all — there is no prior cursor and no row to build a
+watermark from. Every other empty page — a continuation page reached with
+an incoming cursor, which can happen when every remaining row raced past
+the walk's snapshot boundary between pages — still returns a non-null
+`next_cursor`: the same position as the incoming cursor, but with a fresh
+snapshot boundary. Use that new cursor rather than the one you already
+held; the one you held is now stale — it's exactly what the reset exists
+to replace.
 
 So `next_cursor: null` does **not** mean "end of data" — use the separate
 `has_more` boolean for that instead. Keep paginating (pass back the latest

@@ -3,7 +3,7 @@ info:
   title: Walrus Memory — Memory Read API
   description: >-
     Owner-scoped, cursor-paginated read endpoints for Console to sync a
-    user's namespaces, memories, and delegate agents (WALM-295). See
+    user's namespaces, memories, and delegate agents. See
     docs/api/memory-read-api.md for the full narrative contract this spec
     formalizes; that document remains the source of truth for auth mechanics
     and error semantics — this file exists to unblock machine-generated
@@ -286,9 +286,14 @@ components:
           nullable: true
           description: >-
             Always returned for a non-empty page — including the final page
-            of a traversal. Null only for an empty page, which has no row to
-            take a watermark from. Do not treat null as "end of data"; use
-            `has_more` for that instead.
+            of a traversal. Null in exactly one case: the very first page of
+            a fresh walk (no `updated_after` on the request) that matches
+            nothing at all. Every other empty page — a continuation page
+            reached with an incoming cursor, which can happen when every
+            remaining row raced past the walk's snapshot boundary between
+            pages — still returns a non-null cursor: the same position as
+            the incoming cursor, with a fresh snapshot boundary. Do not
+            treat null as "end of data"; use `has_more` for that instead.
         has_more:
           type: boolean
           description: >-
@@ -344,7 +349,7 @@ components:
           format: int32
           nullable: true
           description: >-
-            On-chain Walrus storage lease end epoch (WALM-296). Null until a
+            On-chain Walrus storage lease end epoch. Null until a
             background sweep syncs it, typically within ~5 minutes of the
             memory being written. Nullable independently of `expires_at` —
             the two are not guaranteed to become non-null in the same pass.
@@ -353,8 +358,8 @@ components:
           format: date-time
           nullable: true
           description: >-
-            Computed absolute expiry timestamp derived from `end_epoch`
-            (WALM-296). Null until synced, independently of `end_epoch` —
+            Computed absolute expiry timestamp derived from `end_epoch`.
+            Null until synced, independently of `end_epoch` —
             do not assume the two arrive together.
 
     MemoriesResponse:
@@ -370,9 +375,14 @@ components:
           nullable: true
           description: >-
             Always returned for a non-empty page — including the final page
-            of a traversal. Null only for an empty page, which has no row to
-            take a watermark from. Do not treat null as "end of data"; use
-            `has_more` for that instead.
+            of a traversal. Null in exactly one case: the very first page of
+            a fresh walk (no `updated_after` on the request) that matches
+            nothing at all. Every other empty page — a continuation page
+            reached with an incoming cursor, which can happen when every
+            remaining row raced past the walk's snapshot boundary between
+            pages — still returns a non-null cursor: the same position as
+            the incoming cursor, with a fresh snapshot boundary. Do not
+            treat null as "end of data"; use `has_more` for that instead.
         has_more:
           type: boolean
           description: >-
