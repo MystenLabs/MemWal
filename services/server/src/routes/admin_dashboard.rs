@@ -95,9 +95,9 @@ pub async fn get_wallets(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<WalletsResponse>, AppError> {
     let sidecar_url = &state.config.sidecar_url;
-    let health_url = format!("{}/metrics/wallet", sidecar_url);
+    let wallet_balances_url = format!("{}/internal/wallet-balances", sidecar_url);
 
-    let mut sidecar_request = state.http_client.get(&health_url);
+    let mut sidecar_request = state.http_client.get(&wallet_balances_url);
     if let Some(secret) = state.config.sidecar_secret.as_deref() {
         sidecar_request = sidecar_request.header("authorization", format!("Bearer {}", secret));
     }

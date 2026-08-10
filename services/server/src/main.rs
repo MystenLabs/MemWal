@@ -176,7 +176,7 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
 
         // Fetch uploader pool balance from sidecar
         let sidecar_url = &state.config.sidecar_url;
-        let wallet_metrics_url = format!("{}/metrics/wallet", sidecar_url);
+        let wallet_metrics_url = format!("{}/internal/wallet-balances", sidecar_url);
 
         let mut sidecar_request = state.http_client.get(&wallet_metrics_url);
         if let Some(secret) = state.config.sidecar_secret.as_deref() {
