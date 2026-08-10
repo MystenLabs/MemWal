@@ -171,6 +171,7 @@ function collectMessages(child) {
     });
 
     return {
+        received,
         send: (message) => child.stdin.write(`${JSON.stringify(message)}\n`),
         waitFor(predicate, timeoutMs = 10_000) {
             const existing = received.find(predicate);
@@ -249,6 +250,10 @@ test("in-session memwal_login reconnects the bridge with the new credentials", a
 
     bridge.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
     await bridge.waitFor((message) => message.id === 1 && message.result);
+    // `initialize` is answered locally and the relayer connect runs in the
+    // background, so the SSE handshake lands shortly AFTER the init reply rather
+    // than synchronously with it — wait for it before asserting.
+    await waitUntil(() => mock.handshakes.length >= 1);
     assert.equal(mock.handshakes[0].bearer, `Bearer ${INITIAL_BEARER}`);
     assert.equal(mock.handshakes[0].accountId, ACCOUNT_A);
 
@@ -291,4 +296,79 @@ test("in-session memwal_login reconnects the bridge with the new credentials", a
     assert.notEqual(recall.result?.isError, true);
     assert.match(recall.result.content[0].text, new RegExp(`account=${ACCOUNT_B}`));
     assert.match(recall.result.content[0].text, new RegExp(`bearer=${updatedHandshake.bearer}`));
+});
+
+test("a request buffered during cold start is NOT flushed to a new account after an in-session login", async (t) => {
+    // Merge-composition regression (#415 × #597): a request buffered while the
+    // relayer is still cold-starting (sse not yet up) must not survive an
+    // account-change login and be flushed to the NEW account's session. It must
+    // be failed with the -32001 account-change error, and the new account must
+    // never receive it.
+    const mock = await startMockRelayer();
+    const home = mkdtempSync(join(tmpdir(), "memwal-coldstart-login-test-"));
+    const credentialsPath = join(home, ".memwal", "credentials.json");
+    mkdirSync(dirname(credentialsPath), { recursive: true });
+    writeFileSync(credentialsPath, JSON.stringify(makeCreds(mock.base)), { mode: 0o600 });
+
+    // Delay the FIRST handshake so the initial connect never completes before
+    // the login — the bridge stays in cold start, buffering into pendingForward.
+    mock.delayNextHandshake();
+
+    const child = spawn(process.execPath, [BIN, "--relayer", mock.base, "--web-url", mock.base], {
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+    const bridge = collectMessages(child);
+    t.after(() => {
+        child.kill("SIGKILL");
+        mock.server.close();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    // initialize is answered locally; the connect is delayed (handshake held).
+    bridge.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    await bridge.waitFor((message) => message.id === 1 && message.result);
+    await waitUntil(() => mock.handshakes.length >= 1); // the (delayed) GET arrived
+    assert.equal(mock.handshakes[0].accountId, ACCOUNT_A);
+
+    // A recall for account A — buffered into pendingForward (connect not up).
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: { name: "memwal_recall", arguments: { query: "account A secret" } },
+    });
+
+    // Log into a DIFFERENT account (B) while id=5 sits buffered.
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "memwal_login", arguments: {} },
+    });
+    const login = await bridge.waitFor((message) => message.id === 2);
+    const connectUrl = login.result.content[0].text.match(/\*\*URL:\*\* (http[^\n]+)/)?.[1];
+    assert.ok(connectUrl, "memwal_login should return the browser URL");
+    await completeLogin(connectUrl, ACCOUNT_B);
+
+    // Now release the held handshake so the connect can proceed / reconnect.
+    mock.releaseDelayedHandshake();
+
+    // The buffered account-A recall must come back as the -32001 account-change
+    // error — NOT an account-B recall result.
+    const recallReply = await bridge.waitFor((message) => message.id === 5);
+    assert.equal(recallReply.error?.code, -32001, `id=5 must be the account-change error, got ${JSON.stringify(recallReply)}`);
+    assert.equal(recallReply.result, undefined, "id=5 must not carry a recall result");
+
+    // Give the bridge time to (wrongly) flush id=5 if the bug were present.
+    await new Promise((r) => setTimeout(r, 500));
+
+    // No account-B session may have received the account-A recall (id=5), and
+    // id=5 must have been answered exactly once (no double response).
+    const id5Replies = bridge.received.filter((m) => m.id === 5);
+    assert.equal(id5Replies.length, 1, `id=5 answered exactly once, saw ${id5Replies.length}: ${JSON.stringify(id5Replies)}`);
+    const bAccountRecall = bridge.received.find(
+        (m) => m.id === 5 && m.result && /account A secret/.test(JSON.stringify(m)),
+    );
+    assert.ok(!bAccountRecall, "the account-A recall must never be served by account B");
 });
