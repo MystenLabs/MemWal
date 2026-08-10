@@ -1,6 +1,5 @@
 //! GET /v1/owners/{owner}/namespaces|memories|agents — owner-scoped,
-//! cursor-paginated read API (WALM-295). See docs/superpowers/specs/
-//! 2026-08-04-memory-read-api-design.md.
+//! cursor-paginated read API.
 
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
@@ -255,8 +254,8 @@ pub(crate) async fn query_owner_namespaces(
     // reusing this walk's, which would otherwise never advance again (see
     // `encode_namespaces_cursor`'s doc comment).
     //
-    // WALM-297 review (Henry): an EMPTY page needs the same reset, not just
-    // a populated terminal one. A continuation page (the previous page had
+    // An EMPTY page needs the same reset, not just a populated terminal
+    // one. A continuation page (the previous page had
     // `has_more: true`) can come back with zero rows if every remaining row
     // raced past `snapshot_at` between pages — `rows.last()` is `None`
     // either way, so without this branch `next_cursor` collapsed to plain
@@ -457,9 +456,9 @@ pub(crate) async fn query_owner_memories(
     // the final (or only) page still checkpoints the client for its next
     // incremental poll.
     // `Some(snapshot_at)` while the walk continues, `None` on the terminal
-    // page — see `encode_cursor`'s doc comment. WALM-297 review (Henry): an
-    // empty continuation page needs the same reset — see the identical
-    // branch and its full rationale in `query_owner_namespaces`.
+    // page — see `encode_cursor`'s doc comment. An empty continuation page
+    // needs the same reset — see the identical branch and its full
+    // rationale in `query_owner_namespaces`.
     let next_cursor = match rows.last() {
         Some(r) => Some(encode_cursor(r.4, &r.0, has_more.then_some(snapshot_at))),
         None => after.map(|(cursor_updated_at, cursor_id)| {
@@ -581,10 +580,10 @@ pub async fn list_owner_agents(
     if !same_owner(Some(&path_owner), &auth.owner) {
         return Err(AppError::Forbidden("owner mismatch".to_string()));
     }
-    // Short-TTL cached read (WALM-295 design spec: "Cached with the same
-    // short TTL pattern as walrus_epoch() ... rather than left uncached") —
-    // repeated /agents calls for the same account within the TTL window
-    // don't re-hit the chain.
+    // Short-TTL cached read, following the same caching pattern as
+    // `walrus_epoch()` rather than being left uncached — repeated /agents
+    // calls for the same account within the TTL window don't re-hit the
+    // chain.
     let keys = crate::storage::sui::list_delegate_keys_cached(
         &state.delegate_keys_cache,
         &state.http_client,
@@ -876,8 +875,7 @@ mod tests {
         assert_eq!(decoded.updated_at, ts(120));
 
         // And polling from that fresh watermark with nothing else changed
-        // yields an empty page. WALM-297 review (Henry,
-        // discussion_r3734942009): this still returns a cursor (the same
+        // yields an empty page. That page still returns a cursor (the same
         // watermark position, snapshot_at reset) rather than None, so the
         // next poll doesn't inherit a stale pinned snapshot — see
         // query_owner_namespaces_empty_continuation_page_resets_snapshot.
@@ -970,10 +968,9 @@ mod tests {
                 .unwrap();
             assert!(page.namespaces.len() <= 2);
             if page.namespaces.is_empty() {
-                // WALM-297 review (Henry, discussion_r3734942009): an empty
-                // page reached from a real incoming cursor still returns
-                // that cursor's own position with snapshot_at reset (not
-                // None) — see
+                // An empty page reached from a real incoming cursor still
+                // returns that cursor's own position with snapshot_at
+                // reset (not None) — see
                 // query_owner_namespaces_empty_continuation_page_resets_snapshot.
                 // This walk always seeds data, so the terminating empty
                 // page here is reached with `cursor.is_some()`.
@@ -1028,8 +1025,8 @@ mod tests {
             .await
             .unwrap();
         assert!(empty.namespaces.is_empty());
-        // WALM-297 review (Henry, discussion_r3734942009): still returns a
-        // cursor (same watermark, snapshot_at reset), not None — see
+        // Still returns a cursor (same watermark, snapshot_at reset), not
+        // None — see
         // query_owner_namespaces_empty_continuation_page_resets_snapshot.
         let reset_cursor = empty
             .next_cursor
@@ -1235,8 +1232,8 @@ mod tests {
             .await;
     }
 
-    /// PR #554 review (Henry, discussion_r3734942009): the terminal-cursor
-    /// reset above only fires when the terminal page still has rows. If a
+    /// The terminal-cursor reset above only fires when the terminal page
+    /// still has rows. If a
     /// *continuation* page (the previous page had `has_more: true`) comes
     /// back with zero rows — because every row that would have appeared
     /// raced past `snapshot_at` between pages — `rows.last()` is `None`,
@@ -1297,7 +1294,7 @@ mod tests {
         );
 
         // Race "bravo" past page 1's snapshot before page 2 is requested —
-        // the exact scenario Henry's finding describes.
+        // the exact scenario this test guards against.
         let snapshot_at = decode_namespaces_cursor(&cursor1)
             .unwrap()
             .snapshot_at
@@ -1515,9 +1512,8 @@ mod tests {
         assert_eq!(decoded.updated_at, page3.memories[0].updated_at);
 
         // Polling again from that watermark with nothing new written comes
-        // back empty. WALM-297 review (Henry, discussion_r3734942009): it
-        // still returns a cursor (the same watermark, snapshot_at reset),
-        // not None — see
+        // back empty. It still returns a cursor (the same watermark,
+        // snapshot_at reset), not None — see
         // query_owner_memories_empty_continuation_page_resets_snapshot.
         let page4 = query_owner_memories(&pool, &owner, Some(terminal), 2)
             .await
@@ -1581,8 +1577,8 @@ mod tests {
             .await
             .unwrap();
         assert!(empty.memories.is_empty());
-        // WALM-297 review (Henry, discussion_r3734942009): still returns a
-        // cursor (same watermark, snapshot_at reset), not None — see
+        // Still returns a cursor (same watermark, snapshot_at reset), not
+        // None — see
         // query_owner_memories_empty_continuation_page_resets_snapshot.
         let reset_cursor = empty
             .next_cursor
@@ -1832,8 +1828,8 @@ mod tests {
             .await;
     }
 
-    /// PR #554 review (Henry, discussion_r3734942009): the memories path has
-    /// the identical empty-continuation-page failure mode as
+    /// The memories path has the identical empty-continuation-page failure
+    /// mode as
     /// `query_owner_namespaces_empty_continuation_page_resets_snapshot` —
     /// see that test's doc comment for the full scenario. Seeds `s0`
     /// (delivered on page 1) and `s1` (peeked, giving page 1

@@ -24,7 +24,7 @@ pub enum UploadBlobError {
         blob_id: String,
         object_id: String,
         message: String,
-        /// Walrus epoch the storage lease ends at (WALM-296) — carried from
+        /// Walrus epoch the storage lease ends at — carried from
         /// whichever response surfaced the failure (the sidecar includes it
         /// on both the success shape and the metadata-transfer failure
         /// shape) so the eventual recovery/finalize path doesn't have to
@@ -86,7 +86,7 @@ struct QueryBlobsResponse {
     blobs: Vec<OnChainBlob>,
     total: usize,
     /// True when the sidecar's raw on-chain candidate fetch hit its own
-    /// cap before namespace/package filtering (WALM-319) -- `blobs` may be
+    /// cap before namespace/package filtering -- `blobs` may be
     /// an incomplete view of what's actually on chain even though this
     /// response itself isn't further truncated by `limit`. Defaulted so an
     /// older sidecar (mid rolling-deploy) that doesn't send this field yet
@@ -97,7 +97,7 @@ struct QueryBlobsResponse {
 
 /// A blob's on-chain storage lease, as returned by the sidecar's
 /// `/walrus/query-blobs` endpoint when called with `includeStorageLease:
-/// true` (WALM-296's expiry sweep). This is a genuinely different response
+/// true` (the periodic expiry sweep). This is a genuinely different response
 /// shape from `OnChainBlob`/`query_blobs_by_owner` — no `namespace`,
 /// `packageId`, or `agentId` — so it gets its own struct rather than
 /// extending `OnChainBlob`.
@@ -595,7 +595,7 @@ pub async fn query_blobs_by_owner(
 
 /// Query on-chain storage-lease end epochs for a specific set of blob IDs
 /// owned by `owner_address`, via the sidecar's `/walrus/query-blobs`
-/// endpoint's `includeStorageLease: true` mode (WALM-296's periodic expiry
+/// endpoint's `includeStorageLease: true` mode (the periodic expiry
 /// sweep). Unlike `query_blobs_by_owner`, this is scoped to exactly the
 /// blob IDs passed in and returns each one's `storageEndEpoch` rather than
 /// namespace/package/agent metadata.
@@ -618,7 +618,7 @@ pub async fn query_blob_storage_leases(
     // logic is later changed to respect it for this call shape too. The
     // real fix is sidecar-side (early-exit `listBlobObjectsGrpc` once all
     // `requestedBlobIds` are found) and is tracked as a follow-up, not
-    // done here — see WALM-296's SDD ledger.
+    // done here.
     let body = serde_json::json!({
         "owner": owner_address,
         "blobIds": blob_ids,
@@ -949,10 +949,10 @@ mod tests {
     };
     use crate::types::AppError;
 
-    // WALM-297 review (Henry): the sidecar's metadata-transfer failure
-    // response includes `endEpoch` (see walrus-upload.ts's 500 response for
-    // the "failed" transfer_status case), but `WalrusUploadErrorResponse`
-    // didn't declare the field, so serde silently dropped it despite the
+    // The sidecar's metadata-transfer failure response includes `endEpoch`
+    // (see walrus-upload.ts's 500 response for the "failed"
+    // transfer_status case), but `WalrusUploadErrorResponse` didn't
+    // declare the field, so serde silently dropped it despite the
     // sidecar sending it. This pins the deserialize directly against the
     // sidecar's real response shape, without needing a live sidecar.
     #[test]
@@ -984,7 +984,7 @@ mod tests {
         assert_eq!(parsed.end_epoch, None);
     }
 
-    // ── QueryBlobsResponse.source_capped (WALM-319) ──────────────────────
+    // ── QueryBlobsResponse.source_capped ─────────────────────────────────
 
     #[test]
     fn query_blobs_response_reads_source_capped_when_present() {

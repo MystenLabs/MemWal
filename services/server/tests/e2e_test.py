@@ -9,7 +9,7 @@ What this covers:
   4. Expired timestamps are rejected (401)
   5. Opt-in: signed /api/remember + /api/recall happy path with a
      pre-registered delegate key (requires TEST_DELEGATE_KEY + real backend)
-  6. Opt-in: WALM-297 owner-scoped bearer token auth against the real
+  6. Opt-in: owner-scoped bearer token auth against the real
      `GET /v1/owners/{owner}/{namespaces,memories,agents}` handlers
      (requires TEST_OWNER_ADDRESS + OWNER_TOKEN_SERVICE_CREDENTIAL)
 
@@ -230,10 +230,10 @@ def test_owner_token_bearer_auth_invalid_token_401(owner: str) -> None:
 def test_ed25519_signed_request_still_works_on_read_routes(
     signing_key: SigningKey, account_id: str | None, owner: str
 ) -> None:
-    """Regression guard: swapping read_api_routes' auth layer for the WALM-297
-    dispatcher must not affect ordinary signed requests (no Authorization
-    header) — this is the additive/non-replacing guarantee the design docs
-    promise for the existing Ed25519 SDK/dashboard path.
+    """Regression guard: swapping read_api_routes' auth layer for the
+    owner-token dispatcher must not affect ordinary signed requests (no
+    Authorization header) — bearer auth is additive, so the existing Ed25519
+    SDK/dashboard path must keep working unchanged.
     """
     result = make_signed_request(
         "GET", f"/v1/owners/{owner}/agents", None, signing_key, account_id=account_id

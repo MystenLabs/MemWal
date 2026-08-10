@@ -10,11 +10,11 @@
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
 //! - `accounts` — `/api/accounts/{owner}/exists` (public MemWalAccount
 //!   existence check)
-//! - `memory_read` — WALM-295 `GET /v1/owners/{owner}/{namespaces,memories,agents}`
+//! - `memory_read` — `GET /v1/owners/{owner}/{namespaces,memories,agents}`
 //!   (owner-scoped, cursor-paginated reads; accepts either the Ed25519
-//!   signed-request scheme or a WALM-297 owner-scoped bearer token — see
+//!   signed-request scheme or an owner-scoped bearer token — see
 //!   `auth::verify_read_api_auth`)
-//! - `owner_token` — WALM-297 `POST /v1/owner-tokens` (owner-scoped bearer
+//! - `owner_token` — `POST /v1/owner-tokens` (owner-scoped bearer
 //!   token issuance) + `GET /v1/owners/{owner}/_token_probe` (the original
 //!   dev-only smoke-test route this mechanism was proven against before
 //!   `memory_read`'s real handlers existed; now redundant with them)
@@ -183,7 +183,7 @@ pub(super) async fn cleanup_expired_blob(
 /// Same pattern is used by both `/api/recall` and `/api/ask` — extracting
 /// it here keeps the two call sites in sync.
 ///
-/// Renamed from `zip_created_at_onto_hydrated` in once importance
+/// Renamed from `zip_created_at_onto_hydrated` once importance
 /// joined the zip. Single function (rather than two separate ones) because
 /// both fields come from the same `SearchHit` and we don't want to walk
 /// the hits vector twice for what's a hot path.

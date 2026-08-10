@@ -1,9 +1,9 @@
-## Owner-Scoped Token Authentication (WALM-297, Phase 1)
+## Owner-Scoped Token Authentication
 
-Lets Console call WM's owner-scoped read API (WALM-295) without ever holding
+Lets Console call WM's owner-scoped read API without ever holding
 a delegate key. Console proves control of a WM owner address `Y` entirely on
-its own side (WALM-298 — Enoki Connect or a wallet-signature challenge; WM is
-never involved in that proof). It then calls `POST /v1/owner-tokens`,
+its own side (its own identity-link flow — Enoki Connect or a wallet-signature
+challenge; WM is never involved in that proof). It then calls `POST /v1/owner-tokens`,
 authenticating itself as a legitimate client via a single static **service
 credential** WM issues to Console out of band, to mint a short-lived bearer
 token scoped to `Y`. Console presents that token as `Authorization: Bearer
@@ -11,7 +11,7 @@ token scoped to `Y`. Console presents that token as `Authorization: Bearer
 
 This is additive: it does not replace the existing Ed25519 signed-request
 scheme (`x-public-key`/`x-signature`/...) every other protected route and
-WALM-295's read routes already use. The two schemes are separate, parallel
+the owner-scoped read routes already use. The two schemes are separate, parallel
 auth mechanisms — mirroring how `security-delete.md`'s Bearer-token flow
 coexists with it today.
 
@@ -41,9 +41,9 @@ request parameter, trusted because the caller already proved it holds the
 credential. If the credential leaks, whoever holds it can mint a
 `memories.read` token for **any** owner address — there is no secondary check
 tying a specific token request back to a specific proven identity-link event.
-This is an accepted Phase-1 trade-off (Slack thread, Henry + Harry Phan — the
-same thread that chose "service credential" over mTLS/signed-client-assertion
-for cost/complexity reasons), not an oversight. Treat the credential with the
+This is an accepted Phase-1 trade-off — a deliberate choice of a shared
+service credential over mTLS/signed-client-assertion for cost/complexity
+reasons — not an oversight. Treat the credential with the
 same handling rigor as a database password: unique per environment, rotated
 if any Console-side compromise is suspected, never logged, never in a repo.
 
@@ -93,7 +93,7 @@ existing token's lifetime.
 | Status | Body | Cause |
 |---|---|---|
 | `400` | `{"error": "owner must be a 0x-prefixed 32-byte Sui address (66 characters)"}` | Malformed `owner` |
-| `400` | `{"error": "owner has no MemWalAccount"}` | `owner` is a well-formed address but has never created a `MemWalAccount` — minting a token for it would be nonsensical (see WALM-298's own `GET /api/accounts/{owner}/exists`, the primitive Console should use to avoid hitting this) |
+| `400` | `{"error": "owner has no MemWalAccount"}` | `owner` is a well-formed address but has never created a `MemWalAccount` — minting a token for it would be nonsensical (Console's own existence-check endpoint, `GET /api/accounts/{owner}/exists`, is the primitive it should use to avoid hitting this) |
 | `401` | *(bare, no body)* | Missing/wrong `x-service-credential`, or the credential is unconfigured on this deployment |
 | `429` | See "Rate limiting" — **two different shapes**, do not assume one | Per-owner or per-credential budget exceeded |
 | `503` | See "Availability failures" — **two different shapes**, do not assume one | `OWNER_TOKEN_SECRET` unconfigured, or the rate limiter's Redis backend is unreachable |
@@ -105,7 +105,7 @@ GET /v1/owners/{owner}/memories
 Authorization: Bearer <token>
 ```
 
-`GET /v1/owners/{owner}/namespaces`, `.../memories`, and `.../agents` (WALM-295)
+`GET /v1/owners/{owner}/namespaces`, `.../memories`, and `.../agents`
 all accept this same bearer token via `auth::verify_read_api_auth`
 (`services/server/src/auth.rs`), which dispatches between it and the
 existing Ed25519 signed-request scheme based on whether the request carries

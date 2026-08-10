@@ -202,10 +202,10 @@ pub async fn verify_signature(
     //         empty string so the signature will mismatch and the request
     //         is rejected below.
     //
-    // NOTE (coordinator): this change must land in lockstep with the SDK
-    // signing change in packages/sdk/src/{memwal,manual}.ts. If the Rust
-    // sidecar agent edits this function concurrently, reconcile so the
-    // canonical message below is the single source of truth.
+    // The canonical message below is the single source of truth for this
+    // format: any change to it must land in lockstep with the SDK signing
+    // code in packages/sdk/src/{memwal,manual}.ts, or every signed request
+    // from an unmatched SDK will fail verification.
     //
     // Canonical format:
     //   "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
@@ -440,7 +440,7 @@ async fn resolve_account(
     Err("no account found: not in cache, exact account id, or registry".to_string())
 }
 
-/// Combined auth dispatcher for `read_api_routes`: tries WALM-297's owner-scoped
+/// Combined auth dispatcher for `read_api_routes`: tries the owner-scoped
 /// bearer token (Console) when `Authorization: Bearer` is present, otherwise falls
 /// back to the unmodified Ed25519 signed-request scheme (SDK/dashboard delegate-key
 /// callers). The two calling populations are disjoint by construction — Console never
@@ -750,7 +750,7 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&secret)
     }
 
-    // ── WALM-297 review (Henry): public-key casing must canonicalize ────
+    // ── Public-key casing must canonicalize ─────────────────────────────
     //
     // `hex::decode` accepts mixed-case input, but `AuthInfo.public_key` (and
     // everything keyed by it downstream: account-resolution cache lookups,
@@ -876,7 +876,7 @@ mod tests {
         assert!(!debug_str.contains("<redacted>"));
     }
 
-    // ── WALM-297: owner-token → AuthInfo bridge for read_api_routes ──────
+    // ── Owner-token → AuthInfo bridge for read_api_routes ────────────────
 
     fn owner_token_claims(permissions: &[&str]) -> owner_token_auth::OwnerTokenClaims {
         owner_token_auth::OwnerTokenClaims {

@@ -165,7 +165,7 @@ pub struct DelegateKeyInfo {
 }
 
 // ============================================================
-// Delegate keys — short-TTL in-memory cache (WALM-295 `/agents`)
+// Delegate keys — short-TTL in-memory cache (`/agents`)
 // ============================================================
 //
 // Mirrors `sui/client.rs`'s `Timed<WalrusEpoch>` pattern used by
@@ -294,7 +294,7 @@ pub fn parse_delegate_keys(
 }
 
 /// List all delegate keys on a MemWalAccount object. JSON-RPC only (mirrors
-/// verify_delegate_key_onchain's non-gRPC path) — WALM-295 Phase 1 does not
+/// verify_delegate_key_onchain's non-gRPC path) — the initial phase did not
 /// need the gRPC variant since this endpoint is not on the hot signature-
 /// verification path.
 /// Routes through gRPC when `grpc_client` is provided, mirroring
@@ -330,8 +330,8 @@ pub async fn list_delegate_keys_onchain(
         .json(&body);
     let request = crate::observability::apply_request_id_header(request);
     // Mirror verify_delegate_key_onchain's instrumentation exactly so this
-    // call is visible in the same `sui_rpc` external-call metrics (final
-    // review, WALM-295 Fix 4) instead of being an invisible RPC cost.
+    // call is visible in the same `sui_rpc` external-call metrics instead
+    // of being an invisible RPC cost.
     let started = std::time::Instant::now();
     let response = request.send().await.map_err(|e| {
         crate::observability::observe_external(
@@ -1430,7 +1430,7 @@ mod tests {
         assert_eq!(parsed[1].label, "mobile");
     }
 
-    // ── list_delegate_keys_cached (WALM-295 Fix 4 — short-TTL cache) ────
+    // ── list_delegate_keys_cached (short-TTL cache) ─────────────────────
     //
     // No mock-HTTP crate exists in this codebase's dependency tree, so these
     // tests prove the cache-hit / TTL-expiry branches without a live chain
@@ -1538,8 +1538,8 @@ mod tests {
         );
     }
 
-    // ── DelegateKeysCache periodic sweep (WALM-295 finding: nothing ever
-    //    removed a map slot — only the TTL above gated trust-on-hit) ──────
+    // ── DelegateKeysCache periodic sweep (nothing else ever removed a map
+    //    slot — only the TTL above gated trust-on-hit) ───────────────────
     //
     // The sweep itself is a `tokio::spawn` + `interval` loop in `main.rs`
     // (not unit-testable in isolation without booting the binary), but its

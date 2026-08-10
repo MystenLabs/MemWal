@@ -147,9 +147,9 @@ fn endpoint_weight(path: &str) -> i64 {
         "/api/remember/manual" => 3, // Walrus upload only (client did embed/encrypt)
         "/api/restore" => 3,         // download + decrypt + re-embed
         "/api/ask" => 2,             // recall + LLM
-        // WALM-295 owner-scoped read API — {owner} is a variable path
-        // segment, so match by prefix/suffix like the observability
-        // route_label() normalization does for the same three routes.
+        // Owner-scoped read API — {owner} is a variable path segment, so
+        // match by prefix/suffix like the observability route_label()
+        // normalization does for the same three routes.
         _ if path.starts_with("/v1/owners/") && path.ends_with("/agents") => 2, // live sui_getObject RPC call, weighted like /api/ask's recall+LLM call
         _ if path.starts_with("/v1/owners/") && path.ends_with("/namespaces") => 1, // DB read only
         _ if path.starts_with("/v1/owners/") && path.ends_with("/memories") => 1, // DB read only
@@ -390,7 +390,7 @@ fn rate_limiter_unavailable_response() -> Response {
 /// routes (`/api/*`, mounted on `protected_routes` in `main.rs`).
 ///
 /// The owner-scoped read API (`/v1/owners/{owner}/{namespaces,memories,agents}`)
-/// does NOT run through this middleware — as of WALM-295 it has its own
+/// does NOT run through this middleware — it has its own
 /// dedicated single-layer budget (`read_api_rate_limit_middleware`, below)
 /// so routine read pagination can never spend the write path's budget or
 /// vice versa.
@@ -630,8 +630,8 @@ pub async fn rate_limit_middleware(
 /// Rate limiting middleware for the owner-scoped read API
 /// (`GET /v1/owners/{owner}/{namespaces,memories,agents}`).
 ///
-/// WALM-295 finding: these routes used to sit in the same `protected_routes`
-/// router as every write endpoint, behind `rate_limit_middleware`, so they
+/// These routes used to sit in the same `protected_routes` router as every
+/// write endpoint, behind `rate_limit_middleware`, so they
 /// spent the same 30/min per-delegate-key budget that exists to bound the
 /// write path's spend-risk (Walrus upload, LLM calls, gas). A single
 /// dedicated budget is enough here — reads don't carry that risk, so there's
@@ -1289,7 +1289,7 @@ pub async fn accounts_rate_limit_middleware(
 }
 
 // ============================================================
-// Owner Token — issuance rate limiting (WALM-297)
+// Owner Token — issuance rate limiting
 // ============================================================
 
 /// Pre-handler rate limiting for `POST /v1/owner-tokens`, keyed by a
@@ -1526,7 +1526,7 @@ pub async fn owner_token_credential_rate_limit_middleware(
     next.run(request).await
 }
 
-/// Per-owner cap on `POST /v1/owner-tokens` issuance (WALM-297). Keyed by
+/// Per-owner cap on `POST /v1/owner-tokens` issuance. Keyed by
 /// the canonical (lowercased) owner address, independent of the
 /// per-service-credential budget enforced by
 /// `owner_token_credential_rate_limit_middleware` — a compromised or buggy
@@ -1656,7 +1656,7 @@ mod tests {
 
     #[test]
     fn test_endpoint_weight_owner_scoped_read_api_routes() {
-        // WALM-295: previously these three fell through to the default `1`
+        // Previously these three fell through to the default `1`
         // implicitly (no explicit entry) — now explicit, and /agents is
         // weighted higher since it makes a live on-chain RPC call per request.
         assert_eq!(endpoint_weight("/v1/owners/0xabc123/namespaces"), 1);
@@ -1704,7 +1704,7 @@ mod tests {
         assert!(resp.headers().contains_key("retry-after"));
     }
 
-    // ---- Read API rate limit config + response shape (WALM-295) ----
+    // ---- Read API rate limit config + response shape ----
 
     #[test]
     fn test_read_api_rate_limit_config_defaults() {

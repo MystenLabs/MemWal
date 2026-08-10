@@ -743,7 +743,7 @@ async fn main() {
         config.security_delete_execute_max_in_flight,
     ));
 
-    // General-purpose Sui client for the per-memory expiry sweep (WALM-296).
+    // General-purpose Sui client for the per-memory expiry sweep.
     // Deliberately independent of `security_delete_component_enabled` —
     // unlike `security_delete_sui` above, the expiry sweep must have a
     // client whenever SUI_GRPC_URL is configured at all, so it works in
@@ -1021,7 +1021,7 @@ async fn main() {
     });
 
     // Spawn background task to bound the in-memory `DelegateKeysCache`
-    // (WALM-295 `/agents` cache — see `storage/sui.rs`). Unlike the
+    // (the `/agents` cache — see `storage/sui.rs`). Unlike the
     // Postgres-backed eviction above, nothing else ever removes entries from
     // this HashMap: the 30s TTL only gates whether a hit is trusted, so
     // without this sweep it grows for the lifetime of the process, one
@@ -1068,13 +1068,13 @@ async fn main() {
     // A blob's storage_end_epoch and the current_epoch its lease lookup
     // was observed at — both scoped to the same sidecar response, both
     // needed by the current-epoch-anchored `expires_at_from_epoch` formula
-    // (WALM-296's expiry sweep, below).
+    // (the expiry sweep, below).
     struct LeaseEpochs {
         storage_end_epoch: i32,
         current_epoch: i32,
     }
 
-    // Spawn background task for per-memory expiry refresh (WALM-296).
+    // Spawn background task for per-memory expiry refresh.
     //
     // Populates `end_epoch`/`expires_at` on `vector_entries` rows so the
     // owner-scoped memory listing API never needs a live chain read.
@@ -1257,15 +1257,15 @@ async fn main() {
         ))
         .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
 
-    // WALM-295: owner-scoped read API — split out of `protected_routes` so
+    // Owner-scoped read API — split out of `protected_routes` so
     // these 3 GET endpoints stop spending the write path's 30/min
     // per-delegate-key budget (that budget exists to bound Walrus
     // upload/LLM/gas spend-risk; plain reads carry none of that risk and a
     // routine pagination loop could trip it under completely normal use).
-    // Auth is `auth::verify_read_api_auth` (WALM-297): a combined dispatcher
-    // that accepts either the existing Ed25519 signed-request scheme
-    // (SDK/dashboard delegate-key callers, unmodified) or a WALM-297
-    // owner-scoped bearer token (Console, which structurally can never
+    // Auth is `auth::verify_read_api_auth`: a combined dispatcher that
+    // accepts either the existing Ed25519 signed-request scheme
+    // (SDK/dashboard delegate-key callers, unmodified) or an owner-scoped
+    // bearer token (Console, which structurally can never
     // produce an Ed25519 signature — see `owner_token_auth`'s module doc).
     // Both paths populate the same `AuthInfo` extension, so the handlers
     // themselves don't need to know which scheme authenticated the request.
@@ -1358,7 +1358,7 @@ async fn main() {
         .merge(security_delete_bearer_routes)
         .layer(security_delete_cors());
 
-    // WALM-297 — owner-scoped bearer token issuance. Its own dedicated
+    // Owner-scoped bearer token issuance. Its own dedicated
     // router group (mirrors `security_delete_auth_routes`): it belongs in
     // neither `protected_routes` (which requires an Ed25519 signed
     // request — Console structurally can never produce one, since it
@@ -1520,7 +1520,7 @@ async fn main() {
         // NOT the security-delete API's blanket allow-any: the service
         // credential must never reach browser JS (the mint call is
         // server-to-server, Console backend → WM), and the probe / future
-        // WALM-295 read routes are only meant to be reachable from origins
+        // owner-scoped read routes are only meant to be reachable from origins
         // this deployment explicitly trusts.
         .merge(owner_token_routes)
         .merge(owner_token_probe_routes)

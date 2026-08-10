@@ -1,6 +1,6 @@
 -- services/server/migrations/013_memory_read_api_index.sql
 --
--- WALM-295: keyset pagination for GET /v1/owners/{owner}/memories needs
+-- Keyset pagination for GET /v1/owners/{owner}/memories needs
 -- (owner, updated_at, id) so ORDER BY updated_at, id can use an index
 -- instead of a sort. This is a SEPARATE migration file because
 -- sqlx::raw_sql runs every statement in one file as a single implicit

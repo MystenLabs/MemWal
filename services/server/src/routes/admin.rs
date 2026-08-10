@@ -127,7 +127,7 @@ pub async fn stats(
 /// here means only "the server process is up," not "your delegate
 /// key/account ID are valid." A caller preflighting credentials before a
 /// signed call should not treat this as a substitute for that call
-/// succeeding (WALM-318).
+/// succeeding.
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -431,7 +431,7 @@ pub async fn ask(
 /// returns: that sidecar call itself bounds the raw candidates it fetches
 /// (shared across the owner's namespaces, hard-capped regardless of
 /// `limit`), so `truncated == false` here does not guarantee every missing
-/// blob in the namespace was found — see WALM-317's PR discussion.
+/// blob in the namespace was found.
 fn paginate_missing_blobs(all_missing: Vec<String>, limit: usize) -> (Vec<String>, bool) {
     let truncated = all_missing.len() > limit;
     let page = all_missing.into_iter().take(limit).collect();
@@ -493,7 +493,7 @@ pub async fn restore(
 
     // Preserve on-chain provenance (agent_id/package_id) so restored rows
     // keep the same owner-scoped read API metadata as freshly-remembered
-    // ones (WALM-295).
+    // ones.
     let blob_provenance: std::collections::HashMap<String, (Option<String>, String)> =
         on_chain_blobs
             .iter()
@@ -509,7 +509,7 @@ pub async fn restore(
         // source_capped, not unconditionally false: the raw candidate fetch
         // can hit its cap fulfilling OTHER namespaces before this one is
         // even filtered out, so zero found here doesn't rule out more
-        // existing that were never fetched (WALM-319).
+        // existing that were never fetched.
         return Ok(Json(RestoreResponse {
             restored: 0,
             skipped: 0,
@@ -535,7 +535,7 @@ pub async fn restore(
     // than N candidates match after namespace/package filtering, restore
     // returns a partial result instead of scanning the whole wallet.
     let (missing_blob_ids, limit_truncated) = paginate_missing_blobs(all_missing, limit);
-    // OR in source_capped (WALM-319): the local limit-slice check alone
+    // OR in source_capped: the local limit-slice check alone
     // can't see truncation that already happened one layer up, in the
     // sidecar's raw candidate fetch.
     let truncated = limit_truncated || source_capped;
@@ -840,7 +840,7 @@ mod tests {
         }
     }
 
-    // ── restore() limit=10 silently truncates (WALM-317) ────────────────
+    // ── restore() limit=10 silently truncates ───────────────────────────
     //
     // restore()'s on-chain-missing-blob list is sliced to `limit` before
     // being restored, with no signal to the caller when there was more to

@@ -107,7 +107,7 @@ pub enum WalletOperation {
         account_id: Option<String>,
         #[serde(default)]
         policy_package_id: Option<String>,
-        /// Walrus epoch the storage lease ends at (WALM-296), carried from
+        /// Walrus epoch the storage lease ends at, carried from
         /// the `UploadBlobError::MetadataTransferFailed` that triggered this
         /// recovery job. `#[serde(default)]` so in-flight jobs enqueued
         /// before this field existed deserialize as `None` (the prior
@@ -133,7 +133,7 @@ pub enum WalletOperation {
         #[serde(default = "default_importance")]
         importance: f32,
         /// Carried from the originating SetMetadataAndTransfer job so the
-        /// eventual insert_vector call can persist them (WALM-295).
+        /// eventual insert_vector call can persist them.
         /// `#[serde(default)]` so in-flight jobs enqueued before this field
         /// existed deserialize as None rather than failing.
         #[serde(default)]
@@ -141,7 +141,7 @@ pub enum WalletOperation {
         #[serde(default)]
         package_id: Option<String>,
         /// Carried from the originating SetMetadataAndTransfer job so the
-        /// eventual insert_vector call can persist it (WALM-296), the same
+        /// eventual insert_vector call can persist it, the same
         /// way agent_id/package_id already are. `#[serde(default)]` so
         /// in-flight jobs enqueued before this field existed deserialize as
         /// `None` rather than failing.

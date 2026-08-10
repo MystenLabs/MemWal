@@ -701,9 +701,9 @@ fn route_label(path: &str) -> String {
         "/api/mcp/messages" => "/api/mcp/messages".to_string(),
         "/api/mcp" => "/api/mcp".to_string(),
         _ if path.starts_with("/api/remember/") => "/api/remember/{job_id}".to_string(),
-        // WALM-295 owner-scoped read API — {owner} is a variable Sui address
-        // path segment, so these three fall back to prefix/suffix matching
-        // the same way /api/remember/{job_id} does above.
+        // Owner-scoped read API — {owner} is a variable Sui address path
+        // segment, so these three fall back to prefix/suffix matching the
+        // same way /api/remember/{job_id} does above.
         _ if path.starts_with("/v1/owners/") && path.ends_with("/namespaces") => {
             "/v1/owners/{owner}/namespaces".to_string()
         }

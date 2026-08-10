@@ -1,18 +1,18 @@
-//! WALM-297 Phase 1 — `POST /v1/owner-tokens` issuance + a minimal
-//! token-gated probe route.
+//! `POST /v1/owner-tokens` issuance (phase 1) + a minimal token-gated probe
+//! route.
 //!
-//! Console has already proven (entirely on its own side — WALM-298, PR
-//! #533; WM is never involved) that a user controls a WM owner address `Y`.
+//! Console has already proven (entirely on its own side; WM is never
+//! involved) that a user controls a WM owner address `Y`.
 //! It then calls `POST /v1/owner-tokens`, authenticating itself as a
-//! legitimate client via the team-decided **service credential** (a single
-//! static shared secret WM generates and hands to Console out of band —
-//! Slack thread, Henry + Harry Phan; mTLS and signed-client-assertion were
-//! explicitly considered and NOT chosen), to mint a short-lived bearer
+//! legitimate client via the **service credential** (a single
+//! static shared secret WM generates and hands to Console out of band;
+//! mTLS and signed-client-assertion were explicitly considered and NOT
+//! chosen), to mint a short-lived bearer
 //! token scoped to `Y`. Console then presents that token as `Authorization:
 //! Bearer <token>` to WM's owner-scoped read routes.
 //!
 //! `token_probe` was originally added as a minimal token-gated route so this
-//! feature could be tested end-to-end before PR #537 (WALM-295)'s real
+//! feature could be tested end-to-end before the real
 //! `GET /v1/owners/{owner}/{namespaces,memories,agents}` handlers existed on
 //! this branch. That wiring is now done: those handlers accept this same
 //! bearer token via `auth::verify_read_api_auth` (`services/server/src/auth.rs`),
@@ -36,7 +36,7 @@ use crate::security_delete_auth::same_owner;
 use crate::types::{AppError, AppState};
 
 /// Header Console sends the shared WM↔Console service credential on.
-/// Not specified by the ticket text; chosen to read clearly on the wire and
+/// Chosen to read clearly on the wire and
 /// to follow this crate's existing lowercase-`x-*` convention for
 /// auth-adjacent headers (`x-public-key`, `x-signature`, `x-account-id`,
 /// ... — see `auth.rs`), same family as the sidecar's own shared-secret
@@ -175,16 +175,15 @@ pub async fn issue_token(
         }
     }
 
-    // Design decision (flagged for review, not explicitly demanded by the
-    // WALM-297 ticket's literal ACs): reject up front, with 400, when the
-    // owner has no MemWalAccount at all, rather than minting a token for a
-    // nonexistent account. Justification: a token scoped to an address with
-    // no account is nonsensical — every real read route it would be used
-    // against is itself scoped to an existing account's data — and this
-    // mirrors WALM-298's own `GET /api/accounts/{owner}/exists` design
-    // (an explicit existence-check primitive Console is expected to use
-    // before this call anyway). Reuses the exact same DB helper accounts.rs
-    // calls (`db.find_account_by_owner`), not a second implementation.
+    // Reject up front, with 400, when the owner has no MemWalAccount at
+    // all, rather than minting a token for a nonexistent account. A token
+    // scoped to an address with no account is nonsensical — every real read
+    // route it would be used against is itself scoped to an existing
+    // account's data — and this mirrors the `GET
+    // /api/accounts/{owner}/exists` design (an explicit existence-check
+    // primitive Console is expected to use before this call anyway). Reuses
+    // the exact same DB helper accounts.rs calls
+    // (`db.find_account_by_owner`), not a second implementation.
     let exists = state.db.find_account_by_owner(&owner).await?.is_some();
     if !exists {
         return Err(AppError::BadRequest("owner has no MemWalAccount".into()));
@@ -234,9 +233,9 @@ pub struct TokenProbeResponse {
 /// `GET /v1/owners/{owner}/_token_probe` — minimal token-gated route.
 ///
 /// This route was originally added so owner-token auth was testable
-/// end-to-end before PR #537 (WALM-295)'s real
+/// end-to-end before the real
 /// `GET /v1/owners/{owner}/{namespaces,memories,agents}` handlers existed on
-/// this branch. It is not itself a WALM-295 read endpoint. Its authorization
+/// this branch. It is not itself one of those read endpoints. Its authorization
 /// logic — extract `OwnerToken`, compare the `{owner}` path segment against
 /// `claims.owner_address` via `same_owner` (403 on mismatch), check the
 /// required permission string is present in `claims.permissions` (403 if
@@ -251,10 +250,9 @@ pub async fn token_probe(
     OwnerToken(claims): OwnerToken,
     Path(owner): Path<String>,
 ) -> Result<Json<TokenProbeResponse>, StatusCode> {
-    // Reuse `security_delete_auth::same_owner` (WALM-295's memory_read.rs
-    // does not exist in this branch to grep — see module doc — but
-    // `security_delete_auth.rs` already has the identical canonical-address
-    // comparison helper) rather than writing a second implementation.
+    // Reuse `security_delete_auth::same_owner`, which already implements
+    // the canonical-address comparison, rather than writing a second
+    // implementation.
     if !same_owner(Some(owner.as_str()), &claims.owner_address) {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -305,8 +303,8 @@ mod tests {
 
     // `token_probe`'s two checks (owner-match, permission-scope) are the
     // actual authorization decision this whole feature exists to make, and
-    // are explicitly documented as the copy-paste template WALM-295's real
-    // read handlers will use — so they're tested directly here even though
+    // are the template the real owner-scoped read handlers follow — so
+    // they're tested directly here even though
     // `token_probe` is itself a dev-only stand-in route. `OwnerToken` and
     // `Path` are both directly constructible (no AppState/DB/Redis needed),
     // matching how `routes::accounts` unit-tests its pure logic.

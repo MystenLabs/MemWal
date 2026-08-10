@@ -1,14 +1,14 @@
-//! WALM-297 Phase 1 — owner-scoped bearer tokens for the read API.
+//! Owner-scoped bearer tokens for the read API (phase 1).
 //!
 //! Console proves control of a WM owner address entirely on its own side
-//! (WALM-298 — Enoki Connect or wallet-signature; WM is never involved in
-//! that proof). Once Console has done so, it calls `POST /v1/owner-tokens`
+//! (via Enoki Connect or a wallet signature — WM is never involved in that
+//! proof). Once Console has done so, it calls `POST /v1/owner-tokens`
 //! (see `routes::owner_token`), authenticating itself as a legitimate
-//! client via the team-decided **service credential** (one static shared
+//! client via the **service credential** (one static shared
 //! secret WM hands Console — see `routes::owner_token::SERVICE_CREDENTIAL_HEADER`),
 //! to mint a short-lived bearer token scoped to that owner. Console then
 //! presents that token as `Authorization: Bearer <token>` to WM's owner-
-//! scoped read routes (WALM-295, `GET /v1/owners/{owner}/...`).
+//! scoped read routes (`GET /v1/owners/{owner}/...`).
 //!
 //! This module is deliberately modeled on `security_delete_auth.rs`'s
 //! `mint_token`/`verify_token`/`SdOwner` triad — same HMAC-SHA256
@@ -51,8 +51,8 @@ pub const OWNER_TOKEN_SUBJECT: &str = "console";
 /// migration.
 pub const PERMISSION_MEMORIES_READ: &str = "memories.read";
 
-/// Claims embedded in an owner-scoped bearer token, exactly as specified by
-/// WALM-297: subject · owner_address · audience · issued_at · expires_at ·
+/// Claims embedded in an owner-scoped bearer token:
+/// subject · owner_address · audience · issued_at · expires_at ·
 /// nonce · permissions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OwnerTokenClaims {
@@ -73,10 +73,10 @@ pub struct OwnerTokenClaims {
     /// Unique per-token identifier (UUID v4), generated fresh at mint time.
     ///
     /// **Design note (deliberately NOT a single-use replay guard):** the
-    /// WALM-297 ticket text says "nonce to prevent replay," which is the
-    /// right instinct for the *signed-request* scheme this bridges from
+    /// name suggests replay prevention, which is the right instinct for the
+    /// *signed-request* scheme this bridges from
     /// (`auth::verify_signature`'s `x-nonce`, single-use-checked against
-    /// Redis per WALM-295's read routes) — there, a nonce stops one
+    /// Redis on the owner-scoped read routes) — there, a nonce stops one
     /// specific signed HTTP request from being captured and replayed.
     ///
     /// But an owner-scoped token is a **bearer** token: it is minted once
@@ -98,9 +98,9 @@ pub struct OwnerTokenClaims {
     ///      an operator trace which minted token served which request,
     ///      without logging the token itself.
     ///
-    /// This is a real ambiguity in the ticket text, resolved here rather
-    /// than silently — flagged explicitly in the WALM-297 implementation
-    /// report's design decisions.
+    /// Spelled out here because "nonce" almost always means single-use, and
+    /// a reader who assumes that would file the absence of a Redis check as
+    /// a bug rather than the deliberate choice it is.
     pub nonce: String,
     /// Granted scopes. Phase 1 always mints exactly `["memories.read"]`
     /// (see [`PERMISSION_MEMORIES_READ`]); modeled as a `Vec<String>` so

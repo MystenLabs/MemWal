@@ -34,7 +34,7 @@ pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
-/// Hard ceiling for `OWNER_TOKEN_TTL_SECS` (WALM-297) — 24 hours. Without a
+/// Hard ceiling for `OWNER_TOKEN_TTL_SECS` — 24 hours. Without a
 /// bound, `env_positive_u64` accepts any positive u64, and a very large TTL
 /// both defeats the "short-lived" security property the token scheme's
 /// whole threat model rests on (see docs/api/owner-token-auth.md's
@@ -133,7 +133,7 @@ pub struct AppState {
     pub security_delete_background_sui: Option<Arc<dyn crate::sui::SuiApi>>,
     /// General-purpose Sui client for on-chain reads unrelated to security
     /// deletion (currently: the per-memory expiry sweep's
-    /// `walrus_epoch_schedule()` lookup, WALM-296). Unlike
+    /// `walrus_epoch_schedule()` lookup). Unlike
     /// `security_delete_sui`, this is populated whenever `SUI_GRPC_URL` is
     /// configured, regardless of whether the security-delete component is
     /// enabled — the expiry sweep must work in deployments that don't run
@@ -154,7 +154,7 @@ pub struct AppState {
     /// `sui/client.rs`'s `Timed<WalrusEpoch>` window) in-memory cache of
     /// each account's on-chain delegate-key list, keyed by account object
     /// id. Backs `GET /v1/owners/{owner}/agents` so repeated calls within
-    /// the TTL window don't re-hit the chain (WALM-295).
+    /// the TTL window don't re-hit the chain.
     pub delegate_keys_cache: crate::storage::sui::DelegateKeysCache,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
@@ -325,7 +325,7 @@ pub struct Config {
     pub sponsor_rate_limit: SponsorRateLimitConfig,
     /// Dedicated rate-limit budget for the owner-scoped read API
     /// (`/v1/owners/{owner}/{namespaces,memories,agents}`), separate from
-    /// the write path's `rate_limit` budget (WALM-295).
+    /// the write path's `rate_limit` budget.
     pub read_api_rate_limit: ReadApiRateLimitConfig,
     /// Rate limiting for the public, unauthenticated `GET
     /// /api/accounts/{owner}/exists` endpoint
@@ -377,10 +377,10 @@ pub struct Config {
     /// walrus_system_object_id. The system state object (read by
     /// sui::client::walrus_epoch()) carries committee.epoch; this object's
     /// state carries epoch_duration/first_epoch_start, needed to convert a
-    /// Walrus epoch into a wall-clock timestamp (WALM-296). Do not
+    /// Walrus epoch into a wall-clock timestamp. Do not
     /// conflate the two ids.
     pub walrus_staking_pool_id: String,
-    /// WALM-297 — HMAC signing secret for owner-scoped bearer tokens
+    /// HMAC signing secret for owner-scoped bearer tokens
     /// (`OWNER_TOKEN_SECRET`). Typed `String` rather than `Option<String>`
     /// (unlike `deletion_token_secret`, whose env-loading idiom this
     /// otherwise mirrors — `nonempty_env`, trimmed): owner-token issuance
@@ -391,23 +391,23 @@ pub struct Config {
     /// unconditional rejection rather than letting an empty HMAC key
     /// validate (see `owner_token_auth::OwnerToken`'s doc comment).
     pub owner_token_secret: String,
-    /// WALM-297 — the team-decided **service credential**: one static
+    /// The **service credential**: one static
     /// shared secret WM generates and hands to Console, which Console
     /// includes on every `POST /v1/owner-tokens` call
     /// (`OWNER_TOKEN_SERVICE_CREDENTIAL`, header
-    /// `routes::owner_token::SERVICE_CREDENTIAL_HEADER`). Not one of the
-    /// two fields the WALM-297 spec named explicitly for this struct
-    /// (`owner_token_secret` / `owner_token_ttl_secs`) — added because the
-    /// client-authentication requirement in the same ticket has nothing
-    /// else to compare against otherwise. Same empty-string-means-
-    /// unconfigured contract as `owner_token_secret` above.
+    /// `routes::owner_token::SERVICE_CREDENTIAL_HEADER`). Distinct from
+    /// `owner_token_secret`, which only signs the minted tokens: this one
+    /// authenticates the *client* calling the mint endpoint, and there is
+    /// nothing else for that check to compare against. Same
+    /// empty-string-means-unconfigured contract as `owner_token_secret`
+    /// above.
     pub owner_token_service_credential: String,
-    /// WALM-297 — TTL for owner-scoped bearer tokens
-    /// (`OWNER_TOKEN_TTL_SECS`). Default 900s (15 min): short-lived per the
-    /// ticket, long enough that Console doesn't need to re-mint on every
-    /// single read during one user session.
+    /// TTL for owner-scoped bearer tokens
+    /// (`OWNER_TOKEN_TTL_SECS`). Default 900s (15 min): short enough to keep
+    /// the "short-lived" security property, long enough that Console doesn't
+    /// need to re-mint on every single read during one user session.
     pub owner_token_ttl_secs: u64,
-    /// WALM-297 — rate limiting for `POST /v1/owner-tokens`.
+    /// Rate limiting for `POST /v1/owner-tokens`.
     pub owner_token_rate_limit: OwnerTokenRateLimitConfig,
 }
 
@@ -839,7 +839,7 @@ impl SponsorRateLimitConfig {
 // Read API Rate Limit Config
 // ============================================================
 //
-// WALM-295 finding: the 3 owner-scoped read endpoints (`namespaces`,
+// The 3 owner-scoped read endpoints (`namespaces`,
 // `memories`, `agents`) originally shared the write path's 30/min
 // per-delegate-key budget (`RateLimitConfig::max_requests_per_delegate_key`).
 // That budget exists to bound spend-risk on endpoints that write, upload to
@@ -948,7 +948,7 @@ impl AccountsRateLimitConfig {
 }
 
 // ============================================================
-// Owner Token Rate Limit Config (WALM-297)
+// Owner Token Rate Limit Config
 // ============================================================
 
 /// Rate limits for `POST /v1/owner-tokens`.
@@ -1549,7 +1549,7 @@ pub struct RestoreResponse {
     /// restore, or the sidecar's raw on-chain candidate fetch (bounded
     /// per owner, shared across all of the owner's namespaces, hard-capped
     /// independent of `limit`) hit its own cap before this namespace's
-    /// blobs were even filtered out of that set (WALM-319) — the second
+    /// blobs were even filtered out of that set — the second
     /// case can be `true` even when `total == 0` for this namespace,
     /// since a cap hit elsewhere can starve this namespace's fetch
     /// entirely. Raising `limit` only helps with the first case; past the
@@ -1574,7 +1574,7 @@ pub struct ForgetResponse {
 }
 
 /// GET /api/accounts/:owner/exists — does `owner` have a registered
-/// MemWalAccount? Backs Console's WALM-298 existence-check primitive.
+/// MemWalAccount? Backs Console's existence-check primitive.
 /// Intentionally minimal: no `account_id`, since Console doesn't need the
 /// internal identifier and returning it would needlessly widen the API's
 /// surface for future churn.
@@ -1721,8 +1721,8 @@ pub struct SponsorExecuteRequest {
 /// Headers required for authenticated requests
 #[derive(Clone)]
 pub struct AuthInfo {
-    /// Hex-encoded Ed25519 public key for a signed-request caller. For a
-    /// WALM-297 owner-token-authenticated read-API request (no delegate key
+    /// Hex-encoded Ed25519 public key for a signed-request caller. For an
+    /// owner-token-authenticated read-API request (no delegate key
     /// involved), `auth::verify_read_api_auth` populates this instead with
     /// the synthetic sentinel `"ownertoken:{owner_address}"` — never a real
     /// key — solely so `read_api_rate_limit_middleware`'s per-key budget
