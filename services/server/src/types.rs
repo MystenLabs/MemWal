@@ -407,6 +407,10 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Balance monitoring (proactive alerts)
+    pub balance_monitor_interval_secs: u64,
+    pub wallet_balance_low_threshold_wal: u64,
+    pub sponsor_balance_low_threshold_sui: u64,
     /// Gates the /admin/wallets, /admin/upload-errors, /admin/config routes
     /// via auth::verify_admin_key. Unrelated to app_auth_admin_token — a
     /// separate operator credential for a separate admin surface.
@@ -561,6 +565,18 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            balance_monitor_interval_secs: normalized_balance_monitor_interval(env_positive_u64(
+                "BALANCE_MONITOR_INTERVAL_SECS",
+                300,
+            )),
+            wallet_balance_low_threshold_wal: env_number(
+                "WALLET_BALANCE_LOW_THRESHOLD_WAL",
+                1_000_000,
+            ),
+            sponsor_balance_low_threshold_sui: env_number(
+                "SPONSOR_BALANCE_LOW_THRESHOLD_SUI",
+                100_000_000,
+            ),
             admin_api_key: nonempty_env("ADMIN_API_KEY"),
         }
     }
@@ -673,6 +689,11 @@ fn env_positive_u64(name: &str, default: u64) -> u64 {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn normalized_balance_monitor_interval(interval_secs: u64) -> u64 {
+    const MIN_BALANCE_MONITOR_INTERVAL_SECS: u64 = 30;
+    interval_secs.max(MIN_BALANCE_MONITOR_INTERVAL_SECS)
 }
 
 fn sui_rpc_quota_from_env() -> (u32, std::time::Duration) {
