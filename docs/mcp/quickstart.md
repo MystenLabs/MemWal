@@ -42,65 +42,68 @@ answer: >-
 
 Every supported client runs the same local server, `npx -y @mysten-incubation/memwal-mcp`, and differs only in where the configuration lives. Pick your client below, add the server, restart, and sign in.
 
-See also:
-
-- [Overview](/mcp/overview): how the local server bridges tool calls to the relayer
-- [Reference](/mcp/reference): every tool with full parameters and transports
-
 ## Prerequisites
 
-- Node.js 20+ (the server runs with `npx`, no install step).
-- A Walrus Memory account. The first tool call triggers `memwal_login`, which opens a browser to connect your wallet; config files carry no keys.
+- You need Node.js 20 or later, because the server runs through `npx` with no install step.
+- You need a Walrus Memory account. The first tool call triggers `memwal_login`, which opens a browser to connect your wallet, so config files carry no keys.
 
 ## Set up your client
 
 | **Client** | **Where the config lives** | **Setup** |
 | --- | --- | --- |
 | Claude Code | Managed by the CLI | `claude mcp add --scope user memwal -- npx -y @mysten-incubation/memwal-mcp`, or install the [plugin](/mcp/claude-code) for automatic-memory hooks |
-| Claude Desktop | `claude_desktop_config.json` | Add the [JSON block](#json-clients) below; see [Claude Desktop](/mcp/claude-desktop) for the per-OS file path |
-| Cursor | `~/.cursor/mcp.json` | Add the [JSON block](#json-clients) below; hooks are [optional](/mcp/cursor) |
-| Codex | `~/.codex/config.toml` | Add the [TOML block](#codex) below; hooks need a [repo install](/mcp/codex) |
-| OpenCode | `~/.config/opencode/opencode.json` | Add the [OpenCode block](#opencode) below |
-| Antigravity | Plugin directory or MCP config | `npx degit MystenLabs/MemWal/packages/mcp/plugin ~/.gemini/config/plugins/memwal`, or the [JSON block](#json-clients); see [Antigravity](/mcp/antigravity) |
+| Claude Desktop | `claude_desktop_config.json` | Add the [JSON block](#config-blocks) below; see [Claude Desktop](/mcp/claude-desktop) for the per-OS file path |
+| Cursor | `~/.cursor/mcp.json` | Add the [JSON block](#config-blocks) below; hooks are [optional](/mcp/cursor) |
+| Codex | `~/.codex/config.toml` | Add the [TOML block](#config-blocks) below; hooks need a [repo install](/mcp/codex) |
+| OpenCode | `~/.config/opencode/opencode.json` | Add the [OpenCode block](#config-blocks) below |
+| Antigravity | Plugin directory or MCP config | `npx degit MystenLabs/MemWal/packages/mcp/plugin ~/.gemini/config/plugins/memwal`, or the [JSON block](#config-blocks); see [Antigravity](/mcp/antigravity) |
 
 After any of these, restart the client (MCP servers load at startup) and ask the agent to run `memwal_login`.
 
-### JSON clients
+### Config blocks
 
-Claude Desktop, Cursor, and Antigravity's MCP config all take the same shape. The server entry is the canonical configuration from the [`packages/mcp` README](https://github.com/MystenLabs/MemWal/tree/main/packages/mcp), and a CI check keeps every copy in these docs in sync with it:
+Every client runs the same server and differs only in the file format. The server entry is the canonical configuration from the [`packages/mcp` README](https://github.com/MystenLabs/MemWal/tree/main/packages/mcp), and a CI check keeps every copy in these docs in sync with it.
 
-```json
-{
-  "mcpServers": {
-    "memwal": {
-      "command": "npx",
-      "args": ["-y", "@mysten-incubation/memwal-mcp"]
+<Tabs>
+  <Tab title="JSON clients">
+    Claude Desktop, Cursor, and Antigravity's MCP config all take this shape:
+
+    ```json
+    {
+      "mcpServers": {
+        "memwal": {
+          "command": "npx",
+          "args": ["-y", "@mysten-incubation/memwal-mcp"]
+        }
+      }
     }
-  }
-}
-```
+    ```
+  </Tab>
+  <Tab title="Codex">
+    Codex reads `~/.codex/config.toml`:
 
-### Codex
+    ```toml
+    [mcp_servers.memwal]
+    command = "npx"
+    args = ["-y", "@mysten-incubation/memwal-mcp"]
+    ```
+  </Tab>
+  <Tab title="OpenCode">
+    OpenCode reads `~/.config/opencode/opencode.json`:
 
-```toml
-[mcp_servers.memwal]
-command = "npx"
-args = ["-y", "@mysten-incubation/memwal-mcp"]
-```
-
-### OpenCode
-
-```json
-{
-  "mcp": {
-    "memwal": {
-      "type": "local",
-      "command": ["npx", "-y", "@mysten-incubation/memwal-mcp"],
-      "enabled": true
+    ```json
+    {
+      "mcp": {
+        "memwal": {
+          "type": "local",
+          "command": ["npx", "-y", "@mysten-incubation/memwal-mcp"],
+          "enabled": true
+        }
+      }
     }
-  }
-}
-```
+    ```
+  </Tab>
+</Tabs>
 
 ## Configure a namespace
 
