@@ -10,7 +10,7 @@ ci-offline-onchain = []
 
 [dependencies]
 # Web framework
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "form"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
@@ -26,7 +26,18 @@ hmac = "0.12"
 hex = "0.4"
 
 # SEAL encryption is handled by TS sidecar scripts (@mysten/seal)
-# (no Rust crypto deps needed)
+# (no Rust crypto deps needed for that path)
+
+# MCP OAuth (Claude custom connectors) — AES-256-GCM envelope for
+# server-custodied delegate keys, ported from the reviewed WALM-30/ENG-1783
+# `app_auth.rs` design (branch feature/eng-1783-hosted-connect-memwal-flow-
+# for-web-apps, PR #193, unmerged). See services/server/src/oauth.rs.
+aes-gcm = "0.10"
+rand = "0.8"
+blake2 = "0.10"
+ipnet = "2"
+zeroize = "1"
+url = "2"
 
 # Background job queue — persistent metadata+transfer tasks
 apalis     = { version = "0.7", default-features = false, features = ["tracing"] }

@@ -1137,6 +1137,7 @@ mod tests {
             balance_monitor_interval_secs: 900,
             wallet_balance_low_threshold_wal: 1_000_000,
             sponsor_balance_low_threshold_sui: 100_000_000,
+            mcp_oauth: None,
         }
     }
 

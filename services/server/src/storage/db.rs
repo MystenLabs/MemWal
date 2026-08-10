@@ -302,6 +302,15 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
+        // MCP OAuth 2.1 (Claude custom connectors) — client registry,
+        // server-custodied delegate keys, and the authorize/code/grant/token
+        // tables. Inert until MCP_OAUTH_ENABLED=true routes traffic to them.
+        let migration_010 = include_str!("../../migrations/010_mcp_oauth.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -837,5 +846,532 @@ impl VectorDb {
                 .map_err(|e| AppError::Internal(format!("Failed to query accounts: {}", e)))?;
 
         Ok(result.map(|(id,)| id))
+    }
+
+    // ============================================================
+    // MCP OAuth (Claude custom connectors) — see `../oauth.rs` and
+    // `../../migrations/010_mcp_oauth.sql`. Inert until
+    // `MCP_OAUTH_ENABLED=true`; every method here is only ever called from
+    // `routes/oauth.rs` (PR2) and `mcp_proxy.rs`'s bearer resolution (PR3).
+    // ============================================================
+
+    pub async fn insert_oauth_client(&self, client: &oauth_rows::OAuthClientRow) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO mcp_oauth_clients
+                (client_id, client_secret_sha256, client_name, redirect_uris, grant_types,
+                 response_types, token_endpoint_auth_method, scope, status, registered_ip)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(&client.client_id)
+        .bind(&client.client_secret_sha256)
+        .bind(&client.client_name)
+        .bind(&client.redirect_uris)
+        .bind(&client.grant_types)
+        .bind(&client.response_types)
+        .bind(&client.token_endpoint_auth_method)
+        .bind(&client.scope)
+        .bind(&client.status)
+        .bind(&client.registered_ip)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert oauth client: {}", e)))?;
+        Ok(())
+    }
+
+    pub async fn fetch_oauth_client(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<oauth_rows::OAuthClientRow>, AppError> {
+        sqlx::query_as::<_, oauth_rows::OAuthClientRow>(
+            "SELECT client_id, client_secret_sha256, client_name, redirect_uris, grant_types,
+                    response_types, token_endpoint_auth_method, scope, status, registered_ip
+             FROM mcp_oauth_clients WHERE client_id = $1 AND status = 'active'",
+        )
+        .bind(client_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch oauth client: {}", e)))
+    }
+
+    pub async fn touch_oauth_client_last_used(&self, client_id: &str) -> Result<(), AppError> {
+        sqlx::query("UPDATE mcp_oauth_clients SET last_used_at = NOW() WHERE client_id = $1")
+            .bind(client_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to touch oauth client: {}", e)))?;
+        Ok(())
+    }
+
+    /// Total DCR-registered clients that never completed a grant, created in
+    /// the given window. Backstop for decision D5 (Anthropic's shared egress
+    /// CIDR is exempted from per-IP throttling, so this global cap is the
+    /// remaining defense against a registration flood).
+    pub async fn count_unconsumed_oauth_clients(
+        &self,
+        within: std::time::Duration,
+    ) -> Result<i64, AppError> {
+        let secs = within.as_secs().min(i64::MAX as u64) as i64;
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM mcp_oauth_clients c
+             WHERE c.created_at > NOW() - ($1 * INTERVAL '1 second')
+               AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id = c.client_id)",
+        )
+        .bind(secs)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to count unconsumed oauth clients: {}", e)))?;
+        Ok(row.0)
+    }
+
+    pub async fn insert_oauth_delegate(
+        &self,
+        delegate: &oauth_rows::OAuthDelegateRow,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO mcp_oauth_delegates
+                (delegate_ref, account_id, owner_address, delegate_public_key, delegate_address,
+                 encrypted_private_key, label, status, tx_digest)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(&delegate.delegate_ref)
+        .bind(&delegate.account_id)
+        .bind(&delegate.owner_address)
+        .bind(&delegate.delegate_public_key)
+        .bind(&delegate.delegate_address)
+        .bind(&delegate.encrypted_private_key)
+        .bind(&delegate.label)
+        .bind(&delegate.status)
+        .bind(&delegate.tx_digest)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert oauth delegate: {}", e)))?;
+        Ok(())
+    }
+
+    pub async fn fetch_oauth_delegate(
+        &self,
+        delegate_ref: &str,
+    ) -> Result<Option<oauth_rows::OAuthDelegateRow>, AppError> {
+        sqlx::query_as::<_, oauth_rows::OAuthDelegateRow>(
+            "SELECT delegate_ref, account_id, owner_address, delegate_public_key, delegate_address,
+                    encrypted_private_key, label, status, tx_digest
+             FROM mcp_oauth_delegates WHERE delegate_ref = $1",
+        )
+        .bind(delegate_ref)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch oauth delegate: {}", e)))
+    }
+
+    /// A delegate this account already activated for a *previous* OAuth
+    /// grant, if any. Checked before minting a brand-new delegate keypair at
+    /// `/oauth/authorize` time so a user reconnecting the same account
+    /// doesn't have to sign another on-chain `add_delegate_key` tx and burn
+    /// another slot toward the on-chain 20-key cap.
+    pub async fn find_reusable_oauth_delegate(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<oauth_rows::OAuthDelegateRow>, AppError> {
+        sqlx::query_as::<_, oauth_rows::OAuthDelegateRow>(
+            "SELECT delegate_ref, account_id, owner_address, delegate_public_key, delegate_address,
+                    encrypted_private_key, label, status, tx_digest
+             FROM mcp_oauth_delegates
+             WHERE account_id = $1 AND status = 'active'
+             ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to query reusable oauth delegate: {}", e)))
+    }
+
+    pub async fn activate_oauth_delegate(
+        &self,
+        delegate_ref: &str,
+        account_id: &str,
+        owner_address: &str,
+        tx_digest: &str,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "UPDATE mcp_oauth_delegates
+             SET account_id = $2, owner_address = $3, tx_digest = $4, status = 'active', updated_at = NOW()
+             WHERE delegate_ref = $1",
+        )
+        .bind(delegate_ref)
+        .bind(account_id)
+        .bind(owner_address)
+        .bind(tx_digest)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to activate oauth delegate: {}", e)))?;
+        Ok(())
+    }
+
+    /// Admin-style operation, not yet called from any route — reserved for
+    /// a future "revoke this delegate everywhere" admin action distinct
+    /// from `revoke_oauth_grant` (a delegate can in principle be shared
+    /// across grants from different clients via the reuse path in
+    /// `routes/oauth.rs::session_account`).
+    #[allow(dead_code)]
+    pub async fn revoke_oauth_delegate(&self, delegate_ref: &str) -> Result<(), AppError> {
+        sqlx::query(
+            "UPDATE mcp_oauth_delegates SET status = 'revoked', updated_at = NOW() WHERE delegate_ref = $1",
+        )
+        .bind(delegate_ref)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to revoke oauth delegate: {}", e)))?;
+        Ok(())
+    }
+
+    pub async fn insert_oauth_session(
+        &self,
+        session: &oauth_rows::OAuthSessionRow,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO mcp_oauth_authorize_sessions
+                (session_id, client_id, redirect_uri, state, scope, resource, code_challenge,
+                 code_challenge_method, delegate_ref, status, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(&session.session_id)
+        .bind(&session.client_id)
+        .bind(&session.redirect_uri)
+        .bind(&session.state)
+        .bind(&session.scope)
+        .bind(&session.resource)
+        .bind(&session.code_challenge)
+        .bind(&session.code_challenge_method)
+        .bind(&session.delegate_ref)
+        .bind(&session.status)
+        .bind(session.expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert oauth session: {}", e)))?;
+        Ok(())
+    }
+
+    pub async fn fetch_oauth_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<oauth_rows::OAuthSessionRow>, AppError> {
+        sqlx::query_as::<_, oauth_rows::OAuthSessionRow>(
+            "SELECT session_id, client_id, redirect_uri, state, scope, resource, code_challenge,
+                    code_challenge_method, delegate_ref, status, expires_at
+             FROM mcp_oauth_authorize_sessions
+             WHERE session_id = $1 AND expires_at > NOW()",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch oauth session: {}", e)))
+    }
+
+    /// Atomically claim a pending session so it can't be completed twice —
+    /// `UPDATE ... WHERE status = 'pending' RETURNING *` is the Postgres
+    /// equivalent of the WALM-30 prior art's Redis `GETDEL` single-use
+    /// guarantee (decision D3).
+    pub async fn consume_oauth_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<oauth_rows::OAuthSessionRow>, AppError> {
+        sqlx::query_as::<_, oauth_rows::OAuthSessionRow>(
+            "UPDATE mcp_oauth_authorize_sessions
+             SET status = 'consumed'
+             WHERE session_id = $1 AND status = 'pending' AND expires_at > NOW()
+             RETURNING session_id, client_id, redirect_uri, state, scope, resource, code_challenge,
+                       code_challenge_method, delegate_ref, status, expires_at",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to consume oauth session: {}", e)))
+    }
+
+    pub async fn insert_oauth_code(&self, code: &oauth_rows::OAuthCodeRow) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO mcp_oauth_codes
+                (code_sha256, client_id, redirect_uri, scope, resource, code_challenge,
+                 code_challenge_method, delegate_ref, account_id, owner_address, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(&code.code_sha256)
+        .bind(&code.client_id)
+        .bind(&code.redirect_uri)
+        .bind(&code.scope)
+        .bind(&code.resource)
+        .bind(&code.code_challenge)
+        .bind(&code.code_challenge_method)
+        .bind(&code.delegate_ref)
+        .bind(&code.account_id)
+        .bind(&code.owner_address)
+        .bind(code.expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert oauth code: {}", e)))?;
+        Ok(())
+    }
+
+    /// Single-use consume via `DELETE ... RETURNING` — the first successful
+    /// exchange deletes the row; any replay finds nothing. Also filters on
+    /// `client_id` so a code minted for one client can never be redeemed by
+    /// another, even under a future refactor bug (defense in depth, same
+    /// reasoning as the WALM-30 prior art's `app_auth_token` doc comment).
+    pub async fn consume_oauth_code(
+        &self,
+        client_id: &str,
+        code_sha256: &str,
+    ) -> Result<Option<oauth_rows::OAuthCodeRow>, AppError> {
+        sqlx::query_as::<_, oauth_rows::OAuthCodeRow>(
+            "DELETE FROM mcp_oauth_codes
+             WHERE code_sha256 = $1 AND client_id = $2 AND expires_at > NOW()
+             RETURNING code_sha256, client_id, redirect_uri, scope, resource, code_challenge,
+                       code_challenge_method, delegate_ref, account_id, owner_address, expires_at",
+        )
+        .bind(code_sha256)
+        .bind(client_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to consume oauth code: {}", e)))
+    }
+
+    pub async fn insert_oauth_grant(&self, grant: &oauth_rows::OAuthGrantRow) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO mcp_oauth_grants
+                (grant_id, client_id, delegate_ref, account_id, owner_address, scope, resource)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&grant.grant_id)
+        .bind(&grant.client_id)
+        .bind(&grant.delegate_ref)
+        .bind(&grant.account_id)
+        .bind(&grant.owner_address)
+        .bind(&grant.scope)
+        .bind(&grant.resource)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert oauth grant: {}", e)))?;
+        Ok(())
+    }
+
+    /// Revokes a grant and every token derived from it in one statement —
+    /// this is the entire "disconnect this connector" operation (and the
+    /// refresh-token-reuse-detection response, see `resolve_oauth_bearer`).
+    pub async fn revoke_oauth_grant(&self, grant_id: &str) -> Result<(), AppError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to start tx: {}", e)))?;
+        sqlx::query("UPDATE mcp_oauth_grants SET revoked_at = NOW() WHERE grant_id = $1 AND revoked_at IS NULL")
+            .bind(grant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to revoke oauth grant: {}", e)))?;
+        sqlx::query(
+            "UPDATE mcp_oauth_tokens SET revoked_at = NOW() WHERE grant_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(grant_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to revoke oauth grant tokens: {}", e)))?;
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to commit oauth grant revocation: {}", e)))?;
+        Ok(())
+    }
+
+    pub async fn insert_oauth_token(&self, token: &oauth_rows::OAuthTokenRow) -> Result<(), AppError> {
+        sqlx::query(
+            "INSERT INTO mcp_oauth_tokens (token_sha256, grant_id, token_type, expires_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&token.token_sha256)
+        .bind(&token.grant_id)
+        .bind(&token.token_type)
+        .bind(token.expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert oauth token: {}", e)))?;
+        Ok(())
+    }
+
+    /// Resolve a hashed bearer token all the way to the delegate it
+    /// authorizes, joining through the grant. This is the query the proxy's
+    /// `resolve_oauth_bearer` (PR3) runs on every MCP request, so it's a
+    /// single round trip rather than N+1.
+    pub async fn fetch_oauth_token_with_delegate(
+        &self,
+        token_sha256: &str,
+    ) -> Result<Option<oauth_rows::OAuthTokenWithDelegateRow>, AppError> {
+        sqlx::query_as::<_, oauth_rows::OAuthTokenWithDelegateRow>(
+            "SELECT t.token_sha256, t.grant_id, t.token_type, t.expires_at, t.revoked_at,
+                    g.account_id, g.owner_address, g.scope, g.revoked_at AS grant_revoked_at,
+                    d.delegate_ref, d.encrypted_private_key, d.delegate_public_key, d.status AS delegate_status
+             FROM mcp_oauth_tokens t
+             JOIN mcp_oauth_grants g ON g.grant_id = t.grant_id
+             JOIN mcp_oauth_delegates d ON d.delegate_ref = g.delegate_ref
+             WHERE t.token_sha256 = $1",
+        )
+        .bind(token_sha256)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch oauth token: {}", e)))
+    }
+
+    pub async fn revoke_oauth_token(&self, token_sha256: &str) -> Result<(), AppError> {
+        sqlx::query("UPDATE mcp_oauth_tokens SET revoked_at = NOW() WHERE token_sha256 = $1")
+            .bind(token_sha256)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to revoke oauth token: {}", e)))?;
+        Ok(())
+    }
+
+    /// Periodic sweep for the hourly eviction task (mirrors
+    /// `evict_expired_delegate_keys`): clears expired authorize sessions and
+    /// authorization codes. Grants/tokens/clients/delegates are durable and
+    /// are NOT touched here — only ever revoked explicitly.
+    pub async fn evict_expired_oauth_state(&self) -> Result<u64, AppError> {
+        let mut total = 0u64;
+        let sessions = sqlx::query("DELETE FROM mcp_oauth_authorize_sessions WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to evict expired oauth sessions: {}", e)))?;
+        total += sessions.rows_affected();
+        let codes = sqlx::query("DELETE FROM mcp_oauth_codes WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to evict expired oauth codes: {}", e)))?;
+        total += codes.rows_affected();
+        if total > 0 {
+            tracing::info!("Evicted {} expired MCP OAuth session/code rows", total);
+        }
+        Ok(total)
+    }
+
+    /// DCR clients registered more than 24h ago that never completed a
+    /// grant. Claude registers a fresh client on every new connection
+    /// (expected, per Anthropic's docs), so this table grows without bound
+    /// unless swept — see the plan's "DCR client-table growth" risk note.
+    pub async fn prune_unconsumed_oauth_clients(&self) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            "DELETE FROM mcp_oauth_clients c
+             WHERE c.created_at <= NOW() - INTERVAL '24 hours'
+               AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id = c.client_id)",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to prune unconsumed oauth clients: {}", e)))?;
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::info!("Pruned {} unconsumed MCP OAuth DCR clients", rows);
+        }
+        Ok(rows)
+    }
+}
+
+/// Row types for the MCP OAuth tables (`sqlx::FromRow`) — kept in their own
+/// submodule so `db.rs`'s existing tuple-based queries elsewhere aren't
+/// disturbed by this file's naming.
+pub mod oauth_rows {
+    use chrono::{DateTime, Utc};
+
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct OAuthClientRow {
+        pub client_id: String,
+        pub client_secret_sha256: Option<String>,
+        pub client_name: String,
+        pub redirect_uris: Vec<String>,
+        pub grant_types: Vec<String>,
+        pub response_types: Vec<String>,
+        pub token_endpoint_auth_method: String,
+        pub scope: String,
+        pub status: String,
+        pub registered_ip: Option<String>,
+    }
+
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct OAuthDelegateRow {
+        pub delegate_ref: String,
+        pub account_id: Option<String>,
+        pub owner_address: Option<String>,
+        pub delegate_public_key: String,
+        pub delegate_address: String,
+        pub encrypted_private_key: String,
+        pub label: String,
+        pub status: String,
+        pub tx_digest: Option<String>,
+    }
+
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct OAuthSessionRow {
+        pub session_id: String,
+        pub client_id: String,
+        pub redirect_uri: String,
+        pub state: Option<String>,
+        pub scope: String,
+        pub resource: String,
+        pub code_challenge: String,
+        pub code_challenge_method: String,
+        pub delegate_ref: String,
+        pub status: String,
+        pub expires_at: DateTime<Utc>,
+    }
+
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct OAuthCodeRow {
+        pub code_sha256: String,
+        pub client_id: String,
+        pub redirect_uri: String,
+        pub scope: String,
+        pub resource: String,
+        pub code_challenge: String,
+        pub code_challenge_method: String,
+        pub delegate_ref: String,
+        pub account_id: String,
+        pub owner_address: String,
+        pub expires_at: DateTime<Utc>,
+    }
+
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct OAuthGrantRow {
+        pub grant_id: String,
+        pub client_id: String,
+        pub delegate_ref: String,
+        pub account_id: String,
+        pub owner_address: String,
+        pub scope: String,
+        pub resource: String,
+    }
+
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct OAuthTokenRow {
+        pub token_sha256: String,
+        pub grant_id: String,
+        pub token_type: String,
+        pub expires_at: DateTime<Utc>,
+    }
+
+    /// Denormalized join result for resolving a bearer token straight
+    /// through to signable delegate material — what `resolve_oauth_bearer`
+    /// (PR3) needs in one round trip. Most fields are unread until PR3
+    /// wires up the proxy-side consumer.
+    #[allow(dead_code)]
+    #[derive(Debug, Clone, sqlx::FromRow)]
+    pub struct OAuthTokenWithDelegateRow {
+        pub token_sha256: String,
+        pub grant_id: String,
+        pub token_type: String,
+        pub expires_at: DateTime<Utc>,
+        pub revoked_at: Option<DateTime<Utc>>,
+        pub account_id: String,
+        pub owner_address: String,
+        pub scope: String,
+        pub grant_revoked_at: Option<DateTime<Utc>>,
+        pub delegate_ref: String,
+        pub encrypted_private_key: String,
+        pub delegate_public_key: String,
+        pub delegate_status: String,
     }
 }
