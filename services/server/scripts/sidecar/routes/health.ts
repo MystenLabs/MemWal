@@ -3,7 +3,8 @@
  *
  * All are registered BEFORE the shared-secret middleware (see app.ts):
  * /health is local liveness, /ready validates upload execution identity, and
- * /metrics/wallet is scraped by operators without a token.
+ * /metrics/wallet exposes aggregate metrics to unauthenticated scrapers.
+ * Per-wallet addresses and balances are served separately behind sidecar auth.
  */
 
 import type { Express, Request, Response as ExpressResponse } from "express";
@@ -138,11 +139,28 @@ export function registerWalletMetricsRoute(app: Express): void {
     app.get("/metrics/wallet", async (_req: Request, res: ExpressResponse) => {
         const snapshot = sidecarStateSnapshot();
         try {
-            const balances = await getWalletBalanceSnapshot(SERVER_SUI_ADDRESSES);
+            const balances: Partial<Awaited<ReturnType<typeof getWalletBalanceSnapshot>>> = {
+                ...await getWalletBalanceSnapshot(SERVER_SUI_ADDRESSES),
+            };
+            delete balances.perWallet;
             res.json({ ...snapshot, ...balances });
         } catch (error) {
             sidecarLog("warn", "wallet_balance_metrics_failed", { error: errorMessage(error) });
             res.json(snapshot);
+        }
+    });
+}
+
+// Operational wallet details. Register this route only after
+// sharedSecretAuthMiddleware in app.ts.
+export function registerInternalWalletBalancesRoute(app: Express): void {
+    app.get("/internal/wallet-balances", async (_req: Request, res: ExpressResponse) => {
+        try {
+            const { perWallet } = await getWalletBalanceSnapshot(SERVER_SUI_ADDRESSES);
+            res.json({ perWallet });
+        } catch (error) {
+            sidecarLog("warn", "internal_wallet_balances_failed", { error: errorMessage(error) });
+            res.status(503).json({ error: "Wallet balances unavailable" });
         }
     });
 }
