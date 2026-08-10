@@ -1977,6 +1977,9 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            balance_monitor_interval_secs: 300,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
             admin_api_key: None,
         }
     }
