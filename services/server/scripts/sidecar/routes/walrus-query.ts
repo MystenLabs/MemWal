@@ -7,11 +7,73 @@ import express, { type Express } from "express";
 import { blobIdFromInt } from "@mysten/walrus";
 import { bcs } from "@mysten/sui/bcs";
 import { normalizeSuiAddress } from "@mysten/sui/utils";
-import { JSON_LIMIT_METADATA, JSON_LIMIT_WALRUS_VERIFY, WALRUS_PACKAGE_ID } from "../config.js";
+import {
+    JSON_LIMIT_METADATA,
+    JSON_LIMIT_WALRUS_VERIFY,
+    getTrustedUploaderAddresses,
+    WALRUS_PACKAGE_ID,
+} from "../config.js";
 import { getWalrusClient, refreshWalrusClientIfStale, suiClient } from "../clients.js";
 import { requestIdFor, sidecarLog } from "../log.js";
 import { withRpcRetry } from "../retry/rpc.js";
 import { errorMessage, mapConcurrent } from "../util.js";
+
+// ============================================================
+// Provenance gate — WALM-299 / GH #501
+// ============================================================
+
+type ProvenanceClient = Pick<typeof suiClient, "getTransactionBlock">;
+
+/**
+ * Result of verifying a blob's uploader provenance.
+ * - `trusted`   — sender of previousTransaction is in TRUSTED_UPLOADER_ADDRESSES
+ * - `untrusted` — sender is known and is NOT in the trusted set
+ * - `unknown`   — previousTransaction is null / cannot be fetched
+ */
+export type ProvenanceResult =
+    | { readonly kind: "trusted" }
+    | { readonly kind: "untrusted"; readonly sender: string }
+    | { readonly kind: "unknown" };
+
+/**
+ * Verify whether a blob's previousTransaction sender is a trusted uploader.
+ *
+ * Normal server uploads: register (mint → server wallet) → metadata+transfer (sender = server wallet).
+ * Migration uploads: same, but sender = migration writer shard (also in TRUSTED_UPLOADER_ADDRESSES).
+ * Attack: attacker mints their own blob and transfers it to the victim — sender = attacker address.
+ *
+ * When previousTransaction is null/unavailable we return `unknown` so restore still
+ * works for blobs minted before the provenance gate was deployed. This is the
+ * migration-safe path — any blob that predates the gate is allowed through on
+ * provenance alone and relies on the ownership + decrypt checks below.
+ */
+export async function verifyBlobUploaderProvenance(
+    previousTransaction: string | null | undefined,
+    client: ProvenanceClient = suiClient
+): Promise<ProvenanceResult> {
+    if (!previousTransaction) return { kind: "unknown" };
+
+    try {
+        const tx = await withRpcRetry(`[provenance] getTransactionBlock ${previousTransaction.slice(0, 10)}…`, () =>
+            client.getTransactionBlock({ digest: previousTransaction, options: { showSender: true } })
+        );
+        const sender = tx.transaction?.data?.sender;
+        if (!sender) return { kind: "unknown" };
+        const canonicalSender = normalizeSuiAddress(sender);
+        if (getTrustedUploaderAddresses().includes(canonicalSender)) {
+            return { kind: "trusted" };
+        }
+        return { kind: "untrusted", sender: canonicalSender };
+    } catch (err: unknown) {
+        // If we cannot verify, fail open — let ownership + decrypt handle it.
+        // This avoids hard-bricking restore when RPC has gaps for old transactions.
+        return { kind: "unknown" };
+    }
+}
+
+// ============================================================
+// blob_id helpers
+// ============================================================
 
 /**
  * blob_id from chain is a big integer (U256); convert to base64url
@@ -453,11 +515,12 @@ export function registerWalrusQueryRoute(app: Express): void {
                         : "")
             );
 
-            // Step 2: Fetch metadata for each blob with bounded concurrency
+            // Step 2: Fetch provenance + metadata for each blob with bounded concurrency
             // to avoid overwhelming Sui RPC and hitting 429 rate limits.
             type BlobMeta = {
                 objectId: string;
                 rawBlobId: string | number | null;
+                provenanceResult: ProvenanceResult;
                 blobNamespace: string;
                 blobOwner: string;
                 blobPackageId: string;
@@ -470,6 +533,24 @@ export function registerWalrusQueryRoute(app: Express): void {
                 let blobOwner = "";
                 let blobPackageId = "";
                 let blobAgentId = "";
+                let provenanceResult: ProvenanceResult = { kind: "unknown" };
+
+                // Verify provenance first — skip metadata fetch entirely for untrusted blobs.
+                // (unknown is allowed through to preserve migration compatibility).
+                try {
+                    provenanceResult = await verifyBlobUploaderProvenance(obj.previousTransaction);
+                } catch {
+                    provenanceResult = { kind: "unknown" };
+                }
+
+                if (provenanceResult.kind === "untrusted") {
+                    sidecarLog("debug", "query_blobs_provenance_excluded", {
+                        objectId: obj.objectId,
+                        owner,
+                        sender: provenanceResult.sender,
+                    });
+                    return { ...obj, provenanceResult, blobNamespace, blobOwner, blobPackageId, blobAgentId };
+                }
 
                 try {
                     for (const { key, value } of await fetchBlobMetadataEntries(obj.objectId)) {
@@ -482,13 +563,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                     // No dynamic field = no metadata = use defaults
                 }
 
-                return {
-                    ...obj,
-                    blobNamespace,
-                    blobOwner,
-                    blobPackageId,
-                    blobAgentId,
-                };
+                return { ...obj, provenanceResult, blobNamespace, blobOwner, blobPackageId, blobAgentId };
             });
 
             // Step 3: Filter + convert blob IDs
@@ -500,7 +575,13 @@ export function registerWalrusQueryRoute(app: Express): void {
                 agentId: string;
             }[] = [];
 
+            let excludedProvenanceUntrusted = 0;
             for (const meta of metas) {
+                // Reject blobs with untrusted provenance before any other filter.
+                if (meta.provenanceResult.kind === "untrusted") {
+                    excludedProvenanceUntrusted++;
+                    continue;
+                }
                 // Filter by namespace if specified
                 if (namespace && meta.blobNamespace !== namespace) continue;
                 // Filter by packageId if specified
@@ -523,7 +604,7 @@ export function registerWalrusQueryRoute(app: Express): void {
             console.log(
                 `[query-blobs] returning ${blobs.length} blobs (filtered from ${
                     rawObjs.length
-                }) for owner=${owner} ns=${namespace || "*"}`
+                }; excluded untrusted=${excludedProvenanceUntrusted}) for owner=${owner} ns=${namespace || "*"}`
             );
             res.json({ blobs, total: blobs.length });
         } catch (err: any) {

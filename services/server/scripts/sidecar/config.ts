@@ -8,6 +8,7 @@
 
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { normalizeSuiAddress } from "@mysten/sui/utils";
 import { getSealCommitteeIdentity, getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "../seal-config.js";
 import { parseSuiNetwork } from "./sui-transport-policy.js";
 
@@ -100,6 +101,50 @@ export const SERVER_SUI_ADDRESSES = SERVER_SUI_PRIVATE_KEYS.map((privateKey, ind
 
 if (new Set(SERVER_SUI_ADDRESSES).size !== SERVER_SUI_ADDRESSES.length) {
     throw new Error("SERVER_SUI_PRIVATE_KEYS contains duplicate wallet addresses");
+}
+
+// ============================================================
+// Provenance gate — trusted uploader addresses
+// ============================================================
+
+// Extended uploader allowlist for the restore/query-blobs provenance gate.
+// Defaults to the server wallet pool; append migration writer shard addresses
+// (from collect-live-writer-addresses.sh output or the legacy migration DB)
+// as a comma-separated list via env when migration writer shards are in use.
+//
+// Lazily reads env so tests can set TRUSTED_UPLOADER_ADDRESSES before calling
+// verifyBlobUploaderProvenance — config.ts is loaded by tsx before the test's
+// top-level process.env assignments run, so eager evaluation would see empty keys.
+// Cached value — set once on first call so the env-parse + canonicalize runs exactly once.
+let _trustedAddrs: readonly string[] | undefined;
+
+export function getTrustedUploaderAddresses(): readonly string[] {
+    if (_trustedAddrs) return _trustedAddrs;
+
+    const env = process.env.TRUSTED_UPLOADER_ADDRESSES ?? "";
+    const extra = env
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+        .map((s) => normalizeSuiAddress(s));
+
+    // Warn once on first call when extra addresses are configured but no server keys exist.
+    // The warning lives here (inside the cache) so it fires on the first real use,
+    // not at module-evaluation time when test env may not be ready yet.
+    if (extra.length > 0 && SERVER_SUI_ADDRESSES.length === 0) {
+        console.warn(
+            "[sidecar] TRUSTED_UPLOADER_ADDRESSES is set but SERVER_SUI_PRIVATE_KEYS is empty — " +
+                "provenance gate may be ineffective"
+        );
+    }
+
+    _trustedAddrs = [...SERVER_SUI_ADDRESSES, ...new Set(extra)];
+    return _trustedAddrs;
+}
+
+/** Resets the cache — for testing only. Do not call in production. */
+export function _clearTrustedUploaderAddressesCache(): void {
+    _trustedAddrs = undefined;
 }
 
 // ============================================================

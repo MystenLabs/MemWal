@@ -1,6 +1,23 @@
+// ============================================================
+// TEST ISOLATION: set up mock env BEFORE any imports.
+// ESM hoists all imports to the top of the module scope, so any
+// env reads at module-evaluation time (e.g. config.ts) will only
+// see the env values that are set before the import block.
+// ============================================================
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+
+// Derive the real address from a valid key so it matches what config.ts
+// canonicalizes when populating TRUSTED_UPLOADER_ADDRESSES.  The key is a
+// randomly-generated Ed25519 scalar; it is never used for signing in this test.
+const TEST_KEYPAIR = new Ed25519Keypair();
+const TEST_SERVER_ADDR = TEST_KEYPAIR.toSuiAddress();
+const TEST_MIGRATION_WRITER = "0x" + "c3".repeat(32);
+process.env.SERVER_SUI_PRIVATE_KEYS ??= TEST_KEYPAIR.getSecretKey().toString("base64");
+process.env.TRUSTED_UPLOADER_ADDRESSES ??= `${TEST_SERVER_ADDR},${TEST_MIGRATION_WRITER}`;
+// ============================================================
+
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions";
 import {
     assertCompletionBlobObject,
@@ -14,9 +31,16 @@ import {
     ownerMatchesRecipient,
     readBlobObject,
     strictWalrusEpoch,
+    verifyBlobUploaderProvenance,
+    type ProvenanceResult,
 } from "../sidecar/routes/walrus-query.js";
 import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sidecar/blob-metadata.js";
-import { parseDurableWalrusEpochs, SUI_TYPE, WALRUS_PACKAGE_ID } from "../sidecar/config.js";
+import {
+    _clearTrustedUploaderAddressesCache,
+    parseDurableWalrusEpochs,
+    SUI_TYPE,
+    WALRUS_PACKAGE_ID,
+} from "../sidecar/config.js";
 import {
     assertAddressBalanceRegisterTransaction,
     createdBlobObjectIdFromTransaction,
@@ -574,4 +598,94 @@ test("normal registration checkpoints the exact Blob from transaction effects", 
         FailedTransaction: { status: { success: false, error: {} } },
         })
     );
+});
+
+// ============================================================
+// Provenance gate — WALM-299 / GH #501
+// ============================================================
+
+const SERVER_ADDR = TEST_SERVER_ADDR;
+const ATTACKER_ADDR = "0x" + "b2".repeat(32);
+const MIGRATION_WRITER = TEST_MIGRATION_WRITER;
+
+const makeClient = (tx: unknown) => {
+    _clearTrustedUploaderAddressesCache();
+    return {
+        async getTransactionBlock({ digest }: { digest: string }) {
+            if (digest === "trusted-tx") {
+                return tx;
+            }
+            throw new Error("not found");
+        },
+    } as unknown as { getTransactionBlock: (opts: { digest: string; options: unknown }) => Promise<unknown> };
+};
+
+test("verifyBlobUploaderProvenance: trusted server wallet → kind=trusted", async () => {
+    const result = await verifyBlobUploaderProvenance(
+        "trusted-tx",
+        makeClient({ transaction: { data: { sender: SERVER_ADDR } } })
+    );
+    assert.equal(result.kind, "trusted");
+});
+
+test("verifyBlobUploaderProvenance: trusted migration writer → kind=trusted", async () => {
+    const result = await verifyBlobUploaderProvenance(
+        "trusted-tx",
+        makeClient({ transaction: { data: { sender: MIGRATION_WRITER } } })
+    );
+    assert.equal(result.kind, "trusted");
+});
+
+test("verifyBlobUploaderProvenance: attacker address → kind=untrusted with sender", async () => {
+    const result = await verifyBlobUploaderProvenance(
+        "trusted-tx",
+        makeClient({ transaction: { data: { sender: ATTACKER_ADDR } } })
+    );
+    assert.equal(result.kind, "untrusted");
+    assert.equal(result.sender, ATTACKER_ADDR.toLowerCase());
+});
+
+test("verifyBlobUploaderProvenance: sender mixed case → canonicalized before check", async () => {
+    const result = await verifyBlobUploaderProvenance(
+        "trusted-tx",
+        makeClient({ transaction: { data: { sender: SERVER_ADDR.toUpperCase() } } })
+    );
+    assert.equal(result.kind, "trusted");
+});
+
+test("verifyBlobUploaderProvenance: null previousTransaction → kind=unknown", async () => {
+    const result = await verifyBlobUploaderProvenance(null, makeClient({}));
+    assert.equal(result.kind, "unknown");
+});
+
+test("verifyBlobUploaderProvenance: undefined previousTransaction → kind=unknown", async () => {
+    const result = await verifyBlobUploaderProvenance(undefined, makeClient({}));
+    assert.equal(result.kind, "unknown");
+});
+
+test("verifyBlobUploaderProvenance: RPC error → kind=unknown (fail open)", async () => {
+    const result = await verifyBlobUploaderProvenance("unverifiable-tx", {
+        async getTransactionBlock() {
+            throw new Error("RPC unavailable");
+        },
+    } as unknown as { getTransactionBlock: (opts: { digest: string; options: unknown }) => Promise<unknown> });
+    assert.equal(result.kind, "unknown");
+});
+
+test("verifyBlobUploaderProvenance: tx exists but sender missing → kind=unknown", async () => {
+    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient({ transaction: { data: {} } }));
+    assert.equal(result.kind, "unknown");
+});
+
+test("verifyBlobUploaderProvenance: returns correct ProvenanceResult discriminated union types", () => {
+    const trusted: ProvenanceResult = { kind: "trusted" };
+    const untrusted: ProvenanceResult = { kind: "untrusted", sender: "0xtest" };
+    const unknown: ProvenanceResult = { kind: "unknown" };
+
+    assert.equal(trusted.kind, "trusted");
+    assert.equal(untrusted.kind, "untrusted");
+    assert.equal(untrusted.sender, "0xtest");
+    assert.equal(unknown.kind, "unknown");
+    assert.equal(Object.keys(trusted).join(","), "kind");
+    assert.equal(Object.keys(untrusted).join(","), "kind,sender");
 });
