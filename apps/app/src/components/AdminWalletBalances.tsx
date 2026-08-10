@@ -17,13 +17,13 @@ function abbreviateAddress(address: string): string {
 function getStatusBadgeColor(status: string): string {
   switch (status) {
     case 'healthy':
-      return '#10b981'
+      return '#4ade80'
     case 'warning':
-      return '#f59e0b'
+      return '#fbbf24'
     case 'critical':
-      return '#ef4444'
+      return '#ff8f8f'
     default:
-      return '#6b7280'
+      return '#8f9294'
   }
 }
 
@@ -97,7 +97,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
             </thead>
             <tbody>
               {response.uploaderPoolWallets.map((wallet) => (
-                <tr key={wallet.address} className={`admin-table-row admin-table-row-${wallet.status}`}>
+                <tr key={wallet.address} className="admin-table-row">
                   <td title={wallet.address} className="admin-table-monospace">
                     {abbreviateAddress(wallet.address)}
                   </td>
@@ -110,7 +110,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
                   <td>
                     <span
                       className="admin-status-badge"
-                      style={{ backgroundColor: getStatusBadgeColor(wallet.status) }}
+                      style={{ color: getStatusBadgeColor(wallet.status) }}
                     >
                       {wallet.status}
                     </span>
@@ -152,7 +152,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
             <span className="admin-sponsor-label">Status</span>
             <span
               className="admin-status-badge"
-              style={{ backgroundColor: getStatusBadgeColor(response.sponsorWallet.status) }}
+              style={{ color: getStatusBadgeColor(response.sponsorWallet.status) }}
             >
               {response.sponsorWallet.status}
             </span>

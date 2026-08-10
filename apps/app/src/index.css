@@ -11443,11 +11443,13 @@ h1, h2, h3 {
   }
 }
 
-/* ========== Admin Dashboard ========== */
+/* ========== Admin Dashboard ==========
+ * Scoped under .dash-page (added to AdminDashboard.tsx's root) so it
+ * inherits the same dark theme — bg/text/card tokens, .card look — as the
+ * real authenticated dashboard, instead of the light neo-brutalist :root
+ * defaults every other unscoped page falls back to. */
 
-.admin-dashboard-page {
-  min-height: 100vh;
-  background: var(--bg-primary);
+.dash-page.admin-dashboard-page {
   padding: 24px;
 }
 
@@ -11457,19 +11459,20 @@ h1, h2, h3 {
 }
 
 .admin-page-header {
-  margin-bottom: 32px;
+  margin-bottom: 40px;
 }
 
-.admin-page-header h1 {
-  font-size: 2rem;
-  font-weight: 700;
-  margin-bottom: 8px;
-  color: var(--text-primary);
+.dash-page .admin-page-header h1 {
+  font-size: 2.5rem;
+  font-weight: 500;
+  line-height: 1.1;
+  margin-bottom: 10px;
+  color: var(--dash-text);
 }
 
-.admin-page-subtitle {
+.dash-page .admin-page-subtitle {
   font-size: 1rem;
-  color: var(--text-secondary);
+  color: var(--dash-muted);
 }
 
 /* Admin Key Entry Modal */
@@ -11482,29 +11485,30 @@ h1, h2, h3 {
   padding: 24px;
 }
 
-.admin-key-entry-card {
-  background: var(--bg-card);
-  border-radius: var(--radius-md);
+.dash-page .admin-key-entry-card {
+  background: var(--dash-panel);
+  border: 1px solid var(--dash-card-border);
+  border-radius: 18px;
   padding: 40px;
   max-width: 400px;
   width: 100%;
-  box-shadow: var(--shadow-md);
+  box-shadow: none;
 }
 
 .admin-key-entry-header {
   margin-bottom: 24px;
 }
 
-.admin-key-entry-header h2 {
-  font-size: 1.5rem;
-  font-weight: 700;
+.dash-page .admin-key-entry-header h2 {
+  font-size: 1.7rem;
+  font-weight: 500;
   margin-bottom: 8px;
-  color: var(--text-primary);
+  color: var(--dash-text);
 }
 
-.admin-key-entry-subtitle {
+.dash-page .admin-key-entry-subtitle {
   font-size: 0.9rem;
-  color: var(--text-secondary);
+  color: var(--dash-muted);
   margin: 0;
 }
 
@@ -11516,97 +11520,102 @@ h1, h2, h3 {
   margin-bottom: 20px;
 }
 
-.admin-key-entry-field label {
+.dash-page .admin-key-entry-field label {
   display: block;
-  font-size: 0.9rem;
-  font-weight: 600;
-  margin-bottom: 8px;
-  color: var(--text-primary);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 10px;
+  color: var(--dash-yellow);
 }
 
-.admin-key-input {
+.dash-page .admin-key-input {
   width: 100%;
-  padding: 10px 12px;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  border-radius: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--dash-card-border);
+  border-radius: 10px;
   font-size: 0.95rem;
   font-family: var(--font-mono);
-  background: var(--bg-input);
-  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--dash-text);
   transition: border-color 0.2s;
 }
 
-.admin-key-input:focus {
+.dash-page .admin-key-input:focus {
   outline: none;
-  border-color: var(--accent);
-  background: #ffffff;
+  border-color: var(--dash-yellow);
+  background: rgba(255, 255, 255, 0.06);
 }
 
-.admin-key-input-error {
-  border-color: var(--danger-border);
-  background: rgba(248, 113, 113, 0.04);
+.dash-page .admin-key-input-error {
+  border-color: #ff8f8f;
+  background: rgba(248, 113, 113, 0.08);
 }
 
-.admin-key-error {
+.dash-page .admin-key-error {
   font-size: 0.8rem;
-  color: var(--danger);
+  color: #ff8f8f;
   margin-top: 6px;
 }
 
-.admin-key-banner {
+.dash-page .admin-key-banner {
   font-size: 0.85rem;
-  color: var(--danger);
-  background: rgba(248, 113, 113, 0.08);
-  border: 1px solid var(--danger-border);
-  border-radius: 8px;
+  color: #ff8f8f;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.36);
+  border-radius: 10px;
   padding: 10px 12px;
   margin-bottom: 16px;
 }
 
-.admin-key-submit-btn {
+.dash-page .admin-key-submit-btn {
   width: 100%;
-  padding: 10px 16px;
-  background: var(--accent);
-  color: #ffffff;
+  min-height: 48px;
+  padding: 0 16px;
+  background: var(--dash-paper);
+  color: var(--dash-bg);
   border: none;
-  border-radius: 8px;
+  border-radius: 999px;
   font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background 0.2s, transform 0.2s;
 }
 
-.admin-key-submit-btn:hover:not(:disabled) {
-  background: var(--accent-hover);
-  box-shadow: var(--shadow-md);
+.dash-page .admin-key-submit-btn:hover:not(:disabled) {
+  background: var(--dash-yellow);
+  transform: translateY(-1px);
 }
 
-.admin-key-submit-btn:disabled {
-  background: #ccc;
+.dash-page .admin-key-submit-btn:disabled {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--dash-muted);
   cursor: not-allowed;
 }
 
-.admin-key-logout-btn {
+.dash-page .admin-key-logout-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   width: 100%;
-  padding: 10px 16px;
+  min-height: 48px;
+  padding: 0 16px;
   background: transparent;
-  color: var(--text-secondary);
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  border-radius: 8px;
+  color: var(--dash-subtle);
+  border: 1px solid var(--dash-card-border);
+  border-radius: 999px;
   font-size: 0.9rem;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
 }
 
-.admin-key-logout-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: rgba(0, 0, 0, 0.02);
+.dash-page .admin-key-logout-btn:hover {
+  border-color: var(--dash-card-border-hover);
+  color: var(--dash-text);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 /* Admin Panels */
@@ -11614,52 +11623,49 @@ h1, h2, h3 {
 .admin-panels {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: var(--dashboard-related-gap, 30px);
 }
 
 .admin-wallets-section {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--dashboard-related-gap, 30px);
 }
 
-.admin-wallets-card,
-.admin-errors-card,
-.admin-config-card,
-.admin-sponsor-card {
-  background: var(--bg-card);
-}
-
-.admin-refresh-btn {
+.dash-page .admin-refresh-btn {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
-  background: var(--accent);
-  color: #ffffff;
-  border: none;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  font-weight: 600;
+  min-height: 36px;
+  padding: 0 14px;
+  background: transparent;
+  color: var(--dash-subtle);
+  border: 1px solid var(--dash-card-border);
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
 }
 
-.admin-refresh-btn:hover:not(:disabled) {
-  background: var(--accent-hover);
-  box-shadow: var(--shadow-sm);
+.dash-page .admin-refresh-btn:hover:not(:disabled) {
+  border-color: var(--dash-yellow-border);
+  color: var(--dash-yellow);
 }
 
-.admin-refresh-btn:disabled {
-  background: #ccc;
+.dash-page .admin-refresh-btn:disabled {
+  color: var(--dash-muted);
   cursor: not-allowed;
 }
 
-/* Admin Tables */
+/* Admin Tables — mirrors the real dashboard's .dashboard-key-table panel */
 
 .admin-table-wrapper {
   overflow-x: auto;
   margin-bottom: 16px;
+  border: 1px solid var(--dash-card-border);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .admin-table {
@@ -11668,33 +11674,33 @@ h1, h2, h3 {
   font-size: 0.875rem;
 }
 
-.admin-table th,
-.admin-table td {
-  padding: 12px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
+.dash-page .admin-table th,
+.dash-page .admin-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(250, 248, 245, 0.08);
   text-align: left;
 }
 
-.admin-table th {
-  background: var(--bg-secondary);
-  font-weight: 600;
-  color: var(--text-primary);
+.dash-page .admin-table th {
+  background: transparent;
+  border-bottom: 1px solid rgba(250, 248, 245, 0.12);
+  font-weight: 500;
+  color: var(--dash-muted);
+  font-size: 0.8rem;
 }
 
-.admin-table td {
-  color: var(--text-primary);
+.dash-page .admin-table td {
+  color: var(--dash-text);
 }
 
-.admin-table-row-healthy {
-  background: rgba(16, 185, 129, 0.04);
+.admin-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
-.admin-table-row-warning {
-  background: rgba(245, 158, 11, 0.04);
-}
-
+.admin-table-row-healthy,
+.admin-table-row-warning,
 .admin-table-row-critical {
-  background: rgba(239, 68, 68, 0.04);
+  background: transparent;
 }
 
 .admin-table-monospace {
@@ -11702,19 +11708,20 @@ h1, h2, h3 {
   font-size: 0.8rem;
 }
 
-.admin-status-badge {
+.dash-page .admin-status-badge {
   display: inline-block;
-  padding: 4px 10px;
+  padding: 3px 10px;
   border-radius: 999px;
-  color: #ffffff;
-  font-size: 0.75rem;
-  font-weight: 600;
+  background: transparent;
+  border: 1px solid currentColor;
+  font-size: 0.72rem;
+  font-weight: 500;
   text-transform: capitalize;
 }
 
-.admin-timestamp {
+.dash-page .admin-timestamp {
   font-size: 0.8rem;
-  color: var(--text-muted);
+  color: var(--dash-muted);
   margin-top: 8px;
 }
 
@@ -11723,79 +11730,78 @@ h1, h2, h3 {
 .admin-sponsor-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 4px;
 }
 
-.admin-sponsor-item {
+.dash-page .admin-sponsor-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(250, 248, 245, 0.08);
 }
 
 .admin-sponsor-item:last-child {
   border-bottom: none;
 }
 
-.admin-sponsor-label {
-  font-size: 0.9rem;
-  color: var(--text-secondary);
+.dash-page .admin-sponsor-label {
+  font-size: 0.85rem;
+  color: var(--dash-muted);
   font-weight: 500;
 }
 
-.admin-sponsor-value {
+.dash-page .admin-sponsor-value {
   font-family: var(--font-mono);
   font-size: 0.85rem;
-  color: var(--text-primary);
+  color: var(--dash-text);
 }
 
 .admin-config-items {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 4px;
 }
 
-.admin-config-item {
+.dash-page .admin-config-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(250, 248, 245, 0.08);
 }
 
 .admin-config-item:last-child {
   border-bottom: none;
 }
 
-.admin-config-label {
-  font-size: 0.9rem;
-  color: var(--text-secondary);
+.dash-page .admin-config-label {
+  font-size: 0.85rem;
+  color: var(--dash-muted);
   font-weight: 500;
 }
 
-.admin-config-value {
+.dash-page .admin-config-value {
   font-family: var(--font-mono);
   font-size: 0.85rem;
-  color: var(--text-primary);
+  color: var(--dash-text);
 }
 
-.admin-config-badge {
+.dash-page .admin-config-badge {
   display: inline-block;
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 0.75rem;
+  font-weight: 500;
 }
 
-.admin-config-badge-active {
-  background: rgba(16, 185, 129, 0.1);
-  color: #166534;
+.dash-page .admin-config-badge-active {
+  color: var(--dash-yellow);
 }
 
-.admin-config-badge-inactive {
-  background: rgba(107, 114, 128, 0.1);
-  color: #4b5563;
+.dash-page .admin-config-badge-inactive {
+  color: var(--dash-muted);
 }
 
 /* Admin Error Messages */
@@ -11807,19 +11813,19 @@ h1, h2, h3 {
   margin-bottom: 16px;
 }
 
-.admin-limit-label {
-  font-size: 0.9rem;
-  color: var(--text-secondary);
+.dash-page .admin-limit-label {
+  font-size: 0.85rem;
+  color: var(--dash-muted);
   font-weight: 500;
 }
 
-.admin-limit-select {
+.dash-page .admin-limit-select {
   padding: 6px 10px;
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  border-radius: 6px;
+  border: 1px solid var(--dash-card-border);
+  border-radius: 8px;
   font-size: 0.85rem;
-  background: var(--bg-input);
-  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--dash-text);
   cursor: pointer;
 }
 
@@ -11833,39 +11839,39 @@ h1, h2, h3 {
   gap: 8px;
 }
 
-.admin-error-msg-btn {
+.dash-page .admin-error-msg-btn {
   flex: 1;
   padding: 0;
   background: none;
   border: none;
-  color: var(--text-primary);
+  color: var(--dash-text);
   font-size: 0.85rem;
   text-align: left;
   cursor: pointer;
   word-break: break-word;
   text-decoration: underline;
-  text-decoration-color: rgba(0, 0, 0, 0.2);
+  text-decoration-color: rgba(250, 248, 245, 0.25);
   transition: text-decoration-color 0.2s;
 }
 
-.admin-error-msg-btn:hover {
-  text-decoration-color: var(--accent);
+.dash-page .admin-error-msg-btn:hover {
+  text-decoration-color: var(--dash-yellow);
 }
 
-.admin-copy-btn {
+.dash-page .admin-copy-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 4px;
   background: none;
   border: none;
-  color: var(--text-muted);
+  color: var(--dash-muted);
   cursor: pointer;
   transition: color 0.2s;
 }
 
-.admin-copy-btn:hover {
-  color: var(--accent);
+.dash-page .admin-copy-btn:hover {
+  color: var(--dash-yellow);
 }
 
 /* Admin Pagination */
@@ -11875,12 +11881,12 @@ h1, h2, h3 {
   align-items: center;
   justify-content: space-between;
   padding-top: 16px;
-  border-top: 1px solid rgba(0, 0, 0, 0.12);
+  border-top: 1px solid rgba(250, 248, 245, 0.08);
   font-size: 0.85rem;
 }
 
-.admin-pagination-status {
-  color: var(--text-secondary);
+.dash-page .admin-pagination-status {
+  color: var(--dash-muted);
 }
 
 .admin-pagination-controls {
@@ -11888,28 +11894,29 @@ h1, h2, h3 {
   gap: 6px;
 }
 
-.admin-pagination-btn {
+.dash-page .admin-pagination-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 32px;
   height: 32px;
   padding: 0;
-  background: var(--accent);
-  color: #ffffff;
-  border: none;
-  border-radius: 6px;
+  background: transparent;
+  color: var(--dash-subtle);
+  border: 1px solid var(--dash-card-border);
+  border-radius: 999px;
   cursor: pointer;
   transition: all 0.2s;
 }
 
-.admin-pagination-btn:hover:not(:disabled) {
-  background: var(--accent-hover);
-  box-shadow: var(--shadow-sm);
+.dash-page .admin-pagination-btn:hover:not(:disabled) {
+  border-color: var(--dash-yellow-border);
+  color: var(--dash-yellow);
 }
 
-.admin-pagination-btn:disabled {
-  background: #ccc;
+.dash-page .admin-pagination-btn:disabled {
+  color: var(--dash-muted);
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
@@ -11921,7 +11928,7 @@ h1, h2, h3 {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.7);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -11929,43 +11936,44 @@ h1, h2, h3 {
   padding: 24px;
 }
 
-.admin-error-modal {
-  background: var(--bg-card);
-  border-radius: var(--radius-md);
+.dash-page .admin-error-modal {
+  background: #0a0a0a;
+  border: 1px solid var(--dash-card-border);
+  border-radius: 18px;
   max-width: 600px;
   width: 100%;
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  box-shadow: var(--shadow-lg);
+  box-shadow: none;
 }
 
-.admin-error-modal-header {
+.dash-page .admin-error-modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 20px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
+  border-bottom: 1px solid rgba(250, 248, 245, 0.08);
 }
 
-.admin-error-modal-header h3 {
+.dash-page .admin-error-modal-header h3 {
   font-size: 1.2rem;
-  font-weight: 700;
+  font-weight: 500;
   margin: 0;
-  color: var(--text-primary);
+  color: var(--dash-text);
 }
 
-.admin-error-modal-close {
+.dash-page .admin-error-modal-close {
   background: none;
   border: none;
   font-size: 1.5rem;
   cursor: pointer;
-  color: var(--text-muted);
+  color: var(--dash-muted);
   transition: color 0.2s;
 }
 
-.admin-error-modal-close:hover {
-  color: var(--text-primary);
+.dash-page .admin-error-modal-close:hover {
+  color: var(--dash-text);
 }
 
 .admin-error-modal-content {
@@ -11974,66 +11982,67 @@ h1, h2, h3 {
   flex: 1;
 }
 
-.admin-error-modal-timestamp {
+.dash-page .admin-error-modal-timestamp {
   font-size: 0.8rem;
-  color: var(--text-muted);
+  color: var(--dash-muted);
   margin-bottom: 12px;
 }
 
-.admin-error-modal-message {
+.dash-page .admin-error-modal-message {
   margin: 0;
   padding: 12px;
-  background: var(--bg-secondary);
-  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(250, 248, 245, 0.08);
+  border-radius: 10px;
   font-family: var(--font-mono);
   font-size: 0.8rem;
-  color: var(--text-primary);
+  color: var(--dash-text);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.admin-error-modal-footer {
+.dash-page .admin-error-modal-footer {
   padding: 16px 20px;
-  border-top: 1px solid rgba(0, 0, 0, 0.12);
+  border-top: 1px solid rgba(250, 248, 245, 0.08);
   display: flex;
   justify-content: flex-end;
 }
 
-.admin-copy-full-btn {
+.dash-page .admin-copy-full-btn {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 16px;
-  background: var(--accent);
-  color: #ffffff;
+  min-height: 36px;
+  padding: 0 16px;
+  background: var(--dash-paper);
+  color: var(--dash-bg);
   border: none;
-  border-radius: 6px;
+  border-radius: 999px;
   font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background 0.2s;
 }
 
-.admin-copy-full-btn:hover {
-  background: var(--accent-hover);
-  box-shadow: var(--shadow-sm);
+.dash-page .admin-copy-full-btn:hover {
+  background: var(--dash-yellow);
 }
 
 /* Loading and Error States */
 
-.admin-loading {
+.dash-page .admin-loading {
   padding: 32px 16px;
   text-align: center;
-  color: var(--text-secondary);
+  color: var(--dash-muted);
   font-size: 0.95rem;
 }
 
-.admin-error {
+.dash-page .admin-error {
   padding: 16px;
-  background: rgba(248, 113, 113, 0.08);
-  border: 1px solid rgba(248, 113, 113, 0.2);
-  border-radius: var(--radius-md);
-  color: var(--danger);
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  border-radius: 12px;
+  color: #ff8f8f;
   font-size: 0.9rem;
 }
 
@@ -12042,33 +12051,34 @@ h1, h2, h3 {
 .admin-logout-section {
   display: flex;
   justify-content: center;
-  margin-top: 32px;
+  margin-top: 16px;
   padding-top: 24px;
-  border-top: 1px solid rgba(0, 0, 0, 0.12);
+  border-top: 1px solid rgba(250, 248, 245, 0.08);
 }
 
-.admin-logout-button {
-  padding: 10px 24px;
+.dash-page .admin-logout-button {
+  min-height: 40px;
+  padding: 0 24px;
   background: transparent;
-  color: var(--text-secondary);
-  border: 1px solid rgba(0, 0, 0, 0.18);
-  border-radius: 8px;
+  color: var(--dash-subtle);
+  border: 1px solid var(--dash-card-border);
+  border-radius: 999px;
   font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
 }
 
-.admin-logout-button:hover {
-  border-color: var(--danger-border);
-  color: var(--danger);
-  background: rgba(248, 113, 113, 0.04);
+.dash-page .admin-logout-button:hover {
+  border-color: rgba(248, 113, 113, 0.5);
+  color: #ff8f8f;
+  background: rgba(248, 113, 113, 0.06);
 }
 
 /* Responsive */
 
 @media (max-width: 768px) {
-  .admin-dashboard-page {
+  .dash-page.admin-dashboard-page {
     padding: 16px;
   }
 
@@ -12076,11 +12086,11 @@ h1, h2, h3 {
     margin-bottom: 24px;
   }
 
-  .admin-page-header h1 {
-    font-size: 1.5rem;
+  .dash-page .admin-page-header h1 {
+    font-size: 1.7rem;
   }
 
-  .admin-key-entry-card {
+  .dash-page .admin-key-entry-card {
     padding: 24px;
   }
 
@@ -12092,16 +12102,16 @@ h1, h2, h3 {
     font-size: 0.75rem;
   }
 
-  .admin-table th,
-  .admin-table td {
-    padding: 8px;
+  .dash-page .admin-table th,
+  .dash-page .admin-table td {
+    padding: 10px;
   }
 
   .admin-error-modal-overlay {
     padding: 16px;
   }
 
-  .admin-error-modal {
+  .dash-page .admin-error-modal {
     max-height: 90vh;
   }
 }

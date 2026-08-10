@@ -61,7 +61,7 @@ export default function AdminDashboard() {
   }
 
   return (
-    <div className="admin-dashboard-page">
+    <div className="admin-dashboard-page dash-page">
       <div className="admin-dashboard-container">
         <div className="admin-page-header">
           <h1>Admin Dashboard</h1>
