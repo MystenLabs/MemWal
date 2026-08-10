@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Copy, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Card } from './Card'
@@ -6,6 +6,7 @@ import { fetchAdminErrors } from '../utils/admin-api'
 
 interface AdminUploadErrorsProps {
   adminKey: string
+  onInvalidKey: () => void
 }
 
 interface ExpandedError {
@@ -13,20 +14,35 @@ interface ExpandedError {
   fullMessage: string
 }
 
-export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
+export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsProps) {
   const [limit, setLimit] = useState(20)
   const [offset, setOffset] = useState(0)
   const [expanded, setExpanded] = useState<ExpandedError | null>(null)
   const [copied, setCopied] = useState(false)
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['adminErrors', adminKey, limit, offset],
+    queryKey: ['admin', 'errors', limit, offset],
     queryFn: () => fetchAdminErrors(adminKey, limit, offset),
     retry: (failureCount, error) => {
       const err = error as Error
       return err.message !== 'INVALID_KEY' && failureCount < 3
     },
   })
+
+  const isInvalidKey = error instanceof Error && error.message === 'INVALID_KEY'
+
+  useEffect(() => {
+    if (isInvalidKey) onInvalidKey()
+  }, [isInvalidKey, onInvalidKey])
+
+  useEffect(() => {
+    if (!expanded) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(null)
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [expanded])
 
   const handleCopy = async (text: string) => {
     try {
@@ -60,18 +76,17 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
 
   if (isLoading) {
     return (
-      <Card title="Upload Errors" className="admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
         <div className="admin-loading">Loading error data...</div>
       </Card>
     )
   }
 
   if (error) {
-    const err = error as Error
     return (
-      <Card title="Upload Errors" className="admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
         <div className="admin-error">
-          {err.message === 'INVALID_KEY' ? 'Invalid API key' : 'Failed to load errors'}
+          {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load errors'}
         </div>
       </Card>
     )
@@ -79,18 +94,18 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
 
   if (!data) {
     return (
-      <Card title="Upload Errors" className="admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
         <div className="admin-error">No data available</div>
       </Card>
     )
   }
 
-  const startNum = offset + 1
+  const startNum = data.total === 0 ? 0 : offset + 1
   const endNum = Math.min(offset + limit, data.total)
 
   return (
     <>
-      <Card title="Upload Errors" className="admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
         <div className="admin-errors-controls">
           <label htmlFor="error-limit" className="admin-limit-label">
             Show:
@@ -123,34 +138,35 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
             <tbody>
               {data.errors.length === 0 ? (
                 <tr>
-                  <td colSpan={4} style={{ textAlign: 'center', color: '#999' }}>
+                  <td colSpan={4} className="admin-table-empty">
                     No errors to display
                   </td>
                 </tr>
               ) : (
-                data.errors.map((error, idx) => (
-                  <tr key={`${error.timestamp}-${idx}`} className="admin-table-row">
+                data.errors.map((error) => (
+                  <tr key={error.id} className="admin-table-row">
                     <td className="admin-table-monospace admin-error-timestamp">
                       {new Date(error.timestamp).toLocaleString()}
                     </td>
-                    <td className="admin-table-monospace">
+                    <td className="admin-table-monospace" title={error.owner}>
                       {error.owner.slice(0, 6)}
                     </td>
                     <td>{error.namespace}</td>
                     <td className="admin-error-message">
                       <button
                         className="admin-error-msg-btn"
-                        onClick={() => openError(error.timestamp, error.errorMessage ?? '(no message)')}
+                        onClick={() => openError(error.timestamp, error.errorMessage)}
                         title="View full error message"
                       >
-                        {(error.errorMessage ?? '(no message)').length > 50
-                          ? `${(error.errorMessage ?? '').slice(0, 50)}...`
-                          : (error.errorMessage ?? '(no message)')}
+                        {error.errorMessage.length > 50
+                          ? `${error.errorMessage.slice(0, 50)}...`
+                          : error.errorMessage}
                       </button>
                       <button
                         className="admin-copy-btn"
-                        onClick={() => handleCopy(error.errorMessage ?? '(no message)')}
+                        onClick={() => handleCopy(error.errorMessage)}
                         title="Copy error message"
+                        aria-label="Copy error message"
                       >
                         <Copy size={14} />
                       </button>
@@ -172,6 +188,7 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
               disabled={offset === 0}
               className="admin-pagination-btn"
               title="Previous page"
+              aria-label="Previous page"
             >
               <ChevronLeft size={16} />
             </button>
@@ -180,6 +197,7 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
               disabled={offset + limit >= data.total}
               className="admin-pagination-btn"
               title="Next page"
+              aria-label="Next page"
             >
               <ChevronRight size={16} />
             </button>
@@ -189,9 +207,15 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
 
       {expanded && (
         <div className="admin-error-modal-overlay" onClick={closeError}>
-          <div className="admin-error-modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="admin-error-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="admin-error-dialog-title"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="admin-error-modal-header">
-              <h3>Error Details</h3>
+              <h3 id="admin-error-dialog-title">Error Details</h3>
               <button
                 onClick={closeError}
                 className="admin-error-modal-close"
@@ -204,9 +228,7 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
               <p className="admin-error-modal-timestamp">
                 {new Date(expanded.timestamp).toLocaleString()}
               </p>
-              <pre className="admin-error-modal-message">
-                {expanded.fullMessage}
-              </pre>
+              <pre className="admin-error-modal-message">{expanded.fullMessage}</pre>
             </div>
             <div className="admin-error-modal-footer">
               <button

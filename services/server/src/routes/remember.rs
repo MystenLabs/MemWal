@@ -1110,11 +1110,6 @@ mod tests {
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
-            app_auth_clients: vec![],
-            app_auth_public_client_registration_enabled: false,
-            app_auth_admin_token: None,
-            app_auth_enable_dev_localhost_wildcards: false,
-            app_auth_delegate_secret: None,
             enable_memory_deletion: false,
             enable_security_delete: false,
             legacy_db_url: None,
@@ -1139,7 +1134,9 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: String::new(),
             walrus_system_object_id: String::new(),
-            admin_api_key: None,
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
         }
     }
 

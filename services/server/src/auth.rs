@@ -1,6 +1,6 @@
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -461,7 +461,15 @@ pub async fn verify_admin_key(
         return Err(constant_time_reject().await);
     }
 
-    Ok(next.run(request).await)
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private"),
+    );
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    Ok(response)
 }
 
 // ============================================================

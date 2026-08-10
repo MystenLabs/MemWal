@@ -1,8 +1,9 @@
+import { config } from '../config'
+
 export interface WalletBalance {
   address: string
   suiBalance: bigint
   walBalance: bigint
-  thresholdPercent: number
   status: 'healthy' | 'warning' | 'critical'
 }
 
@@ -14,17 +15,17 @@ export interface SponsorWallet {
 }
 
 export interface UploadError {
+  id: string
   timestamp: string
   owner: string
   namespace: string
-  errorMessage: string | null
+  errorMessage: string
 }
 
 export interface AdminConfig {
   balanceMonitorIntervalSecs: number
   uploaderWalLowThresholdFrost: bigint
   sponsorSuiLowThresholdMist: bigint
-  adminApiKeySet: boolean
 }
 
 export interface AdminWalletsResponse {
@@ -40,12 +41,33 @@ export interface AdminErrorsResponse {
   offset: number
 }
 
-async function makeAdminRequest<T>(
+/**
+ * Format a raw base-unit amount (mist/frost, 9 decimals) as a human-readable
+ * token amount, e.g. 50026696048n -> "50.0267".
+ */
+export function formatTokenAmount(raw: bigint): string {
+  const decimals = 9n
+  const divisor = 10n ** decimals
+  const negative = raw < 0n
+  const abs = negative ? -raw : raw
+  const whole = abs / divisor
+  const frac = abs % divisor
+  const fracStr = frac
+    .toString()
+    .padStart(Number(decimals), '0')
+    .slice(0, 4)
+    .replace(/0+$/, '')
+  const wholeStr = whole.toLocaleString()
+  const sign = negative ? '-' : ''
+  return fracStr ? `${sign}${wholeStr}.${fracStr}` : `${sign}${wholeStr}`
+}
+
+async function makeAdminRequest(
   endpoint: string,
   adminKey: string,
   method: string = 'GET',
   body?: unknown,
-): Promise<T> {
+): Promise<unknown> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'x-admin-api-key': adminKey,
@@ -54,13 +76,15 @@ async function makeAdminRequest<T>(
   const opts: RequestInit = {
     method,
     headers,
+    cache: 'no-store',
   }
 
   if (body) {
     opts.body = JSON.stringify(body)
   }
 
-  const resp = await fetch(`/api/admin${endpoint}`, opts)
+  const baseUrl = config.memwalServerUrl.replace(/\/$/, '')
+  const resp = await fetch(`${baseUrl}/api/admin${endpoint}`, opts)
 
   if (!resp.ok) {
     if (resp.status === 401 || resp.status === 403) {
@@ -76,13 +100,80 @@ async function makeAdminRequest<T>(
   return resp.json()
 }
 
+// Backend (snake_case, Rust) wire shapes — as actually returned by
+// services/server/src/routes/admin_dashboard.rs. Kept separate from the
+// camelCase UI-facing types above; the fetch* functions below map one to
+// the other at this API boundary.
+interface RawWalletBalance {
+  address: string
+  sui: string
+  wal: string
+  status: string
+}
+
+interface RawWalletsResponse {
+  uploader_pool: {
+    wallets: RawWalletBalance[]
+    wal_threshold: string
+    last_updated: string
+  }
+  sponsor_wallet: {
+    address: string | null
+    sui: string
+    sui_threshold: string
+    status: string
+  }
+}
+
+interface RawFailedJob {
+  id: string
+  owner: string
+  namespace: string
+  status: string
+  error_msg: string | null
+  created_at: string
+  updated_at: string
+}
+
+interface RawUploadErrorsResponse {
+  results: RawFailedJob[]
+  total: number
+  limit: number
+  offset: number
+}
+
+interface RawConfigResponse {
+  balance_monitor_interval_secs: number
+  wallet_wal_low_threshold_frost: string
+  sponsor_sui_low_threshold_mist: string
+}
+
+function toBadgeStatus(status: string): 'healthy' | 'warning' | 'critical' {
+  if (status === 'ok') return 'healthy'
+  if (status === 'low') return 'critical'
+  return 'warning'
+}
+
 export async function fetchAdminWallets(
   adminKey: string,
 ): Promise<AdminWalletsResponse> {
-  return makeAdminRequest<AdminWalletsResponse>(
-    '/wallets',
-    adminKey,
-  )
+  const raw = (await makeAdminRequest('/wallets', adminKey)) as RawWalletsResponse
+
+  return {
+    uploaderPoolWallets: raw.uploader_pool.wallets.map((wallet) => ({
+      address: wallet.address,
+      suiBalance: BigInt(wallet.sui || '0'),
+      walBalance: BigInt(wallet.wal || '0'),
+      status: toBadgeStatus(wallet.status),
+    })),
+    sponsorWallet: {
+      address: raw.sponsor_wallet.address ?? 'Not configured',
+      suiBalance: BigInt(raw.sponsor_wallet.sui || '0'),
+      suiThreshold: BigInt(raw.sponsor_wallet.sui_threshold || '0'),
+      status: toBadgeStatus(raw.sponsor_wallet.status),
+    },
+    lastUpdated: raw.uploader_pool.last_updated,
+  }
 }
 
 export async function fetchAdminErrors(
@@ -94,17 +185,33 @@ export async function fetchAdminErrors(
     limit: limit.toString(),
     offset: offset.toString(),
   })
-  return makeAdminRequest<AdminErrorsResponse>(
+  const raw = (await makeAdminRequest(
     `/upload-errors?${params}`,
     adminKey,
-  )
+  )) as RawUploadErrorsResponse
+
+  return {
+    errors: raw.results.map((job) => ({
+      id: job.id,
+      timestamp: job.updated_at,
+      owner: job.owner,
+      namespace: job.namespace,
+      errorMessage: job.error_msg ?? '(no error message)',
+    })),
+    total: raw.total,
+    limit: raw.limit,
+    offset: raw.offset,
+  }
 }
 
 export async function fetchAdminConfig(
   adminKey: string,
 ): Promise<AdminConfig> {
-  return makeAdminRequest<AdminConfig>(
-    '/config',
-    adminKey,
-  )
+  const raw = (await makeAdminRequest('/config', adminKey)) as RawConfigResponse
+
+  return {
+    balanceMonitorIntervalSecs: raw.balance_monitor_interval_secs,
+    uploaderWalLowThresholdFrost: BigInt(raw.wallet_wal_low_threshold_frost),
+    sponsorSuiLowThresholdMist: BigInt(raw.sponsor_sui_low_threshold_mist),
+  }
 }

@@ -1,10 +1,12 @@
+import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { Card } from './Card'
-import { fetchAdminWallets, type AdminWalletsResponse } from '../utils/admin-api'
+import { fetchAdminWallets, formatTokenAmount, type AdminWalletsResponse } from '../utils/admin-api'
 
 interface AdminWalletBalancesProps {
   adminKey: string
+  onInvalidKey: () => void
 }
 
 function abbreviateAddress(address: string): string {
@@ -12,27 +14,13 @@ function abbreviateAddress(address: string): string {
   return `${address.slice(0, 6)}...${address.slice(-4)}`
 }
 
-function getStatusBadgeColor(status: string): string {
-  switch (status) {
-    case 'healthy':
-      return '#10b981'
-    case 'warning':
-      return '#f59e0b'
-    case 'critical':
-      return '#ef4444'
-    default:
-      return '#6b7280'
-  }
+function formatBalance(balance: bigint, symbol: string): string {
+  return `${formatTokenAmount(balance)} ${symbol}`
 }
 
-function formatBalance(balance: bigint): string {
-  const num = Number(balance)
-  return num.toLocaleString()
-}
-
-export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['adminWallets', adminKey],
+export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalancesProps) {
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
+    queryKey: ['admin', 'wallets'],
     queryFn: () => fetchAdminWallets(adminKey),
     refetchInterval: 30000,
     retry: (failureCount, error) => {
@@ -41,20 +29,25 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
     },
   })
 
+  const isInvalidKey = error instanceof Error && error.message === 'INVALID_KEY'
+
+  useEffect(() => {
+    if (isInvalidKey) onInvalidKey()
+  }, [isInvalidKey, onInvalidKey])
+
   if (isLoading) {
     return (
-      <Card title="Wallet Balances" className="admin-wallets-card">
+      <Card title="Wallet Balances" className="dashboard-keys-card admin-wallets-card">
         <div className="admin-loading">Loading wallet data...</div>
       </Card>
     )
   }
 
   if (error) {
-    const err = error as Error
     return (
-      <Card title="Wallet Balances" className="admin-wallets-card">
+      <Card title="Wallet Balances" className="dashboard-keys-card admin-wallets-card">
         <div className="admin-error">
-          {err.message === 'INVALID_KEY' ? 'Invalid API key' : 'Failed to load wallets'}
+          {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load wallets'}
         </div>
       </Card>
     )
@@ -66,17 +59,19 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
     <div className="admin-wallets-section">
       <Card
         title="Uploader Pool Wallets"
-        className="admin-wallets-card"
+        className="dashboard-keys-card admin-wallets-card"
         action={
-          <button
-            onClick={() => refetch()}
-            className="admin-refresh-btn"
-            title="Refresh wallet data"
-            disabled={isLoading}
-          >
-            <RefreshCw size={16} />
-            Refresh Now
-          </button>
+          <div className="card-header-actions">
+            <button
+              onClick={() => refetch()}
+              className="btn btn-secondary btn-sm dashboard-keys-refresh admin-refresh-btn"
+              title="Refresh wallet data"
+              disabled={isFetching}
+            >
+              <RefreshCw size={12} />
+              Refresh
+            </button>
+          </div>
         }
       >
         <div className="admin-table-wrapper">
@@ -84,32 +79,31 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
             <thead>
               <tr>
                 <th scope="col">Address</th>
-                <th scope="col" style={{ textAlign: 'right' }}>SUI (mist)</th>
-                <th scope="col" style={{ textAlign: 'right' }}>WAL (frost)</th>
-                <th scope="col" style={{ textAlign: 'right' }}>% of Threshold</th>
+                <th scope="col" style={{ textAlign: 'right' }}>SUI</th>
+                <th scope="col" style={{ textAlign: 'right' }}>WAL</th>
                 <th scope="col">Status</th>
               </tr>
             </thead>
             <tbody>
-              {response.uploaderPoolWallets.map((wallet) => (
-                <tr key={wallet.address} className={`admin-table-row admin-table-row-${wallet.status}`}>
+              {response.uploaderPoolWallets.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="admin-table-empty">
+                    No uploader wallets reported
+                  </td>
+                </tr>
+              ) : response.uploaderPoolWallets.map((wallet) => (
+                <tr key={wallet.address} className="admin-table-row">
                   <td title={wallet.address} className="admin-table-monospace">
                     {abbreviateAddress(wallet.address)}
                   </td>
-                  <td style={{ textAlign: 'right' }} className="admin-table-monospace">
-                    {formatBalance(wallet.suiBalance)}
+                  <td style={{ textAlign: 'right' }} className="admin-table-monospace" title={`${wallet.suiBalance} mist`}>
+                    {formatBalance(wallet.suiBalance, 'SUI')}
                   </td>
-                  <td style={{ textAlign: 'right' }} className="admin-table-monospace">
-                    {formatBalance(wallet.walBalance)}
-                  </td>
-                  <td style={{ textAlign: 'right' }}>
-                    {wallet.thresholdPercent.toFixed(1)}%
+                  <td style={{ textAlign: 'right' }} className="admin-table-monospace" title={`${wallet.walBalance} frost`}>
+                    {formatBalance(wallet.walBalance, 'WAL')}
                   </td>
                   <td>
-                    <span
-                      className="admin-status-badge"
-                      style={{ backgroundColor: getStatusBadgeColor(wallet.status) }}
-                    >
+                    <span className={`admin-status-badge admin-status-badge--${wallet.status}`}>
                       {wallet.status}
                     </span>
                   </td>
@@ -123,7 +117,7 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
         </div>
       </Card>
 
-      <Card title="Sponsor Wallet" className="admin-sponsor-card">
+      <Card title="Sponsor Wallet" className="dashboard-keys-card admin-sponsor-card">
         <div className="admin-sponsor-content">
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">Address</span>
@@ -134,24 +128,21 @@ export function AdminWalletBalances({ adminKey }: AdminWalletBalancesProps) {
 
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">SUI Balance</span>
-            <code className="admin-sponsor-value">
-              {formatBalance(response.sponsorWallet.suiBalance)} mist
+            <code className="admin-sponsor-value" title={`${response.sponsorWallet.suiBalance} mist`}>
+              {formatBalance(response.sponsorWallet.suiBalance, 'SUI')}
             </code>
           </div>
 
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">SUI Threshold</span>
-            <code className="admin-sponsor-value">
-              {formatBalance(response.sponsorWallet.suiThreshold)} mist
+            <code className="admin-sponsor-value" title={`${response.sponsorWallet.suiThreshold} mist`}>
+              {formatBalance(response.sponsorWallet.suiThreshold, 'SUI')}
             </code>
           </div>
 
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">Status</span>
-            <span
-              className="admin-status-badge"
-              style={{ backgroundColor: getStatusBadgeColor(response.sponsorWallet.status) }}
-            >
+            <span className={`admin-status-badge admin-status-badge--${response.sponsorWallet.status}`}>
               {response.sponsorWallet.status}
             </span>
           </div>

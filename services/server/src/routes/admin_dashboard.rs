@@ -3,7 +3,6 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::jobs::WAL_BALANCE_LOW_THRESHOLD_MIST;
 use crate::types::{AppError, AppState};
 
 #[derive(Debug, Deserialize)]
@@ -16,19 +15,25 @@ pub struct AdminQuery {
 
 #[derive(Debug, Serialize)]
 pub struct WalletBalance {
+    pub address: String,
     pub sui: String,
     pub wal: String,
+    pub status: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct UploaderPool {
-    pub wallet: WalletBalance,
+    pub wallets: Vec<WalletBalance>,
+    pub wal_threshold: String,
     pub last_updated: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SponsorWallet {
+    pub address: Option<String>,
     pub sui: String,
+    pub sui_threshold: String,
+    pub status: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,37 +42,52 @@ pub struct WalletsResponse {
     pub sponsor_wallet: SponsorWallet,
 }
 
-/// Field names and shape match apps/app/src/utils/admin-api.ts's UploadError —
-/// the frontend reads these camelCase keys directly off the JSON response.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UploadError {
-    pub timestamp: String,
+pub struct FailedJob {
+    pub id: String,
     pub owner: String,
     pub namespace: String,
-    pub error_message: Option<String>,
+    pub status: String,
+    pub error_msg: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct UploadErrorsResponse {
-    pub errors: Vec<UploadError>,
+    pub results: Vec<FailedJob>,
     pub total: i64,
     pub limit: i64,
     pub offset: i64,
 }
 
-/// Field names match apps/app/src/utils/admin-api.ts's AdminConfig.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ConfigResponse {
-    /// How often the dashboard client polls — mirrors
-    /// AdminWalletBalances.tsx's refetchInterval (30s). Not yet a
-    /// server-side poll; there is no background balance-monitor job today.
     pub balance_monitor_interval_secs: u64,
-    pub uploader_wal_low_threshold_frost: u64,
-    pub sponsor_sui_low_threshold_mist: u64,
-    pub admin_api_key_set: bool,
+    pub wallet_wal_low_threshold_frost: String,
+    pub sponsor_sui_low_threshold_mist: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SidecarWalletBalance {
+    address: String,
+    sui_mist: String,
+    wal_frost: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SidecarWalletMetrics {
+    per_wallet: Vec<SidecarWalletBalance>,
+}
+
+fn wallet_status(wal_frost: u64, threshold: u64) -> &'static str {
+    if wal_frost < threshold {
+        "low"
+    } else {
+        "ok"
+    }
 }
 
 #[tracing::instrument(name = "admin.wallets", skip_all)]
@@ -75,14 +95,15 @@ pub async fn get_wallets(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<WalletsResponse>, AppError> {
     let sidecar_url = &state.config.sidecar_url;
-    let health_url = format!("{}/metrics/wallet", sidecar_url);
+    let wallet_balances_url = format!("{}/internal/wallet-balances", sidecar_url);
 
-    let response = state
-        .http_client
-        .get(&health_url)
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch sidecar wallet metrics: {}", e)))?;
+    let mut sidecar_request = state.http_client.get(&wallet_balances_url);
+    if let Some(secret) = state.config.sidecar_secret.as_deref() {
+        sidecar_request = sidecar_request.header("authorization", format!("Bearer {}", secret));
+    }
+    let response = sidecar_request.send().await.map_err(|e| {
+        AppError::Internal(format!("Failed to fetch sidecar wallet metrics: {}", e))
+    })?;
 
     if !response.status().is_success() {
         return Err(AppError::Internal(format!(
@@ -91,35 +112,85 @@ pub async fn get_wallets(
         )));
     }
 
-    let sidecar_data: serde_json::Value = response
+    let sidecar_data: SidecarWalletMetrics = response
         .json()
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to parse sidecar response: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Invalid sidecar wallet metrics: {}", e)))?;
 
-    let wallet_sui_mist = sidecar_data
-        .get("walletSuiBalanceMist")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0")
-        .to_string();
+    let wal_threshold = state.config.wallet_balance_low_threshold_wal;
+    let wallets: Vec<WalletBalance> = sidecar_data
+        .per_wallet
+        .into_iter()
+        .map(|entry| {
+            if entry.address.trim().is_empty() {
+                return Err(AppError::Internal(
+                    "Sidecar wallet metrics contained an empty address".to_string(),
+                ));
+            }
+            let sui = entry.sui_mist.parse::<u64>().map_err(|_| {
+                AppError::Internal(
+                    "Sidecar wallet metrics contained invalid SUI balance".to_string(),
+                )
+            })?;
+            let wal = entry.wal_frost.parse::<u64>().map_err(|_| {
+                AppError::Internal(
+                    "Sidecar wallet metrics contained invalid WAL balance".to_string(),
+                )
+            })?;
+            Ok(WalletBalance {
+                address: entry.address,
+                sui: sui.to_string(),
+                wal: wal.to_string(),
+                status: wallet_status(wal, wal_threshold).to_string(),
+            })
+        })
+        .collect::<Result<_, AppError>>()?;
 
-    let wallet_wal_frost = sidecar_data
-        .get("walletWalBalanceFrost")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0")
-        .to_string();
+    let sponsor_threshold = state.config.sponsor_balance_low_threshold_sui;
+    let mut sponsor_address: Option<String> = None;
+    let mut sponsor_sui_mist = "0".to_string();
+    let mut sponsor_status = "unknown";
+
+    if let Some(sponsor_key) = &state.config.sponsor_private_key {
+        if let Ok(address) = crate::sui::tx_build::sponsor_address(sponsor_key) {
+            if let Some(sui_client) = &state.security_delete_background_sui {
+                match sui_client.address_balance(&address).await {
+                    Ok(balance) => {
+                        sponsor_sui_mist = balance.to_string();
+                        sponsor_status = if balance < sponsor_threshold {
+                            "low"
+                        } else {
+                            "ok"
+                        };
+                    }
+                    Err(e) => {
+                        tracing::warn!("admin.wallets: failed to fetch sponsor balance: {}", e);
+                    }
+                }
+            }
+            sponsor_address = Some(address);
+        }
+    }
 
     Ok(Json(WalletsResponse {
         uploader_pool: UploaderPool {
-            wallet: WalletBalance {
-                sui: wallet_sui_mist,
-                wal: wallet_wal_frost,
-            },
+            wallets,
+            wal_threshold: wal_threshold.to_string(),
             last_updated: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         },
         sponsor_wallet: SponsorWallet {
-            sui: "0".to_string(),
+            address: sponsor_address,
+            sui: sponsor_sui_mist,
+            sui_threshold: sponsor_threshold.to_string(),
+            status: sponsor_status.to_string(),
         },
     }))
+}
+
+fn normalized_pagination(params: &AdminQuery) -> (i64, i64) {
+    let limit = params.limit.unwrap_or(50).clamp(1, 1000);
+    let offset = params.offset.unwrap_or(0).max(0);
+    (limit, offset)
 }
 
 #[tracing::instrument(name = "admin.upload_errors", skip_all)]
@@ -127,18 +198,16 @@ pub async fn get_upload_errors(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AdminQuery>,
 ) -> Result<Json<UploadErrorsResponse>, AppError> {
-    let limit = params.limit.unwrap_or(50).max(1).min(1000);
-    let offset = params.offset.unwrap_or(0).max(0);
+    let (limit, offset) = normalized_pagination(&params);
 
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM remember_jobs WHERE status = 'failed'",
-    )
-    .fetch_one(state.db.pool())
-    .await
-    .map_err(|e| AppError::Internal(format!("Failed to count failed jobs: {}", e)))?;
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM remember_jobs WHERE status = 'failed'")
+            .fetch_one(state.db.pool())
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to count failed jobs: {}", e)))?;
 
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, chrono::DateTime<chrono::Utc>)>(
-        "SELECT owner, namespace, error_msg, updated_at FROM remember_jobs WHERE status = 'failed' ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
+    let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+        "SELECT id, owner, namespace, status, error_msg, created_at, updated_at FROM remember_jobs WHERE status = 'failed' ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
     )
     .bind(limit)
     .bind(offset)
@@ -146,18 +215,23 @@ pub async fn get_upload_errors(
     .await
     .map_err(|e| AppError::Internal(format!("Failed to fetch failed jobs: {}", e)))?;
 
-    let errors = rows
+    let results = rows
         .into_iter()
-        .map(|(owner, namespace, error_msg, updated_at)| UploadError {
-            timestamp: updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            owner,
-            namespace,
-            error_message: error_msg,
-        })
+        .map(
+            |(id, owner, namespace, status, error_msg, created_at, updated_at)| FailedJob {
+                id,
+                owner,
+                namespace,
+                status,
+                error_msg,
+                created_at: created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                updated_at: updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            },
+        )
         .collect();
 
     Ok(Json(UploadErrorsResponse {
-        errors,
+        results,
         total,
         limit,
         offset,
@@ -169,10 +243,9 @@ pub async fn get_admin_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ConfigResponse>, AppError> {
     Ok(Json(ConfigResponse {
-        balance_monitor_interval_secs: 30,
-        uploader_wal_low_threshold_frost: WAL_BALANCE_LOW_THRESHOLD_MIST,
-        sponsor_sui_low_threshold_mist: state.config.sponsor_min_balance_alert,
-        admin_api_key_set: state.config.admin_api_key.is_some(),
+        balance_monitor_interval_secs: state.config.balance_monitor_interval_secs,
+        wallet_wal_low_threshold_frost: state.config.wallet_balance_low_threshold_wal.to_string(),
+        sponsor_sui_low_threshold_mist: state.config.sponsor_balance_low_threshold_sui.to_string(),
     }))
 }
 
@@ -183,300 +256,118 @@ pub async fn get_admin_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-
-    // ── Response structure validation tests ──────────────────
 
     #[test]
-    fn wallet_balance_serialization() {
-        let wallet = WalletBalance {
-            sui: "1000000".to_string(),
-            wal: "500000".to_string(),
-        };
-
-        let json = serde_json::to_value(&wallet).unwrap();
-        assert_eq!(json["sui"], "1000000");
-        assert_eq!(json["wal"], "500000");
+    fn wallet_status_respects_the_configured_threshold() {
+        assert_eq!(wallet_status(999, 1_000), "low");
+        assert_eq!(wallet_status(1_000, 1_000), "ok");
     }
 
     #[test]
-    fn uploader_pool_serialization() {
-        let uploader_pool = UploaderPool {
-            wallet: WalletBalance {
-                sui: "1000000".to_string(),
-                wal: "500000".to_string(),
-            },
-            last_updated: "2024-01-01T00:00:00Z".to_string(),
-        };
-
-        let json = serde_json::to_value(&uploader_pool).unwrap();
-        assert_eq!(json["wallet"]["sui"], "1000000");
-        assert_eq!(json["last_updated"], "2024-01-01T00:00:00Z");
+    fn sidecar_wallet_metrics_require_the_per_wallet_contract() {
+        let valid = serde_json::json!({
+            "perWallet": [{
+                "address": "0x123",
+                "suiMist": "1000000000",
+                "walFrost": "2000000000"
+            }]
+        });
+        let parsed: SidecarWalletMetrics = serde_json::from_value(valid).unwrap();
+        assert_eq!(parsed.per_wallet.len(), 1);
+        assert!(
+            serde_json::from_value::<SidecarWalletMetrics>(serde_json::json!({
+                "walletWalBalanceFrost": "2000000000"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
-    fn wallets_response_structure() {
+    fn pagination_defaults_and_clamps_untrusted_values() {
+        assert_eq!(
+            normalized_pagination(&AdminQuery {
+                limit: None,
+                offset: None,
+            }),
+            (50, 0)
+        );
+        assert_eq!(
+            normalized_pagination(&AdminQuery {
+                limit: Some(0),
+                offset: Some(-10),
+            }),
+            (1, 0)
+        );
+        assert_eq!(
+            normalized_pagination(&AdminQuery {
+                limit: Some(5_000),
+                offset: Some(40),
+            }),
+            (1_000, 40)
+        );
+    }
+
+    #[test]
+    fn wallets_response_matches_the_frontend_wire_contract() {
         let response = WalletsResponse {
             uploader_pool: UploaderPool {
-                wallet: WalletBalance {
-                    sui: "1000000".to_string(),
-                    wal: "500000".to_string(),
-                },
-                last_updated: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                wallets: vec![WalletBalance {
+                    address: "0x123".to_string(),
+                    sui: "1000000000".to_string(),
+                    wal: "2000000000".to_string(),
+                    status: "ok".to_string(),
+                }],
+                wal_threshold: "1000000".to_string(),
+                last_updated: "2026-08-10T00:00:00Z".to_string(),
             },
             sponsor_wallet: SponsorWallet {
-                sui: "2000000".to_string(),
+                address: Some("0x456".to_string()),
+                sui: "3000000000".to_string(),
+                sui_threshold: "100000000".to_string(),
+                status: "ok".to_string(),
             },
         };
 
-        let json = serde_json::to_value(&response).unwrap();
-        assert!(json["uploader_pool"].is_object());
-        assert!(json["sponsor_wallet"].is_object());
-        assert_eq!(json["uploader_pool"]["wallet"]["sui"], "1000000");
-        assert_eq!(json["sponsor_wallet"]["sui"], "2000000");
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["uploader_pool"]["wallets"][0]["wal"], "2000000000");
+        assert_eq!(json["sponsor_wallet"]["sui_threshold"], "100000000");
     }
 
     #[test]
-    fn upload_error_serialization_with_error() {
-        let error = UploadError {
-            timestamp: "2024-01-01T01:00:00Z".to_string(),
-            owner: "0xowner".to_string(),
-            namespace: "default".to_string(),
-            error_message: Some("Out of memory".to_string()),
-        };
-
-        let json = serde_json::to_value(&error).unwrap();
-        assert_eq!(json["owner"], "0xowner");
-        assert_eq!(json["namespace"], "default");
-        assert_eq!(json["errorMessage"], "Out of memory");
-        assert!(json["timestamp"].is_string());
-    }
-
-    #[test]
-    fn upload_error_serialization_without_error() {
-        let error = UploadError {
-            timestamp: "2024-01-01T01:00:00Z".to_string(),
-            owner: "0xowner2".to_string(),
-            namespace: "custom".to_string(),
-            error_message: None,
-        };
-
-        let json = serde_json::to_value(&error).unwrap();
-        assert!(json["errorMessage"].is_null());
-    }
-
-    #[test]
-    fn upload_errors_response_single_result() {
+    fn upload_errors_response_matches_the_frontend_wire_contract() {
         let response = UploadErrorsResponse {
-            errors: vec![
-                UploadError {
-                    timestamp: "2024-01-01T00:00:00Z".to_string(),
-                    owner: "0xowner1".to_string(),
-                    namespace: "default".to_string(),
-                    error_message: Some("Error 1".to_string()),
-                },
-            ],
-            total: 10,
-            limit: 1,
-            offset: 0,
-        };
-
-        let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["errors"].as_array().unwrap().len(), 1);
-        assert_eq!(json["total"], 10);
-        assert_eq!(json["limit"], 1);
-        assert_eq!(json["offset"], 0);
-    }
-
-    #[test]
-    fn upload_errors_response_empty_results() {
-        let response = UploadErrorsResponse {
-            errors: vec![],
-            total: 0,
-            limit: 50,
-            offset: 0,
-        };
-
-        let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["errors"].as_array().unwrap().len(), 0);
-        assert_eq!(json["total"], 0);
-        assert_eq!(json["limit"], 50);
-        assert_eq!(json["offset"], 0);
-    }
-
-    #[test]
-    fn upload_errors_response_pagination_offset() {
-        let response = UploadErrorsResponse {
-            errors: vec![
-                UploadError {
-                    timestamp: "2024-01-01T00:00:00Z".to_string(),
-                    owner: "0xowner".to_string(),
-                    namespace: "default".to_string(),
-                    error_message: None,
-                },
-            ],
-            total: 100,
+            results: vec![FailedJob {
+                id: "job-1".to_string(),
+                owner: "0xowner".to_string(),
+                namespace: "default".to_string(),
+                status: "failed".to_string(),
+                error_msg: Some("upload failed".to_string()),
+                created_at: "2026-08-10T00:00:00Z".to_string(),
+                updated_at: "2026-08-10T00:01:00Z".to_string(),
+            }],
+            total: 1,
             limit: 20,
-            offset: 20,
+            offset: 0,
         };
 
-        let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["offset"], 20);
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["results"][0]["error_msg"], "upload failed");
+        assert_eq!(json["total"], 1);
         assert_eq!(json["limit"], 20);
-        assert_eq!(json["total"], 100);
+        assert_eq!(json["offset"], 0);
     }
 
     #[test]
-    fn config_response_serialization_with_key_set() {
-        let config = ConfigResponse {
-            balance_monitor_interval_secs: 30,
-            uploader_wal_low_threshold_frost: 2_000_000_000,
-            sponsor_sui_low_threshold_mist: 1_000_000_000,
-            admin_api_key_set: true,
+    fn config_serializes_token_amounts_as_lossless_strings() {
+        let response = ConfigResponse {
+            balance_monitor_interval_secs: 900,
+            wallet_wal_low_threshold_frost: u64::MAX.to_string(),
+            sponsor_sui_low_threshold_mist: "100000000".to_string(),
         };
 
-        let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["sponsorSuiLowThresholdMist"], 1_000_000_000u64);
-        assert_eq!(json["uploaderWalLowThresholdFrost"], 2_000_000_000u64);
-        assert_eq!(json["adminApiKeySet"], true);
-    }
-
-    #[test]
-    fn config_response_serialization_without_key_set() {
-        let config = ConfigResponse {
-            balance_monitor_interval_secs: 30,
-            uploader_wal_low_threshold_frost: 2_000_000_000,
-            sponsor_sui_low_threshold_mist: 1_000_000_000,
-            admin_api_key_set: false,
-        };
-
-        let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["adminApiKeySet"], false);
-    }
-
-    // ── Limit/offset validation tests ────────────────────────
-
-    #[test]
-    fn query_limit_clamped_to_minimum() {
-        // In get_upload_errors, limit is clamped: .max(1).min(1000)
-        let limit = 0i64;
-        let clamped = limit.max(1).min(1000);
-        assert_eq!(clamped, 1);
-    }
-
-    #[test]
-    fn query_limit_clamped_to_maximum() {
-        let limit = 2000i64;
-        let clamped = limit.max(1).min(1000);
-        assert_eq!(clamped, 1000);
-    }
-
-    #[test]
-    fn query_limit_valid_range_unchanged() {
-        let limit = 50i64;
-        let clamped = limit.max(1).min(1000);
-        assert_eq!(clamped, 50);
-    }
-
-    #[test]
-    fn query_limit_boundary_at_one() {
-        let limit = 1i64;
-        let clamped = limit.max(1).min(1000);
-        assert_eq!(clamped, 1);
-    }
-
-    #[test]
-    fn query_limit_boundary_at_max() {
-        let limit = 1000i64;
-        let clamped = limit.max(1).min(1000);
-        assert_eq!(clamped, 1000);
-    }
-
-    #[test]
-    fn query_offset_clamped_to_minimum() {
-        let offset = -10i64;
-        let clamped = offset.max(0);
-        assert_eq!(clamped, 0);
-    }
-
-    #[test]
-    fn query_offset_valid_unchanged() {
-        let offset = 100i64;
-        let clamped = offset.max(0);
-        assert_eq!(clamped, 100);
-    }
-
-    #[test]
-    fn query_offset_exactly_zero() {
-        let offset = 0i64;
-        let clamped = offset.max(0);
-        assert_eq!(clamped, 0);
-    }
-
-    #[test]
-    fn query_offset_large_value() {
-        let offset = 999_999_999i64;
-        let clamped = offset.max(0);
-        assert_eq!(clamped, 999_999_999);
-    }
-
-    // ── Admin query struct tests ─────────────────────────────
-
-    #[test]
-    fn admin_query_defaults_are_none() {
-        let query = AdminQuery {
-            limit: None,
-            offset: None,
-        };
-        assert_eq!(query.limit, None);
-        assert_eq!(query.offset, None);
-    }
-
-    #[test]
-    fn admin_query_with_limit_only() {
-        let query = AdminQuery {
-            limit: Some(10),
-            offset: None,
-        };
-        assert_eq!(query.limit, Some(10));
-        assert_eq!(query.offset, None);
-    }
-
-    #[test]
-    fn admin_query_with_offset_only() {
-        let query = AdminQuery {
-            limit: None,
-            offset: Some(20),
-        };
-        assert_eq!(query.limit, None);
-        assert_eq!(query.offset, Some(20));
-    }
-
-    #[test]
-    fn admin_query_with_both_params() {
-        let query = AdminQuery {
-            limit: Some(50),
-            offset: Some(100),
-        };
-        assert_eq!(query.limit, Some(50));
-        assert_eq!(query.offset, Some(100));
-    }
-
-    #[test]
-    fn admin_query_with_zero_limit() {
-        let query = AdminQuery {
-            limit: Some(0),
-            offset: None,
-        };
-        assert_eq!(query.limit, Some(0));
-    }
-
-    #[test]
-    fn admin_query_with_negative_offset() {
-        let query = AdminQuery {
-            limit: None,
-            offset: Some(-10),
-        };
-        assert_eq!(query.offset, Some(-10));
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["wallet_wal_low_threshold_frost"], u64::MAX.to_string());
+        assert!(json["wallet_wal_low_threshold_frost"].is_string());
+        assert!(json["sponsor_sui_low_threshold_mist"].is_string());
     }
 }
