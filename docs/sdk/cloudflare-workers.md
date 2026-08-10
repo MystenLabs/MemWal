@@ -33,12 +33,6 @@ answer: >-
 
 MemWal runs on the [Cloudflare Workers](https://developers.cloudflare.com/workers/) runtime, but the edge environment differs from Node.js in a few ways that affect bundling and reliability. The configuration and patterns below make it work cleanly.
 
-See also:
-
-- [Walrus Memory client](/sdk/usage/memwal): the default relayer-backed client used below
-- [Public relayer](/relayer/public-relayer): managed Mainnet and Testnet relayer endpoints
-- [API Reference](/sdk/api-reference): full method signatures and config fields
-
 ## Required configuration
 
 The SDK relies on the Node.js `crypto` built-in, and `@mysten/seal` and `@mysten/sui` pull in more Node APIs. Enable the Node.js compatibility flag in your `wrangler.toml`:
