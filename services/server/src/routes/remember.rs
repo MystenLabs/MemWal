@@ -1140,6 +1140,9 @@ mod tests {
             owner_token_service_credential: "owner-token-test-credential".to_string(),
             owner_token_ttl_secs: 900,
             owner_token_rate_limit: crate::types::OwnerTokenRateLimitConfig::default(),
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
         }
     }
 

@@ -204,13 +204,14 @@ pub async fn issue_token(
     // real error rather than silently substituting "now" (which would have
     // told the caller their brand-new token was already expired) if that
     // invariant is ever violated.
-    let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(now.saturating_add(ttl as i64), 0)
-        .ok_or_else(|| {
-            AppError::Internal(format!(
-                "owner-token expiry timestamp out of range (now={now}, ttl={ttl})"
-            ))
-        })?
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let expires_at =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(now.saturating_add(ttl as i64), 0)
+            .ok_or_else(|| {
+                AppError::Internal(format!(
+                    "owner-token expiry timestamp out of range (now={now}, ttl={ttl})"
+                ))
+            })?
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     Ok(Json(IssueOwnerTokenResponse {
         token,
@@ -324,10 +325,8 @@ mod tests {
     // reject anything shorter, so a placeholder like "0xabc" fails for the
     // wrong reason (invalid address) rather than exercising the actual
     // owner-comparison logic these tests target.
-    const TEST_OWNER: &str =
-        "0x0000000000000000000000000000000000000000000000000000000000000abc";
-    const OTHER_OWNER: &str =
-        "0x0000000000000000000000000000000000000000000000000000000000000def";
+    const TEST_OWNER: &str = "0x0000000000000000000000000000000000000000000000000000000000000abc";
+    const OTHER_OWNER: &str = "0x0000000000000000000000000000000000000000000000000000000000000def";
 
     #[tokio::test]
     async fn token_probe_allows_matching_owner_with_memories_read() {

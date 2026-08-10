@@ -1347,7 +1347,9 @@ pub async fn owner_token_ip_rate_limit_middleware(
     {
         Some(ip) => ip.to_string(),
         None => {
-            tracing::warn!("owner_token_ip_rate_limit_middleware: cannot determine client IP, denying");
+            tracing::warn!(
+                "owner_token_ip_rate_limit_middleware: cannot determine client IP, denying"
+            );
             return rate_limiter_unavailable_response();
         }
     };
@@ -1407,7 +1409,12 @@ pub async fn owner_token_ip_rate_limit_middleware(
                 ip,
                 config.ip_per_hour
             );
-            return rate_limit_response("owner_token_ip_sustained", config.ip_per_hour, "hour", 300);
+            return rate_limit_response(
+                "owner_token_ip_sustained",
+                config.ip_per_hour,
+                "hour",
+                300,
+            );
         }
         Err(e) => {
             tracing::error!(

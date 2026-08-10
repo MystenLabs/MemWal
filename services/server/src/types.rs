@@ -32,6 +32,9 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
+/// Prevent an accidental low interval from continuously polling Sui and the sidecar.
+const MIN_BALANCE_MONITOR_INTERVAL_SECS: u64 = 30;
+
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
 /// Hard ceiling for `OWNER_TOKEN_TTL_SECS` — 24 hours. Without a
@@ -409,6 +412,10 @@ pub struct Config {
     pub owner_token_ttl_secs: u64,
     /// Rate limiting for `POST /v1/owner-tokens`.
     pub owner_token_rate_limit: OwnerTokenRateLimitConfig,
+    /// Balance monitoring (proactive alerts)
+    pub balance_monitor_interval_secs: u64,
+    pub wallet_balance_low_threshold_wal: u64,
+    pub sponsor_balance_low_threshold_sui: u64,
 }
 
 impl Config {
@@ -552,6 +559,12 @@ impl Config {
             owner_token_ttl_secs: env_positive_u64("OWNER_TOKEN_TTL_SECS", 900)
                 .min(MAX_OWNER_TOKEN_TTL_SECS),
             owner_token_rate_limit: OwnerTokenRateLimitConfig::from_env(),
+            balance_monitor_interval_secs: normalized_balance_monitor_interval(env_positive_u64(
+                "BALANCE_MONITOR_INTERVAL_SECS",
+                900,
+            )),
+            wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
+            sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
         }
     }
 }
@@ -593,6 +606,10 @@ fn env_positive_u64(name: &str, default: u64) -> u64 {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn normalized_balance_monitor_interval(interval_secs: u64) -> u64 {
+    interval_secs.max(MIN_BALANCE_MONITOR_INTERVAL_SECS)
 }
 
 fn sui_rpc_quota_from_env() -> (u32, std::time::Duration) {
@@ -1897,6 +1914,13 @@ mod tests {
 
     static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn balance_monitor_interval_has_a_safe_minimum() {
+        assert_eq!(normalized_balance_monitor_interval(1), 30);
+        assert_eq!(normalized_balance_monitor_interval(30), 30);
+        assert_eq!(normalized_balance_monitor_interval(900), 900);
+    }
+
     // ── Client-supplied embedding vector validation ──────────────
 
     #[test]
@@ -2021,6 +2045,9 @@ mod tests {
             owner_token_service_credential: "owner-token-test-credential".into(),
             owner_token_ttl_secs: 900,
             owner_token_rate_limit: OwnerTokenRateLimitConfig::default(),
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
         }
     }
 

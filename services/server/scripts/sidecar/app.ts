@@ -19,7 +19,11 @@ import {
     sharedSecretAuthMiddleware,
     stripCorsMiddleware,
 } from "./middleware.js";
-import { registerHealthRoute, registerWalletMetricsRoute } from "./routes/health.js";
+import {
+    registerHealthRoute,
+    registerInternalWalletBalancesRoute,
+    registerWalletMetricsRoute,
+} from "./routes/health.js";
 import { registerSealRoutes } from "./routes/seal.js";
 import { registerSponsorRoutes } from "./routes/sponsor.js";
 import {
@@ -56,6 +60,9 @@ export function createSidecarApp(mode: "full" | "writer" = SIDECAR_ROUTE_MODE): 
     registerWalletMetricsRoute(app);
 
     app.use(sharedSecretAuthMiddleware);
+
+    // Full wallet addresses and per-wallet balances are operationally sensitive.
+    registerInternalWalletBalancesRoute(app);
 
     if (mode === "writer") {
         registerWalrusUploadJournalRoute(app);
