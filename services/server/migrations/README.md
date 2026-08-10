@@ -60,9 +60,8 @@ health-check / deploy-timeout windows. Once every row has a non-NULL
 `updated_at`, later boots pay only the cost of one `SELECT` per file
 that finds nothing left to update.
 
-There is no `011_*.sql` file. An earlier version of this backfill lived
-there as the plain unbatched `UPDATE` described above; once it moved
-into Rust, migration 011 became a permanent no-op. Rather than leave a
-dead file around or renumber every migration after it, the number was
-removed and left unused — see `backfill_updated_at()`'s doc comment for
-the full history.
+Migration 011 was deleted. An earlier version of the backfill lived
+there as a plain unbatched `UPDATE`; once it moved into Rust, the file
+became a permanent no-op (`SELECT 1;`). Rather than keep a dead file
+or renumber every migration after it, the placeholder was removed — see
+`backfill_updated_at()`'s doc comment for the full history.
