@@ -17,7 +17,7 @@ export interface UploadError {
   timestamp: string
   owner: string
   namespace: string
-  errorMessage: string
+  errorMessage: string | null
 }
 
 export interface AdminConfig {

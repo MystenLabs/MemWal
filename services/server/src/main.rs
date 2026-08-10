@@ -278,6 +278,11 @@ async fn main() {
         tracing::error!("boot guard: {}", error);
         std::process::exit(1);
     }
+    if config.admin_api_key.is_none() {
+        tracing::warn!(
+            "ADMIN_API_KEY not set — /api/admin/* routes reject every request. Set ADMIN_API_KEY to use the admin dashboard."
+        );
+    }
     tracing::info!("starting memwal server on port {}", config.port);
     tracing::info!("  Sui RPC: {}", config.sui_rpc_url);
     tracing::info!("  package type-origin id: {}", config.package_id);

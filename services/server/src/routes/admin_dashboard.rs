@@ -3,6 +3,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::jobs::WAL_BALANCE_LOW_THRESHOLD_MIST;
 use crate::types::{AppError, AppState};
 
 #[derive(Debug, Deserialize)]
@@ -36,29 +37,36 @@ pub struct WalletsResponse {
     pub sponsor_wallet: SponsorWallet,
 }
 
+/// Field names and shape match apps/app/src/utils/admin-api.ts's UploadError —
+/// the frontend reads these camelCase keys directly off the JSON response.
 #[derive(Debug, Serialize)]
-pub struct FailedJob {
-    pub id: String,
+#[serde(rename_all = "camelCase")]
+pub struct UploadError {
+    pub timestamp: String,
     pub owner: String,
     pub namespace: String,
-    pub status: String,
-    pub error_msg: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UploadErrorsResponse {
-    pub results: Vec<FailedJob>,
+    pub errors: Vec<UploadError>,
     pub total: i64,
     pub limit: i64,
     pub offset: i64,
 }
 
+/// Field names match apps/app/src/utils/admin-api.ts's AdminConfig.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigResponse {
-    pub sponsor_wallet_threshold_mist: u64,
-    pub uploader_pool_threshold_mist: u64,
+    /// How often the dashboard client polls — mirrors
+    /// AdminWalletBalances.tsx's refetchInterval (30s). Not yet a
+    /// server-side poll; there is no background balance-monitor job today.
+    pub balance_monitor_interval_secs: u64,
+    pub uploader_wal_low_threshold_frost: u64,
+    pub sponsor_sui_low_threshold_mist: u64,
     pub admin_api_key_set: bool,
 }
 
@@ -129,8 +137,8 @@ pub async fn get_upload_errors(
     .await
     .map_err(|e| AppError::Internal(format!("Failed to count failed jobs: {}", e)))?;
 
-    let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
-        "SELECT id, owner, namespace, status, error_msg, created_at, updated_at FROM remember_jobs WHERE status = 'failed' ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, chrono::DateTime<chrono::Utc>)>(
+        "SELECT owner, namespace, error_msg, updated_at FROM remember_jobs WHERE status = 'failed' ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
     )
     .bind(limit)
     .bind(offset)
@@ -138,21 +146,18 @@ pub async fn get_upload_errors(
     .await
     .map_err(|e| AppError::Internal(format!("Failed to fetch failed jobs: {}", e)))?;
 
-    let results = rows
+    let errors = rows
         .into_iter()
-        .map(|(id, owner, namespace, status, error_msg, created_at, updated_at)| FailedJob {
-            id,
+        .map(|(owner, namespace, error_msg, updated_at)| UploadError {
+            timestamp: updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             owner,
             namespace,
-            status,
-            error_msg,
-            created_at: created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            updated_at: updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            error_message: error_msg,
         })
         .collect();
 
     Ok(Json(UploadErrorsResponse {
-        results,
+        errors,
         total,
         limit,
         offset,
@@ -161,14 +166,13 @@ pub async fn get_upload_errors(
 
 #[tracing::instrument(name = "admin.config", skip_all)]
 pub async fn get_admin_config(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ConfigResponse>, AppError> {
-    let admin_api_key_set = std::env::var("ADMIN_API_KEY").is_ok();
-
     Ok(Json(ConfigResponse {
-        sponsor_wallet_threshold_mist: 1_000_000_000,
-        uploader_pool_threshold_mist: 500_000_000,
-        admin_api_key_set,
+        balance_monitor_interval_secs: 30,
+        uploader_wal_low_threshold_frost: WAL_BALANCE_LOW_THRESHOLD_MIST,
+        sponsor_sui_low_threshold_mist: state.config.sponsor_min_balance_alert,
+        admin_api_key_set: state.config.admin_api_key.is_some(),
     }))
 }
 
@@ -233,55 +237,43 @@ mod tests {
     }
 
     #[test]
-    fn failed_job_serialization_with_error() {
-        let job = FailedJob {
-            id: "job-123".to_string(),
+    fn upload_error_serialization_with_error() {
+        let error = UploadError {
+            timestamp: "2024-01-01T01:00:00Z".to_string(),
             owner: "0xowner".to_string(),
             namespace: "default".to_string(),
-            status: "failed".to_string(),
-            error_msg: Some("Out of memory".to_string()),
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: "2024-01-01T01:00:00Z".to_string(),
+            error_message: Some("Out of memory".to_string()),
         };
 
-        let json = serde_json::to_value(&job).unwrap();
-        assert_eq!(json["id"], "job-123");
+        let json = serde_json::to_value(&error).unwrap();
         assert_eq!(json["owner"], "0xowner");
         assert_eq!(json["namespace"], "default");
-        assert_eq!(json["status"], "failed");
-        assert_eq!(json["error_msg"], "Out of memory");
-        assert!(json["created_at"].is_string());
-        assert!(json["updated_at"].is_string());
+        assert_eq!(json["errorMessage"], "Out of memory");
+        assert!(json["timestamp"].is_string());
     }
 
     #[test]
-    fn failed_job_serialization_without_error() {
-        let job = FailedJob {
-            id: "job-456".to_string(),
+    fn upload_error_serialization_without_error() {
+        let error = UploadError {
+            timestamp: "2024-01-01T01:00:00Z".to_string(),
             owner: "0xowner2".to_string(),
             namespace: "custom".to_string(),
-            status: "failed".to_string(),
-            error_msg: None,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_at: "2024-01-01T01:00:00Z".to_string(),
+            error_message: None,
         };
 
-        let json = serde_json::to_value(&job).unwrap();
-        assert!(json["error_msg"].is_null());
+        let json = serde_json::to_value(&error).unwrap();
+        assert!(json["errorMessage"].is_null());
     }
 
     #[test]
     fn upload_errors_response_single_result() {
         let response = UploadErrorsResponse {
-            results: vec![
-                FailedJob {
-                    id: "job-1".to_string(),
+            errors: vec![
+                UploadError {
+                    timestamp: "2024-01-01T00:00:00Z".to_string(),
                     owner: "0xowner1".to_string(),
                     namespace: "default".to_string(),
-                    status: "failed".to_string(),
-                    error_msg: Some("Error 1".to_string()),
-                    created_at: "2024-01-01T00:00:00Z".to_string(),
-                    updated_at: "2024-01-01T00:00:00Z".to_string(),
+                    error_message: Some("Error 1".to_string()),
                 },
             ],
             total: 10,
@@ -290,7 +282,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["results"].as_array().unwrap().len(), 1);
+        assert_eq!(json["errors"].as_array().unwrap().len(), 1);
         assert_eq!(json["total"], 10);
         assert_eq!(json["limit"], 1);
         assert_eq!(json["offset"], 0);
@@ -299,14 +291,14 @@ mod tests {
     #[test]
     fn upload_errors_response_empty_results() {
         let response = UploadErrorsResponse {
-            results: vec![],
+            errors: vec![],
             total: 0,
             limit: 50,
             offset: 0,
         };
 
         let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["results"].as_array().unwrap().len(), 0);
+        assert_eq!(json["errors"].as_array().unwrap().len(), 0);
         assert_eq!(json["total"], 0);
         assert_eq!(json["limit"], 50);
         assert_eq!(json["offset"], 0);
@@ -315,15 +307,12 @@ mod tests {
     #[test]
     fn upload_errors_response_pagination_offset() {
         let response = UploadErrorsResponse {
-            results: vec![
-                FailedJob {
-                    id: "job-21".to_string(),
+            errors: vec![
+                UploadError {
+                    timestamp: "2024-01-01T00:00:00Z".to_string(),
                     owner: "0xowner".to_string(),
                     namespace: "default".to_string(),
-                    status: "failed".to_string(),
-                    error_msg: None,
-                    created_at: "2024-01-01T00:00:00Z".to_string(),
-                    updated_at: "2024-01-01T00:00:00Z".to_string(),
+                    error_message: None,
                 },
             ],
             total: 100,
@@ -340,27 +329,29 @@ mod tests {
     #[test]
     fn config_response_serialization_with_key_set() {
         let config = ConfigResponse {
-            sponsor_wallet_threshold_mist: 1_000_000_000,
-            uploader_pool_threshold_mist: 500_000_000,
+            balance_monitor_interval_secs: 30,
+            uploader_wal_low_threshold_frost: 2_000_000_000,
+            sponsor_sui_low_threshold_mist: 1_000_000_000,
             admin_api_key_set: true,
         };
 
         let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["sponsor_wallet_threshold_mist"], 1_000_000_000u64);
-        assert_eq!(json["uploader_pool_threshold_mist"], 500_000_000u64);
-        assert_eq!(json["admin_api_key_set"], true);
+        assert_eq!(json["sponsorSuiLowThresholdMist"], 1_000_000_000u64);
+        assert_eq!(json["uploaderWalLowThresholdFrost"], 2_000_000_000u64);
+        assert_eq!(json["adminApiKeySet"], true);
     }
 
     #[test]
     fn config_response_serialization_without_key_set() {
         let config = ConfigResponse {
-            sponsor_wallet_threshold_mist: 1_000_000_000,
-            uploader_pool_threshold_mist: 500_000_000,
+            balance_monitor_interval_secs: 30,
+            uploader_wal_low_threshold_frost: 2_000_000_000,
+            sponsor_sui_low_threshold_mist: 1_000_000_000,
             admin_api_key_set: false,
         };
 
         let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["admin_api_key_set"], false);
+        assert_eq!(json["adminApiKeySet"], false);
     }
 
     // ── Limit/offset validation tests ────────────────────────

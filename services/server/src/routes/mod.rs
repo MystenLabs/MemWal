@@ -20,7 +20,7 @@ mod accounts;
 mod admin;
 pub mod admin_dashboard;
 mod analyze;
-mod app_auth;
+pub(crate) mod app_auth;
 mod recall;
 mod remember;
 pub mod security_delete;

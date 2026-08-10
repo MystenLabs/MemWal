@@ -1139,6 +1139,7 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: String::new(),
             walrus_system_object_id: String::new(),
+            admin_api_key: None,
         }
     }
 

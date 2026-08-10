@@ -140,16 +140,16 @@ export function AdminUploadErrors({ adminKey }: AdminUploadErrorsProps) {
                     <td className="admin-error-message">
                       <button
                         className="admin-error-msg-btn"
-                        onClick={() => openError(error.timestamp, error.errorMessage)}
+                        onClick={() => openError(error.timestamp, error.errorMessage ?? '(no message)')}
                         title="View full error message"
                       >
-                        {error.errorMessage.length > 50
-                          ? `${error.errorMessage.slice(0, 50)}...`
-                          : error.errorMessage}
+                        {(error.errorMessage ?? '(no message)').length > 50
+                          ? `${(error.errorMessage ?? '').slice(0, 50)}...`
+                          : (error.errorMessage ?? '(no message)')}
                       </button>
                       <button
                         className="admin-copy-btn"
-                        onClick={() => handleCopy(error.errorMessage)}
+                        onClick={() => handleCopy(error.errorMessage ?? '(no message)')}
                         title="Copy error message"
                       >
                         <Copy size={14} />

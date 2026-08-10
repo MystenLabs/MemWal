@@ -407,6 +407,10 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Gates the /admin/wallets, /admin/upload-errors, /admin/config routes
+    /// via auth::verify_admin_key. Unrelated to app_auth_admin_token — a
+    /// separate operator credential for a separate admin surface.
+    pub admin_api_key: Option<String>,
 }
 
 impl Config {
@@ -557,6 +561,7 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            admin_api_key: nonempty_env("ADMIN_API_KEY"),
         }
     }
 }
@@ -1951,6 +1956,7 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            admin_api_key: None,
         }
     }
 

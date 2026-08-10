@@ -322,7 +322,7 @@ pub async fn execute_meta_transfer(
 /// Maximum number of attempts (1 initial + N-1 retries).
 #[allow(dead_code)]
 pub const MAX_ATTEMPTS: u32 = 5;
-const WAL_BALANCE_LOW_THRESHOLD_MIST: u64 = 2_000_000_000;
+pub(crate) const WAL_BALANCE_LOW_THRESHOLD_MIST: u64 = 2_000_000_000;
 
 /// Maximum number of congestion requeues per upload job. Each requeue is
 /// scheduled with `congestion_backoff_secs` delay, so 6 requeues spread over
