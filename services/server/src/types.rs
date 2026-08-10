@@ -482,7 +482,7 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
-            balance_monitor_interval_secs: env_number("BALANCE_MONITOR_INTERVAL_SECS", 900),
+            balance_monitor_interval_secs: env_positive_u64("BALANCE_MONITOR_INTERVAL_SECS", 900),
             wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
             sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
         }

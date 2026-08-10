@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Copy, ChevronLeft, ChevronRight } from 'lucide-react'
-import DOMPurify from 'dompurify'
 import { Card } from './Card'
 import { fetchAdminErrors } from '../utils/admin-api'
 
@@ -22,7 +21,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
   const [copied, setCopied] = useState(false)
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['adminErrors', adminKey, limit, offset],
+    queryKey: ['admin', 'errors', limit, offset],
     queryFn: () => fetchAdminErrors(adminKey, limit, offset),
     retry: (failureCount, error) => {
       const err = error as Error
@@ -68,7 +67,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   if (isLoading) {
     return (
-      <Card title="Upload Errors" className="admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
         <div className="admin-loading">Loading error data...</div>
       </Card>
     )
@@ -76,7 +75,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   if (error) {
     return (
-      <Card title="Upload Errors" className="admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
         <div className="admin-error">
           {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load errors'}
         </div>
@@ -86,18 +85,18 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   if (!data) {
     return (
-      <Card title="Upload Errors" className="admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
         <div className="admin-error">No data available</div>
       </Card>
     )
   }
 
-  const startNum = offset + 1
+  const startNum = data.total === 0 ? 0 : offset + 1
   const endNum = Math.min(offset + limit, data.total)
 
   return (
     <>
-      <Card title="Upload Errors" className="admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
         <div className="admin-errors-controls">
           <label htmlFor="error-limit" className="admin-limit-label">
             Show:
@@ -211,12 +210,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
               <p className="admin-error-modal-timestamp">
                 {new Date(expanded.timestamp).toLocaleString()}
               </p>
-              <pre className="admin-error-modal-message">
-                {DOMPurify.sanitize(expanded.fullMessage, {
-                  ALLOWED_TAGS: [],
-                  ALLOWED_ATTR: []
-                })}
-              </pre>
+              <pre className="admin-error-modal-message">{expanded.fullMessage}</pre>
             </div>
             <div className="admin-error-modal-footer">
               <button

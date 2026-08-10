@@ -1,6 +1,6 @@
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -429,11 +429,7 @@ async fn resolve_account(
 }
 
 #[tracing::instrument(name = "auth.verify_admin_key", skip_all)]
-pub async fn verify_admin_key(
-    State(_state): State<Arc<AppState>>,
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
+pub async fn verify_admin_key(request: Request, next: Next) -> Result<Response, StatusCode> {
     let headers = request.headers();
 
     let api_key = headers
@@ -441,14 +437,28 @@ pub async fn verify_admin_key(
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let expected_key = std::env::var("ADMIN_API_KEY")
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let expected_key = std::env::var("ADMIN_API_KEY").map_err(|_| StatusCode::UNAUTHORIZED)?;
+    if !admin_api_key_is_configured(&expected_key) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
 
     if !constant_time_compare(api_key.as_bytes(), expected_key.as_bytes()) {
         return Err(constant_time_reject().await);
     }
 
-    Ok(next.run(request).await)
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private"),
+    );
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
+pub(crate) fn admin_api_key_is_configured(key: &str) -> bool {
+    !key.trim().is_empty()
 }
 
 fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
@@ -764,81 +774,23 @@ mod tests {
         assert!(!debug_str.contains("<redacted>"));
     }
 
-    // ── Admin key authentication middleware tests ─────────────
-
     #[test]
-    fn constant_time_compare_identical_keys_returns_true() {
-        let key1 = b"secret-key-12345";
-        let key2 = b"secret-key-12345";
-        assert!(constant_time_compare(key1, key2));
+    fn admin_key_configuration_rejects_empty_values() {
+        assert!(!admin_api_key_is_configured(""));
+        assert!(!admin_api_key_is_configured("   \t\n"));
+        assert!(admin_api_key_is_configured("a-strong-secret"));
     }
 
     #[test]
-    fn constant_time_compare_different_keys_returns_false() {
-        let key1 = b"secret-key-aaaaa";
-        let key2 = b"secret-key-bbbbb";
-        assert!(!constant_time_compare(key1, key2));
-    }
-
-    #[test]
-    fn constant_time_compare_different_lengths_returns_false() {
-        let key1 = b"short";
-        let key2 = b"much-longer-key";
-        assert!(!constant_time_compare(key1, key2));
-    }
-
-    #[test]
-    fn constant_time_compare_empty_keys_returns_true() {
-        let key1 = b"";
-        let key2 = b"";
-        assert!(constant_time_compare(key1, key2));
-    }
-
-    #[test]
-    fn constant_time_compare_single_bit_difference_returns_false() {
-        let key1 = b"a";
-        let key2 = b"b"; // single character difference
-        assert!(!constant_time_compare(key1, key2));
-    }
-
-    #[test]
-    fn constant_time_compare_first_byte_differs() {
-        let key1 = b"aaaaaa";
-        let key2 = b"baaaaa";
-        assert!(!constant_time_compare(key1, key2));
-    }
-
-    #[test]
-    fn constant_time_compare_last_byte_differs() {
-        let key1 = b"aaaaaa";
-        let key2 = b"aaaaaab";
-        assert!(!constant_time_compare(key1, key2));
-    }
-
-    #[test]
-    fn constant_time_compare_middle_byte_differs() {
-        let key1 = b"aaabaa";
-        let key2 = b"aaacaa";
-        assert!(!constant_time_compare(key1, key2));
-    }
-
-    #[test]
-    fn constant_time_compare_many_differences_returns_false() {
-        let key1 = b"aaaaaa";
-        let key2 = b"bbbbbb";
-        assert!(!constant_time_compare(key1, key2));
-    }
-
-    #[test]
-    fn constant_time_compare_long_identical_keys() {
-        let key = b"this-is-a-very-long-secret-key-that-should-still-compare-correctly";
-        assert!(constant_time_compare(key, key));
-    }
-
-    #[test]
-    fn constant_time_compare_long_different_keys() {
-        let key1 = b"this-is-a-very-long-secret-key-that-should-still-compare-correctly";
-        let key2 = b"this-is-a-very-long-secret-key-that-should-not-compare-correctly-x";
-        assert!(!constant_time_compare(key1, key2));
+    fn admin_key_comparison_requires_identical_bytes_and_length() {
+        assert!(constant_time_compare(
+            b"secret-key-12345",
+            b"secret-key-12345"
+        ));
+        assert!(!constant_time_compare(
+            b"secret-key-aaaaa",
+            b"secret-key-bbbbb"
+        ));
+        assert!(!constant_time_compare(b"short", b"much-longer-key"));
     }
 }

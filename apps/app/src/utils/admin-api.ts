@@ -25,7 +25,6 @@ export interface AdminConfig {
   balanceMonitorIntervalSecs: number
   uploaderWalLowThresholdFrost: bigint
   sponsorSuiLowThresholdMist: bigint
-  adminApiKeySet: boolean
 }
 
 export interface AdminWalletsResponse {
@@ -76,6 +75,7 @@ async function makeAdminRequest(
   const opts: RequestInit = {
     method,
     headers,
+    cache: 'no-store',
   }
 
   if (body) {
@@ -143,9 +143,8 @@ interface RawUploadErrorsResponse {
 
 interface RawConfigResponse {
   balance_monitor_interval_secs: number
-  wallet_wal_low_threshold_frost: number
-  sponsor_sui_low_threshold_mist: number
-  admin_api_key_set: boolean
+  wallet_wal_low_threshold_frost: string
+  sponsor_sui_low_threshold_mist: string
 }
 
 function toBadgeStatus(status: string): 'healthy' | 'warning' | 'critical' {
@@ -192,7 +191,7 @@ export async function fetchAdminErrors(
 
   return {
     errors: raw.results.map((job) => ({
-      timestamp: job.created_at,
+      timestamp: job.updated_at,
       owner: job.owner,
       namespace: job.namespace,
       errorMessage: job.error_msg ?? '(no error message)',
@@ -212,6 +211,5 @@ export async function fetchAdminConfig(
     balanceMonitorIntervalSecs: raw.balance_monitor_interval_secs,
     uploaderWalLowThresholdFrost: BigInt(raw.wallet_wal_low_threshold_frost),
     sponsorSuiLowThresholdMist: BigInt(raw.sponsor_sui_low_threshold_mist),
-    adminApiKeySet: raw.admin_api_key_set,
   }
 }

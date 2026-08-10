@@ -14,26 +14,13 @@ function abbreviateAddress(address: string): string {
   return `${address.slice(0, 6)}...${address.slice(-4)}`
 }
 
-function getStatusBadgeColor(status: string): string {
-  switch (status) {
-    case 'healthy':
-      return '#4ade80'
-    case 'warning':
-      return '#fbbf24'
-    case 'critical':
-      return '#ff8f8f'
-    default:
-      return '#8f9294'
-  }
-}
-
 function formatBalance(balance: bigint, symbol: string): string {
   return `${formatTokenAmount(balance)} ${symbol}`
 }
 
 export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalancesProps) {
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['adminWallets', adminKey],
+    queryKey: ['admin', 'wallets'],
     queryFn: () => fetchAdminWallets(adminKey),
     refetchInterval: 30000,
     retry: (failureCount, error) => {
@@ -50,7 +37,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
 
   if (isLoading) {
     return (
-      <Card title="Wallet Balances" className="admin-wallets-card">
+      <Card title="Wallet Balances" className="dashboard-keys-card admin-wallets-card">
         <div className="admin-loading">Loading wallet data...</div>
       </Card>
     )
@@ -58,7 +45,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
 
   if (error) {
     return (
-      <Card title="Wallet Balances" className="admin-wallets-card">
+      <Card title="Wallet Balances" className="dashboard-keys-card admin-wallets-card">
         <div className="admin-error">
           {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load wallets'}
         </div>
@@ -72,17 +59,19 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
     <div className="admin-wallets-section">
       <Card
         title="Uploader Pool Wallets"
-        className="admin-wallets-card"
+        className="dashboard-keys-card admin-wallets-card"
         action={
-          <button
-            onClick={() => refetch()}
-            className="admin-refresh-btn"
-            title="Refresh wallet data"
-            disabled={isLoading}
-          >
-            <RefreshCw size={16} />
-            Refresh Now
-          </button>
+          <div className="card-header-actions">
+            <button
+              onClick={() => refetch()}
+              className="btn btn-secondary btn-sm dashboard-keys-refresh admin-refresh-btn"
+              title="Refresh wallet data"
+              disabled={isLoading}
+            >
+              <RefreshCw size={12} />
+              Refresh
+            </button>
+          </div>
         }
       >
         <div className="admin-table-wrapper">
@@ -108,10 +97,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
                     {formatBalance(wallet.walBalance, 'WAL')}
                   </td>
                   <td>
-                    <span
-                      className="admin-status-badge"
-                      style={{ color: getStatusBadgeColor(wallet.status) }}
-                    >
+                    <span className={`admin-status-badge admin-status-badge--${wallet.status}`}>
                       {wallet.status}
                     </span>
                   </td>
@@ -125,7 +111,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
         </div>
       </Card>
 
-      <Card title="Sponsor Wallet" className="admin-sponsor-card">
+      <Card title="Sponsor Wallet" className="dashboard-keys-card admin-sponsor-card">
         <div className="admin-sponsor-content">
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">Address</span>
@@ -150,10 +136,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
 
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">Status</span>
-            <span
-              className="admin-status-badge"
-              style={{ color: getStatusBadgeColor(response.sponsorWallet.status) }}
-            >
+            <span className={`admin-status-badge admin-status-badge--${response.sponsorWallet.status}`}>
               {response.sponsorWallet.status}
             </span>
           </div>

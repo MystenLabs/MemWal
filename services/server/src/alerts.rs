@@ -94,9 +94,9 @@ pub struct AlertManager {
     /// and the monitor keeps polling every interval while the backlog lasts,
     /// so one notification per network per window is enough.
     walrus_queue_saturation_dedup: AlertDedup,
-    /// Suppresses wallet balance low spam. Keyed by
-    /// `(wallet_type, address_abbreviated)` so each wallet only alerts once
-    /// per dedup window even if the monitor runs many times.
+    /// Suppresses wallet balance low spam. Keyed by `(wallet_type, address)`
+    /// so each wallet only alerts once per dedup window even if the monitor
+    /// runs many times.
     wallet_balance_low_dedup: AlertDedup,
 }
 
@@ -257,10 +257,9 @@ impl AlertManager {
         let Some(slack) = &self.slack else {
             return Ok(());
         };
-        // Dedup per (wallet_type, abbreviated_address) so each wallet only
-        // alerts once per window during the balance monitor loop.
-        let abbrev_address = short_address(&alert.address);
-        let key = (alert.wallet_type.clone(), abbrev_address);
+        // Dedup by the full address; abbreviating here could make two distinct
+        // wallets with the same prefix/suffix suppress each other's alerts.
+        let key = (alert.wallet_type.clone(), alert.address.clone());
         if self.wallet_balance_low_dedup.should_suppress(key) {
             return Ok(());
         }
@@ -768,7 +767,10 @@ If the wallet is being topped up, rotate or temporarily remove that key from poo
     }
 
     fn for_wallet_balance_low(alert: &WalletBalanceLowAlert) -> Self {
-        let title = format!("⚠️ Wallet Balance Low: {} {}", alert.wallet_type, alert.token);
+        let title = format!(
+            "⚠️ Wallet Balance Low: {} {}",
+            alert.wallet_type, alert.token
+        );
         let abbrev_address = short_address(&alert.address);
         let balance_amount = format_token_amount(alert.balance);
         let threshold_amount = format_token_amount(alert.threshold);
@@ -1222,10 +1224,7 @@ mod tests {
         // Second alert with same key should be suppressed
         assert!(dedup.should_suppress(("sponsor".to_string(), "0x1234...abcd".to_string())));
         // Different wallet type should not be suppressed
-        assert!(!dedup.should_suppress((
-            "uploader_pool".to_string(),
-            "0x1234...abcd".to_string()
-        )));
+        assert!(!dedup.should_suppress(("uploader_pool".to_string(), "0x1234...abcd".to_string())));
     }
 
     #[test]

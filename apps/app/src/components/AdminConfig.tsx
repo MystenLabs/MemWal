@@ -10,7 +10,7 @@ interface AdminConfigProps {
 
 export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
   const { data, isLoading, error } = useQuery({
-    queryKey: ['adminConfig', adminKey],
+    queryKey: ['admin', 'config'],
     queryFn: () => fetchAdminConfig(adminKey),
     retry: (failureCount, error) => {
       const err = error as Error
@@ -26,7 +26,7 @@ export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
 
   if (isLoading) {
     return (
-      <Card title="Configuration" className="admin-config-card">
+      <Card title="Configuration" className="dashboard-keys-card admin-config-card">
         <div className="admin-loading">Loading configuration...</div>
       </Card>
     )
@@ -34,7 +34,7 @@ export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
 
   if (error) {
     return (
-      <Card title="Configuration" className="admin-config-card">
+      <Card title="Configuration" className="dashboard-keys-card admin-config-card">
         <div className="admin-error">
           {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load configuration'}
         </div>
@@ -44,14 +44,14 @@ export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
 
   if (!data) {
     return (
-      <Card title="Configuration" className="admin-config-card">
+      <Card title="Configuration" className="dashboard-keys-card admin-config-card">
         <div className="admin-error">No configuration available</div>
       </Card>
     )
   }
 
   return (
-    <Card title="Configuration" className="admin-config-card">
+    <Card title="Configuration" className="dashboard-keys-card admin-config-card">
       <div className="admin-config-items">
         <div className="admin-config-item">
           <span className="admin-config-label">Balance Monitor Interval</span>
@@ -74,12 +74,6 @@ export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
           </code>
         </div>
 
-        <div className="admin-config-item">
-          <span className="admin-config-label">Admin API Key Set</span>
-          <span className={`admin-config-badge ${data.adminApiKeySet ? 'admin-config-badge-active' : 'admin-config-badge-inactive'}`}>
-            {data.adminApiKeySet ? 'Configured' : 'Not configured'}
-          </span>
-        </div>
       </div>
     </Card>
   )

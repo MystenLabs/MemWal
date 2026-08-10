@@ -177,25 +177,49 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
         let sidecar_url = &state.config.sidecar_url;
         let wallet_metrics_url = format!("{}/metrics/wallet", sidecar_url);
 
-        match state.http_client.get(&wallet_metrics_url).send().await {
+        let mut sidecar_request = state.http_client.get(&wallet_metrics_url);
+        if let Some(secret) = state.config.sidecar_secret.as_deref() {
+            sidecar_request = sidecar_request.header("authorization", format!("Bearer {}", secret));
+        }
+
+        match sidecar_request.send().await {
             Ok(resp) if resp.status().is_success() => {
                 match resp.json::<serde_json::Value>().await {
                     Ok(data) => {
-                        if let Some(wal_frost_str) = data
-                            .get("walletWalBalanceFrost")
-                            .and_then(|v| v.as_str())
+                        if let Some(wallets) =
+                            data.get("perWallet").and_then(|value| value.as_array())
                         {
-                            if let Ok(wal_balance) = wal_frost_str.parse::<u64>() {
+                            for wallet in wallets {
+                                let Some(address) =
+                                    wallet.get("address").and_then(|value| value.as_str())
+                                else {
+                                    tracing::warn!(
+                                        "balance_monitor: wallet metrics entry missing address"
+                                    );
+                                    continue;
+                                };
+                                let Some(wal_balance) = wallet
+                                    .get("walFrost")
+                                    .and_then(|value| value.as_str())
+                                    .and_then(|value| value.parse::<u64>().ok())
+                                else {
+                                    tracing::warn!(
+                                    address,
+                                    "balance_monitor: wallet metrics entry has invalid walFrost"
+                                );
+                                    continue;
+                                };
+
                                 if wal_balance < state.config.wallet_balance_low_threshold_wal {
                                     tracing::warn!(
-                                        "balance_monitor: uploader pool WAL balance {} below threshold {}",
-                                        wal_balance,
-                                        state.config.wallet_balance_low_threshold_wal
-                                    );
-                                    // Use "pool" as a constant address for dedup
+                                    address,
+                                    balance = wal_balance,
+                                    threshold = state.config.wallet_balance_low_threshold_wal,
+                                    "balance_monitor: uploader wallet WAL balance below threshold"
+                                );
                                     let alert = alerts::WalletBalanceLowAlert {
-                                        wallet_type: "uploader_pool".to_string(),
-                                        address: "pool".to_string(),
+                                        wallet_type: "uploader".to_string(),
+                                        address: address.to_string(),
                                         balance: wal_balance,
                                         threshold: state.config.wallet_balance_low_threshold_wal,
                                         token: "WAL".to_string(),
@@ -203,24 +227,39 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                     if let Err(err) =
                                         state.alerts.notify_wallet_balance_low(alert).await
                                     {
-                                        tracing::warn!("balance_monitor: failed to send uploader pool alert: {}", err);
+                                        tracing::warn!(
+                                            address,
+                                            "balance_monitor: failed to send uploader alert: {}",
+                                            err
+                                        );
                                     }
                                 } else {
                                     tracing::debug!(
-                                        "balance_monitor: uploader pool WAL balance {} ok",
-                                        wal_balance
+                                        address,
+                                        balance = wal_balance,
+                                        "balance_monitor: uploader wallet WAL balance ok"
                                     );
                                 }
                             }
+                        } else {
+                            tracing::warn!(
+                                "balance_monitor: sidecar wallet metrics missing perWallet"
+                            );
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("balance_monitor: failed to parse sidecar wallet metrics: {}", e);
+                        tracing::warn!(
+                            "balance_monitor: failed to parse sidecar wallet metrics: {}",
+                            e
+                        );
                     }
                 }
             }
             Err(e) => {
-                tracing::warn!("balance_monitor: failed to fetch sidecar wallet metrics: {}", e);
+                tracing::warn!(
+                    "balance_monitor: failed to fetch sidecar wallet metrics: {}",
+                    e
+                );
             }
             Ok(resp) => {
                 tracing::warn!(
@@ -239,7 +278,8 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                     if let Some(sui_client) = &state.security_delete_background_sui {
                         match sui_client.address_balance(&sponsor_address).await {
                             Ok(sponsor_balance) => {
-                                if sponsor_balance < state.config.sponsor_balance_low_threshold_sui {
+                                if sponsor_balance < state.config.sponsor_balance_low_threshold_sui
+                                {
                                     tracing::warn!(
                                         "balance_monitor: sponsor wallet SUI balance {} below threshold {}",
                                         sponsor_balance,
@@ -255,7 +295,10 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                     if let Err(err) =
                                         state.alerts.notify_wallet_balance_low(alert).await
                                     {
-                                        tracing::warn!("balance_monitor: failed to send sponsor alert: {}", err);
+                                        tracing::warn!(
+                                            "balance_monitor: failed to send sponsor alert: {}",
+                                            err
+                                        );
                                     }
                                 } else {
                                     tracing::debug!(
@@ -265,7 +308,10 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!("balance_monitor: failed to fetch sponsor balance: {}", e);
+                                tracing::warn!(
+                                    "balance_monitor: failed to fetch sponsor balance: {}",
+                                    e
+                                );
                             }
                         }
                     }
@@ -806,9 +852,9 @@ async fn main() {
             Arc::new(sui::verifier::GrpcWalletSignatureVerifier::new(client)),
         )
     } else if let Some(url) = config.sui_grpc_url.as_deref() {
-        // Sponsor authorization also uses this verifier. Keep zkLogin and
-        // multisig verification available even when security deletion itself
-        // is disabled by delegating JWK handling to the fullnode.
+        // Sponsor authorization also uses this verifier. Keep zkLogin,
+        // multisig verification, and sponsor balance monitoring available even
+        // when security deletion itself is disabled.
         let client = sui::SuiClient::new(
             url,
             config.sui_rpc_requests_per_window,
@@ -817,9 +863,10 @@ async fn main() {
         .expect("failed to initialize sponsor signature verifier")
         .with_rpc_limits(config.sui_rpc_attempt_timeout, config.sui_rpc_max_in_flight)
         .expect("invalid sponsor signature RPC controls");
+        let background_client = Arc::new(client.background());
         (
             None,
-            None,
+            Some(background_client),
             Arc::new(sui::verifier::GrpcWalletSignatureVerifier::new(client)),
         )
     } else {
@@ -1264,10 +1311,7 @@ async fn main() {
             "/api/admin/config",
             get(routes::admin_dashboard::get_admin_config).layer(DefaultBodyLimit::max(16 * 1024)),
         )
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::verify_admin_key,
-        ));
+        .layer(middleware::from_fn(auth::verify_admin_key));
 
     // Public routes
     // /health and /config accept no body — cap at 16 KiB to reject

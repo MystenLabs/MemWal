@@ -1,4 +1,7 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
+import { LogOut } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
 import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { AdminWalletBalances } from '../components/AdminWalletBalances'
 import { AdminUploadErrors } from '../components/AdminUploadErrors'
@@ -8,6 +11,7 @@ import { fetchAdminConfig } from '../utils/admin-api'
 const ADMIN_KEY_STORAGE = 'admin_api_key'
 
 export default function AdminDashboard() {
+  const queryClient = useQueryClient()
   const [adminKey, setAdminKey] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isRestoring, setIsRestoring] = useState(true)
@@ -36,6 +40,7 @@ export default function AdminDashboard() {
       const trimmedKey = key.trim()
       await fetchAdminConfig(trimmedKey)
       sessionStorage.setItem(ADMIN_KEY_STORAGE, trimmedKey)
+      queryClient.removeQueries({ queryKey: ['admin'] })
       setBanner(undefined)
       setAdminKey(trimmedKey)
     } finally {
@@ -45,6 +50,7 @@ export default function AdminDashboard() {
 
   const handleLogout = () => {
     sessionStorage.removeItem(ADMIN_KEY_STORAGE)
+    queryClient.removeQueries({ queryKey: ['admin'] })
     setBanner(undefined)
     setAdminKey(null)
   }
@@ -56,15 +62,33 @@ export default function AdminDashboard() {
   // back to the login form with an explicit reason.
   const handleInvalidKey = () => {
     sessionStorage.removeItem(ADMIN_KEY_STORAGE)
+    queryClient.removeQueries({ queryKey: ['admin'] })
     setAdminKey(null)
     setBanner('Your admin API key is no longer valid. Please sign in again.')
   }
 
   return (
     <div className="admin-dashboard-page dash-page">
-      <div className="admin-dashboard-container">
-        <div className="admin-page-header">
-          <img className="admin-page-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
+      <nav className="nav playground-nav dashboard-nav">
+        <div className="nav-inner">
+          <Link to="/" className="nav-brand">
+            <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
+          </Link>
+          {adminKey && (
+            <div className="nav-user">
+              <span className="nav-address">Admin</span>
+              <button className="lp-nav-cta" onClick={handleLogout}>
+                Sign out <LogOut size={14} />
+              </button>
+            </div>
+          )}
+        </div>
+      </nav>
+
+      <main className="admin-dashboard-container dash-shell">
+        <div className="dashboard-header">
+          <h2>Admin Dashboard</h2>
+          <p>Monitor wallet balances, upload errors, and system configuration</p>
         </div>
 
         {isRestoring ? (
@@ -72,7 +96,6 @@ export default function AdminDashboard() {
         ) : !adminKey ? (
           <AdminKeyEntry
             onKeySubmit={handleKeySubmit}
-            onLogout={handleLogout}
             isLoading={isSubmitting}
             banner={banner}
           />
@@ -81,17 +104,9 @@ export default function AdminDashboard() {
             <AdminWalletBalances adminKey={adminKey} onInvalidKey={handleInvalidKey} />
             <AdminUploadErrors adminKey={adminKey} onInvalidKey={handleInvalidKey} />
             <AdminConfig adminKey={adminKey} onInvalidKey={handleInvalidKey} />
-            <div className="admin-logout-section">
-              <button
-                onClick={handleLogout}
-                className="admin-logout-button"
-              >
-                Logout
-              </button>
-            </div>
           </div>
         )}
-      </div>
+      </main>
     </div>
   )
 }

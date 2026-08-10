@@ -1,16 +1,14 @@
 import { useState } from 'react'
-import { LogOut } from 'lucide-react'
+import { Card } from './Card'
 
 export interface AdminKeyEntryProps {
   onKeySubmit: (key: string) => Promise<void>
-  onLogout: () => void
   isLoading?: boolean
   banner?: string
 }
 
 export function AdminKeyEntry({
   onKeySubmit,
-  onLogout,
   isLoading = false,
   banner,
 }: AdminKeyEntryProps) {
@@ -44,18 +42,17 @@ export function AdminKeyEntry({
   }
 
   return (
-    <div className="admin-key-entry-modal">
-      <div className="admin-key-entry-card">
-        <div className="admin-key-entry-header">
-          <h2>Admin Dashboard</h2>
-          <p className="admin-key-entry-subtitle">Enter your admin API key to continue</p>
-        </div>
-
+    <div className="admin-key-entry-shell">
+      <Card
+        className="dashboard-keys-card admin-key-entry-card"
+        title="Admin sign in"
+        subtitle="Enter your admin API key to continue"
+      >
         {banner && <div className="admin-key-banner">{banner}</div>}
 
         <form onSubmit={handleSubmit} className="admin-key-entry-form">
-          <div className="admin-key-entry-field">
-            <label htmlFor="admin-key">API Key</label>
+          <div className="dashboard-add-key-field">
+            <label htmlFor="admin-key" className="dashboard-add-key-label">API key</label>
             <input
               id="admin-key"
               type="password"
@@ -63,30 +60,23 @@ export function AdminKeyEntry({
               value={key}
               onChange={(e) => setKey(e.target.value)}
               disabled={isSubmitting || isLoading}
-              className={error ? 'admin-key-input admin-key-input-error' : 'admin-key-input'}
+              className={`dashboard-add-key-input admin-key-input${error ? ' admin-key-input-error' : ''}`}
               autoComplete="off"
             />
             {error && <div className="admin-key-error">{error}</div>}
           </div>
 
-          <button
-            type="submit"
-            disabled={isSubmitting || isLoading || !key.trim()}
-            className="admin-key-submit-btn"
-          >
-            {isSubmitting ? 'Signing in...' : 'Sign In'}
-          </button>
+          <div className="dashboard-add-key-actions">
+            <button
+              type="submit"
+              disabled={isSubmitting || isLoading || !key.trim()}
+              className="dashboard-add-key-create admin-key-submit-btn"
+            >
+              {isSubmitting ? 'Signing in...' : 'Sign in'}
+            </button>
+          </div>
         </form>
-
-        <button
-          onClick={onLogout}
-          className="admin-key-logout-btn"
-          title="Log out of admin dashboard"
-        >
-          <LogOut size={16} />
-          Logout
-        </button>
-      </div>
+      </Card>
     </div>
   )
 }
