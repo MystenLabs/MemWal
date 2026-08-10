@@ -647,7 +647,6 @@ mod tests {
             include_str!("../../migrations/008_benchmark_plaintext.sql"),
             include_str!("../../migrations/009_importance_signal.sql"),
             include_str!("../../migrations/010_memory_read_api_columns.sql"),
-            include_str!("../../migrations/011_memory_read_api_backfill_updated_at.sql"),
             include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql"),
             include_str!("../../migrations/013_memory_read_api_index.sql"),
             include_str!("../../migrations/014_memory_expiry_columns.sql"),
