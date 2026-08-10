@@ -23,7 +23,7 @@ import {
 } from '@mysten/sui/jsonRpc'
 import { SuiGrpcClient } from '@mysten/sui/grpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
@@ -32,6 +32,7 @@ import AdminDashboard from './pages/AdminDashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
+import ConnectApp from './pages/ConnectApp'
 import { useRouteAnalytics } from './hooks/useRouteAnalytics'
 
 
@@ -211,15 +212,17 @@ function RegisterEnokiWallets() {
       providers: {
         google: {
           clientId: config.googleClientId,
-          // Pin the Google OAuth redirect_uri to the app origin root — a URL
-          // already registered for this client (the dashboard sign-in uses it,
+          // Pin the Google OAuth redirect_uri to the app origin root by default — a
+          // URL already registered for this client (the dashboard sign-in uses it,
           // which is why dashboard Google login works). Enoki otherwise defaults
           // to window.location.href, so signing in from
           // /connect/mcp?...&connectState=... would send a redirect_uri with a
           // non-registered path + query → Google rejects it (redirect_uri_mismatch).
           // The /connect/mcp params survive the round-trip via sessionStorage
           // (ConnectMcp persists them; PostAuthRedirect restores them). WALM-86.
-          redirectUrl: `${window.location.origin}/`,
+          // VITE_ENOKI_REDIRECT_URL lets a deployment override this root when a
+          // registered redirect URI differs from window.location.origin.
+          redirectUrl: config.enokiRedirectUrl || `${window.location.origin}/`,
         },
       },
       client,
@@ -230,6 +233,81 @@ function RegisterEnokiWallets() {
   }, [client, network])
 
   return null
+}
+
+function EnokiCallback() {
+  return (
+    <main style={{
+      minHeight: '100vh',
+      display: 'grid',
+      placeItems: 'center',
+      background: 'var(--bg-primary)',
+      color: 'var(--text-primary)',
+    }}>
+      <p style={{ color: 'var(--text-secondary)' }}>Finishing sign in...</p>
+    </main>
+  )
+}
+
+function LocalAppAuthCallback() {
+  const { search } = useLocation()
+  const params = new URLSearchParams(search)
+  const code = params.get('code')
+  const state = params.get('state')
+  const error = params.get('error')
+
+  return (
+    <main style={{
+      minHeight: '100vh',
+      display: 'grid',
+      placeItems: 'center',
+      padding: 24,
+      background: 'var(--bg-primary)',
+      color: 'var(--text-primary)',
+    }}>
+      <section style={{
+        width: 'min(100%, 520px)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        padding: 24,
+        background: 'var(--bg-secondary)',
+        boxShadow: '0 20px 60px rgba(15, 23, 42, 0.08)',
+      }}>
+        <h1 style={{ margin: '0 0 8px', fontSize: 24, letterSpacing: 0 }}>
+          Local Walrus Memory callback
+        </h1>
+        <p style={{ color: 'var(--text-secondary)', lineHeight: 1.5, margin: '0 0 18px' }}>
+          This local test page only shows the browser callback result. The app backend must exchange the code server-side.
+        </p>
+        <dl style={{ display: 'grid', gap: 12, margin: 0 }}>
+          <div>
+            <dt style={{ color: 'var(--text-muted)', fontSize: 12, fontWeight: 700, textTransform: 'uppercase' }}>
+              code
+            </dt>
+            <dd style={{ margin: '4px 0 0', fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>
+              {code || '-'}
+            </dd>
+          </div>
+          <div>
+            <dt style={{ color: 'var(--text-muted)', fontSize: 12, fontWeight: 700, textTransform: 'uppercase' }}>
+              state
+            </dt>
+            <dd style={{ margin: '4px 0 0', fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere' }}>
+              {state || '-'}
+            </dd>
+          </div>
+          <div>
+            <dt style={{ color: 'var(--text-muted)', fontSize: 12, fontWeight: 700, textTransform: 'uppercase' }}>
+              error
+            </dt>
+            <dd style={{ margin: '4px 0 0', fontFamily: 'var(--font-mono)', overflowWrap: 'anywhere', color: error ? '#dc2626' : 'inherit' }}>
+              {error || '-'}
+            </dd>
+          </div>
+        </dl>
+      </section>
+    </main>
+  )
 }
 
 // ============================================================
@@ -292,6 +370,24 @@ function AppContent() {
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       )} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
+      <Route path="/connect/app" element={<ConnectApp />} />
+      <Route path="/auth/enoki/callback" element={<EnokiCallback />} />
+      {/* ENG-1783 review N1 (2026-05-26): LocalAppAuthCallback is for local
+          third-party dev only (when the demo app shares an origin with this
+          Vite dev server). Registering these routes in production builds
+          would let a malicious app register `memwal.ai/api/memwal/callback`
+          as an allowed redirect_uri — the consent screen would say "Return
+          to memwal.ai" (which looks safe to users), the code would land
+          here and silently render the query string, and the attacker would
+          observe nothing in the address bar. Code exchange still requires
+          client_secret so they can't escalate, but the UX confusion is the
+          phishing primitive — gating to DEV removes it entirely. */}
+      {import.meta.env.DEV && (
+        <>
+          <Route path="/api/memwal/callback" element={<LocalAppAuthCallback />} />
+          <Route path="/memwal/error" element={<LocalAppAuthCallback />} />
+        </>
+      )}
       <Route path="/admin" element={<AdminDashboard />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

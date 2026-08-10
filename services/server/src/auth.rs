@@ -9,6 +9,7 @@ use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+use crate::routes::app_auth::constant_time_eq;
 use crate::storage::sui::{
     find_account_by_delegate_key, verify_delegate_key_onchain, OnchainVerifyError,
 };
@@ -429,7 +430,11 @@ async fn resolve_account(
 }
 
 #[tracing::instrument(name = "auth.verify_admin_key", skip_all)]
-pub async fn verify_admin_key(request: Request, next: Next) -> Result<Response, StatusCode> {
+pub async fn verify_admin_key(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
     let headers = request.headers();
 
     let api_key = headers
@@ -437,12 +442,22 @@ pub async fn verify_admin_key(request: Request, next: Next) -> Result<Response, 
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let expected_key = std::env::var("ADMIN_API_KEY").map_err(|_| StatusCode::UNAUTHORIZED)?;
-    if !admin_api_key_is_configured(&expected_key) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    // Fail closed: an unconfigured ADMIN_API_KEY rejects every request
+    // rather than silently disabling the check. main.rs logs a boot-time
+    // warning when this is unset so an operator sees it before a request does.
+    let expected_key = state
+        .config
+        .admin_api_key
+        .as_deref()
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if !constant_time_compare(api_key.as_bytes(), expected_key.as_bytes()) {
+    // Hash both sides to fixed-length digests before comparing — matches
+    // the app_auth admin-token pattern (ensure_configured_app_auth_admin_token
+    // below) and removes any comparison-length side channel, unlike comparing
+    // the raw secret bytes directly.
+    let presented_hash = Sha256::digest(api_key.as_bytes());
+    let expected_hash = Sha256::digest(expected_key.as_bytes());
+    if !constant_time_eq(presented_hash.as_slice(), expected_hash.as_slice()) {
         return Err(constant_time_reject().await);
     }
 
@@ -455,21 +470,6 @@ pub async fn verify_admin_key(request: Request, next: Next) -> Result<Response, 
         .headers_mut()
         .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
     Ok(response)
-}
-
-pub(crate) fn admin_api_key_is_configured(key: &str) -> bool {
-    !key.trim().is_empty()
-}
-
-fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
-    let mut result = (a.len() ^ b.len()) as usize;
-    let len = a.len().max(b.len());
-    for i in 0..len {
-        let x = *a.get(i).unwrap_or(&0);
-        let y = *b.get(i).unwrap_or(&0);
-        result |= (x ^ y) as usize;
-    }
-    result == 0
 }
 
 // ============================================================
@@ -774,23 +774,81 @@ mod tests {
         assert!(!debug_str.contains("<redacted>"));
     }
 
+    // ── Admin key authentication middleware tests ─────────────
+
     #[test]
-    fn admin_key_configuration_rejects_empty_values() {
-        assert!(!admin_api_key_is_configured(""));
-        assert!(!admin_api_key_is_configured("   \t\n"));
-        assert!(admin_api_key_is_configured("a-strong-secret"));
+    fn constant_time_eq_identical_keys_returns_true() {
+        let key1 = b"secret-key-12345";
+        let key2 = b"secret-key-12345";
+        assert!(constant_time_eq(key1, key2));
     }
 
     #[test]
-    fn admin_key_comparison_requires_identical_bytes_and_length() {
-        assert!(constant_time_compare(
-            b"secret-key-12345",
-            b"secret-key-12345"
-        ));
-        assert!(!constant_time_compare(
-            b"secret-key-aaaaa",
-            b"secret-key-bbbbb"
-        ));
-        assert!(!constant_time_compare(b"short", b"much-longer-key"));
+    fn constant_time_eq_different_keys_returns_false() {
+        let key1 = b"secret-key-aaaaa";
+        let key2 = b"secret-key-bbbbb";
+        assert!(!constant_time_eq(key1, key2));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths_returns_false() {
+        let key1 = b"short";
+        let key2 = b"much-longer-key";
+        assert!(!constant_time_eq(key1, key2));
+    }
+
+    #[test]
+    fn constant_time_eq_empty_keys_returns_true() {
+        let key1 = b"";
+        let key2 = b"";
+        assert!(constant_time_eq(key1, key2));
+    }
+
+    #[test]
+    fn constant_time_eq_single_bit_difference_returns_false() {
+        let key1 = b"a";
+        let key2 = b"b"; // single character difference
+        assert!(!constant_time_eq(key1, key2));
+    }
+
+    #[test]
+    fn constant_time_eq_first_byte_differs() {
+        let key1 = b"aaaaaa";
+        let key2 = b"baaaaa";
+        assert!(!constant_time_eq(key1, key2));
+    }
+
+    #[test]
+    fn constant_time_eq_last_byte_differs() {
+        let key1 = b"aaaaaa";
+        let key2 = b"aaaaaab";
+        assert!(!constant_time_eq(key1, key2));
+    }
+
+    #[test]
+    fn constant_time_eq_middle_byte_differs() {
+        let key1 = b"aaabaa";
+        let key2 = b"aaacaa";
+        assert!(!constant_time_eq(key1, key2));
+    }
+
+    #[test]
+    fn constant_time_eq_many_differences_returns_false() {
+        let key1 = b"aaaaaa";
+        let key2 = b"bbbbbb";
+        assert!(!constant_time_eq(key1, key2));
+    }
+
+    #[test]
+    fn constant_time_eq_long_identical_keys() {
+        let key = b"this-is-a-very-long-secret-key-that-should-still-compare-correctly";
+        assert!(constant_time_eq(key, key));
+    }
+
+    #[test]
+    fn constant_time_eq_long_different_keys() {
+        let key1 = b"this-is-a-very-long-secret-key-that-should-still-compare-correctly";
+        let key2 = b"this-is-a-very-long-secret-key-that-should-not-compare-correctly-x";
+        assert!(!constant_time_eq(key1, key2));
     }
 }

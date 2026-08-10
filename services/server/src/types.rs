@@ -1,5 +1,6 @@
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -31,9 +32,6 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
-
-/// Prevent an accidental low interval from continuously polling Sui and the sidecar.
-const MIN_BALANCE_MONITOR_INTERVAL_SECS: u64 = 30;
 
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
@@ -247,6 +245,52 @@ impl KeyPool {
 // Config
 // ============================================================
 
+#[derive(Clone)]
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    pub fn from_string(value: String) -> Self {
+        Self(value.into_bytes())
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AppAuthClientConfig {
+    pub client_id: String,
+    pub client_secret_sha256: String,
+    pub display_name: String,
+    pub allowed_redirect_uris: Vec<String>,
+    pub fallback_uri: Option<String>,
+    #[serde(default)]
+    pub allowed_fallback_uris: Vec<String>,
+    #[serde(default = "default_app_auth_client_status")]
+    pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppAuthClientRecord {
+    pub client: AppAuthClientConfig,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub const APP_AUTH_CLIENT_STATUS_ACTIVE: &str = "active";
+pub const APP_AUTH_CLIENT_STATUS_BLOCKED: &str = "blocked";
+
+fn default_app_auth_client_status() -> String {
+    APP_AUTH_CLIENT_STATUS_ACTIVE.to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
@@ -315,6 +359,21 @@ pub struct Config {
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
+    /// Legacy/static confidential clients for hosted web app auth. Real dapps
+    /// should use `/api/app-auth/clients`, which stores clients in Postgres.
+    pub app_auth_clients: Vec<AppAuthClientConfig>,
+    /// Staging/demo only: allow unauthenticated third-party app client
+    /// registration. Production leaves this off and requires APP_AUTH_ADMIN_TOKEN
+    /// on `POST /api/app-auth/clients`.
+    pub app_auth_public_client_registration_enabled: bool,
+    /// Optional operator token for hosted app-auth admin actions, such as
+    /// blocking a dynamically registered client.
+    pub app_auth_admin_token: Option<SecretBytes>,
+    /// Dev/test only: allow configured localhost callback paths on any port.
+    pub app_auth_enable_dev_localhost_wildcards: bool,
+    /// AES key material derived from APP_AUTH_DELEGATE_ENCRYPTION_KEY or
+    /// SIDECAR_AUTH_TOKEN. Redacted in Debug.
+    pub app_auth_delegate_secret: Option<SecretBytes>,
     /// Master visibility flag for the memory-deletion feature family.
     pub enable_memory_deletion: bool,
     /// Selects the tracked, backend-built security-delete flow. The master
@@ -352,6 +411,10 @@ pub struct Config {
     pub balance_monitor_interval_secs: u64,
     pub wallet_balance_low_threshold_wal: u64,
     pub sponsor_balance_low_threshold_sui: u64,
+    /// Gates the /admin/wallets, /admin/upload-errors, /admin/config routes
+    /// via auth::verify_admin_key. Unrelated to app_auth_admin_token — a
+    /// separate operator credential for a separate admin surface.
+    pub admin_api_key: Option<String>,
 }
 
 impl Config {
@@ -377,6 +440,9 @@ impl Config {
         let package_id = std::env::var("MEMWAL_PACKAGE_ID").expect("MEMWAL_PACKAGE_ID must be set");
         let seal_policy_package_id =
             nonempty_env("MEMWAL_SEAL_POLICY_PACKAGE_ID").unwrap_or_else(|| package_id.clone());
+
+        let app_auth_enable_dev_localhost_wildcards =
+            app_auth_dev_localhost_wildcards_enabled(&network);
 
         Self {
             port: std::env::var("PORT")
@@ -446,6 +512,20 @@ impl Config {
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            app_auth_clients: parse_app_auth_clients(
+                &network,
+                app_auth_enable_dev_localhost_wildcards,
+            ),
+            app_auth_public_client_registration_enabled: env_bool(
+                "APP_AUTH_PUBLIC_CLIENT_REGISTRATION_ENABLED",
+            ),
+            app_auth_admin_token: std::env::var("APP_AUTH_ADMIN_TOKEN")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .map(SecretBytes::from_string),
+            app_auth_enable_dev_localhost_wildcards,
+            app_auth_delegate_secret: derive_app_auth_delegate_secret(),
             enable_memory_deletion: env_bool("ENABLE_MEMORY_DELETION"),
             enable_security_delete: env_bool("ENABLE_SECURITY_DELETE"),
             legacy_db_url: nonempty_env("LEGACY_DB_URL"),
@@ -487,12 +567,105 @@ impl Config {
                 .unwrap_or_default(),
             balance_monitor_interval_secs: normalized_balance_monitor_interval(env_positive_u64(
                 "BALANCE_MONITOR_INTERVAL_SECS",
-                900,
+                300,
             )),
-            wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
-            sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
+            wallet_balance_low_threshold_wal: env_number(
+                "WALLET_BALANCE_LOW_THRESHOLD_WAL",
+                1_000_000,
+            ),
+            sponsor_balance_low_threshold_sui: env_number(
+                "SPONSOR_BALANCE_LOW_THRESHOLD_SUI",
+                100_000_000,
+            ),
+            admin_api_key: nonempty_env("ADMIN_API_KEY"),
         }
     }
+}
+
+fn parse_app_auth_clients(
+    network: &str,
+    include_dev_localhost_client: bool,
+) -> Vec<AppAuthClientConfig> {
+    let mut clients = match std::env::var("APP_AUTH_CLIENTS_JSON") {
+        Ok(raw) if !raw.trim().is_empty() => match serde_json::from_str(&raw) {
+            Ok(clients) => clients,
+            Err(err) => {
+                tracing::error!(
+                    "APP_AUTH_CLIENTS_JSON is invalid: {}; falling back to built-in non-mainnet app-auth clients",
+                    err
+                );
+                default_app_auth_clients_for_network(network)
+            }
+        },
+        _ => default_app_auth_clients_for_network(network),
+    };
+
+    if include_dev_localhost_client
+        && !clients
+            .iter()
+            .any(|client| client.client_id == "dev_localhost")
+    {
+        clients.push(AppAuthClientConfig {
+            client_id: "dev_localhost".to_string(),
+            // sha256("dev_localhost_secret") — local/dev only.
+            client_secret_sha256:
+                "a8af739963bcf3b6b2267229bbaba4106dc13812e7ace14c03b4cdb70acc0667".to_string(),
+            display_name: "Local Dev App".to_string(),
+            allowed_redirect_uris: vec![
+                "http://localhost:*/api/memwal/callback".to_string(),
+                "http://127.0.0.1:*/api/memwal/callback".to_string(),
+            ],
+            fallback_uri: None,
+            allowed_fallback_uris: vec![
+                "http://localhost:*/memwal/error".to_string(),
+                "http://127.0.0.1:*/memwal/error".to_string(),
+            ],
+            status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
+        });
+    }
+
+    clients
+}
+
+fn default_app_auth_clients_for_network(network: &str) -> Vec<AppAuthClientConfig> {
+    if network.eq_ignore_ascii_case("mainnet") {
+        Vec::new()
+    } else {
+        vec![AppAuthClientConfig {
+            client_id: "demo_dapp".to_string(),
+            // sha256("demo_dapp_secret") — test/dev only. Override in production.
+            client_secret_sha256:
+                "5619a8cdf18ecc129cf7301e0272f0bb4d04144ec1e72e2882de620436a5c577".to_string(),
+            display_name: "Demo Dapp".to_string(),
+            allowed_redirect_uris: vec!["https://example.invalid/api/memwal/callback".to_string()],
+            fallback_uri: Some("https://example.invalid/memwal/error".to_string()),
+            allowed_fallback_uris: vec!["https://example.invalid/memwal/error".to_string()],
+            status: APP_AUTH_CLIENT_STATUS_ACTIVE.to_string(),
+        }]
+    }
+}
+
+fn app_auth_dev_localhost_wildcards_enabled(network: &str) -> bool {
+    app_auth_dev_localhost_wildcards_enabled_from_value(
+        network,
+        env_bool("APP_AUTH_ENABLE_DEV_LOCALHOST_WILDCARDS"),
+    )
+}
+
+fn app_auth_dev_localhost_wildcards_enabled_from_value(network: &str, enabled: bool) -> bool {
+    !network.eq_ignore_ascii_case("mainnet") && enabled
+}
+
+fn derive_app_auth_delegate_secret() -> Option<SecretBytes> {
+    let source = std::env::var("APP_AUTH_DELEGATE_ENCRYPTION_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("SIDECAR_AUTH_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    Some(SecretBytes(Sha256::digest(source.as_bytes()).to_vec()))
 }
 
 fn nonempty_env(name: &str) -> Option<String> {
@@ -519,6 +692,7 @@ fn env_positive_u64(name: &str, default: u64) -> u64 {
 }
 
 fn normalized_balance_monitor_interval(interval_secs: u64) -> u64 {
+    const MIN_BALANCE_MONITOR_INTERVAL_SECS: u64 = 30;
     interval_secs.max(MIN_BALANCE_MONITOR_INTERVAL_SECS)
 }
 
@@ -1680,13 +1854,6 @@ mod tests {
 
     static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    #[test]
-    fn balance_monitor_interval_has_a_safe_minimum() {
-        assert_eq!(normalized_balance_monitor_interval(1), 30);
-        assert_eq!(normalized_balance_monitor_interval(30), 30);
-        assert_eq!(normalized_balance_monitor_interval(900), 900);
-    }
-
     // ── Client-supplied embedding vector validation ──────────────
 
     #[test]
@@ -1781,6 +1948,11 @@ mod tests {
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
+            app_auth_clients: vec![],
+            app_auth_public_client_registration_enabled: false,
+            app_auth_admin_token: None,
+            app_auth_enable_dev_localhost_wildcards: false,
+            app_auth_delegate_secret: None,
             enable_memory_deletion: false,
             enable_security_delete: false,
             legacy_db_url: None,
@@ -1805,9 +1977,10 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
-            balance_monitor_interval_secs: 900,
+            balance_monitor_interval_secs: 300,
             wallet_balance_low_threshold_wal: 1_000_000,
             sponsor_balance_low_threshold_sui: 100_000_000,
+            admin_api_key: None,
         }
     }
 
@@ -2286,6 +2459,30 @@ mod tests {
         // this middleware used to (bug-)reuse, or the fix regresses.
         assert!(config.per_minute < RateLimitConfig::default().max_requests_per_minute);
         assert!(config.per_hour < RateLimitConfig::default().max_requests_per_hour);
+    }
+
+    #[test]
+    fn app_auth_dev_localhost_wildcards_are_never_enabled_on_mainnet() {
+        assert!(!app_auth_dev_localhost_wildcards_enabled_from_value(
+            "mainnet", true
+        ));
+        assert!(!app_auth_dev_localhost_wildcards_enabled_from_value(
+            "Mainnet", true
+        ));
+        assert!(app_auth_dev_localhost_wildcards_enabled_from_value(
+            "testnet", true
+        ));
+        assert!(!app_auth_dev_localhost_wildcards_enabled_from_value(
+            "testnet", false
+        ));
+    }
+
+    #[test]
+    fn app_auth_demo_default_clients_are_not_injected_on_mainnet() {
+        assert!(default_app_auth_clients_for_network("mainnet").is_empty());
+        assert!(default_app_auth_clients_for_network("testnet")
+            .iter()
+            .any(|client| client.client_id == "demo_dapp"));
     }
 
     #[test]

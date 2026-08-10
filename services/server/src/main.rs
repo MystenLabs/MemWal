@@ -20,7 +20,7 @@ use axum::http::{header, HeaderValue, Method};
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use std::net::SocketAddr;
@@ -440,6 +440,11 @@ async fn main() {
         tracing::error!("boot guard: {}", error);
         std::process::exit(1);
     }
+    if config.admin_api_key.is_none() {
+        tracing::warn!(
+            "ADMIN_API_KEY not set — /api/admin/* routes reject every request. Set ADMIN_API_KEY to use the admin dashboard."
+        );
+    }
     tracing::info!("starting memwal server on port {}", config.port);
     tracing::info!("  Sui RPC: {}", config.sui_rpc_url);
     tracing::info!("  package type-origin id: {}", config.package_id);
@@ -475,6 +480,14 @@ async fn main() {
         config.accounts_rate_limit.per_hour,
         config.accounts_rate_limit.global_per_minute,
         config.accounts_rate_limit.global_per_hour,
+    );
+    tracing::info!(
+        "  app auth public client registration: {}",
+        if config.app_auth_public_client_registration_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
     if config.rate_limit.bench_bypass_enabled {
         // Storage quota is unaffected — this only skips the request-rate
@@ -1298,6 +1311,82 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         );
 
+    // Hosted app auth routes — OAuth-style connect flow for third-party web
+    // apps. Browser-facing endpoints create/complete a short-lived session;
+    // the token endpoint is server-to-server and requires HTTP Basic client
+    // authentication.
+    let app_auth_routes = Router::new()
+        .route(
+            "/api/app-auth/clients",
+            post(routes::app_auth_create_client)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_clients_rate_limit_middleware,
+                )),
+        )
+        .route(
+            "/api/app-auth/register",
+            post(routes::app_auth_register)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_clients_rate_limit_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/app-auth/login",
+            post(routes::app_auth_admin_login)
+                .layer(DefaultBodyLimit::max(4 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_admin_login_rate_limit_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/app-auth/clients",
+            get(routes::app_auth_admin_list_clients)
+                .post(routes::app_auth_admin_create_client)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/app-auth/clients/{client_id}",
+            patch(routes::app_auth_admin_update_client).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/app-auth/clients/{client_id}/rotate-secret",
+            post(routes::app_auth_rotate_client_secret).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
+            "/api/admin/app-auth/clients/{client_id}/block",
+            post(routes::app_auth_block_client).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
+            "/api/admin/app-auth/clients/{client_id}/unblock",
+            post(routes::app_auth_unblock_client).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
+            "/api/app-auth/start",
+            post(routes::app_auth_start)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::app_auth_start_rate_limit_middleware,
+                )),
+        )
+        .route(
+            "/api/app-auth/complete",
+            post(routes::app_auth_complete).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/app-auth/cancel",
+            post(routes::app_auth_cancel).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/app-auth/token",
+            post(routes::app_auth_token).layer(DefaultBodyLimit::max(4 * 1024)),
+        );
+
     // Admin dashboard routes (requires ADMIN_API_KEY)
     let admin_dashboard_routes = Router::new()
         .route(
@@ -1312,7 +1401,10 @@ async fn main() {
             "/api/admin/config",
             get(routes::admin_dashboard::get_admin_config).layer(DefaultBodyLimit::max(16 * 1024)),
         )
-        .layer(middleware::from_fn(auth::verify_admin_key));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::verify_admin_key,
+        ));
 
     // Public routes
     // /health and /config accept no body — cap at 16 KiB to reject
@@ -1349,7 +1441,8 @@ async fn main() {
             get(observability::metrics).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .merge(sponsor_routes)
-        .merge(mcp_routes);
+        .merge(mcp_routes)
+        .merge(app_auth_routes);
 
     // CORS — restrict to configured origins.
     // Safe default is deny-all (no Access-Control-Allow-Origin header returned),
@@ -1375,7 +1468,13 @@ async fn main() {
             tracing::info!("  CORS origins: {}", config.allowed_origins);
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
-                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PATCH,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
                 .allow_headers([
                     header::CONTENT_TYPE,
                     header::AUTHORIZATION,
@@ -1388,6 +1487,7 @@ async fn main() {
                     "x-delegate-key".parse::<header::HeaderName>().unwrap(),
                     "x-request-id".parse::<header::HeaderName>().unwrap(),
                     "x-correlation-id".parse::<header::HeaderName>().unwrap(),
+                    "x-admin-token".parse::<header::HeaderName>().unwrap(),
                     // SessionKey envelope replacing x-delegate-key
                     "x-seal-session".parse::<header::HeaderName>().unwrap(),
                     // MCP headers — caller's Walrus Memory account id + optional default namespace.

@@ -22,6 +22,7 @@ const localE2eJsonRpc = import.meta.env.DEV &&
 export const config = {
     enokiApiKey: import.meta.env.VITE_ENOKI_API_KEY as string || '',
     googleClientId: import.meta.env.VITE_GOOGLE_CLIENT_ID as string || '',
+    enokiRedirectUrl: import.meta.env.VITE_ENOKI_REDIRECT_URL as string || '',
     memwalPackageId,
     memwalRegistryId,
     // Legacy-deployment ids for the security-delete surface. The exposed
