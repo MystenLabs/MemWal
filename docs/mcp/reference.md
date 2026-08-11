@@ -338,34 +338,59 @@ See [Environment Variables](/reference/environment-variables) for the full list 
 
 ### MCP OAuth 2.1 Configuration
 
-Claude custom connector support uses OAuth 2.1. Configuration is minimal — most values are derived from `MEMWAL_RELAYER_URL`:
+Claude custom connector support uses OAuth 2.1. Most values are derived from `MEMWAL_RELAYER_URL` — only one secret is required.
 
-| Variable | Required | Description |
-| --- | --- | --- |
-| `MCP_OAUTH_DELEGATE_ENCRYPTION_KEY` | Yes | AES-256-GCM key (32 bytes, base64url-encoded, no padding) for encrypting delegate private keys at rest. **Generate once and persist** — this key encrypts every user's delegate key. |
+#### Required: Delegate Encryption Key
 
-**Derived values** (no config needed):
-
-| Derived from | Value |
+| Variable | Description |
 | --- | --- |
-| `MEMWAL_RELAYER_URL` | `issuer` (e.g. `https://relayer.memory.walrus.xyz`) |
-| `issuer + "/api/mcp"` | `resource` (what Claude requests) |
-| `issuer` with `relayer.` → `memory.` + `/connect/claude` | `consent_url` |
+| `MCP_OAUTH_DELEGATE_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, base64url-encoded, no padding) |
 
-**Optional overrides**:
+**Why is this needed?**
+
+Claude Code (an AI agent) cannot hold a Sui wallet private key itself. The OAuth flow solves this:
+
+```
+1. User clicks "Add connector" in Claude
+2. Browser generates a delegate key pair (private key NEVER leaves the browser)
+3. Browser encrypts the private key with the server's key → sends to server
+4. Server stores the encrypted key in the database
+5. When an OAuth token is verified → server decrypts the private key
+6. Server uses the private key to sign MCP requests on behalf of the user
+```
+
+The `MCP_OAUTH_DELEGATE_ENCRYPTION_KEY` is the **server's symmetric encryption key** used to encrypt/decrypt every user's delegate private keys stored in the database.
+
+**Generate a key:**
+
+```bash
+openssl rand -base64 32 | tr -d '=' | tr '+/' '-_'
+# Output example: GxK9pL2mQr8vN3jF5Ys7hT6wZ1cD4eR8
+```
+
+**Important:**
+- Generate once and persist — changing this key invalidates all existing OAuth tokens
+- The key never leaves the server
+- Delegate private keys are encrypted at rest and only decrypted in-memory when signing
+
+#### Derived Values (no config needed)
+
+| From | Value |
+| --- | --- |
+| `MEMWAL_RELAYER_URL` | `issuer` |
+| `issuer + "/api/mcp"` | `resource` |
+| `issuer` (relayer → memory) | `consent_url` |
+
+#### Optional Overrides
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MCP_OAUTH_ACCESS_TTL_SECS` | `3600` | Access token lifetime in seconds |
+| `MCP_OAUTH_ACCESS_TTL_SECS` | `3600` | Access token lifetime |
 | `MCP_OAUTH_REFRESH_TTL_SECS` | `2592000` | Refresh token lifetime (30 days) |
-| `MCP_OAUTH_CODE_TTL_SECS` | `300` | Authorization code lifetime (5 min) |
-| `MCP_OAUTH_SESSION_TTL_SECS` | `900` | OAuth session lifetime (15 min) |
-| `MCP_OAUTH_ALLOWED_REGISTRATION_HOSTS` | `claude.ai` | Comma-separated redirect URI allowlist |
-| `MCP_OAUTH_REGISTRATION_PER_HOUR_PER_IP` | `20` | DCR rate limit per IP per hour |
-
-**To enable**: Set `MCP_OAUTH_DELEGATE_ENCRYPTION_KEY` and restart the relayer. No feature flag needed — OAuth is available whenever the key is present.
-
-**Security note**: The encryption key never leaves the server. Delegate private keys are generated client-side, encrypted with this key, and only decrypted in-memory when signing MCP requests.
+| `MCP_OAUTH_CODE_TTL_SECS` | `300` | Authorization code lifetime |
+| `MCP_OAUTH_SESSION_TTL_SECS` | `900` | OAuth session lifetime |
+| `MCP_OAUTH_ALLOWED_REGISTRATION_HOSTS` | `claude.ai` | Redirect URI allowlist |
+| `MCP_OAUTH_REGISTRATION_PER_HOUR_PER_IP` | `20` | DCR rate limit |
 
 ## Logout semantics
 
