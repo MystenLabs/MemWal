@@ -9,6 +9,7 @@ import {
     blobIdMatchesRequested,
     blobObjectMatchesRegistration,
     chainBlobIdFromRaw,
+    filterTrustedBlobCandidates,
     findBlobCreationSender,
     isSourceCapped,
     isWalrusBlobObjectType,
@@ -554,6 +555,21 @@ test("blob provenance excludes external creators and fails closed on incomplete 
         reason: "owner",
         uploader: null,
     });
+});
+
+test("provenance transport failures fail the query instead of silently dropping blobs", async () => {
+    const recipient = `0x${"2".repeat(64)}`;
+    const blob = {
+        objectId: `0x${"1".repeat(64)}`,
+        owner: { AddressOwner: recipient },
+        previousTransaction: "create-tx",
+    };
+    await assert.rejects(
+        filterTrustedBlobCandidates([blob], recipient, "test-request", async () => {
+            throw new Error("archive timeout");
+        }),
+        /unable to verify Blob creation provenance \(1 lookup failures\)/
+    );
 });
 
 test("ownerMatchesRecipient compares canonicalized addresses, not exact strings", () => {

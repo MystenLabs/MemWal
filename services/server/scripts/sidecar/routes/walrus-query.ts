@@ -245,46 +245,61 @@ export async function trustedBlobCandidate(
         : { trusted: false, reason: "provenance", uploader };
 }
 
-async function filterTrustedBlobCandidates<T extends Pick<RawBlobObj, "objectId" | "owner" | "previousTransaction">>(
+export async function filterTrustedBlobCandidates<
+    T extends Pick<RawBlobObj, "objectId" | "owner" | "previousTransaction">
+>(
     candidates: T[],
     recipient: string,
-    requestId: string
+    requestId: string,
+    creationSender: (blob: T) => Promise<string | null> = cachedBlobCreationSender
 ): Promise<T[]> {
     const provenance = await mapConcurrent(candidates, 2, async (blob) => {
         try {
             const result = !ownerMatchesRecipient(blob.owner, recipient)
                 ? { trusted: false as const, reason: "owner" as const, uploader: null }
-                : await cachedBlobCreationSender(blob).then((uploader) =>
+                : await creationSender(blob).then((uploader) =>
                       uploader && TRUSTED_WALRUS_UPLOADER_SET.has(uploader)
                           ? { trusted: true as const, reason: "trusted" as const, uploader }
                           : { trusted: false as const, reason: "provenance" as const, uploader }
                   );
             return { blob, result, error: undefined as string | undefined };
         } catch (error: unknown) {
-            return {
-                blob,
-                result: { trusted: false as const, reason: "provenance" as const, uploader: null },
-                error: errorMessage(error),
-            };
+            return { blob, result: null, error: errorMessage(error) };
         }
     });
-    const excluded = provenance.filter(({ result }) => !result.trusted);
+    const unavailable = provenance.filter(({ error }) => error !== undefined);
+    if (unavailable.length > 0) {
+        sidecarLog("error", "walrus_query_blobs_provenance_unavailable", {
+            requestId,
+            owner: recipient,
+            failureCount: unavailable.length,
+            sample: unavailable.slice(0, 5).map(({ blob, error }) => ({
+                objectId: blob.objectId,
+                error,
+            })),
+        });
+        // Preserve fail-closed semantics without silently presenting a partial
+        // restore as complete. The endpoint fails so the caller can retry after
+        // the archival service recovers; no unverified Blob is ever returned.
+        throw new Error(`unable to verify Blob creation provenance (${unavailable.length} lookup failures)`);
+    }
+    const verified = provenance.filter((entry) => entry.result !== null);
+    const excluded = verified.filter(({ result }) => !result!.trusted);
     if (excluded.length > 0) {
         sidecarLog("warn", "walrus_query_blobs_untrusted_candidates_excluded", {
             requestId,
             owner: recipient,
             excludedCount: excluded.length,
-            ownershipMismatchCount: excluded.filter(({ result }) => result.reason === "owner").length,
-            unverifiedProvenanceCount: excluded.filter(({ result }) => result.reason === "provenance").length,
-            sample: excluded.slice(0, 5).map(({ blob, result, error }) => ({
+            ownershipMismatchCount: excluded.filter(({ result }) => result!.reason === "owner").length,
+            unverifiedProvenanceCount: excluded.filter(({ result }) => result!.reason === "provenance").length,
+            sample: excluded.slice(0, 5).map(({ blob, result }) => ({
                 objectId: blob.objectId,
-                uploader: result.uploader,
-                reason: result.reason,
-                ...(error ? { error } : {}),
+                uploader: result!.uploader,
+                reason: result!.reason,
             })),
         });
     }
-    return provenance.filter(({ result }) => result.trusted).map(({ blob }) => blob);
+    return verified.filter(({ result }) => result!.trusted).map(({ blob }) => blob);
 }
 
 /**
