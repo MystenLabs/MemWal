@@ -240,6 +240,30 @@ test("/seal/decrypt 400s when sealAbi=v1-new omits registryId", async () => {
     });
 });
 
+test("/seal/decrypt rejects malformed account and registry IDs during validation", async () => {
+    await withServer(async (baseUrl) => {
+        const badAccount = await post(baseUrl, "/seal/decrypt", {
+            data: DATA,
+            packageId: PKG,
+            accountId: "not-an-object-id",
+            sealAbi: "v1",
+        });
+        assert.equal(badAccount.status, 400);
+        assert.match(badAccount.body.error!, /accountId format/);
+
+        const badRegistry = await post(baseUrl, "/seal/decrypt-batch", {
+            items: [DATA],
+            packageId: PKG,
+            policyPackageId: ROUTE_POLICY.sealPolicyPackageId,
+            accountId: ACC,
+            registryId: `0x${"1".repeat(65)}`,
+            sealAbi: "v1-new",
+        });
+        assert.equal(badRegistry.status, 400);
+        assert.match(badRegistry.body.error!, /registryId format/);
+    });
+});
+
 test("/seal/decrypt 400s on an invalid policyPackageId", async () => {
     await withServer(async (baseUrl) => {
         const r = await post(baseUrl, "/seal/decrypt", {

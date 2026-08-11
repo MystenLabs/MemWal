@@ -467,6 +467,7 @@ pub async fn analyze(
                     &owner,
                     &account_id,
                     &state.config.package_id,
+                    state.config.seal_expected_committee_identity.as_ref(),
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
                 // carry `importance` through the prep tuple so
