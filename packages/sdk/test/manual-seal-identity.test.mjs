@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EncryptedObject } from "@mysten/seal";
+import { Inputs } from "@mysten/sui/transactions";
 
 import { MemWalManual } from "../dist/manual.js";
 
@@ -8,6 +9,7 @@ const ACCOUNT_ID = `0x${"aa".repeat(32)}`;
 const PACKAGE_ID = `0x${"33".repeat(32)}`;
 const OWNER = `0x${"11".repeat(32)}`;
 const DELEGATE_SIGNER = `0x${"22".repeat(32)}`;
+const REGISTRY_ID = `0x${"bb".repeat(32)}`;
 const COUNTER_LE_7 = "0700000000000000";
 
 function ciphertext(packageId) {
@@ -43,11 +45,26 @@ function manualWithAccountResponse(response) {
                 objectRequests.push(request);
                 return response;
             },
+            core: {
+                getObject: async () => ({ object: { version: "1" } }),
+                resolveTransactionPlugin: () => async (transactionData, _options, next) => {
+                    transactionData.inputs = transactionData.inputs.map((input) =>
+                        input.UnresolvedObject
+                            ? Inputs.SharedObjectRef({
+                                  objectId: input.UnresolvedObject.objectId,
+                                  initialSharedVersion: "1",
+                                  mutable: true,
+                              })
+                            : input
+                    );
+                    await next();
+                },
+            },
         },
         embeddingApiKey: "test",
         packageId: PACKAGE_ID,
         accountId: ACCOUNT_ID,
-        registryId: "0xregistry",
+        registryId: REGISTRY_ID,
         sealServerConfigs: [{ objectId: "0xserver", weight: 1 }],
     });
     manual._sealClient = {
@@ -127,7 +144,7 @@ test("inactive accounts fail before encryption", async () => {
     assert.equal(encryptCalls.length, 0);
 });
 
-test("manual recall rejects a foreign ciphertext package before fetching keys", async () => {
+test("manual recall skips a foreign ciphertext package before fetching keys", async () => {
     const { manual } = manualWithAccountResponse({});
     let fetchCalls = 0;
     manual.embed = async () => [0];
@@ -143,9 +160,53 @@ test("manual recall rejects a foreign ciphertext package before fetching keys", 
         decrypt: async () => new Uint8Array(),
     };
 
-    await assert.rejects(
-        manual.recallManual("query"),
-        /ciphertext foreign packageId does not match the configured immutable packageId/
-    );
+    const originalConsoleError = console.error;
+    const errors = [];
+    console.error = (...args) => errors.push(args.join(" "));
+    try {
+        assert.deepEqual(await manual.recallManual("query"), { results: [], total: 0 });
+    } finally {
+        console.error = originalConsoleError;
+    }
+
     assert.equal(fetchCalls, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /Skipping ciphertext foreign: packageId does not match/);
+});
+
+test("manual recall returns valid memories when another ciphertext package is foreign", async () => {
+    const { manual } = manualWithAccountResponse({});
+    const fetchIds = [];
+    manual.embed = async () => [0];
+    manual.signedRequest = async () => ({
+        results: [
+            { blob_id: "foreign", distance: 0.1 },
+            { blob_id: "valid", distance: 0.2 },
+        ],
+        total: 2,
+    });
+    manual.walrusDownload = async (blobId) =>
+        ciphertext(blobId === "valid" ? PACKAGE_ID : `0x${"44".repeat(32)}`);
+    manual._sealClient = {
+        fetchKeys: async ({ ids }) => fetchIds.push(...ids),
+        decrypt: async () => new TextEncoder().encode("valid memory"),
+    };
+
+    const originalConsoleError = console.error;
+    const errors = [];
+    console.error = (...args) => errors.push(args.join(" "));
+    let result;
+    try {
+        result = await manual.recallManual("query");
+    } finally {
+        console.error = originalConsoleError;
+    }
+
+    assert.deepEqual(result, {
+        results: [{ blob_id: "valid", text: "valid memory", distance: 0.2 }],
+        total: 1,
+    });
+    assert.deepEqual(fetchIds, ["aabb"]);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /Skipping ciphertext foreign: packageId does not match/);
 });
