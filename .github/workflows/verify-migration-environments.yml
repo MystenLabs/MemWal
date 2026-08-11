@@ -1,0 +1,22 @@
+name: verify-migration-environments
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * 1"
+
+permissions:
+  actions: read
+  contents: read
+  deployments: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify migration ceremony environment protections
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_MIGRATION_REVIEWER: harrymove-ctrl
+        run: scripts/verify-migration-environments.sh
