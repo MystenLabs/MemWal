@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { decodeJwt, jwtVerify } from "jose";
 import { SESSION_MAX_AGE_SECONDS, signSessionIdentity } from "./session-token";
+import { sessionMemoryCredentials } from "./session-memory";
 
 const secret = new TextEncoder().encode("unit-test-auth-secret");
 
@@ -26,5 +27,22 @@ test("Researcher session tokens contain identity only, never delegate credential
   assert.ok(
     Number(verified.payload.exp) - Math.floor(Date.now() / 1000) <=
       SESSION_MAX_AGE_SECONDS
+  );
+});
+
+test("Researcher memory credentials never fall back to process-wide keys", () => {
+  process.env.MEMWAL_PRIVATE_KEY = "global-key";
+  process.env.MEMWAL_ACCOUNT_ID = "global-account";
+
+  assert.equal(
+    sessionMemoryCredentials({ privateKey: "", accountId: "" }),
+    null
+  );
+  assert.deepEqual(
+    sessionMemoryCredentials({
+      privateKey: "session-key",
+      accountId: "session-account",
+    }),
+    { key: "session-key", accountId: "session-account" }
   );
 });
