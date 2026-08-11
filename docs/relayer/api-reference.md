@@ -57,7 +57,7 @@ All `/api/*` routes except the [MCP transports](#mcp-transports) require signed 
 | **Header** | **Description** |
 |--------|-------------|
 | `x-account-id` | MemWalAccount object ID hint. Official SDKs always send it and include it in the canonical signature |
-| `x-seal-session` | Base64 exported Seal SessionKey for relayer-managed decrypt flows. The TypeScript and Python SDKs use it |
+| `x-seal-session` | Base64-encoded Seal SessionKey for relayer-managed decrypt flows. The TypeScript and Python SDKs use it |
 | `x-delegate-key` | Legacy delegate private key credential for relayer-managed decrypt flows. Deprecated; use `x-seal-session` where supported |
 
 ### Signature format
@@ -435,7 +435,7 @@ Rebuild missing vector entries for one namespace. Queries onchain blobs by owner
 }
 ```
 
-`truncated` is `true` when this restore cannot complete: either more onchain blobs were missing locally than `limit` allowed this call to restore, or the sidecar's raw onchain candidate fetch (bounded per owner, shared across all of the owner's namespaces, hard-capped independent of `limit`) hit its own cap before this namespace's blobs were even filtered out of that set. The second case can produce `truncated: true` even when `total` is `0` for this namespace, since a cap hit elsewhere can starve this namespace's fetch entirely. Raising `limit` only helps with the first case. Past the sidecar's cap, only a cursor or pagination-based restore would help.
+`truncated` is `true` when this restore cannot complete: either more onchain blobs were missing locally than `limit` allowed this call to restore, or the sidecar's raw onchain candidate fetch (bounded per owner, shared across all of the owner's namespaces, hard-capped independent of `limit`) hit its own cap before this namespace's blobs were even filtered out of that set. The second case can produce `truncated: true` even when `total` is `0` for this namespace, because a cap hit elsewhere can starve this namespace's fetch entirely. Raising `limit` only helps with the first case. Past the sidecar's cap, only a cursor or pagination-based restore would help.
 
 ### `POST /api/forget`
 
