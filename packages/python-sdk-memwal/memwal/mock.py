@@ -7,6 +7,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from .types import (
@@ -258,7 +259,7 @@ class MemWalMock:
         self,
         text: str,
         namespace: Optional[str] = None,
-        occurred_at: Any = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
     ) -> AnalyzeResult:
         del occurred_at
         memory = self._store(text, namespace)
@@ -279,9 +280,9 @@ class MemWalMock:
         text: str,
         namespace: Optional[str] = None,
         opts: Optional[RememberBulkOptions] = None,
-        occurred_at: Any = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
     ) -> AnalyzeWaitResult:
-        analyzed = await self.analyze(text, namespace, occurred_at)
+        analyzed = await self.analyze(text, namespace, occurred_at=occurred_at)
         settled = await self.wait_for_remember_jobs(analyzed.job_ids, opts)
         return AnalyzeWaitResult(
             results=settled.results,
@@ -433,6 +434,18 @@ class MemWalMockSync:
 
     @staticmethod
     def _run(coro: Any) -> Any:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # Match MemWalSync in notebooks and other hosts with a live loop:
+            # execute the coroutine on a fresh event loop in a worker thread.
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result()
         return asyncio.run(coro)
 
     def remember(self, text: str, namespace: Optional[str] = None) -> RememberAcceptedResult:
@@ -443,16 +456,38 @@ class MemWalMockSync:
     ) -> RememberAcceptedResult:
         return self.remember(text, namespace)
 
-    def wait_for_remember_job(self, job_id: str) -> RememberResult:
-        return self._run(self._inner.wait_for_remember_job(job_id))
+    def wait_for_remember_job(
+        self,
+        job_id: str,
+        poll_interval_ms: int = 1500,
+        timeout_ms: int = 60_000,
+    ) -> RememberResult:
+        return self._run(
+            self._inner.wait_for_remember_job(
+                job_id,
+                poll_interval_ms=poll_interval_ms,
+                timeout_ms=timeout_ms,
+            )
+        )
 
     def get_remember_status(self, job_id: str) -> RememberJobStatus:
         return self._run(self._inner.get_remember_status(job_id))
 
     def remember_and_wait(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        poll_interval_ms: int = 1500,
+        timeout_ms: int = 60_000,
     ) -> RememberResult:
-        return self._run(self._inner.remember_and_wait(text, namespace))
+        return self._run(
+            self._inner.remember_and_wait(
+                text,
+                namespace,
+                poll_interval_ms=poll_interval_ms,
+                timeout_ms=timeout_ms,
+            )
+        )
 
     def remember_bulk_async(
         self, items: Sequence[RememberBulkItem]
@@ -470,14 +505,18 @@ class MemWalMockSync:
         return self._run(self._inner.get_remember_bulk_status(job_ids))
 
     def wait_for_remember_jobs(
-        self, job_ids: Sequence[str]
+        self,
+        job_ids: Sequence[str],
+        opts: Optional[RememberBulkOptions] = None,
     ) -> RememberBulkResult:
-        return self._run(self._inner.wait_for_remember_jobs(job_ids))
+        return self._run(self._inner.wait_for_remember_jobs(job_ids, opts))
 
     def remember_bulk_and_wait(
-        self, items: Sequence[RememberBulkItem]
+        self,
+        items: Sequence[RememberBulkItem],
+        opts: Optional[RememberBulkOptions] = None,
     ) -> RememberBulkResult:
-        return self._run(self._inner.remember_bulk_and_wait(items))
+        return self._run(self._inner.remember_bulk_and_wait(items, opts))
 
     def recall(
         self,
@@ -491,14 +530,27 @@ class MemWalMockSync:
         )
 
     def analyze(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
     ) -> AnalyzeResult:
-        return self._run(self._inner.analyze(text, namespace))
+        return self._run(
+            self._inner.analyze(text, namespace, occurred_at=occurred_at)
+        )
 
     def analyze_and_wait(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        opts: Optional[RememberBulkOptions] = None,
+        occurred_at: Optional[Union[str, datetime]] = None,
     ) -> AnalyzeWaitResult:
-        return self._run(self._inner.analyze_and_wait(text, namespace))
+        return self._run(
+            self._inner.analyze_and_wait(
+                text, namespace, opts, occurred_at=occurred_at
+            )
+        )
 
     def embed(self, text: str) -> EmbedResult:
         return self._run(self._inner.embed(text))

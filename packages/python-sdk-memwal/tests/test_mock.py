@@ -1,13 +1,17 @@
 """Offline mock client regression tests."""
 
+import inspect
+
 import pytest
 
 from memwal import (
     MemWalMock,
     MemWalMockSeed,
     MemWalMockSync,
+    MemWalSync,
     RecallParams,
     RememberBulkItem,
+    RememberBulkOptions,
 )
 
 
@@ -94,10 +98,65 @@ async def test_mock_seed_embed_health_and_compatibility():
     assert (await first.compatibility())["featureFlags"]["offlineMock"] is True
 
 
-def test_sync_mock_wraps_core_flows():
+def test_sync_mock_wraps_core_flows_and_accepts_production_options():
     mock = MemWalMockSync.create(namespace="sync")
-    stored = mock.remember_and_wait("sync memory")
+    opts = RememberBulkOptions(poll_interval_ms=1, timeout_ms=10)
+
+    accepted = mock.remember("accepted memory")
+    stored = mock.wait_for_remember_job(
+        accepted.job_id, poll_interval_ms=1, timeout_ms=10
+    )
+    waited = mock.remember_and_wait(
+        "sync memory", poll_interval_ms=1, timeout_ms=10
+    )
+    bulk = mock.remember_bulk_and_wait(
+        [RememberBulkItem(text="bulk memory")], opts=opts
+    )
+    assert mock.wait_for_remember_jobs([accepted.job_id], opts=opts).succeeded == 1
+    analyzed = mock.analyze("analyzed memory", occurred_at="2024-01-01T00:00:00Z")
+    analyzed_wait = mock.analyze_and_wait(
+        "analyzed and waited",
+        opts=opts,
+        occurred_at="2024-01-01T00:00:00Z",
+    )
     recalled = mock.recall("sync")
 
-    assert stored.namespace == "sync"
+    assert stored.blob_id == "mock-blob-000001"
+    assert waited.namespace == "sync"
+    assert bulk.succeeded == 1
+    assert analyzed.fact_count == 1
+    assert analyzed_wait.succeeded == 1
     assert recalled.results[0].text == "sync memory"
+
+
+def test_sync_mock_polling_and_analyze_signatures_match_production():
+    methods = (
+        "wait_for_remember_job",
+        "remember_and_wait",
+        "wait_for_remember_jobs",
+        "remember_bulk_and_wait",
+        "analyze",
+        "analyze_and_wait",
+    )
+
+    def parameter_contract(method):
+        return [
+            (parameter.name, parameter.kind, parameter.default)
+            for parameter in inspect.signature(method).parameters.values()
+        ]
+
+    for method_name in methods:
+        assert parameter_contract(getattr(MemWalMockSync, method_name)) == parameter_contract(
+            getattr(MemWalSync, method_name)
+        )
+
+
+@pytest.mark.asyncio
+async def test_sync_mock_works_inside_an_existing_event_loop():
+    mock = MemWalMockSync.create(namespace="notebook")
+
+    stored = mock.remember_and_wait("called from a running loop")
+    recalled = mock.recall("running loop")
+
+    assert stored.namespace == "notebook"
+    assert recalled.results[0].text == "called from a running loop"
