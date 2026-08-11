@@ -126,6 +126,10 @@ Use these snippets when the target client is not Claude Code, or when you only w
 
 ### Codex
 
+Codex can run Walrus Memory through MCP. It does not consume Claude Code slash commands, but it sees the same `memwal_*` tools.
+
+#### MCP-only quick test
+
 Add to `~/.codex/config.toml`:
 
 ```toml
@@ -144,10 +148,26 @@ args = ["-y", "@mysten-incubation/memwal-mcp", "--label", "Codex", "--namespace"
 
 Restart Codex, then ask the agent to call `memwal_login`.
 
-Codex hook support is separate from Claude Code plugin support. If you cloned the full MemWal repo and want hook nudges, run:
+Inside a Codex task, test:
+
+```text
+What MCP tools do you have available?
+Call memwal_login and help me connect Walrus Memory.
+Call memwal_health.
+Remember that Codex successfully connected to Walrus Memory through the plugin repo test.
+Recall Codex Walrus Memory plugin repo test.
+```
+
+Expected tools: `memwal_login`, `memwal_logout`, `memwal_health`, `memwal_remember`, `memwal_remember_bulk`, `memwal_recall`, `memwal_analyze`, and `memwal_restore`.
+
+#### Optional Codex hooks
+
+Codex hook support is separate from Claude Code plugin support. If you cloned this plugin repo and want hook nudges, run:
 
 ```bash
-node packages/mcp/plugin/scripts/install_codex_hooks.mjs
+git clone https://github.com/CommandOSSLabs/walrus-memory-plugin.git
+cd walrus-memory-plugin
+node scripts/install_codex_hooks.mjs
 ```
 
 Then enable hooks in `~/.codex/config.toml`:
@@ -158,6 +178,12 @@ codex_hooks = true
 ```
 
 Do not also add a duplicate `[mcp_servers.memwal]` entry if the installer already added one.
+
+To uninstall hooks:
+
+```bash
+node scripts/install_codex_hooks.mjs --uninstall
+```
 
 ### OpenCode
 

@@ -38,6 +38,80 @@ MCP tools exposed by `@mysten-incubation/memwal-mcp`:
 
 Codex and other IDEs can use the same MCP tools through their MCP config even if they do not install Claude Code slash commands.
 
+## Test In Codex
+
+Codex does not install Claude Code plugins directly, but it can run the same Walrus Memory MCP server. Use MCP-only for the fastest test, or install optional hooks if you want automatic memory nudges.
+
+### Option A: MCP-Only
+
+Add this to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.memwal]
+command = "npx"
+args = ["-y", "@mysten-incubation/memwal-mcp", "--label", "Codex"]
+```
+
+Optional namespace:
+
+```toml
+[mcp_servers.memwal]
+command = "npx"
+args = ["-y", "@mysten-incubation/memwal-mcp", "--label", "Codex", "--namespace", "work"]
+```
+
+Restart Codex. In a new Codex task, verify:
+
+```text
+What MCP tools do you have available?
+```
+
+Expected: `memwal_login`, `memwal_health`, `memwal_remember`, `memwal_remember_bulk`, `memwal_recall`, `memwal_analyze`, `memwal_restore`, and `memwal_logout`.
+
+Then run the login flow:
+
+```text
+Call memwal_login and help me connect Walrus Memory.
+```
+
+After the browser flow completes, test memory:
+
+```text
+Call memwal_health.
+Remember that Codex successfully connected to Walrus Memory through the plugin repo test.
+Recall Codex Walrus Memory plugin repo test.
+```
+
+### Option B: MCP + Codex Hooks
+
+Clone this repo:
+
+```bash
+git clone https://github.com/CommandOSSLabs/walrus-memory-plugin.git
+cd walrus-memory-plugin
+```
+
+Install hooks and register MCP:
+
+```bash
+node scripts/install_codex_hooks.mjs
+```
+
+Enable Codex hooks in `~/.codex/config.toml`:
+
+```toml
+[features]
+codex_hooks = true
+```
+
+Restart Codex. The installer is idempotent; re-running it updates the hook paths. To remove hooks:
+
+```bash
+node scripts/install_codex_hooks.mjs --uninstall
+```
+
+Do not combine Option A with Option B unless you remove duplicate `[mcp_servers.memwal]` entries.
+
 ## Auth Model
 
 This plugin uses the current Walrus Memory custom-header auth flow. On first use, the MCP package opens the browser login flow, creates or finds the user's Walrus Memory account, registers a delegate key, and stores local credentials in:
