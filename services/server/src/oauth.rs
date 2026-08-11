@@ -28,6 +28,7 @@ use blake2::{
     digest::{Update, VariableOutput},
     Blake2bVar,
 };
+use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use ipnet::IpNet;
 use rand::rngs::OsRng;
@@ -677,6 +678,96 @@ pub fn sanitize_label(raw: &str, default: &str) -> String {
     } else {
         cleaned
     }
+}
+
+// ---------------------------------------------------------------------
+// Resource-server bearer resolution — the PR3 piece `mcp_proxy.rs` calls on
+// every `/api/mcp*` request to translate an OAuth access token into the
+// legacy delegate-key credential the TS sidecar already understands.
+// ---------------------------------------------------------------------
+
+/// Everything the proxy needs to rewrite an inbound request's headers into
+/// the legacy `Authorization: Bearer <hex>` + `X-MemWal-Account-Id` shape.
+pub struct ResolvedOAuthIdentity {
+    pub account_id: String,
+    pub delegate_private_key: DelegateSecret,
+    #[allow(dead_code)]
+    pub grant_id: String,
+}
+
+#[derive(Debug)]
+pub enum OAuthBearerError {
+    /// Not shaped like an OAuth token at all (no `mwo_` prefix) — the
+    /// caller should fall back to the legacy bearer check.
+    NotOAuthToken,
+    Invalid,
+    Expired,
+    Revoked,
+    /// Delegate was revoked independently of the grant (e.g. the on-chain
+    /// key was removed) — same external symptom as `Revoked` but a
+    /// distinct internal cause, useful in logs.
+    DelegateNotActive,
+    Internal(String),
+}
+
+impl OAuthBearerError {
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            OAuthBearerError::NotOAuthToken => "invalid_token",
+            OAuthBearerError::Invalid => "invalid_token",
+            OAuthBearerError::Expired => "invalid_token",
+            OAuthBearerError::Revoked => "invalid_token",
+            OAuthBearerError::DelegateNotActive => "invalid_token",
+            OAuthBearerError::Internal(_) => "invalid_token",
+        }
+    }
+}
+
+/// Resolve a presented bearer token to a signable delegate identity.
+/// Returns `Err(NotOAuthToken)` immediately (no DB call) for anything not
+/// prefixed `mwo_`, so the legacy 64-hex path costs nothing extra.
+pub async fn resolve_oauth_bearer(
+    state: &crate::types::AppState,
+    token: &str,
+) -> Result<ResolvedOAuthIdentity, OAuthBearerError> {
+    if !token.starts_with(ACCESS_TOKEN_PREFIX) {
+        return Err(OAuthBearerError::NotOAuthToken);
+    }
+    let cfg = state
+        .config
+        .mcp_oauth
+        .as_ref()
+        .ok_or(OAuthBearerError::NotOAuthToken)?;
+
+    let hash = hash_token(token);
+    let row = state
+        .db
+        .fetch_oauth_token_with_delegate(&hash)
+        .await
+        .map_err(|e| OAuthBearerError::Internal(e.to_string()))?
+        .ok_or(OAuthBearerError::Invalid)?;
+
+    if row.token_type != "access" {
+        return Err(OAuthBearerError::Invalid);
+    }
+    if row.revoked_at.is_some() || row.grant_revoked_at.is_some() {
+        return Err(OAuthBearerError::Revoked);
+    }
+    if row.expires_at <= Utc::now() {
+        return Err(OAuthBearerError::Expired);
+    }
+    if row.delegate_status != "active" {
+        return Err(OAuthBearerError::DelegateNotActive);
+    }
+
+    let delegate_private_key = decrypt_delegate_private_key(&cfg.encryption_key, &row.encrypted_private_key)
+        .map_err(|_| OAuthBearerError::Internal("failed to decrypt delegate private key".to_string()))?;
+
+    Ok(ResolvedOAuthIdentity {
+        account_id: row.account_id,
+        delegate_private_key,
+        grant_id: row.grant_id,
+    })
 }
 
 #[cfg(test)]
