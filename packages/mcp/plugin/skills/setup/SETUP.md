@@ -4,6 +4,25 @@ This guide is for the Walrus Memory Claude Code marketplace plugin. It covers th
 
 This plugin does not use the hosted Claude custom-connector OAuth flow. OAuth connector work and Claude Code plugin setup are separate surfaces.
 
+## Hosted Claude Custom Connector URL
+
+If you are testing Claude's native hosted custom connector, use the remote MCP endpoint below in Claude's connector UI:
+
+```text
+https://relayer.dev.memwal.ai/api/mcp
+```
+
+Discovery endpoints:
+
+```text
+https://relayer.dev.memwal.ai/.well-known/oauth-authorization-server
+https://relayer.dev.memwal.ai/.well-known/oauth-protected-resource
+```
+
+That hosted connector flow uses OAuth. It should let Claude add the remote endpoint, complete login and consent, then call `tools/list` and representative memory tools without the user manually pasting delegate private keys or custom headers.
+
+This setup skill is for the Claude Code plugin path, which is separate: local stdio MCP plus delegate-key custom-header auth through `@mysten-incubation/memwal-mcp`.
+
 ## What Gets Installed
 
 The plugin ships these Claude Code components:
