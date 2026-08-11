@@ -1,8 +1,5 @@
 import { createSession } from "@/lib/auth/session";
-import {
-  getUserByPublicKey,
-  createUserByPublicKey,
-} from "@/lib/db/queries";
+import { upsertDelegateCredentialsByPublicKey } from "@/lib/db/queries";
 import * as ed from "@noble/ed25519";
 import { sha512 } from "@noble/hashes/sha512";
 
@@ -45,10 +42,17 @@ export async function POST(request: Request) {
     const pubKeyBytes = ed.getPublicKey(privKeyBytes);
     const publicKey = bytesToHex(pubKeyBytes);
 
-    const existing = await getUserByPublicKey(publicKey);
-    const user = existing ?? (await createUserByPublicKey(publicKey));
+    if (!accountId || typeof accountId !== "string") {
+      return Response.json({ error: "Account ID is required." }, { status: 400 });
+    }
 
-    await createSession(user.id, publicKey, privateKey, accountId || '');
+    const user = await upsertDelegateCredentialsByPublicKey({
+      publicKey,
+      delegatePrivateKey: privateKey,
+      accountId,
+    });
+
+    await createSession(user.id, publicKey, accountId);
 
     return Response.json({ success: true });
   } catch (error) {
