@@ -10,8 +10,8 @@
     {
       "name": "memwal",
       "source": "./packages/mcp/plugin",
-      "description": "Automatic Walrus Memory — proactive recall and durable-fact saving via the MemWal MCP + lifecycle hooks.",
-      "version": "0.0.6"
+      "description": "Walrus Memory for Claude Code: MCP tools, delegate-key setup guidance, slash commands, and lifecycle hooks for durable encrypted memory.",
+      "version": "0.0.7"
     }
   ]
 }

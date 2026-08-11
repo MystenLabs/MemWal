@@ -307,10 +307,10 @@ export default function ConnectClaude() {
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title">Create a Walrus Memory account first</h2>
                             <p className="setup-classic-description">
-                                This wallet doesn't have a Walrus Memory account yet. Run through the one-time setup, then come back here.
+                                This wallet doesn't have a Walrus Memory account yet. Run through the one-time setup, then we'll bring you back here to finish connecting.
                             </p>
                             <div className="setup-classic-actions">
-                                <Link to="/setup" className="lp-btn-yellow">Create account</Link>
+                                <Link to="/setup" className="lp-btn-yellow">Create account and continue</Link>
                             </div>
                         </div>
                     )}

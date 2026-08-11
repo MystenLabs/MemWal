@@ -1,12 +1,25 @@
 {
   "name": "memwal",
-  "version": "0.0.6",
-  "description": "Automatic Walrus Memory for Claude Code — proactive recall and durable-fact saving via the MemWal MCP + lifecycle hooks.",
+  "displayName": "Walrus Memory",
+  "version": "0.0.7",
+  "description": "Walrus Memory for Claude Code: MCP tools, delegate-key setup guidance, slash commands, and lifecycle hooks for durable encrypted memory.",
   "author": {
-    "name": "Mysten Labs"
+    "name": "Mysten Labs",
+    "url": "https://memory.walrus.xyz"
   },
   "homepage": "https://memory.walrus.xyz",
-  "repository": "https://github.com/MystenLabs/MemWal",
+  "repository": "https://github.com/harrymove-ctrl/walrus-memory-claude-code-plugin",
   "license": "Apache-2.0",
-  "keywords": ["memory", "mcp", "walrus", "sui", "semantic-search"]
+  "keywords": [
+    "claude-code",
+    "memory",
+    "mcp",
+    "walrus",
+    "sui",
+    "semantic-search"
+  ],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "hooks": "./hooks/hooks.json"
 }

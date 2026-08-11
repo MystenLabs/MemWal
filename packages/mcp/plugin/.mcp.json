@@ -2,7 +2,15 @@
   "mcpServers": {
     "memwal": {
       "command": "npx",
-      "args": ["-y", "@mysten-incubation/memwal-mcp"]
+      "args": [
+        "-y",
+        "@mysten-incubation/memwal-mcp",
+        "--label",
+        "Claude Code Plugin"
+      ],
+      "env": {
+        "MEMWAL_CLIENT_LABEL": "Claude Code Plugin"
+      }
     }
   }
 }
