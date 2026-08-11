@@ -85,6 +85,23 @@ matches = client.recall(RecallParams(query="food allergies"))
 client.close()
 ```
 
+### Offline tests and CI
+
+`MemWalMock` and `MemWalMockSync` implement the common memory API in process. They require no credentials, relayer, chain, or paid storage and use deterministic token-overlap ranking.
+
+```python
+from memwal import MemWalMock, RecallParams
+
+async def test_memory_flow():
+    memwal = MemWalMock.create(namespace="test-user")
+    await memwal.remember_and_wait("The user prefers dark mode")
+
+    result = await memwal.recall(RecallParams(query="display preference"))
+    assert "dark mode" in result.results[0].text
+```
+
+The mock supports remember/job polling, bulk remember, recall, analyze, embed, ask, health, restore, `forget(blob_id)`, and `clear(namespace)`. For deterministic behavior, `analyze` stores its full input as one fact instead of invoking an LLM extractor. Its simple relevance score is for application tests, not production search-quality evaluation.
+
 ### Context Manager
 
 ```python
