@@ -19,6 +19,11 @@ import {
   verifyAndConsumeEnokiChallenge,
 } from "../lib/enoki-challenge";
 import { SharedRedisUnavailableError } from "@/shared/lib/shared-redis";
+import {
+  assertDelegateAccountBinding,
+  DelegateAccountBindingError,
+  deriveDelegatePublicKeyHex,
+} from "../lib/delegate-account";
 
 // Canonical Sui address: 0x + 64 hex. Reject malformed input at the boundary so
 // it never reaches normalizeSuiAddress (which would silently left-pad garbage
@@ -155,8 +160,8 @@ export const authRouter = router({
       suiAddress: suiAddressSchema,
       challengeId: z.string().min(1),
       signature: z.string().min(1),
-      privateKey: z.string().optional(),
-      accountId: z.string().optional(),
+      privateKey: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
+      accountId: suiAddressSchema.optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const { challengeId, signature, privateKey, accountId } = input;
@@ -214,6 +219,13 @@ export const authRouter = router({
           throw new TRPCError({ code: "BAD_REQUEST", message: "privateKey and accountId required" });
         }
 
+        const delegatePublicKey = await deriveDelegatePublicKeyHex(privateKey);
+        await assertDelegateAccountBinding({
+          accountId,
+          owner: suiAddress,
+          publicKeyHex: delegatePublicKey,
+        });
+
         const user = await authService.upsertEnokiUser(ctx.db, {
           suiAddress, delegatePrivateKey: privateKey, delegateAccountId: accountId,
         });
@@ -233,6 +245,9 @@ export const authRouter = router({
         if (error instanceof TRPCError) throw error;
         if (error instanceof DelegateCredentialConflictError) {
           throw new TRPCError({ code: "CONFLICT", message: error.message });
+        }
+        if (error instanceof DelegateAccountBindingError) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: error.message });
         }
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
@@ -353,7 +368,7 @@ export const authRouter = router({
   connectDelegateKey: procedure
     .input(z.object({
       privateKey: z.string().regex(/^[0-9a-f]{64}$/i, "Must be 64 hex characters"),
-      accountId: z.string().min(1),
+      accountId: suiAddressSchema,
     }))
     .mutation(async ({ ctx, input }) => {
       const { privateKey, accountId } = input;
@@ -374,6 +389,10 @@ export const authRouter = router({
           privateKey.match(/.{2}/g)!.map((b) => parseInt(b, 16))
         );
         const pubKeyBytes = ed.getPublicKey(privKeyBytes);
+        const publicKeyHex = Array.from(pubKeyBytes)
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("");
+        await assertDelegateAccountBinding({ accountId, publicKeyHex });
 
         const { blake2b } = await import("@noble/hashes/blake2.js");
         const addrInput = new Uint8Array(33);
@@ -401,6 +420,9 @@ export const authRouter = router({
         if (error instanceof TRPCError) throw error;
         if (error instanceof DelegateCredentialConflictError) {
           throw new TRPCError({ code: "CONFLICT", message: error.message });
+        }
+        if (error instanceof DelegateAccountBindingError) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: error.message });
         }
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
