@@ -491,7 +491,11 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
-            restore_requests_per_owner_per_minute: env_positive_u64(
+            // `env_number`, not `env_positive_u64`: `0` is a meaningful,
+            // documented value here (disables `check_restore_call_rate_limit`
+            // entirely) — `env_positive_u64` would silently coerce it back
+            // to the default, making that escape hatch unreachable.
+            restore_requests_per_owner_per_minute: env_number(
                 "RESTORE_REQUESTS_PER_OWNER_PER_MINUTE",
                 10,
             ),

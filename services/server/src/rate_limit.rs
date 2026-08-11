@@ -690,10 +690,13 @@ fn stable_hash_i64(s: &str) -> i64 {
 /// a dedicated, owner-keyed guard on top, reusing the same atomic
 /// sliding-window primitive the account limiter already uses.
 ///
-/// Deliberately keyed only by `owner` + call frequency — it does not
-/// inspect, record, or reason about who created/uploaded/relayed any blob
-/// (see GH #501: Henry explicitly rejected an uploader/relayer allowlist as
-/// the fix direction).
+/// Deliberately keyed only by `owner` + call frequency — this guard itself
+/// does not inspect, record, or reason about who created/uploaded/relayed
+/// any blob (see GH #501: Henry explicitly rejected an uploader/relayer
+/// allowlist as *this* guard's fix direction). A separate mechanism,
+/// `verifyBlobUploaderProvenance` in the sidecar's `walrus-query.ts`, does
+/// check uploader provenance upstream of this — see that function's
+/// doc-comment for why it exists independently of the decision made here.
 ///
 /// Fails OPEN (logs a warning and allows the call) on a Redis error,
 /// consistent with `rate_limit_middleware`'s graceful-degrade philosophy for
@@ -702,6 +705,44 @@ fn stable_hash_i64(s: &str) -> i64 {
 /// (Contrast with `sponsor_rate_limit_middleware`, which fails closed
 /// because it guards the unauthenticated, deployment-wide sponsor budget.)
 ///
+/// Shared "single-window, per-key" wrapper around `check_and_record_window`:
+/// classifies the result, records the denial metric, logs, and fails open on
+/// a Redis error. Factored out so a caller like
+/// `check_restore_call_rate_limit` doesn't hand-copy the
+/// check/log/fail-open boilerplate that already exists inline in
+/// `rate_limit_middleware`'s per-account layer and in the global
+/// sponsor/account limiters below.
+async fn check_owner_window_limit(
+    redis: &mut redis::aio::MultiplexedConnection,
+    scope: &str,
+    key: &str,
+    window_start: f64,
+    now: f64,
+    limit: i64,
+    weight: i64,
+    ttl_seconds: i64,
+    owner: &str,
+    deny_message: impl FnOnce() -> String,
+) -> Result<(), AppError> {
+    match check_and_record_window(redis, key, window_start, now, limit, weight, ttl_seconds).await {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial(scope);
+            tracing::warn!(
+                "rate limit [{}]: owner={} denied (limit={}/min)",
+                scope,
+                owner,
+                limit
+            );
+            Err(AppError::RateLimited(deny_message()))
+        }
+        Ok(WindowCheckResult::Allowed) => Ok(()),
+        Err(e) => {
+            tracing::warn!("rate limit [{}] Redis error, failing open: {}", scope, e);
+            Ok(())
+        }
+    }
+}
+
 /// `restore_requests_per_owner_per_minute == 0` disables the guard.
 pub(crate) async fn check_restore_call_rate_limit(
     state: &crate::types::AppState,
@@ -717,35 +758,19 @@ pub(crate) async fn check_restore_call_rate_limit(
     let key = format!("rate:restore-call:{owner}");
     let window_start = now - 60_000.0; // 1-min window (ms)
 
-    match check_and_record_window(
+    check_owner_window_limit(
         &mut redis,
+        "restore_call",
         &key,
         window_start,
         now,
         limit as i64,
         1,   // weight = 1 per restore() call
         120, // TTL 2 min
+        owner,
+        || format!("restore called too frequently; limit is {} calls/min", limit),
     )
     .await
-    {
-        Ok(WindowCheckResult::Denied) => {
-            crate::observability::record_rate_limit_denial("restore_call");
-            tracing::warn!(
-                "rate limit [restore-call]: owner={} denied (limit={}/min)",
-                owner,
-                limit
-            );
-            Err(AppError::RateLimited(format!(
-                "restore called too frequently; limit is {} calls/min",
-                limit
-            )))
-        }
-        Ok(WindowCheckResult::Allowed) => Ok(()),
-        Err(e) => {
-            tracing::warn!("rate limit [restore-call] Redis error, failing open: {}", e);
-            Ok(())
-        }
-    }
 }
 
 // ============================================================

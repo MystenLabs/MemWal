@@ -121,6 +121,13 @@ pub async fn stats(
 // ============================================================
 
 /// GET /health
+///
+/// Public and unauthenticated by design (registered under `public_routes`
+/// in `main.rs`) — it does not accept or validate credentials, so a `200`
+/// here means only "the server process is up," not "your delegate
+/// key/account ID are valid." A caller preflighting credentials before a
+/// signed call should not treat this as a substitute for that call
+/// succeeding (WALM-318).
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -431,6 +438,16 @@ fn paginate_missing_blobs(all_missing: Vec<String>, limit: usize) -> (Vec<String
     (page, truncated)
 }
 
+/// Clamp `/api/restore`'s `body.limit` to a sane range (GH #501 / WALM-299).
+///
+/// Ceiling of 100 mirrors `/api/ask`'s `body.limit.unwrap_or(5).min(100)`.
+/// Floor of 1 matters too: the sidecar's query-blobs route treats `limit: 0`
+/// as "no limit supplied" and falls back to an *unbounded* raw chain scan,
+/// so passing 0 straight through would defeat this clamp's entire purpose.
+fn clamp_restore_limit(limit: usize) -> usize {
+    limit.clamp(1, 100)
+}
+
 /// POST /api/restore
 ///
 /// Restore a namespace from Walrus:
@@ -455,13 +472,11 @@ pub async fn restore(
     // this is on top of the generic account rate limiter.
     crate::rate_limit::check_restore_call_rate_limit(&state, owner).await?;
 
-    // GH #501 / WALM-299: cap `limit` the same way `/api/ask` caps its
-    // `limit` (`body.limit.unwrap_or(5).min(100)`) — without this, a
-    // misbehaving or malicious caller could request an unbounded number of
-    // blobs to download + SEAL-decrypt in a single call. The sidecar's own
-    // gRPC discovery cap (~100 items) is an incidental backstop, not a
-    // deliberate one, so this clamp is the real ceiling.
-    let limit = body.limit.min(100);
+    // GH #501 / WALM-299: without this, a misbehaving or malicious caller
+    // could request an unbounded number of blobs to download + SEAL-decrypt
+    // in a single call. See `clamp_restore_limit` for why both a floor and
+    // a ceiling are required.
+    let limit = clamp_restore_limit(body.limit);
     tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
 
     // Prefer the client-built SessionKey; fall back to legacy
@@ -809,7 +824,7 @@ pub async fn restore(
 #[cfg(test)]
 mod tests {
     use super::encode_untrusted_memory_context;
-    use crate::types::RecallResult;
+    use crate::types::{RecallResult, RestoreResponse};
 
     // ── Memory context stays structured, untrusted JSON ──────────
 
@@ -870,28 +885,69 @@ mod tests {
     //
     // `RestoreRequest.limit` (plain `usize`, serde default 10 — unlike
     // `/api/ask`'s `Option<usize>`) previously had no upper bound in
-    // `restore()`. Mirrors `ask_limit_caps_at_one_hundred` against the
-    // production expression `body.limit.min(100)`.
+    // `restore()`. Calls the real `super::clamp_restore_limit` production
+    // function directly, so a regression in the clamp itself fails this
+    // test rather than a hand-copied assertion of the same expression.
 
     #[test]
-    fn restore_limit_caps_at_one_hundred() {
-        // Mirror the production expression: body.limit.min(100)
+    fn restore_limit_clamps_to_one_hundred_with_a_floor_of_one() {
         for (input, expected) in [
             (10, 10),   // serde default, unclamped
-            (0, 0),     // pass-through (caller intent)
+            (0, 1),     // 0 must not pass through: the sidecar treats
+            // `limit: 0` as "unbounded", so the floor is required
+            (1, 1),     // at floor
             (50, 50),   // under cap
             (100, 100), // at cap
             (101, 100), // over cap → clamped
             (10_000, 100),
             (usize::MAX, 100),
         ] {
-            let clamped = input.min(100);
+            let clamped = super::clamp_restore_limit(input);
             assert_eq!(
                 clamped, expected,
                 "restore limit clamp: input={} expected={} got={}",
                 input, expected, clamped
             );
         }
+    }
+
+    // ── restore() missing-blob pagination (WALM-317 / GH #501) ──────────
+    //
+    // restore()'s on-chain-missing-blob list is sliced to `limit` before
+    // being restored, with no signal to the caller when there was more to
+    // restore than fit. Exercises the real production function directly
+    // (rather than re-deriving `len() > limit` as a standalone predicate)
+    // so a wiring bug in that function fails this test, not just a
+    // hand-copied assertion of the same expression.
+
+    #[test]
+    fn paginate_missing_blobs_flags_truncation_and_slices_to_limit() {
+        let all_missing: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+
+        let (page, truncated) = super::paginate_missing_blobs(all_missing.clone(), 2);
+        assert_eq!(page, vec!["a".to_string(), "b".to_string()]);
+        assert!(truncated, "more missing than limit must flag truncated");
+
+        let (page, truncated) = super::paginate_missing_blobs(all_missing.clone(), 3);
+        assert_eq!(page, all_missing, "exactly at limit returns everything");
+        assert!(!truncated);
+
+        let (page, truncated) = super::paginate_missing_blobs(all_missing, 10);
+        assert_eq!(page.len(), 3, "under limit returns everything");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn restore_response_carries_truncated_field() {
+        let resp = RestoreResponse {
+            restored: 5,
+            skipped: 2,
+            total: 20,
+            namespace: "ns".to_string(),
+            owner: "0xabc".to_string(),
+            truncated: true,
+        };
+        assert!(resp.truncated);
     }
 
     // ── /api/forget + /api/stats empty-namespace validation ─────────────

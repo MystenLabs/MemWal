@@ -11,14 +11,22 @@
 -- and re-decrypt-attempted on *every* future restore() call for that
 -- owner+namespace, forever — an unbounded, repeated processing cost.
 --
--- This table is a bounded-processing / retry-avoidance cache, NOT an
--- uploader/origin/relayer record. It is keyed purely by (owner, namespace,
--- blob_id) + the *outcome* of this owner's own decrypt/validation attempt.
--- It never inspects, stores, or reasons about who created, uploaded, or
--- relayed a blob, and does not restrict the self-host-then-migrate-to a
--- managed-relayer path in any way (see Henry's Slack rejection of an
--- uploader allowlist on #501 — this fix is deliberately "bounded processing
--- + rate limiting" only).
+-- This table itself is a bounded-processing / retry-avoidance cache, NOT
+-- an uploader/origin/relayer record. It is keyed purely by (owner,
+-- namespace, blob_id) + the *outcome* of this owner's own decrypt/validation
+-- attempt. It never inspects, stores, or reasons about who created,
+-- uploaded, or relayed a blob (see Henry's Slack rejection of an uploader
+-- allowlist on #501 — this table is deliberately "bounded processing +
+-- rate limiting" only, and does not restrict the self-host-then-migrate-to-
+-- a-managed-relayer path).
+--
+-- A *separate* mechanism, `verifyBlobUploaderProvenance` in
+-- `sidecar/routes/walrus-query.ts`, does check the mint/transfer transaction
+-- sender against `TRUSTED_UPLOADER_ADDRESSES` and excludes untrusted blobs
+-- from `/walrus/query-blobs` results before they ever reach this table or
+-- `restore()`. That gate operates independently, upstream of everything
+-- described here — do not read this comment as "no part of this codebase
+-- looks at who uploaded a blob."
 --
 -- Only *permanent* failures are recorded here (see
 -- `seal::DecryptOutcome::permanent_from_error` — deterministic decrypt

@@ -22,7 +22,16 @@ import { errorMessage, mapConcurrent } from "../util.js";
 // Provenance gate — WALM-299 / GH #501
 // ============================================================
 
-type ProvenanceClient = Pick<typeof suiClient, "getTransactionBlock">;
+// Narrow, non-generic shape (rather than `Pick<typeof suiClient, "getTransaction">`,
+// whose generic call signature makes hand-written test mocks unwieldy) covering only
+// the one call verifyBlobUploaderProvenance actually makes. The real `suiClient`
+// satisfies this structurally, so no cast is needed at the call site below.
+export type ProvenanceClient = {
+    getTransaction(input: { digest: string; include: { transaction: true } }): Promise<{
+        Transaction?: { transaction?: { sender?: string | null } };
+        FailedTransaction?: { transaction?: { sender?: string | null } };
+    }>;
+};
 
 /**
  * Result of verifying a blob's uploader provenance.
@@ -54,10 +63,12 @@ export async function verifyBlobUploaderProvenance(
     if (!previousTransaction) return { kind: "unknown" };
 
     try {
-        const tx = await withRpcRetry(`[provenance] getTransactionBlock ${previousTransaction.slice(0, 10)}…`, () =>
-            client.getTransactionBlock({ digest: previousTransaction, options: { showSender: true } })
+        const tx = await withRpcRetry(`[provenance] getTransaction ${previousTransaction.slice(0, 10)}…`, () =>
+            client.getTransaction({ digest: previousTransaction, include: { transaction: true } })
         );
-        const sender = tx.transaction?.data?.sender;
+        // A reverted/failed transaction still had a real sender who submitted it,
+        // so check both branches of the discriminated union.
+        const sender = (tx.Transaction ?? tx.FailedTransaction)?.transaction?.sender;
         if (!sender) return { kind: "unknown" };
         const canonicalSender = normalizeSuiAddress(sender);
         if (getTrustedUploaderAddresses().includes(canonicalSender)) {

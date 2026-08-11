@@ -33,6 +33,7 @@ import {
     readBlobObject,
     strictWalrusEpoch,
     verifyBlobUploaderProvenance,
+    type ProvenanceClient,
     type ProvenanceResult,
 } from "../sidecar/routes/walrus-query.js";
 import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sidecar/blob-metadata.js";
@@ -623,73 +624,80 @@ const SERVER_ADDR = TEST_SERVER_ADDR;
 const ATTACKER_ADDR = "0x" + "b2".repeat(32);
 const MIGRATION_WRITER = TEST_MIGRATION_WRITER;
 
-const makeClient = (tx: unknown) => {
+// Shape matches SuiGrpcClient's real `getTransaction` response
+// (SuiClientTypes.TransactionResult): a `$kind`-discriminated union of
+// `{ Transaction }` / `{ FailedTransaction }`, each carrying
+// `transaction: { sender, ... }` when `include.transaction` is requested —
+// not the JSON-RPC-era `{ transaction: { data: { sender } } }` shape.
+const makeClient = (sender: unknown): ProvenanceClient => {
     _clearTrustedUploaderAddressesCache();
     return {
-        async getTransactionBlock({ digest }: { digest: string }) {
+        async getTransaction({ digest }) {
             if (digest === "trusted-tx") {
-                return tx;
+                return { Transaction: { transaction: { sender: sender as string | null | undefined } } };
             }
             throw new Error("not found");
         },
-    } as unknown as { getTransactionBlock: (opts: { digest: string; options: unknown }) => Promise<unknown> };
+    };
 };
 
 test("verifyBlobUploaderProvenance: trusted server wallet → kind=trusted", async () => {
-    const result = await verifyBlobUploaderProvenance(
-        "trusted-tx",
-        makeClient({ transaction: { data: { sender: SERVER_ADDR } } })
-    );
+    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(SERVER_ADDR));
     assert.equal(result.kind, "trusted");
 });
 
 test("verifyBlobUploaderProvenance: trusted migration writer → kind=trusted", async () => {
-    const result = await verifyBlobUploaderProvenance(
-        "trusted-tx",
-        makeClient({ transaction: { data: { sender: MIGRATION_WRITER } } })
-    );
+    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(MIGRATION_WRITER));
     assert.equal(result.kind, "trusted");
 });
 
 test("verifyBlobUploaderProvenance: attacker address → kind=untrusted with sender", async () => {
-    const result = await verifyBlobUploaderProvenance(
-        "trusted-tx",
-        makeClient({ transaction: { data: { sender: ATTACKER_ADDR } } })
-    );
+    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(ATTACKER_ADDR));
     assert.equal(result.kind, "untrusted");
     assert.equal(result.sender, ATTACKER_ADDR.toLowerCase());
 });
 
 test("verifyBlobUploaderProvenance: sender mixed case → canonicalized before check", async () => {
-    const result = await verifyBlobUploaderProvenance(
-        "trusted-tx",
-        makeClient({ transaction: { data: { sender: SERVER_ADDR.toUpperCase() } } })
-    );
+    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(SERVER_ADDR.toUpperCase()));
     assert.equal(result.kind, "trusted");
 });
 
 test("verifyBlobUploaderProvenance: null previousTransaction → kind=unknown", async () => {
-    const result = await verifyBlobUploaderProvenance(null, makeClient({}));
+    const result = await verifyBlobUploaderProvenance(null, makeClient(undefined));
     assert.equal(result.kind, "unknown");
 });
 
 test("verifyBlobUploaderProvenance: undefined previousTransaction → kind=unknown", async () => {
-    const result = await verifyBlobUploaderProvenance(undefined, makeClient({}));
+    const result = await verifyBlobUploaderProvenance(undefined, makeClient(undefined));
     assert.equal(result.kind, "unknown");
 });
 
 test("verifyBlobUploaderProvenance: RPC error → kind=unknown (fail open)", async () => {
-    const result = await verifyBlobUploaderProvenance("unverifiable-tx", {
-        async getTransactionBlock() {
+    const client: ProvenanceClient = {
+        async getTransaction() {
             throw new Error("RPC unavailable");
         },
-    } as unknown as { getTransactionBlock: (opts: { digest: string; options: unknown }) => Promise<unknown> });
+    };
+    const result = await verifyBlobUploaderProvenance("unverifiable-tx", client);
     assert.equal(result.kind, "unknown");
 });
 
 test("verifyBlobUploaderProvenance: tx exists but sender missing → kind=unknown", async () => {
-    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient({ transaction: { data: {} } }));
+    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(undefined));
     assert.equal(result.kind, "unknown");
+});
+
+test("verifyBlobUploaderProvenance: reverted transaction still reports its real sender", async () => {
+    _clearTrustedUploaderAddressesCache();
+    const client: ProvenanceClient = {
+        async getTransaction({ digest }) {
+            if (digest !== "trusted-tx") throw new Error("not found");
+            return { FailedTransaction: { transaction: { sender: ATTACKER_ADDR } } };
+        },
+    };
+    const result = await verifyBlobUploaderProvenance("trusted-tx", client);
+    assert.equal(result.kind, "untrusted");
+    assert.equal(result.sender, ATTACKER_ADDR.toLowerCase());
 });
 
 test("verifyBlobUploaderProvenance: returns correct ProvenanceResult discriminated union types", () => {
