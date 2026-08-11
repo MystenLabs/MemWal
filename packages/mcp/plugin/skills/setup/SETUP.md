@@ -30,11 +30,41 @@ The plugin ships these Claude Code components:
 - `.claude-plugin/plugin.json`: plugin metadata for Claude Code and marketplace validation.
 - `.mcp.json`: starts the Walrus Memory MCP server with `npx -y @mysten-incubation/memwal-mcp`.
 - `skills/setup/SKILL.md`: setup and troubleshooting instructions for Claude.
-- `commands/remember.md`: `/memwal:remember <fact>` helper.
-- `commands/recall.md`: `/memwal:recall <query>` helper.
+- `commands/`: slash-command shortcuts for setup, health, remember, recall, analyze, restore, and logout.
 - `hooks/hooks.json`: lifecycle hooks that remind Claude to recall and save durable context.
 
 The MCP server uses the current custom-header auth path. After login, the MCP package signs relayer requests with the delegate key and sends the existing account-bound headers expected by the relayer.
+
+## Commands And Tools
+
+The slash commands are Claude Code conveniences. The MCP server supports more than `/remember` and `/recall`.
+
+Slash commands included in this plugin:
+
+| Command | Purpose |
+| --- | --- |
+| `/memwal:setup` | Connect Walrus Memory and verify the tools. |
+| `/memwal:health` | Check credential and relayer health. |
+| `/memwal:remember` | Save one durable fact. |
+| `/memwal:recall` | Search memory. |
+| `/memwal:analyze` | Extract and save multiple durable facts from text. |
+| `/memwal:restore` | Rebuild the search index for a namespace. |
+| `/memwal:logout` | Remove local credentials. |
+
+MCP tools exposed by the server:
+
+| Tool | Purpose |
+| --- | --- |
+| `memwal_login` | Start browser login and create local credentials. |
+| `memwal_logout` | Remove local credentials. |
+| `memwal_health` | Check server/auth health. |
+| `memwal_remember` | Save one durable fact. |
+| `memwal_remember_bulk` | Save multiple durable facts. |
+| `memwal_recall` | Semantic memory search. |
+| `memwal_analyze` | Extract durable facts from a passage and save them. |
+| `memwal_restore` | Rebuild a namespace search index from Walrus. |
+
+Codex, OpenCode, Cursor, Claude Desktop, and other MCP clients can use these MCP tools through config even when they cannot install Claude Code slash commands.
 
 ## Claude Code Plugin vs Other IDEs
 
