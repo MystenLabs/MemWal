@@ -6,6 +6,7 @@
 
 import { noteInsertSchema, idInputSchema } from "@/shared/db/type";
 import { z } from "zod";
+import { memoryTextWithinLimit } from "./memory-policy";
 
 // ═══════════════════════════════════════════════════════════════
 // NOTE CRUD
@@ -51,7 +52,10 @@ export const listNotesInput = z.object({
 
 export const detectMemoriesInput = z.object({
   noteId: z.string().uuid(),
-  plainText: z.string().optional(), // Optional: use current editor content if provided
+  plainText: z
+    .string()
+    .refine(memoryTextWithinLimit, "Memory text is too large")
+    .optional(), // Optional: use current editor content if provided
 });
 
 // ═══════════════════════════════════════════════════════════════

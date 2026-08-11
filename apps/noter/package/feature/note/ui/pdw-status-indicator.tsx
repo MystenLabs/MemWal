@@ -41,7 +41,7 @@ export function PDWStatusIndicator() {
             </div>
           </TooltipTrigger>
           <TooltipContent>
-            <p className="text-xs">Walrus Memory not configured (MEMWAL_PRIVATE_KEY not set)</p>
+            <p className="text-xs">Walrus Memory is not connected for this session</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>

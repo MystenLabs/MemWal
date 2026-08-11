@@ -20,11 +20,11 @@ The environments were configured through the GitHub API. Run the following befor
 
 ```bash
 GH_TOKEN="$(gh auth token)" \
-  EXPECTED_MIGRATION_REVIEWER=harrymove-ctrl \
+  EXPECTED_MIGRATION_REVIEWERS=user:harrymove-ctrl \
   scripts/verify-migration-environments.sh
 ```
 
-The scheduled `verify-migration-environments` workflow performs the same check weekly. A missing environment is a failure: GitHub otherwise creates a referenced environment on first use without reviewer protection.
+The scheduled `verify-migration-environments` workflow performs the same check weekly. It requires the configured reviewer set to match the typed allowlist exactly (`user:<login>` or `team:<slug>`); GitHub treats multiple required reviewers as one-of, so any extra reviewer is a failure. A missing environment is also a failure: GitHub otherwise creates a referenced environment on first use without reviewer protection.
 
 ## Workflow boundaries
 

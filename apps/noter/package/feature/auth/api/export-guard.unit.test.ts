@@ -45,7 +45,11 @@ vi.mock("@/shared/lib/shared-redis", () => ({
 async function callerFor(userId: string | null) {
   const { authRouter } = await import("./route");
   // Minimal ctx matching the tRPC Context shape used by these procedures.
-  const ctx = { db: {}, userId, memwalKey: null, memwalAccountId: null };
+  const ctx = {
+    db: {},
+    request: new Request("http://localhost/api/trpc/auth"),
+    userId,
+  };
   return authRouter.createCaller(ctx as never);
 }
 

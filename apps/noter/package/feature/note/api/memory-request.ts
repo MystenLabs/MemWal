@@ -5,8 +5,12 @@ import { eq } from "drizzle-orm";
 import { db } from "@/shared/lib/db";
 import { users, walletSessions } from "@/shared/db/schema";
 import { requireSharedRedisClient } from "@/shared/lib/shared-redis";
+import {
+  MAX_MEMORY_TEXT_BYTES,
+  memoryTextWithinLimit,
+} from "./memory-policy";
 
-export const MAX_MEMORY_TEXT_BYTES = 64 * 1024;
+export { MAX_MEMORY_TEXT_BYTES } from "./memory-policy";
 const MEMORY_RATE_LIMIT_TTL_SECONDS = 60;
 const MEMORY_RATE_LIMIT_PER_USER = 30;
 const MEMORY_RATE_LIMIT_PER_IP = 60;
@@ -53,7 +57,7 @@ function trustedClientIp(req: Request): string | undefined {
   return candidate && isIP(candidate) ? candidate : undefined;
 }
 
-async function checkMemoryRateLimit(
+export async function checkMemoryRateLimit(
   req: Request,
   userId: string
 ): Promise<void> {
@@ -85,10 +89,11 @@ async function checkMemoryRateLimit(
   }
 }
 
-/** Authenticate first and return only credentials bound to that active session. */
-export async function authorizeMemoryRequest(req: Request): Promise<{
+/** Resolve only credentials bound to the active wallet session. */
+export async function resolveMemoryCredentials(req: Request): Promise<{
   key: string;
   accountId: string;
+  userId: string;
 }> {
   const sessionId = req.headers.get("x-session-id")?.trim();
   if (!sessionId || sessionId.length > 128) {
@@ -116,11 +121,21 @@ export async function authorizeMemoryRequest(req: Request): Promise<{
     );
   }
 
-  await checkMemoryRateLimit(req, user.id);
   return {
     key: user.delegatePrivateKey,
     accountId: user.delegateAccountId,
+    userId: user.id,
   };
+}
+
+/** Authenticate first, then consume the Redis-backed memory-write budget. */
+export async function authorizeMemoryRequest(req: Request): Promise<{
+  key: string;
+  accountId: string;
+}> {
+  const credentials = await resolveMemoryCredentials(req);
+  await checkMemoryRateLimit(req, credentials.userId);
+  return { key: credentials.key, accountId: credentials.accountId };
 }
 
 export async function readMemoryText(req: Request): Promise<string> {
@@ -139,7 +154,7 @@ export async function readMemoryText(req: Request): Promise<string> {
   if (typeof text !== "string" || !text.trim()) {
     throw new MemoryRequestError(400, "text is required");
   }
-  if (new TextEncoder().encode(text).byteLength > MAX_MEMORY_TEXT_BYTES) {
+  if (!memoryTextWithinLimit(text)) {
     throw new MemoryRequestError(413, "Memory text is too large");
   }
   return text;

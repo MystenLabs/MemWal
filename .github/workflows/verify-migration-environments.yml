@@ -18,5 +18,5 @@ jobs:
       - name: Verify migration ceremony environment protections
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_MIGRATION_REVIEWER: harrymove-ctrl
+          EXPECTED_MIGRATION_REVIEWERS: user:harrymove-ctrl
         run: scripts/verify-migration-environments.sh
