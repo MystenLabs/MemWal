@@ -892,8 +892,8 @@ mod tests {
     #[test]
     fn restore_limit_clamps_to_one_hundred_with_a_floor_of_one() {
         for (input, expected) in [
-            (10, 10),   // serde default, unclamped
-            (0, 1),     // 0 must not pass through: the sidecar treats
+            (10, 10), // serde default, unclamped
+            (0, 1),   // 0 must not pass through: the sidecar treats
             // `limit: 0` as "unbounded", so the floor is required
             (1, 1),     // at floor
             (50, 50),   // under cap

@@ -177,18 +177,24 @@ query BlobCreationTransaction($objectId: SuiAddress!) {
 
 const blobHistoryClient: BlobHistoryClient = {
     getTransaction: (digest) =>
-        withRpcRetry(`[query-blobs] archival transaction ${digest}`, () =>
-            suiGraphqlClient.getTransaction({
-                digest,
-                include: { effects: true, transaction: true },
-            })
+        withRpcRetry(
+            `[query-blobs] archival transaction ${digest}`,
+            () =>
+                suiGraphqlClient.getTransaction({
+                    digest,
+                    include: { effects: true, transaction: true },
+                }),
+            2
         ),
     getCreationTransaction: async (objectId) => {
-        const result: any = await withRpcRetry(`[query-blobs] creation version ${objectId}`, () =>
-            suiGraphqlClient.query({
-                query: CREATION_TRANSACTION_QUERY,
-                variables: { objectId },
-            })
+        const result: any = await withRpcRetry(
+            `[query-blobs] creation version ${objectId}`,
+            () =>
+                suiGraphqlClient.query({
+                    query: CREATION_TRANSACTION_QUERY,
+                    variables: { objectId },
+                }),
+            2
         );
         if (Array.isArray(result?.errors) && result.errors.length > 0) {
             throw new Error(`archival GraphQL lookup failed: ${result.errors[0]?.message ?? "unknown error"}`);
@@ -262,44 +268,30 @@ export async function filterTrustedBlobCandidates<
                           ? { trusted: true as const, reason: "trusted" as const, uploader }
                           : { trusted: false as const, reason: "provenance" as const, uploader }
                   );
-            return { blob, result, error: undefined as string | undefined };
+            return { blob, result };
         } catch (error: unknown) {
-            return { blob, result: null, error: errorMessage(error) };
+            // Abort this query on the first exhausted archival lookup rather
+            // than silently omitting a legitimate Blob or waiting for every
+            // remaining candidate to fail during an outage.
+            throw new Error(`unable to verify creation provenance for ${blob.objectId}: ${errorMessage(error)}`);
         }
     });
-    const unavailable = provenance.filter(({ error }) => error !== undefined);
-    if (unavailable.length > 0) {
-        sidecarLog("error", "walrus_query_blobs_provenance_unavailable", {
-            requestId,
-            owner: recipient,
-            failureCount: unavailable.length,
-            sample: unavailable.slice(0, 5).map(({ blob, error }) => ({
-                objectId: blob.objectId,
-                error,
-            })),
-        });
-        // Preserve fail-closed semantics without silently presenting a partial
-        // restore as complete. The endpoint fails so the caller can retry after
-        // the archival service recovers; no unverified Blob is ever returned.
-        throw new Error(`unable to verify Blob creation provenance (${unavailable.length} lookup failures)`);
-    }
-    const verified = provenance.filter((entry) => entry.result !== null);
-    const excluded = verified.filter(({ result }) => !result!.trusted);
+    const excluded = provenance.filter(({ result }) => !result.trusted);
     if (excluded.length > 0) {
         sidecarLog("warn", "walrus_query_blobs_untrusted_candidates_excluded", {
             requestId,
             owner: recipient,
             excludedCount: excluded.length,
-            ownershipMismatchCount: excluded.filter(({ result }) => result!.reason === "owner").length,
-            unverifiedProvenanceCount: excluded.filter(({ result }) => result!.reason === "provenance").length,
+            ownershipMismatchCount: excluded.filter(({ result }) => result.reason === "owner").length,
+            unverifiedProvenanceCount: excluded.filter(({ result }) => result.reason === "provenance").length,
             sample: excluded.slice(0, 5).map(({ blob, result }) => ({
                 objectId: blob.objectId,
-                uploader: result!.uploader,
-                reason: result!.reason,
+                uploader: result.uploader,
+                reason: result.reason,
             })),
         });
     }
-    return verified.filter(({ result }) => result!.trusted).map(({ blob }) => blob);
+    return provenance.filter(({ result }) => result.trusted).map(({ blob }) => blob);
 }
 
 /**

@@ -34,7 +34,19 @@ import { shortAddress } from "./util.js";
 export const suiClient = new SuiGrpcClient({ network: SUI_NETWORK, baseUrl: SUI_GRPC_URL });
 // Separate archival read path for immutable creation provenance. The regular
 // gRPC fullnode remains the low-latency path for current objects and writes.
-export const suiGraphqlClient = new SuiGraphQLClient({ network: SUI_NETWORK, url: SUI_GRAPHQL_URL });
+// Apply a transport timeout globally because the SDK's high-level
+// getTransaction() helper does not accept an AbortSignal.
+const ARCHIVAL_GRAPHQL_TIMEOUT_MS = 15_000;
+const archivalFetch: typeof fetch = (input, init) => {
+    const timeout = AbortSignal.timeout(ARCHIVAL_GRAPHQL_TIMEOUT_MS);
+    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    return fetch(input, { ...init, signal });
+};
+export const suiGraphqlClient = new SuiGraphQLClient({
+    network: SUI_NETWORK,
+    url: SUI_GRAPHQL_URL,
+    fetch: archivalFetch,
+});
 
 export function createSealClient(): SealClient {
     return new SealClient({

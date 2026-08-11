@@ -694,8 +694,8 @@ fn stable_hash_i64(s: &str) -> i64 {
 /// does not inspect, record, or reason about who created/uploaded/relayed
 /// any blob (see GH #501: Henry explicitly rejected an uploader/relayer
 /// allowlist as *this* guard's fix direction). A separate mechanism,
-/// `verifyBlobUploaderProvenance` in the sidecar's `walrus-query.ts`, does
-/// check uploader provenance upstream of this — see that function's
+/// `findBlobCreationSender` in the sidecar's `walrus-query.ts`, checks
+/// immutable creation provenance upstream of this — see that function's
 /// doc-comment for why it exists independently of the decision made here.
 ///
 /// Fails OPEN (logs a warning and allows the call) on a Redis error,
@@ -768,7 +768,12 @@ pub(crate) async fn check_restore_call_rate_limit(
         1,   // weight = 1 per restore() call
         120, // TTL 2 min
         owner,
-        || format!("restore called too frequently; limit is {} calls/min", limit),
+        || {
+            format!(
+                "restore called too frequently; limit is {} calls/min",
+                limit
+            )
+        },
     )
     .await
 }

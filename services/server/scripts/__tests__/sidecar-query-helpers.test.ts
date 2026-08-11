@@ -543,7 +543,7 @@ test("provenance transport failures fail the query instead of silently dropping 
         filterTrustedBlobCandidates([blob], recipient, "test-request", async () => {
             throw new Error("archive timeout");
         }),
-        /unable to verify Blob creation provenance \(1 lookup failures\)/
+        /unable to verify creation provenance.*archive timeout/
     );
 });
 
