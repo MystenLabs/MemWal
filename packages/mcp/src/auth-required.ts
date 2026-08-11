@@ -81,7 +81,7 @@ const TOOL_DEFINITIONS = [
     {
         name: "memwal_restore",
         description:
-            "Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts only.",
+            "Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts and truncated status; call again with a higher limit when truncated=true.",
         inputSchema: {
             type: "object",
             properties: {

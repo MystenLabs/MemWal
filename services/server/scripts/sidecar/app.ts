@@ -41,7 +41,7 @@ export function createSidecarApp(mode: "full" | "writer" = SIDECAR_ROUTE_MODE): 
     app.use(stripCorsMiddleware);
 
     // Health check — placed before auth middleware so it is always reachable.
-    registerHealthRoute(app);
+    registerHealthRoute(app, mode === "full");
 
     // MCP routes — `/mcp/sse` + `/mcp/messages`. Mounted BEFORE the shared-secret
     // middleware: MCP traffic is forwarded by the Rust relayer with the end-user's

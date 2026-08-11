@@ -37,6 +37,11 @@ export const SUI_NETWORK = parseSuiNetwork(process.env.SUI_NETWORK);
 // One transport for reads and writes. Production supplies the co-located
 // Mysten gRPC endpoint; the public fullnode remains a development default.
 export const SUI_GRPC_URL = process.env.SUI_GRPC_URL?.trim() || `https://fullnode.${SUI_NETWORK}.sui.io`;
+// Provenance lookups need historical transactions/object versions that fullnodes
+// are allowed to prune. Sui's GraphQL service retains that history; deployments
+// may point this at a private archival GraphQL indexer.
+export const SUI_GRAPHQL_URL =
+    process.env.SUI_GRAPHQL_URL?.trim() || `https://graphql.${SUI_NETWORK}.sui.io/graphql`;
 export const SUI_CHAIN_IDENTIFIER =
     SUI_NETWORK === "testnet"
     ? "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD"
@@ -105,7 +110,8 @@ if (new Set(SERVER_SUI_ADDRESSES).size !== SERVER_SUI_ADDRESSES.length) {
 
 // Restore provenance trusts the normal server wallet pool plus historical
 // migration writers. Operators must populate TRUSTED_UPLOADER_ADDRESSES from
-// migration.upload_writer_shards / collect-live-writer-addresses.sh before
+// migration.upload_writer_shards, or pass the JSON emitted by
+// collect-live-writer-addresses.sh as TRUSTED_UPLOADER_INVENTORY_JSON before
 // cutover; request data can never extend this set.
 export function parseTrustedUploaderAddresses(raw: string): string[] {
     return [
@@ -124,9 +130,30 @@ export function parseTrustedUploaderAddresses(raw: string): string[] {
     ];
 }
 
+export function parseTrustedUploaderInventory(raw: string): string[] {
+    if (!raw.trim()) return [];
+    let inventory: unknown;
+    try {
+        inventory = JSON.parse(raw);
+    } catch (error) {
+        throw new Error(`invalid TRUSTED_UPLOADER_INVENTORY_JSON: ${error instanceof Error ? error.message : error}`);
+    }
+    if (!inventory || typeof inventory !== "object" || !Array.isArray((inventory as any).writers)) {
+        throw new Error("invalid TRUSTED_UPLOADER_INVENTORY_JSON: writers array is required");
+    }
+    const addresses = (inventory as any).writers.flatMap((writer: any) =>
+        Array.isArray(writer?.addresses) ? writer.addresses : []
+    );
+    if (!addresses.every((address: unknown) => typeof address === "string")) {
+        throw new Error("invalid TRUSTED_UPLOADER_INVENTORY_JSON: every writer address must be a string");
+    }
+    return parseTrustedUploaderAddresses(addresses.join(","));
+}
+
 export const TRUSTED_WALRUS_UPLOADER_SET: ReadonlySet<string> = new Set([
     ...SERVER_SUI_ADDRESSES.map((address) => normalizeSuiAddress(address)),
     ...parseTrustedUploaderAddresses(process.env.TRUSTED_UPLOADER_ADDRESSES ?? ""),
+    ...parseTrustedUploaderInventory(process.env.TRUSTED_UPLOADER_INVENTORY_JSON ?? ""),
 ]);
 
 // ============================================================

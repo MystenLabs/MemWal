@@ -13,7 +13,7 @@ import {
     TRUSTED_WALRUS_UPLOADER_SET,
     WALRUS_PACKAGE_ID,
 } from "../config.js";
-import { getWalrusClient, refreshWalrusClientIfStale, suiClient } from "../clients.js";
+import { getWalrusClient, refreshWalrusClientIfStale, suiClient, suiGraphqlClient } from "../clients.js";
 import { requestIdFor, sidecarLog } from "../log.js";
 import { withRpcRetry } from "../retry/rpc.js";
 import { errorMessage, mapConcurrent } from "../util.js";
@@ -134,7 +134,7 @@ type RawBlobObj = {
 
 type BlobHistoryClient = {
     getTransaction(digest: string): Promise<any>;
-    getPreviousTransaction(objectId: string, version: string): Promise<string | null>;
+    getCreationTransaction(objectId: string): Promise<string | null>;
 };
 
 function finalizedTransaction(response: any): any | null {
@@ -145,53 +145,62 @@ function finalizedTransaction(response: any): any | null {
 }
 
 /**
- * Walk an object's immutable version history to the transaction that created
- * its UID and return that transaction's sender. The current object's
- * `previousTransaction` is insufficient: metadata attachment and ownership
- * transfer both mutate a Blob after registration.
+ * Resolve the immutable UID-creation transaction through archival GraphQL and
+ * return its sender. The current object's `previousTransaction` is insufficient:
+ * metadata attachment, lease renewal and ownership transfer all mutate a Blob.
  */
 export async function findBlobCreationSender(
     blob: Pick<RawBlobObj, "objectId" | "previousTransaction">,
-    client: BlobHistoryClient,
-    maxHops = 64
+    client: BlobHistoryClient
 ): Promise<string | null> {
-    let digest = blob.previousTransaction;
-    for (let hop = 0; digest && hop < maxHops; hop += 1) {
-        const transaction = finalizedTransaction(await client.getTransaction(digest));
-        if (!transaction?.status?.success) return null;
-        const changed = transaction.effects?.changedObjects?.find(
-            (object: any) => normalizedSuiAddressOrNull(object?.objectId) === normalizedSuiAddressOrNull(blob.objectId)
-        );
-        if (!changed) return null;
-        if (changed.idOperation === "Created") {
-            return normalizedSuiAddressOrNull(transaction.transaction?.sender);
-        }
-        if (changed.inputState !== "Exists" || changed.inputVersion === null || changed.inputVersion === undefined) {
-            return null;
-        }
-        digest = await client.getPreviousTransaction(blob.objectId, String(changed.inputVersion));
-    }
-    return null;
+    const digest = await client.getCreationTransaction(blob.objectId);
+    if (!digest) return null;
+    const transaction = finalizedTransaction(await client.getTransaction(digest));
+    if (!transaction?.status?.success) return null;
+    const created = transaction.effects?.changedObjects?.find(
+        (object: any) =>
+            normalizedSuiAddressOrNull(object?.objectId) === normalizedSuiAddressOrNull(blob.objectId) &&
+            object?.idOperation === "Created"
+    );
+    return created ? normalizedSuiAddressOrNull(transaction.transaction?.sender) : null;
 }
+
+const CREATION_TRANSACTION_QUERY = `
+query BlobCreationTransaction($objectId: SuiAddress!) {
+  object(address: $objectId) {
+    previousTransaction { digest }
+    objectVersionsBefore(first: 1) {
+      nodes { previousTransaction { digest } }
+    }
+  }
+}`;
 
 const blobHistoryClient: BlobHistoryClient = {
     getTransaction: (digest) =>
-        withRpcRetry(`[query-blobs] transaction ${digest}`, () =>
-            (suiClient as any).getTransaction({
+        withRpcRetry(`[query-blobs] archival transaction ${digest}`, () =>
+            suiGraphqlClient.getTransaction({
                 digest,
                 include: { effects: true, transaction: true },
             })
         ),
-    getPreviousTransaction: async (objectId, version) => {
-        const result: any = await withRpcRetry(`[query-blobs] historical object ${objectId}@${version}`, () =>
-            (suiClient as any).ledgerService.getObject({
-                objectId,
-                version: BigInt(version),
-                readMask: { paths: ["object_id", "version", "previous_transaction"] },
+    getCreationTransaction: async (objectId) => {
+        const result: any = await withRpcRetry(`[query-blobs] creation version ${objectId}`, () =>
+            suiGraphqlClient.query({
+                query: CREATION_TRANSACTION_QUERY,
+                variables: { objectId },
             })
         );
-        return typeof result?.response?.object?.previousTransaction === "string"
-            ? result.response.object.previousTransaction
+        if (Array.isArray(result?.errors) && result.errors.length > 0) {
+            throw new Error(`archival GraphQL lookup failed: ${result.errors[0]?.message ?? "unknown error"}`);
+        }
+        const object = result?.data?.object;
+        if (!object) return null;
+        // GraphQL connections are ascending for `first`; node[0] is the UID's
+        // earliest retained version. A never-mutated object has no prior nodes,
+        // so its current version is itself the creation version.
+        const creationVersion = object.objectVersionsBefore?.nodes?.[0] ?? object;
+        return typeof creationVersion?.previousTransaction?.digest === "string"
+            ? creationVersion.previousTransaction.digest
             : null;
     },
 };

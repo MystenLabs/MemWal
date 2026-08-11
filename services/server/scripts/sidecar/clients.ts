@@ -8,12 +8,14 @@
  */
 
 import { SuiGrpcClient } from "@mysten/sui/grpc";
+import { SuiGraphQLClient } from "@mysten/sui/graphql";
 import { normalizeStructTag } from "@mysten/sui/utils";
 import { SealClient } from "@mysten/seal";
 import { WalrusClient, type WalrusClientConfig } from "@mysten/walrus";
 import {
     SEAL_KEY_SERVER_TIMEOUT_MS,
     SEAL_SERVER_CONFIGS,
+    SUI_GRAPHQL_URL,
     SUI_GRPC_URL,
     SUI_NETWORK,
     SUI_TYPE,
@@ -30,6 +32,9 @@ import { shortAddress } from "./util.js";
 
 // Shared gRPC core client for Walrus, SEAL, Enoki, and blob queries.
 export const suiClient = new SuiGrpcClient({ network: SUI_NETWORK, baseUrl: SUI_GRPC_URL });
+// Separate archival read path for immutable creation provenance. The regular
+// gRPC fullnode remains the low-latency path for current objects and writes.
+export const suiGraphqlClient = new SuiGraphQLClient({ network: SUI_NETWORK, url: SUI_GRAPHQL_URL });
 
 export function createSealClient(): SealClient {
     return new SealClient({

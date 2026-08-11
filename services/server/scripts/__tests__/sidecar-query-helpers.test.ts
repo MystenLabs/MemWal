@@ -22,6 +22,7 @@ import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sideca
 import {
     parseDurableWalrusEpochs,
     parseTrustedUploaderAddresses,
+    parseTrustedUploaderInventory,
     SUI_TYPE,
     WALRUS_PACKAGE_ID,
 } from "../sidecar/config.js";
@@ -473,38 +474,41 @@ test("trusted uploader config normalizes migration writers and rejects invalid e
     assert.throws(() => parseTrustedUploaderAddresses("not-an-address"), /invalid TRUSTED_UPLOADER_ADDRESSES/);
 });
 
-test("blob provenance walks past transfers to the immutable creation sender", async () => {
+test("trusted uploader inventory accepts collect-live-writer-addresses output", () => {
+    const first = "0x2";
+    const second = `0x${"3".repeat(64)}`;
+    assert.deepEqual(
+        parseTrustedUploaderInventory(JSON.stringify({
+            schemaVersion: 1,
+            writers: [
+                { id: "writer-0", addresses: [first] },
+                { id: "writer-1", addresses: [second, first] },
+            ],
+        })),
+        [`0x${"0".repeat(63)}2`, second]
+    );
+    assert.throws(() => parseTrustedUploaderInventory("{}"), /writers array is required/);
+});
+
+test("blob provenance uses the archival creation transaction, not the latest transfer", async () => {
     const objectId = `0x${"1".repeat(64)}`;
     const trusted = `0x${"2".repeat(64)}`;
     const attacker = `0x${"3".repeat(64)}`;
-    const versions = new Map([["3", "metadata-tx"], ["2", "create-tx"]]);
-    const transactions = new Map<string, any>([
-        ["transfer-tx", {
-            status: { success: true },
-            transaction: { sender: attacker },
-            effects: { changedObjects: [{ objectId, idOperation: "None", inputState: "Exists", inputVersion: "3" }] },
-        }],
-        ["metadata-tx", {
-            status: { success: true },
-            transaction: { sender: trusted },
-            effects: { changedObjects: [{ objectId, idOperation: "None", inputState: "Exists", inputVersion: "2" }] },
-        }],
-        ["create-tx", {
-            status: { success: true },
-            transaction: { sender: trusted },
-            effects: { changedObjects: [{ objectId, idOperation: "Created", inputState: "DoesNotExist", inputVersion: null }] },
-        }],
-    ]);
     const client = {
-        async getTransaction(digest: string) {
-            return transactions.get(digest);
+        async getCreationTransaction() {
+            return "create-tx";
         },
-        async getPreviousTransaction(_objectId: string, version: string) {
-            return versions.get(version) ?? null;
+        async getTransaction(digest: string) {
+            assert.equal(digest, "create-tx");
+            return {
+                status: { success: true },
+                transaction: { sender: trusted },
+                effects: { changedObjects: [{ objectId, idOperation: "Created" }] },
+            };
         },
     };
 
-    assert.equal(await findBlobCreationSender({ objectId, previousTransaction: "transfer-tx" }, client), trusted);
+    assert.equal(await findBlobCreationSender({ objectId, previousTransaction: "attacker-transfer-tx" }, client), trusted);
     assert.deepEqual(
         await trustedBlobCandidate(
             { objectId, owner: { AddressOwner: attacker }, previousTransaction: "transfer-tx" },
@@ -528,8 +532,8 @@ test("blob provenance excludes external creators and fails closed on incomplete 
                 effects: { changedObjects: [{ objectId, idOperation: "Created" }] },
             };
         },
-        async getPreviousTransaction() {
-            return null;
+        async getCreationTransaction() {
+            return "create-tx";
         },
     };
     const blob = { objectId, owner: { AddressOwner: recipient }, previousTransaction: "create-tx" };
@@ -538,7 +542,7 @@ test("blob provenance excludes external creators and fails closed on incomplete 
         reason: "provenance",
         uploader: attacker,
     });
-    const unavailableClient = { ...creationClient, getTransaction: async () => null };
+    const unavailableClient = { ...creationClient, getCreationTransaction: async () => null };
     assert.equal(await findBlobCreationSender(blob, unavailableClient), null);
     assert.deepEqual(await trustedBlobCandidate(blob, recipient, new Set([attacker]), unavailableClient), {
         trusted: false,

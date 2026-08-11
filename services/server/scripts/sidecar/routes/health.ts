@@ -16,6 +16,7 @@ import {
     SEAL_THRESHOLD,
     SERVER_SUI_ADDRESSES,
     SERVER_SUI_PRIVATE_KEYS,
+    TRUSTED_WALRUS_UPLOADER_SET,
     SUI_CHAIN_IDENTIFIER,
     SUI_NETWORK,
     WALRUS_PACKAGE_ID,
@@ -23,7 +24,7 @@ import {
     WALRUS_UPLOAD_MAX_CONCURRENCY,
     WALRUS_UPLOAD_PER_WALLET_CONCURRENCY,
 } from "../config.js";
-import { getWalletBalanceSnapshot, getWalrusClient, suiClient } from "../clients.js";
+import { getWalletBalanceSnapshot, getWalrusClient, suiClient, suiGraphqlClient } from "../clients.js";
 import { getUploadCounts } from "../concurrency.js";
 import { sidecarLog } from "../log.js";
 import { sidecarStartedAtMs, sidecarStateSnapshot } from "../state.js";
@@ -89,7 +90,18 @@ export async function assertUploadExecutionIdentity(
     );
 }
 
-export function registerHealthRoute(app: Express): void {
+async function assertProvenanceEndpointIdentity(): Promise<void> {
+    const result = await suiGraphqlClient.query<{ chainIdentifier?: string }>({
+        query: "query ProvenanceReadiness { chainIdentifier }",
+        variables: {},
+        signal: AbortSignal.timeout(READINESS_RPC_TIMEOUT_MS),
+    });
+    if (result.errors?.length || result.data?.chainIdentifier !== SUI_CHAIN_IDENTIFIER) {
+        throw new Error(`Sui archival GraphQL endpoint does not match ${SUI_NETWORK}`);
+    }
+}
+
+export function registerHealthRoute(app: Express, requireProvenance = true): void {
     app.get("/health", (_req: Request, res: ExpressResponse) => {
         res.json({ status: "ok", uptimeMs: Date.now() - sidecarStartedAtMs });
     });
@@ -97,6 +109,7 @@ export function registerHealthRoute(app: Express): void {
     app.get("/ready", async (_req: Request, res: ExpressResponse) => {
         try {
             const identity = await executionIdentity();
+            if (requireProvenance) await assertProvenanceEndpointIdentity();
             const uploads = getUploadCounts();
             res.json({
                 status: "ok",
@@ -105,6 +118,7 @@ export function registerHealthRoute(app: Express): void {
                 queuedWalrusUploads: uploads.queued,
                 serverKeyCount: SERVER_SUI_PRIVATE_KEYS.length,
                 serverKeyAddresses: SERVER_SUI_ADDRESSES,
+                trustedUploaderCount: TRUSTED_WALRUS_UPLOADER_SET.size,
                 suiNetwork: SUI_NETWORK,
                 uploadProtocolVersion: DURABLE_UPLOAD_PROTOCOL_VERSION,
                 durableUploadDirectSign: !ENOKI_API_KEY,

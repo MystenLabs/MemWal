@@ -20,10 +20,10 @@
 -- rate limiting" only, and does not restrict the self-host-then-migrate-to-
 -- a-managed-relayer path).
 --
--- A *separate* mechanism, `verifyBlobUploaderProvenance` in
--- `sidecar/routes/walrus-query.ts`, does check the mint/transfer transaction
--- sender against `TRUSTED_UPLOADER_ADDRESSES` and excludes untrusted blobs
--- from `/walrus/query-blobs` results before they ever reach this table or
+-- A *separate* mechanism, `findBlobCreationSender` in
+-- `sidecar/routes/walrus-query.ts`, resolves the Blob's immutable UID-creation
+-- transaction through archival GraphQL and checks its sender against the
+-- configured trusted-uploader inventory before the Blob reaches this table or
 -- `restore()`. That gate operates independently, upstream of everything
 -- described here — do not read this comment as "no part of this codebase
 -- looks at who uploaded a blob."
