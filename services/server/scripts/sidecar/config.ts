@@ -8,7 +8,6 @@
 
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-import { normalizeSuiAddress } from "@mysten/sui/utils";
 import { getSealCommitteeIdentity, getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "../seal-config.js";
 import { parseSuiNetwork } from "./sui-transport-policy.js";
 
@@ -108,53 +107,9 @@ if (new Set(SERVER_SUI_ADDRESSES).size !== SERVER_SUI_ADDRESSES.length) {
     throw new Error("SERVER_SUI_PRIVATE_KEYS contains duplicate wallet addresses");
 }
 
-// Restore provenance trusts the normal server wallet pool plus historical
-// migration writers. Operators must populate TRUSTED_UPLOADER_ADDRESSES from
-// migration.upload_writer_shards, or pass the JSON emitted by
-// collect-live-writer-addresses.sh as TRUSTED_UPLOADER_INVENTORY_JSON before
-// cutover; request data can never extend this set.
-export function parseTrustedUploaderAddresses(raw: string): string[] {
-    return [
-        ...new Set(
-            raw
-                .split(",")
-                .map((value) => value.trim())
-                .filter(Boolean)
-                .map((value) => {
-                    if (!/^0x[0-9a-fA-F]{1,64}$/.test(value)) {
-                        throw new Error(`invalid TRUSTED_UPLOADER_ADDRESSES entry: ${value}`);
-                    }
-                    return normalizeSuiAddress(value);
-                })
-        ),
-    ];
-}
-
-export function parseTrustedUploaderInventory(raw: string): string[] {
-    if (!raw.trim()) return [];
-    let inventory: unknown;
-    try {
-        inventory = JSON.parse(raw);
-    } catch (error) {
-        throw new Error(`invalid TRUSTED_UPLOADER_INVENTORY_JSON: ${error instanceof Error ? error.message : error}`);
-    }
-    if (!inventory || typeof inventory !== "object" || !Array.isArray((inventory as any).writers)) {
-        throw new Error("invalid TRUSTED_UPLOADER_INVENTORY_JSON: writers array is required");
-    }
-    const addresses = (inventory as any).writers.flatMap((writer: any) =>
-        Array.isArray(writer?.addresses) ? writer.addresses : []
-    );
-    if (!addresses.every((address: unknown) => typeof address === "string")) {
-        throw new Error("invalid TRUSTED_UPLOADER_INVENTORY_JSON: every writer address must be a string");
-    }
-    return parseTrustedUploaderAddresses(addresses.join(","));
-}
-
-export const TRUSTED_WALRUS_UPLOADER_SET: ReadonlySet<string> = new Set([
-    ...SERVER_SUI_ADDRESSES.map((address) => normalizeSuiAddress(address)),
-    ...parseTrustedUploaderAddresses(process.env.TRUSTED_UPLOADER_ADDRESSES ?? ""),
-    ...parseTrustedUploaderInventory(process.env.TRUSTED_UPLOADER_INVENTORY_JSON ?? ""),
-]);
+// Creation provenance is trusted only when the Blob was written by one of the
+// wallets already configured through SERVER_SUI_PRIVATE_KEYS.
+export const SERVER_SUI_ADDRESS_SET: ReadonlySet<string> = new Set(SERVER_SUI_ADDRESSES);
 
 // ============================================================
 // Walrus

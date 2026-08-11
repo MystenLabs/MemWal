@@ -22,8 +22,6 @@ import {
 import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sidecar/blob-metadata.js";
 import {
     parseDurableWalrusEpochs,
-    parseTrustedUploaderAddresses,
-    parseTrustedUploaderInventory,
     SUI_TYPE,
     WALRUS_PACKAGE_ID,
 } from "../sidecar/config.js";
@@ -466,29 +464,6 @@ test("ownerMatchesRecipient handles string and object owner encodings", () => {
     assert.equal(ownerMatchesRecipient({ AddressOwner: "0xb" }, "0xa"), false);
     assert.equal(ownerMatchesRecipient(null, "0xa"), false);
     assert.equal(ownerMatchesRecipient(42, "0xa"), false);
-});
-
-test("trusted uploader config normalizes migration writers and rejects invalid entries", () => {
-    const short = "0x2";
-    const canonical = `0x${"0".repeat(63)}2`;
-    assert.deepEqual(parseTrustedUploaderAddresses(` ${short},${canonical} `), [canonical]);
-    assert.throws(() => parseTrustedUploaderAddresses("not-an-address"), /invalid TRUSTED_UPLOADER_ADDRESSES/);
-});
-
-test("trusted uploader inventory accepts collect-live-writer-addresses output", () => {
-    const first = "0x2";
-    const second = `0x${"3".repeat(64)}`;
-    assert.deepEqual(
-        parseTrustedUploaderInventory(JSON.stringify({
-            schemaVersion: 1,
-            writers: [
-                { id: "writer-0", addresses: [first] },
-                { id: "writer-1", addresses: [second, first] },
-            ],
-        })),
-        [`0x${"0".repeat(63)}2`, second]
-    );
-    assert.throws(() => parseTrustedUploaderInventory("{}"), /writers array is required/);
 });
 
 test("blob provenance uses the archival creation transaction, not the latest transfer", async () => {

@@ -23,8 +23,8 @@
 -- A *separate* mechanism, `findBlobCreationSender` in
 -- `sidecar/routes/walrus-query.ts`, resolves the Blob's immutable UID-creation
 -- transaction through archival GraphQL and checks its sender against the
--- configured trusted-uploader inventory before the Blob reaches this table or
--- `restore()`. That gate operates independently, upstream of everything
+-- server wallet pool derived from `SERVER_SUI_PRIVATE_KEYS` before the Blob
+-- reaches this table or `restore()`. That gate operates independently, upstream of everything
 -- described here — do not read this comment as "no part of this codebase
 -- looks at who uploaded a blob."
 --

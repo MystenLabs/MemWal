@@ -110,8 +110,6 @@ These are not all enforced at boot, but most real deployments need them.
 | `SUI_RPC_URL` | network default | Override the Sui fullnode JSON-RPC URL |
 | `SUI_GRPC_URL` | network public fullnode | Sui gRPC endpoint used for current-object reads and writes |
 | `SUI_GRAPHQL_URL` | network public GraphQL service | Archival Sui GraphQL endpoint used to resolve immutable Blob creation provenance. It must retain historical transactions and object versions; `/ready` rejects a wrong-network endpoint |
-| `TRUSTED_UPLOADER_ADDRESSES` | server wallet pool | Comma-separated historical server or migration-writer addresses trusted as Blob creators. Invalid entries fail sidecar startup |
-| `TRUSTED_UPLOADER_INVENTORY_JSON` | none | JSON emitted by `scripts/collect-live-writer-addresses.sh`; all `writers[].addresses` are added to the trusted creator set. Use this or `TRUSTED_UPLOADER_ADDRESSES` before migration cutover |
 | `WALRUS_PUBLISHER_URL` | Walrus mainnet publisher | Override upload endpoint |
 | `WALRUS_AGGREGATOR_URL` | Walrus mainnet aggregator | Override download endpoint |
 | `WALRUS_AGGREGATOR_URLS` | none | Optional comma-separated extra aggregator/proxy endpoints for cold-read tail racing. `WALRUS_AGGREGATOR_URL` remains the primary |

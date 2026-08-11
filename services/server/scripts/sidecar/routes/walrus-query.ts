@@ -10,7 +10,7 @@ import { normalizeSuiAddress } from "@mysten/sui/utils";
 import {
     JSON_LIMIT_METADATA,
     JSON_LIMIT_WALRUS_VERIFY,
-    TRUSTED_WALRUS_UPLOADER_SET,
+    SERVER_SUI_ADDRESS_SET,
     WALRUS_PACKAGE_ID,
 } from "../config.js";
 import { getWalrusClient, refreshWalrusClientIfStale, suiClient, suiGraphqlClient } from "../clients.js";
@@ -258,7 +258,7 @@ export async function filterTrustedBlobCandidates<
             const result = !ownerMatchesRecipient(blob.owner, recipient)
                 ? { trusted: false as const, reason: "owner" as const, uploader: null }
                 : await creationSender(blob).then((uploader) =>
-                      uploader && TRUSTED_WALRUS_UPLOADER_SET.has(uploader)
+                      uploader && SERVER_SUI_ADDRESS_SET.has(uploader)
                           ? { trusted: true as const, reason: "trusted" as const, uploader }
                           : { trusted: false as const, reason: "provenance" as const, uploader }
                   );
