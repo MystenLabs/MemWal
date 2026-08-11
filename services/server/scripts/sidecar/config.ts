@@ -103,49 +103,31 @@ if (new Set(SERVER_SUI_ADDRESSES).size !== SERVER_SUI_ADDRESSES.length) {
     throw new Error("SERVER_SUI_PRIVATE_KEYS contains duplicate wallet addresses");
 }
 
-// ============================================================
-// Provenance gate — trusted uploader addresses
-// ============================================================
-
-// Extended uploader allowlist for the restore/query-blobs provenance gate.
-// Defaults to the server wallet pool; append migration writer shard addresses
-// (from collect-live-writer-addresses.sh output or the legacy migration DB)
-// as a comma-separated list via env when migration writer shards are in use.
-//
-// Lazily reads env so tests can set TRUSTED_UPLOADER_ADDRESSES before calling
-// verifyBlobUploaderProvenance — config.ts is loaded by tsx before the test's
-// top-level process.env assignments run, so eager evaluation would see empty keys.
-// Cached value — set once on first call so the env-parse + canonicalize runs exactly once.
-let _trustedAddrs: readonly string[] | undefined;
-
-export function getTrustedUploaderAddresses(): readonly string[] {
-    if (_trustedAddrs) return _trustedAddrs;
-
-    const env = process.env.TRUSTED_UPLOADER_ADDRESSES ?? "";
-    const extra = env
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0)
-        .map((s) => normalizeSuiAddress(s));
-
-    // Warn once on first call when extra addresses are configured but no server keys exist.
-    // The warning lives here (inside the cache) so it fires on the first real use,
-    // not at module-evaluation time when test env may not be ready yet.
-    if (extra.length > 0 && SERVER_SUI_ADDRESSES.length === 0) {
-        console.warn(
-            "[sidecar] TRUSTED_UPLOADER_ADDRESSES is set but SERVER_SUI_PRIVATE_KEYS is empty — " +
-                "provenance gate may be ineffective"
-        );
-    }
-
-    _trustedAddrs = [...SERVER_SUI_ADDRESSES, ...new Set(extra)];
-    return _trustedAddrs;
+// Restore provenance trusts the normal server wallet pool plus historical
+// migration writers. Operators must populate TRUSTED_UPLOADER_ADDRESSES from
+// migration.upload_writer_shards / collect-live-writer-addresses.sh before
+// cutover; request data can never extend this set.
+export function parseTrustedUploaderAddresses(raw: string): string[] {
+    return [
+        ...new Set(
+            raw
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean)
+                .map((value) => {
+                    if (!/^0x[0-9a-fA-F]{1,64}$/.test(value)) {
+                        throw new Error(`invalid TRUSTED_UPLOADER_ADDRESSES entry: ${value}`);
+                    }
+                    return normalizeSuiAddress(value);
+                })
+        ),
+    ];
 }
 
-/** Resets the cache — for testing only. Do not call in production. */
-export function _clearTrustedUploaderAddressesCache(): void {
-    _trustedAddrs = undefined;
-}
+export const TRUSTED_WALRUS_UPLOADER_SET: ReadonlySet<string> = new Set([
+    ...SERVER_SUI_ADDRESSES.map((address) => normalizeSuiAddress(address)),
+    ...parseTrustedUploaderAddresses(process.env.TRUSTED_UPLOADER_ADDRESSES ?? ""),
+]);
 
 // ============================================================
 // Walrus

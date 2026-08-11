@@ -1,23 +1,6 @@
-// ============================================================
-// TEST ISOLATION: set up mock env BEFORE any imports.
-// ESM hoists all imports to the top of the module scope, so any
-// env reads at module-evaluation time (e.g. config.ts) will only
-// see the env values that are set before the import block.
-// ============================================================
-import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-
-// Derive the real address from a valid key so it matches what config.ts
-// canonicalizes when populating TRUSTED_UPLOADER_ADDRESSES.  The key is a
-// randomly-generated Ed25519 scalar; it is never used for signing in this test.
-const TEST_KEYPAIR = new Ed25519Keypair();
-const TEST_SERVER_ADDR = TEST_KEYPAIR.toSuiAddress();
-const TEST_MIGRATION_WRITER = "0x" + "c3".repeat(32);
-process.env.SERVER_SUI_PRIVATE_KEYS ??= TEST_KEYPAIR.getSecretKey().toString("base64");
-process.env.TRUSTED_UPLOADER_ADDRESSES ??= `${TEST_SERVER_ADDR},${TEST_MIGRATION_WRITER}`;
-// ============================================================
-
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions";
 import {
     assertCompletionBlobObject,
@@ -26,20 +9,19 @@ import {
     blobIdMatchesRequested,
     blobObjectMatchesRegistration,
     chainBlobIdFromRaw,
+    findBlobCreationSender,
     isSourceCapped,
     isWalrusBlobObjectType,
     isVerifiedNonexistentSource,
     ownerMatchesRecipient,
     readBlobObject,
     strictWalrusEpoch,
-    verifyBlobUploaderProvenance,
-    type ProvenanceClient,
-    type ProvenanceResult,
+    trustedBlobCandidate,
 } from "../sidecar/routes/walrus-query.js";
 import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sidecar/blob-metadata.js";
 import {
-    _clearTrustedUploaderAddressesCache,
     parseDurableWalrusEpochs,
+    parseTrustedUploaderAddresses,
     SUI_TYPE,
     WALRUS_PACKAGE_ID,
 } from "../sidecar/config.js";
@@ -484,6 +466,92 @@ test("ownerMatchesRecipient handles string and object owner encodings", () => {
     assert.equal(ownerMatchesRecipient(42, "0xa"), false);
 });
 
+test("trusted uploader config normalizes migration writers and rejects invalid entries", () => {
+    const short = "0x2";
+    const canonical = `0x${"0".repeat(63)}2`;
+    assert.deepEqual(parseTrustedUploaderAddresses(` ${short},${canonical} `), [canonical]);
+    assert.throws(() => parseTrustedUploaderAddresses("not-an-address"), /invalid TRUSTED_UPLOADER_ADDRESSES/);
+});
+
+test("blob provenance walks past transfers to the immutable creation sender", async () => {
+    const objectId = `0x${"1".repeat(64)}`;
+    const trusted = `0x${"2".repeat(64)}`;
+    const attacker = `0x${"3".repeat(64)}`;
+    const versions = new Map([["3", "metadata-tx"], ["2", "create-tx"]]);
+    const transactions = new Map<string, any>([
+        ["transfer-tx", {
+            status: { success: true },
+            transaction: { sender: attacker },
+            effects: { changedObjects: [{ objectId, idOperation: "None", inputState: "Exists", inputVersion: "3" }] },
+        }],
+        ["metadata-tx", {
+            status: { success: true },
+            transaction: { sender: trusted },
+            effects: { changedObjects: [{ objectId, idOperation: "None", inputState: "Exists", inputVersion: "2" }] },
+        }],
+        ["create-tx", {
+            status: { success: true },
+            transaction: { sender: trusted },
+            effects: { changedObjects: [{ objectId, idOperation: "Created", inputState: "DoesNotExist", inputVersion: null }] },
+        }],
+    ]);
+    const client = {
+        async getTransaction(digest: string) {
+            return transactions.get(digest);
+        },
+        async getPreviousTransaction(_objectId: string, version: string) {
+            return versions.get(version) ?? null;
+        },
+    };
+
+    assert.equal(await findBlobCreationSender({ objectId, previousTransaction: "transfer-tx" }, client), trusted);
+    assert.deepEqual(
+        await trustedBlobCandidate(
+            { objectId, owner: { AddressOwner: attacker }, previousTransaction: "transfer-tx" },
+            attacker,
+            new Set([trusted]),
+            client
+        ),
+        { trusted: true, reason: "trusted", uploader: trusted }
+    );
+});
+
+test("blob provenance excludes external creators and fails closed on incomplete history", async () => {
+    const objectId = `0x${"1".repeat(64)}`;
+    const recipient = `0x${"2".repeat(64)}`;
+    const attacker = `0x${"3".repeat(64)}`;
+    const creationClient = {
+        async getTransaction() {
+            return {
+                status: { success: true },
+                transaction: { sender: attacker },
+                effects: { changedObjects: [{ objectId, idOperation: "Created" }] },
+            };
+        },
+        async getPreviousTransaction() {
+            return null;
+        },
+    };
+    const blob = { objectId, owner: { AddressOwner: recipient }, previousTransaction: "create-tx" };
+    assert.deepEqual(await trustedBlobCandidate(blob, recipient, new Set([recipient]), creationClient), {
+        trusted: false,
+        reason: "provenance",
+        uploader: attacker,
+    });
+    const unavailableClient = { ...creationClient, getTransaction: async () => null };
+    assert.equal(await findBlobCreationSender(blob, unavailableClient), null);
+    assert.deepEqual(await trustedBlobCandidate(blob, recipient, new Set([attacker]), unavailableClient), {
+        trusted: false,
+        reason: "provenance",
+        uploader: null,
+    });
+    assert.deepEqual(await trustedBlobCandidate({ ...blob, owner: { AddressOwner: attacker } }, recipient, new Set(), creationClient), {
+        trusted: false,
+        reason: "owner",
+        uploader: null,
+    });
+});
+
 test("ownerMatchesRecipient compares canonicalized addresses, not exact strings", () => {
     const lower = `0x${"ab".repeat(32)}`;
     const upper = `0x${"AB".repeat(32)}`;
@@ -614,101 +682,4 @@ test("normal registration checkpoints the exact Blob from transaction effects", 
         FailedTransaction: { status: { success: false, error: {} } },
         })
     );
-});
-
-// ============================================================
-// Provenance gate — WALM-299 / GH #501
-// ============================================================
-
-const SERVER_ADDR = TEST_SERVER_ADDR;
-const ATTACKER_ADDR = "0x" + "b2".repeat(32);
-const MIGRATION_WRITER = TEST_MIGRATION_WRITER;
-
-// Shape matches SuiGrpcClient's real `getTransaction` response
-// (SuiClientTypes.TransactionResult): a `$kind`-discriminated union of
-// `{ Transaction }` / `{ FailedTransaction }`, each carrying
-// `transaction: { sender, ... }` when `include.transaction` is requested —
-// not the JSON-RPC-era `{ transaction: { data: { sender } } }` shape.
-const makeClient = (sender: unknown): ProvenanceClient => {
-    _clearTrustedUploaderAddressesCache();
-    return {
-        async getTransaction({ digest }) {
-            if (digest === "trusted-tx") {
-                return { Transaction: { transaction: { sender: sender as string | null | undefined } } };
-            }
-            throw new Error("not found");
-        },
-    };
-};
-
-test("verifyBlobUploaderProvenance: trusted server wallet → kind=trusted", async () => {
-    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(SERVER_ADDR));
-    assert.equal(result.kind, "trusted");
-});
-
-test("verifyBlobUploaderProvenance: trusted migration writer → kind=trusted", async () => {
-    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(MIGRATION_WRITER));
-    assert.equal(result.kind, "trusted");
-});
-
-test("verifyBlobUploaderProvenance: attacker address → kind=untrusted with sender", async () => {
-    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(ATTACKER_ADDR));
-    assert.equal(result.kind, "untrusted");
-    assert.equal(result.sender, ATTACKER_ADDR.toLowerCase());
-});
-
-test("verifyBlobUploaderProvenance: sender mixed case → canonicalized before check", async () => {
-    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(SERVER_ADDR.toUpperCase()));
-    assert.equal(result.kind, "trusted");
-});
-
-test("verifyBlobUploaderProvenance: null previousTransaction → kind=unknown", async () => {
-    const result = await verifyBlobUploaderProvenance(null, makeClient(undefined));
-    assert.equal(result.kind, "unknown");
-});
-
-test("verifyBlobUploaderProvenance: undefined previousTransaction → kind=unknown", async () => {
-    const result = await verifyBlobUploaderProvenance(undefined, makeClient(undefined));
-    assert.equal(result.kind, "unknown");
-});
-
-test("verifyBlobUploaderProvenance: RPC error → kind=unknown (fail open)", async () => {
-    const client: ProvenanceClient = {
-        async getTransaction() {
-            throw new Error("RPC unavailable");
-        },
-    };
-    const result = await verifyBlobUploaderProvenance("unverifiable-tx", client);
-    assert.equal(result.kind, "unknown");
-});
-
-test("verifyBlobUploaderProvenance: tx exists but sender missing → kind=unknown", async () => {
-    const result = await verifyBlobUploaderProvenance("trusted-tx", makeClient(undefined));
-    assert.equal(result.kind, "unknown");
-});
-
-test("verifyBlobUploaderProvenance: reverted transaction still reports its real sender", async () => {
-    _clearTrustedUploaderAddressesCache();
-    const client: ProvenanceClient = {
-        async getTransaction({ digest }) {
-            if (digest !== "trusted-tx") throw new Error("not found");
-            return { FailedTransaction: { transaction: { sender: ATTACKER_ADDR } } };
-        },
-    };
-    const result = await verifyBlobUploaderProvenance("trusted-tx", client);
-    assert.equal(result.kind, "untrusted");
-    assert.equal(result.sender, ATTACKER_ADDR.toLowerCase());
-});
-
-test("verifyBlobUploaderProvenance: returns correct ProvenanceResult discriminated union types", () => {
-    const trusted: ProvenanceResult = { kind: "trusted" };
-    const untrusted: ProvenanceResult = { kind: "untrusted", sender: "0xtest" };
-    const unknown: ProvenanceResult = { kind: "unknown" };
-
-    assert.equal(trusted.kind, "trusted");
-    assert.equal(untrusted.kind, "untrusted");
-    assert.equal(untrusted.sender, "0xtest");
-    assert.equal(unknown.kind, "unknown");
-    assert.equal(Object.keys(trusted).join(","), "kind");
-    assert.equal(Object.keys(untrusted).join(","), "kind,sender");
 });

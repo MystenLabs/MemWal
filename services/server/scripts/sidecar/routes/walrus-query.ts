@@ -10,81 +10,13 @@ import { normalizeSuiAddress } from "@mysten/sui/utils";
 import {
     JSON_LIMIT_METADATA,
     JSON_LIMIT_WALRUS_VERIFY,
-    getTrustedUploaderAddresses,
+    TRUSTED_WALRUS_UPLOADER_SET,
     WALRUS_PACKAGE_ID,
 } from "../config.js";
 import { getWalrusClient, refreshWalrusClientIfStale, suiClient } from "../clients.js";
 import { requestIdFor, sidecarLog } from "../log.js";
 import { withRpcRetry } from "../retry/rpc.js";
 import { errorMessage, mapConcurrent } from "../util.js";
-
-// ============================================================
-// Provenance gate — WALM-299 / GH #501
-// ============================================================
-
-// Narrow, non-generic shape (rather than `Pick<typeof suiClient, "getTransaction">`,
-// whose generic call signature makes hand-written test mocks unwieldy) covering only
-// the one call verifyBlobUploaderProvenance actually makes. The real `suiClient`
-// satisfies this structurally, so no cast is needed at the call site below.
-export type ProvenanceClient = {
-    getTransaction(input: { digest: string; include: { transaction: true } }): Promise<{
-        Transaction?: { transaction?: { sender?: string | null } };
-        FailedTransaction?: { transaction?: { sender?: string | null } };
-    }>;
-};
-
-/**
- * Result of verifying a blob's uploader provenance.
- * - `trusted`   — sender of previousTransaction is in TRUSTED_UPLOADER_ADDRESSES
- * - `untrusted` — sender is known and is NOT in the trusted set
- * - `unknown`   — previousTransaction is null / cannot be fetched
- */
-export type ProvenanceResult =
-    | { readonly kind: "trusted" }
-    | { readonly kind: "untrusted"; readonly sender: string }
-    | { readonly kind: "unknown" };
-
-/**
- * Verify whether a blob's previousTransaction sender is a trusted uploader.
- *
- * Normal server uploads: register (mint → server wallet) → metadata+transfer (sender = server wallet).
- * Migration uploads: same, but sender = migration writer shard (also in TRUSTED_UPLOADER_ADDRESSES).
- * Attack: attacker mints their own blob and transfers it to the victim — sender = attacker address.
- *
- * When previousTransaction is null/unavailable we return `unknown` so restore still
- * works for blobs minted before the provenance gate was deployed. This is the
- * migration-safe path — any blob that predates the gate is allowed through on
- * provenance alone and relies on the ownership + decrypt checks below.
- */
-export async function verifyBlobUploaderProvenance(
-    previousTransaction: string | null | undefined,
-    client: ProvenanceClient = suiClient
-): Promise<ProvenanceResult> {
-    if (!previousTransaction) return { kind: "unknown" };
-
-    try {
-        const tx = await withRpcRetry(`[provenance] getTransaction ${previousTransaction.slice(0, 10)}…`, () =>
-            client.getTransaction({ digest: previousTransaction, include: { transaction: true } })
-        );
-        // A reverted/failed transaction still had a real sender who submitted it,
-        // so check both branches of the discriminated union.
-        const sender = (tx.Transaction ?? tx.FailedTransaction)?.transaction?.sender;
-        if (!sender) return { kind: "unknown" };
-        const canonicalSender = normalizeSuiAddress(sender);
-        if (getTrustedUploaderAddresses().includes(canonicalSender)) {
-            return { kind: "trusted" };
-        }
-        return { kind: "untrusted", sender: canonicalSender };
-    } catch (err: unknown) {
-        // If we cannot verify, fail open — let ownership + decrypt handle it.
-        // This avoids hard-bricking restore when RPC has gaps for old transactions.
-        return { kind: "unknown" };
-    }
-}
-
-// ============================================================
-// blob_id helpers
-// ============================================================
 
 /**
  * blob_id from chain is a big integer (U256); convert to base64url
@@ -191,6 +123,7 @@ export async function readBlobObject(
 
 type RawBlobObj = {
     objectId: string;
+    owner: unknown;
     rawBlobId: string | number | null;
     rawSize: string | number | null;
     deletable: boolean | null;
@@ -198,6 +131,152 @@ type RawBlobObj = {
     previousTransaction?: string | null;
     timestampMs?: string | null;
 };
+
+type BlobHistoryClient = {
+    getTransaction(digest: string): Promise<any>;
+    getPreviousTransaction(objectId: string, version: string): Promise<string | null>;
+};
+
+function finalizedTransaction(response: any): any | null {
+    if (response?.$kind === "Transaction") return response.Transaction ?? null;
+    // Keep the helper usable with a narrow mock and with SDK transports that
+    // return the transaction payload directly.
+    return response?.effects && response?.transaction ? response : null;
+}
+
+/**
+ * Walk an object's immutable version history to the transaction that created
+ * its UID and return that transaction's sender. The current object's
+ * `previousTransaction` is insufficient: metadata attachment and ownership
+ * transfer both mutate a Blob after registration.
+ */
+export async function findBlobCreationSender(
+    blob: Pick<RawBlobObj, "objectId" | "previousTransaction">,
+    client: BlobHistoryClient,
+    maxHops = 64
+): Promise<string | null> {
+    let digest = blob.previousTransaction;
+    for (let hop = 0; digest && hop < maxHops; hop += 1) {
+        const transaction = finalizedTransaction(await client.getTransaction(digest));
+        if (!transaction?.status?.success) return null;
+        const changed = transaction.effects?.changedObjects?.find(
+            (object: any) => normalizedSuiAddressOrNull(object?.objectId) === normalizedSuiAddressOrNull(blob.objectId)
+        );
+        if (!changed) return null;
+        if (changed.idOperation === "Created") {
+            return normalizedSuiAddressOrNull(transaction.transaction?.sender);
+        }
+        if (changed.inputState !== "Exists" || changed.inputVersion === null || changed.inputVersion === undefined) {
+            return null;
+        }
+        digest = await client.getPreviousTransaction(blob.objectId, String(changed.inputVersion));
+    }
+    return null;
+}
+
+const blobHistoryClient: BlobHistoryClient = {
+    getTransaction: (digest) =>
+        withRpcRetry(`[query-blobs] transaction ${digest}`, () =>
+            (suiClient as any).getTransaction({
+                digest,
+                include: { effects: true, transaction: true },
+            })
+        ),
+    getPreviousTransaction: async (objectId, version) => {
+        const result: any = await withRpcRetry(`[query-blobs] historical object ${objectId}@${version}`, () =>
+            (suiClient as any).ledgerService.getObject({
+                objectId,
+                version: BigInt(version),
+                readMask: { paths: ["object_id", "version", "previous_transaction"] },
+            })
+        );
+        return typeof result?.response?.object?.previousTransaction === "string"
+            ? result.response.object.previousTransaction
+            : null;
+    },
+};
+
+// Creation provenance is immutable for an object ID. Bound the process cache
+// so repeated restores avoid walking the same version history while memory use
+// remains predictable. Null/error results are not cached because they may be
+// caused by transient archive-node lag.
+const BLOB_PROVENANCE_CACHE_MAX = 10_000;
+const blobCreationSenderCache = new Map<string, string>();
+
+async function cachedBlobCreationSender(blob: Pick<RawBlobObj, "objectId" | "previousTransaction">) {
+    const cached = blobCreationSenderCache.get(blob.objectId);
+    if (cached) {
+        // Refresh insertion order for simple LRU eviction.
+        blobCreationSenderCache.delete(blob.objectId);
+        blobCreationSenderCache.set(blob.objectId, cached);
+        return cached;
+    }
+    const sender = await findBlobCreationSender(blob, blobHistoryClient);
+    if (sender) {
+        blobCreationSenderCache.set(blob.objectId, sender);
+        if (blobCreationSenderCache.size > BLOB_PROVENANCE_CACHE_MAX) {
+            blobCreationSenderCache.delete(blobCreationSenderCache.keys().next().value!);
+        }
+    }
+    return sender;
+}
+
+export async function trustedBlobCandidate(
+    blob: Pick<RawBlobObj, "objectId" | "owner" | "previousTransaction">,
+    recipient: string,
+    trustedUploaders: ReadonlySet<string>,
+    client: BlobHistoryClient
+): Promise<{ trusted: boolean; reason: "trusted" | "owner" | "provenance"; uploader: string | null }> {
+    if (!ownerMatchesRecipient(blob.owner, recipient)) {
+        return { trusted: false, reason: "owner", uploader: null };
+    }
+    const uploader = await findBlobCreationSender(blob, client);
+    return uploader && trustedUploaders.has(uploader)
+        ? { trusted: true, reason: "trusted", uploader }
+        : { trusted: false, reason: "provenance", uploader };
+}
+
+async function filterTrustedBlobCandidates<T extends Pick<RawBlobObj, "objectId" | "owner" | "previousTransaction">>(
+    candidates: T[],
+    recipient: string,
+    requestId: string
+): Promise<T[]> {
+    const provenance = await mapConcurrent(candidates, 2, async (blob) => {
+        try {
+            const result = !ownerMatchesRecipient(blob.owner, recipient)
+                ? { trusted: false as const, reason: "owner" as const, uploader: null }
+                : await cachedBlobCreationSender(blob).then((uploader) =>
+                      uploader && TRUSTED_WALRUS_UPLOADER_SET.has(uploader)
+                          ? { trusted: true as const, reason: "trusted" as const, uploader }
+                          : { trusted: false as const, reason: "provenance" as const, uploader }
+                  );
+            return { blob, result, error: undefined as string | undefined };
+        } catch (error: unknown) {
+            return {
+                blob,
+                result: { trusted: false as const, reason: "provenance" as const, uploader: null },
+                error: errorMessage(error),
+            };
+        }
+    });
+    const excluded = provenance.filter(({ result }) => !result.trusted);
+    if (excluded.length > 0) {
+        sidecarLog("warn", "walrus_query_blobs_untrusted_candidates_excluded", {
+            requestId,
+            owner: recipient,
+            excludedCount: excluded.length,
+            ownershipMismatchCount: excluded.filter(({ result }) => result.reason === "owner").length,
+            unverifiedProvenanceCount: excluded.filter(({ result }) => result.reason === "provenance").length,
+            sample: excluded.slice(0, 5).map(({ blob, result, error }) => ({
+                objectId: blob.objectId,
+                uploader: result.uploader,
+                reason: result.reason,
+                ...(error ? { error } : {}),
+            })),
+        });
+    }
+    return provenance.filter(({ result }) => result.trusted).map(({ blob }) => blob);
+}
 
 /**
  * True when the raw candidate fetch proved more than `cap` objects exist for
@@ -250,6 +329,7 @@ async function listBlobObjectsGrpc(
             if (requestedBlobIds && !requestedBlobIds.has(chainBlobIdFromRaw(rawBlobId) ?? "")) continue;
             out.push({
                 objectId: obj.objectId,
+                owner: obj.owner,
                 rawBlobId,
                 rawSize: obj.json?.size ?? null,
                 deletable: typeof obj.json?.deletable === "boolean" ? obj.json.deletable : null,
@@ -489,7 +569,7 @@ export function registerWalrusQueryRoute(app: Express): void {
             // truncated even though discovery completed (PR #538 review).
             const probeCap = cap === Infinity ? Infinity : cap + 1;
             const probedObjs = await listBlobObjectsGrpc(owner, WALRUS_BLOB_TYPE, probeCap, requestedBlobIds);
-            const rawObjs = probedObjs.slice(0, cap);
+            const ownedCandidates = probedObjs.slice(0, cap);
             // WALM-319: the candidate fetch above is capped independent of
             // `limit` once desiredMatches >= 20 (`cap` saturates at 100) and
             // shared across all of the owner's namespaces — a caller (namely
@@ -497,7 +577,15 @@ export function registerWalrusQueryRoute(app: Express): void {
             // "stopped early because of the cap" once results are filtered
             // down to one namespace.
             const sourceCapped = isSourceCapped(probedObjs.length, cap);
+
             if (includeStorageLease === true) {
+                // Lease queries supply exact blob IDs and skip metadata, so
+                // provenance is the first candidate-level gate on this path.
+                const rawObjs = await filterTrustedBlobCandidates(
+                    ownedCandidates,
+                    owner,
+                    requestIdFor(req)
+                );
                 // Expiry is a terminal migration decision. Do not use the
                 // upload client's normal 30-minute metadata cache here.
                 refreshWalrusClientIfStale(1_000);
@@ -547,7 +635,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                 });
             }
             console.log(
-                `[query-blobs] found ${rawObjs.length} raw blob objects for owner=${owner} via gRPC` +
+                `[query-blobs] found ${ownedCandidates.length} raw blob objects for owner=${owner} via gRPC` +
                 (requestedBlobIds
                     ? ` (requested=${requestedBlobIds.size})`
                         : useRecentTxPath
@@ -555,12 +643,9 @@ export function registerWalrusQueryRoute(app: Express): void {
                         : "")
             );
 
-            // Step 2: Fetch provenance + metadata for each blob with bounded concurrency
+            // Step 2: Fetch metadata for each blob with bounded concurrency
             // to avoid overwhelming Sui RPC and hitting 429 rate limits.
-            type BlobMeta = {
-                objectId: string;
-                rawBlobId: string | number | null;
-                provenanceResult: ProvenanceResult;
+            type BlobMeta = RawBlobObj & {
                 blobNamespace: string;
                 blobOwner: string;
                 blobPackageId: string;
@@ -568,29 +653,11 @@ export function registerWalrusQueryRoute(app: Express): void {
             };
 
             const metadataConcurrency = useRecentTxPath ? 2 : 5;
-            const metas: BlobMeta[] = await mapConcurrent(rawObjs, metadataConcurrency, async (obj) => {
+            const metas: BlobMeta[] = await mapConcurrent(ownedCandidates, metadataConcurrency, async (obj) => {
                 let blobNamespace = "default";
                 let blobOwner = "";
                 let blobPackageId = "";
                 let blobAgentId = "";
-                let provenanceResult: ProvenanceResult = { kind: "unknown" };
-
-                // Verify provenance first — skip metadata fetch entirely for untrusted blobs.
-                // (unknown is allowed through to preserve migration compatibility).
-                try {
-                    provenanceResult = await verifyBlobUploaderProvenance(obj.previousTransaction);
-                } catch {
-                    provenanceResult = { kind: "unknown" };
-                }
-
-                if (provenanceResult.kind === "untrusted") {
-                    sidecarLog("debug", "query_blobs_provenance_excluded", {
-                        objectId: obj.objectId,
-                        owner,
-                        sender: provenanceResult.sender,
-                    });
-                    return { ...obj, provenanceResult, blobNamespace, blobOwner, blobPackageId, blobAgentId };
-                }
 
                 try {
                     for (const { key, value } of await fetchBlobMetadataEntries(obj.objectId)) {
@@ -603,10 +670,30 @@ export function registerWalrusQueryRoute(app: Express): void {
                     // No dynamic field = no metadata = use defaults
                 }
 
-                return { ...obj, provenanceResult, blobNamespace, blobOwner, blobPackageId, blobAgentId };
+                return {
+                    ...obj,
+                    blobNamespace,
+                    blobOwner,
+                    blobPackageId,
+                    blobAgentId,
+                };
             });
 
-            // Step 3: Filter + convert blob IDs
+            // Step 3: Narrow by cheap metadata first, then perform the more
+            // expensive immutable-history provenance walk only for candidates
+            // that can actually belong to this restore request.
+            const metadataMatches = metas.filter(
+                (meta) =>
+                    (!namespace || meta.blobNamespace === namespace) &&
+                    (!packageId || meta.blobPackageId === packageId)
+            );
+            const trustedMetas = await filterTrustedBlobCandidates(
+                metadataMatches,
+                owner,
+                requestIdFor(req)
+            );
+
+            // Step 4: Convert trusted blob IDs.
             const blobs: {
                 blobId: string;
                 objectId: string;
@@ -615,18 +702,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                 agentId: string;
             }[] = [];
 
-            let excludedProvenanceUntrusted = 0;
-            for (const meta of metas) {
-                // Reject blobs with untrusted provenance before any other filter.
-                if (meta.provenanceResult.kind === "untrusted") {
-                    excludedProvenanceUntrusted++;
-                    continue;
-                }
-                // Filter by namespace if specified
-                if (namespace && meta.blobNamespace !== namespace) continue;
-                // Filter by packageId if specified
-                if (packageId && meta.blobPackageId !== packageId) continue;
-
+            for (const meta of trustedMetas) {
                 if (meta.rawBlobId) {
                     const blobIdStr = blobIdFromRaw(meta.rawBlobId);
                     if (blobIdStr) {
@@ -643,8 +719,8 @@ export function registerWalrusQueryRoute(app: Express): void {
 
             console.log(
                 `[query-blobs] returning ${blobs.length} blobs (filtered from ${
-                    rawObjs.length
-                }; excluded untrusted=${excludedProvenanceUntrusted}) for owner=${owner} ns=${namespace || "*"}`
+                    ownedCandidates.length
+                }) for owner=${owner} ns=${namespace || "*"}`
             );
             res.json({ blobs, total: blobs.length, sourceCapped });
         } catch (err: any) {
