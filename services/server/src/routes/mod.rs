@@ -8,20 +8,26 @@
 //! - `admin` — `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`,
 //!   `/health`, `/version`, `/config`
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
+//! - `accounts` — `/api/accounts/{owner}/exists` (public MemWalAccount
+//!   existence check)
 //!
 //! Shared route-level helpers (`enqueue_wallet_job`, `truncate_str`,
 //! `collect_bounded_results`, `cleanup_expired_blob`) live here in `mod.rs`.
 //! Capability-level code (embedding, extraction, OpenAI chat wire types,
 //! prompt assets) lives in `crate::services` per the Phase 2/3 refactor.
 
+mod accounts;
 mod admin;
+pub mod admin_dashboard;
 mod analyze;
 mod recall;
 mod remember;
+pub mod security_delete;
 mod sponsor;
 
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
 // without having to know which submodule each handler lives in.
+pub use accounts::account_exists;
 pub use admin::{ask, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
 pub use recall::{recall, recall_manual};
@@ -117,25 +123,32 @@ where
 /// Called when Walrus returns 404 (blob expired / not found).
 /// Errors are logged but not propagated — cleanup is best-effort.
 ///
-/// `owner` is required so the DELETE is scoped to the caller's rows.
-/// The DB layer enforces `WHERE blob_id = $1 AND owner = $2`, so an expired
-/// blob discovered via one user's recall cannot delete another user's entry
-/// even if blob_ids collided.
-pub(super) async fn cleanup_expired_blob(db: &VectorDb, blob_id: &str, owner: &str) {
-    match db.delete_by_blob_id(blob_id, owner).await {
+/// `owner` and `namespace` are required so the DELETE is scoped to the
+/// caller's isolated rows. The DB layer enforces all three predicates, so an
+/// expired blob discovered in one namespace cannot delete another entry even
+/// if the owner and blob_id are identical.
+pub(super) async fn cleanup_expired_blob(
+    db: &VectorDb,
+    blob_id: &str,
+    owner: &str,
+    namespace: &str,
+) {
+    match db.delete_by_blob_id(blob_id, owner, namespace).await {
         Ok(rows) => {
             tracing::info!(
-                "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={}",
+                "reactive cleanup: deleted {} vector entries for expired blob_id={} owner={} namespace={}",
                 rows,
                 blob_id,
-                owner
+                owner,
+                namespace
             );
         }
         Err(e) => {
             tracing::error!(
-                "reactive cleanup failed for blob_id={} owner={}: {}",
+                "reactive cleanup failed for blob_id={} owner={} namespace={}: {}",
                 blob_id,
                 owner,
+                namespace,
                 e
             );
         }

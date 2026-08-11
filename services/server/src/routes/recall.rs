@@ -204,7 +204,8 @@ pub async fn recall(
 
     // Hydrate the hits through the storage engine: blob cache -> Walrus
     // download -> batched SEAL decrypt -> UTF-8, with reactive cleanup on
-    // Walrus 404 / permanent decrypt failure. The engine owns the
+    // Walrus 404 (decrypt failures are dropped, never deleted). The
+    // engine owns the
     // cache/decrypt-batch internals and derives the SEAL credential from
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
     let t2 = std::time::Instant::now();
@@ -212,8 +213,10 @@ pub async fn recall(
         .iter()
         .map(|h| (h.blob_id.clone(), h.distance))
         .collect();
-    let (mut hydrated, dropped_count, timings) =
-        state.engine.fetch_batch(owner, &hit_refs, &auth).await?;
+    let (mut hydrated, dropped_count, timings) = state
+        .engine
+        .fetch_batch(owner, namespace, &hit_refs, &auth)
+        .await?;
     let fetch_ms = t2.elapsed().as_millis();
 
     // Zip `created_at` (recency signal) + `importance` from the
@@ -317,9 +320,12 @@ pub async fn recall_manual(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<RecallManualRequest>,
 ) -> Result<Json<RecallManualResponse>, AppError> {
-    if body.vector.is_empty() {
-        return Err(AppError::BadRequest("vector cannot be empty".into()));
-    }
+    // Validate the client-supplied query vector (width + finiteness) up front.
+    // The store's embedding column is fixed-width and refuses NaN/Inf, so a
+    // malformed query vector can only fail inside pgvector and surface as an
+    // opaque 500; reject it here with an actionable 400. (No upload/gas on this
+    // read path, unlike remember_manual — this is purely a clearer-error improvement.)
+    validate_embedding_vector(&body.vector)?;
 
     // Validate scoring_weights up front (NaN / out-of-range / sub-floor
     // half-life) before the vector search, mirroring `recall`. Previously

@@ -98,7 +98,9 @@ interface SessionCacheEntry {
 interface ServerConfig {
     packageId: string;
     network: string;
-    suiRpcUrl: string;
+    suiRpcUrl?: string;
+    suiGrpcUrl?: string;
+    suiTransport: "grpc" | "jsonrpc";
 }
 
 const SEAL_SESSION_TTL_MIN = 5;
@@ -775,13 +777,16 @@ export class MemWal {
      * - `total` — on-chain blobs the relayer saw for `(owner, namespace)`
      *   before the limit was applied.
      *
-     * **`limit`** caps the *number of blobs the relayer inspects*, newest
-     * first. It is not a cap on `restored` directly. The server default is
-     * `10` (matches the SDK default).
+     * **`limit`** caps the *number of missing blobs the relayer selects* from
+     * the candidates it sees, in unspecified order. It is not a cap on
+     * `restored` directly. The server default is `10` (matches the SDK
+     * default).
      *
-     * **No pagination cursor** — restore is single-shot. To rebuild a large
-     * namespace, call repeatedly with a growing `limit` or prune the local
-     * index first.
+     * **No pagination cursor** — restore is single-shot. A larger `limit` may
+     * help when `truncated` is caused by the request limit, but candidate
+     * discovery also has a per-owner source cap shared across namespaces.
+     * Hitting that cap requires cursor/pagination support for guaranteed full
+     * recovery; increasing `limit` or retrying cannot guarantee it.
      *
      * **Performance** scales linearly in `limit`: up to 10 Walrus downloads
      * in parallel, then 3 SEAL decrypts in parallel, then embeddings.
@@ -798,10 +803,14 @@ export class MemWal {
      * ```
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
-        return this.signedRequest<RestoreResult>("POST", "/api/restore", {
+        const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,
         });
+        // Relayers older than WALM-319 omit `truncated` entirely — treat
+        // "not present" as "not known to be truncated" rather than drop
+        // the field or require every relayer version to send it.
+        return { ...result, truncated: result.truncated ?? false };
     }
 
     /**
@@ -906,14 +915,37 @@ export class MemWal {
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
         }
-        const body = (await res.json()) as Partial<ServerConfig>;
-        if (!body.packageId || !body.network || !body.suiRpcUrl) {
-            throw new Error("GET /config response missing packageId / network / suiRpcUrl");
+        const body = (await res.json()) as Record<string, unknown>;
+        if (typeof body.packageId !== "string" || !body.packageId ||
+            typeof body.network !== "string" || !body.network) {
+            throw new Error("GET /config response missing packageId / network");
+        }
+        if (body.suiTransport !== undefined &&
+            body.suiTransport !== "grpc" && body.suiTransport !== "jsonrpc") {
+            throw new Error("GET /config response has invalid suiTransport");
+        }
+        for (const field of ["suiGrpcUrl", "suiRpcUrl"] as const) {
+            if (body[field] !== undefined && (typeof body[field] !== "string" || !body[field])) {
+                throw new Error(`GET /config response has invalid ${field}`);
+            }
+        }
+        const transport = body.network === "testnet"
+            ? "grpc"
+            : (body.suiTransport as "grpc" | "jsonrpc" | undefined) ?? (body.suiGrpcUrl ? "grpc" : "jsonrpc");
+        if (transport === "grpc" && !body.suiGrpcUrl && !body.suiRpcUrl) {
+            throw new Error(
+                `GET /config requires suiGrpcUrl or suiRpcUrl for ${body.network} ${transport} transport`,
+            );
+        }
+        if (transport === "jsonrpc" && !body.suiRpcUrl) {
+            throw new Error("GET /config requires suiRpcUrl for explicit non-testnet JSON-RPC transport");
         }
         this.serverConfig = {
             packageId: body.packageId,
             network: body.network,
-            suiRpcUrl: body.suiRpcUrl,
+            suiRpcUrl: body.suiRpcUrl as string | undefined,
+            suiGrpcUrl: body.suiGrpcUrl as string | undefined,
+            suiTransport: transport,
         };
         return this.serverConfig;
     }
@@ -927,58 +959,63 @@ export class MemWal {
 
         const clientCandidates: Array<{ name: string; client: any }> = [];
 
-        // Prefer Sui's gRPC client on modern @mysten/sui versions. Keep the
-        // JSON-RPC probes as compatibility fallbacks for older peer installs.
-        try {
-            const mod = (await import("@mysten/sui/grpc")) as any;
-            if (typeof mod.SuiGrpcClient === "function") {
-                clientCandidates.push({
-                    name: "SuiGrpcClient",
-                    client: new mod.SuiGrpcClient({
-                        network: normalizeSuiNetworkForGrpc(cfg.network),
-                        baseUrl: cfg.suiRpcUrl,
-                    }),
-                });
+        if (cfg.suiTransport === "grpc" && cfg.suiGrpcUrl) {
+            try {
+                const mod = (await import("@mysten/sui/grpc")) as any;
+                if (typeof mod.SuiGrpcClient === "function") {
+                    clientCandidates.push({
+                        name: "SuiGrpcClient",
+                        client: new mod.SuiGrpcClient({
+                            network: normalizeSuiNetworkForGrpc(cfg.network),
+                            baseUrl: cfg.suiGrpcUrl,
+                        }),
+                    });
+                }
+            } catch {
+                /* Try the legacy JSON-RPC client below. */
             }
-        } catch {
-            /* @mysten/sui/grpc is not present on this version */
         }
 
-        let SuiClient: any = undefined;
-        try {
-            const mod = (await import("@mysten/sui/client")) as any;
-            SuiClient = mod.SuiClient;
-        } catch {
-            /* not present on this version */
-        }
-        if (typeof SuiClient !== "function") {
+        // Keep JSON-RPC as a runtime fallback when gRPC is preferred. This is
+        // required for rolling SDK/server deployments and prevents a transient
+        // gRPC outage from breaking every relayer-mode request while the
+        // advertised JSON-RPC endpoint remains healthy.
+        if (cfg.suiRpcUrl) {
+            let SuiClient: any = undefined;
             try {
-                const mod = (await import("@mysten/sui/jsonRpc")) as any;
-                SuiClient = mod.SuiJsonRpcClient ?? mod.SuiClient;
+                const mod = (await import("@mysten/sui/client")) as any;
+                SuiClient = mod.SuiClient;
             } catch {
-                /* not present on this version either */
+                /* not present on this version */
             }
-        }
-        if (typeof SuiClient === "function") {
-            clientCandidates.push({
-                name: "SuiClient",
-                client: new SuiClient({ url: cfg.suiRpcUrl }),
-            });
+            if (typeof SuiClient !== "function") {
+                try {
+                    const mod = (await import("@mysten/sui/jsonRpc")) as any;
+                    SuiClient = mod.SuiJsonRpcClient ?? mod.SuiClient;
+                } catch {
+                    /* not present on this version either */
+                }
+            }
+            if (typeof SuiClient === "function") {
+                clientCandidates.push({
+                    name: "SuiClient",
+                    client: new SuiClient({ url: cfg.suiRpcUrl }),
+                });
+            }
         }
 
         if (clientCandidates.length === 0 || typeof Ed25519Keypair !== "function") {
             throw new Error(
-                "SuiGrpcClient/SuiClient or Ed25519Keypair not found in @mysten/sui. " +
+                `Required ${cfg.suiTransport} Sui client or Ed25519Keypair not found in @mysten/sui. ` +
                 "Ensure @mysten/sui >=2.5.0 and @mysten/seal >=1.1.0 are installed."
             );
         }
 
         const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
 
-        // gRPC getObject returns { object } whereas legacy JSON-RPC returns
-        // { data }. SessionKey accepts either through the shared core client
-        // interface. If the relayer still serves a JSON-RPC URL in config,
-        // the legacy client remains a runtime fallback.
+        // SessionKey accepts either transport through the shared core client
+        // interface. Candidates are ordered by the server's preferred
+        // transport, with JSON-RPC retained as a compatibility fallback.
         let session: any = undefined;
         let lastClientError: unknown;
         for (const candidate of clientCandidates) {

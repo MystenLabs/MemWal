@@ -2,7 +2,7 @@ import { tool, type UIMessageStreamWriter } from "ai";
 import type { Session } from "next-auth";
 import { z } from "zod";
 import { documentHandlersByArtifactKind } from "@/lib/artifacts/server";
-import { getDocumentById } from "@/lib/db/queries";
+import { getDocumentByIdForUser } from "@/lib/db/queries";
 import type { ChatMessage } from "@/lib/types";
 
 type UpdateDocumentProps = {
@@ -20,9 +20,26 @@ export const updateDocument = ({ session, dataStream }: UpdateDocumentProps) =>
         .describe("The description of changes that need to be made"),
     }),
     execute: async ({ id, description }) => {
-      const document = await getDocumentById({ id });
+      // No authenticated user id means no document can belong to the caller.
+      // Bail out with the same "not found" shape rather than passing an empty
+      // string into the userId filter (a UUID-typed column), which would throw.
+      const userId = session.user?.id;
+      if (!userId) {
+        return {
+          error: "Document not found",
+        };
+      }
 
-      if (!document) {
+      // Scope the lookup to the calling user so this tool can only ever read or
+      // update the caller's own documents — the same ownership check the HTTP
+      // route (app/(chat)/api/document/route.ts) enforces on every method.
+      const document = await getDocumentByIdForUser({ id, userId });
+
+      // Defense in depth: even though the lookup is owner-scoped, re-assert
+      // ownership here so a future refactor of the lookup cannot silently
+      // reopen the gap. Non-owners get the same "not found" shape as a
+      // missing id, so existence is not disclosed.
+      if (!document || document.userId !== userId) {
         return {
           error: "Document not found",
         };

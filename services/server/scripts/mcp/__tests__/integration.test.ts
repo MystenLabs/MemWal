@@ -23,10 +23,15 @@ process.env.MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN = "2";
 
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import express from "express";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { mountMcpRoutes } from "../index.js";
 
@@ -49,7 +54,20 @@ let baseUrl: string;
 
 before(async () => {
     const app = express();
+    app.get("/version", (_req, res) => {
+        res.json({
+            apiVersion: "1.0.0",
+            relayerVersion: "1.0.0",
+            minSupportedSdk: { mcp: "0.0.1" },
+        });
+    });
     mountMcpRoutes(app, { relayerUrl: "http://localhost:1" });
+    // The Rust relayer exposes /api/mcp/* and proxies it to these same MCP
+    // routes. Mount the real handlers under /api as well so the official
+    // stdio bridge can exercise its production URLs without a proxy stub.
+    const publicApi = express.Router();
+    mountMcpRoutes(publicApi, { relayerUrl: "http://localhost:1" });
+    app.use("/api", publicApi);
     await new Promise<void>((resolve) => {
         server = app.listen(0, "127.0.0.1", () => resolve());
     });
@@ -108,6 +126,37 @@ async function postInit(opts: {
         sessionId: res.headers.get("mcp-session-id"),
         bodyText: await res.text(),
     };
+}
+
+async function openSse(opts: {
+    bearer: string;
+    accountId: string;
+    xff: string;
+}): Promise<{
+    reader: ReadableStreamDefaultReader<Uint8Array>;
+    sessionId: string;
+}> {
+    const response = await fetch(`${baseUrl}/mcp/sse`, {
+        headers: {
+            accept: "text/event-stream",
+            authorization: `Bearer ${opts.bearer}`,
+            "x-memwal-account-id": opts.accountId,
+            "x-forwarded-for": opts.xff,
+        },
+    });
+    assert.equal(response.status, 200);
+    assert(response.body);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let received = "";
+    while (!received.includes("sessionId=")) {
+        const chunk = await reader.read();
+        assert.equal(chunk.done, false, "SSE stream closed before endpoint event");
+        received += decoder.decode(chunk.value, { stream: true });
+    }
+    const match = received.match(/sessionId=([0-9a-f-]+)/i);
+    assert(match, `missing session id in SSE endpoint event: ${received}`);
+    return { reader, sessionId: match[1] };
 }
 
 // ---- tests ----------------------------------------------------------------
@@ -215,4 +264,156 @@ test("malformed bearer returns 401, not 429 — auth still runs after rate-limit
 
     assert.equal(res.status, 401);
     assert.ok(res.headers.get("www-authenticate"));
+});
+
+test("SSE message POST is bound to the principal that opened the session", async () => {
+    const owner = fakeCreds();
+    const attacker = fakeCreds();
+    const opened = await openSse({ ...owner, xff: "192.0.2.70" });
+    const url = `${baseUrl}/mcp/messages?sessionId=${opened.sessionId}`;
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 7, method: "ping" });
+
+    try {
+        const noAuth = await fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+        });
+        assert.equal(noAuth.status, 401);
+        assert.ok(noAuth.headers.get("www-authenticate"));
+
+        const crossPrincipal = await fetch(url, {
+            method: "POST",
+            headers: mcpHeaders({ ...attacker, xff: "192.0.2.71" }),
+            body,
+        });
+        assert.equal(crossPrincipal.status, 403);
+
+        const samePrincipal = await fetch(url, {
+            method: "POST",
+            headers: mcpHeaders({ ...owner, xff: "192.0.2.70" }),
+            body,
+        });
+        assert.equal(samePrincipal.status, 202);
+    } finally {
+        await opened.reader.cancel();
+    }
+});
+
+test("unknown SSE session id remains 404", async () => {
+    const creds = fakeCreds();
+    const response = await fetch(
+        `${baseUrl}/mcp/messages?sessionId=00000000-0000-4000-8000-000000000000`,
+        {
+            method: "POST",
+            headers: mcpHeaders({ ...creds, xff: "192.0.2.72" }),
+            body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "ping" }),
+        }
+    );
+    assert.equal(response.status, 404);
+});
+
+test("official stdio bridge authenticates SSE message POSTs", async (t) => {
+    const creds = fakeCreds();
+    const home = mkdtempSync(join(tmpdir(), "memwal-mcp-auth-binding-"));
+    const credentialsPath = join(home, ".memwal", "credentials.json");
+    mkdirSync(dirname(credentialsPath), { recursive: true });
+    writeFileSync(
+        credentialsPath,
+        JSON.stringify({
+            accountId: creds.accountId,
+            createdAt: new Date(0).toISOString(),
+            delegateAddress: `0x${"1".repeat(64)}`,
+            delegatePrivateKey: creds.bearer,
+            delegatePublicKeyHex: "2".repeat(64),
+            packageId: `0x${"3".repeat(64)}`,
+            relayerUrl: baseUrl,
+            version: 1,
+            walletAddress: `0x${"4".repeat(64)}`,
+        }),
+        { mode: 0o600 },
+    );
+
+    const testDir = dirname(fileURLToPath(import.meta.url));
+    const tsxBin = resolve(testDir, "../../node_modules/.bin/tsx");
+    const bridgeEntry = resolve(testDir, "../../../../../packages/mcp/src/bin/memwal-mcp.ts");
+    const child = spawn(tsxBin, [bridgeEntry, "--relayer", baseUrl, "--web-url", baseUrl], {
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const messages: any[] = [];
+    const listeners = new Set<(message: any) => void>();
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    child.stdout.on("data", (chunk) => {
+        stdoutBuffer += chunk.toString();
+        let newline: number;
+        while ((newline = stdoutBuffer.indexOf("\n")) >= 0) {
+            const line = stdoutBuffer.slice(0, newline);
+            stdoutBuffer = stdoutBuffer.slice(newline + 1);
+            if (!line.trim()) continue;
+            try {
+                const message = JSON.parse(line);
+                messages.push(message);
+                for (const listener of listeners) listener(message);
+            } catch {
+                // Notes and diagnostics belong on stderr, but ignore any
+                // non-JSON stdout so the assertion below remains focused.
+            }
+        }
+    });
+    child.stderr.on("data", (chunk) => {
+        stderrBuffer += chunk.toString();
+    });
+
+    const waitFor = (predicate: (message: any) => boolean, timeoutMs = 10_000): Promise<any> => {
+        const existing = messages.find(predicate);
+        if (existing) return Promise.resolve(existing);
+        return new Promise((resolve, reject) => {
+            const listener = (message: any) => {
+                if (!predicate(message)) return;
+                clearTimeout(timeout);
+                listeners.delete(listener);
+                resolve(message);
+            };
+            const timeout = setTimeout(() => {
+                listeners.delete(listener);
+                reject(new Error(`timed out waiting for bridge response\n${stderrBuffer}`));
+            }, timeoutMs);
+            listeners.add(listener);
+        });
+    };
+    const send = (message: unknown) => {
+        child.stdin.write(`${JSON.stringify(message)}\n`);
+    };
+
+    t.after(() => {
+        child.kill("SIGKILL");
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    send({
+        jsonrpc: "2.0",
+        id: 901,
+        method: "initialize",
+        params: {
+            capabilities: {},
+            clientInfo: { name: "bridge-auth-test", version: "1.0.0" },
+            protocolVersion: "2025-06-18",
+        },
+    });
+    const initialized = await waitFor((message) => message.id === 901);
+    assert(initialized.result, JSON.stringify(initialized));
+
+    send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    send({ jsonrpc: "2.0", id: 902, method: "tools/list", params: {} });
+    const tools = await waitFor((message) => message.id === 902);
+    assert(Array.isArray(tools.result?.tools), JSON.stringify(tools));
+    assert(
+        tools.result.tools.some((tool: { name?: string }) => tool.name === "memwal_login"),
+        "bridge should receive the authenticated tools/list response",
+    );
+
+    child.stdin.end();
 });

@@ -1,6 +1,35 @@
 ---
 title: "Quick Start"
-description: "Install the Walrus Memory memory plugin for NemoClaw/OpenClaw and verify it works."
+description: >-
+  Install the Walrus Memory plugin for NemoClaw/OpenClaw and verify it works.
+  Covers prerequisites, installation, credential setup, configuration, and end-to-end testing.
+keywords:
+  - OpenClaw
+  - Walrus Memory
+  - MemWal
+  - quick start
+  - installation
+  - plugin setup
+goal:
+  description: Install the OpenClaw Walrus Memory plugin, connect it to your account, and run a test conversation to confirm automatic recall and save are working.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I install the Walrus Memory plugin for OpenClaw?
+  - How do I configure the MemWal OpenClaw plugin with my delegate key?
+  - How do I verify that the OpenClaw memory plugin is working?
+answer: >-
+  Install the Walrus Memory OpenClaw plugin with openclaw plugins install @mysten-incubation/oc-memwal. Configure it in ~/.openclaw/openclaw.json with your delegate key (via MEMWAL_PRIVATE_KEY env var), account ID, and relayer URL. Restart the gateway and verify by running openclaw memwal stats, then test the memory loop by storing a fact in one conversation and recalling it in another.
 ---
 
 Get the plugin running and test the memory loop in a few minutes.

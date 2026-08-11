@@ -6,19 +6,21 @@
  *
  *   /connect/mcp?port=17463
  *               &publicKey=<64-hex Ed25519 pub>
- *               &delegateAddress=<0x-prefixed Sui address>
  *               &label=<URL-encoded label>
  *               &relayer=<URL-encoded relayer base URL>
  *               &connectState=<64-hex CSRF token>  (legacy bridges: `state`)
  *
  * Flow:
- *   1. Render consent screen — show requested permissions + key fingerprint.
- *   2. User clicks "Connect Sui Wallet" → standard dApp Kit wallet popup.
- *   3. Build + sign `add_delegate_key(account, publicKey, delegateAddress, label, clock)`
+ *   1. Verify the exact state/public-key tuple against the localhost MCP
+ *      bridge. A copied/emailed URL has no matching bridge and fails closed.
+ *   2. Render consent screen — show requested permissions + the full delegate
+ *      public key/address returned by the verified bridge.
+ *   3. User clicks "Connect Sui Wallet" → standard dApp Kit wallet popup.
+ *   4. Build + sign `add_delegate_key(account, registry, publicKey, label, clock)`
  *      via useSponsoredTransaction (matches SetupWizard pattern).
- *   4. POST result {accountId, walletAddress, packageId, txDigest, label}
+ *   5. POST result {accountId, walletAddress, packageId, txDigest, label}
  *      to http://localhost:<port>/callback — the MCP package's listener.
- *   5. Show success screen — user can close the tab.
+ *   6. Show success screen — user can close the tab.
  *
  * Error paths:
  *   - Wallet not connected → wallet picker.
@@ -34,6 +36,7 @@ import {
     useSuiClient,
 } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
+import { Ed25519PublicKey } from '@mysten/sui/keypairs/ed25519'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { config } from '../config'
@@ -44,6 +47,7 @@ import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
 
 type Step =
+    | 'verifying'
     | 'consent'
     | 'signing'
     | 'callback'
@@ -81,6 +85,30 @@ interface McpCallbackPayload {
     state: string
 }
 
+interface VerifiedBridge {
+    publicKey: string
+    label: string
+    relayer: string
+}
+
+function isVerifiedBridge(
+    value: unknown,
+    expectedPublicKey: string,
+    expectedRelayer: string,
+): value is VerifiedBridge & { ok: true } {
+    if (!value || typeof value !== 'object') return false
+    const candidate = value as Record<string, unknown>
+    return (
+        candidate.ok === true &&
+        typeof candidate.publicKey === 'string' &&
+        candidate.publicKey.toLowerCase() === expectedPublicKey.toLowerCase() &&
+        typeof candidate.label === 'string' &&
+        candidate.label.length > 0 &&
+        typeof candidate.relayer === 'string' &&
+        candidate.relayer.replace(/\/+$/, '') === expectedRelayer.replace(/\/+$/, '')
+    )
+}
+
 export default function ConnectMcp() {
     const [params] = useSearchParams()
     const currentAccount = useCurrentAccount()
@@ -89,8 +117,6 @@ export default function ConnectMcp() {
 
     const port = params.get('port') ?? ''
     const publicKey = params.get('publicKey') ?? ''
-    const delegateAddress = params.get('delegateAddress') ?? ''
-    const label = params.get('label') ?? 'Walrus Memory MCP'
     const relayer = params.get('relayer') ?? config.memwalServerUrl
     /**
      * Cryptographic state token from the MCP bridge. Must be echoed verbatim
@@ -108,11 +134,13 @@ export default function ConnectMcp() {
      */
     const state = params.get('connectState') ?? params.get('state') ?? ''
 
-    const [step, setStep] = useState<Step>('consent')
+    const [step, setStep] = useState<Step>('verifying')
     const [errorMsg, setErrorMsg] = useState('')
     const [walletPickerOpen, setWalletPickerOpen] = useState(false)
     const [callbackPayload, setCallbackPayload] = useState<McpCallbackPayload | null>(null)
     const [callbackDelivered, setCallbackDelivered] = useState<boolean | null>(null)
+    const [verifiedBridge, setVerifiedBridge] = useState<VerifiedBridge | null>(null)
+    const [preflightAttempt, setPreflightAttempt] = useState(0)
     const invalidRequestTrackedRef = useRef(false)
 
     // Validate query string up-front.
@@ -123,13 +151,65 @@ export default function ConnectMcp() {
             portNum > 1024 &&
             portNum < 65536 &&
             /^[0-9a-fA-F]{64}$/.test(publicKey) &&
-            /^0x[0-9a-fA-F]{64}$/.test(delegateAddress) &&
+            // delegateAddress is derived on-chain (v1_new) and no longer sent
+            // in the tx, so it is not required for a valid request.
             // State token is a 32-byte hex string emitted by the MCP bridge.
             // Old bridges without state will fail this check — by design;
             // forces a bridge upgrade so we never accept stateless callbacks.
             /^[0-9a-f]{64}$/.test(state)
         )
-    }, [port, publicKey, delegateAddress, state])
+    }, [port, publicKey, state])
+
+    // Never trust/display the legacy delegateAddress query parameter. The
+    // contract derives this same Sui address from the Ed25519 public key.
+    const delegateAddress = useMemo(() => {
+        if (!/^[0-9a-fA-F]{64}$/.test(publicKey)) return ''
+        return new Ed25519PublicKey(Uint8Array.from(hexToBytes(publicKey))).toSuiAddress()
+    }, [publicKey])
+
+    useEffect(() => {
+        if (!paramsValid) {
+            setVerifiedBridge(null)
+            return
+        }
+        const controller = new AbortController()
+        setStep('verifying')
+        setErrorMsg('')
+        setVerifiedBridge(null)
+
+        void (async () => {
+            try {
+                const response = await fetch(`http://127.0.0.1:${port}/preflight`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ state, publicKey, relayer }),
+                    signal: controller.signal,
+                })
+                const body: unknown = await response.json().catch(() => null)
+                if (!response.ok || !isVerifiedBridge(body, publicKey, relayer)) {
+                    throw new Error('The local MCP bridge did not verify this connection request.')
+                }
+                setVerifiedBridge({
+                    publicKey: body.publicKey,
+                    label: body.label,
+                    relayer: body.relayer,
+                })
+                setStep('consent')
+            } catch (error) {
+                if (controller.signal.aborted) return
+                setVerifiedBridge(null)
+                setErrorMsg(
+                    error instanceof Error
+                        ? error.message
+                        : 'Could not verify the local MCP bridge.',
+                )
+                setStep('error')
+                trackEvent('mcp_connect_failed', { error_type: 'bridge_preflight_failed' })
+            }
+        })()
+
+        return () => controller.abort()
+    }, [paramsValid, port, preflightAttempt, publicKey, relayer, state])
 
     const postCallback = useCallback(
         async (payload: McpCallbackPayload): Promise<boolean> => {
@@ -150,9 +230,9 @@ export default function ConnectMcp() {
     )
 
     const handleConnect = useCallback(async () => {
-        if (!paramsValid) {
+        if (!paramsValid || !verifiedBridge) {
             trackEvent('mcp_connect_failed', { error_type: 'invalid_request' })
-            setErrorMsg('Invalid query parameters from MCP client.')
+            setErrorMsg('This request was not verified by the local MCP client.')
             setStep('error')
             return
         }
@@ -179,9 +259,10 @@ export default function ConnectMcp() {
                 target: `${config.memwalPackageId}::account::add_delegate_key`,
                 arguments: [
                     tx.object(accountId),
-                    tx.pure('vector<u8>', hexToBytes(publicKey)),
-                    tx.pure('address', delegateAddress),
-                    tx.pure('string', label),
+                    tx.object(config.memwalRegistryId),
+                    tx.pure('vector<u8>', hexToBytes(verifiedBridge.publicKey)),
+                    // v1_new derives the Sui address on-chain — no address arg.
+                    tx.pure('string', verifiedBridge.label),
                     tx.object('0x6'),
                 ],
             })
@@ -217,7 +298,7 @@ export default function ConnectMcp() {
                 walletAddress: currentAccount.address,
                 packageId: config.memwalPackageId,
                 txDigest: result.digest,
-                label,
+                label: verifiedBridge.label,
                 state,
             }
             setCallbackPayload(payload)
@@ -238,9 +319,7 @@ export default function ConnectMcp() {
         currentAccount,
         suiClient,
         signAndExecute,
-        publicKey,
-        delegateAddress,
-        label,
+        verifiedBridge,
         state,
         postCallback,
     ])
@@ -261,9 +340,9 @@ export default function ConnectMcp() {
         if (!paramsValid) return
         sessionStorage.setItem(
             'memwal_mcp_connect',
-            JSON.stringify({ port, publicKey, delegateAddress, label, relayer, connectState: state }),
+            JSON.stringify({ port, publicKey, delegateAddress, relayer, connectState: state }),
         )
-    }, [paramsValid, port, publicKey, delegateAddress, label, relayer, state])
+    }, [paramsValid, port, publicKey, delegateAddress, relayer, state])
 
     // If the wallet popup completes after we asked it to open, auto-proceed.
     useEffect(() => {
@@ -305,11 +384,21 @@ export default function ConnectMcp() {
                         </div>
                     )}
 
-                    {paramsValid && step === 'consent' && (
+                    {paramsValid && step === 'verifying' && (
+                        <div className="setup-classic-intro">
+                            <h2 className="setup-classic-title">Verifying local MCP client…</h2>
+                            <p className="setup-classic-description">
+                                Checking that this request came from an MCP login listener running on this device.
+                            </p>
+                        </div>
+                    )}
+
+                    {paramsValid && step === 'consent' && verifiedBridge && (
                         <ConsentCard
-                            label={label}
+                            label={verifiedBridge.label}
+                            publicKey={verifiedBridge.publicKey}
                             delegateAddress={delegateAddress}
-                            relayer={relayer}
+                            relayer={verifiedBridge.relayer}
                             wallet={currentAccount?.address ?? null}
                             onConnect={handleConnect}
                         />
@@ -367,7 +456,11 @@ export default function ConnectMcp() {
                                     onClick={() => {
                                         trackEvent('cta_click', { cta: 'mcp_retry', location: 'connect_mcp' })
                                         setErrorMsg('')
-                                        setStep('consent')
+                                        if (verifiedBridge) {
+                                            setStep('consent')
+                                        } else {
+                                            setPreflightAttempt(attempt => attempt + 1)
+                                        }
                                     }}
                                 >
                                     Try again
@@ -389,12 +482,14 @@ export default function ConnectMcp() {
 
 function ConsentCard({
     label,
+    publicKey,
     delegateAddress,
     relayer,
     wallet,
     onConnect,
 }: {
     label: string
+    publicKey: string
     delegateAddress: string
     relayer: string
     wallet: string | null
@@ -403,17 +498,18 @@ function ConsentCard({
     return (
         <div className="setup-classic-intro">
             <h2 className="setup-classic-title">
-                {label} wants access to your Walrus Memory
+                A local MCP client is requesting access
             </h2>
             <p className="setup-classic-description">
-                Review the permissions below, then connect your Sui wallet to register this delegate key on-chain.
+                This local app calls itself <code style={codeStyle}>{label}</code>. This name is not verified.
+                Approving grants persistent access until you revoke the delegate key on-chain.
             </p>
 
             <div className="card setup-classic-feature-card">
                 <p style={cardLabelStyle}>Permissions requested</p>
                 <ul style={permListStyle}>
-                    <li>✓ Read your memories (<code style={codeStyle}>memwal_recall</code>)</li>
-                    <li>✓ Save new memories (<code style={codeStyle}>memwal_remember</code>)</li>
+                    <li>✓ Read and decrypt all your memories (<code style={codeStyle}>memwal_recall</code>)</li>
+                    <li>✓ Write new memories (<code style={codeStyle}>memwal_remember</code>)</li>
                     <li>✓ Extract facts from text (<code style={codeStyle}>memwal_analyze</code>)</li>
                     <li>✓ Re-index from Walrus (<code style={codeStyle}>memwal_restore</code>)</li>
                 </ul>
@@ -426,8 +522,12 @@ function ConsentCard({
                     <span style={detailValueStyle}>{relayer}</span>
                 </div>
                 <div style={detailRowStyle}>
+                    <span style={detailLabelStyle}>Delegate public key</span>
+                    <span style={{ ...detailValueStyle, overflowWrap: 'anywhere' }}>{publicKey}</span>
+                </div>
+                <div style={detailRowStyle}>
                     <span style={detailLabelStyle}>Delegate address</span>
-                    <span style={detailValueStyle}>{delegateAddress.slice(0, 16)}…{delegateAddress.slice(-6)}</span>
+                    <span style={{ ...detailValueStyle, overflowWrap: 'anywhere' }}>{delegateAddress}</span>
                 </div>
                 <div style={detailRowStyle}>
                     <span style={detailLabelStyle}>Connected wallet</span>

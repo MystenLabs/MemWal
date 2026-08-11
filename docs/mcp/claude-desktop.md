@@ -1,7 +1,34 @@
 ---
 title: Claude Desktop
-description: Add portable Walrus Memory to Claude Desktop through the MemWal MCP server.
-keywords: [MCP, Claude Desktop, Walrus Memory, MemWal, memory]
+description: >-
+  Add portable Walrus Memory to Claude Desktop through the MemWal MCP server.
+  Claude Desktop supports MCP-only installation with proactive memory tools.
+keywords:
+  - MCP
+  - Claude Desktop
+  - Walrus Memory
+  - MemWal
+  - memory tools
+goal:
+  description: Add the MemWal MCP server to Claude Desktop's configuration, authenticate, and verify that memory tools are available in your Claude Desktop session.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 50
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I add Walrus Memory to Claude Desktop?
+  - How do I configure the MemWal MCP server for Claude Desktop?
+  - Does Claude Desktop support the MemWal automatic memory plugin?
+answer: >-
+  To add Walrus Memory to Claude Desktop, configure the MemWal MCP server in your claude_desktop_config.json file using npx -y @mysten-incubation/memwal-mcp as the command. Claude Desktop supports MCP-only (not the plugin with lifecycle hooks). The tool descriptions still make the agent save and recall proactively. Restart Claude Desktop fully (Cmd+Q) after installation, then ask the agent to run memwal_login on first use.
 ---
 
 Add MemWal to Claude Desktop so the agent can save and recall durable facts. Claude Desktop uses the **MCP server** (the memory tools); the automatic-memory plugin hooks are available on [Claude Code](/mcp/claude-code), [Codex](/mcp/codex), [Cursor](/mcp/cursor), and [Antigravity](/mcp/antigravity).
@@ -29,6 +56,10 @@ Add the server to your Claude Desktop config:
   }
 }
 ```
+
+<Note>
+Newer Claude Desktop versions pre-populate `claude_desktop_config.json` with other top-level keys (such as `preferences`) and no `mcpServers` block. Add `mcpServers` as a sibling of the existing keys rather than replacing the file. If an `mcpServers` block already exists, add the `memwal` entry inside it alongside any other servers.
+</Note>
 
 Quit and reopen Claude Desktop (`Cmd+Q` on macOS; closing the window is not enough), then ask the agent to run `memwal_login` on first use.
 

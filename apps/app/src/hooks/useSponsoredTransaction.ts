@@ -21,7 +21,8 @@
  *   4. POST /sponsor/execute → { digest }
  */
 
-import { useCurrentAccount, useSignTransaction, useSuiClient } from '@mysten/dapp-kit'
+import { useCurrentAccount, useSignPersonalMessage, useSignTransaction, useSuiClient } from '@mysten/dapp-kit'
+import { createSponsorAuthorization } from '@mysten-incubation/memwal'
 import { Transaction } from '@mysten/sui/transactions'
 import { config } from '../config'
 
@@ -77,6 +78,7 @@ export function useSponsoredTransaction() {
     const currentAccount = useCurrentAccount()
     const suiClient = useSuiClient()
     const { mutateAsync: signTransaction } = useSignTransaction()
+    const { mutateAsync: signPersonalMessage } = useSignPersonalMessage()
 
     const mutateAsync = async ({ transaction }: { transaction: Transaction }): Promise<{ digest: string }> => {
         const sender = currentAccount?.address
@@ -92,6 +94,11 @@ export function useSponsoredTransaction() {
         let lastError: unknown
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
+                const authorization = await createSponsorAuthorization(
+                    sender,
+                    kindBytes,
+                    (message) => signPersonalMessage({ message }),
+                )
                 // 1. Sponsor via server (proxied to sidecar → Enoki)
                 const sponsorRes = await fetch(`${config.memwalServerUrl}/sponsor`, {
                     method: 'POST',
@@ -99,6 +106,7 @@ export function useSponsoredTransaction() {
                     body: JSON.stringify({
                         transactionBlockKindBytes: kindBase64,
                         sender,
+                        ...authorization,
                     }),
                 })
                 if (!sponsorRes.ok) {
@@ -118,6 +126,7 @@ export function useSponsoredTransaction() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         digest: sponsored.digest,
+                        sender,
                         signature,
                     }),
                 })

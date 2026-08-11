@@ -1,7 +1,7 @@
 import { Output, streamText, tool, type UIMessageStreamWriter } from "ai";
 import type { Session } from "next-auth";
 import { z } from "zod";
-import { getDocumentById, saveSuggestions } from "@/lib/db/queries";
+import { getDocumentByIdForUser, saveSuggestions } from "@/lib/db/queries";
 import type { Suggestion } from "@/lib/db/schema";
 import type { ChatMessage } from "@/lib/types";
 import { generateUUID } from "@/lib/utils";
@@ -27,9 +27,28 @@ export const requestSuggestions = ({
         ),
     }),
     execute: async ({ documentId }) => {
-      const document = await getDocumentById({ id: documentId });
+      // No authenticated user id means no document can belong to the caller.
+      // Bail out with the same "not found" shape rather than passing an empty
+      // string into the userId filter (a UUID-typed column), which would throw.
+      const userId = session.user?.id;
+      if (!userId) {
+        return {
+          error: "Document not found",
+        };
+      }
 
-      if (!document || !document.content) {
+      // Scope the lookup to the calling user so this tool cannot read another
+      // user's document content — mirrors the ownership check the HTTP route
+      // (app/(chat)/api/document/route.ts) enforces on the same resource.
+      const document = await getDocumentByIdForUser({
+        id: documentId,
+        userId,
+      });
+
+      // Defense in depth: re-assert ownership after the scoped lookup so a
+      // future refactor cannot reopen the gap. Non-owners get the same
+      // "not found" shape as a missing id.
+      if (!document || document.userId !== userId || !document.content) {
         return {
           error: "Document not found",
         };
@@ -92,18 +111,14 @@ export const requestSuggestions = ({
         }
       }
 
-      if (session.user?.id) {
-        const userId = session.user.id;
-
-        await saveSuggestions({
-          suggestions: suggestions.map((suggestion) => ({
-            ...suggestion,
-            userId,
-            createdAt: new Date(),
-            documentCreatedAt: document.createdAt,
-          })),
-        });
-      }
+      await saveSuggestions({
+        suggestions: suggestions.map((suggestion) => ({
+          ...suggestion,
+          userId,
+          createdAt: new Date(),
+          documentCreatedAt: document.createdAt,
+        })),
+      });
 
       return {
         id: documentId,

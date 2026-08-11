@@ -1,5 +1,7 @@
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::alerts::AlertManager;
 use crate::engine::MemoryEngine;
@@ -11,6 +13,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Max items in a single POST /api/remember/bulk request.
 pub const MAX_BULK_ITEMS: usize = 20;
+/// Namespace values participate in a composite PostgreSQL B-tree index.
+/// Keep them small enough that caller input can never exceed an index tuple.
+pub const MAX_NAMESPACE_BYTES: usize = 255;
 
 /// Bounded concurrency for concurrent embed+encrypt in bulk route handler.
 pub const BULK_EMBED_CONCURRENCY: usize = 5;
@@ -26,6 +31,9 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
+
+/// Prevent an accidental low interval from continuously polling Sui and the sidecar.
+const MIN_BALANCE_MONITOR_INTERVAL_SECS: u64 = 30;
 
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
@@ -62,6 +70,42 @@ pub(crate) fn configured_walrus_storage_epochs(network: &str) -> u32 {
 /// Delay before racing a cold Walrus read against the next configured aggregator.
 pub const DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS: u64 = 150;
 
+pub const MAX_SECURITY_DELETE_EXECUTE_IN_FLIGHT: usize = 64;
+
+/// Process-local admission gate for deletion transactions that all mutate
+/// the Walrus System shared object. API submits and reconciler replays share
+/// one instance; prepare/read RPCs and every other subsystem bypass it.
+#[derive(Clone)]
+pub struct SecurityDeleteExecutionGate {
+    permits: Arc<Semaphore>,
+}
+
+impl SecurityDeleteExecutionGate {
+    pub fn new(max_in_flight: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(max_in_flight)),
+        }
+    }
+
+    pub async fn acquire(&self) -> OwnedSemaphorePermit {
+        Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .expect("security-delete execution gate is never closed")
+    }
+}
+
+/// Default cap on AccountRegistry pages walked by the auth fallback scan
+/// (Strategy 3 in `auth::resolve_account`). 50 accounts per page → 1000
+/// accounts. Override via MEMWAL_REGISTRY_SCAN_MAX_PAGES.
+pub const DEFAULT_REGISTRY_SCAN_MAX_PAGES: u32 = 20;
+
+/// Max concurrent AccountRegistry fallback scans. Auth runs BEFORE the
+/// rate limiter, so unauthenticated unknown-key traffic could otherwise
+/// stack unbounded full-registry scans (each page fans out one
+/// `sui_getObject` per candidate account).
+pub const REGISTRY_SCAN_MAX_CONCURRENT: usize = 2;
+
 // ============================================================
 // App State (shared across routes + middleware)
 // ============================================================
@@ -71,15 +115,25 @@ pub struct AppState {
     /// `Arc` so the `MemoryEngine` impl can share the same handle rather
     /// than duplicating the pool.
     pub db: Arc<VectorDb>,
+    /// Isolated old-V1 database. Present only when at least one tracked
+    /// security-delete component is enabled.
+    pub legacy_db: Option<Arc<crate::storage::legacy_db::LegacyDb>>,
+    pub security_delete_nonce_store: Arc<dyn crate::security_delete_auth::NonceStore>,
+    pub security_delete_wallet_verifier:
+        Arc<dyn crate::security_delete_auth::WalletSignatureVerifier>,
+    pub security_delete_sui: Option<Arc<dyn crate::sui::SuiApi>>,
+    /// The same security-delete client and quota controls, tagged as
+    /// background so resolver/reconciler traffic cannot consume reservations
+    /// held for auth, prepare, and submit.
+    pub security_delete_background_sui: Option<Arc<dyn crate::sui::SuiApi>>,
+    /// Shared only by security-delete API execution and reconciler replay.
+    pub security_delete_execution_gate: Arc<SecurityDeleteExecutionGate>,
     /// `Arc` so the engine + handlers share one immutable config.
     pub config: Arc<Config>,
     pub http_client: reqwest::Client,
     /// Shared Sui gRPC client for onchain delegate-key verification, built
-    /// once at startup when `SUI_GRPC_URL` is set (`None` keeps the JSON-RPC
-    /// path). Constructing `sui_rpc::Client` parses the OS root-cert store
-    /// and opens a fresh TLS channel, so it must NOT be rebuilt per request —
-    /// it is `Clone` (shares the underlying tonic channel), mirroring how
-    /// `http_client` reuses one pooled reqwest client.
+    /// once at startup. This client is intentionally independent of security
+    /// deletion's quota gate.
     pub sui_grpc_client: Option<sui_rpc::Client>,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
@@ -107,9 +161,14 @@ pub struct AppState {
     pub redis: redis::aio::MultiplexedConnection,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
-    /// Apalis storage for RememberJob — legacy full async pipeline.
-    /// Kept so the legacy worker can drain any rows enqueued before the
-    /// migration to WalletJob::UploadAndTransfer; new requests do NOT use this.
+    /// Bounds concurrent AccountRegistry fallback scans (auth Strategy 3).
+    /// Auth runs before the rate limiter, so this — plus the per-scan page
+    /// cap (`Config::registry_scan_max_pages`) — is what stops unknown-key
+    /// floods from stacking unbounded registry walks. `try_acquire` only:
+    /// saturation rejects the request rather than queueing.
+    pub registry_scan_semaphore: tokio::sync::Semaphore,
+    /// Apalis storage for legacy RememberJob payloads. Kept so the worker can
+    /// fail unfenced rows closed and surface them for reconciliation.
     #[allow(dead_code)]
     pub remember_job_storage: RememberJobStorage,
     /// Single Apalis storage for WalletJob. Routing dimension was previously a
@@ -193,11 +252,8 @@ pub struct Config {
     pub port: u16,
     pub database_url: String,
     pub sui_rpc_url: String,
-    /// gRPC endpoint for onchain account/delegate-key verification. When set,
-    /// verify_delegate_key_onchain uses gRPC instead of JSON-RPC; empty keeps
-    /// the JSON-RPC path unchanged (mirrors the sidecar's SUI_GRPC_URL opt-in
-    /// from the write-path gRPC migration — JSON-RPC sunsets 2026-07-31, and
-    /// testnet's public JSON-RPC endpoint already returns 404).
+    /// Required gRPC endpoint for boot-time SEAL policy validation and onchain
+    /// account/delegate-key verification.
     pub sui_grpc_url: Option<String>,
     /// network name (mainnet/testnet/devnet). Surfaced via
     /// `GET /config` so the SDK can select the matching Sui fullnode
@@ -225,8 +281,19 @@ pub struct Config {
     /// Pool of keys for parallel Walrus uploads (parsed from SERVER_SUI_PRIVATE_KEYS,
     /// falls back to SERVER_SUI_PRIVATE_KEY as a single-element list).
     pub sui_private_keys: Vec<String>,
+    /// Immutable original-publish package ID. This is the Move type origin and
+    /// the SEAL ciphertext namespace; it must not change across upgrades.
     pub package_id: String,
+    /// Package version whose `account::seal_approve` policy is executed for
+    /// decrypts. Defaults to `package_id`, but moves to the latest published
+    /// package after an upgrade without changing the ciphertext namespace.
+    pub seal_policy_package_id: String,
     pub registry_id: String,
+    /// Max AccountRegistry pages (50 accounts each) the auth fallback scan
+    /// walks before giving up (MEMWAL_REGISTRY_SCAN_MAX_PAGES, default 20).
+    /// Bounds the RPC fan-out an unknown delegate key can trigger; clients
+    /// past the cap must send the x-account-id hint instead.
+    pub registry_scan_max_pages: u32,
     /// URL of the SEAL/Walrus TS sidecar HTTP server
     pub sidecar_url: String,
     /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
@@ -235,6 +302,12 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
     pub sponsor_rate_limit: SponsorRateLimitConfig,
+    /// Rate limiting for the public, unauthenticated `GET
+    /// /api/accounts/{owner}/exists` endpoint
+    pub accounts_rate_limit: AccountsRateLimitConfig,
+    /// Reverse-proxy hops trusted to append/sanitize X-Forwarded-For. Zero
+    /// ignores caller-supplied XFF and uses the direct peer address.
+    pub trusted_proxy_hops: usize,
     /// Allowed CORS origins (comma-separated, e.g. "http://localhost:3000,https://memwal.ai")
     pub allowed_origins: String,
     /// when true, select `PlaintextEngine` instead of
@@ -242,11 +315,57 @@ pub struct Config {
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
+    /// Master visibility flag for the memory-deletion feature family.
+    pub enable_memory_deletion: bool,
+    /// Selects the tracked, backend-built security-delete flow. The master
+    /// deletion flag must also be enabled. When false, the legacy
+    /// handlers remain the only destructive API.
+    pub enable_security_delete: bool,
+    pub legacy_db_url: Option<String>,
+    pub deletion_reconciler_enabled: bool,
+    pub deletion_object_resolver_enabled: bool,
+    pub delete_batch_max: usize,
+    pub max_active_batches_per_owner: usize,
+    pub security_delete_auth_requests_per_minute: u64,
+    pub security_delete_prepare_requests_per_minute: u64,
+    /// Process-local concurrency for deletion PTBs mutating the shared
+    /// Walrus System object. Keep at one unless the target network is proven
+    /// to tolerate a higher aggregate across all replicas.
+    pub security_delete_execute_max_in_flight: usize,
+    /// Secret-gated localnet crash failpoint. Unset by default.
+    pub security_delete_crash_test_secret: Option<String>,
+    /// Per-process rolling quota for the security-deletion Sui client.
+    pub sui_rpc_requests_per_window: u32,
+    pub sui_rpc_window: std::time::Duration,
+    pub sui_rpc_attempt_timeout: std::time::Duration,
+    pub sui_rpc_max_in_flight: usize,
+    pub sponsor_private_key: Option<String>,
+    pub sponsor_min_balance_alert: u64,
+    pub claim_ttl_secs: u64,
+    pub exec_grace_secs: u64,
+    pub deletion_token_secret: Option<String>,
+    pub deletion_token_ttl_secs: u64,
+    pub expiry_margin_epochs: u64,
+    pub walrus_package_id: String,
+    pub walrus_system_object_id: String,
+    /// Max `/api/restore` calls per owner per minute (GH #501 / WALM-299).
+    /// Dedicated on top of the generic weighted account rate limiter —
+    /// bounds how often an attacker can force a fresh first-time-discovery
+    /// cost by repeatedly transferring junk blob_ids into a victim's wallet.
+    /// `0` disables the guard.
+    pub restore_requests_per_owner_per_minute: u64,
+    /// Balance monitoring (proactive alerts)
+    pub balance_monitor_interval_secs: u64,
+    pub wallet_balance_low_threshold_wal: u64,
+    pub sponsor_balance_low_threshold_sui: u64,
 }
 
 impl Config {
     pub fn from_env() -> Self {
-        let network = std::env::var("SUI_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+        let network = std::env::var("SUI_NETWORK")
+            .unwrap_or_else(|_| "mainnet".to_string())
+            .trim()
+            .to_ascii_lowercase();
         let default_rpc = match network.as_str() {
             "testnet" => "https://fullnode.testnet.sui.io:443",
             "devnet" => "https://fullnode.devnet.sui.io:443",
@@ -260,6 +379,10 @@ impl Config {
             &walrus_aggregator_url,
             std::env::var("WALRUS_AGGREGATOR_URLS").ok().as_deref(),
         );
+        let (sui_rpc_requests_per_window, sui_rpc_window) = sui_rpc_quota_from_env();
+        let package_id = std::env::var("MEMWAL_PACKAGE_ID").expect("MEMWAL_PACKAGE_ID must be set");
+        let seal_policy_package_id =
+            nonempty_env("MEMWAL_SEAL_POLICY_PACKAGE_ID").unwrap_or_else(|| package_id.clone());
 
         Self {
             port: std::env::var("PORT")
@@ -302,22 +425,271 @@ impl Config {
                 let single = std::env::var("SERVER_SUI_PRIVATE_KEY").ok().map(|k| vec![k]);
                 multi.or(single).unwrap_or_default()
             },
-            package_id: std::env::var("MEMWAL_PACKAGE_ID")
-                .expect("MEMWAL_PACKAGE_ID must be set"),
+            package_id,
+            seal_policy_package_id,
             registry_id: std::env::var("MEMWAL_REGISTRY_ID")
                 .expect("MEMWAL_REGISTRY_ID must be set"),
+            registry_scan_max_pages: std::env::var("MEMWAL_REGISTRY_SCAN_MAX_PAGES")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                // 0 would silently disable the Strategy 3 fallback scan;
+                // clamp to at least one page.
+                .map(|v| v.max(1))
+                .unwrap_or(DEFAULT_REGISTRY_SCAN_MAX_PAGES),
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
+            accounts_rate_limit: AccountsRateLimitConfig::from_env(),
+            trusted_proxy_hops: std::env::var("TRUSTED_PROXY_HOPS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|hops| *hops <= 32)
+                .unwrap_or(0),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
                 .unwrap_or_default(),
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            enable_memory_deletion: env_bool("ENABLE_MEMORY_DELETION"),
+            enable_security_delete: env_bool("ENABLE_SECURITY_DELETE"),
+            legacy_db_url: nonempty_env("LEGACY_DB_URL"),
+            deletion_reconciler_enabled: env_bool("DELETION_RECONCILER_ENABLED"),
+            deletion_object_resolver_enabled: env_bool("DELETION_OBJECT_RESOLVER_ENABLED"),
+            delete_batch_max: env_number("DELETE_BATCH_MAX", 900),
+            max_active_batches_per_owner: env_number("MAX_ACTIVE_BATCHES_PER_OWNER", 16),
+            security_delete_auth_requests_per_minute: env_positive_u64(
+                "SECURITY_DELETE_AUTH_REQUESTS_PER_MINUTE",
+                20,
+            ),
+            security_delete_prepare_requests_per_minute: env_positive_u64(
+                "SECURITY_DELETE_PREPARE_REQUESTS_PER_MINUTE",
+                10,
+            ),
+            security_delete_execute_max_in_flight: env_number(
+                "SECURITY_DELETE_EXECUTE_MAX_IN_FLIGHT",
+                1,
+            ),
+            security_delete_crash_test_secret: nonempty_env(
+                "SECURITY_DELETE_CRASH_TEST_SECRET",
+            ),
+            sui_rpc_requests_per_window,
+            sui_rpc_window,
+            sui_rpc_attempt_timeout: std::time::Duration::from_millis(env_number(
+                "SUI_RPC_ATTEMPT_TIMEOUT_MS",
+                5_000,
+            )),
+            sui_rpc_max_in_flight: env_number("SUI_RPC_MAX_IN_FLIGHT", 64),
+            sponsor_private_key: nonempty_env("SPONSOR_PRIVATE_KEY"),
+            sponsor_min_balance_alert: env_number("SPONSOR_MIN_BALANCE_ALERT", 0),
+            claim_ttl_secs: env_number("CLAIM_TTL_SECS", 600),
+            exec_grace_secs: env_number("EXEC_GRACE_SECS", 120),
+            deletion_token_secret: nonempty_env("DELETION_TOKEN_SECRET"),
+            deletion_token_ttl_secs: env_number("DELETION_TOKEN_TTL_SECS", 2700),
+            expiry_margin_epochs: env_number("EXPIRY_MARGIN_EPOCHS", 1),
+            walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
+            walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
+                .unwrap_or_default(),
+            // `env_number`, not `env_positive_u64`: `0` is a meaningful,
+            // documented value here (disables `check_restore_call_rate_limit`
+            // entirely) — `env_positive_u64` would silently coerce it back
+            // to the default, making that escape hatch unreachable.
+            restore_requests_per_owner_per_minute: env_number(
+                "RESTORE_REQUESTS_PER_OWNER_PER_MINUTE",
+                10,
+            ),
+            balance_monitor_interval_secs: normalized_balance_monitor_interval(env_positive_u64(
+                "BALANCE_MONITOR_INTERVAL_SECS",
+                900,
+            )),
+            wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
+            sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
         }
     }
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_number<T>(name: &str, default: T) -> T
+where
+    T: std::str::FromStr + Copy,
+{
+    nonempty_env(name)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_positive_u64(name: &str, default: u64) -> u64 {
+    nonempty_env(name)
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn normalized_balance_monitor_interval(interval_secs: u64) -> u64 {
+    interval_secs.max(MIN_BALANCE_MONITOR_INTERVAL_SECS)
+}
+
+fn sui_rpc_quota_from_env() -> (u32, std::time::Duration) {
+    resolve_sui_rpc_quota(
+        nonempty_env("SUI_RPC_REQUESTS_PER_WINDOW").as_deref(),
+        nonempty_env("SUI_RPC_WINDOW_SECS").as_deref(),
+        nonempty_env("SUI_RPC_MAX_RPS").as_deref(),
+        nonempty_env("SUI_RPC_QUOTA_UTILIZATION").as_deref(),
+    )
+}
+
+fn resolve_sui_rpc_quota(
+    requests: Option<&str>,
+    window: Option<&str>,
+    legacy_max_rps: Option<&str>,
+    utilization: Option<&str>,
+) -> (u32, std::time::Duration) {
+    match (requests, window) {
+        (None, None) => match legacy_max_rps {
+            None => (
+                apply_sui_rpc_quota_utilization(3_000, utilization),
+                std::time::Duration::from_secs(10),
+            ),
+            Some(value) => match value.parse::<u32>() {
+                Ok(0) => (0, std::time::Duration::ZERO),
+                Ok(max_rps) => (
+                    1,
+                    std::time::Duration::from_secs_f64(1.0 / f64::from(max_rps)),
+                ),
+                Err(_) => (1, std::time::Duration::from_millis(250)),
+            },
+        },
+        (Some(requests), Some(window)) => {
+            let requests = requests.parse().unwrap_or_default();
+            let window = window.parse().unwrap_or_default();
+            (
+                apply_sui_rpc_quota_utilization(requests, utilization),
+                std::time::Duration::from_secs(window),
+            )
+        }
+        _ => (0, std::time::Duration::ZERO),
+    }
+}
+
+fn apply_sui_rpc_quota_utilization(requests: u32, utilization: Option<&str>) -> u32 {
+    if requests == 0 {
+        return 0;
+    }
+    let utilization = match utilization.unwrap_or("0.95").parse::<f64>() {
+        Ok(value) if value.is_finite() && value > 0.0 && value <= 1.0 => value,
+        _ => return 0,
+    };
+    ((f64::from(requests) * utilization).floor() as u32).max(1)
+}
+
+/// Validate the mutually-exclusive legacy/new delete selectors and the
+/// dependencies required by each independently deployable component.
+pub fn validate_security_delete_config(config: &Config) -> Result<(), String> {
+    if !matches!(
+        config.sui_network.as_str(),
+        "mainnet" | "testnet" | "devnet" | "localnet"
+    ) {
+        return Err(format!(
+            "unsupported SUI_NETWORK={}; expected mainnet, testnet, devnet, or localnet",
+            config.sui_network
+        ));
+    }
+    if config.sui_network == "testnet" && config.sui_grpc_url.is_none() {
+        return Err(
+            "SUI_GRPC_URL is required when SUI_NETWORK=testnet; JSON-RPC is not supported".into(),
+        );
+    }
+
+    if config.enable_security_delete && !config.enable_memory_deletion {
+        return Err("ENABLE_SECURITY_DELETE requires ENABLE_MEMORY_DELETION".into());
+    }
+    if config.security_delete_crash_test_secret.is_some() && config.sui_network != "localnet" {
+        return Err("security-delete crash failpoint is allowed only on localnet".into());
+    }
+
+    let any_component = config.enable_security_delete
+        || config.deletion_reconciler_enabled
+        || config.deletion_object_resolver_enabled;
+    if !any_component {
+        return Ok(());
+    }
+
+    if config.delete_batch_max == 0
+        || config.delete_batch_max > 900
+        || config.max_active_batches_per_owner == 0
+        || config.security_delete_execute_max_in_flight == 0
+        || config.security_delete_execute_max_in_flight > MAX_SECURITY_DELETE_EXECUTE_IN_FLIGHT
+        || config.sui_rpc_requests_per_window == 0
+        || config.sui_rpc_requests_per_window > 1_000_000
+        || config.sui_rpc_window.is_zero()
+        || config.sui_rpc_window > std::time::Duration::from_secs(60 * 60)
+        || config.sui_rpc_attempt_timeout.is_zero()
+        || config.sui_rpc_attempt_timeout > std::time::Duration::from_secs(60)
+        || !(2..=10_000).contains(&config.sui_rpc_max_in_flight)
+        || config.claim_ttl_secs == 0
+        || config.deletion_token_ttl_secs == 0
+    {
+        return Err("security-delete numeric limits are invalid; DELETE_BATCH_MAX must be at most 900, SUI_RPC_REQUESTS_PER_WINDOW at most 1000000, SUI_RPC_WINDOW_SECS at most 3600, SUI_RPC_ATTEMPT_TIMEOUT_MS at most 60000, and SUI_RPC_MAX_IN_FLIGHT between 2 and 10000".into());
+    }
+
+    let mut missing = Vec::new();
+    if config.legacy_db_url.is_none() {
+        missing.push("LEGACY_DB_URL");
+    }
+    if config.sui_grpc_url.is_none() {
+        missing.push("SUI_GRPC_URL");
+    }
+    if config.walrus_package_id.trim().is_empty() {
+        missing.push("WALRUS_PACKAGE_ID");
+    }
+    if config.walrus_system_object_id.trim().is_empty() {
+        missing.push("WALRUS_SYSTEM_OBJECT_ID");
+    }
+    if config.enable_security_delete && config.deletion_token_secret.is_none() {
+        missing.push("DELETION_TOKEN_SECRET");
+    }
+    if (config.enable_security_delete || config.deletion_reconciler_enabled)
+        && config.sponsor_private_key.is_none()
+    {
+        missing.push("SPONSOR_PRIVATE_KEY");
+    }
+
+    if !missing.is_empty() {
+        Err(format!(
+            "security-delete configuration requires: {}",
+            missing.join(", ")
+        ))
+    } else {
+        config
+            .walrus_package_id
+            .parse::<sui_sdk_types::Address>()
+            .map_err(|_| "WALRUS_PACKAGE_ID must be a valid Sui address".to_string())?;
+        config
+            .walrus_system_object_id
+            .parse::<sui_sdk_types::Address>()
+            .map_err(|_| "WALRUS_SYSTEM_OBJECT_ID must be a valid Sui address".to_string())?;
+        if let Some(key) = config.sponsor_private_key.as_deref() {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(key)
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(key))
+                .map_err(|_| "SPONSOR_PRIVATE_KEY must be base64".to_string())?;
+            if decoded.len() != 32 {
+                return Err("SPONSOR_PRIVATE_KEY must decode to 32 bytes".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn security_delete_routes_enabled(config: &Config) -> bool {
+    config.enable_memory_deletion && config.enable_security_delete
 }
 
 fn env_bool(name: &str) -> bool {
@@ -360,6 +732,10 @@ pub struct SponsorRateLimitConfig {
     pub per_minute: i64,
     /// Max sponsor requests per hour per IP (default: 30)
     pub per_hour: i64,
+    /// Deployment-wide cap that cannot be bypassed by changing client input.
+    pub global_per_minute: i64,
+    /// Deployment-wide sustained cap that protects the sponsor budget.
+    pub global_per_hour: i64,
 }
 
 impl Default for SponsorRateLimitConfig {
@@ -367,6 +743,8 @@ impl Default for SponsorRateLimitConfig {
         Self {
             per_minute: 10,
             per_hour: 30,
+            global_per_minute: 100,
+            global_per_hour: 1000,
         }
     }
 }
@@ -382,6 +760,85 @@ impl SponsorRateLimitConfig {
         if let Ok(v) = std::env::var("SPONSOR_RATE_LIMIT_PER_HOUR") {
             if let Ok(n) = v.parse() {
                 c.per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("SPONSOR_GLOBAL_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.global_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("SPONSOR_GLOBAL_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.global_per_hour = n;
+            }
+        }
+        c
+    }
+}
+
+// ============================================================
+// Accounts Rate Limit Config
+// ============================================================
+
+/// Per-IP rate limits for the public, unauthenticated `GET
+/// /api/accounts/{owner}/exists` endpoint.
+///
+/// This is a cheap read (one indexed Postgres lookup) rather than a
+/// state-changing, cost-incurring operation like `/sponsor`, so its per-IP
+/// limits are set a bit more generously than `SponsorRateLimitConfig`'s
+/// 10/min · 30/hour. But the endpoint is still an anonymous
+/// address-existence oracle, so it must stay well below the general
+/// authenticated per-account budget (`RateLimitConfig`'s 60/min · 500/hour)
+/// — reusing that budget as a per-IP limit (the bug this config replaces)
+/// left effectively no defense against enumeration. 20/min and 120/hour
+/// per IP is the same order of magnitude as sponsor's proportions while
+/// staying generous enough not to bother a legitimate integrator retrying
+/// a handful of lookups.
+#[derive(Debug, Clone)]
+pub struct AccountsRateLimitConfig {
+    /// Max accounts-exists requests per minute per IP (default: 20)
+    pub per_minute: i64,
+    /// Max accounts-exists requests per hour per IP (default: 120)
+    pub per_hour: i64,
+    /// Deployment-wide cap that cannot be bypassed by IP rotation.
+    pub global_per_minute: i64,
+    /// Deployment-wide sustained cap that protects the DB pool this
+    /// endpoint shares with every other public route.
+    pub global_per_hour: i64,
+}
+
+impl Default for AccountsRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 20,
+            per_hour: 120,
+            global_per_minute: 200,
+            global_per_hour: 1500,
+        }
+    }
+}
+
+impl AccountsRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("ACCOUNTS_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.global_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.global_per_hour = n;
             }
         }
         c
@@ -496,6 +953,44 @@ fn default_limit() -> usize {
 
 fn default_namespace() -> String {
     "default".to_string()
+}
+
+pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
+    if namespace.is_empty() {
+        return Err(AppError::BadRequest("namespace cannot be empty".into()));
+    }
+    if namespace.len() > MAX_NAMESPACE_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "namespace exceeds maximum length of {} bytes",
+            MAX_NAMESPACE_BYTES
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a client-supplied embedding vector against what the fact store can
+/// accept. Shared by the manual write and read paths, where the vector comes
+/// from the caller rather than the server-side embedder. Rejects, with an
+/// actionable `BadRequest` (and, on the write path, before any paid upload):
+///   - a width other than the fixed pgvector column (`EMBEDDING_DIMS`), and
+///   - any non-finite component (NaN / ±Inf), which pgvector refuses to index
+///     and which is meaningless for cosine similarity.
+///
+/// Both would otherwise only fail deep in pgvector as an opaque 500.
+pub fn validate_embedding_vector(vector: &[f32]) -> Result<(), AppError> {
+    use crate::services::embedder::EMBEDDING_DIMS;
+    if vector.len() != EMBEDDING_DIMS {
+        return Err(AppError::BadRequest(format!(
+            "vector must have exactly {EMBEDDING_DIMS} dimensions, got {}",
+            vector.len()
+        )));
+    }
+    if let Some(index) = vector.iter().position(|component| !component.is_finite()) {
+        return Err(AppError::BadRequest(format!(
+            "vector must contain only finite values; component at index {index} is not finite"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -858,6 +1353,17 @@ pub struct RestoreResponse {
     pub total: usize,
     pub namespace: String,
     pub owner: String,
+    /// True when this restore is known-incomplete: either more on-chain
+    /// blobs were missing locally than `limit` allowed this call to
+    /// restore, or the sidecar's raw on-chain candidate fetch (bounded
+    /// per owner, shared across all of the owner's namespaces, hard-capped
+    /// independent of `limit`) hit its own cap before this namespace's
+    /// blobs were even filtered out of that set (WALM-319) — the second
+    /// case can be `true` even when `total == 0` for this namespace,
+    /// since a cap hit elsewhere can starve this namespace's fetch
+    /// entirely. Raising `limit` only helps with the first case; past the
+    /// sidecar's cap, only a cursor/pagination-based restore would.
+    pub truncated: bool,
 }
 
 /// POST /api/forget — delete the vector index rows for a namespace
@@ -874,6 +1380,16 @@ pub struct ForgetResponse {
     pub deleted: u64,
     pub namespace: String,
     pub owner: String,
+}
+
+/// GET /api/accounts/:owner/exists — does `owner` have a registered
+/// MemWalAccount? Backs Console's WALM-298 existence-check primitive.
+/// Intentionally minimal: no `account_id`, since Console doesn't need the
+/// internal identifier and returning it would needlessly widen the API's
+/// surface for future churn.
+#[derive(Debug, Serialize)]
+pub struct AccountExistsResponse {
+    pub exists: bool,
 }
 
 /// POST /api/stats — count + stored bytes for a namespace.
@@ -928,18 +1444,55 @@ pub struct PromptVersions {
 /// GET /config response.
 ///
 /// Public deployment parameters the SDK needs to build a SEAL SessionKey
-/// client-side. All fields are non-secret (on-chain / public RPC URL).
+/// client-side. All fields are non-secret (on-chain / public provider URL).
 #[derive(Debug, Serialize)]
 pub struct ConfigResponse {
     #[serde(rename = "packageId")]
     pub package_id: String,
     pub network: String,
-    #[serde(rename = "suiRpcUrl")]
-    pub sui_rpc_url: String,
+    #[serde(rename = "suiRpcUrl", skip_serializing_if = "Option::is_none")]
+    pub sui_rpc_url: Option<String>,
+    /// Preferred gRPC endpoint. Clients may fall back to `suiRpcUrl` during a
+    /// rolling deployment or when the preferred endpoint is unavailable.
+    #[serde(rename = "suiGrpcUrl", skip_serializing_if = "Option::is_none")]
+    pub sui_grpc_url: Option<String>,
+    /// Preferred transport for Sui reads. Clients may use the other advertised
+    /// endpoint as a compatibility fallback.
+    #[serde(rename = "suiTransport")]
+    pub sui_transport: &'static str,
     /// Mirror of `RateLimitConfig::bench_bypass_enabled`. Lets benchmark
     /// scripts pre-flight the server config before running.
     #[serde(rename = "rateLimitDisabled")]
     pub rate_limit_disabled: bool,
+    /// Effective deletion-only rolling-window quota after utilization is applied.
+    #[serde(rename = "securityDeleteSuiRpcRequestsPerWindow")]
+    pub security_delete_sui_rpc_requests_per_window: u32,
+    #[serde(rename = "securityDeleteSuiRpcWindowSecs")]
+    pub security_delete_sui_rpc_window_secs: u64,
+    #[serde(rename = "securityDeleteEnabled")]
+    pub security_delete_enabled: bool,
+    #[serde(rename = "securityDeleteReconcilerEnabled")]
+    pub security_delete_reconciler_enabled: bool,
+    #[serde(rename = "securityDeleteObjectResolverEnabled")]
+    pub security_delete_object_resolver_enabled: bool,
+    #[serde(rename = "securityDeleteBatchMax")]
+    pub security_delete_batch_max: usize,
+    #[serde(rename = "securityDeleteMaxActiveBatchesPerOwner")]
+    pub security_delete_max_active_batches_per_owner: usize,
+    #[serde(rename = "securityDeleteAuthRequestsPerMinute")]
+    pub security_delete_auth_requests_per_minute: u64,
+    #[serde(rename = "securityDeletePrepareRequestsPerMinute")]
+    pub security_delete_prepare_requests_per_minute: u64,
+    #[serde(rename = "securityDeleteExecuteMaxInFlight")]
+    pub security_delete_execute_max_in_flight: usize,
+    #[serde(rename = "securityDeleteCrashTestEnabled")]
+    pub security_delete_crash_test_enabled: bool,
+    #[serde(rename = "securityDeleteClaimTtlSecs")]
+    pub security_delete_claim_ttl_secs: u64,
+    #[serde(rename = "securityDeleteExecutionGraceSecs")]
+    pub security_delete_execution_grace_secs: u64,
+    #[serde(rename = "securityDeleteExpiryMarginEpochs")]
+    pub security_delete_expiry_margin_epochs: u64,
 }
 
 // ============================================================
@@ -948,21 +1501,25 @@ pub struct ConfigResponse {
 
 /// POST /sponsor — validated request body forwarded to sidecar
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SponsorRequest {
     pub sender: String,
-    #[serde(rename = "transactionBlockKindBytes")]
     pub transaction_block_kind_bytes: String,
+    #[serde(default)]
+    pub auth_signature: Option<String>,
+    #[serde(default)]
+    pub auth_timestamp: Option<i64>,
+    #[serde(default)]
+    pub auth_nonce: Option<String>,
 }
 
 /// POST /sponsor/execute — validated request body forwarded to sidecar.
-/// `sender` is optional — when present it is validated and counted against
-/// the per-sender rate limit bucket (same axis as POST /sponsor).
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SponsorExecuteRequest {
     pub digest: String,
     pub signature: String,
-    /// Sui address of the transaction sender (0x + 64 hex). Optional but
-    /// recommended — enables per-sender rate limiting on this endpoint too.
+    #[serde(default)]
     pub sender: Option<String>,
 }
 
@@ -1136,6 +1693,347 @@ mod tests {
     use std::sync::Mutex;
 
     static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn balance_monitor_interval_has_a_safe_minimum() {
+        assert_eq!(normalized_balance_monitor_interval(1), 30);
+        assert_eq!(normalized_balance_monitor_interval(30), 30);
+        assert_eq!(normalized_balance_monitor_interval(900), 900);
+    }
+
+    // ── Client-supplied embedding vector validation ──────────────
+
+    #[test]
+    fn embedding_of_correct_width_is_accepted() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        assert!(validate_embedding_vector(&vec![0.1_f32; EMBEDDING_DIMS]).is_ok());
+    }
+
+    #[test]
+    fn embedding_of_wrong_width_is_rejected_with_actionable_message() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        // A width from a different embedding model; kept distinct from the
+        // expected width so a transposed format! (expected/actual swapped) still
+        // fails the exact-string assert below.
+        let wrong = EMBEDDING_DIMS / 2 + 1;
+        match validate_embedding_vector(&vec![0.1_f32; wrong]).unwrap_err() {
+            // BadRequest maps to HTTP 400, unlike the opaque 500 a downstream
+            // pgvector failure would produce (after a paid upload on the write path).
+            AppError::BadRequest(msg) => {
+                // Build the expected message from the constant (single source of
+                // truth — survives a dimension change) while still pinning the
+                // exact wording and the expected-then-actual order.
+                assert_eq!(
+                    msg,
+                    format!("vector must have exactly {EMBEDDING_DIMS} dimensions, got {wrong}")
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_empty_vector_is_rejected() {
+        // The width check subsumes a separate non-empty guard.
+        assert!(matches!(
+            validate_embedding_vector(&[]),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn embedding_with_non_finite_component_is_rejected() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        // Correct width, but a NaN/Inf component pgvector would refuse to index —
+        // must be caught here, before any paid upload, not as an opaque 500.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut vector = vec![0.1_f32; EMBEDDING_DIMS];
+            vector[7] = bad;
+            match validate_embedding_vector(&vector).unwrap_err() {
+                AppError::BadRequest(msg) => {
+                    assert!(
+                        msg.contains("finite"),
+                        "message names the finiteness rule: {msg}"
+                    );
+                    assert!(
+                        msg.contains("index 7"),
+                        "message names the offending index: {msg}"
+                    );
+                }
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+    }
+
+    fn security_delete_test_config() -> Config {
+        Config {
+            port: 8000,
+            database_url: "postgres://test".into(),
+            sui_rpc_url: "https://rpc.example".into(),
+            sui_grpc_url: Some("https://grpc.example".into()),
+            sui_network: "testnet".into(),
+            memwal_account_id: None,
+            openai_api_key: None,
+            openai_api_base: "https://api.example".into(),
+            walrus_publisher_url: "https://publisher.example".into(),
+            walrus_aggregator_url: "https://aggregator.example".into(),
+            walrus_storage_epochs: 3,
+            walrus_aggregator_urls: vec!["https://aggregator.example".into()],
+            walrus_skip_consistency_check: false,
+            walrus_aggregator_race_after_ms: 150,
+            sui_private_key: None,
+            sui_private_keys: Vec::new(),
+            package_id: "0x1".into(),
+            seal_policy_package_id: "0x1".into(),
+            registry_id: "0x2".into(),
+            registry_scan_max_pages: DEFAULT_REGISTRY_SCAN_MAX_PAGES,
+            sidecar_url: "http://localhost:9000".into(),
+            sidecar_secret: None,
+            rate_limit: RateLimitConfig::default(),
+            sponsor_rate_limit: SponsorRateLimitConfig::default(),
+            accounts_rate_limit: AccountsRateLimitConfig::default(),
+            trusted_proxy_hops: 0,
+            allowed_origins: String::new(),
+            benchmark_mode: false,
+            enable_memory_deletion: false,
+            enable_security_delete: false,
+            legacy_db_url: None,
+            deletion_reconciler_enabled: false,
+            deletion_object_resolver_enabled: false,
+            delete_batch_max: 900,
+            max_active_batches_per_owner: 16,
+            security_delete_auth_requests_per_minute: 20,
+            security_delete_prepare_requests_per_minute: 10,
+            sui_rpc_requests_per_window: 3_000,
+            sui_rpc_window: std::time::Duration::from_secs(10),
+            sui_rpc_attempt_timeout: std::time::Duration::from_secs(5),
+            sui_rpc_max_in_flight: 64,
+            security_delete_execute_max_in_flight: 1,
+            security_delete_crash_test_secret: None,
+            sponsor_private_key: None,
+            sponsor_min_balance_alert: 0,
+            claim_ttl_secs: 600,
+            exec_grace_secs: 60,
+            deletion_token_secret: None,
+            deletion_token_ttl_secs: 2700,
+            expiry_margin_epochs: 1,
+            walrus_package_id: "0x3".into(),
+            walrus_system_object_id: "0x4".into(),
+            restore_requests_per_owner_per_minute: 10,
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn security_delete_execution_gate_serializes_callers() {
+        let gate = SecurityDeleteExecutionGate::new(1);
+        let first = gate.acquire().await;
+        let waiting_gate = gate.clone();
+        let waiter = tokio::spawn(async move { waiting_gate.acquire().await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(first);
+        let second = waiter.await.unwrap();
+        drop(second);
+    }
+
+    #[test]
+    fn security_delete_execution_concurrency_is_bounded() {
+        let mut config = security_delete_test_config();
+        config.enable_memory_deletion = true;
+        config.enable_security_delete = true;
+        config.legacy_db_url = Some("postgres://legacy".into());
+        config.deletion_token_secret = Some("secret".into());
+        config.sponsor_private_key =
+            Some(base64::engine::general_purpose::STANDARD.encode([0_u8; 32]));
+
+        config.security_delete_execute_max_in_flight = 0;
+        assert!(validate_security_delete_config(&config).is_err());
+        config.security_delete_execute_max_in_flight = MAX_SECURITY_DELETE_EXECUTE_IN_FLIGHT + 1;
+        assert!(validate_security_delete_config(&config).is_err());
+        config.security_delete_execute_max_in_flight = 1;
+        assert!(validate_security_delete_config(&config).is_ok());
+    }
+
+    #[test]
+    fn security_delete_boot_guard_rejects_selector_without_master() {
+        let mut config = security_delete_test_config();
+        config.enable_security_delete = true;
+        assert!(validate_security_delete_config(&config).is_err());
+    }
+
+    #[test]
+    fn security_delete_boot_guard_rejects_missing_dependencies() {
+        let mut config = security_delete_test_config();
+        config.enable_memory_deletion = true;
+        config.enable_security_delete = true;
+        assert!(validate_security_delete_config(&config).is_err());
+        config.legacy_db_url = Some("postgres://legacy".into());
+        config.deletion_token_secret = Some("secret".into());
+        config.sponsor_private_key =
+            Some(base64::engine::general_purpose::STANDARD.encode([7u8; 32]));
+        assert!(validate_security_delete_config(&config).is_ok());
+    }
+
+    #[test]
+    fn security_delete_boot_guard_resolver_only_needs_chain_and_legacy_db() {
+        let mut config = security_delete_test_config();
+        config.deletion_object_resolver_enabled = true;
+        config.legacy_db_url = Some("postgres://legacy".into());
+        assert!(validate_security_delete_config(&config).is_ok());
+    }
+
+    #[test]
+    fn security_delete_boot_guard_reconciler_requires_sponsor() {
+        let mut config = security_delete_test_config();
+        config.deletion_reconciler_enabled = true;
+        config.legacy_db_url = Some("postgres://legacy".into());
+        assert!(validate_security_delete_config(&config).is_err());
+        config.sponsor_private_key =
+            Some(base64::engine::general_purpose::STANDARD.encode([7u8; 32]));
+        assert!(validate_security_delete_config(&config).is_ok());
+    }
+
+    #[test]
+    fn security_delete_boot_guard_all_off_needs_nothing() {
+        let config = security_delete_test_config();
+        assert!(validate_security_delete_config(&config).is_ok());
+    }
+
+    #[test]
+    fn testnet_boot_guard_requires_grpc_even_when_security_delete_is_off() {
+        let mut config = security_delete_test_config();
+        config.sui_grpc_url = None;
+        let error = validate_security_delete_config(&config).unwrap_err();
+        assert!(error.contains("SUI_GRPC_URL is required"));
+
+        config.sui_network = "localnet".into();
+        assert!(validate_security_delete_config(&config).is_ok());
+    }
+
+    #[test]
+    fn boot_guard_rejects_unknown_sui_network() {
+        let mut config = security_delete_test_config();
+        config.sui_network = "testnet ".into();
+        let error = validate_security_delete_config(&config).unwrap_err();
+        assert!(error.contains("unsupported SUI_NETWORK"));
+    }
+
+    #[test]
+    fn config_response_advertises_grpc_transport_compatibly() {
+        let response = ConfigResponse {
+            package_id: "0x1".into(),
+            network: "testnet".into(),
+            sui_rpc_url: Some("https://rpc.example".into()),
+            sui_grpc_url: Some("https://grpc.example".into()),
+            sui_transport: "grpc",
+            rate_limit_disabled: false,
+            security_delete_sui_rpc_requests_per_window: 2_850,
+            security_delete_sui_rpc_window_secs: 10,
+            security_delete_enabled: true,
+            security_delete_reconciler_enabled: true,
+            security_delete_object_resolver_enabled: true,
+            security_delete_batch_max: 900,
+            security_delete_max_active_batches_per_owner: 16,
+            security_delete_auth_requests_per_minute: 20,
+            security_delete_prepare_requests_per_minute: 10,
+            security_delete_execute_max_in_flight: 1,
+            security_delete_crash_test_enabled: false,
+            security_delete_claim_ttl_secs: 600,
+            security_delete_execution_grace_secs: 60,
+            security_delete_expiry_margin_epochs: 1,
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["suiGrpcUrl"], "https://grpc.example");
+        assert_eq!(json["suiTransport"], "grpc");
+        assert_eq!(json["suiRpcUrl"], "https://rpc.example");
+    }
+
+    #[test]
+    fn security_delete_boot_guard_rejects_unsafe_rpc_controls() {
+        let mut config = security_delete_test_config();
+        config.deletion_object_resolver_enabled = true;
+        config.legacy_db_url = Some("postgres://legacy".into());
+
+        config.sui_rpc_attempt_timeout = std::time::Duration::ZERO;
+        assert!(validate_security_delete_config(&config).is_err());
+        config.sui_rpc_attempt_timeout = std::time::Duration::from_secs(5);
+        config.sui_rpc_max_in_flight = 1;
+        assert!(validate_security_delete_config(&config).is_err());
+        config.sui_rpc_max_in_flight = 64;
+        assert!(validate_security_delete_config(&config).is_ok());
+    }
+
+    #[test]
+    fn security_delete_crash_failpoint_is_localnet_only() {
+        let mut config = security_delete_test_config();
+        config.security_delete_crash_test_secret = Some("test-secret".into());
+        config.sui_network = "mainnet".into();
+        assert!(validate_security_delete_config(&config).is_err());
+        config.sui_network = "localnet".into();
+        assert!(validate_security_delete_config(&config).is_ok());
+    }
+
+    #[test]
+    fn security_delete_routes_require_master_and_selector() {
+        for master in [false, true] {
+            for selector in [false, true] {
+                let mut config = security_delete_test_config();
+                config.enable_memory_deletion = master;
+                config.enable_security_delete = selector;
+                assert_eq!(security_delete_routes_enabled(&config), master && selector);
+            }
+        }
+    }
+
+    #[test]
+    fn sui_rpc_quota_defaults_to_provider_window() {
+        assert_eq!(
+            resolve_sui_rpc_quota(None, None, None, None),
+            (2_850, std::time::Duration::from_secs(10))
+        );
+        assert_eq!(
+            resolve_sui_rpc_quota(None, None, None, Some("1")),
+            (3_000, std::time::Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn sui_rpc_quota_preserves_legacy_request_spacing() {
+        assert_eq!(
+            resolve_sui_rpc_quota(None, None, Some("4"), Some("0.5")),
+            (1, std::time::Duration::from_millis(250))
+        );
+        assert_eq!(
+            resolve_sui_rpc_quota(None, None, Some("invalid"), None),
+            (1, std::time::Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn sui_rpc_quota_requires_a_complete_valid_window() {
+        assert_eq!(
+            resolve_sui_rpc_quota(Some("3000"), None, None, None),
+            (0, std::time::Duration::ZERO)
+        );
+        assert_eq!(
+            resolve_sui_rpc_quota(None, Some("10"), None, None),
+            (0, std::time::Duration::ZERO)
+        );
+        assert_eq!(
+            resolve_sui_rpc_quota(Some("invalid"), Some("10"), None, None),
+            (0, std::time::Duration::from_secs(10))
+        );
+        for utilization in ["0", "1.1", "invalid"] {
+            assert_eq!(
+                resolve_sui_rpc_quota(Some("3000"), Some("10"), None, Some(utilization)),
+                (0, std::time::Duration::from_secs(10))
+            );
+        }
+    }
 
     fn with_walrus_storage_epochs_env<R>(value: Option<&str>, test: impl FnOnce() -> R) -> R {
         let _guard = WALRUS_STORAGE_EPOCHS_ENV_LOCK.lock().unwrap();
@@ -1386,6 +2284,23 @@ mod tests {
         let config = SponsorRateLimitConfig::default();
         assert_eq!(config.per_minute, 10);
         assert_eq!(config.per_hour, 30);
+        assert_eq!(config.global_per_minute, 100);
+        assert_eq!(config.global_per_hour, 1000);
+    }
+
+    // ── AccountsRateLimitConfig defaults ────────────────────────────────
+
+    #[test]
+    fn accounts_rate_limit_default_values() {
+        let config = AccountsRateLimitConfig::default();
+        assert_eq!(config.per_minute, 20);
+        assert_eq!(config.per_hour, 120);
+        assert_eq!(config.global_per_minute, 200);
+        assert_eq!(config.global_per_hour, 1500);
+        // Must stay well below the general authenticated per-account budget
+        // this middleware used to (bug-)reuse, or the fix regresses.
+        assert!(config.per_minute < RateLimitConfig::default().max_requests_per_minute);
+        assert!(config.per_hour < RateLimitConfig::default().max_requests_per_hour);
     }
 
     #[test]
@@ -1584,6 +2499,14 @@ mod tests {
         // recall response). Failing this test = ack the change.
         assert_eq!(ScoringWeights::default().recency, 0.0);
         assert!(!ScoringWeights::default().is_ranker_active());
+    }
+
+    #[test]
+    fn namespace_validation_rejects_empty_and_oversized_values() {
+        assert!(validate_namespace("default").is_ok());
+        assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES)).is_ok());
+        assert!(validate_namespace("").is_err());
+        assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES + 1)).is_err());
     }
 
     // ── HealthResponse.prompt_versions wire shape ────────────────

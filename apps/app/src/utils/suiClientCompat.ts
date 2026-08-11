@@ -1,21 +1,31 @@
 /**
- * Sui client compatibility layer — App.tsx's SuiClientProvider hands out a
- * SuiGrpcClient when VITE_SUI_GRPC_URL is set for the active network (opt-in,
- * mirroring the sidecar's SUI_GRPC_URL migration for the JSON-RPC sunset) and
- * a SuiJsonRpcClient otherwise. The two have different getObject /
- * dynamic-field / execute method shapes — these helpers branch on which one
- * is actually present so callers work correctly under either, instead of
- * assuming one shape unconditionally.
+ * Sui client compatibility layer. App.tsx's shared SuiClientProvider stays on
+ * JSON-RPC (see the comment there for why), but callers may still receive a
+ * SuiGrpcClient — e.g. the security-delete subsystem's own scoped client
+ * (utils/suiClientFactory.ts). The two have different getObject and
+ * dynamic-field shapes, so these helpers keep that cross-transport
+ * compatibility at one boundary rather than letting every call site assume
+ * one shape unconditionally.
  */
 
+import { isSuiGrpcClient, type SuiGrpcClient } from '@mysten/sui/grpc'
 import { fromBase64, fromHex, normalizeSuiAddress, toHex } from '@mysten/sui/utils'
 
+interface JsonRpcClientLike {
+    getObject(input: { id: string; options: { showContent: boolean } }): Promise<{
+        data?: { content?: { fields?: unknown } }
+    }>
+    getDynamicFieldObject(input: {
+        parentId: string
+        name: { type: string; value: string }
+    }): Promise<{ data?: { content?: { fields?: unknown } } }>
+}
+
 /**
- * Single transport discriminator shared by every cross-transport helper —
- * gRPC clients expose getDynamicField, JSON-RPC clients don't.
+ * Use the SDK brand rather than inferring transport from coincidental methods.
  */
-export function isGrpcClient(suiClient: unknown): boolean {
-    return typeof (suiClient as { getDynamicField?: unknown })?.getDynamicField === 'function'
+export function isGrpcClient(suiClient: unknown): suiClient is SuiGrpcClient {
+    return isSuiGrpcClient(suiClient)
 }
 
 // JSON-RPC's showContent wraps every nested Move struct in its own
@@ -37,16 +47,16 @@ function unwrapJsonRpcFields(value: unknown): unknown {
 }
 
 /** Fetch a Move object's fields as a flat JS object, regardless of client transport. */
-export async function fetchObjectJson(suiClient: unknown, objectId: string): Promise<Record<string, any> | null> {
+export async function fetchObjectJson(suiClient: unknown, objectId: string): Promise<Record<string, unknown> | null> {
     if (isGrpcClient(suiClient)) {
-        const res = await (suiClient as any).getObject({ objectId, include: { json: true } })
-        return (res?.object?.json as Record<string, any>) ?? null
+        const res = await suiClient.getObject({ objectId, include: { json: true } })
+        return res.object.json ?? null
     }
 
-    const res = await (suiClient as any).getObject({ id: objectId, options: { showContent: true } })
+    const res = await (suiClient as JsonRpcClientLike).getObject({ id: objectId, options: { showContent: true } })
     const content = res?.data?.content
-    if (!content || !('fields' in content)) return null
-    return unwrapJsonRpcFields(content.fields) as Record<string, any>
+    if (!content?.fields) return null
+    return unwrapJsonRpcFields(content.fields) as Record<string, unknown>
 }
 
 // The registry's inner Table object ID is an immutable on-chain constant —
@@ -62,13 +72,16 @@ export async function fetchAccountIdForOwner(
     let tableId = registryTableIdCache.get(registryId)
     if (!tableId) {
         const registryJson = await fetchObjectJson(suiClient, registryId)
-        tableId = (registryJson?.accounts as { id?: string } | undefined)?.id
+        // gRPC json flattens the Table's UID to a plain string. Keep the nested
+        // form solely for the explicit local JSON-RPC browser suite.
+        const rawId = (registryJson?.accounts as { id?: string | { id?: string } } | undefined)?.id
+        tableId = typeof rawId === 'string' ? rawId : rawId?.id
         if (!tableId) return null
         registryTableIdCache.set(registryId, tableId)
     }
 
     if (isGrpcClient(suiClient)) {
-        const dynFieldRes = await (suiClient as any).getDynamicField({
+        const dynFieldRes = await suiClient.getDynamicField({
             parentId: tableId,
             name: { type: 'address', bcs: fromHex(normalizeSuiAddress(ownerAddress)) },
         })
@@ -77,13 +90,13 @@ export async function fetchAccountIdForOwner(
         return '0x' + toHex(valueBytes)
     }
 
-    const dynField = await (suiClient as any).getDynamicFieldObject({
+    const dynField = await (suiClient as JsonRpcClientLike).getDynamicFieldObject({
         parentId: tableId,
         name: { type: 'address', value: ownerAddress },
     })
     const content = dynField?.data?.content
-    if (!content || !('fields' in content)) return null
-    const value = (content.fields as Record<string, unknown>)?.value
+    if (!content?.fields || typeof content.fields !== 'object') return null
+    const value = (content.fields as Record<string, unknown>).value
     return typeof value === 'string' ? value : null
 }
 

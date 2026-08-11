@@ -138,6 +138,13 @@ interface SseHandshakeResult {
     abort: () => void;
 }
 
+function mcpAuthHeaders(creds: MemWalCredentials): Record<string, string> {
+    return {
+        authorization: `Bearer ${creds.delegatePrivateKey}`,
+        "x-memwal-account-id": creds.accountId,
+    };
+}
+
 async function openSseStream(
     relayerUrl: string,
     creds: MemWalCredentials,
@@ -150,8 +157,7 @@ async function openSseStream(
     const resp = await fetch(url, {
         method: "GET",
         headers: {
-            authorization: `Bearer ${creds.delegatePrivateKey}`,
-            "x-memwal-account-id": creds.accountId,
+            ...mcpAuthHeaders(creds),
             accept: "text/event-stream",
             "cache-control": "no-cache",
         },
@@ -335,10 +341,17 @@ async function openSseStream(
     };
 }
 
-async function postMessage(postUrl: string, msg: RpcMessage): Promise<number> {
+async function postMessage(
+    postUrl: string,
+    msg: RpcMessage,
+    creds: MemWalCredentials,
+): Promise<number> {
     const resp = await fetch(postUrl, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+            ...mcpAuthHeaders(creds),
+            "content-type": "application/json",
+        },
         body: JSON.stringify(msg),
     });
     if (!resp.ok && resp.status !== 202) {
@@ -541,7 +554,7 @@ export async function runBridge(
             // start arriving on the new session.
             for (const [id, msg] of Array.from(inFlight.entries())) {
                 try {
-                    const status = await postMessage(sse.postUrl, msg);
+                    const status = await postMessage(sse.postUrl, msg, creds);
                     log.info("bridge.replayed", { id, status });
                 } catch (err) {
                     log.error("bridge.replay_failed", {
@@ -668,7 +681,7 @@ export async function runBridge(
                 ) {
                     inFlight.set(msg.id, msg);
                 }
-                const status = await postMessage(sse.postUrl, msg);
+                const status = await postMessage(sse.postUrl, msg, creds);
                 if (status === 404) {
                     log.warn("bridge.session_stale", { sessionUrl: sse.postUrl });
                     // reconnect() itself replays in-flight against the fresh

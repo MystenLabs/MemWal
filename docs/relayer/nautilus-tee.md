@@ -1,6 +1,34 @@
 ---
 title: "TEE Deployment Pattern"
-description: "Run the Walrus Memory relayer with a TEE deployment pattern and understand what remains for a full Sui Nautilus integration."
+description: >-
+  Run the Walrus Memory relayer inside a Trusted Execution Environment using the Sui Nautilus deployment pattern. Covers the architecture flow, reference template files, required runtime variables, and the steps needed for a full Nautilus integration.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - TEE
+  - Nautilus
+  - trusted execution environment
+  - enclave deployment
+goal:
+  description: Deploy the Walrus Memory relayer inside a Nautilus TEE using the reference template, understand the attestation steps still required, and assess the remaining trust surface.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - "How do I deploy the Walrus Memory relayer in a TEE?"
+  - "What is the Nautilus deployment pattern for MemWal?"
+  - "What security guarantees does a TEE relayer deployment provide?"
+answer: >-
+  The TEE deployment pattern runs the existing Walrus Memory relayer and TypeScript sidecar inside a Trusted Execution Environment using Sui Nautilus. Clients still send plaintext to the relayer, but the relayer processes data inside the enclave and sends only SEAL-encrypted ciphertext to Walrus. A full Nautilus integration requires enclave attestation verification and Move-side identity checks beyond the reference template.
 ---
 
 Run the Walrus Memory relayer with a TEE deployment pattern when you want the default

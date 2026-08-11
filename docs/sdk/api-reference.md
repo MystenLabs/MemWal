@@ -1,5 +1,34 @@
 ---
 title: "API Reference"
+description: >-
+  Complete API reference for the Walrus Memory SDK, including method signatures, config fields, and return types for MemWal, MemWalManual, withMemWal, account management, and utility functions.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - API reference
+  - method signatures
+  - SDK methods
+  - config
+goal:
+  description: Look up the exact method signature, parameter types, return type, and thrown errors for any Walrus Memory SDK method or config field before writing code that calls it.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What are the method signatures for the Walrus Memory SDK?
+  - What config options does MemWal.create accept?
+  - What does the recall method return in Walrus Memory?
+answer: >-
+  The Walrus Memory SDK API includes MemWal (remember, recall, analyze, restore, health, rememberBulk, and more), MemWalManual (rememberManual, recallManual, restore), withMemWal (AI SDK middleware), account management utilities (createAccount, addDelegateKey, removeDelegateKey, generateDelegateKey), and utility functions for delegate key operations.
 ---
 
 See also:
@@ -143,7 +172,7 @@ Rebuild missing indexed entries for one namespace from Walrus. Incremental — o
 
 ### `health(): Promise<HealthResult>`
 
-Check relayer health. Does not require authentication.
+Check relayer health. Does not require authentication — a successful response confirms the relayer is reachable, not that your `key`/`accountId` are valid. A signed call (e.g. `remember()`, `recall()`) can still fail with `401` immediately after a passing `health()`.
 
 **Returns:** `{ status: string, version: string, relayerVersion?: string, apiVersion?: string, minSupportedSdk?: ... }`
 
@@ -242,6 +271,8 @@ import {
 | `createAccount(opts)` | Create a new MemWalAccount on-chain (one per Sui address) |
 | `addDelegateKey(opts)` | Add a delegate key to an account (owner only) |
 | `removeDelegateKey(opts)` | Remove a delegate key from an account (owner only) |
+
+`addDelegateKey` and `removeDelegateKey` require the shared `registryId` alongside the package and account IDs.
 
 ## Utility Functions
 

@@ -4,7 +4,6 @@
 
 Important notes:
 
-- MemWal is currently in beta
 - The SDK talks to a relayer service that handles embedding, SEAL encryption, Walrus upload/download, and vector search
 - All content is end-to-end encrypted — only the owner and authorized delegates can decrypt
 - Delegate keys provide scoped access — agents can read/write memory without holding the owner's private key
@@ -195,6 +194,7 @@ Manual client flow — embed locally, SEAL encrypt locally, send encrypted paylo
 | `embeddingApiBase` | No | Default: `https://api.openai.com/v1` |
 | `embeddingModel` | No | Default: `text-embedding-3-small` |
 | `packageId` | Yes | MemWal package ID on Sui |
+| `registryId` | Yes | AccountRegistry shared object ID on Sui |
 | `suiPrivateKey` or `walletSigner` | One required | Local keypair or connected wallet |
 | `suiNetwork` | No | Default: `mainnet` |
 
@@ -268,6 +268,8 @@ import {
 | `addDelegateKey(opts)` | Add a delegate key to an account (owner only) |
 | `removeDelegateKey(opts)` | Remove a delegate key from an account (owner only) |
 
+`addDelegateKey` and `removeDelegateKey` require the shared `registryId` alongside the package and account IDs.
+
 ---
 
 ## Utility Functions
@@ -308,6 +310,7 @@ Used by `MemWalManual.create(config)`.
 | `embeddingApiBase` | no | Default: `https://api.openai.com/v1` |
 | `embeddingModel` | no | Default: `text-embedding-3-small` |
 | `packageId` | yes | MemWal package ID on Sui |
+| `registryId` | yes | AccountRegistry shared object ID on Sui |
 | `accountId` | yes | MemWalAccount object ID |
 | `namespace` | no | Default namespace |
 | `suiPrivateKey` | one of two | Use for local signing |

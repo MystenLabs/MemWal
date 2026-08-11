@@ -67,6 +67,27 @@ export function bytesToHex(bytes: Uint8Array): string {
         .join("");
 }
 
+/**
+ * BCS-encode a u64 as 8 little-endian bytes, hex — matching `bcs::to_bytes(&u64)`
+ * on the Move side. Used to tail a SEAL key id with the account's rotation
+ * counter so it matches what `seal_approve` parses back out.
+ *
+ * Hand-rolled rather than pulling in @mysten/bcs: this package keeps @mysten/*
+ * as peer dependencies, and eight bytes are not worth a dynamic import.
+ */
+export function u64ToLeHex(value: bigint): string {
+    if (value < 0n || value > 0xffff_ffff_ffff_ffffn) {
+        throw new Error(`u64ToLeHex: ${value} is out of u64 range`);
+    }
+    let hex = "";
+    for (let i = 0n; i < 8n; i++) {
+        hex += Number((value >> (i * 8n)) & 0xffn)
+            .toString(16)
+            .padStart(2, "0");
+    }
+    return hex;
+}
+
 export function scoringWeightsToWire(weights?: ScoringWeights): object | undefined {
     if (!weights) return undefined;
 
@@ -136,7 +157,8 @@ export function sanitizeServerError(
         return {
             message:
                 "401 from relayer: typically wrong private key, key not registered on this account, " +
-                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials.",
+                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+                "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
         };

@@ -1,6 +1,6 @@
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -9,7 +9,9 @@ use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::storage::sui::{find_account_by_delegate_key, verify_delegate_key_onchain};
+use crate::storage::sui::{
+    find_account_by_delegate_key, verify_delegate_key_onchain, OnchainVerifyError,
+};
 use crate::types::{AppState, AuthInfo};
 
 /// Maximum signed-JSON body the auth middleware will buffer before computing
@@ -230,8 +232,13 @@ pub async fn verify_signature(
                     .with_expiration(redis::SetExpiry::EX(600)),
             )
             .await
-            .unwrap_or(None); // if Redis is down, fail-open for nonce check only
-                              // (signature + timestamp still protect against most replays)
+            .unwrap_or(None); // A Redis error maps to None here, which is
+                              // indistinguishable from "nonce already seen" below —
+                              // i.e. the request is REJECTED (fail-CLOSED). That is
+                              // deliberate: replay protection holds even when Redis
+                              // is down, at the availability cost that a Redis
+                              // outage 401s all signed traffic through this
+                              // middleware until Redis recovers.
 
         if set_result.is_none() {
             // NX failed = nonce already exists = replay attempt
@@ -298,6 +305,7 @@ async fn resolve_account(
             state.sui_grpc_client.as_ref(),
             &cached_account_id,
             pk_bytes,
+            &state.config.package_id,
         )
         .await
         {
@@ -335,6 +343,7 @@ async fn resolve_account(
             state.sui_grpc_client.as_ref(),
             exact_account_id,
             pk_bytes,
+            &state.config.package_id,
         )
         .await
         .map_err(|e| {
@@ -356,13 +365,43 @@ async fn resolve_account(
         return Ok((exact_account_id.to_string(), owner));
     }
 
-    // Strategy 3: Scan AccountRegistry on-chain only when no exact account id
-    // is available.
+    // Strategy 3: The legacy registry scan uses JSON-RPC. Testnet no longer
+    // serves JSON-RPC, so fail closed when a modern signed x-account-id hint
+    // is absent instead of silently contacting a retired endpoint.
+    if state.config.sui_network == "testnet" {
+        return Err(
+            "x-account-id is required for delegate-key authentication on testnet".to_string(),
+        );
+    }
+
+    // Non-testnet compatibility path: scan AccountRegistry only when no exact
+    // account id is available. The scan runs before the rate limiter, so use
+    // an in-process concurrency permit so
+    // unknown-key floods can't stack unbounded scans, and a per-scan page
+    // cap (MEMWAL_REGISTRY_SCAN_MAX_PAGES) inside the scan itself. Both
+    // rejection messages name the x-account-id remediation, but they surface
+    // only in server logs: the middleware collapses every auth failure to a
+    // bare 401 (no oracle). A key past the page cap therefore cannot
+    // self-resolve — operators must diagnose the lockout from the warn logs
+    // and either raise the cap or have the client send the header hint,
+    // which Strategy 2 verifies directly without any scan.
+    let _scan_permit = match state.registry_scan_semaphore.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Err(
+                "registry scan concurrency limit reached; retry, or send the x-account-id \
+                 header hint to skip the registry scan"
+                    .to_string(),
+            );
+        }
+    };
     match find_account_by_delegate_key(
         &state.http_client,
         &state.config.sui_rpc_url,
         &state.config.registry_id,
         pk_bytes,
+        &state.config.package_id,
+        state.config.registry_scan_max_pages,
     )
     .await
     {
@@ -374,12 +413,63 @@ async fn resolve_account(
                 .await;
             return Ok((account_id, owner));
         }
+        Err(e @ OnchainVerifyError::ScanCapExceeded(_)) => {
+            tracing::warn!("registry scan capped: {}", e);
+            return Err(format!(
+                "{}; send the x-account-id header hint to authenticate without a scan",
+                e
+            ));
+        }
         Err(e) => {
             tracing::debug!("registry scan did not find key: {}", e);
         }
     }
 
     Err("no account found: not in cache, exact account id, or registry".to_string())
+}
+
+#[tracing::instrument(name = "auth.verify_admin_key", skip_all)]
+pub async fn verify_admin_key(request: Request, next: Next) -> Result<Response, StatusCode> {
+    let headers = request.headers();
+
+    let api_key = headers
+        .get("x-admin-api-key")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let expected_key = std::env::var("ADMIN_API_KEY").map_err(|_| StatusCode::UNAUTHORIZED)?;
+    if !admin_api_key_is_configured(&expected_key) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    if !constant_time_compare(api_key.as_bytes(), expected_key.as_bytes()) {
+        return Err(constant_time_reject().await);
+    }
+
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private"),
+    );
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
+pub(crate) fn admin_api_key_is_configured(key: &str) -> bool {
+    !key.trim().is_empty()
+}
+
+fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
+    let mut result = (a.len() ^ b.len()) as usize;
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        let x = *a.get(i).unwrap_or(&0);
+        let y = *b.get(i).unwrap_or(&0);
+        result |= (x ^ y) as usize;
+    }
+    result == 0
 }
 
 // ============================================================
@@ -682,5 +772,25 @@ mod tests {
         let debug_str = format!("{:?}", auth);
         assert!(debug_str.contains("None"));
         assert!(!debug_str.contains("<redacted>"));
+    }
+
+    #[test]
+    fn admin_key_configuration_rejects_empty_values() {
+        assert!(!admin_api_key_is_configured(""));
+        assert!(!admin_api_key_is_configured("   \t\n"));
+        assert!(admin_api_key_is_configured("a-strong-secret"));
+    }
+
+    #[test]
+    fn admin_key_comparison_requires_identical_bytes_and_length() {
+        assert!(constant_time_compare(
+            b"secret-key-12345",
+            b"secret-key-12345"
+        ));
+        assert!(!constant_time_compare(
+            b"secret-key-aaaaa",
+            b"secret-key-bbbbb"
+        ));
+        assert!(!constant_time_compare(b"short", b"much-longer-key"));
     }
 }

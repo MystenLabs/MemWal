@@ -99,6 +99,7 @@ fn spawn_prepare_remember_job(
     job_id: String,
     text: String,
     owner: String,
+    account_id: String,
     namespace: String,
     agent_public_key: String,
 ) {
@@ -133,6 +134,7 @@ fn spawn_prepare_remember_job(
                     state.config.sidecar_secret.as_deref(),
                     text.as_bytes(),
                     &owner,
+                    &account_id,
                     &state.config.package_id,
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
@@ -163,6 +165,7 @@ fn spawn_prepare_remember_job(
                         owner: owner.clone(),
                         namespace: namespace.clone(),
                         package_id: state.config.package_id.clone(),
+                        account_id: account_id.clone(),
                         agent_public_key: Some(agent_public_key.clone()),
                         remember_job_id: Some(job_id.clone()),
                         epochs: state.config.walrus_storage_epochs,
@@ -200,6 +203,7 @@ fn spawn_prepare_remember_job(
 fn spawn_prepare_bulk_remember_job(
     state: Arc<AppState>,
     owner: String,
+    account_id: String,
     agent_public_key: String,
     pending_items: Vec<PendingBulkRememberItem>,
 ) {
@@ -216,6 +220,7 @@ fn spawn_prepare_bulk_remember_job(
                     .map(|item| {
                         let state = Arc::clone(&state);
                         let owner = owner.clone();
+                        let account_id = account_id.clone();
                         async move {
                             // bulk items can carry up to MAX_REMEMBER_TEXT_BYTES
                             // each, so the same summarize-before-embed rule applies here.
@@ -246,6 +251,7 @@ fn spawn_prepare_bulk_remember_job(
                                 state.config.sidecar_secret.as_deref(),
                                 item.text.as_bytes(),
                                 &owner,
+                                &account_id,
                                 &state.config.package_id,
                             );
                             let (vector_result, encrypted_result) =
@@ -299,6 +305,7 @@ fn spawn_prepare_bulk_remember_job(
                 storage
                     .push(crate::jobs::BulkRememberJob {
                         owner: owner.clone(),
+                        account_id: account_id.clone(),
                         package_id: state.config.package_id.clone(),
                         agent_public_key: Some(agent_public_key.clone()),
                         items: bulk_items,
@@ -628,6 +635,7 @@ pub async fn remember(
             MAX_REMEMBER_TEXT_BYTES
         )));
     }
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -652,6 +660,7 @@ pub async fn remember(
         job_id.clone(),
         text,
         owner_owned,
+        auth.account_id.clone(),
         namespace_owned,
         auth.public_key.clone(),
     );
@@ -749,6 +758,18 @@ pub async fn remember_bulk(
                 i, MAX_REMEMBER_TEXT_BYTES
             )));
         }
+        if item.namespace.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "items[{}].namespace cannot be empty",
+                i
+            )));
+        }
+        if item.namespace.len() > MAX_NAMESPACE_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "items[{}].namespace exceeds maximum length of {} bytes",
+                i, MAX_NAMESPACE_BYTES
+            )));
+        }
     }
 
     let owner = &auth.owner;
@@ -787,6 +808,7 @@ pub async fn remember_bulk(
     spawn_prepare_bulk_remember_job(
         Arc::clone(&state),
         owner.clone(),
+        auth.account_id.clone(),
         auth.public_key.clone(),
         pending_items,
     );
@@ -891,9 +913,14 @@ pub async fn remember_manual(
             "encrypted_data cannot be empty".into(),
         ));
     }
-    if body.vector.is_empty() {
-        return Err(AppError::BadRequest("vector cannot be empty".into()));
-    }
+    // Validate the client-supplied embedding (width + finiteness) up front. The
+    // fact store's `embedding` column is a fixed-width pgvector that also refuses
+    // NaN/Inf, so a malformed vector can never be indexed — and store_blob pays
+    // for the (irreversible) Walrus upload before it reaches the insert. Rejecting
+    // here means a bad vector costs no gas and returns an actionable 400, instead
+    // of an opaque 500 after the paid upload.
+    validate_embedding_vector(&body.vector)?;
+    validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -920,6 +947,7 @@ pub async fn remember_manual(
         .engine
         .store_blob(
             owner,
+            &auth.account_id,
             namespace,
             &encrypted_bytes,
             &body.vector,
@@ -1071,13 +1099,45 @@ mod tests {
             sui_private_key: None,
             sui_private_keys: vec![],
             package_id: "0xpackage".to_string(),
+            seal_policy_package_id: "0xpackage".to_string(),
             registry_id: "0xregistry".to_string(),
+            registry_scan_max_pages: crate::types::DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9003".to_string(),
             sidecar_secret: None,
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
+            accounts_rate_limit: crate::types::AccountsRateLimitConfig::default(),
+            trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
+            enable_memory_deletion: false,
+            enable_security_delete: false,
+            legacy_db_url: None,
+            deletion_reconciler_enabled: false,
+            deletion_object_resolver_enabled: false,
+            delete_batch_max: 900,
+            max_active_batches_per_owner: 16,
+            security_delete_auth_requests_per_minute: 20,
+            security_delete_prepare_requests_per_minute: 10,
+            sui_rpc_requests_per_window: 3_000,
+            sui_rpc_window: std::time::Duration::from_secs(10),
+            sui_rpc_attempt_timeout: std::time::Duration::from_secs(5),
+            sui_rpc_max_in_flight: 64,
+            security_delete_execute_max_in_flight: 1,
+            security_delete_crash_test_secret: None,
+            sponsor_private_key: None,
+            sponsor_min_balance_alert: 0,
+            claim_ttl_secs: 600,
+            exec_grace_secs: 60,
+            deletion_token_secret: None,
+            deletion_token_ttl_secs: 2700,
+            expiry_margin_epochs: 1,
+            walrus_package_id: String::new(),
+            walrus_system_object_id: String::new(),
+            restore_requests_per_owner_per_minute: 10,
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
         }
     }
 

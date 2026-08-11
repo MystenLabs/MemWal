@@ -11,7 +11,7 @@ import {
 } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
-import { generateDelegateKey, addDelegateKey } from '@mysten-incubation/memwal/account'
+import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useNavigate } from 'react-router-dom'
 import { TriangleAlert, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle } from 'lucide-react'
@@ -23,6 +23,7 @@ SyntaxHighlighter.registerLanguage('javascript', js)
 SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
+import SecurityDeleteSection from '../components/SecurityDeleteSection'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
@@ -223,6 +224,24 @@ export default function Dashboard({
     const [accountLookupComplete, setAccountLookupComplete] = useState(!shouldResolveAccount)
     const [loadingAccount, setLoadingAccount] = useState(false)
     const effectiveAccountObjectId = accountObjectId ?? previewAccountObjectId ?? resolvedAccountObjectId
+    // Security-delete previews authorize against the PRE-cutover package's
+    // Account object (seal_approve is typed to that package), so when a
+    // legacy registry is configured, resolve the account from it instead of
+    // reusing the current-deployment account above.
+    const legacyRegistryDiffers = config.legacyMemwalRegistryId !== config.memwalRegistryId
+    const [legacyAccountObjectId, setLegacyAccountObjectId] = useState<string | null>(null)
+    useEffect(() => {
+        if (!legacyRegistryDiffers || !address || previewMode) { setLegacyAccountObjectId(null); return }
+        let cancelled = false
+        fetchAccountIdForOwner(suiClient, config.legacyMemwalRegistryId, address)
+            .then(accountId => { if (!cancelled) setLegacyAccountObjectId(accountId) })
+            .catch(err => {
+                console.error('Failed to fetch legacy account object ID:', err)
+                if (!cancelled) setLegacyAccountObjectId(null)
+            })
+        return () => { cancelled = true }
+    }, [legacyRegistryDiffers, address, previewMode, suiClient])
+    const securityDeleteAccountObjectId = legacyRegistryDiffers ? legacyAccountObjectId : effectiveAccountObjectId
     const [showKey, setShowKey] = useState(false)
     const [copied, setCopied] = useState<string | null>(null)
     const [pkgManager, setPkgManager] = useState<'npm' | 'pnpm' | 'yarn' | 'bun'>('npm')
@@ -350,7 +369,6 @@ export default function Dashboard({
     const hasResolvedAccount = Boolean(effectiveAccountObjectId)
     const accountLookupPending = loadingAccount || (shouldResolveAccount && (!accountLookupComplete || accountLookupAddress !== address))
     const isRecoveringExistingAccount = !delegateKey && hasResolvedAccount && !previewReady
-    const isNewAccount = !delegateKey && accountLookupComplete && !hasResolvedAccount
     const activeEnvironmentLabel = config.suiNetwork === 'mainnet'
         ? 'production / mainnet'
         : 'staging / testnet'
@@ -468,16 +486,20 @@ export default function Dashboard({
             // Generate keypair via SDK
             const delegate = await generateDelegateKey()
 
-            // Register on-chain via SDK
-            await addDelegateKey({
-                packageId: config.memwalPackageId,
-                accountId: effectiveAccountObjectId!,
-                publicKey: delegate.publicKey,
-                label: trimmedLabel,
-                walletSigner,
-                suiClient,
-                suiNetwork: config.suiNetwork,
+            // Register on-chain (v1_new ABI: address derived on-chain, not passed)
+            const tx = new Transaction()
+            tx.moveCall({
+                target: `${config.memwalPackageId}::account::add_delegate_key`,
+                arguments: [
+                    tx.object(effectiveAccountObjectId!),
+                    tx.object(config.memwalRegistryId),
+                    tx.pure('vector<u8>', Array.from(delegate.publicKey)),
+                    tx.pure('string', trimmedLabel),
+                    tx.object('0x6'),
+                ],
             })
+            const result = await signAndExecuteTx({ transaction: tx })
+            await suiClient.waitForTransaction({ digest: result.digest })
 
             const delegatePublicKeyHex = bytesToHex(delegate.publicKey)
             setNewPrivateKey(delegate.privateKey)
@@ -497,6 +519,7 @@ export default function Dashboard({
         }
     }, [
         walletSigner,
+        signAndExecuteTx,
         hasMaxDelegateKeys,
         effectiveAccountObjectId,
         newKeyLabel,
@@ -519,16 +542,14 @@ export default function Dashboard({
                 target: `${config.memwalPackageId}::account::remove_delegate_key`,
                 arguments: [
                     tx.object(effectiveAccountObjectId),
+                    tx.object(config.memwalRegistryId),
                     tx.pure('vector<u8>', hexToByteArray(publicKeyHex)),
                 ],
             })
         }
 
         const result = await signAndExecuteTx({ transaction: tx })
-        await suiClient.waitForTransaction({
-            digest: result.digest,
-            options: { showEffects: true, showObjectChanges: true },
-        })
+        await suiClient.waitForTransaction({ digest: result.digest })
     }, [walletSigner, effectiveAccountObjectId, signAndExecuteTx, suiClient])
 
     const executeRemoveKeys = useCallback(async (publicKeyHexes: string[], source: RemoveKeysConfirmState['source']) => {
@@ -650,8 +671,8 @@ export default function Dashboard({
         ? 'Remove delegate key?'
         : `Remove ${removeConfirmCount} delegate keys?`
     const removeConfirmDescription = removeConfirmCount === 1
-        ? 'This key will be removed from your Walrus Memory account. This cannot be undone.'
-        : `${removeConfirmCount} selected keys will be removed from your Walrus Memory account. This cannot be undone.`
+        ? 'This key will be removed from your Walrus Memory account. It can no longer read new memories, but anything already saved stays readable by it until re-encrypted. This cannot be undone.'
+        : `${removeConfirmCount} selected keys will be removed from your Walrus Memory account. They can no longer read new memories, but anything already saved stays readable by them until re-encrypted. This cannot be undone.`
 
     // ============================================================
     // SDK code snippets
@@ -758,15 +779,6 @@ const result = await generateText({
                         <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                         <p>
                             Your Walrus Memory account is active, but this browser has no saved delegate key. Create a new key to continue, or revoke an old one below.
-                        </p>
-                    </div>
-                )}
-
-                {isNewAccount && (
-                    <div className="dash-alert" style={{ marginBottom: 24 }}>
-                        <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
-                        <p>
-                            No Walrus Memory account found for this wallet. Create a delegate key to get started.
                         </p>
                     </div>
                 )}
@@ -1343,6 +1355,11 @@ const result = await generateText({
                         </button>
                     </div>
                 </Card>
+
+                {config.enableMemoryDeletion && (
+                    config.securityDeleteEnabled
+                        && <SecurityDeleteSection accountObjectId={securityDeleteAccountObjectId} />
+                )}
 
                 {removeKeysConfirm && (
                     <div

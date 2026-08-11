@@ -1,14 +1,19 @@
 mod alerts;
 mod auth;
+mod client_ip;
 mod compatibility;
 mod engine;
 mod jobs;
+mod jobs_security_delete;
 mod mcp_proxy;
 mod observability;
 mod rate_limit;
 mod routes;
+mod security_delete_auth;
+mod security_delete_error;
 mod services;
 mod storage;
+mod sui;
 mod types;
 
 use axum::http::{header, HeaderValue, Method};
@@ -34,6 +39,7 @@ use jobs::{
 };
 use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
+use storage::legacy_db::LegacyDb;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
     DEFAULT_EMBEDDING_CACHE_TTL_SECS,
@@ -42,6 +48,93 @@ use types::{
 const STALE_REMEMBER_JOB_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const APALIS_MONITOR_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 const DEFAULT_APALIS_STARTUP_TIMEOUT_SECS: u64 = 45;
+
+fn security_delete_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn security_delete_cors_is_public_and_route_scoped() {
+        let restricted_cors =
+            CorsLayer::new().allow_origin(AllowOrigin::list(["https://app.memwal.test"
+                .parse()
+                .unwrap()]));
+        let app = Router::new()
+            .route("/restricted", get(|| async {}))
+            .layer(restricted_cors)
+            .merge(
+                Router::new()
+                    .route("/security-delete", post(|| async {}))
+                    .layer(security_delete_cors()),
+            );
+
+        let public_preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/security-delete")
+            .header(header::ORIGIN, "https://third-party.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(
+                header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization,content-type",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let public_response = app.clone().oneshot(public_preflight).await.unwrap();
+
+        assert_eq!(
+            public_response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "*"
+        );
+        let allowed_methods = public_response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for method in ["GET", "POST", "DELETE", "OPTIONS"] {
+            assert!(allowed_methods.split(',').any(|allowed| allowed == method));
+        }
+        let allowed_headers = public_response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for name in ["authorization", "content-type"] {
+            assert!(allowed_headers
+                .split(',')
+                .any(|allowed| allowed.eq_ignore_ascii_case(name)));
+        }
+
+        let restricted_preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/restricted")
+            .header(header::ORIGIN, "https://third-party.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .body(Body::empty())
+            .unwrap();
+        let restricted_response = app.oneshot(restricted_preflight).await.unwrap();
+
+        assert_eq!(
+            restricted_response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            None
+        );
+    }
+}
 
 fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
     let Ok(raw) = std::env::var(name) else {
@@ -68,6 +161,168 @@ fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
 
 fn parse_env_u32(name: &str, fallback: u32, min: u32, max: u32) -> u32 {
     parse_env_u64(name, fallback as u64, min as u64, max as u64) as u32
+}
+
+/// Background task that periodically monitors wallet balances and alerts Slack
+/// when balances fall below configured thresholds. Fetches uploader pool balances
+/// from the sidecar and sponsor wallet balance from the RPC.
+#[tracing::instrument(name = "balance_monitor", skip_all)]
+async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        interval.tick().await;
+
+        // Fetch uploader pool balance from sidecar
+        let sidecar_url = &state.config.sidecar_url;
+        let wallet_metrics_url = format!("{}/internal/wallet-balances", sidecar_url);
+
+        let mut sidecar_request = state.http_client.get(&wallet_metrics_url);
+        if let Some(secret) = state.config.sidecar_secret.as_deref() {
+            sidecar_request = sidecar_request.header("authorization", format!("Bearer {}", secret));
+        }
+
+        match sidecar_request.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(data) => {
+                        if let Some(wallets) =
+                            data.get("perWallet").and_then(|value| value.as_array())
+                        {
+                            for wallet in wallets {
+                                let Some(address) =
+                                    wallet.get("address").and_then(|value| value.as_str())
+                                else {
+                                    tracing::warn!(
+                                        "balance_monitor: wallet metrics entry missing address"
+                                    );
+                                    continue;
+                                };
+                                let Some(wal_balance) = wallet
+                                    .get("walFrost")
+                                    .and_then(|value| value.as_str())
+                                    .and_then(|value| value.parse::<u64>().ok())
+                                else {
+                                    tracing::warn!(
+                                    address,
+                                    "balance_monitor: wallet metrics entry has invalid walFrost"
+                                );
+                                    continue;
+                                };
+
+                                if wal_balance < state.config.wallet_balance_low_threshold_wal {
+                                    tracing::warn!(
+                                    address,
+                                    balance = wal_balance,
+                                    threshold = state.config.wallet_balance_low_threshold_wal,
+                                    "balance_monitor: uploader wallet WAL balance below threshold"
+                                );
+                                    let alert = alerts::WalletBalanceLowAlert {
+                                        wallet_type: "uploader".to_string(),
+                                        address: address.to_string(),
+                                        balance: wal_balance,
+                                        threshold: state.config.wallet_balance_low_threshold_wal,
+                                        token: "WAL".to_string(),
+                                    };
+                                    if let Err(err) =
+                                        state.alerts.notify_wallet_balance_low(alert).await
+                                    {
+                                        tracing::warn!(
+                                            address,
+                                            "balance_monitor: failed to send uploader alert: {}",
+                                            err
+                                        );
+                                    }
+                                } else {
+                                    tracing::debug!(
+                                        address,
+                                        balance = wal_balance,
+                                        "balance_monitor: uploader wallet WAL balance ok"
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                "balance_monitor: sidecar wallet metrics missing perWallet"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "balance_monitor: failed to parse sidecar wallet metrics: {}",
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "balance_monitor: failed to fetch sidecar wallet metrics: {}",
+                    e
+                );
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "balance_monitor: sidecar wallet metrics returned status {}",
+                    resp.status()
+                );
+            }
+        }
+
+        // Fetch sponsor wallet balance if configured
+        if let Some(sponsor_key) = &state.config.sponsor_private_key {
+            // Derive sponsor address from the key
+            match sui::tx_build::sponsor_address(sponsor_key) {
+                Ok(sponsor_address) => {
+                    // Use the security_delete_background_sui client for balance checking if available
+                    if let Some(sui_client) = &state.security_delete_background_sui {
+                        match sui_client.address_balance(&sponsor_address).await {
+                            Ok(sponsor_balance) => {
+                                if sponsor_balance < state.config.sponsor_balance_low_threshold_sui
+                                {
+                                    tracing::warn!(
+                                        "balance_monitor: sponsor wallet SUI balance {} below threshold {}",
+                                        sponsor_balance,
+                                        state.config.sponsor_balance_low_threshold_sui
+                                    );
+                                    let alert = alerts::WalletBalanceLowAlert {
+                                        wallet_type: "sponsor".to_string(),
+                                        address: sponsor_address.clone(),
+                                        balance: sponsor_balance,
+                                        threshold: state.config.sponsor_balance_low_threshold_sui,
+                                        token: "SUI".to_string(),
+                                    };
+                                    if let Err(err) =
+                                        state.alerts.notify_wallet_balance_low(alert).await
+                                    {
+                                        tracing::warn!(
+                                            "balance_monitor: failed to send sponsor alert: {}",
+                                            err
+                                        );
+                                    }
+                                } else {
+                                    tracing::debug!(
+                                        "balance_monitor: sponsor wallet SUI balance {} ok",
+                                        sponsor_balance
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "balance_monitor: failed to fetch sponsor balance: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("balance_monitor: failed to derive sponsor address: {}", e);
+                }
+            }
+        }
+    }
 }
 
 async fn init_apalis_pool(
@@ -167,6 +422,13 @@ async fn apalis_schema_ready(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
 
 #[tokio::main]
 async fn main() {
+    #[cfg(all(feature = "ci-offline-onchain", debug_assertions))]
+    assert_eq!(
+        std::env::var("CI").as_deref(),
+        Ok("true"),
+        "ci-offline-onchain is restricted to CI test processes"
+    );
+
     // Load .env file (optional, won't error if missing)
     dotenvy::dotenv().ok();
 
@@ -174,9 +436,17 @@ async fn main() {
 
     // Load config
     let config = Config::from_env();
+    if let Err(error) = crate::types::validate_security_delete_config(&config) {
+        tracing::error!("boot guard: {}", error);
+        std::process::exit(1);
+    }
     tracing::info!("starting memwal server on port {}", config.port);
     tracing::info!("  Sui RPC: {}", config.sui_rpc_url);
-    tracing::info!("  package id: {}", config.package_id);
+    tracing::info!("  package type-origin id: {}", config.package_id);
+    tracing::info!(
+        "  SEAL policy package id: {}",
+        config.seal_policy_package_id
+    );
     tracing::info!("  registry id: {}", config.registry_id);
     tracing::info!(
         "  memwal account: {}",
@@ -193,9 +463,18 @@ async fn main() {
         config.rate_limit.max_storage_bytes / 1_048_576
     );
     tracing::info!(
-        "  sponsor rate limit: {}/min, {}/hr per IP+sender",
+        "  sponsor rate limit: {}/min, {}/hr per IP; {}/min, {}/hr global",
         config.sponsor_rate_limit.per_minute,
         config.sponsor_rate_limit.per_hour,
+        config.sponsor_rate_limit.global_per_minute,
+        config.sponsor_rate_limit.global_per_hour,
+    );
+    tracing::info!(
+        "  accounts rate limit: {}/min, {}/hr per IP; {}/min, {}/hr global",
+        config.accounts_rate_limit.per_minute,
+        config.accounts_rate_limit.per_hour,
+        config.accounts_rate_limit.global_per_minute,
+        config.accounts_rate_limit.global_per_hour,
     );
     if config.rate_limit.bench_bypass_enabled {
         // Storage quota is unaffected — this only skips the request-rate
@@ -322,6 +601,23 @@ async fn main() {
             .await
             .expect("Failed to connect to PostgreSQL"),
     );
+    let security_delete_component_enabled = config.enable_security_delete
+        || config.deletion_reconciler_enabled
+        || config.deletion_object_resolver_enabled;
+    let legacy_db = if security_delete_component_enabled {
+        Some(Arc::new(
+            LegacyDb::new(
+                config
+                    .legacy_db_url
+                    .as_deref()
+                    .expect("boot guard requires LEGACY_DB_URL"),
+            )
+            .await
+            .expect("Failed to initialize legacy security-delete database"),
+        ))
+    } else {
+        None
+    };
 
     let apalis_startup_timeout_secs = parse_env_u64(
         "APALIS_STARTUP_TIMEOUT_SECS",
@@ -396,6 +692,8 @@ async fn main() {
         .await
         .expect("Failed to connect to Redis for rate limiting");
     tracing::info!("  Redis: connected at {}", config.rate_limit.redis_url);
+    let security_delete_nonce_store: Arc<dyn security_delete_auth::NonceStore> =
+        Arc::new(security_delete_auth::RedisNonceStore::new(redis.clone()));
 
     // Redis Walrus blob ciphertext cache skips Walrus fetch on warm recall.
     let blob_cache_ttl_secs = std::env::var("BLOB_CACHE_TTL_SECS")
@@ -478,9 +776,9 @@ async fn main() {
 
     let alerts = Arc::new(AlertManager::from_env(http_client.clone()));
 
-    // Sui gRPC client for delegate-key verification — built once here (the
-    // constructor parses the OS root-cert store and sets up the channel) and
-    // cheaply cloned per request in auth, mirroring the pooled http_client.
+    // General delegate-key verification and the boot-time SEAL policy check
+    // share this independent gRPC client; security deletion owns a separate
+    // quota-gated client below.
     let sui_grpc_client = config.sui_grpc_url.as_deref().map(|url| {
         sui_rpc::Client::new(url)
             .unwrap_or_else(|e| panic!("SUI_GRPC_URL {url} is not a valid gRPC endpoint: {e}"))
@@ -489,9 +787,109 @@ async fn main() {
         tracing::info!("  Sui gRPC: {}", url);
     }
 
+    #[cfg(not(all(feature = "ci-offline-onchain", debug_assertions)))]
+    {
+        let policy_client = sui_grpc_client.as_ref().unwrap_or_else(|| {
+            panic!("SUI_GRPC_URL is required to validate MEMWAL_SEAL_POLICY_PACKAGE_ID")
+        });
+        storage::sui::verify_seal_policy_package(
+            policy_client,
+            &config.package_id,
+            &config.seal_policy_package_id,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("invalid SEAL policy package configuration: {error}"));
+        tracing::info!("  SEAL policy package lineage and ABI verified");
+
+        // Fail closed if MEMWAL_PACKAGE_ID is an upgraded/current package rather
+        // than the immutable type-origin encoded in AccountRegistry. Delegate-key
+        // verification uses this id to reject foreign lookalike Move objects.
+        storage::sui::verify_registry_type_origin(
+            &http_client,
+            &config.sui_rpc_url,
+            sui_grpc_client.as_ref(),
+            &config.registry_id,
+            &config.package_id,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "MEMWAL_PACKAGE_ID must be the immutable type-origin package id for registry {}: {}",
+                config.registry_id, error
+            )
+        });
+        tracing::info!("  package type-origin invariant verified from AccountRegistry");
+    }
+    #[cfg(all(feature = "ci-offline-onchain", debug_assertions))]
+    {
+        tracing::warn!("  CI-only build: onchain startup validation is disabled");
+    }
+
+    type SecurityDeleteSui = Option<Arc<dyn sui::SuiApi>>;
+    type SecurityDeleteVerifier = Arc<dyn security_delete_auth::WalletSignatureVerifier>;
+    let (security_delete_sui, security_delete_background_sui, security_delete_wallet_verifier): (
+        SecurityDeleteSui,
+        SecurityDeleteSui,
+        SecurityDeleteVerifier,
+    ) = if security_delete_component_enabled {
+        let client = sui::SuiClient::new(
+            config
+                .sui_grpc_url
+                .as_deref()
+                .expect("boot guard requires SUI_GRPC_URL"),
+            config.sui_rpc_requests_per_window,
+            config.sui_rpc_window,
+        )
+        .expect("failed to initialize security-delete Sui client")
+        .with_rpc_limits(config.sui_rpc_attempt_timeout, config.sui_rpc_max_in_flight)
+        .expect("invalid security-delete Sui RPC controls")
+        .with_walrus_config(
+            config.walrus_package_id.clone(),
+            config.walrus_system_object_id.clone(),
+        );
+        (
+            Some(Arc::new(client.clone())),
+            Some(Arc::new(client.background())),
+            Arc::new(sui::verifier::GrpcWalletSignatureVerifier::new(client)),
+        )
+    } else if let Some(url) = config.sui_grpc_url.as_deref() {
+        // Sponsor authorization also uses this verifier. Keep zkLogin,
+        // multisig verification, and sponsor balance monitoring available even
+        // when security deletion itself is disabled.
+        let client = sui::SuiClient::new(
+            url,
+            config.sui_rpc_requests_per_window,
+            config.sui_rpc_window,
+        )
+        .expect("failed to initialize sponsor signature verifier")
+        .with_rpc_limits(config.sui_rpc_attempt_timeout, config.sui_rpc_max_in_flight)
+        .expect("invalid sponsor signature RPC controls");
+        let background_client = Arc::new(client.background());
+        (
+            None,
+            Some(background_client),
+            Arc::new(sui::verifier::GrpcWalletSignatureVerifier::new(client)),
+        )
+    } else {
+        (
+            None,
+            None,
+            Arc::new(security_delete_auth::NativeWalletSignatureVerifier),
+        )
+    };
+    let security_delete_execution_gate = Arc::new(types::SecurityDeleteExecutionGate::new(
+        config.security_delete_execute_max_in_flight,
+    ));
+
     // Shared application state
     let state = Arc::new(AppState {
         db,
+        legacy_db,
+        security_delete_nonce_store,
+        security_delete_wallet_verifier,
+        security_delete_sui,
+        security_delete_background_sui,
+        security_delete_execution_gate,
         config: Arc::clone(&config),
         http_client,
         sui_grpc_client,
@@ -503,6 +901,9 @@ async fn main() {
         ranker,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
+        registry_scan_semaphore: tokio::sync::Semaphore::new(
+            crate::types::REGISTRY_SCAN_MAX_CONCURRENT,
+        ),
         remember_job_storage: remember_job_storage.clone(),
         wallet_storage: wallet_storage.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
@@ -510,6 +911,9 @@ async fn main() {
         blob_cache_max_bytes,
         embedding_cache_ttl,
     });
+
+    jobs_security_delete::spawn_reconciler(Arc::clone(&state));
+    jobs_security_delete::spawn_object_resolver(Arc::clone(&state));
 
     tracing::info!(
         "  alerts: Slack {} via ALERT_TO_SLACK",
@@ -528,8 +932,7 @@ async fn main() {
     // throttle the burst) — before queued requests outlive the sidecar's
     // 120s acquire timeout and start failing.
     let saturation_threshold = parse_env_u64("SIDECAR_QUEUE_SATURATION_THRESHOLD", 20, 1, 10_000);
-    let saturation_consecutive =
-        parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
+    let saturation_consecutive = parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
     let saturation_interval_secs =
         parse_env_u64("SIDECAR_QUEUE_SATURATION_INTERVAL_SECS", 30, 5, 300);
     tracing::info!(
@@ -544,9 +947,8 @@ async fn main() {
         let monitor_alerts = Arc::clone(&state.alerts);
         let monitor_network = config.sui_network.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                saturation_interval_secs,
-            ));
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(saturation_interval_secs));
             let mut consecutive_saturated = 0u32;
             loop {
                 interval.tick().await;
@@ -605,8 +1007,9 @@ async fn main() {
                         threshold: saturation_threshold,
                         consecutive_checks: consecutive_saturated,
                     };
-                    if let Err(err) =
-                        monitor_alerts.notify_walrus_upload_queue_saturated(alert).await
+                    if let Err(err) = monitor_alerts
+                        .notify_walrus_upload_queue_saturated(alert)
+                        .await
                     {
                         tracing::warn!("  sidecar: saturation alert delivery failed: {}", err);
                     }
@@ -615,7 +1018,7 @@ async fn main() {
         });
     }
 
-    // Worker 1: MetaTransferJob (legacy — backward compat with existing DB rows)
+    // Worker 1: deserialize legacy rows and fail them closed for reconciliation.
     {
         let worker_state = state.clone();
         let storage = job_storage.clone();
@@ -636,7 +1039,7 @@ async fn main() {
         tracing::info!("  Apalis: worker 'meta-transfer' spawned (concurrency=2)");
     }
 
-    // Worker 2: RememberJob (legacy full pipeline)
+    // Worker 2: deserialize legacy rows and fail them closed before upload.
     {
         let worker_state = state.clone();
         let storage = remember_job_storage.clone();
@@ -743,6 +1146,21 @@ async fn main() {
         }
     });
 
+    // Spawn background task for proactive wallet balance monitoring
+    {
+        let balance_monitor_state = state.clone();
+        let balance_monitor_interval_secs = config.balance_monitor_interval_secs;
+        tracing::info!(
+            "  balance monitor: starting with interval={}s, wallet_threshold_wal={}, sponsor_threshold_sui={}",
+            balance_monitor_interval_secs,
+            config.wallet_balance_low_threshold_wal,
+            config.sponsor_balance_low_threshold_sui,
+        );
+        tokio::spawn(async move {
+            balance_monitor_task(balance_monitor_state, balance_monitor_interval_secs).await;
+        });
+    }
+
     // Build routes
     // Protected routes (require Ed25519 signature + onchain verification)
     // 2 MiB covers the largest realistic JSON
@@ -788,7 +1206,8 @@ async fn main() {
         ))
         .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
 
-    // Sponsor routes — body limits + IP rate limit middleware
+    // Security-delete has its own server-side sponsor and does not use these
+    // routes.
     let sponsor_routes = Router::new()
         .route(
             "/sponsor",
@@ -802,6 +1221,57 @@ async fn main() {
             state.clone(),
             rate_limit::sponsor_rate_limit_middleware,
         ));
+
+    let security_delete_auth_routes = Router::new()
+        .route(
+            "/api/security-delete-auth/challenge",
+            post(security_delete_auth::challenge).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
+            "/api/security-delete-auth/verify",
+            post(security_delete_auth::verify).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::security_delete::security_delete_auth_rate_limit,
+        ))
+        // Last layer executes first: hide disabled deployments before rate
+        // limiting or JSON extraction can reveal the route contract.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::security_delete::security_delete_feature_gate,
+        ));
+
+    let security_delete_bearer_routes = Router::new()
+        .route(
+            "/api/security-deletable-blobs",
+            get(routes::security_delete::list_deletable_blobs),
+        )
+        .route(
+            "/api/security-deletions",
+            post(routes::security_delete::prepare_deletion)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/api/security-deletions/{batch_id}/submit",
+            post(routes::security_delete::submit_deletion).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/security-deletions/{batch_id}",
+            get(routes::security_delete::deletion_status)
+                .delete(routes::security_delete::cancel_deletion),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::security_delete::security_delete_feature_gate,
+        ));
+
+    // The deletion API is intentionally consumable by public browser clients.
+    // Keep its CORS policy route-scoped so the rest of the API still uses the
+    // deployment's ALLOWED_ORIGINS allowlist.
+    let security_delete_routes = security_delete_auth_routes
+        .merge(security_delete_bearer_routes)
+        .layer(security_delete_cors());
 
     // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
     // No signed-request auth here: MCP clients ship a single Bearer at SSE
@@ -828,6 +1298,22 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         );
 
+    // Admin dashboard routes (requires ADMIN_API_KEY)
+    let admin_dashboard_routes = Router::new()
+        .route(
+            "/api/admin/wallets",
+            get(routes::admin_dashboard::get_wallets).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/upload-errors",
+            get(routes::admin_dashboard::get_upload_errors).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/config",
+            get(routes::admin_dashboard::get_admin_config).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .layer(middleware::from_fn(auth::verify_admin_key));
+
     // Public routes
     // /health and /config accept no body — cap at 16 KiB to reject
     // oversized unauthenticated requests before they reach any handler.
@@ -846,6 +1332,17 @@ async fn main() {
         .route(
             "/config",
             get(routes::get_config).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/accounts/{owner}/exists",
+            get(routes::account_exists)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                // Only route in `public_routes` that hits the DB pool — see
+                // `rate_limit::accounts_rate_limit_middleware` doc comment.
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rate_limit::accounts_rate_limit_middleware,
+                )),
         )
         .route(
             "/metrics",
@@ -878,7 +1375,7 @@ async fn main() {
             tracing::info!("  CORS origins: {}", config.allowed_origins);
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
-                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
                 .allow_headers([
                     header::CONTENT_TYPE,
                     header::AUTHORIZATION,
@@ -896,6 +1393,9 @@ async fn main() {
                     // MCP headers — caller's Walrus Memory account id + optional default namespace.
                     "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
                     "x-memwal-namespace".parse::<header::HeaderName>().unwrap(),
+                    // Admin dashboard auth (browser fetches from a different subdomain,
+                    // so this custom header must be preflight-allowed)
+                    "x-admin-api-key".parse::<header::HeaderName>().unwrap(),
                 ])
         }
     };
@@ -903,8 +1403,12 @@ async fn main() {
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)
-        .with_state(state)
+        .merge(admin_dashboard_routes)
         .layer(cors)
+        // Merge after applying the deployment-wide CORS layer so its
+        // preflight handler cannot shadow the deletion API's public policy.
+        .merge(security_delete_routes)
+        .with_state(state)
         .layer(middleware::from_fn(
             observability::request_context_middleware,
         ));

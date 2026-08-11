@@ -15,7 +15,10 @@ use opentelemetry_sdk::{
     logs::SdkLoggerProvider, propagation::TraceContextPropagator, trace::SdkTracerProvider,
     Resource,
 };
-use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec};
+use prometheus::{
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec,
+};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -129,6 +132,68 @@ static RATE_LIMIT_FALLBACKS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
     .expect("register memwal_rate_limit_fallbacks_total")
 });
+
+static SECURITY_DELETE_SUI_RPC_ADMISSIONS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    prometheus::register_int_counter!(
+        "memwal_security_delete_sui_rpc_admissions_total",
+        "Security-deletion Sui RPC attempts admitted by the rolling-window gate, including retries."
+    )
+    .expect("register memwal_security_delete_sui_rpc_admissions_total")
+});
+
+static SECURITY_DELETE_SUI_RPC_WINDOW_ADMISSIONS: LazyLock<IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!(
+        "memwal_security_delete_sui_rpc_window_admissions",
+        "Security-deletion Sui RPC admissions retained in the current rolling window."
+    )
+    .expect("register memwal_security_delete_sui_rpc_window_admissions")
+});
+
+static SECURITY_DELETE_SUI_RPC_WINDOW_LIMIT: LazyLock<IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!(
+        "memwal_security_delete_sui_rpc_window_limit",
+        "Configured effective security-deletion Sui RPC rolling-window limit."
+    )
+    .expect("register memwal_security_delete_sui_rpc_window_limit")
+});
+
+static SECURITY_DELETE_SUI_RPC_GATE_WAIT_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    prometheus::register_histogram!(HistogramOpts::new(
+        "memwal_security_delete_sui_rpc_gate_wait_seconds",
+        "Time security-deletion Sui RPC attempts wait for rolling-window admission."
+    )
+    .buckets(vec![
+        0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0
+    ]))
+    .expect("register memwal_security_delete_sui_rpc_gate_wait_seconds")
+});
+
+static SECURITY_DELETE_SUI_RPC_PROVIDER_RATE_LIMITS_TOTAL: LazyLock<IntCounter> =
+    LazyLock::new(|| {
+        prometheus::register_int_counter!(
+            "memwal_security_delete_sui_rpc_provider_rate_limits_total",
+            "Provider RESOURCE_EXHAUSTED responses observed by the security-deletion Sui client."
+        )
+        .expect("register memwal_security_delete_sui_rpc_provider_rate_limits_total")
+    });
+
+static SECURITY_DELETE_SUI_RPC_COOLDOWNS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    prometheus::register_int_counter!(
+        "memwal_security_delete_sui_rpc_cooldowns_total",
+        "Provider-directed cooldowns applied by the security-deletion Sui client."
+    )
+    .expect("register memwal_security_delete_sui_rpc_cooldowns_total")
+});
+
+static SECURITY_DELETE_SUI_RPC_COOLDOWN_SECONDS: LazyLock<Histogram> =
+    LazyLock::new(|| {
+        prometheus::register_histogram!(HistogramOpts::new(
+        "memwal_security_delete_sui_rpc_cooldown_seconds",
+        "Provider Retry-After or retry-pushback cooldown requested for security-deletion Sui RPC."
+    )
+    .buckets(vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 300.0, 3600.0]))
+        .expect("register memwal_security_delete_sui_rpc_cooldown_seconds")
+    });
 
 static EXTERNAL_REQUEST_DURATION_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
     prometheus::register_histogram_vec!(
@@ -532,6 +597,22 @@ pub fn record_rate_limit_denial(bucket: &str) {
 
 pub fn record_rate_limit_fallback(scope: &'static str) {
     RATE_LIMIT_FALLBACKS_TOTAL.with_label_values(&[scope]).inc();
+}
+
+pub fn record_security_delete_sui_rpc_admission(in_window: usize, limit: usize, waited: Duration) {
+    SECURITY_DELETE_SUI_RPC_ADMISSIONS_TOTAL.inc();
+    SECURITY_DELETE_SUI_RPC_WINDOW_ADMISSIONS.set(in_window as i64);
+    SECURITY_DELETE_SUI_RPC_WINDOW_LIMIT.set(limit as i64);
+    SECURITY_DELETE_SUI_RPC_GATE_WAIT_SECONDS.observe(waited.as_secs_f64());
+}
+
+pub fn record_security_delete_sui_rpc_provider_rate_limit() {
+    SECURITY_DELETE_SUI_RPC_PROVIDER_RATE_LIMITS_TOTAL.inc();
+}
+
+pub fn record_security_delete_sui_rpc_cooldown(duration: Duration) {
+    SECURITY_DELETE_SUI_RPC_COOLDOWNS_TOTAL.inc();
+    SECURITY_DELETE_SUI_RPC_COOLDOWN_SECONDS.observe(duration.as_secs_f64());
 }
 
 pub fn observe_external(

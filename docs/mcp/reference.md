@@ -1,7 +1,36 @@
 ---
 title: Reference
-description: Complete reference for Walrus Memory MCP tools, CLI flags, environment presets, transport routes, and self-hosting.
-keywords: [MCP, Walrus Memory, MemWal, reference, CLI, transports, self-hosting]
+description: >-
+  Complete reference for Walrus Memory MCP tools, CLI flags, environment presets, transport routes, and self-hosting.
+  Covers all eight tools, credential management, stdio and HTTP transports, and runtime safety details.
+keywords:
+  - MCP
+  - Walrus Memory
+  - MemWal
+  - reference
+  - CLI
+  - transports
+  - self-hosting
+goal:
+  description: Look up the exact CLI flags, transport options, tool parameters, and configuration schema for the @mysten-incubation/memwal-mcp package.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What are the parameters for the MemWal MCP tools?
+  - How do I configure the MemWal MCP CLI flags and environment variables?
+  - How do I set up Streamable HTTP transport for Walrus Memory MCP?
+answer: >-
+  The MemWal MCP reference documents eight tools (memwal_remember, memwal_remember_bulk, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, memwal_logout) with full parameter details. It covers CLI flags (--relayer, --namespace, --label, etc.), environment presets (prod, staging, local), two transport modes (stdio and Streamable HTTP), credential file format, default namespace precedence, self-hosting configuration, and runtime safety notes for 401 handling and relayer overrides.
 ---
 
 This page documents every tool, flag, environment variable, and transport route the Walrus Memory MCP package exposes. For per-client setup, start with the [MCP overview](/mcp/overview).
@@ -284,6 +313,7 @@ Self-hosted relayers expose the same public MCP routes as the hosted relayer. Th
 | `MCP_MAX_TOTAL_SESSIONS` | `1000` | Cap on concurrent MCP sessions across SSE and Streamable HTTP |
 | `MCP_MAX_SESSIONS_PER_IP` | `16` | Cap on concurrent sessions from one source IP |
 | `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Rate cap on new sessions per source IP per minute |
+| `TRUSTED_PROXY_HOPS` | `0` | Trusted reverse-proxy hops used to resolve the canonical client IP; keep `0` for direct deployments |
 
 See [Environment Variables](/reference/environment-variables) for the full list including SEAL, Walrus, embeddings, and database settings.
 

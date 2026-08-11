@@ -96,7 +96,6 @@ export default function SetupWizard() {
     const [error, setError] = useState('')
     const [importKeyHex, setImportKeyHex] = useState('')
     const [importingKey, setImportingKey] = useState(false)
-    const [suiAddress, setSuiAddress] = useState('')
 
     const setupRunningRef = useRef(false)
     const address = currentAccount?.address || ''
@@ -113,17 +112,10 @@ export default function SetupWizard() {
 
     const deriveDelegateKey = useCallback(async (privateKeyHexValue: string) => {
         const ed = await import('@noble/ed25519')
-        const { blake2b } = await import('@noble/hashes/blake2.js')
         const privateKey = hexToBytes(privateKeyHexValue)
         const publicKey = await ed.getPublicKeyAsync(privateKey)
 
-        const input = new Uint8Array(33)
-        input[0] = 0x00
-        input.set(publicKey, 1)
-        const addressBytes = blake2b(input, { dkLen: 32 })
-        const suiAddr = '0x' + bytesToHex(new Uint8Array(addressBytes))
-
-        return { privHex: privateKeyHexValue, pubHex: bytesToHex(publicKey), suiAddr }
+        return { privHex: privateKeyHexValue, pubHex: bytesToHex(publicKey) }
     }, [])
 
     // ── Generate Ed25519 keypair (shared) ──
@@ -137,7 +129,6 @@ export default function SetupWizard() {
     const registerOnchain = useCallback(async (
         ownerAddress: string,
         pubKeyHex: string,
-        delegateSuiAddress: string,
     ): Promise<string> => {
         let knownAccountId = await getAccountObjectId(suiClient, ownerAddress)
 
@@ -158,8 +149,9 @@ export default function SetupWizard() {
                 target: `${config.memwalPackageId}::account::add_delegate_key`,
                 arguments: [
                     tx.object(knownAccountId),
+                    tx.object(config.memwalRegistryId),
                     tx.pure('vector<u8>', pubKeyBytes),
-                    tx.pure('address', delegateSuiAddress),
+                    // v1_new derives the Sui address on-chain — no address arg.
                     tx.pure('string', 'Web App'),
                     tx.object('0x6'),
                 ],
@@ -179,21 +171,13 @@ export default function SetupWizard() {
             const createResult = await signAndExecute({ transaction: tx })
             await suiClient.waitForTransaction({ digest: createResult.digest })
 
-            const txDetails = await suiClient.getTransactionBlock({
-                digest: createResult.digest,
-                options: { showObjectChanges: true },
-            })
-            const createdObj = txDetails.objectChanges?.find(
-                (c) => c.type === 'created' &&
-                    'objectType' in c &&
-                    c.objectType.includes('MemWalAccount')
-            )
-            if (createdObj && 'objectId' in createdObj) {
-                knownAccountId = createdObj.objectId
-            }
+            // Resolve through AccountRegistry after finality. This works for
+            // both the app-wide gRPC client and the local JSON-RPC E2E client;
+            // getTransactionBlock() is JSON-RPC-only.
+            knownAccountId = await getAccountObjectId(suiClient, ownerAddress)
 
             if (!knownAccountId) {
-                throw new Error('Account created but object ID not found in transaction. Please try again.')
+                throw new Error('Account created but object ID was not found in the registry. Please try again.')
             }
 
             setTxStatus('adding delegate key...')
@@ -202,8 +186,9 @@ export default function SetupWizard() {
                 target: `${config.memwalPackageId}::account::add_delegate_key`,
                 arguments: [
                     tx2.object(knownAccountId),
+                    tx2.object(config.memwalRegistryId),
                     tx2.pure('vector<u8>', pubKeyBytes),
-                    tx2.pure('address', delegateSuiAddress),
+                    // v1_new derives the Sui address on-chain — no address arg.
                     tx2.pure('string', 'Web App'),
                     tx2.object('0x6'),
                 ],
@@ -225,10 +210,9 @@ export default function SetupWizard() {
         setError('')
 
         try {
-            const { privHex, pubHex, suiAddr } = await generateKeys()
+            const { privHex, pubHex } = await generateKeys()
             setPrivateKeyHex(privHex)
             setPublicKeyHex(pubHex)
-            setSuiAddress(suiAddr)
             setStep('show-key')
             trackEvent('delegate_key_generated', { location: 'setup' })
         } catch (err) {
@@ -297,7 +281,7 @@ export default function SetupWizard() {
         setTxStatus('checking existing account...')
 
         try {
-            const accountId = await registerOnchain(address, publicKeyHex, suiAddress)
+            const accountId = await registerOnchain(address, publicKeyHex)
             setTxStatus('delegate key registered onchain!')
             setDelegateKeys(privateKeyHex, publicKeyHex, accountId)
             setPrivateKeyHex('')
@@ -314,7 +298,7 @@ export default function SetupWizard() {
         } finally {
             setupRunningRef.current = false
         }
-    }, [address, publicKeyHex, privateKeyHex, suiAddress, registerOnchain, setDelegateKeys, isEnoki])
+    }, [address, publicKeyHex, privateKeyHex, registerOnchain, setDelegateKeys, isEnoki])
 
     const copyKey = useCallback(async () => {
         await navigator.clipboard.writeText(privateKeyHex)

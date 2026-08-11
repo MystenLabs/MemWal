@@ -1,7 +1,35 @@
 ---
 title: Antigravity
-description: Add portable Walrus Memory to Antigravity through the MemWal MCP server.
-keywords: [MCP, Antigravity, Walrus Memory, MemWal, plugin, automatic memory]
+description: >-
+  Add portable Walrus Memory to Antigravity through the MemWal MCP server.
+  Install as a plugin with automatic memory hooks or as MCP-only for just the memory tools.
+keywords:
+  - MCP
+  - Antigravity
+  - Walrus Memory
+  - MemWal
+  - plugin
+  - automatic memory
+goal:
+  description: Add MemWal to Antigravity as a plugin with lifecycle hooks or as a standalone MCP server, authenticate with your account credentials, and verify the connection with a test recall.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I add Walrus Memory to Antigravity?
+  - How do I install the MemWal plugin on Antigravity?
+  - What lifecycle hooks does the MemWal Antigravity plugin provide?
+answer: >-
+  To add Walrus Memory to Antigravity, install MemWal as a plugin by deploying to Antigravity's plugin directory using npx degit, or configure it as MCP-only by adding the server to Antigravity's MCP configuration. The plugin includes lifecycle hooks for session start, user prompt, and post-tool events that drive automatic recall and save behavior.
 ---
 
 Add MemWal to Antigravity so the agent recalls context and saves durable facts. Install it as a **plugin** (adds automatic-memory hooks) or as **MCP-only** (just the tools).

@@ -1,0 +1,93 @@
+name: burn-cap-tx
+
+permissions:
+  contents: read
+
+# Build the UNSIGNED transaction bytes that burn a spent MigrationCap —
+# account::burn_migration_cap(MigrationCap), which deletes the cap so no import
+# authority survives finalize. Nothing is executed on-chain — the base64 output is
+# meant to be signed later (multisig / ledger / offline) and then submitted
+# separately.
+#
+# No sui CLI needed: this is pure @mysten/sui over gRPC.
+#
+# NOT an AdminCap action: the cap is taken by value, so the sender is the hot
+# wallet that OWNS the cap (the controller's), and that wallet signs. Run once per
+# cap. Burn every cap before the separate AdminCap-signed `finalize-tx`.
+on:
+  workflow_dispatch:
+    inputs:
+      sender:
+        description: "Wallet that owns the MigrationCap / signer (0x + 64 hex)."
+        required: true
+        type: string
+      package_id:
+        description: "Published memwal package id."
+        required: true
+        type: string
+      migration_cap_id:
+        description: "MigrationCap object id owned by the sender, to burn."
+        required: true
+        type: string
+      grpc_url:
+        description: "gRPC-web base URL of a fullnode (no JSON-RPC)."
+        required: true
+        type: string
+      network:
+        description: "Sui network."
+        required: true
+        default: mainnet
+        type: choice
+        options: [mainnet, testnet]
+      gas_budget:
+        description: "Gas budget in MIST."
+        required: true
+        default: "500000000"
+        type: string
+
+jobs:
+  build:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    # Burning destroys migration authority, so use the same reviewed environment.
+    environment: walrus-memory-migration-governance-${{ inputs.network }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned burn-cap tx
+        env:
+          NETWORK: ${{ inputs.network }}
+          GRPC_URL: ${{ inputs.grpc_url }}
+          SENDER: ${{ inputs.sender }}
+          PACKAGE_ID: ${{ inputs.package_id }}
+          MIGRATION_CAP_ID: ${{ inputs.migration_cap_id }}
+          GAS_BUDGET: ${{ inputs.gas_budget }}
+          OUT: unsigned-burn-cap-tx.b64
+        run: pnpm tx:burn-cap
+
+      - name: Summary
+        env:
+          SENDER: ${{ inputs.sender }}
+          PACKAGE_ID: ${{ inputs.package_id }}
+          MIGRATION_CAP_ID: ${{ inputs.migration_cap_id }}
+        run: |
+          {
+            echo "### Unsigned burn-cap tx"
+            echo "Sender: \`$SENDER\` · package: \`$PACKAGE_ID\` · cap: \`$MIGRATION_CAP_ID\`"
+            echo '```'
+            cat unsigned-burn-cap-tx.b64
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-burn-cap-tx
+          path: unsigned-burn-cap-tx.b64

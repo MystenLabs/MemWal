@@ -1,5 +1,16 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.6
+
+### Security
+
+- Require a localhost preflight handshake proving the exact state, public key, and relayer before accepting a delegate-key login callback.
+
+### Fixed
+
+- Authenticate MCP SSE POST messages and replayed requests with the delegate credentials.
+- Keep the canonical login label from the verified local flow instead of trusting the browser callback.
+
 ## 0.0.5
 
 ### Added
