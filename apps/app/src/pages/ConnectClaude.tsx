@@ -178,8 +178,9 @@ export default function ConnectClaude() {
                     target: `${config.memwalPackageId}::account::add_delegate_key`,
                     arguments: [
                         tx.object(accountId),
+                        tx.object(config.memwalRegistryId),
                         tx.pure('vector<u8>', hexToBytes(preflight.delegate_public_key)),
-                        tx.pure('address', preflight.delegate_sui_address),
+                        // v1_new derives the Sui address on-chain — no address arg.
                         tx.pure('string', `Claude (${new Date().toISOString().slice(0, 10)})`),
                         tx.object('0x6'),
                     ],
