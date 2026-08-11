@@ -45,6 +45,7 @@ mod tests {
             include_str!("../../migrations/003_rate_limiter.sql"),
             include_str!("../../migrations/008_benchmark_plaintext.sql"),
             include_str!("../../migrations/009_importance_signal.sql"),
+            include_str!("../../migrations/010_restore_failed_blobs.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -301,6 +302,13 @@ impl VectorDb {
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
+
+        // Permanent restore-failure negative cache (GH #501 / WALM-299).
+        let migration_010 = include_str!("../../migrations/010_restore_failed_blobs.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
@@ -837,5 +845,73 @@ impl VectorDb {
                 .map_err(|e| AppError::Internal(format!("Failed to query accounts: {}", e)))?;
 
         Ok(result.map(|(id,)| id))
+    }
+
+    /// Return blob_ids that have permanently failed to restore for `owner` +
+    /// `namespace` (GH #501 / WALM-299). Used by restore() to exclude blobs
+    /// that already failed decrypt/validation once and should never be
+    /// re-downloaded and re-decrypt-attempted on every subsequent restore() call.
+    pub async fn get_failed_blob_ids(
+        &self,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<Vec<String>, AppError> {
+        let started = std::time::Instant::now();
+        let result: Result<Vec<(String,)>, AppError> = sqlx::query_as(
+            "SELECT blob_id FROM restore_failed_blobs
+             WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get failed blobs: {}", e)));
+        crate::observability::observe_db(
+            "vector.get_failed_blob_ids",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let rows = result?;
+
+        Ok(rows.into_iter().map(|(blob_id,)| blob_id).collect())
+    }
+
+    /// Record that `blob_id` permanently failed to restore for `owner` +
+    /// `namespace` (GH #501 / WALM-299). `reason` is `"decrypt_permanent"`
+    /// (SEAL rejected it deterministically) or `"invalid_utf8"`
+    /// (decrypt succeeded but the plaintext wasn't valid UTF-8). Repeated
+    /// calls for the same (owner, namespace, blob_id) bump `attempts`
+    /// instead of erroring or duplicating the row.
+    pub async fn record_restore_failure(
+        &self,
+        owner: &str,
+        namespace: &str,
+        blob_id: &str,
+        reason: &str,
+    ) -> Result<(), AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "INSERT INTO restore_failed_blobs (owner, namespace, blob_id, reason)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (owner, namespace, blob_id) DO UPDATE SET
+                attempts = restore_failed_blobs.attempts + 1,
+                last_attempt_at = now(),
+                reason = EXCLUDED.reason",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .bind(blob_id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to record restore failure: {}", e)));
+        crate::observability::observe_db(
+            "vector.record_restore_failure",
+            db_status(&result),
+            started.elapsed(),
+        );
+        result?;
+
+        Ok(())
     }
 }
