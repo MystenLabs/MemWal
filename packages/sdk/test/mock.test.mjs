@@ -62,6 +62,46 @@ test("MemWalMock isolates namespaces and honors maxDistance", async () => {
     assert.equal(empty.total, 0);
 });
 
+test("MemWalMock matches production recall overloads and topK precedence", async () => {
+    const mock = MemWalMock.create();
+    await mock.rememberAndWait("shared first", "options");
+    await mock.rememberAndWait("shared second", "options");
+
+    const optionsStyle = await mock.recall("shared", {
+        namespace: "options",
+        limit: 2,
+    });
+    const objectStyle = await mock.recall({
+        query: "shared",
+        namespace: "options",
+        limit: 1,
+        topK: 2,
+    });
+
+    assert.deepEqual(
+        optionsStyle.results.map((memory) => memory.text),
+        ["shared first", "shared second"]
+    );
+    assert.equal(objectStyle.results.length, 2);
+});
+
+test("MemWalMock tokenization does not depend on the host locale", async () => {
+    const originalLocaleLowerCase = String.prototype.toLocaleLowerCase;
+    String.prototype.toLocaleLowerCase = () => {
+        throw new Error("locale-dependent lowercase must not be used");
+    };
+    try {
+        const mock = MemWalMock.create();
+        await mock.rememberAndWait("I LIKE COFFEE");
+        const recalled = await mock.recall({ query: "i like coffee" });
+
+        assert.equal(recalled.results[0].distance, 0);
+        assert.equal((await mock.embed("I LIKE COFFEE")).vector.length, 16);
+    } finally {
+        String.prototype.toLocaleLowerCase = originalLocaleLowerCase;
+    }
+});
+
 test("MemWalMock supports job, bulk, analyze, forget, and clear flows", async () => {
     const mock = MemWalMock.create();
     const accepted = await mock.remember("single fact");

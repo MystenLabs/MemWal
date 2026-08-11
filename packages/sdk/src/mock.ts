@@ -57,7 +57,7 @@ function tokenize(text: string): Set<string> {
     return new Set(
         text
             .normalize("NFKC")
-            .toLocaleLowerCase()
+            .toLowerCase()
             .match(/[\p{L}\p{N}]+/gu) ?? []
     );
 }
@@ -228,25 +228,33 @@ export class MemWalMock {
     async recall(params: RecallParams): Promise<RecallResult>;
     async recall(
         query: string,
-        limit?: number,
+        limitOrOptions?: number | RecallOptions,
         namespace?: string
     ): Promise<RecallResult>;
     async recall(
         queryOrParams: string | RecallParams,
-        limit = 10,
+        limitOrOptions: number | RecallOptions | undefined = 10,
         namespace?: string
     ): Promise<RecallResult> {
-        const query =
-            typeof queryOrParams === "string"
-                ? queryOrParams
-                : queryOrParams.query;
+        let query: string;
+        let options: RecallOptions;
+        if (typeof queryOrParams === "object") {
+            const { query: objectQuery, ...rest } = queryOrParams;
+            query = objectQuery;
+            options = rest;
+        } else {
+            query = queryOrParams;
+            if (limitOrOptions == null) {
+                options = { limit: 10, namespace };
+            } else if (typeof limitOrOptions === "number") {
+                options = { limit: limitOrOptions, namespace };
+            } else {
+                options = limitOrOptions;
+            }
+        }
         validateText(query, "query");
-        const options: RecallOptions =
-            typeof queryOrParams === "string"
-                ? { limit, namespace }
-                : queryOrParams;
         const resolvedNamespace = options.namespace ?? this.namespace;
-        const resolvedLimit = options.limit ?? options.topK ?? 10;
+        const resolvedLimit = options.topK ?? options.limit ?? 10;
         if (!Number.isInteger(resolvedLimit) || resolvedLimit < 0) {
             throw new Error("limit must be a non-negative integer");
         }
