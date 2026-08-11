@@ -7,8 +7,13 @@ import express, { type Express } from "express";
 import { blobIdFromInt } from "@mysten/walrus";
 import { bcs } from "@mysten/sui/bcs";
 import { normalizeSuiAddress } from "@mysten/sui/utils";
-import { JSON_LIMIT_METADATA, JSON_LIMIT_WALRUS_VERIFY, WALRUS_PACKAGE_ID } from "../config.js";
-import { getWalrusClient, refreshWalrusClientIfStale, suiClient } from "../clients.js";
+import {
+    JSON_LIMIT_METADATA,
+    JSON_LIMIT_WALRUS_VERIFY,
+    SERVER_SUI_ADDRESS_SET,
+    WALRUS_PACKAGE_ID,
+} from "../config.js";
+import { getWalrusClient, refreshWalrusClientIfStale, suiClient, suiGraphqlClient } from "../clients.js";
 import { requestIdFor, sidecarLog } from "../log.js";
 import { withRpcRetry } from "../retry/rpc.js";
 import { errorMessage, mapConcurrent } from "../util.js";
@@ -118,6 +123,7 @@ export async function readBlobObject(
 
 type RawBlobObj = {
     objectId: string;
+    owner: unknown;
     rawBlobId: string | number | null;
     rawSize: string | number | null;
     deletable: boolean | null;
@@ -125,6 +131,183 @@ type RawBlobObj = {
     previousTransaction?: string | null;
     timestampMs?: string | null;
 };
+
+type BlobHistoryClient = {
+    getTransaction(digest: string): Promise<any>;
+    getCreationTransaction(objectId: string): Promise<string | null>;
+};
+
+function finalizedTransaction(response: any): any | null {
+    if (response?.$kind === "Transaction") return response.Transaction ?? null;
+    // Keep the helper usable with a narrow mock and with SDK transports that
+    // return the transaction payload directly.
+    return response?.effects && response?.transaction ? response : null;
+}
+
+/**
+ * Resolve the immutable UID-creation transaction through archival GraphQL and
+ * return its sender. The current object's `previousTransaction` is insufficient:
+ * metadata attachment, lease renewal and ownership transfer all mutate a Blob.
+ */
+export async function findBlobCreationSender(
+    blob: Pick<RawBlobObj, "objectId" | "previousTransaction">,
+    client: BlobHistoryClient
+): Promise<string | null> {
+    const digest = await client.getCreationTransaction(blob.objectId);
+    if (!digest) return null;
+    const transaction = finalizedTransaction(await client.getTransaction(digest));
+    if (!transaction?.status?.success) return null;
+    const created = transaction.effects?.changedObjects?.find(
+        (object: any) =>
+            normalizedSuiAddressOrNull(object?.objectId) === normalizedSuiAddressOrNull(blob.objectId) &&
+            object?.idOperation === "Created"
+    );
+    return created ? normalizedSuiAddressOrNull(transaction.transaction?.sender) : null;
+}
+
+const CREATION_TRANSACTION_QUERY = `
+query BlobCreationTransaction($objectId: SuiAddress!) {
+  object(address: $objectId) {
+    previousTransaction { digest }
+    objectVersionsBefore(first: 1) {
+      nodes { previousTransaction { digest } }
+    }
+  }
+}`;
+
+const blobHistoryClient: BlobHistoryClient = {
+    getTransaction: (digest) =>
+        withRpcRetry(
+            `[query-blobs] archival transaction ${digest}`,
+            () =>
+                suiGraphqlClient.getTransaction({
+                    digest,
+                    include: { effects: true, transaction: true },
+                }),
+            2
+        ),
+    getCreationTransaction: async (objectId) => {
+        const result: any = await withRpcRetry(
+            `[query-blobs] creation version ${objectId}`,
+            () =>
+                suiGraphqlClient.query({
+                    query: CREATION_TRANSACTION_QUERY,
+                    variables: { objectId },
+                }),
+            2
+        );
+        if (Array.isArray(result?.errors) && result.errors.length > 0) {
+            throw new Error(`archival GraphQL lookup failed: ${result.errors[0]?.message ?? "unknown error"}`);
+        }
+        const object = result?.data?.object;
+        if (!object) return null;
+        // GraphQL connections are ascending for `first`; node[0] is the UID's
+        // earliest retained version. A never-mutated object has no prior nodes,
+        // so its current version is itself the creation version.
+        const creationVersion = object.objectVersionsBefore?.nodes?.[0] ?? object;
+        return typeof creationVersion?.previousTransaction?.digest === "string"
+            ? creationVersion.previousTransaction.digest
+            : null;
+    },
+};
+
+// Creation provenance is immutable for an object ID. Bound the process cache
+// so repeated restores avoid walking the same version history while memory use
+// remains predictable. Null/error results are not cached because they may be
+// caused by transient archive-node lag.
+const BLOB_PROVENANCE_CACHE_MAX = 10_000;
+const blobCreationSenderCache = new Map<string, string>();
+
+async function cachedBlobCreationSender(blob: Pick<RawBlobObj, "objectId" | "previousTransaction">) {
+    const cached = blobCreationSenderCache.get(blob.objectId);
+    if (cached) {
+        // Refresh insertion order for simple LRU eviction.
+        blobCreationSenderCache.delete(blob.objectId);
+        blobCreationSenderCache.set(blob.objectId, cached);
+        return cached;
+    }
+    const sender = await findBlobCreationSender(blob, blobHistoryClient);
+    if (sender) {
+        blobCreationSenderCache.set(blob.objectId, sender);
+        if (blobCreationSenderCache.size > BLOB_PROVENANCE_CACHE_MAX) {
+            blobCreationSenderCache.delete(blobCreationSenderCache.keys().next().value!);
+        }
+    }
+    return sender;
+}
+
+export async function trustedBlobCandidate(
+    blob: Pick<RawBlobObj, "objectId" | "owner" | "previousTransaction">,
+    recipient: string,
+    trustedUploaders: ReadonlySet<string>,
+    client: BlobHistoryClient
+): Promise<{ trusted: boolean; reason: "trusted" | "owner" | "provenance"; uploader: string | null }> {
+    if (!ownerMatchesRecipient(blob.owner, recipient)) {
+        return { trusted: false, reason: "owner", uploader: null };
+    }
+    const uploader = await findBlobCreationSender(blob, client);
+    return uploader && trustedUploaders.has(uploader)
+        ? { trusted: true, reason: "trusted", uploader }
+        : { trusted: false, reason: "provenance", uploader };
+}
+
+export async function filterTrustedBlobCandidates<
+    T extends Pick<RawBlobObj, "objectId" | "owner" | "previousTransaction">
+>(
+    candidates: T[],
+    recipient: string,
+    requestId: string,
+    creationSender: (blob: T) => Promise<string | null> = cachedBlobCreationSender
+): Promise<T[]> {
+    const provenance = await mapConcurrent(candidates, 2, async (blob) => {
+        try {
+            const result = !ownerMatchesRecipient(blob.owner, recipient)
+                ? { trusted: false as const, reason: "owner" as const, uploader: null }
+                : await creationSender(blob).then((uploader) =>
+                      uploader && SERVER_SUI_ADDRESS_SET.has(uploader)
+                          ? { trusted: true as const, reason: "trusted" as const, uploader }
+                          : { trusted: false as const, reason: "provenance" as const, uploader }
+                  );
+            return { blob, result };
+        } catch (error: unknown) {
+            // Abort this query on the first exhausted archival lookup rather
+            // than silently omitting a legitimate Blob or waiting for every
+            // remaining candidate to fail during an outage.
+            throw new Error(`unable to verify creation provenance for ${blob.objectId}: ${errorMessage(error)}`);
+        }
+    });
+    const excluded = provenance.filter(({ result }) => !result.trusted);
+    if (excluded.length > 0) {
+        sidecarLog("warn", "walrus_query_blobs_untrusted_candidates_excluded", {
+            requestId,
+            owner: recipient,
+            excludedCount: excluded.length,
+            ownershipMismatchCount: excluded.filter(({ result }) => result.reason === "owner").length,
+            unverifiedProvenanceCount: excluded.filter(({ result }) => result.reason === "provenance").length,
+            sample: excluded.slice(0, 5).map(({ blob, result }) => ({
+                objectId: blob.objectId,
+                uploader: result.uploader,
+                reason: result.reason,
+            })),
+        });
+    }
+    return provenance.filter(({ result }) => result.trusted).map(({ blob }) => blob);
+}
+
+/**
+ * True when the raw candidate fetch proved more than `cap` objects exist for
+ * the owner (WALM-319). The call site probes with `cap + 1` (see
+ * `listBlobObjectsGrpc` invocation below) and passes that raw fetched count
+ * here alongside the real `cap`, so `fetchedCount > cap` means the probe
+ * turned up at least one candidate beyond the cap — proof discovery didn't
+ * complete. `fetchedCount === cap` means the owner had at most `cap` Blob
+ * objects and discovery finished on its own, so that case must NOT read as
+ * capped (PR #538 review: exact-cap results were being reported as
+ * definitely truncated).
+ */
+export function isSourceCapped(fetchedCount: number, cap: number): boolean {
+    return fetchedCount > cap;
+}
 
 /**
  * gRPC path for step 1: listOwnedObjects filters by object type server-side
@@ -162,6 +345,7 @@ async function listBlobObjectsGrpc(
             if (requestedBlobIds && !requestedBlobIds.has(chainBlobIdFromRaw(rawBlobId) ?? "")) continue;
             out.push({
                 objectId: obj.objectId,
+                owner: obj.owner,
                 rawBlobId,
                 rawSize: obj.json?.size ?? null,
                 deletable: typeof obj.json?.deletable === "boolean" ? obj.json.deletable : null,
@@ -394,8 +578,30 @@ export function registerWalrusQueryRoute(app: Express): void {
             // `limit`; cap work when no exact blob IDs were supplied.
             const cap =
                 useRecentTxPath && !requestedBlobIds ? Math.max(1, Math.min(desiredMatches * 5, 100)) : Infinity;
-            const rawObjs = await listBlobObjectsGrpc(owner, WALRUS_BLOB_TYPE, cap, requestedBlobIds);
+            // Probe with `cap + 1` (when finite) so the raw fetch can prove
+            // whether more than `cap` candidates actually exist, rather than
+            // inferring "capped" merely from hitting `cap` exactly — an
+            // owner with precisely `cap` blobs would otherwise read as
+            // truncated even though discovery completed (PR #538 review).
+            const probeCap = cap === Infinity ? Infinity : cap + 1;
+            const probedObjs = await listBlobObjectsGrpc(owner, WALRUS_BLOB_TYPE, probeCap, requestedBlobIds);
+            const ownedCandidates = probedObjs.slice(0, cap);
+            // WALM-319: the candidate fetch above is capped independent of
+            // `limit` once desiredMatches >= 20 (`cap` saturates at 100) and
+            // shared across all of the owner's namespaces — a caller (namely
+            // restore()) can't otherwise tell "found everything" apart from
+            // "stopped early because of the cap" once results are filtered
+            // down to one namespace.
+            const sourceCapped = isSourceCapped(probedObjs.length, cap);
+
             if (includeStorageLease === true) {
+                // Lease queries supply exact blob IDs and skip metadata, so
+                // provenance is the first candidate-level gate on this path.
+                const rawObjs = await filterTrustedBlobCandidates(
+                    ownedCandidates,
+                    owner,
+                    requestIdFor(req)
+                );
                 // Expiry is a terminal migration decision. Do not use the
                 // upload client's normal 30-minute metadata cache here.
                 refreshWalrusClientIfStale(1_000);
@@ -445,7 +651,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                 });
             }
             console.log(
-                `[query-blobs] found ${rawObjs.length} raw blob objects for owner=${owner} via gRPC` +
+                `[query-blobs] found ${ownedCandidates.length} raw blob objects for owner=${owner} via gRPC` +
                 (requestedBlobIds
                     ? ` (requested=${requestedBlobIds.size})`
                         : useRecentTxPath
@@ -455,9 +661,7 @@ export function registerWalrusQueryRoute(app: Express): void {
 
             // Step 2: Fetch metadata for each blob with bounded concurrency
             // to avoid overwhelming Sui RPC and hitting 429 rate limits.
-            type BlobMeta = {
-                objectId: string;
-                rawBlobId: string | number | null;
+            type BlobMeta = RawBlobObj & {
                 blobNamespace: string;
                 blobOwner: string;
                 blobPackageId: string;
@@ -465,7 +669,7 @@ export function registerWalrusQueryRoute(app: Express): void {
             };
 
             const metadataConcurrency = useRecentTxPath ? 2 : 5;
-            const metas: BlobMeta[] = await mapConcurrent(rawObjs, metadataConcurrency, async (obj) => {
+            const metas: BlobMeta[] = await mapConcurrent(ownedCandidates, metadataConcurrency, async (obj) => {
                 let blobNamespace = "default";
                 let blobOwner = "";
                 let blobPackageId = "";
@@ -491,7 +695,21 @@ export function registerWalrusQueryRoute(app: Express): void {
                 };
             });
 
-            // Step 3: Filter + convert blob IDs
+            // Step 3: Narrow by cheap metadata first, then perform the more
+            // expensive immutable-history provenance walk only for candidates
+            // that can actually belong to this restore request.
+            const metadataMatches = metas.filter(
+                (meta) =>
+                    (!namespace || meta.blobNamespace === namespace) &&
+                    (!packageId || meta.blobPackageId === packageId)
+            );
+            const trustedMetas = await filterTrustedBlobCandidates(
+                metadataMatches,
+                owner,
+                requestIdFor(req)
+            );
+
+            // Step 4: Convert trusted blob IDs.
             const blobs: {
                 blobId: string;
                 objectId: string;
@@ -500,12 +718,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                 agentId: string;
             }[] = [];
 
-            for (const meta of metas) {
-                // Filter by namespace if specified
-                if (namespace && meta.blobNamespace !== namespace) continue;
-                // Filter by packageId if specified
-                if (packageId && meta.blobPackageId !== packageId) continue;
-
+            for (const meta of trustedMetas) {
                 if (meta.rawBlobId) {
                     const blobIdStr = blobIdFromRaw(meta.rawBlobId);
                     if (blobIdStr) {
@@ -522,10 +735,10 @@ export function registerWalrusQueryRoute(app: Express): void {
 
             console.log(
                 `[query-blobs] returning ${blobs.length} blobs (filtered from ${
-                    rawObjs.length
+                    ownedCandidates.length
                 }) for owner=${owner} ns=${namespace || "*"}`
             );
-            res.json({ blobs, total: blobs.length });
+            res.json({ blobs, total: blobs.length, sourceCapped });
         } catch (err: any) {
             const traceId = requestIdFor(req);
             const message = errorMessage(err);

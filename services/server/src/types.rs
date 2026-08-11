@@ -32,6 +32,9 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
+/// Prevent an accidental low interval from continuously polling Sui and the sidecar.
+const MIN_BALANCE_MONITOR_INTERVAL_SECS: u64 = 30;
+
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
 pub const DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS: u32 = 5;
@@ -299,6 +302,9 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
     pub sponsor_rate_limit: SponsorRateLimitConfig,
+    /// Rate limiting for the public, unauthenticated `GET
+    /// /api/accounts/{owner}/exists` endpoint
+    pub accounts_rate_limit: AccountsRateLimitConfig,
     /// Reverse-proxy hops trusted to append/sanitize X-Forwarded-For. Zero
     /// ignores caller-supplied XFF and uses the direct peer address.
     pub trusted_proxy_hops: usize,
@@ -342,6 +348,16 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Max `/api/restore` calls per owner per minute (GH #501 / WALM-299).
+    /// Dedicated on top of the generic weighted account rate limiter —
+    /// bounds how often an attacker can force a fresh first-time-discovery
+    /// cost by repeatedly transferring junk blob_ids into a victim's wallet.
+    /// `0` disables the guard.
+    pub restore_requests_per_owner_per_minute: u64,
+    /// Balance monitoring (proactive alerts)
+    pub balance_monitor_interval_secs: u64,
+    pub wallet_balance_low_threshold_wal: u64,
+    pub sponsor_balance_low_threshold_sui: u64,
 }
 
 impl Config {
@@ -425,6 +441,7 @@ impl Config {
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
+            accounts_rate_limit: AccountsRateLimitConfig::from_env(),
             trusted_proxy_hops: std::env::var("TRUSTED_PROXY_HOPS")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
@@ -474,6 +491,20 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            // `env_number`, not `env_positive_u64`: `0` is a meaningful,
+            // documented value here (disables `check_restore_call_rate_limit`
+            // entirely) — `env_positive_u64` would silently coerce it back
+            // to the default, making that escape hatch unreachable.
+            restore_requests_per_owner_per_minute: env_number(
+                "RESTORE_REQUESTS_PER_OWNER_PER_MINUTE",
+                10,
+            ),
+            balance_monitor_interval_secs: normalized_balance_monitor_interval(env_positive_u64(
+                "BALANCE_MONITOR_INTERVAL_SECS",
+                900,
+            )),
+            wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
+            sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
         }
     }
 }
@@ -499,6 +530,10 @@ fn env_positive_u64(name: &str, default: u64) -> u64 {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn normalized_balance_monitor_interval(interval_secs: u64) -> u64 {
+    interval_secs.max(MIN_BALANCE_MONITOR_INTERVAL_SECS)
 }
 
 fn sui_rpc_quota_from_env() -> (u32, std::time::Duration) {
@@ -742,6 +777,75 @@ impl SponsorRateLimitConfig {
 }
 
 // ============================================================
+// Accounts Rate Limit Config
+// ============================================================
+
+/// Per-IP rate limits for the public, unauthenticated `GET
+/// /api/accounts/{owner}/exists` endpoint.
+///
+/// This is a cheap read (one indexed Postgres lookup) rather than a
+/// state-changing, cost-incurring operation like `/sponsor`, so its per-IP
+/// limits are set a bit more generously than `SponsorRateLimitConfig`'s
+/// 10/min · 30/hour. But the endpoint is still an anonymous
+/// address-existence oracle, so it must stay well below the general
+/// authenticated per-account budget (`RateLimitConfig`'s 60/min · 500/hour)
+/// — reusing that budget as a per-IP limit (the bug this config replaces)
+/// left effectively no defense against enumeration. 20/min and 120/hour
+/// per IP is the same order of magnitude as sponsor's proportions while
+/// staying generous enough not to bother a legitimate integrator retrying
+/// a handful of lookups.
+#[derive(Debug, Clone)]
+pub struct AccountsRateLimitConfig {
+    /// Max accounts-exists requests per minute per IP (default: 20)
+    pub per_minute: i64,
+    /// Max accounts-exists requests per hour per IP (default: 120)
+    pub per_hour: i64,
+    /// Deployment-wide cap that cannot be bypassed by IP rotation.
+    pub global_per_minute: i64,
+    /// Deployment-wide sustained cap that protects the DB pool this
+    /// endpoint shares with every other public route.
+    pub global_per_hour: i64,
+}
+
+impl Default for AccountsRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 20,
+            per_hour: 120,
+            global_per_minute: 200,
+            global_per_hour: 1500,
+        }
+    }
+}
+
+impl AccountsRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("ACCOUNTS_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.global_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.global_per_hour = n;
+            }
+        }
+        c
+    }
+}
+
+// ============================================================
 // API Types
 // ============================================================
 
@@ -859,6 +963,31 @@ pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
         return Err(AppError::BadRequest(format!(
             "namespace exceeds maximum length of {} bytes",
             MAX_NAMESPACE_BYTES
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a client-supplied embedding vector against what the fact store can
+/// accept. Shared by the manual write and read paths, where the vector comes
+/// from the caller rather than the server-side embedder. Rejects, with an
+/// actionable `BadRequest` (and, on the write path, before any paid upload):
+///   - a width other than the fixed pgvector column (`EMBEDDING_DIMS`), and
+///   - any non-finite component (NaN / ±Inf), which pgvector refuses to index
+///     and which is meaningless for cosine similarity.
+///
+/// Both would otherwise only fail deep in pgvector as an opaque 500.
+pub fn validate_embedding_vector(vector: &[f32]) -> Result<(), AppError> {
+    use crate::services::embedder::EMBEDDING_DIMS;
+    if vector.len() != EMBEDDING_DIMS {
+        return Err(AppError::BadRequest(format!(
+            "vector must have exactly {EMBEDDING_DIMS} dimensions, got {}",
+            vector.len()
+        )));
+    }
+    if let Some(index) = vector.iter().position(|component| !component.is_finite()) {
+        return Err(AppError::BadRequest(format!(
+            "vector must contain only finite values; component at index {index} is not finite"
         )));
     }
     Ok(())
@@ -1224,6 +1353,17 @@ pub struct RestoreResponse {
     pub total: usize,
     pub namespace: String,
     pub owner: String,
+    /// True when this restore is known-incomplete: either more on-chain
+    /// blobs were missing locally than `limit` allowed this call to
+    /// restore, or the sidecar's raw on-chain candidate fetch (bounded
+    /// per owner, shared across all of the owner's namespaces, hard-capped
+    /// independent of `limit`) hit its own cap before this namespace's
+    /// blobs were even filtered out of that set (WALM-319) — the second
+    /// case can be `true` even when `total == 0` for this namespace,
+    /// since a cap hit elsewhere can starve this namespace's fetch
+    /// entirely. Raising `limit` only helps with the first case; past the
+    /// sidecar's cap, only a cursor/pagination-based restore would.
+    pub truncated: bool,
 }
 
 /// POST /api/forget — delete the vector index rows for a namespace
@@ -1240,6 +1380,16 @@ pub struct ForgetResponse {
     pub deleted: u64,
     pub namespace: String,
     pub owner: String,
+}
+
+/// GET /api/accounts/:owner/exists — does `owner` have a registered
+/// MemWalAccount? Backs Console's WALM-298 existence-check primitive.
+/// Intentionally minimal: no `account_id`, since Console doesn't need the
+/// internal identifier and returning it would needlessly widen the API's
+/// surface for future churn.
+#[derive(Debug, Serialize)]
+pub struct AccountExistsResponse {
+    pub exists: bool,
 }
 
 /// POST /api/stats — count + stored bytes for a namespace.
@@ -1544,6 +1694,77 @@ mod tests {
 
     static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn balance_monitor_interval_has_a_safe_minimum() {
+        assert_eq!(normalized_balance_monitor_interval(1), 30);
+        assert_eq!(normalized_balance_monitor_interval(30), 30);
+        assert_eq!(normalized_balance_monitor_interval(900), 900);
+    }
+
+    // ── Client-supplied embedding vector validation ──────────────
+
+    #[test]
+    fn embedding_of_correct_width_is_accepted() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        assert!(validate_embedding_vector(&vec![0.1_f32; EMBEDDING_DIMS]).is_ok());
+    }
+
+    #[test]
+    fn embedding_of_wrong_width_is_rejected_with_actionable_message() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        // A width from a different embedding model; kept distinct from the
+        // expected width so a transposed format! (expected/actual swapped) still
+        // fails the exact-string assert below.
+        let wrong = EMBEDDING_DIMS / 2 + 1;
+        match validate_embedding_vector(&vec![0.1_f32; wrong]).unwrap_err() {
+            // BadRequest maps to HTTP 400, unlike the opaque 500 a downstream
+            // pgvector failure would produce (after a paid upload on the write path).
+            AppError::BadRequest(msg) => {
+                // Build the expected message from the constant (single source of
+                // truth — survives a dimension change) while still pinning the
+                // exact wording and the expected-then-actual order.
+                assert_eq!(
+                    msg,
+                    format!("vector must have exactly {EMBEDDING_DIMS} dimensions, got {wrong}")
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_empty_vector_is_rejected() {
+        // The width check subsumes a separate non-empty guard.
+        assert!(matches!(
+            validate_embedding_vector(&[]),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn embedding_with_non_finite_component_is_rejected() {
+        use crate::services::embedder::EMBEDDING_DIMS;
+        // Correct width, but a NaN/Inf component pgvector would refuse to index —
+        // must be caught here, before any paid upload, not as an opaque 500.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut vector = vec![0.1_f32; EMBEDDING_DIMS];
+            vector[7] = bad;
+            match validate_embedding_vector(&vector).unwrap_err() {
+                AppError::BadRequest(msg) => {
+                    assert!(
+                        msg.contains("finite"),
+                        "message names the finiteness rule: {msg}"
+                    );
+                    assert!(
+                        msg.contains("index 7"),
+                        "message names the offending index: {msg}"
+                    );
+                }
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+    }
+
     fn security_delete_test_config() -> Config {
         Config {
             port: 8000,
@@ -1570,6 +1791,7 @@ mod tests {
             sidecar_secret: None,
             rate_limit: RateLimitConfig::default(),
             sponsor_rate_limit: SponsorRateLimitConfig::default(),
+            accounts_rate_limit: AccountsRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -1597,6 +1819,10 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            restore_requests_per_owner_per_minute: 10,
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
         }
     }
 
@@ -2060,6 +2286,21 @@ mod tests {
         assert_eq!(config.per_hour, 30);
         assert_eq!(config.global_per_minute, 100);
         assert_eq!(config.global_per_hour, 1000);
+    }
+
+    // ── AccountsRateLimitConfig defaults ────────────────────────────────
+
+    #[test]
+    fn accounts_rate_limit_default_values() {
+        let config = AccountsRateLimitConfig::default();
+        assert_eq!(config.per_minute, 20);
+        assert_eq!(config.per_hour, 120);
+        assert_eq!(config.global_per_minute, 200);
+        assert_eq!(config.global_per_hour, 1500);
+        // Must stay well below the general authenticated per-account budget
+        // this middleware used to (bug-)reuse, or the fix regresses.
+        assert!(config.per_minute < RateLimitConfig::default().max_requests_per_minute);
+        assert!(config.per_hour < RateLimitConfig::default().max_requests_per_hour);
     }
 
     #[test]

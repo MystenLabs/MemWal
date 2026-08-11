@@ -913,9 +913,13 @@ pub async fn remember_manual(
             "encrypted_data cannot be empty".into(),
         ));
     }
-    if body.vector.is_empty() {
-        return Err(AppError::BadRequest("vector cannot be empty".into()));
-    }
+    // Validate the client-supplied embedding (width + finiteness) up front. The
+    // fact store's `embedding` column is a fixed-width pgvector that also refuses
+    // NaN/Inf, so a malformed vector can never be indexed — and store_blob pays
+    // for the (irreversible) Walrus upload before it reaches the insert. Rejecting
+    // here means a bad vector costs no gas and returns an actionable 400, instead
+    // of an opaque 500 after the paid upload.
+    validate_embedding_vector(&body.vector)?;
     validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
@@ -1102,6 +1106,7 @@ mod tests {
             sidecar_secret: None,
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
+            accounts_rate_limit: crate::types::AccountsRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -1129,6 +1134,10 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: String::new(),
             walrus_system_object_id: String::new(),
+            restore_requests_per_owner_per_minute: 10,
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
         }
     }
 

@@ -677,6 +677,108 @@ fn stable_hash_i64(s: &str) -> i64 {
 }
 
 // ============================================================
+// Restore — owner-scoped call-frequency guard (GH #501 / WALM-299)
+// ============================================================
+
+/// Bound how often a single owner can call `/api/restore`.
+///
+/// `/api/restore` already rides the generic weighted account limiter
+/// (`rate_limit_middleware`, weight 3), but that budget is shared across
+/// every endpoint and flat regardless of per-call blob volume — it does not
+/// specifically bound "attacker keeps transferring a fresh junk blob_id,
+/// costing one new first-time-discovery download+decrypt per call". This is
+/// a dedicated, owner-keyed guard on top, reusing the same atomic
+/// sliding-window primitive the account limiter already uses.
+///
+/// Deliberately keyed only by `owner` + call frequency — this guard itself
+/// does not inspect, record, or reason about who created/uploaded/relayed
+/// any blob (see GH #501: Henry explicitly rejected an uploader/relayer
+/// allowlist as *this* guard's fix direction). A separate mechanism,
+/// `findBlobCreationSender` in the sidecar's `walrus-query.ts`, checks
+/// immutable creation provenance upstream of this — see that function's
+/// doc-comment for why it exists independently of the decision made here.
+///
+/// Fails OPEN (logs a warning and allows the call) on a Redis error,
+/// consistent with `rate_limit_middleware`'s graceful-degrade philosophy for
+/// authenticated routes — `restore()` runs after auth, so an unreachable
+/// Redis should not lock a legitimate user out of their own memories.
+/// (Contrast with `sponsor_rate_limit_middleware`, which fails closed
+/// because it guards the unauthenticated, deployment-wide sponsor budget.)
+///
+/// Shared "single-window, per-key" wrapper around `check_and_record_window`:
+/// classifies the result, records the denial metric, logs, and fails open on
+/// a Redis error. Factored out so a caller like
+/// `check_restore_call_rate_limit` doesn't hand-copy the
+/// check/log/fail-open boilerplate that already exists inline in
+/// `rate_limit_middleware`'s per-account layer and in the global
+/// sponsor/account limiters below.
+async fn check_owner_window_limit(
+    redis: &mut redis::aio::MultiplexedConnection,
+    scope: &str,
+    key: &str,
+    window_start: f64,
+    now: f64,
+    limit: i64,
+    weight: i64,
+    ttl_seconds: i64,
+    owner: &str,
+    deny_message: impl FnOnce() -> String,
+) -> Result<(), AppError> {
+    match check_and_record_window(redis, key, window_start, now, limit, weight, ttl_seconds).await {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial(scope);
+            tracing::warn!(
+                "rate limit [{}]: owner={} denied (limit={}/min)",
+                scope,
+                owner,
+                limit
+            );
+            Err(AppError::RateLimited(deny_message()))
+        }
+        Ok(WindowCheckResult::Allowed) => Ok(()),
+        Err(e) => {
+            tracing::warn!("rate limit [{}] Redis error, failing open: {}", scope, e);
+            Ok(())
+        }
+    }
+}
+
+/// `restore_requests_per_owner_per_minute == 0` disables the guard.
+pub(crate) async fn check_restore_call_rate_limit(
+    state: &crate::types::AppState,
+    owner: &str,
+) -> Result<(), AppError> {
+    let limit = state.config.restore_requests_per_owner_per_minute;
+    if limit == 0 {
+        return Ok(());
+    }
+
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let key = format!("rate:restore-call:{owner}");
+    let window_start = now - 60_000.0; // 1-min window (ms)
+
+    check_owner_window_limit(
+        &mut redis,
+        "restore_call",
+        &key,
+        window_start,
+        now,
+        limit as i64,
+        1,   // weight = 1 per restore() call
+        120, // TTL 2 min
+        owner,
+        || {
+            format!(
+                "restore called too frequently; limit is {} calls/min",
+                limit
+            )
+        },
+    )
+    .await
+}
+
+// ============================================================
 // Sponsor — deployment-wide budget limit
 // ============================================================
 
@@ -962,6 +1064,230 @@ pub async fn sponsor_rate_limit_middleware(
 }
 
 // ============================================================
+// Accounts — deployment-wide budget limit
+// ============================================================
+
+/// Check whether the deployment has exceeded its accounts-exists budget
+/// limits.
+///
+/// Uses a sliding-window counter in Redis just like
+/// `check_global_sponsor_rate_limit`, but keyed by fixed server-controlled
+/// identifiers so IP rotation cannot bypass an aggregate ceiling on this
+/// anonymous, enumeration-risk endpoint.
+///
+/// Returns `Err(())` on Redis failure so callers can fail closed. A
+/// per-process fallback would not enforce a deployment-wide cap across
+/// replicas.
+pub async fn check_global_accounts_rate_limit(
+    state: &crate::types::AppState,
+    per_minute: i64,
+    per_hour: i64,
+) -> Result<SponsorRlResult, ()> {
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let mut redis = state.redis.clone();
+
+    let min_key = "rate:accounts:global:min";
+    let hr_key = "rate:accounts:global:hr";
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    // --- Atomic check-and-record for minute bucket ---
+    match check_and_record_window(
+        &mut redis,
+        min_key,
+        min_window_start,
+        now,
+        per_minute,
+        1, // weight = 1 per accounts-exists request
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("accounts_global_burst");
+            return Ok(SponsorRlResult::MinuteLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_global_accounts_rate_limit: Redis error (minute): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    // --- Atomic check-and-record for hour bucket ---
+    match check_and_record_window(
+        &mut redis,
+        hr_key,
+        hr_window_start,
+        now + 0.1,
+        per_hour,
+        1, // weight = 1 per accounts-exists request
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("accounts_global_sustained");
+            return Ok(SponsorRlResult::HourLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_global_accounts_rate_limit: Redis error (hour): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    Ok(SponsorRlResult::Allowed)
+}
+
+// ============================================================
+// Accounts Rate Limit Middleware (IP-based, unauthenticated)
+// ============================================================
+
+/// Pre-authentication rate limiting middleware for the public
+/// `GET /api/accounts/{owner}/exists` route.
+///
+/// This is the only route in `public_routes` that reaches the DB pool
+/// (`max_connections(10)`) — `/health`, `/version`, `/config`, `/metrics`
+/// are all static/no-DB. Modeled directly on `sponsor_rate_limit_middleware`:
+/// enforces a per-IP sliding-window limit via `AccountsRateLimitConfig`
+/// (a dedicated, stricter budget than the general authenticated
+/// `RateLimitConfig` this middleware used to reuse — see that config's doc
+/// comment for the reasoning behind its numbers), plus a deployment-wide
+/// global cap via `check_global_accounts_rate_limit` so IP rotation alone
+/// cannot exceed an aggregate ceiling.
+///
+/// Redis errors return 503. A local fallback cannot provide consistent abuse
+/// protection across replicas, so — like `sponsor_rate_limit_middleware` —
+/// this path intentionally fails closed.
+pub async fn accounts_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // RATE_LIMIT_DISABLED=1 — see RateLimitConfig::bench_bypass_enabled.
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    // XFF is ignored by default. Only walk back through the explicitly
+    // configured number of trusted proxy hops, using the same resolver as
+    // the sponsor and MCP proxy paths.
+    let ip = match request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
+    {
+        Some(ip) => ip.to_string(),
+        None => {
+            // Cannot determine IP — fail-closed: deny rather than allow unknown callers.
+            tracing::warn!("accounts_rate_limit_middleware: cannot determine client IP, denying");
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let config = &state.config.accounts_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:accounts:ip:min:{}", ip);
+    let hr_key = format!("rate:accounts:ip:hr:{}", ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    // --- Atomic check-and-record for minute bucket (IP-based) ---
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "accounts rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                config.per_minute
+            );
+            return rate_limit_response("accounts_ip_burst", config.per_minute, "min", 60);
+        }
+        Err(e) => {
+            tracing::error!(
+                "accounts_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    // --- Atomic check-and-record for hour bucket (IP-based) ---
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "accounts rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                config.per_hour
+            );
+            return rate_limit_response("accounts_ip_sustained", config.per_hour, "hour", 300);
+        }
+        Err(e) => {
+            tracing::error!(
+                "accounts_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_global_accounts_rate_limit(&state, config.global_per_minute, config.global_per_hour)
+        .await
+    {
+        Ok(SponsorRlResult::MinuteLimitExceeded) => {
+            return rate_limit_response(
+                "accounts_global_burst",
+                config.global_per_minute,
+                "min",
+                60,
+            );
+        }
+        Ok(SponsorRlResult::HourLimitExceeded) => {
+            return rate_limit_response(
+                "accounts_global_sustained",
+                config.global_per_hour,
+                "hour",
+                300,
+            );
+        }
+        Ok(SponsorRlResult::Allowed) => {}
+        Err(()) => return rate_limiter_unavailable_response(),
+    }
+
+    next.run(request).await
+}
+
+// ============================================================
 // Unit Tests
 // ============================================================
 
@@ -1154,6 +1480,109 @@ mod tests {
 
         assert_eq!(allowed, LIMIT);
         assert_eq!(cardinality, LIMIT);
+    }
+
+    /// Regression test for `check_restore_call_rate_limit`'s underlying
+    /// window (GH #501 / WALM-299 owner-scoped restore-call guard). Talks to
+    /// a real Redis instance for the same reason as
+    /// `concurrent_same_millisecond_requests_respect_limit`.
+    ///
+    /// `check_restore_call_rate_limit` itself takes `&AppState`, which
+    /// nothing in this crate constructs outside of `main.rs` (it wires a DB
+    /// pool, Sui clients, the memory engine, embedder, extractor, ranker,
+    /// etc.). Standing one up here would test plumbing this fix didn't
+    /// touch, so this test drives the exact `rate:restore-call:{owner}` key
+    /// + 1-minute-window + weight-1 shape through `check_and_record_window`
+    /// directly — the same primitive `check_restore_call_rate_limit` calls,
+    /// with no logic of its own in between.
+    ///
+    /// Run with:
+    /// TEST_REDIS_URL=redis://127.0.0.1:6379 \
+    ///   cargo test restore_call_rate_limit_denies_past_the_owner_window -- --ignored
+    #[tokio::test]
+    #[ignore = "requires TEST_REDIS_URL pointing to a real Redis instance"]
+    async fn restore_call_rate_limit_denies_past_the_owner_window() {
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .expect("TEST_REDIS_URL must be set when running Redis integration tests");
+        let client = redis::Client::open(redis_url).expect("valid TEST_REDIS_URL");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("connect to test Redis");
+
+        const LIMIT: i64 = 10;
+        let owner = format!("0xrestore-rl-owner-{}", Uuid::new_v4());
+        let other_owner = format!("0xrestore-rl-other-{}", Uuid::new_v4());
+        let key = format!("rate:restore-call:{owner}");
+        let other_key = format!("rate:restore-call:{other_owner}");
+        let now = chrono::Utc::now().timestamp_millis() as f64;
+        let window_start = now - 60_000.0;
+
+        // First LIMIT calls for `owner` are allowed, the LIMIT+1'th is denied.
+        for i in 0..LIMIT {
+            let result = check_and_record_window(
+                &mut connection,
+                &key,
+                window_start,
+                now + i as f64,
+                LIMIT,
+                1,
+                120,
+            )
+            .await
+            .expect("Redis script failed");
+            assert_eq!(
+                result,
+                WindowCheckResult::Allowed,
+                "call {} of {} should be allowed",
+                i + 1,
+                LIMIT
+            );
+        }
+        let denied = check_and_record_window(
+            &mut connection,
+            &key,
+            window_start,
+            now + LIMIT as f64,
+            LIMIT,
+            1,
+            120,
+        )
+        .await
+        .expect("Redis script failed");
+        assert_eq!(
+            denied,
+            WindowCheckResult::Denied,
+            "call {} should be denied for a limit of {}",
+            LIMIT + 1,
+            LIMIT
+        );
+
+        // Key isolation: a distinct owner's window is unaffected by the
+        // first owner having exhausted theirs.
+        let other_allowed = check_and_record_window(
+            &mut connection,
+            &other_key,
+            window_start,
+            now,
+            LIMIT,
+            1,
+            120,
+        )
+        .await
+        .expect("Redis script failed");
+        assert_eq!(
+            other_allowed,
+            WindowCheckResult::Allowed,
+            "a distinct owner must not be affected by another owner's exhausted window"
+        );
+
+        let _: i64 = redis::cmd("DEL")
+            .arg(&key)
+            .arg(&other_key)
+            .query_async(&mut connection)
+            .await
+            .expect("clean test keys");
     }
 
     /// Verify that WindowCheckResult variants are correctly defined.

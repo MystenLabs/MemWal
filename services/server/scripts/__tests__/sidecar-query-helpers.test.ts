@@ -9,14 +9,22 @@ import {
     blobIdMatchesRequested,
     blobObjectMatchesRegistration,
     chainBlobIdFromRaw,
+    filterTrustedBlobCandidates,
+    findBlobCreationSender,
+    isSourceCapped,
     isWalrusBlobObjectType,
     isVerifiedNonexistentSource,
     ownerMatchesRecipient,
     readBlobObject,
     strictWalrusEpoch,
+    trustedBlobCandidate,
 } from "../sidecar/routes/walrus-query.js";
 import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sidecar/blob-metadata.js";
-import { parseDurableWalrusEpochs, SUI_TYPE, WALRUS_PACKAGE_ID } from "../sidecar/config.js";
+import {
+    parseDurableWalrusEpochs,
+    SUI_TYPE,
+    WALRUS_PACKAGE_ID,
+} from "../sidecar/config.js";
 import {
     assertAddressBalanceRegisterTransaction,
     createdBlobObjectIdFromTransaction,
@@ -410,6 +418,20 @@ test("source lease epochs accept only u32 numbers", () => {
     }
 });
 
+test("isSourceCapped flags only when the raw candidate fetch proved more than cap exist (WALM-319)", () => {
+    // The call site now probes with `cap + 1` and slices back down to `cap`,
+    // so `fetchedCount` here is the probe fetch's raw count compared against
+    // the real (non-probe) cap. Exactly `cap` fetched means discovery
+    // completed within the cap — not capped. Only strictly more than `cap`
+    // proves the source had more candidates than the cap allowed (Henry's
+    // review on PR #538: exact-cap results must not read as truncated).
+    assert.equal(isSourceCapped(3, 5), false, "fewer fetched than cap: not capped");
+    assert.equal(isSourceCapped(5, 5), false, "fetched exactly cap: discovery completed, not capped");
+    assert.equal(isSourceCapped(6, 5), true, "fetched more than cap (probe proved more exist): capped");
+    assert.equal(isSourceCapped(0, 5), false, "nothing fetched: not capped");
+    assert.equal(isSourceCapped(5, Infinity), false, "unbounded cap can never be hit");
+});
+
 test("registration reconciliation requires matching size and deletability", () => {
     assert.equal(blobObjectMatchesRegistration({ rawSize: "42", deletable: true }, 42), true);
     assert.equal(blobObjectMatchesRegistration({ rawSize: 41, deletable: true }, 42), false);
@@ -442,6 +464,87 @@ test("ownerMatchesRecipient handles string and object owner encodings", () => {
     assert.equal(ownerMatchesRecipient({ AddressOwner: "0xb" }, "0xa"), false);
     assert.equal(ownerMatchesRecipient(null, "0xa"), false);
     assert.equal(ownerMatchesRecipient(42, "0xa"), false);
+});
+
+test("blob provenance uses the archival creation transaction, not the latest transfer", async () => {
+    const objectId = `0x${"1".repeat(64)}`;
+    const trusted = `0x${"2".repeat(64)}`;
+    const attacker = `0x${"3".repeat(64)}`;
+    const client = {
+        async getCreationTransaction() {
+            return "create-tx";
+        },
+        async getTransaction(digest: string) {
+            assert.equal(digest, "create-tx");
+            return {
+                status: { success: true },
+                transaction: { sender: trusted },
+                effects: { changedObjects: [{ objectId, idOperation: "Created" }] },
+            };
+        },
+    };
+
+    assert.equal(await findBlobCreationSender({ objectId, previousTransaction: "attacker-transfer-tx" }, client), trusted);
+    assert.deepEqual(
+        await trustedBlobCandidate(
+            { objectId, owner: { AddressOwner: attacker }, previousTransaction: "transfer-tx" },
+            attacker,
+            new Set([trusted]),
+            client
+        ),
+        { trusted: true, reason: "trusted", uploader: trusted }
+    );
+});
+
+test("blob provenance excludes external creators and fails closed on incomplete history", async () => {
+    const objectId = `0x${"1".repeat(64)}`;
+    const recipient = `0x${"2".repeat(64)}`;
+    const attacker = `0x${"3".repeat(64)}`;
+    const creationClient = {
+        async getTransaction() {
+            return {
+                status: { success: true },
+                transaction: { sender: attacker },
+                effects: { changedObjects: [{ objectId, idOperation: "Created" }] },
+            };
+        },
+        async getCreationTransaction() {
+            return "create-tx";
+        },
+    };
+    const blob = { objectId, owner: { AddressOwner: recipient }, previousTransaction: "create-tx" };
+    assert.deepEqual(await trustedBlobCandidate(blob, recipient, new Set([recipient]), creationClient), {
+        trusted: false,
+        reason: "provenance",
+        uploader: attacker,
+    });
+    const unavailableClient = { ...creationClient, getCreationTransaction: async () => null };
+    assert.equal(await findBlobCreationSender(blob, unavailableClient), null);
+    assert.deepEqual(await trustedBlobCandidate(blob, recipient, new Set([attacker]), unavailableClient), {
+        trusted: false,
+        reason: "provenance",
+        uploader: null,
+    });
+    assert.deepEqual(await trustedBlobCandidate({ ...blob, owner: { AddressOwner: attacker } }, recipient, new Set(), creationClient), {
+        trusted: false,
+        reason: "owner",
+        uploader: null,
+    });
+});
+
+test("provenance transport failures fail the query instead of silently dropping blobs", async () => {
+    const recipient = `0x${"2".repeat(64)}`;
+    const blob = {
+        objectId: `0x${"1".repeat(64)}`,
+        owner: { AddressOwner: recipient },
+        previousTransaction: "create-tx",
+    };
+    await assert.rejects(
+        filterTrustedBlobCandidates([blob], recipient, "test-request", async () => {
+            throw new Error("archive timeout");
+        }),
+        /unable to verify creation provenance.*archive timeout/
+    );
 });
 
 test("ownerMatchesRecipient compares canonicalized addresses, not exact strings", () => {

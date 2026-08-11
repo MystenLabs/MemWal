@@ -1,5 +1,16 @@
 # @mysten-incubation/memwal
 
+## 0.1.1
+
+### Added
+
+- Added `flush()` for pending `withMemWal` auto-saves.
+- Added `truncated` to restore results for incomplete recovery.
+
+### Fixed
+
+- Linked `AUTH_REJECTED` errors to troubleshooting guidance.
+
 ## 0.1.0
 
 ### Added

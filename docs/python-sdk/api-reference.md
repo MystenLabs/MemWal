@@ -183,7 +183,7 @@ RestoreResult(restored: int, skipped: int, total: int, namespace: str, owner: st
 
 ### `health() -> HealthResult`
 
-Check relayer health. No authentication. Raises `MemWalError` on non-200.
+Check relayer health. No authentication — a successful response confirms the relayer is reachable, not that your `key`/`account_id` are valid. A signed call (e.g. `remember()`, `recall()`) can still fail with `401` immediately after a passing `health()`. Raises `MemWalError` on non-200.
 
 ```python
 HealthResult(

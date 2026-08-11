@@ -152,7 +152,7 @@ const stored = await memwal.waitForRememberJob(accepted.job_id, {
 |---|---|---|
 | `remember(text, namespace?)` | Accept one memory job immediately | `{ job_id, status }` |
 | `rememberAndWait(text, namespace?, opts?)` | Store one memory and wait for completion | `{ id, job_id, blob_id, owner, namespace }` |
-| `recall({ query, limit?, namespace?, maxDistance? })` *(preferred)* or `recall(query, limit?, namespace?)` | Semantic search for memories | `{ results: [{ blob_id, text, distance }], total }` |
+| `recall({ query, limit?, topK?, namespace?, maxDistance? })` *(preferred)* or `recall(query, limit?, namespace?)` | Semantic search for memories | `{ results: [{ blob_id, text, distance }], total }` |
 | `analyze(text, namespace?)` | Extract facts and accept one memory job per fact | `{ job_ids, facts, fact_count, status, owner }` |
 | `analyzeAndWait(text, namespace?, opts?)` | Extract facts and wait for all fact jobs to complete | `{ results, facts, total, succeeded, failed, owner }` |
 | `restore(namespace, limit?)` | Rebuild missing index entries from Walrus | `{ restored, skipped, total, namespace, owner }` |
@@ -205,10 +205,12 @@ interface RecallResult {
 
 interface RecallOptions {
   limit?: number;
-  topK?: number;
+  topK?: number; // alias of limit; if both are set, topK wins
   namespace?: string;
   maxDistance?: number;
 }
+
+// `topK` and `limit` are aliases for the same value; if both are provided, `topK` takes precedence.
 
 interface RememberBulkAcceptedResult {
   job_ids: string[];
