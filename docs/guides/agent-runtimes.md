@@ -46,20 +46,20 @@ answer: >-
 
 Agents built on EVM, Base, Virtuals, or any other stack can use Walrus Memory. The runtime your agent executes in and the chain it transacts on are independent of where its memory lives.
 
-That surprises people who expect a bridge, so it is worth stating plainly: **you need not bridge anything.** Walrus Memory stores memories as encrypted blobs on Walrus and records ownership in a Sui account. Your agent proves who it is with an Ed25519 delegate key that the account owner registers on that account. Whether the same agent also signs Ethereum transactions, holds an ERC-20 balance, or runs inside a Virtuals runtime makes no difference to any of that.
+Walrus Memory stores memories as encrypted blobs on Walrus and records ownership in a Sui account. Your agent authenticates with an Ed25519 delegate key that the account owner registers on that account. An agent that also signs Ethereum transactions, holds an ERC-20 balance, or runs inside a Virtuals runtime uses Walrus Memory the same way as any other agent.
 
-## What your agent actually needs
+## Requirements
 
-Two things, regardless of language or chain:
+Your agent needs two things, whatever its language or chain:
 
-1. **Register an Ed25519 delegate key on a Walrus Memory account.** The account owner registers the public key onchain, which grants the agent permission to read and write that account's memory. See [Ownership and Delegates](/fundamentals/concepts/ownership-and-access).
-2. **Network access to a relayer.** The relayer performs the encryption, storage, and indexing work, so your agent does not need a Sui node, a Walrus node, or WAL tokens.
+1. **An Ed25519 delegate key registered on a Walrus Memory account.** The account owner registers the public key onchain, which grants the agent permission to read and write that account's memory. See [Ownership and Delegates](/fundamentals/concepts/ownership-and-access).
+2. **Network access to a relayer.** The relayer performs the encryption, storage, and indexing work, so your agent needs no Sui node, Walrus node, or WAL tokens.
 
-What your agent does **not** need: a Sui wallet for its own funds, a bridge, a wrapped token, or any change to how it transacts on its own chain.
+Your agent needs no Sui wallet of its own, no bridge, no wrapped token, and no change to how it transacts on its own chain.
 
-## Path 1: use an SDK
+## Use an SDK
 
-If your agent runs in TypeScript or Python, use the SDK. It handles the request signing, the encryption session, and retries for you.
+For agents in TypeScript or Python, the SDK handles request signing, the encryption session, and retries:
 
 ```ts
 import { MemWal } from "@mysten-incubation/memwal";
@@ -77,17 +77,19 @@ await memwal.remember("The user prefers dark mode.");
 const hits = await memwal.recall({ query: "user preferences", limit: 5 });
 ```
 
-For loading credentials from the environment, validating connectivity at boot, and handling credential errors, see [Headless SDK Setup](/sdk/headless-setup). For the write-confirm-recall cycle, see the [Agent Storage Loop](/sdk/agent-storage-loop).
+To load credentials from the environment, validate connectivity at boot, and handle credential errors, see [Headless SDK Setup](/sdk/headless-setup). For the write-confirm-recall cycle, see the [Agent Storage Loop](/sdk/agent-storage-loop).
 
-## Path 2: sign requests directly
+## Sign requests directly
 
-If your agent runs in a language with no SDK, such as Go, Rust, or Elixir, call the relayer API directly. Every authenticated route takes the same signed headers, so you need an Ed25519 signer, SHA-256, and an HTTP client.
+For agents in a language with no SDK, such as Go, Rust, or Elixir, call the relayer API directly. Every authenticated route takes the same signed headers, so your agent needs an Ed25519 signer, SHA-256, and an HTTP client.
 
-Build the canonical message, sign it, and send the signature as hex:
+Build this canonical message and sign it:
 
 ```text
 {timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}
 ```
+
+Send the result as hex in these headers:
 
 | **Header** | **Value** |
 |---|---|
@@ -99,25 +101,18 @@ Build the canonical message, sign it, and send the signature as hex:
 
 The relayer verifies the signature, then resolves the owner by looking up your public key in the account's onchain delegate keys. For every route, request shape, and response shape, see the [Relayer API Reference](/relayer/api-reference).
 
+Confirm the agent reaches the relayer before you debug signing, using the unauthenticated health route:
+
 ```sh
 $ curl -sS "$MEMWAL_RELAYER_URL/health"
 ```
 
-Start with `/health`, which needs no authentication, to confirm the agent can reach the relayer before you debug signing.
+## Limits of cross-chain support
 
-## What "cross-chain" does not mean here
+Walrus Memory does not do the following. A design that assumes otherwise does not work:
 
-Three things are outside what Walrus Memory does, and assuming otherwise leads to designs that cannot work:
+1. Walrus Memory never mirrors, wraps, or relays a memory onto another chain. Ownership records live on Sui.
+2. An Ethereum address cannot own a memory account. The delegate key is Ed25519, and the account is a Sui object.
+3. Walrus charges storage in WAL. Your agent neither holds nor spends it when a relayer fronts that cost.
 
-1. **No bridging.** Walrus Memory never mirrors, wraps, or relays a memory onto another chain. Ownership records live on Sui.
-2. **No EVM-native ownership.** An Ethereum address cannot own a memory account. The delegate key is Ed25519, and the account is a Sui object.
-3. **No payment in other tokens.** Walrus charges storage in WAL. Your agent neither holds nor spends it when a relayer fronts that cost.
-
-If your design needs an onchain link between an EVM contract and a memory account, model it in your own application: keep the mapping in your contract or database, and have your agent present the matching delegate key.
-
-## See also
-
-- [Ownership and Delegates](/fundamentals/concepts/ownership-and-access) for how delegate keys grant access.
-- [Headless SDK Setup](/sdk/headless-setup) for credentials and boot-time checks in a server runtime.
-- [Relayer API Reference](/relayer/api-reference) for the full authenticated surface.
-- [How AI Agent Memory Works](/fundamentals/concepts/how-agent-memory-works) for the embed, store, and recall loop.
+To link an EVM contract to a memory account, model the mapping in your own application: store it in your contract or database, and have your agent present the matching delegate key. For how the embed, store, and recall loop works underneath, see [How AI Agent Memory Works](/fundamentals/concepts/how-agent-memory-works).
