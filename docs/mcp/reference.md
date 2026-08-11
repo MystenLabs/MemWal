@@ -265,7 +265,7 @@ If your client cannot attach headers from the CLI, edit the generated MCP config
 
 Claude's native "Add custom connector" flow speaks OAuth 2.1, not the explicit-header model above — it discovers an authorization server, dynamically registers itself as a client, and drives the user through a hosted consent screen instead of expecting a pasted bearer token.
 
-When enabled (`MCP_OAUTH_ENABLED=true`), the hosted relayer additionally exposes:
+When configured, the hosted relayer additionally exposes:
 
 - `GET /.well-known/oauth-protected-resource` (+ the `/api/mcp`-suffixed variant Claude probes first) — RFC 9728 resource metadata.
 - `GET /.well-known/oauth-authorization-server` — RFC 8414 metadata, advertising `code_challenge_methods_supported: ["S256"]` and `offline_access` (the scope that triggers Claude to request a refresh token).
@@ -301,7 +301,7 @@ The hosted relayer (and any self-hosted relayer) exposes the same MCP routes:
 | `GET /api/mcp` | Streamable HTTP server-to-client stream |
 | `POST /api/mcp` | Streamable HTTP JSON-RPC messages |
 | `DELETE /api/mcp` | Close a Streamable HTTP session |
-| `GET /.well-known/oauth-protected-resource` | OAuth resource metadata (RFC 9728, when `MCP_OAUTH_ENABLED=true`) |
+| `GET /.well-known/oauth-protected-resource` | OAuth resource metadata (RFC 9728, when configured) |
 | `GET /.well-known/oauth-authorization-server` | OAuth authorization-server metadata (RFC 8414) |
 | `POST /oauth/register` | Dynamic client registration (RFC 7591) |
 | `GET /oauth/authorize`, `POST /oauth/token`, `POST /oauth/revoke` | Authorization-code + PKCE + refresh flow |
@@ -335,6 +335,37 @@ Self-hosted relayers expose the same public MCP routes as the hosted relayer. Th
 | `TRUSTED_PROXY_HOPS` | `0` | Trusted reverse-proxy hops used to resolve the canonical client IP; keep `0` for direct deployments |
 
 See [Environment Variables](/reference/environment-variables) for the full list including SEAL, Walrus, embeddings, and database settings.
+
+### MCP OAuth 2.1 Configuration
+
+Claude custom connector support uses OAuth 2.1. Configuration is minimal — most values are derived from `MEMWAL_RELAYER_URL`:
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `MCP_OAUTH_DELEGATE_ENCRYPTION_KEY` | Yes | AES-256-GCM key (32 bytes, base64url-encoded, no padding) for encrypting delegate private keys at rest. **Generate once and persist** — this key encrypts every user's delegate key. |
+
+**Derived values** (no config needed):
+
+| Derived from | Value |
+| --- | --- |
+| `MEMWAL_RELAYER_URL` | `issuer` (e.g. `https://relayer.memory.walrus.xyz`) |
+| `issuer + "/api/mcp"` | `resource` (what Claude requests) |
+| `issuer` with `relayer.` → `memory.` + `/connect/claude` | `consent_url` |
+
+**Optional overrides**:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MCP_OAUTH_ACCESS_TTL_SECS` | `3600` | Access token lifetime in seconds |
+| `MCP_OAUTH_REFRESH_TTL_SECS` | `2592000` | Refresh token lifetime (30 days) |
+| `MCP_OAUTH_CODE_TTL_SECS` | `300` | Authorization code lifetime (5 min) |
+| `MCP_OAUTH_SESSION_TTL_SECS` | `900` | OAuth session lifetime (15 min) |
+| `MCP_OAUTH_ALLOWED_REGISTRATION_HOSTS` | `claude.ai` | Comma-separated redirect URI allowlist |
+| `MCP_OAUTH_REGISTRATION_PER_HOUR_PER_IP` | `20` | DCR rate limit per IP per hour |
+
+**To enable**: Set `MCP_OAUTH_DELEGATE_ENCRYPTION_KEY` and restart the relayer. No feature flag needed — OAuth is available whenever the key is present.
+
+**Security note**: The encryption key never leaves the server. Delegate private keys are generated client-side, encrypted with this key, and only decrypted in-memory when signing MCP requests.
 
 ## Logout semantics
 

@@ -1128,9 +1128,8 @@ async fn main() {
             if let Err(e) = evict_state.db.evict_expired_delegate_keys().await {
                 tracing::error!("Background eviction failed: {}", e);
             }
-            // MCP OAuth housekeeping — no-op (cheap SELECT/DELETE against
-            // empty tables) when MCP_OAUTH_ENABLED is off, so this runs
-            // unconditionally rather than being gated like the routes.
+            // MCP OAuth housekeeping — runs unconditionally since oauth state
+            // is cheap to clean up even when OAuth isn't actively used.
             if let Err(e) = evict_state.db.evict_expired_oauth_state().await {
                 tracing::error!("MCP OAuth session/code eviction failed: {}", e);
             }
@@ -1361,12 +1360,11 @@ async fn main() {
         .merge(sponsor_routes)
         .merge(mcp_routes);
 
-    // MCP OAuth 2.1 (Claude custom connectors) — mounted only when
-    // MCP_OAUTH_ENABLED=true, same tier as the routes above (no
-    // auth::verify_signature; OAuth is its own auth scheme). Kept as a
-    // conditional merge rather than always-mounted-but-404ing so the
-    // absence is visible in routing, not just in each handler's internal
-    // check.
+    // MCP OAuth 2.1 (Claude custom connectors) — mounted when configured
+    // (env vars present), same tier as the routes above (no
+    // auth::verify_signature; OAuth is its own auth scheme). Routes are
+    // always mounted if configured; OAuth tokens simply won't resolve if
+    // clients haven't registered yet.
     if config.mcp_oauth.is_some() {
         let oauth_routes = Router::new()
             .route(
@@ -1414,7 +1412,7 @@ async fn main() {
                 post(routes::oauth::session_cancel).layer(DefaultBodyLimit::max(4 * 1024)),
             );
         public_routes = public_routes.merge(oauth_routes);
-        tracing::info!("MCP OAuth routes mounted (MCP_OAUTH_ENABLED=true)");
+        tracing::info!("MCP OAuth routes mounted");
     }
 
     // CORS — restrict to configured origins.

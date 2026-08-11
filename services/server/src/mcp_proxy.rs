@@ -109,8 +109,8 @@ fn out_set(
 // ---------------------------------------------------------------------
 
 enum McpAuthOutcome {
-    /// `MCP_OAUTH_ENABLED=false`, or the bearer is the legacy 64-hex
-    /// delegate key — forward exactly as today, byte for byte.
+    /// The bearer is the legacy 64-hex delegate key — forward exactly as
+    /// today, byte for byte (OAuth tokens are never valid here).
     Passthrough,
     Oauth(Box<crate::oauth::ResolvedOAuthIdentity>),
     /// OAuth is enabled and the bearer is missing/malformed/expired/

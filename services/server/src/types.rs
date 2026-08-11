@@ -353,11 +353,9 @@ pub struct Config {
     pub wallet_balance_low_threshold_wal: u64,
     pub sponsor_balance_low_threshold_sui: u64,
     /// MCP OAuth 2.1 support for Claude (and future) native custom
-    /// connectors. `None` when `MCP_OAUTH_ENABLED` is unset/false — every
-    /// dependent code path (route mounting in PR2, the proxy bearer
-    /// classifier in PR3) must treat `None` as "behave exactly as today."
-    /// Unread until PR2/PR3 wire it up — same as other foundation-first
-    /// fields in this codebase.
+    /// connectors. `None` when required env vars are unset — routes still
+    /// mount but OAuth tokens won't resolve. When configured, OAuth is
+    /// always available alongside the legacy delegate-key bearer.
     #[allow(dead_code)]
     pub mcp_oauth: Option<crate::oauth::McpOAuthConfig>,
 }

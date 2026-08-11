@@ -8,11 +8,8 @@
 //! `crate::oauth`; this file is HTTP plumbing + the on-chain verification
 //! call at `/api/oauth/session/{id}/complete`.
 //!
-//! PR2 scope: these routes mint delegate keys, run the consent flow, and
-//! issue tokens, but `/api/mcp*` doesn't accept those tokens yet — that's
-//! PR3 (`mcp_proxy.rs`'s bearer resolution). Nothing here is reachable
-//! unless `MCP_OAUTH_ENABLED=true`, which also gates whether `main.rs`
-//! mounts this router at all.
+//! Routes are always mounted when configured; OAuth tokens simply won't resolve
+//! if clients haven't registered yet.
 
 use axum::extract::{ConnectInfo, FromRequest, Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -30,16 +27,13 @@ use crate::storage::db::oauth_rows::{
 use crate::storage::sui::verify_delegate_key_onchain;
 use crate::types::AppState;
 
-/// Read the enabled `McpOAuthConfig`, or fail closed with a generic 404 —
-/// every handler in this file starts with this so an operator who forgets
-/// to unset `MCP_OAUTH_ENABLED` correctly gets "not found," not a panic or
-/// a confusing 500.
+/// Read the configured `McpOAuthConfig`, or fail with 404 if not configured.
 fn require_oauth(state: &AppState) -> Result<&oauth::McpOAuthConfig, OAuthError> {
     state
         .config
         .mcp_oauth
         .as_ref()
-        .ok_or_else(|| OAuthError::new(StatusCode::NOT_FOUND, "not_found", "MCP OAuth is not enabled"))
+        .ok_or_else(|| OAuthError::new(StatusCode::NOT_FOUND, "not_found", "MCP OAuth is not configured"))
 }
 
 // ---------------------------------------------------------------------

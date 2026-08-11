@@ -304,7 +304,8 @@ impl VectorDb {
 
         // MCP OAuth 2.1 (Claude custom connectors) — client registry,
         // server-custodied delegate keys, and the authorize/code/grant/token
-        // tables. Inert until MCP_OAUTH_ENABLED=true routes traffic to them.
+        // tables. OAuth routes are always available when configured — no separate
+        // feature flag needed.
         let migration_010 = include_str!("../../migrations/010_mcp_oauth.sql");
         sqlx::raw_sql(migration_010)
             .execute(&pool)
@@ -850,9 +851,8 @@ impl VectorDb {
 
     // ============================================================
     // MCP OAuth (Claude custom connectors) — see `../oauth.rs` and
-    // `../../migrations/010_mcp_oauth.sql`. Inert until
-    // `MCP_OAUTH_ENABLED=true`; every method here is only ever called from
-    // `routes/oauth.rs` (PR2) and `mcp_proxy.rs`'s bearer resolution (PR3).
+    // `../../migrations/010_mcp_oauth.sql`. Methods are only called from
+    // `routes/oauth.rs` and `mcp_proxy.rs`'s bearer resolution.
     // ============================================================
 
     pub async fn insert_oauth_client(&self, client: &oauth_rows::OAuthClientRow) -> Result<(), AppError> {

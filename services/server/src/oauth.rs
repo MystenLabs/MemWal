@@ -69,10 +69,9 @@ const CLAUDE_HOSTED_CALLBACK: &str = "https://claude.ai/api/mcp/auth_callback";
 const CLAUDE_CODE_LOOPBACK_PATHS: &[&str] = &["/callback"];
 
 /// Runtime configuration for the MCP OAuth feature. `from_env()` returns
-/// `None` when `MCP_OAUTH_ENABLED` is unset/false — every call site (the
-/// proxy classifier in PR3, the route mounting in PR2) must treat `None` as
-/// "behave exactly as today," which is what makes this rollout safe to ship
-/// dark.
+/// `None` when required env vars are unset. When configured, OAuth is always
+/// available — clients that haven't registered simply can't get tokens, so
+/// existing behavior is unchanged.
 ///
 /// `Debug` is hand-written (not derived) to redact `encryption_key` — the
 /// derived impl would otherwise print the raw AES-256 key any time `Config`
@@ -137,27 +136,41 @@ impl std::fmt::Debug for McpOAuthConfig {
 }
 
 impl McpOAuthConfig {
-    /// `None` when the feature is off (default) — every dependent code path
-    /// must fall back to today's static-bearer behavior unchanged.
+    /// Configured when `MCP_OAUTH_DELEGATE_ENCRYPTION_KEY` is set.
+    /// Other values are derived from `MEMWAL_RELAYER_URL`:
+    /// - issuer = MEMWAL_RELAYER_URL
+    /// - resource = issuer + "/api/mcp"
+    /// - consent_url = issuer with "relayer" replaced by "memory" + "/connect/claude"
     pub fn from_env() -> Option<Self> {
-        let enabled = std::env::var("MCP_OAUTH_ENABLED")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
-        if !enabled {
-            return None;
-        }
+        // Only the encryption key requires a separate env var; everything else
+        // is derived from MEMWAL_RELAYER_URL which is already configured.
+        let encryption_key_b64 = match std::env::var("MCP_OAUTH_DELEGATE_ENCRYPTION_KEY") {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
+        let encryption_key = load_encryption_key(&encryption_key_b64)
+            .expect("MCP_OAUTH_DELEGATE_ENCRYPTION_KEY must decode to exactly 32 bytes (base64url, no padding)");
 
-        let issuer = std::env::var("MCP_OAUTH_ISSUER")
-            .expect("MCP_OAUTH_ISSUER must be set when MCP_OAUTH_ENABLED=true");
-        let resource = std::env::var("MCP_OAUTH_RESOURCE")
-            .expect("MCP_OAUTH_RESOURCE must be set when MCP_OAUTH_ENABLED=true");
-        let consent_url = std::env::var("MCP_OAUTH_CONSENT_URL")
-            .expect("MCP_OAUTH_CONSENT_URL must be set when MCP_OAUTH_ENABLED=true");
-        let encryption_key = load_encryption_key(
-            &std::env::var("MCP_OAUTH_DELEGATE_ENCRYPTION_KEY")
-                .expect("MCP_OAUTH_DELEGATE_ENCRYPTION_KEY must be set when MCP_OAUTH_ENABLED=true"),
-        )
-        .expect("MCP_OAUTH_DELEGATE_ENCRYPTION_KEY must decode to exactly 32 bytes (base64url, no padding)");
+        // Derive issuer from MEMWAL_RELAYER_URL
+        let issuer = std::env::var("MEMWAL_RELAYER_URL").ok()?;
+        let issuer = issuer.trim_end_matches('/');
+
+        // Derive resource = issuer + "/api/mcp"
+        let resource = format!("{}/api/mcp", issuer);
+
+        // Derive consent_url: replace "relayer" with "memory" in domain
+        // e.g. https://relayer.memory.walrus.xyz -> https://memory.walrus.xyz/connect/claude
+        let consent_url = if issuer.contains("relayer.") {
+            let with_memory = issuer.replace("relayer.", "");
+            format!("{}/connect/claude", with_memory)
+        } else if issuer.contains("relayer") {
+            // Handle relayer.walrus.xyz -> memory.walrus.xyz case
+            let with_memory = issuer.replace("relayer", "memory");
+            format!("{}/connect/claude", with_memory)
+        } else {
+            // Fallback: assume memory.walrus.xyz or similar
+            format!("{}/connect/claude", issuer)
+        };
 
         let allowed_registration_redirect_hosts = std::env::var("MCP_OAUTH_ALLOWED_REGISTRATION_HOSTS")
             .ok()
@@ -183,7 +196,7 @@ impl McpOAuthConfig {
             .unwrap_or_else(|| vec!["160.79.104.0/21".parse().expect("valid CIDR literal")]);
 
         Some(Self {
-            issuer,
+            issuer: issuer.to_string(),
             resource,
             consent_url,
             encryption_key,
