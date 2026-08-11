@@ -189,6 +189,21 @@ type RawBlobObj = {
 };
 
 /**
+ * True when the raw candidate fetch proved more than `cap` objects exist for
+ * the owner (WALM-319). The call site probes with `cap + 1` (see
+ * `listBlobObjectsGrpc` invocation below) and passes that raw fetched count
+ * here alongside the real `cap`, so `fetchedCount > cap` means the probe
+ * turned up at least one candidate beyond the cap — proof discovery didn't
+ * complete. `fetchedCount === cap` means the owner had at most `cap` Blob
+ * objects and discovery finished on its own, so that case must NOT read as
+ * capped (PR #538 review: exact-cap results were being reported as
+ * definitely truncated).
+ */
+export function isSourceCapped(fetchedCount: number, cap: number): boolean {
+    return fetchedCount > cap;
+}
+
+/**
  * gRPC path for step 1: listOwnedObjects filters by object type server-side
  * and `include.json` returns the flattened Move fields (blob_id included), so
  * one paginated call replaces both the queryTransactionBlocks candidate scan
@@ -456,7 +471,21 @@ export function registerWalrusQueryRoute(app: Express): void {
             // `limit`; cap work when no exact blob IDs were supplied.
             const cap =
                 useRecentTxPath && !requestedBlobIds ? Math.max(1, Math.min(desiredMatches * 5, 100)) : Infinity;
-            const rawObjs = await listBlobObjectsGrpc(owner, WALRUS_BLOB_TYPE, cap, requestedBlobIds);
+            // Probe with `cap + 1` (when finite) so the raw fetch can prove
+            // whether more than `cap` candidates actually exist, rather than
+            // inferring "capped" merely from hitting `cap` exactly — an
+            // owner with precisely `cap` blobs would otherwise read as
+            // truncated even though discovery completed (PR #538 review).
+            const probeCap = cap === Infinity ? Infinity : cap + 1;
+            const probedObjs = await listBlobObjectsGrpc(owner, WALRUS_BLOB_TYPE, probeCap, requestedBlobIds);
+            const rawObjs = probedObjs.slice(0, cap);
+            // WALM-319: the candidate fetch above is capped independent of
+            // `limit` once desiredMatches >= 20 (`cap` saturates at 100) and
+            // shared across all of the owner's namespaces — a caller (namely
+            // restore()) can't otherwise tell "found everything" apart from
+            // "stopped early because of the cap" once results are filtered
+            // down to one namespace.
+            const sourceCapped = isSourceCapped(probedObjs.length, cap);
             if (includeStorageLease === true) {
                 // Expiry is a terminal migration decision. Do not use the
                 // upload client's normal 30-minute metadata cache here.
@@ -606,7 +635,7 @@ export function registerWalrusQueryRoute(app: Express): void {
                     rawObjs.length
                 }; excluded untrusted=${excludedProvenanceUntrusted}) for owner=${owner} ns=${namespace || "*"}`
             );
-            res.json({ blobs, total: blobs.length });
+            res.json({ blobs, total: blobs.length, sourceCapped });
         } catch (err: any) {
             const traceId = requestIdFor(req);
             const message = errorMessage(err);

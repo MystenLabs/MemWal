@@ -28,6 +28,7 @@ import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
 import Dashboard from './pages/Dashboard'
+import AdminDashboard from './pages/AdminDashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
@@ -291,6 +292,7 @@ function AppContent() {
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       )} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
+      <Route path="/admin" element={<AdminDashboard />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

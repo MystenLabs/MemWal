@@ -12,7 +12,7 @@ data they can trust.
 ## For AI Agents
 
 - **Single-file guide**: Read [`SKILL.md`](SKILL.md) for a complete integration reference (install, configure, API surface, troubleshooting)
-- **LLM-friendly docs**: [`llms.txt`](https://docs.wal.app/llms.txt) — structured overview following the [llmstxt.org](https://llmstxt.org) standard
+- **LLM-friendly docs**: [`llms.txt`](https://docs.wal.app/walrus-memory/llms.txt) — structured overview following the [llmstxt.org](https://llmstxt.org) standard
 
 ## Install
 

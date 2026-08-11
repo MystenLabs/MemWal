@@ -413,6 +413,24 @@ pub async fn ask(
 // /api/restore
 // ============================================================
 
+/// Slice `all_missing` to at most `limit` entries, reporting whether more
+/// than `limit` were available. Kept as its own function (rather than a
+/// slice plus a separately-derived boolean inline in `restore()`) so the
+/// pairing is computed — and tested — as one unit: a caller of this
+/// function cannot get the returned page out of sync with whether it was
+/// truncated.
+///
+/// This only sees truncation applied *after* `query_blobs_by_owner`
+/// returns: that sidecar call itself bounds the raw candidates it fetches
+/// (shared across the owner's namespaces, hard-capped regardless of
+/// `limit`), so `truncated == false` here does not guarantee every missing
+/// blob in the namespace was found — see WALM-317's PR discussion.
+fn paginate_missing_blobs(all_missing: Vec<String>, limit: usize) -> (Vec<String>, bool) {
+    let truncated = all_missing.len() > limit;
+    let page = all_missing.into_iter().take(limit).collect();
+    (page, truncated)
+}
+
 /// POST /api/restore
 ///
 /// Restore a namespace from Walrus:
@@ -466,7 +484,7 @@ pub async fn restore(
         owner,
         namespace
     );
-    let on_chain_blobs = walrus::query_blobs_by_owner(
+    let (on_chain_blobs, source_capped) = walrus::query_blobs_by_owner(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
@@ -480,12 +498,17 @@ pub async fn restore(
     let total = all_blob_ids.len();
 
     if total == 0 {
+        // source_capped, not unconditionally false: the raw candidate fetch
+        // can hit its cap fulfilling OTHER namespaces before this one is
+        // even filtered out, so zero found here doesn't rule out more
+        // existing that were never fetched (WALM-319).
         return Ok(Json(RestoreResponse {
             restored: 0,
             skipped: 0,
             total: 0,
             namespace: namespace.clone(),
             owner: owner.clone(),
+            truncated: source_capped,
         }));
     }
 
@@ -515,15 +538,21 @@ pub async fn restore(
     // download + decrypt, not to prioritize recency. If fewer than N
     // candidates match after namespace/package filtering, restore returns a
     // partial result instead of scanning the whole wallet.
-    let missing_blob_ids: Vec<String> = all_missing.into_iter().take(limit).collect();
+    let (missing_blob_ids, limit_truncated) = paginate_missing_blobs(all_missing, limit);
+    // OR in source_capped (WALM-319): the local limit-slice check alone
+    // can't see truncation that already happened one layer up, in the
+    // sidecar's raw candidate fetch.
+    let truncated = limit_truncated || source_capped;
     let skipped = total - missing_blob_ids.len();
     tracing::info!(
-        "restore: total={} on-chain, existing={}, negative-cached={}, missing={} (limited to {}) for ns={}",
+        "restore: total={} on-chain, existing={}, negative-cached={}, missing={} (limited to {}, truncated={}, source_capped={}) for ns={}",
         total,
         existing_blob_ids.len(),
         failed_blob_ids.len(),
         missing_blob_ids.len(),
         limit,
+        truncated,
+        source_capped,
         namespace
     );
 
@@ -534,6 +563,7 @@ pub async fn restore(
             total,
             namespace: namespace.clone(),
             owner: owner.clone(),
+            truncated,
         }));
     }
 
@@ -604,6 +634,7 @@ pub async fn restore(
             total,
             namespace: namespace.clone(),
             owner: owner.clone(),
+            truncated,
         }));
     }
 
@@ -771,6 +802,7 @@ pub async fn restore(
         total,
         namespace: namespace.clone(),
         owner: owner.clone(),
+        truncated,
     }))
 }
 

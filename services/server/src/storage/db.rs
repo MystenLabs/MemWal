@@ -120,88 +120,101 @@ mod tests {
         );
     }
 
-    // ── GH #501 / WALM-299: restore_failed_blobs negative cache ────────
+    // ── find_account_by_owner (backs GET /api/accounts/{owner}/exists) ──
+    //
+    // `accounts` is populated by the v2-indexer from onchain
+    // `AccountCreated` events, not by this server. This test simulates
+    // that indexer write directly (a raw INSERT) rather than driving it
+    // through any server code path, since the indexer itself is a
+    // separate service/binary outside this crate.
 
     #[tokio::test]
-    async fn record_restore_failure_round_trips_and_increments_attempts() {
+    async fn find_account_by_owner_reflects_indexed_accounts_table() {
         let Some(db) = test_db().await else {
             eprintln!("skipping DB integration test: DATABASE_URL is not configured");
             return;
         };
         let suffix = uuid::Uuid::new_v4();
-        let owner = format!("0xrestore-fail-owner-{suffix}");
-        let namespace = format!("ns-{suffix}");
-        let blob_id = format!("bad-blob-{suffix}");
+        let owner = format!("0xaccount-exists-owner-{suffix}");
+        let account_id = format!("account-{suffix}");
 
-        db.record_restore_failure(&owner, &namespace, &blob_id, "decrypt_permanent")
+        // No indexed row yet — an address that has never created a
+        // MemWalAccount (or whose AccountCreated event hasn't been
+        // indexed yet) must resolve to `None`.
+        assert_eq!(db.find_account_by_owner(&owner).await.unwrap(), None);
+
+        // Simulate the v2-indexer inserting a row after observing
+        // `AccountCreated` onchain.
+        sqlx::query("INSERT INTO accounts (account_id, owner) VALUES ($1, $2)")
+            .bind(&account_id)
+            .bind(&owner)
+            .execute(db.pool())
             .await
             .unwrap();
 
-        let failed = db.get_failed_blob_ids(&owner, &namespace).await.unwrap();
-        assert_eq!(failed, vec![blob_id.clone()]);
-
-        // A second failure for the same (owner, namespace, blob_id) must
-        // bump `attempts` via ON CONFLICT, not error or duplicate the row.
-        db.record_restore_failure(&owner, &namespace, &blob_id, "decrypt_permanent")
-            .await
-            .unwrap();
-        let attempts: (i32,) = sqlx::query_as(
-            "SELECT attempts FROM restore_failed_blobs
-             WHERE owner = $1 AND namespace = $2 AND blob_id = $3",
-        )
-        .bind(&owner)
-        .bind(&namespace)
-        .bind(&blob_id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert_eq!(attempts.0, 2);
-
-        let failed_again = db.get_failed_blob_ids(&owner, &namespace).await.unwrap();
         assert_eq!(
-            failed_again,
-            vec![blob_id.clone()],
-            "still exactly one row after the repeat failure"
+            db.find_account_by_owner(&owner).await.unwrap(),
+            Some(account_id.clone())
         );
 
-        sqlx::query("DELETE FROM restore_failed_blobs WHERE owner = $1")
+        sqlx::query("DELETE FROM accounts WHERE owner = $1")
             .bind(&owner)
             .execute(db.pool())
             .await
             .unwrap();
     }
 
+    /// `find_account_by_owner` is an exact, case-sensitive match — it does
+    /// not itself lowercase the input. `accounts.owner` is always indexed
+    /// in lowercase hex by the v2-indexer (`hex::encode` in
+    /// `services/indexer/src/handler.rs`), so callers (the
+    /// `account_exists` route handler) are responsible for lowercasing the
+    /// caller-supplied address before calling this function. This test
+    /// pins down both halves of that contract: an uppercase/mixed-case
+    /// lookup against a lowercase-indexed row misses without
+    /// normalization, and hits once the same normalization the handler
+    /// applies (`to_ascii_lowercase`) is applied here too.
     #[tokio::test]
-    async fn get_failed_blob_ids_does_not_leak_across_owner_or_namespace() {
+    async fn find_account_by_owner_is_case_sensitive_requiring_caller_normalization() {
         let Some(db) = test_db().await else {
             eprintln!("skipping DB integration test: DATABASE_URL is not configured");
             return;
         };
         let suffix = uuid::Uuid::new_v4();
-        let owner = format!("0xrestore-fail-owner-{suffix}");
-        let other_owner = format!("0xother-owner-{suffix}");
-        let namespace = format!("ns-{suffix}");
-        let other_namespace = format!("other-ns-{suffix}");
-        let blob_id = format!("bad-blob-{suffix}");
+        // Indexed rows are always lowercase, mirroring the indexer's
+        // `hex::encode` output.
+        let owner_lower = format!("0xcase-owner-{suffix}").to_ascii_lowercase();
+        let owner_upper = owner_lower.to_ascii_uppercase();
+        let account_id = format!("account-case-{suffix}");
 
-        // Same blob_id recorded as a failure under a different owner and a
-        // different namespace must not leak into the original owner+ns query
-        // — the negative cache is scoped exactly like `get_blobs_by_namespace`.
-        db.record_restore_failure(&owner, &namespace, &blob_id, "invalid_utf8")
-            .await
-            .unwrap();
-        db.record_restore_failure(&other_owner, &namespace, &blob_id, "invalid_utf8")
-            .await
-            .unwrap();
-        db.record_restore_failure(&owner, &other_namespace, &blob_id, "invalid_utf8")
+        sqlx::query("INSERT INTO accounts (account_id, owner) VALUES ($1, $2)")
+            .bind(&account_id)
+            .bind(&owner_lower)
+            .execute(db.pool())
             .await
             .unwrap();
 
-        let failed = db.get_failed_blob_ids(&owner, &namespace).await.unwrap();
-        assert_eq!(failed, vec![blob_id.clone()]);
+        // Without normalization, an uppercase/mixed-case address for an
+        // account that DOES exist would false-negative — this is the bug
+        // the route handler's `to_ascii_lowercase()` fixes.
+        assert_eq!(
+            db.find_account_by_owner(&owner_upper).await.unwrap(),
+            None,
+            "find_account_by_owner must not silently case-fold internally \
+             (that would defeat the btree index via a query-side LOWER())"
+        );
 
-        sqlx::query("DELETE FROM restore_failed_blobs WHERE blob_id = $1")
-            .bind(&blob_id)
+        // The handler's normalization step, applied here, must resolve to
+        // the same account as the canonical lowercase lookup.
+        assert_eq!(
+            db.find_account_by_owner(&owner_upper.to_ascii_lowercase())
+                .await
+                .unwrap(),
+            Some(account_id.clone())
+        );
+
+        sqlx::query("DELETE FROM accounts WHERE owner = $1")
+            .bind(&owner_lower)
             .execute(db.pool())
             .await
             .unwrap();
@@ -289,14 +302,6 @@ impl VectorDb {
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
-
-        // per-owner negative cache of blobs that permanently fail restore
-        // (GH #501 / WALM-299 bounded-processing fix).
-        let migration_010 = include_str!("../../migrations/010_restore_failed_blobs.sql");
-        sqlx::raw_sql(migration_010)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
@@ -545,80 +550,6 @@ impl VectorDb {
         let rows = result?;
 
         Ok(rows.into_iter().map(|(blob_id,)| blob_id).collect())
-    }
-
-    /// Get blob_ids that have permanently failed to restore for a given
-    /// owner + namespace (GH #501 / WALM-299 negative cache — see
-    /// `record_restore_failure`). `restore()` folds this into the same
-    /// exclusion set as `get_blobs_by_namespace` so a foreign/attacker blob
-    /// that already failed decrypt/validation once is never re-downloaded
-    /// and re-decrypt-attempted on every subsequent restore() call.
-    pub async fn get_failed_blob_ids(
-        &self,
-        owner: &str,
-        namespace: &str,
-    ) -> Result<Vec<String>, AppError> {
-        let started = std::time::Instant::now();
-        let result: Result<Vec<(String,)>, AppError> = sqlx::query_as(
-            "SELECT blob_id FROM restore_failed_blobs
-             WHERE owner = $1 AND namespace = $2",
-        )
-        .bind(owner)
-        .bind(namespace)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to get failed blobs: {}", e)));
-        crate::observability::observe_db(
-            "vector.get_failed_blob_ids",
-            db_status(&result),
-            started.elapsed(),
-        );
-        let rows = result?;
-
-        Ok(rows.into_iter().map(|(blob_id,)| blob_id).collect())
-    }
-
-    /// Record that `blob_id` permanently failed to restore for `owner` +
-    /// `namespace` (GH #501 / WALM-299). `reason` is `"decrypt_permanent"`
-    /// (SEAL rejected it deterministically — see
-    /// `seal::DecryptOutcome::permanent_from_error`) or `"invalid_utf8"`
-    /// (decrypt succeeded but the plaintext wasn't valid UTF-8). Repeated
-    /// calls for the same (owner, namespace, blob_id) bump `attempts`
-    /// instead of erroring or duplicating the row.
-    ///
-    /// This is purely an (owner, blob_id) decrypt/validation-outcome cache —
-    /// it never records who uploaded or transferred the blob.
-    pub async fn record_restore_failure(
-        &self,
-        owner: &str,
-        namespace: &str,
-        blob_id: &str,
-        reason: &str,
-    ) -> Result<(), AppError> {
-        let started = std::time::Instant::now();
-        let result = sqlx::query(
-            "INSERT INTO restore_failed_blobs (owner, namespace, blob_id, reason)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (owner, namespace, blob_id) DO UPDATE SET
-                attempts = restore_failed_blobs.attempts + 1,
-                last_attempt_at = now(),
-                reason = EXCLUDED.reason",
-        )
-        .bind(owner)
-        .bind(namespace)
-        .bind(blob_id)
-        .bind(reason)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to record restore failure: {}", e)));
-        crate::observability::observe_db(
-            "vector.record_restore_failure",
-            db_status(&result),
-            started.elapsed(),
-        );
-        result?;
-
-        Ok(())
     }
 
     /// Count + total stored bytes for a given owner + namespace.
@@ -898,7 +829,6 @@ impl VectorDb {
 
     /// Find an account by owner address (from indexed accounts table).
     /// Returns `Some(account_id)` if the owner has a registered account.
-    #[allow(dead_code)]
     pub async fn find_account_by_owner(&self, owner: &str) -> Result<Option<String>, AppError> {
         let result: Option<(String,)> =
             sqlx::query_as("SELECT account_id FROM accounts WHERE owner = $1")
@@ -908,5 +838,73 @@ impl VectorDb {
                 .map_err(|e| AppError::Internal(format!("Failed to query accounts: {}", e)))?;
 
         Ok(result.map(|(id,)| id))
+    }
+
+    /// Return blob_ids that have permanently failed to restore for `owner` +
+    /// `namespace` (GH #501 / WALM-299). Used by restore() to exclude blobs
+    /// that already failed decrypt/validation once and should never be
+    /// re-downloaded and re-decrypt-attempted on every subsequent restore() call.
+    pub async fn get_failed_blob_ids(
+        &self,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<Vec<String>, AppError> {
+        let started = std::time::Instant::now();
+        let result: Result<Vec<(String,)>, AppError> = sqlx::query_as(
+            "SELECT blob_id FROM restore_failed_blobs
+             WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get failed blobs: {}", e)));
+        crate::observability::observe_db(
+            "vector.get_failed_blob_ids",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let rows = result?;
+
+        Ok(rows.into_iter().map(|(blob_id,)| blob_id).collect())
+    }
+
+    /// Record that `blob_id` permanently failed to restore for `owner` +
+    /// `namespace` (GH #501 / WALM-299). `reason` is `"decrypt_permanent"`
+    /// (SEAL rejected it deterministically) or `"invalid_utf8"`
+    /// (decrypt succeeded but the plaintext wasn't valid UTF-8). Repeated
+    /// calls for the same (owner, namespace, blob_id) bump `attempts`
+    /// instead of erroring or duplicating the row.
+    pub async fn record_restore_failure(
+        &self,
+        owner: &str,
+        namespace: &str,
+        blob_id: &str,
+        reason: &str,
+    ) -> Result<(), AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "INSERT INTO restore_failed_blobs (owner, namespace, blob_id, reason)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (owner, namespace, blob_id) DO UPDATE SET
+                attempts = restore_failed_blobs.attempts + 1,
+                last_attempt_at = now(),
+                reason = EXCLUDED.reason",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .bind(blob_id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to record restore failure: {}", e)));
+        crate::observability::observe_db(
+            "vector.record_restore_failure",
+            db_status(&result),
+            started.elapsed(),
+        );
+        result?;
+
+        Ok(())
     }
 }

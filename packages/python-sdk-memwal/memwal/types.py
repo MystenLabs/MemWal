@@ -201,6 +201,17 @@ class RestoreResult:
     total: int
     namespace: str
     owner: str
+    #: True when this restore is known-incomplete: either more on-chain
+    #: blobs were missing locally than ``limit`` allowed this call to
+    #: restore, or the sidecar's raw on-chain candidate fetch hit its own
+    #: cap before this namespace's blobs were even filtered out of that
+    #: set (WALM-319) -- this can be ``True`` even when ``total == 0``,
+    #: since a cap hit elsewhere can starve this namespace's fetch
+    #: entirely. Raising ``limit`` only helps with the first case.
+    #:
+    #: Relayers older than WALM-319 don't send this field at all; the SDK
+    #: defaults it to ``False`` in that case rather than requiring it.
+    truncated: bool = False
 
 
 @dataclass
