@@ -189,6 +189,13 @@ export class MemWal {
     private sessionBuildPromise: Promise<string> | null = null;
     /** Single-flight guard so concurrent requests share one compatibility probe. */
     private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
+    /**
+     * Keep a generated idempotency key while a remember request has no
+     * acknowledged response. If the transport times out after the server
+     * accepted the write, the caller's next identical attempt reuses the key
+     * and collapses onto the original paid job.
+     */
+    private pendingRememberKeys = new Map<string, string>();
 
     private constructor(config: MemWalConfig) {
         this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
@@ -227,6 +234,7 @@ export class MemWal {
         this.serverConfig = null;
         this.relayerVersionMetadata = null;
         this.compatibilityPromise = null;
+        this.pendingRememberKeys.clear();
     }
 
     // ============================================================
@@ -236,13 +244,27 @@ export class MemWal {
     /**
      * Submit a remember request and return as soon as the server accepts the job.
      */
-    async rememberAsync(text: string, namespace?: string): Promise<RememberAcceptedResult> {
-        return this.signedRequest<RememberAcceptedResult>(
+    async rememberAsync(
+        text: string,
+        namespace?: string,
+        options: { idempotencyKey?: string } = {},
+    ): Promise<RememberAcceptedResult> {
+        const resolvedNamespace = namespace ?? this.namespace;
+        const requestIdentity = `${resolvedNamespace}\0${text}`;
+        const generatedKey = options.idempotencyKey === undefined;
+        const idempotencyKey = options.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? crypto.randomUUID();
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
+
+        const accepted = await this.signedRequest<RememberAcceptedResult>(
             "POST",
             "/api/remember",
-            { text, namespace: namespace ?? this.namespace },
+            { text, namespace: resolvedNamespace, idempotency_key: idempotencyKey },
             [200, 202],
         );
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
+        return accepted;
     }
 
     /**
@@ -340,10 +362,22 @@ export class MemWal {
     async rememberAndWait(
         text: string,
         namespace?: string,
-        opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
+        opts: { pollIntervalMs?: number; timeoutMs?: number; idempotencyKey?: string } = {},
     ): Promise<RememberResult> {
-        const accepted = await this.rememberAsync(text, namespace);
-        return this.waitForRememberJob(accepted.job_id, opts);
+        const resolvedNamespace = namespace ?? this.namespace;
+        const requestIdentity = `${resolvedNamespace}\0${text}`;
+        const generatedKey = opts.idempotencyKey === undefined;
+        const idempotencyKey = opts.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? crypto.randomUUID();
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
+
+        const accepted = await this.rememberAsync(text, resolvedNamespace, { idempotencyKey });
+        const completed = await this.waitForRememberJob(accepted.job_id, opts);
+        // Clear only after terminal success. A polling timeout/transport failure
+        // keeps the key so retrying the high-level operation reuses the same job.
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
+        return completed;
     }
 
     /**
@@ -355,8 +389,12 @@ export class MemWal {
      * @param text - The text to remember
      * @param namespace - Optional namespace override
      */
-    async remember(text: string, namespace?: string): Promise<RememberAcceptedResult> {
-        return this.rememberAsync(text, namespace);
+    async remember(
+        text: string,
+        namespace?: string,
+        options: { idempotencyKey?: string } = {},
+    ): Promise<RememberAcceptedResult> {
+        return this.rememberAsync(text, namespace, options);
     }
 
     /**

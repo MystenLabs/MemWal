@@ -10,11 +10,12 @@ import { normalizeSuiAddress } from "@mysten/sui/utils";
 import {
     JSON_LIMIT_METADATA,
     JSON_LIMIT_WALRUS_VERIFY,
+    SERVER_SUI_ADDRESSES,
     SERVER_SUI_ADDRESS_SET,
     WALRUS_PACKAGE_ID,
 } from "../config.js";
 import { getWalrusClient, refreshWalrusClientIfStale, suiClient, suiGraphqlClient } from "../clients.js";
-import { requestIdFor, sidecarLog } from "../log.js";
+import { requestIdFor, sanitizeRequestId, sidecarLog } from "../log.js";
 import { withRpcRetry } from "../retry/rpc.js";
 import { errorMessage, mapConcurrent } from "../util.js";
 
@@ -418,6 +419,75 @@ export function assertCompletionBlobResponse(
     return assertCompletionBlobObject(response.object, expected, currentEpoch);
 }
 
+/**
+ * Reconciliation lookup for the write crash-window (GH #477): given a user owner
+ * and a remember job id — NOT a blob id — find the blob (if any) that a prior
+ * upload minted for that job and then lost the record of.
+ *
+ * CRITICAL ownership detail: the upload registers the blob owned by the SERVER
+ * signer wallet and only transfers it to the user in the final step. So a blob
+ * whose write crashed mid-flight is (still) owned by a server pool wallet, not
+ * the user. We therefore scan the server pool wallets AND the user, and match on
+ * BOTH `memwal_job_id == jobId` and `memwal_owner == user` — the job tag alone is
+ * not enough to prove the blob belongs to this user (guards against tag reuse /
+ * collision adopting another user's paid blob).
+ *
+ * Discriminated result so the caller never mistakes "couldn't check" for
+ * "not minted":
+ *   - { status: "found", blobId, objectId }
+ *   - { status: "not_found" } — every scanned owner fully scanned, no match
+ * The lookup paginates every scanned owner to exhaustion. A bounded prefix is
+ * not safe here: once a wallet owns more than the old cap, a matching paid blob
+ * outside that prefix would leave every retry permanently indeterminate.
+ * Per-blob metadata errors are intentionally not swallowed: a throw propagates
+ * to the relayer, which retries without uploading.
+ */
+export type FindBlobByJobResult =
+    | { status: "found"; blobId: string; objectId: string }
+    | { status: "not_found" };
+
+async function scanOwnerForJobBlob(
+    scanOwner: string,
+    userOwner: string,
+    jobId: string
+): Promise<FindBlobByJobResult> {
+    const blobType = `${WALRUS_PACKAGE_ID}::blob::Blob`;
+    const blobs = await listBlobObjectsGrpc(normalizeSuiAddress(scanOwner), blobType, Infinity);
+    for (const blob of blobs) {
+        const entries = await fetchBlobMetadataEntries(blob.objectId);
+        const jobMatches = entries.some(({ key, value }) => key === "memwal_job_id" && value === jobId);
+        // Normalize the tagged owner before comparing — the register stores the
+        // raw `owner` the relayer sent, which may be mixed-case / unpadded hex.
+        const ownerMatches = entries.some(
+            ({ key, value }) =>
+                key === "memwal_owner" &&
+                /^0x[0-9a-fA-F]{1,64}$/.test(value) &&
+                normalizeSuiAddress(value) === userOwner
+        );
+        if (jobMatches && ownerMatches) {
+            const blobId = blobIdFromRaw(blob.rawBlobId);
+            if (blobId) return { status: "found", blobId, objectId: blob.objectId };
+        }
+    }
+    return { status: "not_found" };
+}
+
+export async function findBlobObjectByJob(
+    owner: string,
+    jobId: string
+): Promise<FindBlobByJobResult> {
+    const userOwner = normalizeSuiAddress(owner);
+    // Scan the server pool wallets (where a not-yet-transferred blob lives) AND
+    // the user (where a transferred-but-unrecorded blob lives). De-dup in case a
+    // server key coincides with the user address.
+    const scanOwners = [...new Set([...SERVER_SUI_ADDRESSES.map((a) => normalizeSuiAddress(a)), userOwner])];
+    for (const scanOwner of scanOwners) {
+        const result = await scanOwnerForJobBlob(scanOwner, userOwner, jobId);
+        if (result.status === "found") return result;
+    }
+    return { status: "not_found" };
+}
+
 export async function findOwnedBlobObjects(
     owner: string,
     blobId: string,
@@ -747,6 +817,42 @@ export function registerWalrusQueryRoute(app: Express): void {
                 error: message,
             });
             res.status(500).json({ error: message, traceId });
+        }
+    });
+
+    // GH #477 reconciliation: find a blob a prior write minted for a remember
+    // job whose record was lost to a crash — by (owner, job_id), no blob id
+    // needed. The relayer calls this before re-uploading a `running` job so it
+    // can adopt an already-minted blob instead of minting a duplicate.
+    app.post("/walrus/find-blob-by-job", express.json({ limit: JSON_LIMIT_METADATA }), async (req, res) => {
+        try {
+            const { owner: rawOwner, jobId: rawJobId } = req.body;
+            if (typeof rawOwner !== "string" || !rawOwner) {
+                return res.status(400).json({ error: "Missing required field: owner" });
+            }
+            if (typeof rawJobId !== "string" || !rawJobId) {
+                return res.status(400).json({ error: "Missing required field: jobId" });
+            }
+            // Match on the SAME canonical form the register wrote the tag with
+            // (`sanitizeRequestId`), so the query value can never silently diverge
+            // from the stored value. A job id that doesn't survive sanitization was
+            // never tag-able, so it can't be reconciled — say so explicitly rather
+            // than querying with a value that could never match.
+            const jobId = sanitizeRequestId(rawJobId);
+            if (jobId === null) {
+                return res.status(400).json({ error: "jobId is not a valid tag value" });
+            }
+            const owner = /^0x[0-9a-fA-F]{1,64}$/.test(rawOwner) ? normalizeSuiAddress(rawOwner) : rawOwner;
+            const result = await findBlobObjectByJob(owner, jobId);
+            if (result.status === "found") {
+                return res.json({ blob_id: result.blobId, object_id: result.objectId });
+            }
+            // The exhaustive scan completed without a matching job tag.
+            return res.json({ blob_id: null, object_id: null });
+        } catch (error: unknown) {
+            const message = errorMessage(error);
+            sidecarLog("error", "walrus_find_blob_by_job_failed", { error: message });
+            res.status(500).json({ error: message });
         }
     });
 }

@@ -310,6 +310,21 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
 
+        // Durable idempotency, preparation, and paid-upload recovery state.
+        let migration_012 = include_str!("../../migrations/012_remember_write_idempotency.sql");
+        sqlx::raw_sql(migration_012)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 012: {}", e)))?;
+
+        // Build the owner/key uniqueness constraint without blocking writes.
+        let migration_013 =
+            include_str!("../../migrations/013_remember_write_idempotency_index.sql");
+        sqlx::raw_sql(migration_013)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 013: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
