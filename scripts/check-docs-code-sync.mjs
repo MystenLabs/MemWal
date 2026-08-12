@@ -52,18 +52,63 @@ if (packages.size === 0) {
     process.exit(2);
 }
 
+// CommonMark allows three or more backticks, and a block closes only on a
+// fence at least as long as the one that opened it. Matching a fixed three
+// made a four-backtick block parse as an empty one, which then failed the
+// JSON parse and dropped out of the checks silently.
 function fencedBlocks(markdown) {
     const blocks = [];
-    const re = /^[ \t]*```(\w+)?[^\n]*\n([\s\S]*?)^[ \t]*```/gm;
+    const re = /^[ \t]*(`{3,})([^\n]*)\n([\s\S]*?)^[ \t]*\1`*[ \t]*$/gm;
     let match;
     while ((match = re.exec(markdown)) !== null) {
         blocks.push({
-            lang: (match[1] || "").toLowerCase(),
-            body: match[2],
+            lang: (match[2].trim().split(/\s+/)[0] || "").toLowerCase(),
+            body: match[3],
             line: markdown.slice(0, match.index).split("\n").length,
         });
     }
     return blocks;
+}
+
+// `jsonc` and `json5` render the same client config and are common in MCP
+// docs. Treat them as JSON so a config block cannot dodge the check by
+// changing its info string.
+const JSON_LANGS = new Set(["json", "jsonc", "json5"]);
+
+// Strip // and /* */ comments outside strings, so a commented config block
+// still parses and still gets checked.
+function stripJsonComments(text) {
+    let out = "";
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (inString) {
+            out += char;
+            if (escaped) escaped = false;
+            else if (char === "\\") escaped = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+            out += char;
+            continue;
+        }
+        if (char === "/" && text[i + 1] === "/") {
+            while (i < text.length && text[i] !== "\n") i += 1;
+            out += "\n";
+            continue;
+        }
+        if (char === "/" && text[i + 1] === "*") {
+            const end = text.indexOf("*/", i + 2);
+            i = end === -1 ? text.length : end + 1;
+            continue;
+        }
+        out += char;
+    }
+    // Trailing commas that jsonc allows and JSON.parse does not.
+    return out.replace(/,(\s*[}\]])/g, "$1");
 }
 
 function stripIndent(body) {
@@ -75,7 +120,7 @@ function stripIndent(body) {
 
 function tryParseJson(body) {
     try {
-        return JSON.parse(stripIndent(body));
+        return JSON.parse(stripJsonComments(stripIndent(body)));
     } catch {
         return null;
     }
@@ -83,7 +128,7 @@ function tryParseJson(body) {
 
 const mcpReadme = readFileSync(MCP_README, "utf8");
 const canonicalBlock = fencedBlocks(mcpReadme).find(
-    (b) => b.lang === "json" && tryParseJson(b.body)?.mcpServers?.memwal,
+    (b) => JSON_LANGS.has(b.lang) && tryParseJson(b.body)?.mcpServers?.memwal,
 );
 if (!canonicalBlock) {
     console.error(`Could not find the canonical mcpServers block in ${MCP_README}.`);
@@ -118,6 +163,10 @@ function markdownFiles(dir) {
 
 const failures = [];
 const counts = { specifiers: 0, commands: 0, mcpBlocks: 0 };
+// Per-shape tallies. An aggregate floor is not enough: the docs carry three
+// different config shapes, and a break in the search for one of them hides
+// behind the other two still being found.
+const shapeCounts = new Map();
 
 function lineOf(text, index) {
     return text.slice(0, index).split("\n").length;
@@ -144,6 +193,7 @@ function checkSpecifier(file, line, specifier) {
 
 function checkMcpEntry(file, line, label, command, args) {
     counts.mcpBlocks += 1;
+    shapeCounts.set(label, (shapeCounts.get(label) ?? 0) + 1);
     if (command !== canonicalServer.command) {
         failures.push(
             `${file}:${line} (${label}): command is '${command}', expected '${canonicalServer.command}' per ${MCP_README}.`,
@@ -190,7 +240,7 @@ for (const file of docFiles) {
 
     // 3. MCP client config blocks.
     for (const block of fencedBlocks(text)) {
-        if (block.lang === "json") {
+        if (JSON_LANGS.has(block.lang)) {
             const parsed = tryParseJson(block.body);
             const server = parsed?.mcpServers?.memwal;
             if (server) {
@@ -225,6 +275,30 @@ console.log(
         `Scanned ${docFiles.length} docs pages: ${counts.specifiers} import specifier(s), ` +
         `${counts.commands} install command(s), ${counts.mcpBlocks} MCP config block(s).`,
 );
+
+// A check that finds nothing reports success forever. If a docs change moves
+// a config block out of reach of the search, that is a broken check, not a
+// clean tree, so require every shape the docs are known to contain.
+const FLOOR = { specifiers: 1, commands: 1 };
+const SHAPE_FLOOR = ["mcpServers.memwal", "mcp.memwal", "mcp_servers.memwal"];
+const shortfalls = [
+    ...Object.entries(FLOOR)
+        .filter(([kind, min]) => counts[kind] < min)
+        .map(([kind, min]) => `${kind}: found ${counts[kind]}, expected at least ${min}`),
+    ...SHAPE_FLOOR.filter((shape) => (shapeCounts.get(shape) ?? 0) < 1).map(
+        (shape) => `${shape}: found 0, expected at least 1`,
+    ),
+];
+if (shortfalls.length > 0) {
+    console.error(
+        `Across ${docFiles.length} docs pages this check found less than it should:\n` +
+            shortfalls.map((s) => `  - ${s}`).join("\n") +
+            "\n\nEither the docs no longer contain what this check exists to validate, or the " +
+            "check stopped finding it. Confirm which, then fix the search or change the floor " +
+            "deliberately.",
+    );
+    process.exit(2);
+}
 
 if (failures.length > 0) {
     console.error(`\n${failures.length} docs reference(s) drifted from the packages:\n`);
