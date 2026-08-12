@@ -92,7 +92,7 @@ Both deletion paths are permanent. Start with a preview in the dashboard or a dr
 
 ## Rebuild the index
 
-The search index lives in the relayer's database, not in your browser, so switching devices does not lose it. If recall is missing memories you know you stored, the relayer's index might lack rows for those blobs, for example after a database loss or reset, or when you point a fresh self-hosted relayer at your account. Walrus holds the permanent record, so restore rebuilds the index from it.
+The search index lives in the relayer's database, not in your browser, so switching devices does not lose it. If recall does not return memories you know you stored, the relayer's index might lack rows for those blobs, for example after a database loss or reset, or when you point a fresh self-hosted relayer at your account. Walrus holds the permanent record, so restore rebuilds the index from it.
 
 Restore rediscovers the blobs your account owns in a namespace and re-indexes any the relayer does not already have:
 
