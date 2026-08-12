@@ -13,6 +13,9 @@
 
 // Core client (server-mode: server handles SEAL + Walrus + embedding)
 export { MemWal } from "./memwal.js";
+// Deterministic, dependency-free in-memory client for tests and CI.
+export { MemWalMock } from "./mock.js";
+export type { MemWalMockConfig, MemWalMockSeed } from "./mock.js";
 export {
     MEMWAL_TYPESCRIPT_COMPATIBILITY_VERSION,
     MemWalCompatibilityError,
