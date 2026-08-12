@@ -41,7 +41,9 @@ See also:
 
 ## Authentication
 
-All `/api/*` routes except the [MCP transports](#mcp-transports) require signed headers. The SDK handles this automatically.
+The routes below require signed headers, except the [MCP transports](#mcp-transports), which use bearer authentication. The SDK handles the signing automatically.
+
+Not every `/api/*` route works this way. Account existence checks need no authentication, the security-delete families use their own challenge and bearer flows, and `/api/admin/*` requires an `ADMIN_API_KEY`. Those families stay out of scope here.
 
 ### Required headers
 
@@ -116,7 +118,7 @@ Stable relayer/API compatibility metadata.
 
 ### `GET /config`
 
-Public deployment parameters that the SDK reads to build a Seal SessionKey client-side. Every field is non-secret.
+Public deployment parameters that the SDK reads to build a Seal SessionKey client-side. The endpoint returns no secrets.
 
 **Response:**
 
@@ -125,11 +127,15 @@ Public deployment parameters that the SDK reads to build a Seal SessionKey clien
   "packageId": "0x...",
   "network": "testnet",
   "suiRpcUrl": "https://fullnode.testnet.sui.io",
+  "suiGrpcUrl": "https://fullnode.testnet.sui.io",
+  "suiTransport": "grpc",
   "rateLimitDisabled": false
 }
 ```
 
-`rateLimitDisabled` mirrors the server's benchmark-bypass setting so benchmark scripts can pre-flight the configuration.
+This example shows the fields a client needs to select a transport and build a session key. A deployment can return more, so read fields by name rather than assuming the shape is exhaustive.
+
+`suiGrpcUrl` is the preferred gRPC endpoint, and `suiTransport` names the transport the relayer prefers for Sui reads. Newer SDKs read both; a client might fall back to `suiRpcUrl` while a deployment migrates. `rateLimitDisabled` mirrors the server's benchmark-bypass setting so benchmark scripts can pre-flight the configuration.
 
 ### `GET /metrics`
 
@@ -137,7 +143,7 @@ Prometheus metrics for scraping. See [Observability](/relayer/observability) for
 
 ### `POST /sponsor`
 
-Proxy to the Seal/Walrus sidecar's `/sponsor` endpoint for sponsored transactions. The request must include `authTimestamp`, a UUID-v4 `authNonce`, and `authSignature`: a Sui personal-message signature over the sender, transaction-kind hash, timestamp, and nonce. Only one allowlisted Walrus Memory `account` call is eligible for sponsorship.
+Proxy to the Seal/Walrus sidecar's `/sponsor` endpoint for sponsored transactions. The request must include `authTimestamp`, a UUID-v4 `authNonce`, and `authSignature`: a Sui personal-message signature over the sender, transaction-kind hash, timestamp, and nonce. Only one allowlisted Walrus Memory `account` call qualifies for sponsorship.
 
 ### `POST /sponsor/execute`
 
@@ -255,7 +261,7 @@ Search for memories matching a natural language query. Returns decrypted plainte
 }
 ```
 
-`limit` defaults to `10`; the server caps it at `100`. `namespace` defaults to `"default"`. `scoring_weights` is optional; omit it to keep the plain cosine-distance order.
+`limit` defaults to `10`; the server caps it at `100`. `namespace` defaults to `"default"`. `scoring_weights` takes an optional object; omit it to keep the plain cosine-distance order.
 
 #### Scoring weights
 
