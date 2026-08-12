@@ -45,7 +45,7 @@ Every supported client runs the same local server, `npx -y @mysten-incubation/me
 ## Prerequisites
 
 - You need Node.js 20 or later, because the server runs through `npx` with no install step.
-- You need a Walrus Memory account. The first tool call triggers `memwal_login`, which opens a browser to connect your wallet, so config files carry no keys.
+- You need a Walrus Memory account. An unauthenticated memory-tool call returns sign-in instructions rather than signing you in, so ask the agent to run `memwal_login` and follow the URL it returns to connect your wallet. Config files carry no keys.
 
 ## Set up your client
 

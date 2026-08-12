@@ -91,6 +91,20 @@ if (!canonicalBlock) {
 }
 const canonicalServer = tryParseJson(canonicalBlock.body).mcpServers.memwal;
 
+// The README is a copy too, so anchor it to the package manifest. Without
+// this, a rename could leave the README and every docs page mutually
+// consistent and all of them wrong, with the check still passing.
+const mcpManifest = JSON.parse(readFileSync("packages/mcp/package.json", "utf8"));
+const mcpPackageName = mcpManifest.name;
+if (!canonicalServer.args?.includes(mcpPackageName)) {
+    console.error(
+        `${MCP_README}: the canonical mcpServers args [${(canonicalServer.args ?? []).join(", ")}] ` +
+            `do not name '${mcpPackageName}' from packages/mcp/package.json. ` +
+            `Update the README so the docs baseline matches the published package.`,
+    );
+    process.exit(2);
+}
+
 // ── Walk every docs page ───────────────────────────────────────────
 function markdownFiles(dir) {
     const found = [];

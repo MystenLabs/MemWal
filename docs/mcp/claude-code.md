@@ -39,7 +39,7 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
 
 - Install Node.js 20+ with `npx` on your `PATH`; check with `node --version`.
 - Use a Claude Code version with plugin support if you want the plugin install; the `/plugin` command confirms support, and MCP-only works on any version with `claude mcp add`.
-- Have a Walrus Memory account ready. The first memory tool call opens a browser sign-in (`memwal_login`), and you can create the account during that flow at [memory.walrus.xyz](https://memory.walrus.xyz). Config files carry no keys: credentials land in `~/.memwal/credentials.json` after sign-in.
+- Have a Walrus Memory account ready. An unauthenticated memory-tool call returns sign-in instructions rather than signing you in, so ask the agent to run `memwal_login` and open the URL it returns. You can create the account during that flow at [memory.walrus.xyz](https://memory.walrus.xyz). Config files carry no keys: credentials land in `~/.memwal/credentials.json` after sign-in.
 
 ## Installation
 
@@ -57,7 +57,7 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
         ```
       </Step>
       <Step title="Restart and sign in">
-        Restart Claude Code. On first use the agent runs `memwal_login`, which opens a browser to connect your wallet.
+        Restart Claude Code, then ask the agent to run `memwal_login` and open the URL it returns to connect your wallet.
       </Step>
     </Steps>
   </Tab>
@@ -139,7 +139,15 @@ Restart Claude Code first; MCP servers load at startup. If it still fails, run `
 Your Claude Code version predates plugin support. Update Claude Code, or use the MCP-only install; the memory tools behave the same, you only lose the automatic-memory hooks.
 
 **The browser sign-in cannot open (SSH, containers, headless machines).**
-`memwal_login` needs a browser. Sign in once on a desktop machine, then copy `~/.memwal/credentials.json` to the same path on the headless machine. For fully headless servers, the [headless setup guide](/sdk/headless-setup) covers credential-based configuration.
+`memwal_login` needs a browser. Sign in once on a desktop machine, then copy `~/.memwal/credentials.json` to the same path on the headless machine.
+
+That file holds the raw delegate private key, so treat it as a secret: transfer it over a secure channel such as `scp` rather than pasting it or sending it through chat, and restrict it on arrival.
+
+```sh
+$ chmod 600 ~/.memwal/credentials.json
+```
+
+For fully headless servers, the [headless setup guide](/sdk/headless-setup) covers credential-based configuration.
 
 **Signed in with the wrong account.**
 Ask the agent to run `memwal_logout`, which wipes `~/.memwal/credentials.json`, then run `memwal_login` again with the right wallet.
