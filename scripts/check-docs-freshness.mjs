@@ -106,13 +106,37 @@ const undocumentedByDesign = new Set([
     "/api/security-deletions",
     "/api/security-deletions/:batch_id",
     "/api/security-deletions/:batch_id/submit",
+    // Admin surface, gated by ADMIN_API_KEY rather than the signed-header
+    // auth the public reference describes. #525 scoped it out of that page.
+    "/api/admin/wallets",
+    "/api/admin/upload-errors",
+    "/api/admin/config",
+    // The OAuth consent flow the dashboard drives between /oauth/authorize
+    // and the redirect back to the client. The browser calls these with an
+    // opaque session id; no integrator writes against them, so the public
+    // surface is the OAuth endpoints themselves, which are documented.
+    "/api/oauth/session/:session_id",
+    "/api/oauth/session/:session_id/account",
+    "/api/oauth/session/:session_id/complete",
+    "/api/oauth/session/:session_id/cancel",
 ]);
+
+// RFC 9728 lets a resource publish its metadata at the bare well-known path
+// or at that path with the resource's own path appended. Both registrations
+// serve one documented resource, so documenting the bare form covers the
+// suffixed one.
+function wellKnownParent(route) {
+    const match = route.match(/^(\/\.well-known\/[^/]+)\/.+$/);
+    return match ? match[1] : null;
+}
 
 // A route counts as documented if any page mentions it in backticks.
 for (const route of sourceRouteSet) {
     if (undocumentedByDesign.has(route)) continue;
-    const documentedIn = docs.filter(
-        (doc) => doc.text.includes(`\`${route}\``) || doc.text.includes(` ${route}\``),
+    const parent = wellKnownParent(route);
+    const forms = parent ? [route, parent] : [route];
+    const documentedIn = docs.filter((doc) =>
+        forms.some((form) => doc.text.includes(`\`${form}\``) || doc.text.includes(` ${form}\``)),
     );
     if (documentedIn.length === 0) {
         fail(`registered route ${route} is not documented on any docs page`);
