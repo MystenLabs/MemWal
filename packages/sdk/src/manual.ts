@@ -46,6 +46,7 @@ import {
     u64ToLeHex,
     normalizeServerUrl,
     sanitizeServerError,
+    clockDriftErrorFromResponse,
     scoringWeightsToWire,
 } from "./utils.js";
 import { assertCompatibleRelayer, compatibilityErrorFromStatus } from "./compatibility.js";
@@ -879,6 +880,11 @@ export class MemWalManual {
             const raw = await res.text();
             const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
             if (compatibilityError) throw compatibilityError;
+
+            // Surface a stale-timestamp rejection (401 + x-auth-error) as an
+            // actionable clock-drift error rather than an opaque server error.
+            const clockDriftError = clockDriftErrorFromResponse(res);
+            if (clockDriftError) throw clockDriftError;
 
             const { message: sanitized, serverCode } = sanitizeServerError(res.status, raw);
             const err = new Error(sanitized) as Error & {
