@@ -533,6 +533,7 @@ pub async fn analyze(
                 account_id: account_id.clone(),
                 agent_public_key: Some(auth_pubkey_base.clone()),
                 remember_job_id: Some(job_id.clone()),
+                prepare_claim_token: None,
                 epochs: state.config.walrus_storage_epochs,
             },
         )

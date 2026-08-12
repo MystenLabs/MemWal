@@ -30,6 +30,7 @@ import base64
 import json
 import random
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
@@ -83,7 +84,8 @@ SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
 AUTH_REJECTED_MESSAGE = (
     "401 from relayer: typically wrong private key, key not registered on this "
     "account, account ID mismatch, or staging/mainnet mismatch. Check .env.local "
-    "and dashboard credentials."
+    "and dashboard credentials. Full troubleshooting: "
+    "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
 
 
@@ -222,6 +224,9 @@ class MemWal:
         self._session_build_task: Optional[asyncio.Task[str]] = None
         self._relayer_version_metadata: Optional[Dict[str, Any]] = None
         self._compatibility_lock: Optional[asyncio.Lock] = None
+        # Preserve a generated key across an ambiguous transport failure. A
+        # subsequent identical call then collapses onto the accepted paid job.
+        self._pending_remember_keys: Dict[str, str] = {}
 
     @classmethod
     def create(
@@ -280,7 +285,10 @@ class MemWal:
     # ============================================================
 
     async def remember(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
         """Submit a remember request and return as soon as the server accepts it.
 
@@ -298,12 +306,27 @@ class MemWal:
             :class:`RememberAcceptedResult` with ``job_id`` and initial
             status (``"pending"``).
         """
+        resolved_namespace = namespace or self._namespace
+        request_identity = f"{resolved_namespace}\0{text}"
+        generated_key = idempotency_key is None
+        resolved_key = idempotency_key or self._pending_remember_keys.get(request_identity)
+        if resolved_key is None:
+            resolved_key = str(uuid.uuid4())
+        if generated_key:
+            self._pending_remember_keys[request_identity] = resolved_key
+
         data = await self._signed_request(
             "POST",
             "/api/remember",
-            {"text": text, "namespace": namespace or self._namespace},
+            {
+                "text": text,
+                "namespace": resolved_namespace,
+                "idempotency_key": resolved_key,
+            },
             accepted_statuses=(200, 202),
         )
+        if generated_key:
+            self._pending_remember_keys.pop(request_identity, None)
         return RememberAcceptedResult(
             job_id=data["job_id"],
             status=data.get("status", "pending"),
@@ -311,9 +334,12 @@ class MemWal:
 
     # Alias for parity with TS SDK ``rememberAsync``.
     async def remember_async(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
-        return await self.remember(text, namespace)
+        return await self.remember(text, namespace, idempotency_key)
 
     async def wait_for_remember_job(
         self,
@@ -379,6 +405,7 @@ class MemWal:
         namespace: Optional[str] = None,
         poll_interval_ms: int = 1500,
         timeout_ms: int = 60_000,
+        idempotency_key: Optional[str] = None,
     ) -> RememberResult:
         """Submit a remember and wait for the background worker to finish.
 
@@ -387,12 +414,24 @@ class MemWal:
         ``failed``). Mirrors TS ``rememberAndWait``.
         """
 
-        accepted = await self.remember(text, namespace)
-        return await self.wait_for_remember_job(
+        resolved_namespace = namespace or self._namespace
+        request_identity = f"{resolved_namespace}\0{text}"
+        generated_key = idempotency_key is None
+        resolved_key = idempotency_key or self._pending_remember_keys.get(request_identity)
+        if resolved_key is None:
+            resolved_key = str(uuid.uuid4())
+        if generated_key:
+            self._pending_remember_keys[request_identity] = resolved_key
+
+        accepted = await self.remember(text, resolved_namespace, resolved_key)
+        result = await self.wait_for_remember_job(
             accepted.job_id,
             poll_interval_ms=poll_interval_ms,
             timeout_ms=timeout_ms,
         )
+        if generated_key:
+            self._pending_remember_keys.pop(request_identity, None)
+        return result
 
     # ============================================================
     # Bulk remember (ENG-1408)
@@ -784,22 +823,30 @@ class MemWal:
           do **not** count as either restored or skipped.
         * ``total`` — count of on-chain blobs the relayer saw for
           ``(owner, namespace)`` before the limit was applied.
+        * ``truncated`` — True when this restore is known-incomplete (limit
+          truncation or an upstream on-chain candidate-fetch cap; see
+          :class:`~memwal.types.RestoreResult`). Defaults to ``False`` when
+          talking to a relayer older than WALM-319 that omits the field.
 
         Args:
             namespace: Namespace to restore. Exact match — no prefix or
                 hierarchy semantics (see SKILL.md "Namespace Semantics").
             limit: Max blobs the relayer will *inspect* this call (default:
                 10, matches the server-side default and the TypeScript SDK).
-                The relayer fetches blobs newest-first and caps the work at
-                this number; it does **not** cap ``restored`` separately.
+                The relayer selects up to this many missing blobs from the
+                candidates it sees, in unspecified order; it does **not** cap
+                ``restored`` separately.
 
         Returns:
             :class:`RestoreResult`.
 
         Notes:
-            * **No pagination cursor** — restore is single-shot. To rebuild a
-              large namespace, call repeatedly with a growing ``limit`` or
-              prune the local index first.
+            * **No pagination cursor** — restore is single-shot. A larger
+              ``limit`` may help when ``truncated`` is caused by the request
+              limit, but candidate discovery also has a per-owner source cap
+              shared across namespaces. Hitting that cap requires cursor/
+              pagination support for guaranteed full recovery; increasing
+              ``limit`` or retrying cannot guarantee it.
             * **Performance** scales linearly in ``limit``: up to 10 Walrus
               downloads in parallel, then 3 SEAL decrypts in parallel, then
               embeddings. Expect seconds-per-blob on cold caches.
@@ -814,6 +861,10 @@ class MemWal:
             total=data["total"],
             namespace=data["namespace"],
             owner=data["owner"],
+            # Relayers older than WALM-319 omit `truncated` entirely --
+            # treat "not present" as "not known to be truncated" rather
+            # than require every relayer version to send it.
+            truncated=data.get("truncated", False),
         )
 
     async def health(self) -> HealthResult:
@@ -1272,16 +1323,22 @@ class MemWalSync:
             return asyncio.run(coro)
 
     def remember(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
         """Synchronous version of :meth:`MemWal.remember` (async accept)."""
-        return self._run(self._inner.remember(text, namespace))
+        return self._run(self._inner.remember(text, namespace, idempotency_key))
 
     # Alias for parity with TS SDK ``rememberAsync``.
     def remember_async(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
-        return self._run(self._inner.remember_async(text, namespace))
+        return self._run(self._inner.remember_async(text, namespace, idempotency_key))
 
     def wait_for_remember_job(
         self,
@@ -1304,6 +1361,7 @@ class MemWalSync:
         namespace: Optional[str] = None,
         poll_interval_ms: int = 1500,
         timeout_ms: int = 60_000,
+        idempotency_key: Optional[str] = None,
     ) -> RememberResult:
         """Synchronous version of :meth:`MemWal.remember_and_wait`."""
         return self._run(
@@ -1312,6 +1370,7 @@ class MemWalSync:
                 namespace,
                 poll_interval_ms=poll_interval_ms,
                 timeout_ms=timeout_ms,
+                idempotency_key=idempotency_key,
             )
         )
 

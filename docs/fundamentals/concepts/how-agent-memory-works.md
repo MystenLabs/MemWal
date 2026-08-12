@@ -58,7 +58,33 @@ It helps to think of an agent as having two layers of memory, much as people do.
 
 Long-term memory for agents is usually semantic, which means the agent stores and retrieves by meaning rather than by exact keywords. The mechanism behind it is embeddings and vector search. When you store a piece of text, an embedding model converts it into a vector, a list of numbers that captures its meaning, so that two texts about the same idea end up close together even when they share no words. The store saves that vector alongside the original text. Later, when the agent needs context, it embeds the query the same way, and the store returns the entries whose vectors sit closest to the query, ranked by similarity. The agent adds those retrieved memories to its context window and answers with them in hand, which is the retrieve-then-answer pattern at the core of retrieval-augmented generation.
 
+### Writing a memory
+
+<figure>
+  <iframe src="/diagrams/interactive_agent-memory-write_v1.html"
+    style={{width:'100%',height:'620px',border:'0'}}
+    title="Writing a memory: an embedding model converts the text into a vector. The vector store keeps that vector alongside the original text, so the store can search the vector by meaning and the agent can read the text back."
+    loading="lazy"></iframe>
+  <figcaption>
+    Writing a memory: an embedding model converts the text into a vector, a list of numbers representing its meaning. The vector goes into a vector store that finds nearest neighbors quickly, and the store keeps the original text alongside it. You search the vector, but the agent reads the text.
+  </figcaption>
+</figure>
+
+### Recalling a memory
+
+<figure>
+  <iframe src="/diagrams/interactive_agent-memory-recall_v1.html"
+    style={{width:'100%',height:'480px',border:'0'}}
+    title="Recalling a memory: the same embedding model converts the question into a vector in the same space. The vector store searches for the nearest vectors, returns the top matching memories, and adds their original text to the agent's context window."
+    loading="lazy"></iframe>
+  <figcaption>
+    Recalling a memory: the same embedding model converts the question into a vector so it lands in the same space as the stored memories. The store ranks stored vectors by distance, and the closest ones are the most similar in meaning even when they share no words with the question. The agent adds their original text to its context window.
+  </figcaption>
+</figure>
+
 Semantic recall is what lets an agent answer "How are session tokens issued?" from a memory written as "createSession signs a JWT with a 30-minute TTL," even though the two share almost no words. The embeddings encode meaning, so the match is by concept rather than by string.
+
+### Kinds of long-term memory
 
 Not every memory is a conversation turn. Agents accumulate a few different kinds of long-term memory. Semantic memory is general knowledge and facts, such as how a system works or a user's preferences. Episodic memory is a record of what happened, including past conversations, actions taken, and their outcomes. Procedural memory is how to do things, from reusable steps to learned routines. A single store can hold all three, as long as each item stays individually retrievable by meaning.
 

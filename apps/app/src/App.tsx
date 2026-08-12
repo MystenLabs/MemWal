@@ -28,9 +28,11 @@ import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
 import Dashboard from './pages/Dashboard'
+import AdminDashboard from './pages/AdminDashboard'
 import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
+import ConnectClaude from './pages/ConnectClaude'
 import { useRouteAnalytics } from './hooks/useRouteAnalytics'
 
 
@@ -247,22 +249,33 @@ function RoutePending() {
  *  can resume after the Google OAuth redirect bounces through the app root.
  *  Shared with ConnectMcp.tsx (kept as a literal there to avoid a circular import). */
 const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
+const CLAUDE_CONNECT_STORAGE_KEY = 'memwal_claude_connect'
+
+function consumePendingConnectQuery(storageKey: string): string {
+  const pending = sessionStorage.getItem(storageKey)
+  if (!pending) return ''
+
+  // Consume once — prevents a redirect loop on later visits to `/`.
+  sessionStorage.removeItem(storageKey)
+  try {
+    const params = JSON.parse(pending) as Record<string, string>
+    return new URLSearchParams(params).toString()
+  } catch {
+    return ''
+  }
+}
 
 /** Lands here after a successful sign-in (the OAuth redirect_uri is the app
- *  root). If a /connect/mcp flow was interrupted by that redirect, resume it
- *  by restoring the saved query string; otherwise go to the dashboard. */
+ *  root). Resume an interrupted hosted Claude or local MCP connection by
+ *  restoring its saved query string; otherwise go to the dashboard. */
 function PostAuthRedirect() {
-  const pending = sessionStorage.getItem(MCP_CONNECT_STORAGE_KEY)
-  let connectQuery = ''
-  if (pending) {
-    // Consume once — prevents a redirect loop on later visits to `/`.
-    sessionStorage.removeItem(MCP_CONNECT_STORAGE_KEY)
-    try {
-      const params = JSON.parse(pending) as Record<string, string>
-      connectQuery = new URLSearchParams(params).toString()
-    } catch { /* fall through to dashboard */ }
+  const claudeConnectQuery = consumePendingConnectQuery(CLAUDE_CONNECT_STORAGE_KEY)
+  if (claudeConnectQuery) {
+    return <Navigate to={`/connect/claude?${claudeConnectQuery}`} replace />
   }
-  if (connectQuery) return <Navigate to={`/connect/mcp?${connectQuery}`} replace />
+
+  const mcpConnectQuery = consumePendingConnectQuery(MCP_CONNECT_STORAGE_KEY)
+  if (mcpConnectQuery) return <Navigate to={`/connect/mcp?${mcpConnectQuery}`} replace />
   return <Navigate to="/dashboard" replace />
 }
 
@@ -291,6 +304,8 @@ function AppContent() {
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       )} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
+      <Route path="/connect/claude" element={<ConnectClaude />} />
+      <Route path="/admin" element={<AdminDashboard />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

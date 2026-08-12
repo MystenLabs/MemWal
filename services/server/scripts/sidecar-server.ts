@@ -20,7 +20,8 @@
  * Endpoints:
  *   GET  /health                     → local liveness (no auth)
  *   GET  /ready                      → Sui/Walrus execution identity + limits (no auth)
- *   GET  /metrics/wallet             → wallet-execution counters (no auth)
+ *   GET  /metrics/wallet             → aggregate wallet-execution metrics (no auth)
+ *   GET  /internal/wallet-balances   → per-wallet balances (sidecar auth)
  *   /mcp/*                           → MCP session routes (own auth; see mcp/)
  *   POST /seal/encrypt               → { data, owner, packageId, accountId } → { encryptedData }
  *   POST /migration/seal/encrypt     → migration-only inactive-account encryption

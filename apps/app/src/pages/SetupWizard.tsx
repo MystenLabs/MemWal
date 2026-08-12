@@ -30,9 +30,30 @@ const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_ERROR = `this wallet already has ${MAX_DELEGATE_KEYS} delegate keys. go to the dashboard, remove an old key, then create a new delegate key.`
 
 const AUTH_METHOD_KEY = 'memwal_auth_method'
+const CLAUDE_CONNECT_STORAGE_KEY = 'memwal_claude_connect'
+const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
 
 function getPersistedAuthMethod(): string | null {
     return sessionStorage.getItem(AUTH_METHOD_KEY)
+}
+
+function consumePendingConnectPath(): string {
+    for (const [storageKey, path] of [
+        [CLAUDE_CONNECT_STORAGE_KEY, '/connect/claude'],
+        [MCP_CONNECT_STORAGE_KEY, '/connect/mcp'],
+    ] as const) {
+        const pending = sessionStorage.getItem(storageKey)
+        if (!pending) continue
+        sessionStorage.removeItem(storageKey)
+        try {
+            const params = JSON.parse(pending) as Record<string, string>
+            const query = new URLSearchParams(params).toString()
+            return query ? `${path}?${query}` : path
+        } catch {
+            return ''
+        }
+    }
+    return ''
 }
 
 function isMaxDelegateKeysError(err: unknown): boolean {
@@ -105,7 +126,8 @@ export default function SetupWizard() {
     useEffect(() => {
         if (step === 'done') {
             sessionStorage.removeItem(AUTH_METHOD_KEY)
-            const timer = setTimeout(() => navigate('/dashboard'), 1500)
+            const returnTo = consumePendingConnectPath()
+            const timer = setTimeout(() => navigate(returnTo || '/dashboard'), 1500)
             return () => clearTimeout(timer)
         }
     }, [step, navigate])

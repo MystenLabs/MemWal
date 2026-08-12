@@ -1,5 +1,16 @@
 # memwal
 
+## 0.1.6
+
+### Added
+
+- Added flush helpers for pending middleware auto-saves.
+- Added `truncated` to restore results for incomplete recovery.
+
+### Fixed
+
+- Linked `AUTH_REJECTED` errors to troubleshooting guidance.
+
 ## 0.1.5
 
 ### Added

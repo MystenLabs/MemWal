@@ -13,6 +13,7 @@ import {
     isWalrusObjectLockEquivocation,
 } from "../walrus-error-detection.js";
 import {
+    ENOKI_FALLBACK_TO_DIRECT_SIGN,
     ENOKI_INVALIDATED_BASE_DELAY_MS,
     ENOKI_INVALIDATED_MAX_ATTEMPTS,
     ENOKI_INVALIDATED_MAX_DELAY_MS,
@@ -31,6 +32,14 @@ export const DURABLE_WALLET_FALLBACK_POLICY: EnokiFallbackPolicy = {
     // never submit a second transaction after an ambiguous response.
     directSignIfUnconfigured: true,
     directSignAfterSponsorFailure: false,
+    gasMode: "addressBalance",
+};
+
+// Legacy uploads are not journaled, so preserve their configured direct-sign
+// fallback while ensuring every transaction uses address balances.
+export const ADDRESS_BALANCE_WALLET_FALLBACK_POLICY: EnokiFallbackPolicy = {
+    directSignIfUnconfigured: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    directSignAfterSponsorFailure: ENOKI_FALLBACK_TO_DIRECT_SIGN,
     gasMode: "addressBalance",
 };
 

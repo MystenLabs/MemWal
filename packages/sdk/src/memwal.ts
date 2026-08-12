@@ -189,6 +189,13 @@ export class MemWal {
     private sessionBuildPromise: Promise<string> | null = null;
     /** Single-flight guard so concurrent requests share one compatibility probe. */
     private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
+    /**
+     * Keep a generated idempotency key while a remember request has no
+     * acknowledged response. If the transport times out after the server
+     * accepted the write, the caller's next identical attempt reuses the key
+     * and collapses onto the original paid job.
+     */
+    private pendingRememberKeys = new Map<string, string>();
 
     private constructor(config: MemWalConfig) {
         this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
@@ -227,6 +234,7 @@ export class MemWal {
         this.serverConfig = null;
         this.relayerVersionMetadata = null;
         this.compatibilityPromise = null;
+        this.pendingRememberKeys.clear();
     }
 
     // ============================================================
@@ -236,13 +244,27 @@ export class MemWal {
     /**
      * Submit a remember request and return as soon as the server accepts the job.
      */
-    async rememberAsync(text: string, namespace?: string): Promise<RememberAcceptedResult> {
-        return this.signedRequest<RememberAcceptedResult>(
+    async rememberAsync(
+        text: string,
+        namespace?: string,
+        options: { idempotencyKey?: string } = {},
+    ): Promise<RememberAcceptedResult> {
+        const resolvedNamespace = namespace ?? this.namespace;
+        const requestIdentity = `${resolvedNamespace}\0${text}`;
+        const generatedKey = options.idempotencyKey === undefined;
+        const idempotencyKey = options.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? crypto.randomUUID();
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
+
+        const accepted = await this.signedRequest<RememberAcceptedResult>(
             "POST",
             "/api/remember",
-            { text, namespace: namespace ?? this.namespace },
+            { text, namespace: resolvedNamespace, idempotency_key: idempotencyKey },
             [200, 202],
         );
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
+        return accepted;
     }
 
     /**
@@ -340,10 +362,22 @@ export class MemWal {
     async rememberAndWait(
         text: string,
         namespace?: string,
-        opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
+        opts: { pollIntervalMs?: number; timeoutMs?: number; idempotencyKey?: string } = {},
     ): Promise<RememberResult> {
-        const accepted = await this.rememberAsync(text, namespace);
-        return this.waitForRememberJob(accepted.job_id, opts);
+        const resolvedNamespace = namespace ?? this.namespace;
+        const requestIdentity = `${resolvedNamespace}\0${text}`;
+        const generatedKey = opts.idempotencyKey === undefined;
+        const idempotencyKey = opts.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? crypto.randomUUID();
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
+
+        const accepted = await this.rememberAsync(text, resolvedNamespace, { idempotencyKey });
+        const completed = await this.waitForRememberJob(accepted.job_id, opts);
+        // Clear only after terminal success. A polling timeout/transport failure
+        // keeps the key so retrying the high-level operation reuses the same job.
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
+        return completed;
     }
 
     /**
@@ -355,8 +389,12 @@ export class MemWal {
      * @param text - The text to remember
      * @param namespace - Optional namespace override
      */
-    async remember(text: string, namespace?: string): Promise<RememberAcceptedResult> {
-        return this.rememberAsync(text, namespace);
+    async remember(
+        text: string,
+        namespace?: string,
+        options: { idempotencyKey?: string } = {},
+    ): Promise<RememberAcceptedResult> {
+        return this.rememberAsync(text, namespace, options);
     }
 
     /**
@@ -777,13 +815,16 @@ export class MemWal {
      * - `total` — on-chain blobs the relayer saw for `(owner, namespace)`
      *   before the limit was applied.
      *
-     * **`limit`** caps the *number of blobs the relayer inspects*, newest
-     * first. It is not a cap on `restored` directly. The server default is
-     * `10` (matches the SDK default).
+     * **`limit`** caps the *number of missing blobs the relayer selects* from
+     * the candidates it sees, in unspecified order. It is not a cap on
+     * `restored` directly. The server default is `10` (matches the SDK
+     * default).
      *
-     * **No pagination cursor** — restore is single-shot. To rebuild a large
-     * namespace, call repeatedly with a growing `limit` or prune the local
-     * index first.
+     * **No pagination cursor** — restore is single-shot. A larger `limit` may
+     * help when `truncated` is caused by the request limit, but candidate
+     * discovery also has a per-owner source cap shared across namespaces.
+     * Hitting that cap requires cursor/pagination support for guaranteed full
+     * recovery; increasing `limit` or retrying cannot guarantee it.
      *
      * **Performance** scales linearly in `limit`: up to 10 Walrus downloads
      * in parallel, then 3 SEAL decrypts in parallel, then embeddings.
@@ -800,10 +841,14 @@ export class MemWal {
      * ```
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
-        return this.signedRequest<RestoreResult>("POST", "/api/restore", {
+        const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,
         });
+        // Relayers older than WALM-319 omit `truncated` entirely — treat
+        // "not present" as "not known to be truncated" rather than drop
+        // the field or require every relayer version to send it.
+        return { ...result, truncated: result.truncated ?? false };
     }
 
     /**

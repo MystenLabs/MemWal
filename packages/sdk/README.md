@@ -59,11 +59,27 @@ await memwal.restore("demo");
 
 If you are self-hosting the relayer and do not have an account ID yet, see [Self-Hosting](../../docs/relayer/self-hosting.md) for the account creation and delegate key setup flow.
 
+## Offline tests and CI
+
+`MemWalMock` implements the core async memory API entirely in memory. It requires no key, account, relayer, chain, or paid storage and uses deterministic token-overlap ranking.
+
+```ts
+import { MemWalMock } from "@mysten-incubation/memwal";
+
+const memwal = MemWalMock.create({ namespace: "test-user" });
+await memwal.rememberAndWait("The user prefers dark mode");
+
+const result = await memwal.recall({ query: "display preference" });
+expect(result.results[0].text).toContain("dark mode");
+```
+
+The mock supports remember/job polling, bulk remember, recall, analyze, embed, health, restore, `forget(blobId)`, and `clear(namespace?)`. For deterministic behavior, `analyze` stores its full input as one fact instead of invoking an LLM extractor. Its simple relevance score is for application tests, not production search-quality evaluation.
+
 ## Exports
 
 | Entry | Description |
 |---|---|
-| `@mysten-incubation/memwal` | Default client (`MemWal`). The relayer handles embedding, encryption, Walrus upload/download, retrieval, and restore. |
+| `@mysten-incubation/memwal` | Default client (`MemWal`) and offline test client (`MemWalMock`). The production client delegates embedding, encryption, storage, retrieval, and restore to the relayer. |
 | `@mysten-incubation/memwal/manual` | Manual client flow (`MemWalManual`). You handle embedding calls and local SEAL operations. The relayer still handles upload relay, registration, search, and restore. |
 | `@mysten-incubation/memwal/ai` | Vercel AI SDK integration - wraps `MemWal` as middleware for use with `streamText`, `generateText`, etc. |
 
