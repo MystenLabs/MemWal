@@ -882,8 +882,25 @@ async fn main() {
     ));
 
     // Shared application state
+    // Dedicated pool for per-job upload advisory locks (see AppState docs). Sized
+    // to the wallet-job concurrency (+1 headroom) so every concurrent upload can
+    // hold its own lock connection without touching the request-serving pool. Read
+    // WALLET_JOB_CONCURRENCY here independently of the worker registration below.
+    let wallet_lock_pool_size = std::env::var("WALLET_JOB_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(8)
+        .saturating_add(1)
+        .max(2);
+    let wallet_lock_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(wallet_lock_pool_size)
+        .connect(&config.database_url)
+        .await
+        .expect("Failed to create wallet advisory-lock pool");
+
     let state = Arc::new(AppState {
         db,
+        wallet_lock_pool,
         legacy_db,
         security_delete_nonce_store,
         security_delete_wallet_verifier,

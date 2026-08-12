@@ -115,6 +115,12 @@ pub struct AppState {
     /// `Arc` so the `MemoryEngine` impl can share the same handle rather
     /// than duplicating the pool.
     pub db: Arc<VectorDb>,
+    /// Small dedicated pool used ONLY to hold a per-job `pg_advisory_lock`
+    /// across an upload job's guard-read → mint → persist critical section, so
+    /// two concurrent attempts of the same job can't both mint a paid blob. Kept
+    /// separate from `db` so that holding a connection for the (up to 5-minute)
+    /// upload duration never starves the request-serving pool.
+    pub wallet_lock_pool: sqlx::PgPool,
     /// Isolated old-V1 database. Present only when at least one tracked
     /// security-delete component is enabled.
     pub legacy_db: Option<Arc<crate::storage::legacy_db::LegacyDb>>,
@@ -858,6 +864,12 @@ pub struct RememberRequest {
     /// Namespace for memory isolation (default: "default")
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional client-supplied idempotency key. When set, a retry with the
+    /// same key (for the same owner) collapses onto the original job instead of
+    /// minting a new one — so an ambiguous timeout can't produce a duplicate
+    /// paid on-chain blob. Omit for the default (each request is independent).
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 // ============================================================
@@ -1585,6 +1597,9 @@ pub enum AppError {
     RateLimited(String),
     /// Storage quota exceeded (HTTP 402)
     QuotaExceeded(String),
+    /// Request conflicts with existing state (HTTP 409) — e.g. an idempotency
+    /// key reused for a request with different content.
+    Conflict(String),
     /// upstream LLM/embedding provider returned a transient failure
     /// (gateway timeout / connection reset / "200 OK" wrapping an
     /// `{"error":{"code":504}}` envelope from OpenRouter). Maps to HTTP 503
@@ -1602,6 +1617,7 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
             AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
+            AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
             AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
             AppError::QuotaExceeded(msg) => write!(f, "Quota Exceeded: {}", msg),
             AppError::UpstreamUnavailable(msg) => write!(f, "Upstream Unavailable: {}", msg),
@@ -1632,6 +1648,7 @@ impl axum::response::IntoResponse for AppError {
                 )
             }
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
+            AppError::Conflict(msg) => (axum::http::StatusCode::CONFLICT, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
             AppError::UpstreamUnavailable(msg) => {
@@ -1666,6 +1683,7 @@ impl AppError {
             AppError::Unauthorized(_) => "unauthorized",
             AppError::Internal(_) => "internal",
             AppError::BlobNotFound(_) => "blob_not_found",
+            AppError::Conflict(_) => "conflict",
             AppError::RateLimited(_) => "rate_limited",
             AppError::QuotaExceeded(_) => "quota_exceeded",
             AppError::UpstreamUnavailable(_) => "upstream_unavailable",
