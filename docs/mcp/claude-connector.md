@@ -66,8 +66,8 @@ The OAuth path and the header path reach the same tools through the same relayer
 
 | **Environment** | **Connector URL** |
 | --- | --- |
-| Production (mainnet) | `https://relayer.memory.walrus.xyz/api/mcp` |
-| Staging (testnet) | `https://relayer-staging.memory.walrus.xyz/api/mcp` |
+| Production (Mainnet) | `https://relayer.memory.walrus.xyz/api/mcp` |
+| Staging (Testnet) | `https://relayer-staging.memory.walrus.xyz/api/mcp` |
 | Dev | `https://relayer.dev.memwal.ai/api/mcp` |
 
 ## Add the connector
