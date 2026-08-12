@@ -59,7 +59,7 @@ Your agent needs no Sui wallet of its own, no bridge, no wrapped token, and no c
 
 ## Use an SDK
 
-For agents in TypeScript or Python, the SDK handles request signing, the encryption session, and retries:
+For agents in TypeScript or Python, the SDK signs each request, builds and caches the Seal session key, and polls asynchronous jobs for you:
 
 ```ts
 import { MemWal } from "@mysten-incubation/memwal";
@@ -100,6 +100,24 @@ Send the result as hex in these headers:
 | `x-account-id` | The account object ID. Official SDKs always send it and include it in the signed message |
 
 The relayer verifies the signature, then resolves the owner by looking up your public key in the account's onchain delegate keys. For every route, request shape, and response shape, see the [Relayer API Reference](/relayer/api-reference).
+
+### Reads need a Seal credential too
+
+Signed headers authenticate the caller, but they do not decrypt anything. The routes that return stored memories, `/api/recall`, `/api/ask`, and `/api/restore`, also need a Seal credential, and the relayer rejects the call without one:
+
+```text
+SEAL credential required (x-seal-session, x-delegate-key, or SERVER_SUI_PRIVATE_KEY)
+```
+
+Supply it one of three ways:
+
+| **Credential** | **How it works** |
+|---|---|
+| `x-seal-session` | A base64 exported Seal `SessionKey`. The official SDKs build, cache, and send this, and it is the path to follow for new clients |
+| `x-delegate-key` | The legacy delegate private key header. Deprecated, and it hands the relayer your key |
+| Server fallback | A relayer configured with `SERVER_SUI_PRIVATE_KEY` decrypts on its own key, so the client sends neither header |
+
+A client that sends only the five signed headers authenticates successfully and then fails to decrypt, which is the failure to expect if recall returns nothing usable. Building a `SessionKey` outside the SDK means implementing the Seal client flow yourself, so plan for that work before choosing the direct path for reads. Writes through `/api/remember` do not need it.
 
 Confirm the agent reaches the relayer before you debug signing, using the unauthenticated health route:
 
