@@ -1,10 +1,10 @@
-# Migration ceremony GitHub Environments
+## Migration ceremony GitHub Environments
 
 Migration workflows are gated by four static GitHub Environments:
 
 | Environment                                  | Workflows                                 | Authorization boundary                                            |
 | -------------------------------------------- | ----------------------------------------- | ----------------------------------------------------------------- |
-| `walrus-memory-migration-governance-mainnet` | publish, create caps, burn caps, finalize | Required reviewer before unsigned transaction artifacts are built |
+| `walrus-memory-migration-governance-mainnet` | publish, create caps, burn caps, finalize | Required reviewer before the workflow builds unsigned transaction artifacts |
 | `walrus-memory-migration-governance-testnet` | same, on testnet                          | Required reviewer                                                 |
 | `walrus-memory-migration-funding-mainnet`    | fund distribution                         | Required reviewer before the hot funder key is exposed            |
 | `walrus-memory-migration-funding-testnet`    | fund distribution                         | Required reviewer before the hot funder key is exposed            |
@@ -16,7 +16,7 @@ Each environment must:
 3. disable administrator bypass; and
 4. keep migration/funder secrets environment-scoped rather than repository-scoped.
 
-The environments were configured through the GitHub API. Run the following before every ceremony and after repository administration changes:
+Configure the environments through the GitHub API. Run the following before every ceremony and after repository administration changes:
 
 ```bash
 GH_TOKEN="$(gh auth token)" \
