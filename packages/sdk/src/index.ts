@@ -25,6 +25,13 @@ export {
 // Delegate key utilities (no @mysten/sui dependency)
 export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
 export {
+    estimateTokens,
+    truncateToTokenBudget,
+    applyTokenBudget,
+    CHARS_PER_TOKEN,
+} from "./tokens.js";
+export type { TokenCounter } from "./tokens.js";
+export {
     createSponsorAuthorization,
     sponsorAuthorizationMessage,
 } from "./sponsor-auth.js";
@@ -43,6 +50,8 @@ export type {
     RecallMemory,
     RecallOptions,
     RecallParams,
+    RecallTokenMeta,
+    TruncationStrategy,
     ScoringWeights,
     EmbedResult,
     AnalyzeOptions,
