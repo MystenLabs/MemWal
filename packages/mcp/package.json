@@ -36,7 +36,6 @@
     },
     "files": [
         "dist",
-        "plugin",
         "README.md"
     ],
     "keywords": [

@@ -4,6 +4,10 @@ Walrus Memory MCP is a stdio Model Context Protocol server for Walrus Memory. It
 
 On first use, the package advertises a `memwal_login` tool to the MCP client. The agent can call it inline — no separate CLI command needed. The tool opens a browser-based wallet login flow and stores local credentials at `~/.memwal/credentials.json`. A matching `memwal_logout` tool clears the saved credentials.
 
+## Source and release ownership
+
+This directory is the canonical source for the `@mysten-incubation/memwal-mcp` SDK, its tests, versioning, and npm releases. The Claude Code marketplace package is maintained separately in [`CommandOSSLabs/walrus-memory-mcp-plugin`](https://github.com/CommandOSSLabs/walrus-memory-mcp-plugin) for transfer to MystenLabs. The npm package intentionally ships the MCP runtime only and does not bundle a second copy of the marketplace plugin.
+
 ## Quick Start
 
 Add Walrus Memory MCP to your MCP client config:
