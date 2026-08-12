@@ -144,6 +144,27 @@ test("inactive accounts fail before encryption", async () => {
     assert.equal(encryptCalls.length, 0);
 });
 
+test("manual remember base64-encodes large ciphertext without argument spread overflow", async () => {
+    const { manual } = manualWithAccountResponse({});
+    const encrypted = Uint8Array.from({ length: 256 * 1024 }, (_, index) => index % 256);
+    let request;
+
+    manual.embed = async () => [0.25, 0.75];
+    manual.sealEncrypt = async () => encrypted;
+    manual.signedRequest = async (method, path, body) => {
+        request = { method, path, body };
+        return { blob_id: "large-blob" };
+    };
+
+    await manual.rememberManual("large memory", "large-namespace");
+
+    assert.equal(request.method, "POST");
+    assert.equal(request.path, "/api/remember/manual");
+    assert.equal(request.body.namespace, "large-namespace");
+    assert.deepEqual(request.body.vector, [0.25, 0.75]);
+    assert.deepEqual(Buffer.from(request.body.encrypted_data, "base64"), Buffer.from(encrypted));
+});
+
 test("manual recall skips a foreign ciphertext package before fetching keys", async () => {
     const { manual } = manualWithAccountResponse({});
     let fetchCalls = 0;
