@@ -444,10 +444,11 @@ export class MemWalManual {
                 continue;
             }
             if (normalizeSuiAddress(parsed.packageId) !== immutablePackageId) {
-                throw new Error(
-                    `MemWalManual: ciphertext ${blob.blob_id} packageId does not match ` +
+                console.error(
+                    `[MemWalManual] Skipping ciphertext ${blob.blob_id}: packageId does not match ` +
                         "the configured immutable packageId"
                 );
+                continue;
             }
             parsedBlobs.push({ ...blob, parsed });
         }
