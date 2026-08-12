@@ -1,0 +1,91 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { MemWal } from "../dist/memwal.js";
+
+// End-to-end coverage of the recall() wiring (not just the pure applyTokenBudget
+// function): confirms maxTokens is honored on the real client path and that
+// omitting it leaves the response byte-identical to the pre-budget behavior.
+
+const originalFetch = globalThis.fetch;
+
+test.afterEach(() => {
+    globalThis.fetch = originalFetch;
+});
+
+// Stub the relayer so /api/recall returns a fixed set of hits.
+function stubRecall(hits) {
+    globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/version") {
+            return Response.json({
+                apiVersion: "1.0.0",
+                relayerVersion: "1.0.0",
+                minSupportedSdk: { typescript: "0.0.4" },
+            });
+        }
+        if (path === "/api/config") {
+            return Response.json({ packageId: "0x1", network: "testnet" });
+        }
+        if (path === "/api/recall" && init.method === "POST") {
+            return Response.json({ results: hits, total: hits.length });
+        }
+        throw new Error(`unexpected request ${path}`);
+    };
+}
+
+function client() {
+    const c = MemWal.create({
+        key: new Uint8Array(32).fill(1),
+        accountId: "0x1",
+        serverUrl: "https://relayer.example",
+    });
+    c.buildSealSession = async () => "test-session";
+    return c;
+}
+
+const chars = (n) => "a".repeat(n);
+
+test("recall without maxTokens: response unchanged, NO meta (backward compatible)", async () => {
+    const hits = [
+        { blob_id: "b1", text: chars(40), distance: 0.1 },
+        { blob_id: "b2", text: chars(40), distance: 0.2 },
+    ];
+    stubRecall(hits);
+
+    const result = await client().recall({ query: "x", namespace: "default" });
+    assert.equal(result.results.length, 2);
+    assert.equal(result.total, 2);
+    assert.equal("meta" in result, false, "no meta key when maxTokens is omitted");
+    assert.deepEqual(result.results, hits);
+});
+
+test("recall with maxTokens: budget applied, total recomputed, meta present", async () => {
+    // two 10-token hits (40 chars each); budget 10 → high-relevance-only keeps 1.
+    const hits = [
+        { blob_id: "b1", text: chars(40), distance: 0.1 },
+        { blob_id: "b2", text: chars(40), distance: 0.2 },
+    ];
+    stubRecall(hits);
+
+    const result = await client().recall({ query: "x", maxTokens: 10 });
+    assert.equal(result.results.length, 1, "second hit dropped to fit budget");
+    assert.equal(result.total, 1, "total recomputed to the trimmed count");
+    assert.equal(result.results[0].blob_id, "b1", "kept the lowest-distance hit");
+    assert.ok(result.meta, "meta attached");
+    assert.equal(result.meta.truncated, true);
+    assert.equal(result.meta.tokenEstimate, 10);
+});
+
+test("recall maxTokens + maxDistance compose (distance filter then budget)", async () => {
+    const hits = [
+        { blob_id: "b1", text: chars(40), distance: 0.1 },
+        { blob_id: "b2", text: chars(40), distance: 0.9 }, // filtered by maxDistance
+    ];
+    stubRecall(hits);
+
+    const result = await client().recall({ query: "x", maxDistance: 0.5, maxTokens: 100 });
+    assert.equal(result.results.length, 1, "distance filter dropped b2 before budgeting");
+    assert.equal(result.results[0].blob_id, "b1");
+    assert.equal(result.meta.truncated, false, "within budget after the distance filter");
+});
