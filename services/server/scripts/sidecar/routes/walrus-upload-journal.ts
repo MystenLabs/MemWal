@@ -56,8 +56,10 @@ import {
     readBlobObject,
 } from "./walrus-query.js";
 import { uploadWalrusBlobWithEffectsRetry } from "./walrus-upload.js";
+import { enforceAddressBalanceCoinIntents } from "../address-balance.js";
 import {
     assertUploadExecutionIdentity,
+    executionIdentity,
     parseUploadExecutionIdentity,
 } from "./health.js";
 
@@ -384,7 +386,7 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                     data,
                     keyIndex,
                     jobId: rawJobId,
-                    walletAddress,
+                    walletAddress: rawWalletAddress,
                     owner,
                     namespace,
                     packageId,
@@ -399,16 +401,9 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                 if (!data || keyIndex === undefined || !jobId) {
                     return res.status(400).json({ error: "Missing required fields: data, keyIndex, jobId" });
                 }
-                if (!/^0x[0-9a-fA-F]{64}$/.test(walletAddress)) {
-                    return res.status(400).json({ error: "Invalid walletAddress format" });
-                }
                 if (owner && !/^0x[0-9a-fA-F]{64}$/.test(owner)) {
                     return res.status(400).json({ error: "Invalid owner address format" });
                 }
-                // The journal may carry mixed-case hex while signers and gRPC
-                // report lowercase; canonicalize before comparisons and
-                // on-chain writes.
-                const journaledWalletAddress = normalizeSuiAddress(walletAddress);
                 const targetOwner = owner ? normalizeSuiAddress(owner) : owner;
                 if (packageId && !/^0x[0-9a-fA-F]{1,64}$/.test(packageId)) {
                     return res.status(400).json({ error: "Invalid packageId format" });
@@ -417,6 +412,17 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                 if (keySlot === null || !SERVER_SUI_PRIVATE_KEYS[keySlot]) {
                     return res.status(400).json({ error: `Invalid keyIndex: ${keyIndex}` });
                 }
+                const { secretKey } = decodeSuiPrivateKey(SERVER_SUI_PRIVATE_KEYS[keySlot]);
+                const signer = Ed25519Keypair.fromSecretKey(secretKey);
+                const signerAddress = signer.toSuiAddress();
+                const walletAddress = rawWalletAddress ?? signerAddress;
+                if (!/^0x[0-9a-fA-F]{64}$/.test(walletAddress)) {
+                    return res.status(400).json({ error: "Invalid walletAddress format" });
+                }
+                // New Rust callers can omit walletAddress on the first prepare;
+                // the sidecar derives it from the pinned key slot. Subsequent
+                // replay requests persist and send the derived address.
+                const journaledWalletAddress = normalizeSuiAddress(walletAddress);
                 const epochs = parseDurableWalrusEpochs(rawEpochs);
                 if (epochs === null) {
                     return res.status(400).json({
@@ -459,15 +465,14 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                 }
                 phaseCanSubmitSideEffect = !reconcileOnly
                     && (resume?.step === "encoded" || resume?.step === "uploaded");
-                const uploadExecutionIdentity = parseUploadExecutionIdentity(rawExecutionIdentity);
-                if (!uploadExecutionIdentity) {
-                    return res.status(400).json({ error: "Missing or invalid uploadExecutionIdentity" });
+                const uploadExecutionIdentity = rawExecutionIdentity === undefined
+                    ? null
+                    : parseUploadExecutionIdentity(rawExecutionIdentity);
+                if (rawExecutionIdentity !== undefined && !uploadExecutionIdentity) {
+                    return res.status(400).json({ error: "Invalid uploadExecutionIdentity" });
                 }
-                await assertUploadExecutionIdentity(uploadExecutionIdentity);
+                if (uploadExecutionIdentity) await assertUploadExecutionIdentity(uploadExecutionIdentity);
                 releaseWalrusUploadSlots = await acquireWalrusUploadSlots(keySlot, traceId, jobId);
-                const { secretKey } = decodeSuiPrivateKey(SERVER_SUI_PRIVATE_KEYS[keySlot]);
-                const signer = Ed25519Keypair.fromSecretKey(secretKey);
-                const signerAddress = signer.toSuiAddress();
                 if (signerAddress !== journaledWalletAddress) {
                     return res.status(409).json({
                         error: "keyIndex no longer maps to the journaled wallet",
@@ -550,6 +555,7 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                                 memwal_migration_job: jobId,
                             },
                         });
+                        enforceAddressBalanceCoinIntents(registerTx);
                         const registerTransaction = await prepareRegisterTransaction(
                             registerTx,
                             signer,
@@ -561,7 +567,12 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                             blobId: encoded.blobId,
                             digest: registerTransaction.digest,
                         })}`);
-                        return res.json({ registerTransaction });
+                        return res.json({
+                            registerTransaction,
+                            resumeStep: encoded,
+                            walletAddress: signerAddress,
+                            uploadExecutionIdentity: await executionIdentity(),
+                        });
                     }
                 } else if (resume.step === "registered") {
                     const alreadyCertified = await certifiedStep(resume.blobId, resume.blobObjectId);

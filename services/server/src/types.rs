@@ -115,6 +115,12 @@ pub struct AppState {
     /// `Arc` so the `MemoryEngine` impl can share the same handle rather
     /// than duplicating the pool.
     pub db: Arc<VectorDb>,
+    /// Small dedicated pool used ONLY to hold a per-job `pg_advisory_lock`
+    /// across an upload job's guard-read → mint → persist critical section, so
+    /// two concurrent attempts of the same job can't both mint a paid blob. Kept
+    /// separate from `db` so that holding a connection for the (up to 5-minute)
+    /// upload duration never starves the request-serving pool.
+    pub wallet_lock_pool: sqlx::PgPool,
     /// Isolated old-V1 database. Present only when at least one tracked
     /// security-delete component is enabled.
     pub legacy_db: Option<Arc<crate::storage::legacy_db::LegacyDb>>,
@@ -361,6 +367,12 @@ pub struct Config {
     pub balance_monitor_interval_secs: u64,
     pub wallet_balance_low_threshold_wal: u64,
     pub sponsor_balance_low_threshold_sui: u64,
+    /// MCP OAuth 2.1 support for Claude (and future) native custom
+    /// connectors. `None` when required env vars are unset — routes still
+    /// mount but OAuth tokens won't resolve. When configured, OAuth is
+    /// always available alongside the legacy delegate-key bearer.
+    #[allow(dead_code)]
+    pub mcp_oauth: Option<crate::oauth::McpOAuthConfig>,
 }
 
 impl Config {
@@ -523,6 +535,7 @@ impl Config {
             )),
             wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
             sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
+            mcp_oauth: crate::oauth::McpOAuthConfig::from_env(),
         }
     }
 }
@@ -884,6 +897,12 @@ pub struct RememberRequest {
     /// Namespace for memory isolation (default: "default")
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional client-supplied idempotency key. When set, a retry with the
+    /// same key (for the same owner) collapses onto the original job instead of
+    /// minting a new one — so an ambiguous timeout can't produce a duplicate
+    /// paid on-chain blob. Omit for the default (each request is independent).
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 // ============================================================
@@ -1611,6 +1630,9 @@ pub enum AppError {
     RateLimited(String),
     /// Storage quota exceeded (HTTP 402)
     QuotaExceeded(String),
+    /// Request conflicts with existing state (HTTP 409) — e.g. an idempotency
+    /// key reused for a request with different content.
+    Conflict(String),
     /// upstream LLM/embedding provider returned a transient failure
     /// (gateway timeout / connection reset / "200 OK" wrapping an
     /// `{"error":{"code":504}}` envelope from OpenRouter). Maps to HTTP 503
@@ -1628,6 +1650,7 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
             AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
+            AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
             AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
             AppError::QuotaExceeded(msg) => write!(f, "Quota Exceeded: {}", msg),
             AppError::UpstreamUnavailable(msg) => write!(f, "Upstream Unavailable: {}", msg),
@@ -1658,6 +1681,7 @@ impl axum::response::IntoResponse for AppError {
                 )
             }
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
+            AppError::Conflict(msg) => (axum::http::StatusCode::CONFLICT, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
             AppError::UpstreamUnavailable(msg) => {
@@ -1692,6 +1716,7 @@ impl AppError {
             AppError::Unauthorized(_) => "unauthorized",
             AppError::Internal(_) => "internal",
             AppError::BlobNotFound(_) => "blob_not_found",
+            AppError::Conflict(_) => "conflict",
             AppError::RateLimited(_) => "rate_limited",
             AppError::QuotaExceeded(_) => "quota_exceeded",
             AppError::UpstreamUnavailable(_) => "upstream_unavailable",
@@ -1850,6 +1875,7 @@ mod tests {
             balance_monitor_interval_secs: 900,
             wallet_balance_low_threshold_wal: 1_000_000,
             sponsor_balance_low_threshold_sui: 100_000_000,
+            mcp_oauth: None,
         }
     }
 

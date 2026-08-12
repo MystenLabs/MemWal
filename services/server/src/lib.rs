@@ -15,6 +15,7 @@ mod client_ip;
 mod compatibility;
 mod engine;
 mod jobs;
+mod oauth;
 mod observability;
 mod rate_limit;
 mod security_delete_auth;

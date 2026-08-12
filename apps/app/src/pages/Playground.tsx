@@ -423,7 +423,7 @@ export default function Playground() {
         setRecallResult(null)
         setRecallError(null)
         try {
-            const data = await memwal.recall(recallQuery, 5)
+            const data = await memwal.recall({ query: recallQuery, limit: 5 })
             setRecallResult(JSON.stringify(data, null, 2))
             trackPlaygroundOperation('recall', 'complete')
         } catch (err: unknown) {
@@ -485,7 +485,7 @@ export default function Playground() {
         try {
             // Phase 1: Recall memories using SDK
             setAskPhase('step 1/3 — recalling memories from Walrus Memory...')
-            const recallData = await memwal.recall(askQuestion, 5)
+            const recallData = await memwal.recall({ query: askQuestion, limit: 5 })
             const memories = recallData.results || []
 
             // Phase 2: Build prompt with memory context
@@ -757,7 +757,7 @@ while (true) {
                     number={3}
                     title="recall"
                     description="semantic search → download → decrypt"
-                    code={`const result = await memwal.recall("${recallQuery}", 5)
+                    code={`const result = await memwal.recall({ query: "${recallQuery}", limit: 5 })
 // Server: embed query → cosine search → download → decrypt
 // namespace: "${namespace || 'default'}" — only searches within this namespace
 // → { results: [{ text, blob_id, distance }], total }`}

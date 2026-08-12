@@ -32,6 +32,7 @@ from .client import (
     MemWalSync,
 )
 from .middleware import with_memwal_langchain, with_memwal_openai
+from .mock import MemWalMock, MemWalMockSeed, MemWalMockSync
 from .types import (
     ENV_PRESETS,
     AnalyzedFact,
@@ -72,6 +73,9 @@ __all__ = [
     # Core client
     "MemWal",
     "MemWalSync",
+    "MemWalMock",
+    "MemWalMockSync",
+    "MemWalMockSeed",
     "MemWalError",
     "MemWalCompatibilityError",
     "MemWalRememberJobFailed",

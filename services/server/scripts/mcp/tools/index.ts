@@ -15,12 +15,21 @@ import { registerHealthTool } from "./health.js";
  * relayer for SEAL encrypt/decrypt + Walrus storage.
  */
 export function registerTools(server: McpServer, session: MemWalSession): void {
-    registerRememberTool(server, session);
-    registerRememberBulkTool(server, session);
-    registerRecallTool(server, session);
-    registerAnalyzeTool(server, session);
-    registerRestoreTool(server, session);
-    registerHealthTool(server, session);
+    const granted = new Set(session.oauthScope?.split(/\s+/).filter(Boolean));
+    const unrestricted = session.oauthScope === undefined;
+    const canRead = unrestricted || granted.has("memwal:read");
+    const canWrite = unrestricted || granted.has("memwal:write");
+
+    if (canWrite) {
+        registerRememberTool(server, session);
+        registerRememberBulkTool(server, session);
+        registerAnalyzeTool(server, session);
+        registerRestoreTool(server, session);
+    }
+    if (canRead) {
+        registerRecallTool(server, session);
+        registerHealthTool(server, session);
+    }
 }
 
 export {

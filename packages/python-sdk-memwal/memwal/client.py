@@ -30,6 +30,7 @@ import base64
 import json
 import random
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
@@ -223,6 +224,9 @@ class MemWal:
         self._session_build_task: Optional[asyncio.Task[str]] = None
         self._relayer_version_metadata: Optional[Dict[str, Any]] = None
         self._compatibility_lock: Optional[asyncio.Lock] = None
+        # Preserve a generated key across an ambiguous transport failure. A
+        # subsequent identical call then collapses onto the accepted paid job.
+        self._pending_remember_keys: Dict[str, str] = {}
 
     @classmethod
     def create(
@@ -281,7 +285,10 @@ class MemWal:
     # ============================================================
 
     async def remember(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
         """Submit a remember request and return as soon as the server accepts it.
 
@@ -299,12 +306,27 @@ class MemWal:
             :class:`RememberAcceptedResult` with ``job_id`` and initial
             status (``"pending"``).
         """
+        resolved_namespace = namespace or self._namespace
+        request_identity = f"{resolved_namespace}\0{text}"
+        generated_key = idempotency_key is None
+        resolved_key = idempotency_key or self._pending_remember_keys.get(request_identity)
+        if resolved_key is None:
+            resolved_key = str(uuid.uuid4())
+        if generated_key:
+            self._pending_remember_keys[request_identity] = resolved_key
+
         data = await self._signed_request(
             "POST",
             "/api/remember",
-            {"text": text, "namespace": namespace or self._namespace},
+            {
+                "text": text,
+                "namespace": resolved_namespace,
+                "idempotency_key": resolved_key,
+            },
             accepted_statuses=(200, 202),
         )
+        if generated_key:
+            self._pending_remember_keys.pop(request_identity, None)
         return RememberAcceptedResult(
             job_id=data["job_id"],
             status=data.get("status", "pending"),
@@ -312,9 +334,12 @@ class MemWal:
 
     # Alias for parity with TS SDK ``rememberAsync``.
     async def remember_async(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
-        return await self.remember(text, namespace)
+        return await self.remember(text, namespace, idempotency_key)
 
     async def wait_for_remember_job(
         self,
@@ -380,6 +405,7 @@ class MemWal:
         namespace: Optional[str] = None,
         poll_interval_ms: int = 1500,
         timeout_ms: int = 60_000,
+        idempotency_key: Optional[str] = None,
     ) -> RememberResult:
         """Submit a remember and wait for the background worker to finish.
 
@@ -388,12 +414,24 @@ class MemWal:
         ``failed``). Mirrors TS ``rememberAndWait``.
         """
 
-        accepted = await self.remember(text, namespace)
-        return await self.wait_for_remember_job(
+        resolved_namespace = namespace or self._namespace
+        request_identity = f"{resolved_namespace}\0{text}"
+        generated_key = idempotency_key is None
+        resolved_key = idempotency_key or self._pending_remember_keys.get(request_identity)
+        if resolved_key is None:
+            resolved_key = str(uuid.uuid4())
+        if generated_key:
+            self._pending_remember_keys[request_identity] = resolved_key
+
+        accepted = await self.remember(text, resolved_namespace, resolved_key)
+        result = await self.wait_for_remember_job(
             accepted.job_id,
             poll_interval_ms=poll_interval_ms,
             timeout_ms=timeout_ms,
         )
+        if generated_key:
+            self._pending_remember_keys.pop(request_identity, None)
+        return result
 
     # ============================================================
     # Bulk remember (ENG-1408)
@@ -1285,16 +1323,22 @@ class MemWalSync:
             return asyncio.run(coro)
 
     def remember(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
         """Synchronous version of :meth:`MemWal.remember` (async accept)."""
-        return self._run(self._inner.remember(text, namespace))
+        return self._run(self._inner.remember(text, namespace, idempotency_key))
 
     # Alias for parity with TS SDK ``rememberAsync``.
     def remember_async(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
-        return self._run(self._inner.remember_async(text, namespace))
+        return self._run(self._inner.remember_async(text, namespace, idempotency_key))
 
     def wait_for_remember_job(
         self,
@@ -1317,6 +1361,7 @@ class MemWalSync:
         namespace: Optional[str] = None,
         poll_interval_ms: int = 1500,
         timeout_ms: int = 60_000,
+        idempotency_key: Optional[str] = None,
     ) -> RememberResult:
         """Synchronous version of :meth:`MemWal.remember_and_wait`."""
         return self._run(
@@ -1325,6 +1370,7 @@ class MemWalSync:
                 namespace,
                 poll_interval_ms=poll_interval_ms,
                 timeout_ms=timeout_ms,
+                idempotency_key=idempotency_key,
             )
         )
 
