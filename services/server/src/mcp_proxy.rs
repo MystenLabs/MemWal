@@ -677,6 +677,7 @@ mod tests {
             account_id: "0xrealaccount".to_string(),
             delegate_private_key: secret,
             grant_id: "mwg_test".to_string(),
+            scope: "memwal:read".to_string(),
         };
 
         apply_oauth_headers(&mut forwarded, &identity);
