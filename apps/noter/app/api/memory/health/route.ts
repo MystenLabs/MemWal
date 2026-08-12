@@ -1,11 +1,11 @@
 /** Memory Health API — checks the authenticated user's Memory connection. */
 
-import { resolveMemoryCredentials } from "@/feature/note/api/memory-request";
+import { authorizeMemoryRequest } from "@/feature/note/api/memory-request";
 import { createMemWalClient } from "@/feature/note/lib/pdw-client";
 
 export async function GET(request: Request) {
   try {
-    const { key, accountId } = await resolveMemoryCredentials(request);
+    const { key, accountId } = await authorizeMemoryRequest(request);
     const health = await createMemWalClient(key, accountId).health();
     return Response.json({ ...health, status: "ok" });
   } catch (error) {

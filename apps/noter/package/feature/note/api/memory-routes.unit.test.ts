@@ -129,6 +129,23 @@ describe("Noter memory routes", () => {
     expect(extractMemories).not.toHaveBeenCalled();
   });
 
+  it("does not reject valid near-limit text because of JSON framing", async () => {
+    const { MAX_MEMORY_TEXT_BYTES, readMemoryText } =
+      await import("./memory-request");
+    const text = "x".repeat(MAX_MEMORY_TEXT_BYTES);
+    const body = JSON.stringify({ text });
+    const request = new Request("http://localhost/api/memory", {
+      method: "POST",
+      body,
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      },
+    });
+
+    await expect(readMemoryText(request)).resolves.toBe(text);
+  });
+
   it("bounds memory text by encoded byte size", async () => {
     const { MAX_MEMORY_TEXT_BYTES, readMemoryText } =
       await import("./memory-request");

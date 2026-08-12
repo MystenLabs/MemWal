@@ -19,7 +19,12 @@ const { createSealClient } = await import("../sidecar/clients.js");
 const { appendSealPersistenceFence, InvalidSealPersistenceFenceError, parseSealPersistenceFence } = await import(
     "../sidecar/blob-metadata.js"
 );
-const { parseSealDecryptBatchItems, registerSealRoutes } = await import("../sidecar/routes/seal.js");
+const {
+    parseSealDecryptBatchItems,
+    registerSealRoutes,
+    sealEncryptCommitteeFailure,
+} = await import("../sidecar/routes/seal.js");
+const { SEAL_COMMITTEE_IDENTITY } = await import("../sidecar/config.js");
 
 const ROUTE_POLICY = {
     enableMigrationSealRoute: true,
@@ -215,6 +220,32 @@ test("the opt-in legacy seed encrypt route is registered", async () => {
         assert.equal(r.status, 400);
         assert.match(r.body.error!, /Missing required fields/);
     });
+});
+
+test("/seal/encrypt enforces the pinned committee before RPC work", async () => {
+    const missing = sealEncryptCommitteeFailure(
+        undefined,
+        true,
+        SEAL_COMMITTEE_IDENTITY
+    );
+    assert.equal(missing?.status, 400);
+
+    const mismatch = sealEncryptCommitteeFailure(
+        { ...SEAL_COMMITTEE_IDENTITY, threshold: SEAL_COMMITTEE_IDENTITY.threshold + 1 },
+        true,
+        SEAL_COMMITTEE_IDENTITY
+    );
+    assert.equal(mismatch?.status, 409);
+    assert.equal(mismatch?.body.code, "SEAL_COMMITTEE_MISMATCH");
+
+    assert.equal(
+        sealEncryptCommitteeFailure(
+            SEAL_COMMITTEE_IDENTITY,
+            true,
+            SEAL_COMMITTEE_IDENTITY
+        ),
+        null
+    );
 });
 
 test("the migration encrypt route is absent unless the sidecar opts in", async () => {

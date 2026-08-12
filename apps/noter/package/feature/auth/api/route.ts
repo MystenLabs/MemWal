@@ -24,6 +24,10 @@ import {
   DelegateAccountBindingError,
   deriveDelegatePublicKeyHex,
 } from "../lib/delegate-account";
+import {
+  AuthRateLimitError,
+  checkPublicAuthRateLimit,
+} from "../lib/auth-rate-limit";
 
 // Canonical Sui address: 0x + 64 hex. Reject malformed input at the boundary so
 // it never reaches normalizeSuiAddress (which would silently left-pad garbage
@@ -374,24 +378,12 @@ export const authRouter = router({
       const { privateKey, accountId } = input;
 
       try {
-        // Derive Sui address from private key
-        const ed = await import("@noble/ed25519");
-        const { sha512 } = await import("@noble/hashes/sha2.js");
-        if (!(ed.etc as any).sha512Sync) {
-          (ed.etc as any).sha512Sync = (...m: Uint8Array[]) => {
-            const h = sha512.create();
-            for (const msg of m) h.update(msg);
-            return h.digest();
-          };
-        }
-
-        const privKeyBytes = Uint8Array.from(
-          privateKey.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+        await checkPublicAuthRateLimit(ctx.request);
+        // Derive Sui address and binding key from the same private key.
+        const publicKeyHex = await deriveDelegatePublicKeyHex(privateKey);
+        const pubKeyBytes = Uint8Array.from(
+          publicKeyHex.match(/.{2}/g)!.map((byte) => Number.parseInt(byte, 16))
         );
-        const pubKeyBytes = ed.getPublicKey(privKeyBytes);
-        const publicKeyHex = Array.from(pubKeyBytes)
-          .map((byte) => byte.toString(16).padStart(2, "0"))
-          .join("");
         await assertDelegateAccountBinding({ accountId, publicKeyHex });
 
         const { blake2b } = await import("@noble/hashes/blake2.js");
@@ -418,6 +410,9 @@ export const authRouter = router({
         };
       } catch (error) {
         if (error instanceof TRPCError) throw error;
+        if (error instanceof AuthRateLimitError) {
+          throw new TRPCError({ code: error.code, message: error.message });
+        }
         if (error instanceof DelegateCredentialConflictError) {
           throw new TRPCError({ code: "CONFLICT", message: error.message });
         }

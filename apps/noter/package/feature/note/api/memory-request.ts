@@ -5,10 +5,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/shared/lib/db";
 import { users, walletSessions } from "@/shared/db/schema";
 import { requireSharedRedisClient } from "@/shared/lib/shared-redis";
-import {
-  MAX_MEMORY_TEXT_BYTES,
-  memoryTextWithinLimit,
-} from "./memory-policy";
+import { memoryTextWithinLimit } from "./memory-policy";
 
 export { MAX_MEMORY_TEXT_BYTES } from "./memory-policy";
 const MEMORY_RATE_LIMIT_TTL_SECONDS = 60;
@@ -48,13 +45,21 @@ export class MemoryRequestError extends Error {
   }
 }
 
-function trustedClientIp(req: Request): string | undefined {
-  if (!process.env.VERCEL) return undefined;
-  const candidate = req.headers
-    .get("x-vercel-forwarded-for")
-    ?.split(",")[0]
-    ?.trim();
+function validIp(value: string | undefined): string | undefined {
+  const candidate = value?.trim();
   return candidate && isIP(candidate) ? candidate : undefined;
+}
+
+function trustedClientIp(req: Request): string | undefined {
+  const vercelForwarded = req.headers
+    .get("x-vercel-forwarded-for")
+    ?.split(",")[0];
+  if (process.env.VERCEL) return validIp(vercelForwarded);
+
+  const realIp = req.headers.get("x-real-ip") ?? undefined;
+  // Railway's edge appends the nearest proxy-observed client address last.
+  const forwarded = req.headers.get("x-forwarded-for")?.split(",").at(-1);
+  return validIp(realIp) ?? validIp(forwarded);
 }
 
 export async function checkMemoryRateLimit(
@@ -139,11 +144,6 @@ export async function authorizeMemoryRequest(req: Request): Promise<{
 }
 
 export async function readMemoryText(req: Request): Promise<string> {
-  const contentLength = Number(req.headers.get("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > MAX_MEMORY_TEXT_BYTES) {
-    throw new MemoryRequestError(413, "Memory text is too large");
-  }
-
   let body: unknown;
   try {
     body = await req.json();

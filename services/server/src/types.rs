@@ -445,8 +445,7 @@ impl Config {
             },
             package_id,
             seal_policy_package_id,
-            registry_id: std::env::var("MEMWAL_REGISTRY_ID")
-                .expect("MEMWAL_REGISTRY_ID must be set"),
+            registry_id: normalize_object_id_env("MEMWAL_REGISTRY_ID"),
             registry_scan_max_pages: std::env::var("MEMWAL_REGISTRY_SCAN_MAX_PAGES")
                 .ok()
                 .and_then(|v| v.trim().parse::<u32>().ok())
@@ -709,6 +708,14 @@ pub fn validate_security_delete_config(config: &Config) -> Result<(), String> {
 
 pub fn security_delete_routes_enabled(config: &Config) -> bool {
     config.enable_memory_deletion && config.enable_security_delete
+}
+
+fn normalize_object_id_env(name: &str) -> String {
+    let raw = std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
+    raw.trim()
+        .parse::<sui_sdk_types::Address>()
+        .unwrap_or_else(|error| panic!("{name} must be a valid Sui object ID: {error}"))
+        .to_string()
 }
 
 fn env_bool(name: &str) -> bool {
