@@ -6,6 +6,7 @@ mod engine;
 mod jobs;
 mod jobs_security_delete;
 mod mcp_proxy;
+mod oauth;
 mod observability;
 mod rate_limit;
 mod routes;
@@ -1144,6 +1145,14 @@ async fn main() {
             if let Err(e) = evict_state.db.evict_expired_delegate_keys().await {
                 tracing::error!("Background eviction failed: {}", e);
             }
+            // MCP OAuth housekeeping — runs unconditionally since oauth state
+            // is cheap to clean up even when OAuth isn't actively used.
+            if let Err(e) = evict_state.db.evict_expired_oauth_state().await {
+                tracing::error!("MCP OAuth session/code eviction failed: {}", e);
+            }
+            if let Err(e) = evict_state.db.prune_unconsumed_oauth_clients().await {
+                tracing::error!("MCP OAuth client pruning failed: {}", e);
+            }
         }
     });
 
@@ -1337,7 +1346,7 @@ async fn main() {
     // /config exposes non-secret deployment parameters (packageId,
     // network, sui_rpc_url) so the SDK can build SEAL SessionKey without
     // the user adding packageId to MemWalConfig.
-    let public_routes = Router::new()
+    let mut public_routes = Router::new()
         .route(
             "/health",
             get(routes::health).layer(DefaultBodyLimit::max(16 * 1024)),
@@ -1367,6 +1376,64 @@ async fn main() {
         )
         .merge(sponsor_routes)
         .merge(mcp_routes);
+
+    // MCP OAuth 2.1 (Claude custom connectors) — mounted when configured
+    // (env vars present), same tier as the routes above (no
+    // auth::verify_signature; OAuth is its own auth scheme). Routes are
+    // always mounted if configured; OAuth tokens simply won't resolve if
+    // clients haven't registered yet.
+    if config.mcp_oauth.is_some() {
+        let oauth_routes = Router::new()
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(routes::oauth::protected_resource_metadata)
+                    .layer(DefaultBodyLimit::max(4 * 1024)),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource/api/mcp",
+                get(routes::oauth::protected_resource_metadata)
+                    .layer(DefaultBodyLimit::max(4 * 1024)),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get(routes::oauth::authorization_server_metadata)
+                    .layer(DefaultBodyLimit::max(4 * 1024)),
+            )
+            .route(
+                "/oauth/register",
+                post(routes::oauth::register_client).layer(DefaultBodyLimit::max(32 * 1024)),
+            )
+            .route(
+                "/oauth/authorize",
+                get(routes::oauth::authorize).layer(DefaultBodyLimit::max(4 * 1024)),
+            )
+            .route(
+                "/oauth/token",
+                post(routes::oauth::token).layer(DefaultBodyLimit::max(16 * 1024)),
+            )
+            .route(
+                "/oauth/revoke",
+                post(routes::oauth::revoke).layer(DefaultBodyLimit::max(16 * 1024)),
+            )
+            .route(
+                "/api/oauth/session/{session_id}",
+                get(routes::oauth::session_view).layer(DefaultBodyLimit::max(4 * 1024)),
+            )
+            .route(
+                "/api/oauth/session/{session_id}/account",
+                post(routes::oauth::session_account).layer(DefaultBodyLimit::max(4 * 1024)),
+            )
+            .route(
+                "/api/oauth/session/{session_id}/complete",
+                post(routes::oauth::session_complete).layer(DefaultBodyLimit::max(4 * 1024)),
+            )
+            .route(
+                "/api/oauth/session/{session_id}/cancel",
+                post(routes::oauth::session_cancel).layer(DefaultBodyLimit::max(4 * 1024)),
+            );
+        public_routes = public_routes.merge(oauth_routes);
+        tracing::info!("MCP OAuth routes mounted");
+    }
 
     // CORS — restrict to configured origins.
     // Safe default is deny-all (no Access-Control-Allow-Origin header returned),

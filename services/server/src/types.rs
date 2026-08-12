@@ -364,6 +364,12 @@ pub struct Config {
     pub balance_monitor_interval_secs: u64,
     pub wallet_balance_low_threshold_wal: u64,
     pub sponsor_balance_low_threshold_sui: u64,
+    /// MCP OAuth 2.1 support for Claude (and future) native custom
+    /// connectors. `None` when required env vars are unset — routes still
+    /// mount but OAuth tokens won't resolve. When configured, OAuth is
+    /// always available alongside the legacy delegate-key bearer.
+    #[allow(dead_code)]
+    pub mcp_oauth: Option<crate::oauth::McpOAuthConfig>,
 }
 
 impl Config {
@@ -511,6 +517,7 @@ impl Config {
             )),
             wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
             sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
+            mcp_oauth: crate::oauth::McpOAuthConfig::from_env(),
         }
     }
 }
@@ -1841,6 +1848,7 @@ mod tests {
             balance_monitor_interval_secs: 900,
             wallet_balance_low_threshold_wal: 1_000_000,
             sponsor_balance_low_threshold_sui: 100_000_000,
+            mcp_oauth: None,
         }
     }
 
