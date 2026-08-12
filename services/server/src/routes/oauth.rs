@@ -29,11 +29,13 @@ use crate::types::AppState;
 
 /// Read the configured `McpOAuthConfig`, or fail with 404 if not configured.
 fn require_oauth(state: &AppState) -> Result<&oauth::McpOAuthConfig, OAuthError> {
-    state
-        .config
-        .mcp_oauth
-        .as_ref()
-        .ok_or_else(|| OAuthError::new(StatusCode::NOT_FOUND, "not_found", "MCP OAuth is not configured"))
+    state.config.mcp_oauth.as_ref().ok_or_else(|| {
+        OAuthError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "MCP OAuth is not configured",
+        )
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -128,7 +130,8 @@ pub async fn register_client(
         let mut redis = state.redis.clone();
         let key = format!(
             "mcp_oauth:register_rl:{}",
-            ip.map(|ip| ip.to_string()).unwrap_or_else(|| "unknown".to_string())
+            ip.map(|ip| ip.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
         );
         let count: i64 = redis::cmd("INCR")
             .arg(&key)
@@ -180,8 +183,9 @@ pub async fn register_client(
         }
     }
 
-    let client_name = oauth::sanitize_client_name(req.client_name.as_deref().unwrap_or("Unnamed client"))
-        .map_err(|_| OAuthError::invalid_client_metadata("client_name is invalid"))?;
+    let client_name =
+        oauth::sanitize_client_name(req.client_name.as_deref().unwrap_or("Unnamed client"))
+            .map_err(|_| OAuthError::invalid_client_metadata("client_name is invalid"))?;
 
     let auth_method = req
         .token_endpoint_auth_method
@@ -196,10 +200,12 @@ pub async fn register_client(
         ));
     }
 
-    let grant_types = req
-        .grant_types
-        .clone()
-        .unwrap_or_else(|| vec!["authorization_code".to_string(), "refresh_token".to_string()]);
+    let grant_types = req.grant_types.clone().unwrap_or_else(|| {
+        vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ]
+    });
     for gt in &grant_types {
         if !matches!(gt.as_str(), "authorization_code" | "refresh_token") {
             return Err(OAuthError::invalid_client_metadata(format!(
@@ -207,7 +213,10 @@ pub async fn register_client(
             )));
         }
     }
-    let response_types = req.response_types.clone().unwrap_or_else(|| vec!["code".to_string()]);
+    let response_types = req
+        .response_types
+        .clone()
+        .unwrap_or_else(|| vec!["code".to_string()]);
     if response_types != ["code"] {
         return Err(OAuthError::invalid_client_metadata(
             "only response_type=code is supported",
@@ -337,7 +346,9 @@ pub async fn authorize(
         let mut target = url::Url::parse(&redirect_uri).expect("validated above");
         target.query_pairs_mut().append_pair("error", error);
         if !description.is_empty() {
-            target.query_pairs_mut().append_pair("error_description", description);
+            target
+                .query_pairs_mut()
+                .append_pair("error_description", description);
         }
         if let Some(state) = &query.state {
             target.query_pairs_mut().append_pair("state", state);
@@ -346,7 +357,10 @@ pub async fn authorize(
     };
 
     if query.response_type != "code" {
-        return bounce_error("unsupported_response_type", "only response_type=code is supported");
+        return bounce_error(
+            "unsupported_response_type",
+            "only response_type=code is supported",
+        );
     }
     if query.code_challenge_method.as_deref() != Some("S256") {
         return bounce_error("invalid_request", "code_challenge_method must be S256");
@@ -354,8 +368,15 @@ pub async fn authorize(
     if query.code_challenge.is_empty() {
         return bounce_error("invalid_request", "code_challenge is required");
     }
-    let Some(resource) = query.resource.as_deref().and_then(oauth::normalize_resource_uri) else {
-        return bounce_error("invalid_target", "resource is required and must be a valid https URL");
+    let Some(resource) = query
+        .resource
+        .as_deref()
+        .and_then(oauth::normalize_resource_uri)
+    else {
+        return bounce_error(
+            "invalid_target",
+            "resource is required and must be a valid https URL",
+        );
     };
     if resource != oauth::normalize_resource_uri(&cfg.resource).unwrap_or_default() {
         return bounce_error("invalid_target", "resource does not match this server");
@@ -369,7 +390,8 @@ pub async fn authorize(
     // wallet — here we always mint a placeholder pending delegate; the
     // consent step may swap it for a reused one.
     let (private_key_hex, public_key_hex, delegate_address) = oauth::generate_delegate_key();
-    let encrypted = match oauth::encrypt_delegate_private_key(&cfg.encryption_key, &private_key_hex) {
+    let encrypted = match oauth::encrypt_delegate_private_key(&cfg.encryption_key, &private_key_hex)
+    {
         Ok(env) => env,
         Err(_) => {
             return error_page(
@@ -387,15 +409,16 @@ pub async fn authorize(
         delegate_public_key: public_key_hex,
         delegate_address,
         encrypted_private_key: encrypted,
-        label: oauth::sanitize_label(
-            query.state.as_deref().unwrap_or(""),
-            &client.client_name,
-        ),
+        label: oauth::sanitize_label(query.state.as_deref().unwrap_or(""), &client.client_name),
         status: "pending".to_string(),
         tx_digest: None,
     };
     if state.db.insert_oauth_delegate(&delegate_row).await.is_err() {
-        return error_page(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong", "Please try again.");
+        return error_page(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Something went wrong",
+            "Please try again.",
+        );
     }
 
     let scope = query
@@ -417,9 +440,16 @@ pub async fn authorize(
         expires_at: Utc::now() + Duration::seconds(cfg.session_ttl_secs),
     };
     if state.db.insert_oauth_session(&session_row).await.is_err() {
-        return error_page(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong", "Please try again.");
+        return error_page(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Something went wrong",
+            "Please try again.",
+        );
     }
-    let _ = state.db.touch_oauth_client_last_used(&client.client_id).await;
+    let _ = state
+        .db
+        .touch_oauth_client_last_used(&client.client_id)
+        .await;
 
     Redirect::to(&format!("{}?session={session_id}", cfg.consent_url)).into_response()
 }
@@ -467,7 +497,11 @@ pub async fn session_view(
     Ok(Json(SessionViewResponse {
         client_name: client.client_name,
         redirect_host,
-        scopes: session.scope.split_whitespace().map(str::to_string).collect(),
+        scopes: session
+            .scope
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
         delegate_public_key: delegate.delegate_public_key,
         delegate_sui_address: delegate.delegate_address,
         expires_at: session.expires_at,
@@ -507,7 +541,11 @@ pub async fn session_account(
     // (from a prior grant, any client)? If so, the consent UI can skip the
     // on-chain `add_delegate_key` tx entirely — this is what keeps a
     // reconnect from burning another slot toward the on-chain 20-key cap.
-    if let Some(existing) = state.db.find_reusable_oauth_delegate(&req.account_id).await? {
+    if let Some(existing) = state
+        .db
+        .find_reusable_oauth_delegate(&req.account_id)
+        .await?
+    {
         return Ok(Json(SessionAccountResponse {
             needs_onchain_registration: false,
             delegate_public_key: existing.delegate_public_key,
@@ -542,10 +580,15 @@ pub struct RedirectResponse {
 
 fn sanitize_sui_object_id(raw: &str) -> Result<String, OAuthError> {
     let value = raw.trim();
-    if value.starts_with("0x") && value.len() == 66 && value[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+    if value.starts_with("0x")
+        && value.len() == 66
+        && value[2..].chars().all(|c| c.is_ascii_hexdigit())
+    {
         Ok(value.to_ascii_lowercase())
     } else {
-        Err(OAuthError::invalid_request("account_id/owner_address is invalid"))
+        Err(OAuthError::invalid_request(
+            "account_id/owner_address is invalid",
+        ))
     }
 }
 
@@ -604,7 +647,12 @@ pub async fn session_complete(
 
             state
                 .db
-                .activate_oauth_delegate(&delegate.delegate_ref, &account_id, &verified_owner, &req.tx_digest)
+                .activate_oauth_delegate(
+                    &delegate.delegate_ref,
+                    &account_id,
+                    &verified_owner,
+                    &req.tx_digest,
+                )
                 .await?;
             (delegate.delegate_ref, delegate.delegate_public_key)
         };
@@ -748,10 +796,18 @@ pub struct TokenResponse {
 /// present (confidential clients), otherwise `client_id`/`client_secret`
 /// from the body (RFC 6749 allows either; Claude's public clients send
 /// neither and rely on `token_endpoint_auth_method: "none"`).
-fn client_credentials_from_request(headers: &HeaderMap, body: &TokenRequest) -> Option<(String, Option<String>)> {
-    if let Some(auth) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+fn client_credentials_from_request(
+    headers: &HeaderMap,
+    body: &TokenRequest,
+) -> Option<(String, Option<String>)> {
+    if let Some(auth) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
         if let Some(encoded) = auth.strip_prefix("Basic ") {
-            if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded) {
+            if let Ok(decoded) =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            {
                 if let Ok(text) = String::from_utf8(decoded) {
                     if let Some((id, secret)) = text.split_once(':') {
                         return Some((id.to_string(), Some(secret.to_string())));
@@ -781,7 +837,8 @@ async fn authenticate_client(
     match client.token_endpoint_auth_method.as_str() {
         "none" => Ok(client),
         _ => {
-            let secret = secret.ok_or_else(|| OAuthError::invalid_client("missing client_secret"))?;
+            let secret =
+                secret.ok_or_else(|| OAuthError::invalid_client("missing client_secret"))?;
             let expected = client
                 .client_secret_sha256
                 .as_deref()
@@ -828,7 +885,10 @@ pub async fn token(
     match req.grant_type.as_str() {
         "authorization_code" => {
             let client = authenticate_client(&state, &headers, &req).await?;
-            let code = req.code.as_deref().ok_or_else(|| OAuthError::invalid_request("code is required"))?;
+            let code = req
+                .code
+                .as_deref()
+                .ok_or_else(|| OAuthError::invalid_request("code is required"))?;
             let redirect_uri = req
                 .redirect_uri
                 .as_deref()
@@ -842,18 +902,28 @@ pub async fn token(
                 .db
                 .consume_oauth_code(&client.client_id, &oauth::hash_token(code))
                 .await?
-                .ok_or_else(|| OAuthError::invalid_grant("authorization code is invalid, expired, or already used"))?;
+                .ok_or_else(|| {
+                    OAuthError::invalid_grant(
+                        "authorization code is invalid, expired, or already used",
+                    )
+                })?;
 
             if code_row.redirect_uri != redirect_uri {
-                return Err(OAuthError::invalid_grant("redirect_uri does not match the authorization request"));
+                return Err(OAuthError::invalid_grant(
+                    "redirect_uri does not match the authorization request",
+                ));
             }
             if !oauth::verify_pkce_s256(code_verifier, &code_row.code_challenge) {
-                return Err(OAuthError::invalid_grant("code_verifier does not match code_challenge"));
+                return Err(OAuthError::invalid_grant(
+                    "code_verifier does not match code_challenge",
+                ));
             }
             if let Some(requested_resource) = req.resource.as_deref() {
                 let normalized = oauth::normalize_resource_uri(requested_resource);
                 if normalized.as_deref() != Some(code_row.resource.as_str()) {
-                    return Err(OAuthError::invalid_target("resource does not match the authorization request"));
+                    return Err(OAuthError::invalid_target(
+                        "resource does not match the authorization request",
+                    ));
                 }
             }
 
@@ -932,7 +1002,9 @@ pub async fn token(
                 scope: row.scope,
             }))
         }
-        other => Err(OAuthError::unsupported_grant_type(format!("unsupported grant_type: {other}"))),
+        other => Err(OAuthError::unsupported_grant_type(format!(
+            "unsupported grant_type: {other}"
+        ))),
     }
 }
 

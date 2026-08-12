@@ -184,7 +184,10 @@ fn apply_oauth_headers(
 /// RFC 9728 401 challenge. `state.config.mcp_oauth` must be `Some` — only
 /// called from `classify_and_resolve`'s `Unauthorized` arm, which only
 /// returns that when OAuth is enabled.
-fn oauth_unauthorized_response(state: &AppState, err: Option<&crate::oauth::OAuthBearerError>) -> Response {
+fn oauth_unauthorized_response(
+    state: &AppState,
+    err: Option<&crate::oauth::OAuthBearerError>,
+) -> Response {
     let Some(cfg) = state.config.mcp_oauth.as_ref() else {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     };
@@ -197,7 +200,8 @@ fn oauth_unauthorized_response(state: &AppState, err: Option<&crate::oauth::OAut
     }
     let mut resp = (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     if let Ok(v) = HeaderValue::from_str(&challenge) {
-        resp.headers_mut().insert(axum::http::header::WWW_AUTHENTICATE, v);
+        resp.headers_mut()
+            .insert(axum::http::header::WWW_AUTHENTICATE, v);
     }
     resp
 }
@@ -229,7 +233,9 @@ pub async fn sse_proxy(
     match classify_and_resolve(&state, &headers).await {
         McpAuthOutcome::Passthrough => {}
         McpAuthOutcome::Oauth(identity) => apply_oauth_headers(&mut forwarded, &identity),
-        McpAuthOutcome::Unauthorized(err) => return oauth_unauthorized_response(&state, err.as_ref()),
+        McpAuthOutcome::Unauthorized(err) => {
+            return oauth_unauthorized_response(&state, err.as_ref())
+        }
     }
     let req = state
         .http_client
@@ -330,7 +336,9 @@ pub async fn messages_proxy(
     match classify_and_resolve(&state, &headers).await {
         McpAuthOutcome::Passthrough => {}
         McpAuthOutcome::Oauth(identity) => apply_oauth_headers(&mut forwarded, &identity),
-        McpAuthOutcome::Unauthorized(err) => return oauth_unauthorized_response(&state, err.as_ref()),
+        McpAuthOutcome::Unauthorized(err) => {
+            return oauth_unauthorized_response(&state, err.as_ref())
+        }
     }
     let upstream = state
         .http_client
@@ -438,7 +446,9 @@ pub async fn streamable_proxy(
     match classify_and_resolve(&state, &headers).await {
         McpAuthOutcome::Passthrough => {}
         McpAuthOutcome::Oauth(identity) => apply_oauth_headers(&mut forwarded, &identity),
-        McpAuthOutcome::Unauthorized(err) => return oauth_unauthorized_response(&state, err.as_ref()),
+        McpAuthOutcome::Unauthorized(err) => {
+            return oauth_unauthorized_response(&state, err.as_ref())
+        }
     }
     req = req.headers(forwarded);
 

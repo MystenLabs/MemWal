@@ -348,6 +348,12 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Max `/api/restore` calls per owner per minute (GH #501 / WALM-299).
+    /// Dedicated on top of the generic weighted account rate limiter —
+    /// bounds how often an attacker can force a fresh first-time-discovery
+    /// cost by repeatedly transferring junk blob_ids into a victim's wallet.
+    /// `0` disables the guard.
+    pub restore_requests_per_owner_per_minute: u64,
     /// Balance monitoring (proactive alerts)
     pub balance_monitor_interval_secs: u64,
     pub wallet_balance_low_threshold_wal: u64,
@@ -491,6 +497,14 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            // `env_number`, not `env_positive_u64`: `0` is a meaningful,
+            // documented value here (disables `check_restore_call_rate_limit`
+            // entirely) — `env_positive_u64` would silently coerce it back
+            // to the default, making that escape hatch unreachable.
+            restore_requests_per_owner_per_minute: env_number(
+                "RESTORE_REQUESTS_PER_OWNER_PER_MINUTE",
+                10,
+            ),
             balance_monitor_interval_secs: normalized_balance_monitor_interval(env_positive_u64(
                 "BALANCE_MONITOR_INTERVAL_SECS",
                 900,
@@ -1812,6 +1826,7 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            restore_requests_per_owner_per_minute: 10,
             balance_monitor_interval_secs: 900,
             wallet_balance_low_threshold_wal: 1_000_000,
             sponsor_balance_low_threshold_sui: 100_000_000,

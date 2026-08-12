@@ -1369,15 +1369,18 @@ async fn main() {
         let oauth_routes = Router::new()
             .route(
                 "/.well-known/oauth-protected-resource",
-                get(routes::oauth::protected_resource_metadata).layer(DefaultBodyLimit::max(4 * 1024)),
+                get(routes::oauth::protected_resource_metadata)
+                    .layer(DefaultBodyLimit::max(4 * 1024)),
             )
             .route(
                 "/.well-known/oauth-protected-resource/api/mcp",
-                get(routes::oauth::protected_resource_metadata).layer(DefaultBodyLimit::max(4 * 1024)),
+                get(routes::oauth::protected_resource_metadata)
+                    .layer(DefaultBodyLimit::max(4 * 1024)),
             )
             .route(
                 "/.well-known/oauth-authorization-server",
-                get(routes::oauth::authorization_server_metadata).layer(DefaultBodyLimit::max(4 * 1024)),
+                get(routes::oauth::authorization_server_metadata)
+                    .layer(DefaultBodyLimit::max(4 * 1024)),
             )
             .route(
                 "/oauth/register",

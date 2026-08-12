@@ -25,6 +25,7 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@/shared/components/ui/button";
 import { enokiConfig } from "@/lib/enoki/config";
 import { useAuth } from "@/feature/auth";
+import { trpc } from "@/shared/lib/trpc/client";
 
 type Step =
   | "idle"
@@ -121,10 +122,32 @@ export function EnokiLoginCard() {
   const { mutateAsync: signTransaction } = useSignTransaction();
   const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
   const { connectEnoki } = useAuth();
+  const { mutateAsync: issueChallenge } =
+    trpc.auth.issueEnokiChallenge.useMutation();
 
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState("");
   const setupRunningRef = useRef(false);
+
+  /**
+   * Prove control of `address` by signing a fresh server-issued challenge with
+   * the zkLogin key. Returns the challengeId + signature to hand back to the
+   * server-side ownership gate.
+   */
+  const proveWalletOwnership = useCallback(
+    async (
+      address: string,
+    ): Promise<{ challengeId: string; signature: string }> => {
+      const { challengeId, message } = await issueChallenge({
+        suiAddress: address,
+      });
+      const { signature } = await signPersonalMessage({
+        message: new TextEncoder().encode(message),
+      });
+      return { challengeId, signature };
+    },
+    [issueChallenge, signPersonalMessage],
+  );
 
   const enokiWallets = wallets.filter(isEnokiWallet);
   const googleWallet = enokiWallets.find((w) => w.provider === "google");
@@ -143,9 +166,14 @@ export function EnokiLoginCard() {
       setupRunningRef.current = true;
 
       try {
-        // Phase 1: Check returning user via tRPC
+        // Phase 1: Check returning user via tRPC (ownership-gated)
         setStep("creating-session");
-        const checkResult = await connectEnoki({ suiAddress: address });
+        const checkProof = await proveWalletOwnership(address);
+        const checkResult = await connectEnoki({
+          suiAddress: address,
+          challengeId: checkProof.challengeId,
+          signature: checkProof.signature,
+        });
 
         if ("needsSetup" in checkResult && !checkResult.needsSetup) {
           setStep("done");
@@ -278,10 +306,13 @@ export function EnokiLoginCard() {
           await suiClient.waitForTransaction({ digest: addResult.digest });
         }
 
-        // Create session via tRPC
+        // Create session via tRPC (ownership-gated)
         setStep("creating-session");
+        const registerProof = await proveWalletOwnership(address);
         await connectEnoki({
           suiAddress: address,
+          challengeId: registerProof.challengeId,
+          signature: registerProof.signature,
           privateKey: privateKeyHex,
           accountId: knownAccountId!,
         });
@@ -298,7 +329,7 @@ export function EnokiLoginCard() {
         setupRunningRef.current = false;
       }
     },
-    [suiClient, signTransaction, signPersonalMessage, connectEnoki],
+    [suiClient, signTransaction, signPersonalMessage, connectEnoki, proveWalletOwnership],
   );
 
   useEffect(() => {

@@ -45,6 +45,7 @@ mod tests {
             include_str!("../../migrations/003_rate_limiter.sql"),
             include_str!("../../migrations/008_benchmark_plaintext.sql"),
             include_str!("../../migrations/009_importance_signal.sql"),
+            include_str!("../../migrations/010_restore_failed_blobs.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -302,11 +303,16 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
-        // MCP OAuth 2.1 (Claude custom connectors) — client registry,
-        // server-custodied delegate keys, and the authorize/code/grant/token
-        // tables. OAuth routes are always available when configured — no separate
-        // feature flag needed.
-        let migration_010 = include_str!("../../migrations/010_mcp_oauth.sql");
+        // Permanent restore-failure negative cache (GH #501 / WALM-299).
+        let migration_010 = include_str!("../../migrations/010_restore_failed_blobs.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+
+        // MCP OAuth 2.1 (Claude custom connectors): client registry,
+        // server-custodied delegate keys, and authorization state.
+        let migration_011 = include_str!("../../migrations/011_mcp_oauth.sql");
         sqlx::raw_sql(migration_010)
             .execute(&pool)
             .await
@@ -855,7 +861,10 @@ impl VectorDb {
     // `routes/oauth.rs` and `mcp_proxy.rs`'s bearer resolution.
     // ============================================================
 
-    pub async fn insert_oauth_client(&self, client: &oauth_rows::OAuthClientRow) -> Result<(), AppError> {
+    pub async fn insert_oauth_client(
+        &self,
+        client: &oauth_rows::OAuthClientRow,
+    ) -> Result<(), AppError> {
         sqlx::query(
             "INSERT INTO mcp_oauth_clients
                 (client_id, client_secret_sha256, client_name, redirect_uris, grant_types,
@@ -919,7 +928,9 @@ impl VectorDb {
         .bind(secs)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to count unconsumed oauth clients: {}", e)))?;
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to count unconsumed oauth clients: {}", e))
+        })?;
         Ok(row.0)
     }
 
@@ -1135,7 +1146,10 @@ impl VectorDb {
         .map_err(|e| AppError::Internal(format!("Failed to consume oauth code: {}", e)))
     }
 
-    pub async fn insert_oauth_grant(&self, grant: &oauth_rows::OAuthGrantRow) -> Result<(), AppError> {
+    pub async fn insert_oauth_grant(
+        &self,
+        grant: &oauth_rows::OAuthGrantRow,
+    ) -> Result<(), AppError> {
         sqlx::query(
             "INSERT INTO mcp_oauth_grants
                 (grant_id, client_id, delegate_ref, account_id, owner_address, scope, resource)
@@ -1175,13 +1189,16 @@ impl VectorDb {
         .execute(&mut *tx)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to revoke oauth grant tokens: {}", e)))?;
-        tx.commit()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to commit oauth grant revocation: {}", e)))?;
+        tx.commit().await.map_err(|e| {
+            AppError::Internal(format!("Failed to commit oauth grant revocation: {}", e))
+        })?;
         Ok(())
     }
 
-    pub async fn insert_oauth_token(&self, token: &oauth_rows::OAuthTokenRow) -> Result<(), AppError> {
+    pub async fn insert_oauth_token(
+        &self,
+        token: &oauth_rows::OAuthTokenRow,
+    ) -> Result<(), AppError> {
         sqlx::query(
             "INSERT INTO mcp_oauth_tokens (token_sha256, grant_id, token_type, expires_at)
              VALUES ($1, $2, $3, $4)",
@@ -1234,15 +1251,20 @@ impl VectorDb {
     /// are NOT touched here — only ever revoked explicitly.
     pub async fn evict_expired_oauth_state(&self) -> Result<u64, AppError> {
         let mut total = 0u64;
-        let sessions = sqlx::query("DELETE FROM mcp_oauth_authorize_sessions WHERE expires_at <= NOW()")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to evict expired oauth sessions: {}", e)))?;
+        let sessions =
+            sqlx::query("DELETE FROM mcp_oauth_authorize_sessions WHERE expires_at <= NOW()")
+                .execute(&self.pool)
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!("Failed to evict expired oauth sessions: {}", e))
+                })?;
         total += sessions.rows_affected();
         let codes = sqlx::query("DELETE FROM mcp_oauth_codes WHERE expires_at <= NOW()")
             .execute(&self.pool)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to evict expired oauth codes: {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to evict expired oauth codes: {}", e))
+            })?;
         total += codes.rows_affected();
         if total > 0 {
             tracing::info!("Evicted {} expired MCP OAuth session/code rows", total);
@@ -1262,12 +1284,82 @@ impl VectorDb {
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to prune unconsumed oauth clients: {}", e)))?;
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to prune unconsumed oauth clients: {}", e))
+        })?;
         let rows = result.rows_affected();
         if rows > 0 {
             tracing::info!("Pruned {} unconsumed MCP OAuth DCR clients", rows);
         }
         Ok(rows)
+    }
+
+    /// Return blob_ids that have permanently failed to restore for `owner` +
+    /// `namespace` (GH #501 / WALM-299). Used by restore() to exclude blobs
+    /// that already failed decrypt/validation once and should never be
+    /// re-downloaded and re-decrypt-attempted on every subsequent restore() call.
+    pub async fn get_failed_blob_ids(
+        &self,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<Vec<String>, AppError> {
+        let started = std::time::Instant::now();
+        let result: Result<Vec<(String,)>, AppError> = sqlx::query_as(
+            "SELECT blob_id FROM restore_failed_blobs
+             WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get failed blobs: {}", e)));
+        crate::observability::observe_db(
+            "vector.get_failed_blob_ids",
+            db_status(&result),
+            started.elapsed(),
+        );
+        let rows = result?;
+
+        Ok(rows.into_iter().map(|(blob_id,)| blob_id).collect())
+    }
+
+    /// Record that `blob_id` permanently failed to restore for `owner` +
+    /// `namespace` (GH #501 / WALM-299). `reason` is `"decrypt_permanent"`
+    /// (SEAL rejected it deterministically) or `"invalid_utf8"`
+    /// (decrypt succeeded but the plaintext wasn't valid UTF-8). Repeated
+    /// calls for the same (owner, namespace, blob_id) bump `attempts`
+    /// instead of erroring or duplicating the row.
+    pub async fn record_restore_failure(
+        &self,
+        owner: &str,
+        namespace: &str,
+        blob_id: &str,
+        reason: &str,
+    ) -> Result<(), AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "INSERT INTO restore_failed_blobs (owner, namespace, blob_id, reason)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (owner, namespace, blob_id) DO UPDATE SET
+                attempts = restore_failed_blobs.attempts + 1,
+                last_attempt_at = now(),
+                reason = EXCLUDED.reason",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .bind(blob_id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to record restore failure: {}", e)));
+        crate::observability::observe_db(
+            "vector.record_restore_failure",
+            db_status(&result),
+            started.elapsed(),
+        );
+        result?;
+
+        Ok(())
     }
 }
 

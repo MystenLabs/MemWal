@@ -172,17 +172,18 @@ impl McpOAuthConfig {
             format!("{}/connect/claude", issuer)
         };
 
-        let allowed_registration_redirect_hosts = std::env::var("MCP_OAUTH_ALLOWED_REGISTRATION_HOSTS")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| vec!["claude.ai".to_string()]);
+        let allowed_registration_redirect_hosts =
+            std::env::var("MCP_OAUTH_ALLOWED_REGISTRATION_HOSTS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| vec!["claude.ai".to_string()]);
 
         let registration_trusted_cidrs = std::env::var("MCP_OAUTH_REGISTRATION_TRUSTED_CIDRS")
             .ok()
@@ -228,7 +229,11 @@ pub struct OAuthError {
 }
 
 impl OAuthError {
-    pub fn new(status: axum::http::StatusCode, error: &'static str, description: impl Into<String>) -> Self {
+    pub fn new(
+        status: axum::http::StatusCode,
+        error: &'static str,
+        description: impl Into<String>,
+    ) -> Self {
         Self {
             status,
             error,
@@ -237,19 +242,35 @@ impl OAuthError {
     }
 
     pub fn invalid_request(description: impl Into<String>) -> Self {
-        Self::new(axum::http::StatusCode::BAD_REQUEST, "invalid_request", description)
+        Self::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_request",
+            description,
+        )
     }
 
     pub fn invalid_grant(description: impl Into<String>) -> Self {
-        Self::new(axum::http::StatusCode::BAD_REQUEST, "invalid_grant", description)
+        Self::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            description,
+        )
     }
 
     pub fn invalid_client(description: impl Into<String>) -> Self {
-        Self::new(axum::http::StatusCode::UNAUTHORIZED, "invalid_client", description)
+        Self::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            description,
+        )
     }
 
     pub fn invalid_target(description: impl Into<String>) -> Self {
-        Self::new(axum::http::StatusCode::BAD_REQUEST, "invalid_target", description)
+        Self::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_target",
+            description,
+        )
     }
 
     pub fn invalid_client_metadata(description: impl Into<String>) -> Self {
@@ -450,8 +471,7 @@ pub fn decrypt_delegate_private_key(
     let plaintext = cipher
         .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_slice())
         .map_err(|_| CryptoError::DecryptFailed)?;
-    let private_key_hex =
-        String::from_utf8(plaintext).map_err(|_| CryptoError::DecryptFailed)?;
+    let private_key_hex = String::from_utf8(plaintext).map_err(|_| CryptoError::DecryptFailed)?;
     Ok(DelegateSecret(private_key_hex))
 }
 
@@ -535,9 +555,10 @@ fn parse_redirect_url(raw: &str) -> Option<url::Url> {
 /// registration matches `http://localhost:51234/callback` at authorize
 /// time, but not a different path).
 pub fn redirect_uri_matches(candidate: &str, registered: &str) -> bool {
-    let (Some(candidate_url), Some(registered_url)) =
-        (parse_redirect_url(candidate), parse_redirect_url(registered))
-    else {
+    let (Some(candidate_url), Some(registered_url)) = (
+        parse_redirect_url(candidate),
+        parse_redirect_url(registered),
+    ) else {
         return false;
     };
 
@@ -600,7 +621,9 @@ pub fn normalize_resource_uri(raw: &str) -> Option<String> {
         return None;
     }
     let scheme = url.scheme().to_ascii_lowercase();
-    if scheme != "https" && !(scheme == "http" && url.host_str().map(is_loopback_host).unwrap_or(false)) {
+    if scheme != "https"
+        && !(scheme == "http" && url.host_str().map(is_loopback_host).unwrap_or(false))
+    {
         return None;
     }
     url.set_fragment(None);
@@ -773,8 +796,10 @@ pub async fn resolve_oauth_bearer(
         return Err(OAuthBearerError::DelegateNotActive);
     }
 
-    let delegate_private_key = decrypt_delegate_private_key(&cfg.encryption_key, &row.encrypted_private_key)
-        .map_err(|_| OAuthBearerError::Internal("failed to decrypt delegate private key".to_string()))?;
+    let delegate_private_key =
+        decrypt_delegate_private_key(&cfg.encryption_key, &row.encrypted_private_key).map_err(
+            |_| OAuthBearerError::Internal("failed to decrypt delegate private key".to_string()),
+        )?;
 
     Ok(ResolvedOAuthIdentity {
         account_id: row.account_id,
@@ -950,14 +975,23 @@ mod tests {
     #[test]
     fn registration_accepts_claude_hosted_callback() {
         let hosts = vec!["claude.ai".to_string()];
-        assert!(is_allowed_registration_redirect(claude_hosted_callback(), &hosts));
+        assert!(is_allowed_registration_redirect(
+            claude_hosted_callback(),
+            &hosts
+        ));
     }
 
     #[test]
     fn registration_accepts_claude_code_loopback() {
         let hosts = vec!["claude.ai".to_string()];
-        assert!(is_allowed_registration_redirect("http://localhost/callback", &hosts));
-        assert!(is_allowed_registration_redirect("http://127.0.0.1/callback", &hosts));
+        assert!(is_allowed_registration_redirect(
+            "http://localhost/callback",
+            &hosts
+        ));
+        assert!(is_allowed_registration_redirect(
+            "http://127.0.0.1/callback",
+            &hosts
+        ));
     }
 
     #[test]
@@ -987,7 +1021,10 @@ mod tests {
         // so the safety comes from what operators configure, not a magic
         // rejection of our own domain. Regression-guards the default config
         // instead, exercised in `registration_accepts_claude_hosted_callback`.
-        assert!(is_allowed_registration_redirect("https://memwal.ai/callback", &hosts));
+        assert!(is_allowed_registration_redirect(
+            "https://memwal.ai/callback",
+            &hosts
+        ));
     }
 
     #[test]
@@ -1011,12 +1048,18 @@ mod tests {
 
     #[test]
     fn resource_rejects_fragment() {
-        assert_eq!(normalize_resource_uri("https://relayer.memory.walrus.xyz/api/mcp#x"), None);
+        assert_eq!(
+            normalize_resource_uri("https://relayer.memory.walrus.xyz/api/mcp#x"),
+            None
+        );
     }
 
     #[test]
     fn resource_rejects_missing_scheme() {
-        assert_eq!(normalize_resource_uri("relayer.memory.walrus.xyz/api/mcp"), None);
+        assert_eq!(
+            normalize_resource_uri("relayer.memory.walrus.xyz/api/mcp"),
+            None
+        );
     }
 
     // -- token / hash helpers ------------------------------------------

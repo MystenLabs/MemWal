@@ -8,12 +8,14 @@
  */
 
 import { SuiGrpcClient } from "@mysten/sui/grpc";
+import { SuiGraphQLClient } from "@mysten/sui/graphql";
 import { normalizeStructTag } from "@mysten/sui/utils";
 import { SealClient } from "@mysten/seal";
 import { WalrusClient, type WalrusClientConfig } from "@mysten/walrus";
 import {
     SEAL_KEY_SERVER_TIMEOUT_MS,
     SEAL_SERVER_CONFIGS,
+    SUI_GRAPHQL_URL,
     SUI_GRPC_URL,
     SUI_NETWORK,
     SUI_TYPE,
@@ -30,6 +32,21 @@ import { shortAddress } from "./util.js";
 
 // Shared gRPC core client for Walrus, SEAL, Enoki, and blob queries.
 export const suiClient = new SuiGrpcClient({ network: SUI_NETWORK, baseUrl: SUI_GRPC_URL });
+// Separate archival read path for immutable creation provenance. The regular
+// gRPC fullnode remains the low-latency path for current objects and writes.
+// Apply a transport timeout globally because the SDK's high-level
+// getTransaction() helper does not accept an AbortSignal.
+const ARCHIVAL_GRAPHQL_TIMEOUT_MS = 15_000;
+const archivalFetch: typeof fetch = (input, init) => {
+    const timeout = AbortSignal.timeout(ARCHIVAL_GRAPHQL_TIMEOUT_MS);
+    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    return fetch(input, { ...init, signal });
+};
+export const suiGraphqlClient = new SuiGraphQLClient({
+    network: SUI_NETWORK,
+    url: SUI_GRAPHQL_URL,
+    fetch: archivalFetch,
+});
 
 export function createSealClient(): SealClient {
     return new SealClient({
