@@ -59,7 +59,7 @@ Restore inspects your onchain blobs newest-first, bounded by `limit` (default 10
 
 ## Walrus Memory does not migrate existing data
 
-If you already store files on Walrus directly, expect a clear boundary: Walrus Memory does not import those blobs as memories. There is no migration step, by design. Existing Walrus assets also do not appear in the console yet; surfacing them there is on the near-term product roadmap.
+If you already store files on Walrus directly, expect a clear boundary: Walrus Memory does not import those blobs as memories. There is no migration step, by design. The console does not yet show existing Walrus assets either; surfacing them there is on the near-term product roadmap.
 
 Datasets are a planned asset type for published collections with metadata and an access model. Their scope and availability are still being defined.
 

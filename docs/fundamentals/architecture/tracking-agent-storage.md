@@ -93,7 +93,7 @@ This index is a convenience, not the source of truth. Treat it as a cache the ag
 
 ### 2. Query the chain by owner and namespace
 
-Because a Sui address owns every `Blob` object, the agent can ask the chain directly which blobs an address owns, filtered by the namespace metadata attached at write time. This is the same discovery the relayer performs during restore, and it does not depend on any local state surviving.
+Because a Sui address owns every `Blob` object, the agent can ask the chain directly which blobs an address owns, filtered by the namespace metadata attached at write time. This is the same discovery the relayer performs during restore, and it works even if the agent loses all of its local state.
 
 The relayer exposes this through `restore`, which queries onchain blobs for the caller's owner and namespace, then rebuilds the vector index for any it finds:
 

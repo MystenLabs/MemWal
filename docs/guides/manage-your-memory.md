@@ -76,7 +76,7 @@ Renewal covers two cases:
 2. **Self-managed and agent-owned assets:** Renew at the storage layer by extending the `Blob` object on Walrus. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage).
 
 <Warning>
-Renew before the expiry epoch, not after. Once a blob lapses, its content is no longer recoverable, so a lapsed memory cannot be renewed. Track expiry epochs and renew with a margin to spare.
+Renew before the expiry epoch, not after. Once a blob lapses, you cannot recover its content, and you cannot renew a lapsed memory. Track expiry epochs and renew with a margin to spare.
 </Warning>
 
 ## Delete memories
