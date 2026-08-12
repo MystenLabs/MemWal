@@ -61,8 +61,6 @@ Restore inspects your onchain blobs newest-first, up to `limit` (default 10), so
 
 If you already store files on Walrus directly, expect a clear boundary: Walrus Memory does not import those blobs as memories. There is no migration step, by design. The console does not yet show existing Walrus assets either; surfacing them there is on the near-term product roadmap.
 
-Datasets are a planned asset type for published collections with metadata and an access model. Walrus Memory is still defining their scope and availability.
-
 A memory is not just a blob. When Walrus Memory stores a memory, it encrypts the content with Seal, attaches namespace metadata, and generates a vector embedding so recall can match the memory by meaning. An arbitrary blob you uploaded to Walrus through another tool has none of that structure, so Walrus Memory cannot treat it as a memory or return it from recall.
 
 To bring existing content into Walrus Memory, write it through the SDK, which produces a proper memory:
