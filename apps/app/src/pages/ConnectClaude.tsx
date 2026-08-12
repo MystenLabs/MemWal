@@ -32,6 +32,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
     ConnectModal,
     useCurrentAccount,
+    useSignPersonalMessage,
     useSuiClient,
 } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
@@ -103,6 +104,7 @@ export default function ConnectClaude() {
     const currentAccount = useCurrentAccount()
     const suiClient = useSuiClient()
     const { mutateAsync: signAndExecute } = useSponsoredTransaction()
+    const { mutateAsync: signPersonalMessage } = useSignPersonalMessage()
 
     const apiBase = config.memwalServerUrl.replace(/\/$/, '')
 
@@ -214,6 +216,10 @@ export default function ConnectClaude() {
             }
 
             setStep('finishing')
+            const proofMessage = new TextEncoder().encode(
+                `Walrus Memory OAuth authorization\nsession:${sessionId}\naccount:${accountId.toLowerCase()}\nowner:${currentAccount.address.toLowerCase()}`,
+            )
+            const { signature: ownerSignature } = await signPersonalMessage({ message: proofMessage })
             const { redirect_url } = await fetchJson<{ redirect_url: string }>(
                 `${apiBase}/api/oauth/session/${sessionId}/complete`,
                 {
@@ -221,6 +227,7 @@ export default function ConnectClaude() {
                     body: JSON.stringify({
                         account_id: accountId,
                         owner_address: currentAccount.address,
+                        owner_signature: ownerSignature,
                         tx_digest: txDigest || 'reused-delegate',
                     }),
                 },
@@ -234,7 +241,7 @@ export default function ConnectClaude() {
             setStep('error')
             trackEvent('claude_connect_failed', { error_type: getAnalyticsErrorType(err) })
         }
-    }, [session, currentAccount, suiClient, signAndExecute, apiBase, sessionId])
+    }, [session, currentAccount, suiClient, signAndExecute, signPersonalMessage, apiBase, sessionId])
 
     const handleCancel = useCallback(async () => {
         try {

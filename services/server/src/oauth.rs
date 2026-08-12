@@ -52,6 +52,12 @@ pub const SESSION_ID_PREFIX: &str = "mws_";
 /// Prefix for consented-grant ids.
 pub const GRANT_ID_PREFIX: &str = "mwg_";
 
+pub const SCOPE_READ: &str = "memwal:read";
+pub const SCOPE_WRITE: &str = "memwal:write";
+pub const SCOPE_OFFLINE: &str = "offline_access";
+pub const DEFAULT_SCOPES: &str = "memwal:read memwal:write offline_access";
+const SUPPORTED_SCOPES: &[&str] = &[SCOPE_READ, SCOPE_WRITE, SCOPE_OFFLINE];
+
 const DISPLAY_NAME_MAX_CHARS: usize = 80;
 /// The consent screen renders `client_name` next to a verified redirect
 /// host, but `client_name` itself is caller-supplied, untrusted text — same
@@ -343,19 +349,30 @@ pub fn ip_is_trusted(ip: IpAddr, trusted: &[IpNet]) -> bool {
     trusted.iter().any(|net| net.contains(&ip))
 }
 
-/// Same X-Forwarded-For-first, connection-address-fallback logic as
-/// `rate_limit::sponsor_rate_limit_middleware`, extracted here so
-/// `routes/oauth.rs`'s registration handler doesn't have to duplicate it.
-pub fn extract_client_ip(
-    headers: &axum::http::HeaderMap,
-    connect_addr: Option<std::net::SocketAddr>,
-) -> Option<IpAddr> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .and_then(|s| s.trim().parse::<IpAddr>().ok())
-        .or_else(|| connect_addr.map(|addr| addr.ip()))
+/// Parse, deduplicate, and canonicalize an OAuth scope string. Unknown scopes
+/// are rejected instead of being silently granted full MCP access.
+pub fn normalize_scopes(raw: &str) -> Result<String, &'static str> {
+    let mut scopes = Vec::new();
+    for scope in raw.split_whitespace() {
+        if !SUPPORTED_SCOPES.contains(&scope) {
+            return Err("unsupported scope");
+        }
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    }
+    if scopes.is_empty() {
+        return Err("at least one scope is required");
+    }
+    Ok(scopes.join(" "))
+}
+
+pub fn scopes_are_subset(requested: &str, registered: &str) -> bool {
+    requested.split_whitespace().all(|scope| {
+        registered
+            .split_whitespace()
+            .any(|allowed| allowed == scope)
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -727,8 +744,8 @@ pub fn sanitize_label(raw: &str, default: &str) -> String {
 pub struct ResolvedOAuthIdentity {
     pub account_id: String,
     pub delegate_private_key: DelegateSecret,
-    #[allow(dead_code)]
     pub grant_id: String,
+    pub scope: String,
 }
 
 #[derive(Debug)]
@@ -805,6 +822,7 @@ pub async fn resolve_oauth_bearer(
         account_id: row.account_id,
         delegate_private_key,
         grant_id: row.grant_id,
+        scope: row.scope,
     })
 }
 
@@ -1126,6 +1144,19 @@ mod tests {
         let long = "x".repeat(200);
         let cleaned = sanitize_label(&long, "default");
         assert_eq!(cleaned.len(), LABEL_MAX_CHARS);
+    }
+
+    // -- scopes -------------------------------------------------------------
+
+    #[test]
+    fn scopes_reject_unknown_and_normalize_duplicates() {
+        assert!(normalize_scopes("memwal:read admin").is_err());
+        assert_eq!(
+            normalize_scopes("memwal:read memwal:read offline_access").unwrap(),
+            "memwal:read offline_access"
+        );
+        assert!(scopes_are_subset("memwal:read", DEFAULT_SCOPES));
+        assert!(!scopes_are_subset("memwal:write", "memwal:read"));
     }
 
     // -- CIDR trust check ---------------------------------------------------

@@ -1223,7 +1223,7 @@ impl VectorDb {
     ) -> Result<Option<oauth_rows::OAuthTokenWithDelegateRow>, AppError> {
         sqlx::query_as::<_, oauth_rows::OAuthTokenWithDelegateRow>(
             "SELECT t.token_sha256, t.grant_id, t.token_type, t.expires_at, t.revoked_at,
-                    g.account_id, g.owner_address, g.scope, g.revoked_at AS grant_revoked_at,
+                    g.client_id, g.account_id, g.owner_address, g.scope, g.revoked_at AS grant_revoked_at,
                     d.delegate_ref, d.encrypted_private_key, d.delegate_public_key, d.status AS delegate_status
              FROM mcp_oauth_tokens t
              JOIN mcp_oauth_grants g ON g.grant_id = t.grant_id
@@ -1243,6 +1243,68 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to revoke oauth token: {}", e)))?;
         Ok(())
+    }
+
+    /// Atomically consume one active refresh token and insert its replacement
+    /// pair. The grant's client id is checked inside the same transaction.
+    pub async fn rotate_oauth_refresh_token(
+        &self,
+        presented_sha256: &str,
+        client_id: &str,
+        access: &oauth_rows::OAuthTokenRow,
+        refresh: &oauth_rows::OAuthTokenRow,
+    ) -> Result<Option<oauth_rows::OAuthTokenWithDelegateRow>, AppError> {
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            AppError::Internal(format!("Failed to start oauth refresh rotation: {}", e))
+        })?;
+        let consumed = sqlx::query_as::<_, oauth_rows::OAuthTokenWithDelegateRow>(
+            "UPDATE mcp_oauth_tokens t
+             SET revoked_at = NOW()
+             FROM mcp_oauth_grants g, mcp_oauth_delegates d
+             WHERE t.token_sha256 = $1
+               AND t.grant_id = g.grant_id
+               AND g.delegate_ref = d.delegate_ref
+               AND t.token_type = 'refresh'
+               AND t.revoked_at IS NULL
+               AND t.expires_at > NOW()
+               AND g.revoked_at IS NULL
+               AND g.client_id = $2
+             RETURNING t.token_sha256, t.grant_id, t.token_type, t.expires_at, t.revoked_at,
+                       g.client_id, g.account_id, g.owner_address, g.scope,
+                       g.revoked_at AS grant_revoked_at, d.delegate_ref,
+                       d.encrypted_private_key, d.delegate_public_key,
+                       d.status AS delegate_status",
+        )
+        .bind(presented_sha256)
+        .bind(client_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to consume oauth refresh token: {}", e)))?;
+        if consumed.is_none() {
+            tx.rollback().await.map_err(|e| {
+                AppError::Internal(format!("Failed to roll back oauth refresh rotation: {}", e))
+            })?;
+            return Ok(None);
+        }
+        for token in [access, refresh] {
+            sqlx::query(
+                "INSERT INTO mcp_oauth_tokens (token_sha256, grant_id, token_type, expires_at)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(&token.token_sha256)
+            .bind(&token.grant_id)
+            .bind(&token.token_type)
+            .bind(token.expires_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to insert rotated oauth token: {}", e))
+            })?;
+        }
+        tx.commit().await.map_err(|e| {
+            AppError::Internal(format!("Failed to commit oauth refresh rotation: {}", e))
+        })?;
+        Ok(consumed)
     }
 
     /// Periodic sweep for the hourly eviction task (mirrors
@@ -1457,6 +1519,7 @@ pub mod oauth_rows {
         pub token_type: String,
         pub expires_at: DateTime<Utc>,
         pub revoked_at: Option<DateTime<Utc>>,
+        pub client_id: String,
         pub account_id: String,
         pub owner_address: String,
         pub scope: String,

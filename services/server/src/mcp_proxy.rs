@@ -179,6 +179,14 @@ fn apply_oauth_headers(
     ) {
         forwarded.insert(name, v);
     }
+    // This header is never copied from inbound traffic. Only the relayer can
+    // add it on the loopback request after resolving a valid OAuth token.
+    if let (Ok(name), Ok(v)) = (
+        reqwest::header::HeaderName::from_bytes(b"x-memwal-internal-oauth-scope"),
+        reqwest::header::HeaderValue::from_str(&identity.scope),
+    ) {
+        forwarded.insert(name, v);
+    }
 }
 
 /// RFC 9728 401 challenge. `state.config.mcp_oauth` must be `Some` — only

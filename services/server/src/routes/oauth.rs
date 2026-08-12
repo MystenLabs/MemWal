@@ -122,17 +122,15 @@ pub async fn register_client(
     // one per-IP bucket. Exempt it; throttle everything else per-IP via the
     // existing Redis rate limiter, backed by the global unconsumed-client
     // cap below regardless of source.
-    let ip = oauth::extract_client_ip(&headers, Some(connect_addr));
-    let is_trusted = ip
-        .map(|ip| oauth::ip_is_trusted(ip, &cfg.registration_trusted_cidrs))
-        .unwrap_or(false);
+    let ip = crate::client_ip::canonical_client_ip(
+        &headers,
+        connect_addr,
+        state.config.trusted_proxy_hops,
+    );
+    let is_trusted = oauth::ip_is_trusted(ip, &cfg.registration_trusted_cidrs);
     if !is_trusted {
         let mut redis = state.redis.clone();
-        let key = format!(
-            "mcp_oauth:register_rl:{}",
-            ip.map(|ip| ip.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        );
+        let key = format!("mcp_oauth:register_rl:{}", ip);
         let count: i64 = redis::cmd("INCR")
             .arg(&key)
             .query_async(&mut redis)
@@ -222,10 +220,8 @@ pub async fn register_client(
             "only response_type=code is supported",
         ));
     }
-    let scope = req
-        .scope
-        .clone()
-        .unwrap_or_else(|| "memwal:read memwal:write offline_access".to_string());
+    let scope = oauth::normalize_scopes(req.scope.as_deref().unwrap_or(oauth::DEFAULT_SCOPES))
+        .map_err(OAuthError::invalid_client_metadata)?;
 
     let client_id = oauth::random_token(oauth::CLIENT_ID_PREFIX);
     let (client_secret, client_secret_sha256) = if auth_method == "none" {
@@ -246,7 +242,7 @@ pub async fn register_client(
         token_endpoint_auth_method: auth_method.clone(),
         scope: scope.clone(),
         status: "active".to_string(),
-        registered_ip: ip.map(|ip| ip.to_string()),
+        registered_ip: Some(ip.to_string()),
     };
     state.db.insert_oauth_client(&row).await?;
 
@@ -421,10 +417,16 @@ pub async fn authorize(
         );
     }
 
-    let scope = query
-        .scope
-        .clone()
-        .unwrap_or_else(|| "memwal:read memwal:write offline_access".to_string());
+    let scope = match oauth::normalize_scopes(query.scope.as_deref().unwrap_or(&client.scope)) {
+        Ok(scope) if oauth::scopes_are_subset(&scope, &client.scope) => scope,
+        Ok(_) => {
+            return bounce_error(
+                "invalid_scope",
+                "requested scope exceeds the registered client scope",
+            )
+        }
+        Err(_) => return bounce_error("invalid_scope", "requested scope is unsupported"),
+    };
     let session_id = oauth::random_token(oauth::SESSION_ID_PREFIX);
     let session_row = OAuthSessionRow {
         session_id: session_id.clone(),
@@ -570,12 +572,19 @@ pub async fn session_account(
 pub struct SessionCompleteRequest {
     pub account_id: String,
     pub owner_address: String,
+    pub owner_signature: String,
     pub tx_digest: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RedirectResponse {
     pub redirect_url: String,
+}
+
+fn oauth_owner_proof_message(session_id: &str, account_id: &str, owner_address: &str) -> String {
+    format!(
+        "Walrus Memory OAuth authorization\nsession:{session_id}\naccount:{account_id}\nowner:{owner_address}"
+    )
 }
 
 fn sanitize_sui_object_id(raw: &str) -> Result<String, OAuthError> {
@@ -603,6 +612,19 @@ pub async fn session_complete(
     if req.tx_digest.trim().is_empty() || req.tx_digest.len() > 160 {
         return Err(OAuthError::invalid_request("tx_digest is invalid"));
     }
+    if req.owner_signature.trim().is_empty() || req.owner_signature.len() > 4096 {
+        return Err(OAuthError::invalid_request("owner_signature is invalid"));
+    }
+
+    // Verify a fresh, session-bound wallet signature before consuming the
+    // session or consulting reusable delegates. This prevents an attacker
+    // with a session ID from naming a victim account that connected before.
+    let proof = oauth_owner_proof_message(&session_id, &account_id, &owner_address);
+    state
+        .security_delete_wallet_verifier
+        .verify_personal(&owner_address, proof.as_bytes(), &req.owner_signature)
+        .await
+        .map_err(|_| OAuthError::invalid_request("wallet ownership proof is invalid"))?;
 
     // Atomically claim the session so it can only ever be completed once —
     // Postgres analog of the WALM-30 prior art's Redis GETDEL guarantee.
@@ -612,50 +634,52 @@ pub async fn session_complete(
         .await?
         .ok_or_else(|| OAuthError::invalid_request("session already used, expired, or unknown"))?;
 
-    // Reuse path: an existing active delegate for this account short-circuits
-    // straight to code minting without touching the pending delegate row
-    // this session minted (it's simply left "pending" and pruned later).
-    let (delegate_ref, delegate_public_key) =
-        if let Some(existing) = state.db.find_reusable_oauth_delegate(&account_id).await? {
-            (existing.delegate_ref, existing.delegate_public_key)
-        } else {
-            let delegate = state
+    // Both new and reused delegates require fresh on-chain verification.
+    // Possession of an authorization session ID is not wallet proof and must
+    // never be sufficient to select another account's custodied delegate.
+    let (delegate, is_reused) = match state.db.find_reusable_oauth_delegate(&account_id).await? {
+        Some(existing) => (existing, true),
+        None => (
+            state
                 .db
                 .fetch_oauth_delegate(&session.delegate_ref)
                 .await?
-                .ok_or_else(|| OAuthError::server_error("session delegate is missing"))?;
-
-            let public_key_bytes = hex::decode(&delegate.delegate_public_key)
-                .map_err(|_| OAuthError::server_error("stored delegate public key is invalid"))?;
-            let verified_owner = verify_delegate_key_onchain(
-                &state.http_client,
-                &state.config.sui_rpc_url,
-                state.sui_grpc_client.as_ref(),
+                .ok_or_else(|| OAuthError::server_error("session delegate is missing"))?,
+            false,
+        ),
+    };
+    let public_key_bytes = hex::decode(&delegate.delegate_public_key)
+        .map_err(|_| OAuthError::server_error("stored delegate public key is invalid"))?;
+    let verified_owner = verify_delegate_key_onchain(
+        &state.http_client,
+        &state.config.sui_rpc_url,
+        state.sui_grpc_client.as_ref(),
+        &account_id,
+        &public_key_bytes,
+        &state.config.package_id,
+    )
+    .await
+    .map_err(|e| {
+        OAuthError::invalid_request(format!("delegate key is not registered on-chain: {e}"))
+    })?;
+    if !verified_owner.eq_ignore_ascii_case(&owner_address) {
+        return Err(OAuthError::invalid_request(
+            "verified owner does not match connected account",
+        ));
+    }
+    if !is_reused {
+        state
+            .db
+            .activate_oauth_delegate(
+                &delegate.delegate_ref,
                 &account_id,
-                &public_key_bytes,
-                &state.config.package_id,
+                &verified_owner,
+                &req.tx_digest,
             )
-            .await
-            .map_err(|e| {
-                OAuthError::invalid_request(format!("delegate key is not registered on-chain: {e}"))
-            })?;
-            if !verified_owner.eq_ignore_ascii_case(&owner_address) {
-                return Err(OAuthError::invalid_request(
-                    "verified owner does not match connected account",
-                ));
-            }
-
-            state
-                .db
-                .activate_oauth_delegate(
-                    &delegate.delegate_ref,
-                    &account_id,
-                    &verified_owner,
-                    &req.tx_digest,
-                )
-                .await?;
-            (delegate.delegate_ref, delegate.delegate_public_key)
-        };
+            .await?;
+    }
+    let delegate_ref = delegate.delegate_ref;
+    let delegate_public_key = delegate.delegate_public_key;
 
     let code = oauth::random_token("mwac_");
     let code_row = OAuthCodeRow {
@@ -962,37 +986,45 @@ pub async fn token(
                 .ok_or_else(|| OAuthError::invalid_request("refresh_token is required"))?;
             let presented_hash = oauth::hash_token(presented);
 
-            let row = state
+            let preview = state
                 .db
                 .fetch_oauth_token_with_delegate(&presented_hash)
                 .await?
                 .ok_or_else(|| OAuthError::invalid_grant("refresh_token is invalid"))?;
-            if row.token_type != "refresh" {
+            if preview.token_type != "refresh" {
                 return Err(OAuthError::invalid_grant("token is not a refresh token"));
             }
-
-            // Reuse detection (OAuth 2.1 BCP): a refresh token presented
-            // after it (or its grant) was already revoked means it either
-            // leaked or this is a replay — kill the entire grant so every
-            // token derived from it stops working, not just this one.
-            if row.revoked_at.is_some() || row.grant_revoked_at.is_some() {
-                state.db.revoke_oauth_grant(&row.grant_id).await?;
+            if preview.client_id != client.client_id {
+                return Err(OAuthError::invalid_grant(
+                    "refresh_token belongs to another client",
+                ));
+            }
+            if preview.revoked_at.is_some() || preview.grant_revoked_at.is_some() {
+                state.db.revoke_oauth_grant(&preview.grant_id).await?;
                 return Err(OAuthError::invalid_grant(
                     "refresh_token was already used or revoked; the connection has been revoked",
                 ));
             }
-            if row.expires_at <= Utc::now() {
+            if preview.expires_at <= Utc::now() {
                 return Err(OAuthError::invalid_grant("refresh_token has expired"));
             }
 
-            // Rotate: revoke the presented token, mint a fresh pair on the
-            // same grant (same delegate ⇒ same downstream MCP session key).
-            state.db.revoke_oauth_token(&presented_hash).await?;
+            // Consume and replace the refresh token in one database
+            // transaction. Exactly one concurrent presenter can succeed.
             let (access_token, access_row, refresh_token, refresh_row) =
-                mint_token_pair(cfg, &row.grant_id, &row.scope);
-            state.db.insert_oauth_token(&access_row).await?;
-            state.db.insert_oauth_token(&refresh_row).await?;
-            let _ = client;
+                mint_token_pair(cfg, &preview.grant_id, &preview.scope);
+            let row = state
+                .db
+                .rotate_oauth_refresh_token(
+                    &presented_hash,
+                    &client.client_id,
+                    &access_row,
+                    &refresh_row,
+                )
+                .await?
+                .ok_or_else(|| {
+                    OAuthError::invalid_grant("refresh_token was concurrently used or revoked")
+                })?;
 
             Ok(Json(TokenResponse {
                 access_token,
