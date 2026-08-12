@@ -30,10 +30,10 @@ questions:
   - How do I configure the MemWal MCP CLI flags and environment variables?
   - How do I set up Streamable HTTP transport for Walrus Memory MCP?
 answer: >-
-  The MemWal MCP reference documents eight tools (memwal_remember, memwal_remember_bulk, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, memwal_logout) with full parameter details. It covers CLI flags (--relayer, --namespace, --label, etc.), environment presets (prod, staging, local), two transport modes (stdio and Streamable HTTP), credential file format, default namespace precedence, self-hosting configuration, and runtime safety notes for 401 handling and relayer overrides.
+  The MemWal MCP reference documents eight tools (memwal_remember, memwal_remember_bulk, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, memwal_logout) with full parameter details. It covers CLI flags such as --relayer, --namespace, and --label, environment presets (prod, staging, local), two transport modes (stdio and Streamable HTTP), credential file format, default namespace precedence, self-hosting configuration, and runtime safety notes for 401 handling and relayer overrides.
 ---
 
-This page documents every tool, flag, environment variable, and transport route the Walrus Memory MCP package exposes. For per-client setup, start with the [MCP overview](/mcp/overview).
+The Walrus Memory MCP package exposes the tools, flags, environment variables, and transport routes below. For per-client setup, start with the [MCP overview](/mcp/overview).
 
 ## Tools
 
@@ -41,7 +41,7 @@ The MCP server exposes **eight tools**: six **relayer tools** (memory operations
 
 ## First-run behavior
 
-When `~/.memwal/credentials.json` is missing, the stdio package does **not** exit immediately if it was launched by an MCP host.
+When `~/.memwal/credentials.json` is missing, the stdio package does **not** exit immediately if an MCP host launched it.
 
 Instead it starts in an auth-required mode that:
 
@@ -55,7 +55,7 @@ This is why many first-run sessions show `memwal_login` before the other tools a
 
 Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** whenever it learns something worth remembering across sessions (preference, decision, constraint, correction, identity), not only when the user explicitly asks. Pass the full statement; do not summarize.
 
-| Parameter | Type | Required | Description |
+| **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
 | `text` | string | yes | The complete fact to save. |
 | `namespace` | string | no | Namespace bucket. Defaults to the session namespace. |
@@ -64,7 +64,7 @@ Save a durable fact to the user's Walrus Memory. The agent calls this **proactiv
 
 Save several durable facts in one batched call. Prefer this over repeated `memwal_remember` calls when the agent learns multiple distinct facts at once.
 
-| Parameter | Type | Required | Description |
+| **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
 | `facts` | string[] (1–20) | yes | Array of complete fact statements, one full fact per entry, no summarizing. |
 | `namespace` | string | no | Namespace bucket applied to every fact. Defaults to the session namespace. |
@@ -73,7 +73,7 @@ Save several durable facts in one batched call. Prefer this over repeated `memwa
 
 Search the user's Walrus Memory for facts relevant to a query. The agent calls this **proactively** at the start of a task or when the user references past work, decisions, or preferences. Returns matches ranked by relevance.
 
-| Parameter | Type | Required | Description |
+| **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
 | `query` | string | yes | Natural-language query to match against stored memories. |
 | `limit` | integer (1–100) | no | Max memories to return. Default `10`. |
@@ -83,7 +83,7 @@ Search the user's Walrus Memory for facts relevant to a query. The agent calls t
 
 Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate memory.
 
-| Parameter | Type | Required | Description |
+| **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
 | `text` | string | yes | Conversation transcript, note, or arbitrary text to extract from. |
 | `namespace` | string | no | Namespace for the extracted facts. |
@@ -92,7 +92,7 @@ Extract memorable facts from a longer passage of text (preferences, habits, biog
 
 Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts only (`restored` / `skipped` / `total`), does **not** return memory texts. Call `memwal_recall` afterwards to query the rebuilt index.
 
-| Parameter | Type | Required | Description |
+| **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
 | `namespace` | string | yes | Namespace bucket to restore. |
 | `limit` | integer (1–500) | no | Max memories to re-index. Default `10`. |
@@ -112,7 +112,7 @@ Returns a one-time URL valid for **5 minutes**. If it expires, call the tool aga
 Remove the saved credentials from this machine (`~/.memwal/credentials.json`). Takes no parameters.
 
 <Warning>
-The on-chain delegate key registration is **not** revoked by `memwal_logout`, only the local file is wiped. Visit the [Walrus Memory dashboard](https://memory.walrus.xyz) to remove the delegate key from your account.
+`memwal_logout` does **not** revoke the onchain delegate key registration, it only wipes the local file. Visit the [Walrus Memory dashboard](https://memory.walrus.xyz) to remove the delegate key from your account.
 </Warning>
 
 <Note>
@@ -123,7 +123,7 @@ Both session tools (`memwal_login`, `memwal_logout`) are intercepted locally by 
 
 The stdio package accepts CLI flags and environment variables. **CLI takes precedence** when both are set.
 
-| CLI flag | Environment variable | Description |
+| **CLI flag** | **Environment variable** | **Description** |
 | --- | --- | --- |
 | `--relayer <url>` | `MEMWAL_SERVER_URL` | Override the relayer base URL. |
 | `--web-url <url>` | `MEMWAL_WEB_URL` | Override the dashboard URL used during login. |
@@ -137,27 +137,19 @@ Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
 
 ## Default namespace
 
-Set a default memory namespace once in your client config instead of having
-the agent pass `namespace` on every call. The package injects it into
-`memwal_remember`, `memwal_recall`, `memwal_analyze`, and `memwal_restore`
-calls that don't already carry one.
+Set a default memory namespace once in your client config instead of having the agent pass `namespace` on every call. The package injects it into `memwal_remember`, `memwal_recall`, `memwal_analyze`, and `memwal_restore` calls that don't already carry one.
 
 Precedence, highest first:
 
-1. **Explicit per-call `namespace`**, a non-empty `namespace` in the tool
-   call is used as-is. The configured default never overrides it.
+1. **Explicit per-call `namespace`**. The package forwards a non-empty `namespace` in the tool call unchanged, and the configured default never overrides it.
 2. **`--namespace` CLI flag** (alias `--ns`).
 3. **`MEMWAL_NAMESPACE` environment variable**.
-4. **Unset**, the call is forwarded without a `namespace` and the relayer
-   applies its own `"default"` namespace.
+4. **Unset**. The package forwards the call without a `namespace`, and the relayer applies its own `"default"` namespace.
 
-CLI wins over the environment variable when both are set, matching every other
-flag in the table above.
+CLI wins over the environment variable when you set both, which matches every other flag in the table above.
 
 <Note>
-`memwal_restore` still lists `namespace` as **required** in its tool schema,
-so agents normally pass one explicitly. A configured default is only used as a
-fallback if the agent calls `memwal_restore` without a namespace.
+`memwal_restore` still lists `namespace` as **required** in its tool schema, so agents normally pass one explicitly. The configured default only acts as a fallback when the agent calls `memwal_restore` without a namespace.
 </Note>
 
 Example, pin every memory call to a `work` namespace:
@@ -212,7 +204,7 @@ Common local config locations:
 
 Shortcut flags that set both the relayer and the dashboard URL in one switch:
 
-| Flag | Relayer | Dashboard |
+| **Flag** | **Relayer** | **Dashboard** |
 | --- | --- | --- |
 | `--prod` | `https://relayer.memory.walrus.xyz` | `https://memory.walrus.xyz` |
 | `--staging` | `https://relayer-staging.memory.walrus.xyz` | `https://staging.memory.walrus.xyz` |
@@ -224,7 +216,7 @@ Explicit `--relayer` and `--web-url` override the preset. You can also pass eith
 
 Walrus Memory supports two MCP connection modes.
 
-| Mode | Best for | Configured via |
+| **Mode** | **Best for** | **How you configure it** |
 | --- | --- | --- |
 | **stdio package** | Clients that run local MCP commands (most clients today) | `npx -y @mysten-incubation/memwal-mcp` in the client config |
 | **Streamable HTTP** | Clients that support remote HTTP MCP servers | `url: "https://relayer.memory.walrus.xyz/api/mcp"` + auth headers |
@@ -294,7 +286,7 @@ Prefer **Streamable HTTP** when:
 
 The hosted relayer (and any self-hosted relayer) exposes the same MCP routes:
 
-| Route | Purpose |
+| **Route** | **Purpose** |
 | --- | --- |
 | `GET /api/mcp/sse` | Legacy SSE session for the stdio bridge |
 | `POST /api/mcp/messages` | JSON-RPC messages for the legacy SSE transport |
@@ -306,9 +298,11 @@ The hosted relayer (and any self-hosted relayer) exposes the same MCP routes:
 | `POST /oauth/register` | Dynamic client registration (RFC 7591) |
 | `GET /oauth/authorize`, `POST /oauth/token`, `POST /oauth/revoke` | Authorization-code + PKCE + refresh flow |
 
-The Rust relayer auto-starts a TypeScript sidecar and forwards MCP traffic to it over loopback. The sidecar resolves MCP bearer credentials into normal Walrus Memory SDK sessions, so MCP tool calls go through the **same SEAL, Walrus, and pgvector paths** as direct SDK calls.
+The Rust relayer auto-starts a TypeScript sidecar and forwards MCP traffic to it over loopback. The sidecar resolves MCP bearer credentials into normal Walrus Memory SDK sessions, so MCP tool calls go through the **same `@mysten/seal` encryption, Walrus, and pgvector paths** as direct SDK calls.
 
 ## Runtime safety notes
+
+Two behaviors surprise people often enough to spell out: how the package treats a `401`, and what `--relayer` does to a saved credential.
 
 ### 401 behavior
 
@@ -326,7 +320,7 @@ The saved file is not silently rewritten. To rotate the saved relayer permanentl
 
 Self-hosted relayers expose the same public MCP routes as the hosted relayer. The most common operator-tunable settings:
 
-| Variable | Default | Purpose |
+| **Variable** | **Default** | **Purpose** |
 | --- | --- | --- |
 | `SIDECAR_URL` | `http://localhost:9000` | Loopback endpoint the Rust relayer uses to reach the sidecar |
 | `MCP_MAX_TOTAL_SESSIONS` | `1000` | Cap on concurrent MCP sessions across SSE and Streamable HTTP |
@@ -334,7 +328,7 @@ Self-hosted relayers expose the same public MCP routes as the hosted relayer. Th
 | `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Rate cap on new sessions per source IP per minute |
 | `TRUSTED_PROXY_HOPS` | `0` | Trusted reverse-proxy hops used to resolve the canonical client IP; keep `0` for direct deployments |
 
-See [Environment Variables](/reference/environment-variables) for the full list including SEAL, Walrus, embeddings, and database settings.
+See [Environment Variables](/reference/environment-variables) for the full list including `@mysten/seal` encryption, Walrus, embeddings, and database settings.
 
 ### MCP OAuth 2.1 configuration
 
@@ -401,7 +395,7 @@ The relayer computes these, so they need no configuration.
 | `MCP_OAUTH_SESSION_TTL_SECS` | `900` | OAuth session lifetime |
 | `MCP_OAUTH_ALLOWED_REGISTRATION_HOSTS` | `claude.ai` | Redirect URI allowlist |
 | `MCP_OAUTH_REGISTRATION_PER_HOUR_PER_IP` | `20` | DCR rate limit |
-| `MCP_OAUTH_REGISTRATION_TRUSTED_CIDRS` | `160.79.104.0/21` | Networks that may register a client. The default is Anthropic's documented connector egress range. |
+| `MCP_OAUTH_REGISTRATION_TRUSTED_CIDRS` | `160.79.104.0/21` | Networks that might register a client. The default is Anthropic's documented connector egress range. |
 
 ## Logout semantics
 
@@ -409,16 +403,18 @@ The relayer computes these, so they need no configuration.
 
 They do **not**:
 
-- revoke the on-chain delegate key
+- revoke the onchain delegate key
 - remove the delegate from the Walrus Memory dashboard
 
 If the delegate itself should stop working, revoke it from the dashboard too.
 
 ## Troubleshooting
 
+Work through the symptom that matches what you see.
+
 ### Tools aren't visible to the agent
 
-Quit and relaunch your MCP client, MCP servers only load at startup. If you used `claude mcp add`, run `claude mcp list` to confirm `memwal` is registered before restarting Claude Code.
+Quit and relaunch your MCP client. MCP servers only load at startup. If you used `claude mcp add`, run `claude mcp list` to confirm `memwal` is registered before restarting Claude Code.
 
 ### Only `memwal_login` shows up
 
