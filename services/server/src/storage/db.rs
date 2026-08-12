@@ -15,7 +15,7 @@ mod tests {
 
     use sqlx::postgres::PgPoolOptions;
 
-    use super::VectorDb;
+    use super::{oauth_rows, VectorDb};
 
     static VECTOR_SCHEMA_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -51,6 +51,131 @@ mod tests {
         }
 
         Some(VectorDb { pool })
+    }
+
+    async fn oauth_test_db() -> Option<VectorDb> {
+        let db = test_db().await?;
+        sqlx::raw_sql(include_str!("../../migrations/011_mcp_oauth.sql"))
+            .execute(db.pool())
+            .await
+            .expect("OAuth migration must create tables on a fresh test database");
+        Some(db)
+    }
+
+    #[tokio::test]
+    async fn oauth_migration_011_creates_required_tables() {
+        let Some(db) = oauth_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let tables: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM information_schema.tables
+             WHERE table_schema = current_schema()
+               AND table_name IN ('mcp_oauth_clients', 'mcp_oauth_delegates',
+                                  'mcp_oauth_authorize_sessions', 'mcp_oauth_codes',
+                                  'mcp_oauth_grants', 'mcp_oauth_tokens')",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(tables.0, 6);
+    }
+
+    #[tokio::test]
+    async fn concurrent_refresh_rotation_has_exactly_one_winner() {
+        let Some(db) = oauth_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let client_id = format!("mwc_{suffix}");
+        let delegate_ref = format!("mwd_{suffix}");
+        let grant_id = format!("mwg_{suffix}");
+        let presented = crate::oauth::hash_token(&format!("mwr_{suffix}"));
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            "INSERT INTO mcp_oauth_clients
+             (client_id, client_name, redirect_uris, grant_types, response_types,
+              token_endpoint_auth_method, scope, status)
+             VALUES ($1, 'refresh concurrency test', ARRAY['http://localhost/callback'],
+                     ARRAY['authorization_code','refresh_token'], ARRAY['code'],
+                     'none', 'memwal:read offline_access', 'active')",
+        )
+        .bind(&client_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mcp_oauth_delegates
+             (delegate_ref, account_id, owner_address, delegate_public_key,
+              delegate_address, encrypted_private_key, label, status)
+             VALUES ($1, $2, $3, $4, $5, 'v1.test.test', 'test', 'active')",
+        )
+        .bind(&delegate_ref)
+        .bind(format!("account-{suffix}"))
+        .bind(format!("owner-{suffix}"))
+        .bind(hex::encode(uuid::Uuid::new_v4().as_bytes()).repeat(2))
+        .bind(format!("address-{suffix}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mcp_oauth_grants
+             (grant_id, client_id, delegate_ref, account_id, owner_address, scope, resource)
+             VALUES ($1, $2, $3, $4, $5, 'memwal:read offline_access', 'https://example.test/api/mcp')",
+        )
+        .bind(&grant_id)
+        .bind(&client_id)
+        .bind(&delegate_ref)
+        .bind(format!("account-{suffix}"))
+        .bind(format!("owner-{suffix}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mcp_oauth_tokens (token_sha256, grant_id, token_type, expires_at)
+             VALUES ($1, $2, 'refresh', $3)",
+        )
+        .bind(&presented)
+        .bind(&grant_id)
+        .bind(now + chrono::Duration::minutes(5))
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let pair = |label: &str| {
+            let access = oauth_rows::OAuthTokenRow {
+                token_sha256: crate::oauth::hash_token(&format!("access-{label}-{suffix}")),
+                grant_id: grant_id.clone(),
+                token_type: "access".to_string(),
+                expires_at: now + chrono::Duration::minutes(5),
+            };
+            let refresh = oauth_rows::OAuthTokenRow {
+                token_sha256: crate::oauth::hash_token(&format!("refresh-{label}-{suffix}")),
+                grant_id: grant_id.clone(),
+                token_type: "refresh".to_string(),
+                expires_at: now + chrono::Duration::minutes(10),
+            };
+            (access, refresh)
+        };
+        let (access_a, refresh_a) = pair("a");
+        let (access_b, refresh_b) = pair("b");
+        let first = db.rotate_oauth_refresh_token(&presented, &client_id, &access_a, &refresh_a);
+        let second = db.rotate_oauth_refresh_token(&presented, &client_id, &access_b, &refresh_b);
+        let (first, second) = tokio::join!(first, second);
+        let winners =
+            usize::from(first.unwrap().is_some()) + usize::from(second.unwrap().is_some());
+        assert_eq!(
+            winners, 1,
+            "a refresh token must have exactly one concurrent consumer"
+        );
+
+        sqlx::query("DELETE FROM mcp_oauth_clients WHERE client_id = $1")
+            .bind(&client_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -313,10 +438,10 @@ impl VectorDb {
         // MCP OAuth 2.1 (Claude custom connectors): client registry,
         // server-custodied delegate keys, and authorization state.
         let migration_011 = include_str!("../../migrations/011_mcp_oauth.sql");
-        sqlx::raw_sql(migration_010)
+        sqlx::raw_sql(migration_011)
             .execute(&pool)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 011: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 

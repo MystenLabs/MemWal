@@ -1072,3 +1072,39 @@ pub async fn revoke(
     }
     Ok(StatusCode::OK)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use sui_crypto::ed25519::Ed25519PrivateKey;
+    use sui_crypto::SuiSigner;
+    use sui_sdk_types::{PersonalMessage, UserSignature};
+
+    use crate::security_delete_auth::{NativeWalletSignatureVerifier, WalletSignatureVerifier};
+
+    use super::oauth_owner_proof_message;
+
+    #[tokio::test]
+    async fn delegate_reuse_rejects_proof_from_another_authorization_session() {
+        let key = Ed25519PrivateKey::new([19; 32]);
+        let account_id = format!("0x{}", "11".repeat(32));
+        let owner = key.public_key().derive_address().to_string();
+        let victim_session = "mws_victim-session";
+        let attacker_session = "mws_attacker-session";
+        let signed_message = oauth_owner_proof_message(victim_session, &account_id, &owner);
+        let signature: UserSignature = key
+            .sign_personal_message(&PersonalMessage(Cow::Borrowed(signed_message.as_bytes())))
+            .unwrap();
+
+        let attacker_message = oauth_owner_proof_message(attacker_session, &account_id, &owner);
+        assert!(NativeWalletSignatureVerifier
+            .verify_personal(&owner, attacker_message.as_bytes(), &signature.to_base64())
+            .await
+            .is_err());
+        NativeWalletSignatureVerifier
+            .verify_personal(&owner, signed_message.as_bytes(), &signature.to_base64())
+            .await
+            .unwrap();
+    }
+}
