@@ -131,6 +131,8 @@ def test_sync_mock_wraps_core_flows_and_accepts_production_options():
 
 def test_sync_mock_polling_and_analyze_signatures_match_production():
     methods = (
+        "remember",
+        "remember_async",
         "wait_for_remember_job",
         "remember_and_wait",
         "wait_for_remember_jobs",

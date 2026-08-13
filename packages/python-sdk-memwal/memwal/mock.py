@@ -114,15 +114,22 @@ class MemWalMock:
         await self.close()
 
     async def remember(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
+        del idempotency_key
         memory = self._store(text, namespace)
         return RememberAcceptedResult(job_id=memory.job_id, status="done")
 
     async def remember_async(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
-        return await self.remember(text, namespace)
+        return await self.remember(text, namespace, idempotency_key)
 
     async def wait_for_remember_job(
         self,
@@ -142,8 +149,9 @@ class MemWalMock:
         namespace: Optional[str] = None,
         poll_interval_ms: int = 1500,
         timeout_ms: int = 60_000,
+        idempotency_key: Optional[str] = None,
     ) -> RememberResult:
-        accepted = await self.remember(text, namespace)
+        accepted = await self.remember(text, namespace, idempotency_key)
         return await self.wait_for_remember_job(
             accepted.job_id, poll_interval_ms, timeout_ms
         )
@@ -448,13 +456,21 @@ class MemWalMockSync:
                 return pool.submit(asyncio.run, coro).result()
         return asyncio.run(coro)
 
-    def remember(self, text: str, namespace: Optional[str] = None) -> RememberAcceptedResult:
-        return self._run(self._inner.remember(text, namespace))
+    def remember(
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> RememberAcceptedResult:
+        return self._run(self._inner.remember(text, namespace, idempotency_key))
 
     def remember_async(
-        self, text: str, namespace: Optional[str] = None
+        self,
+        text: str,
+        namespace: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
-        return self.remember(text, namespace)
+        return self.remember(text, namespace, idempotency_key)
 
     def wait_for_remember_job(
         self,
@@ -479,6 +495,7 @@ class MemWalMockSync:
         namespace: Optional[str] = None,
         poll_interval_ms: int = 1500,
         timeout_ms: int = 60_000,
+        idempotency_key: Optional[str] = None,
     ) -> RememberResult:
         return self._run(
             self._inner.remember_and_wait(
@@ -486,6 +503,7 @@ class MemWalMockSync:
                 namespace,
                 poll_interval_ms=poll_interval_ms,
                 timeout_ms=timeout_ms,
+                idempotency_key=idempotency_key,
             )
         )
 

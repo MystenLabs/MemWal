@@ -1,5 +1,13 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.7
+
+### Fixed
+
+- Reload credentials after browser login without restarting the MCP client.
+- Reject stale handshakes and prevent request replay across account changes.
+- Report truncated restores and enforce the relayer's bounded restore limit.
+
 ## 0.0.6
 
 ### Security
