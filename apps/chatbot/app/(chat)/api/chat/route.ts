@@ -213,9 +213,21 @@ export async function POST(request: Request) {
         );
 
         if (titlePromise) {
-          const title = await titlePromise;
-          dataStream.write({ type: "data-chat-title", data: title });
-          updateChatTitleById({ chatId: id, title });
+          try {
+            const title = await titlePromise;
+            dataStream.write({ type: "data-chat-title", data: title });
+            updateChatTitleById({ chatId: id, title });
+          } catch (error) {
+            // Title generation is a non-fatal side effect of the response
+            // already being streamed below it (dataStream.merge above).
+            // Left unguarded, a title-model failure (bad slug, no credits,
+            // upstream 5xx) threw here and was caught by createUIMessageStream's
+            // own onError below, which turned an unrelated, recoverable
+            // title-gen failure into a fatal "error" part on the whole chat
+            // response — even though the real answer above continued to
+            // stream successfully. The chat still works without a title.
+            console.error("[chat] title generation failed:", error);
+          }
         }
       },
       generateId: generateUUID,
@@ -257,6 +269,7 @@ export async function POST(request: Request) {
         }
       },
       onError: (error) => {
+        console.error("[chat] stream execute() error:", error);
         if (
           error instanceof Error &&
           error.message?.includes(
