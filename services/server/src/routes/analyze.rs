@@ -467,6 +467,7 @@ pub async fn analyze(
                     &owner,
                     &account_id,
                     &state.config.package_id,
+                    state.config.seal_expected_committee_identity.as_ref(),
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
                 // carry `importance` through the prep tuple so
@@ -533,6 +534,7 @@ pub async fn analyze(
                 account_id: account_id.clone(),
                 agent_public_key: Some(auth_pubkey_base.clone()),
                 remember_job_id: Some(job_id.clone()),
+                prepare_claim_token: None,
                 epochs: state.config.walrus_storage_epochs,
             },
         )

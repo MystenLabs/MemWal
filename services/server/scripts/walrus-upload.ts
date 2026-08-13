@@ -24,6 +24,7 @@ import { WalrusClient } from "@mysten/walrus";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
+import { enforceAddressBalanceCoinIntents } from "./sidecar/address-balance.js";
 
 // ============================================================
 // Parse CLI arguments
@@ -136,6 +137,10 @@ async function main() {
         owner: signerAddress,
         deletable: true,
     });
+    enforceAddressBalanceCoinIntents(registerTx);
+    // Resolve both gas and Walrus storage payment from the signer's address
+    // balance instead of selecting owned coin objects.
+    registerTx.setGasPayment([]);
 
     // Sign and execute the register transaction
     const registerResult = await suiClient.signAndExecuteTransaction({
@@ -154,6 +159,9 @@ async function main() {
 
     // Step 4: Certify blob on Sui → returns a Transaction
     const certifyTx = flow.certify();
+    certifyTx.setSenderIfNotSet(signerAddress);
+    enforceAddressBalanceCoinIntents(certifyTx);
+    certifyTx.setGasPayment([]);
 
     // Sign and execute the certify transaction
     const certifyResult = await suiClient.signAndExecuteTransaction({

@@ -9,6 +9,7 @@ import {
 import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
 import { getSession } from "@/lib/auth/session";
+import { sessionMemoryCredentials } from "@/lib/auth/session-memory";
 import { allowedModelIds } from "@/lib/ai/models";
 import { researchPrompt, getSprintResumePrompt } from "@/lib/ai/prompts";
 import { buildSprintContext } from "@/lib/sprint/resume";
@@ -137,8 +138,9 @@ export async function POST(request: Request) {
     const modelMessages = await convertToModelMessages(uiMessages);
 
     // Resolve sprint context — pre-built during preparation and stored on chat record
-    const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY;
-    const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
+    const memoryCredentials = sessionMemoryCredentials(session.user);
+    const memwalKey = memoryCredentials?.key;
+    const memwalAccountId = memoryCredentials?.accountId;
     const resolvedSprintIds: string[] = chat?.sprintIds ?? [];
     const prebuiltSprintContext: string | null = chat?.sprintContext ?? null;
 

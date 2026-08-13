@@ -7,12 +7,30 @@ import type { User, ZkProofData } from "@/shared/db/type";
 import type { OAuthProvider } from "../constant";
 
 // ═══════════════════════════════════════════════════════════════
+// Safe User DTO
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Client-facing user shape. Deliberately excludes secrets
+ * (delegatePrivateKey) and unneeded PII (email, providerSub); mirrors the
+ * server-side `toSafeUser` projection.
+ */
+export type SafeUser = {
+  id: string;
+  suiAddress: string;
+  name: string | null;
+  avatar: string | null;
+  authMethod: string;
+  delegateAccountId: string | null;
+};
+
+// ═══════════════════════════════════════════════════════════════
 // Authentication State
 // ═══════════════════════════════════════════════════════════════
 
 export type AuthState = {
   isAuthenticated: boolean;
-  user: User | null;
+  user: SafeUser | null;
   suiAddress: string | null;
   provider: OAuthProvider | null;
   isLoading: boolean;

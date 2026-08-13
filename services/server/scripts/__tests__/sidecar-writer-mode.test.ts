@@ -140,6 +140,21 @@ test("writer mode exposes only durable writer and observability routes", async (
         assert.equal(walletMetrics.walletWalAddressBalanceFrost, "4500000000");
         assert.equal(walletMetrics.walletWalCoinBalanceFrost, "60000000");
         assert.equal(walletMetrics.walletWalAddressFundedCount, 1);
+        assert.equal(walletMetrics.perWallet, undefined);
+        assert.equal((await fetch(`${baseUrl}/internal/wallet-balances`)).status, 401);
+        const internalWalletsResponse = await fetch(`${baseUrl}/internal/wallet-balances`, {
+            headers,
+        });
+        assert.equal(internalWalletsResponse.status, 200);
+        assert.deepEqual(await internalWalletsResponse.json(), {
+            perWallet: [
+                {
+                    address: writerKey.toSuiAddress(),
+                    suiMist: "1230000000",
+                    walFrost: "4560000000",
+                },
+            ],
+        });
         assert.equal(uploadLimits.globalCapacity, WALRUS_UPLOAD_MAX_CONCURRENCY);
         assert.equal(uploadLimits.perWalletCapacity, WALRUS_UPLOAD_PER_WALLET_CONCURRENCY);
         balanceLookupFails = true;
@@ -147,6 +162,11 @@ test("writer mode exposes only durable writer and observability routes", async (
         assert.equal(degradedMetrics.activeWalrusUploads, 0);
         assert.equal(degradedMetrics.walletSuiBalanceMist, undefined);
         assert.equal(degradedMetrics.walletWalBalanceFrost, undefined);
+        assert.equal(degradedMetrics.perWallet, undefined);
+        assert.equal(
+            (await fetch(`${baseUrl}/internal/wallet-balances`, { headers })).status,
+            503,
+        );
         balanceLookupFails = false;
         assert.equal(
             (

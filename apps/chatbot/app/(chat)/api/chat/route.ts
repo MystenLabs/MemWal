@@ -15,6 +15,7 @@ import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
+import { memoryNamespaceForUser } from "@/lib/ai/memory-namespace";
 import { allowedModelIds } from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel, getMemWalModel } from "@/lib/ai/providers";
@@ -76,6 +77,10 @@ export async function POST(request: Request) {
     }
 
     if (!session?.user) {
+      return new ChatbotError("unauthorized:chat").toResponse();
+    }
+    const memoryNamespace = memoryNamespaceForUser(session.user.id);
+    if (!memoryNamespace) {
       return new ChatbotError("unauthorized:chat").toResponse();
     }
 
@@ -160,7 +165,13 @@ export async function POST(request: Request) {
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
       execute: async ({ writer: dataStream }) => {
         const result = streamText({
-          model: useMemWal !== false ? getMemWalModel(selectedChatModel, memwalKey, memwalAccountId) : getLanguageModel(selectedChatModel),
+          model: useMemWal !== false
+            ? getMemWalModel(selectedChatModel, {
+                namespace: memoryNamespace,
+                memwalKey,
+                memwalAccountId,
+              })
+            : getLanguageModel(selectedChatModel),
           system: systemPrompt({ selectedChatModel, requestHints }),
           messages: modelMessages,
           stopWhen: stepCountIs(5),
@@ -185,7 +196,11 @@ export async function POST(request: Request) {
             createDocument: createDocument({ session, dataStream }),
             updateDocument: updateDocument({ session, dataStream }),
             requestSuggestions: requestSuggestions({ session, dataStream }),
-            saveMemory: saveMemory({ memwalKey, memwalAccountId }),
+            saveMemory: saveMemory({
+              namespace: memoryNamespace,
+              memwalKey,
+              memwalAccountId,
+            }),
           },
           experimental_telemetry: {
             isEnabled: isProductionEnvironment,

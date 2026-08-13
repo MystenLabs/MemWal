@@ -32,6 +32,9 @@ pub const DEFAULT_BLOB_CACHE_MAX_BYTES: usize = 512 * 1024;
 /// Default max age for Redis-cached recall query embeddings.
 pub const DEFAULT_EMBEDDING_CACHE_TTL_SECS: u64 = 10 * 60;
 
+/// Prevent an accidental low interval from continuously polling Sui and the sidecar.
+const MIN_BALANCE_MONITOR_INTERVAL_SECS: u64 = 30;
+
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
 pub const DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS: u32 = 5;
@@ -112,6 +115,12 @@ pub struct AppState {
     /// `Arc` so the `MemoryEngine` impl can share the same handle rather
     /// than duplicating the pool.
     pub db: Arc<VectorDb>,
+    /// Small dedicated pool used ONLY to hold a per-job `pg_advisory_lock`
+    /// across an upload job's guard-read → mint → persist critical section, so
+    /// two concurrent attempts of the same job can't both mint a paid blob. Kept
+    /// separate from `db` so that holding a connection for the (up to 5-minute)
+    /// upload duration never starves the request-serving pool.
+    pub wallet_lock_pool: sqlx::PgPool,
     /// Isolated old-V1 database. Present only when at least one tracked
     /// security-delete component is enabled.
     pub legacy_db: Option<Arc<crate::storage::legacy_db::LegacyDb>>,
@@ -295,6 +304,9 @@ pub struct Config {
     pub sidecar_url: String,
     /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
     pub sidecar_secret: Option<String>,
+    /// Reviewed SEAL committee identity pinned on every encryption request.
+    /// The sidecar compares this JSON object to its effective key-server config.
+    pub seal_expected_committee_identity: Option<serde_json::Value>,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
@@ -345,6 +357,22 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Max `/api/restore` calls per owner per minute (GH #501 / WALM-299).
+    /// Dedicated on top of the generic weighted account rate limiter —
+    /// bounds how often an attacker can force a fresh first-time-discovery
+    /// cost by repeatedly transferring junk blob_ids into a victim's wallet.
+    /// `0` disables the guard.
+    pub restore_requests_per_owner_per_minute: u64,
+    /// Balance monitoring (proactive alerts)
+    pub balance_monitor_interval_secs: u64,
+    pub wallet_balance_low_threshold_wal: u64,
+    pub sponsor_balance_low_threshold_sui: u64,
+    /// MCP OAuth 2.1 support for Claude (and future) native custom
+    /// connectors. `None` when required env vars are unset — routes still
+    /// mount but OAuth tokens won't resolve. When configured, OAuth is
+    /// always available alongside the legacy delegate-key bearer.
+    #[allow(dead_code)]
+    pub mcp_oauth: Option<crate::oauth::McpOAuthConfig>,
 }
 
 impl Config {
@@ -370,6 +398,21 @@ impl Config {
         let package_id = std::env::var("MEMWAL_PACKAGE_ID").expect("MEMWAL_PACKAGE_ID must be set");
         let seal_policy_package_id =
             nonempty_env("MEMWAL_SEAL_POLICY_PACKAGE_ID").unwrap_or_else(|| package_id.clone());
+        let seal_expected_committee_identity = nonempty_env("SEAL_EXPECTED_COMMITTEE_IDENTITY")
+            .map(|raw| {
+                serde_json::from_str(&raw).unwrap_or_else(|error| {
+                    panic!(
+                        "SEAL_EXPECTED_COMMITTEE_IDENTITY must be valid JSON: {}",
+                        error
+                    )
+                })
+            });
+        if env_bool("SEAL_REQUIRE_COMMITTEE_IDENTITY") && seal_expected_committee_identity.is_none()
+        {
+            panic!(
+                "SEAL_EXPECTED_COMMITTEE_IDENTITY must be set when SEAL_REQUIRE_COMMITTEE_IDENTITY=true"
+            );
+        }
 
         Self {
             port: std::env::var("PORT")
@@ -414,8 +457,7 @@ impl Config {
             },
             package_id,
             seal_policy_package_id,
-            registry_id: std::env::var("MEMWAL_REGISTRY_ID")
-                .expect("MEMWAL_REGISTRY_ID must be set"),
+            registry_id: normalize_object_id_env("MEMWAL_REGISTRY_ID"),
             registry_scan_max_pages: std::env::var("MEMWAL_REGISTRY_SCAN_MAX_PAGES")
                 .ok()
                 .and_then(|v| v.trim().parse::<u32>().ok())
@@ -426,6 +468,7 @@ impl Config {
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
+            seal_expected_committee_identity,
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             accounts_rate_limit: AccountsRateLimitConfig::from_env(),
@@ -478,6 +521,21 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            // `env_number`, not `env_positive_u64`: `0` is a meaningful,
+            // documented value here (disables `check_restore_call_rate_limit`
+            // entirely) — `env_positive_u64` would silently coerce it back
+            // to the default, making that escape hatch unreachable.
+            restore_requests_per_owner_per_minute: env_number(
+                "RESTORE_REQUESTS_PER_OWNER_PER_MINUTE",
+                10,
+            ),
+            balance_monitor_interval_secs: normalized_balance_monitor_interval(env_positive_u64(
+                "BALANCE_MONITOR_INTERVAL_SECS",
+                900,
+            )),
+            wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
+            sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
+            mcp_oauth: crate::oauth::McpOAuthConfig::from_env(),
         }
     }
 }
@@ -503,6 +561,10 @@ fn env_positive_u64(name: &str, default: u64) -> u64 {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn normalized_balance_monitor_interval(interval_secs: u64) -> u64 {
+    interval_secs.max(MIN_BALANCE_MONITOR_INTERVAL_SECS)
 }
 
 fn sui_rpc_quota_from_env() -> (u32, std::time::Duration) {
@@ -659,6 +721,14 @@ pub fn validate_security_delete_config(config: &Config) -> Result<(), String> {
 
 pub fn security_delete_routes_enabled(config: &Config) -> bool {
     config.enable_memory_deletion && config.enable_security_delete
+}
+
+fn normalize_object_id_env(name: &str) -> String {
+    let raw = std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
+    raw.trim()
+        .parse::<sui_sdk_types::Address>()
+        .unwrap_or_else(|error| panic!("{name} must be a valid Sui object ID: {error}"))
+        .to_string()
 }
 
 fn env_bool(name: &str) -> bool {
@@ -827,6 +897,12 @@ pub struct RememberRequest {
     /// Namespace for memory isolation (default: "default")
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Optional client-supplied idempotency key. When set, a retry with the
+    /// same key (for the same owner) collapses onto the original job instead of
+    /// minting a new one — so an ambiguous timeout can't produce a duplicate
+    /// paid on-chain blob. Omit for the default (each request is independent).
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 // ============================================================
@@ -1554,6 +1630,9 @@ pub enum AppError {
     RateLimited(String),
     /// Storage quota exceeded (HTTP 402)
     QuotaExceeded(String),
+    /// Request conflicts with existing state (HTTP 409) — e.g. an idempotency
+    /// key reused for a request with different content.
+    Conflict(String),
     /// upstream LLM/embedding provider returned a transient failure
     /// (gateway timeout / connection reset / "200 OK" wrapping an
     /// `{"error":{"code":504}}` envelope from OpenRouter). Maps to HTTP 503
@@ -1571,6 +1650,7 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
             AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
+            AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
             AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
             AppError::QuotaExceeded(msg) => write!(f, "Quota Exceeded: {}", msg),
             AppError::UpstreamUnavailable(msg) => write!(f, "Upstream Unavailable: {}", msg),
@@ -1601,6 +1681,7 @@ impl axum::response::IntoResponse for AppError {
                 )
             }
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
+            AppError::Conflict(msg) => (axum::http::StatusCode::CONFLICT, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
             AppError::UpstreamUnavailable(msg) => {
@@ -1635,6 +1716,7 @@ impl AppError {
             AppError::Unauthorized(_) => "unauthorized",
             AppError::Internal(_) => "internal",
             AppError::BlobNotFound(_) => "blob_not_found",
+            AppError::Conflict(_) => "conflict",
             AppError::RateLimited(_) => "rate_limited",
             AppError::QuotaExceeded(_) => "quota_exceeded",
             AppError::UpstreamUnavailable(_) => "upstream_unavailable",
@@ -1662,6 +1744,13 @@ mod tests {
     use std::sync::Mutex;
 
     static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn balance_monitor_interval_has_a_safe_minimum() {
+        assert_eq!(normalized_balance_monitor_interval(1), 30);
+        assert_eq!(normalized_balance_monitor_interval(30), 30);
+        assert_eq!(normalized_balance_monitor_interval(900), 900);
+    }
 
     // ── Client-supplied embedding vector validation ──────────────
 
@@ -1751,6 +1840,7 @@ mod tests {
             registry_scan_max_pages: DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9000".into(),
             sidecar_secret: None,
+            seal_expected_committee_identity: None,
             rate_limit: RateLimitConfig::default(),
             sponsor_rate_limit: SponsorRateLimitConfig::default(),
             accounts_rate_limit: AccountsRateLimitConfig::default(),
@@ -1781,6 +1871,11 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            restore_requests_per_owner_per_minute: 10,
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 1_000_000,
+            sponsor_balance_low_threshold_sui: 100_000_000,
+            mcp_oauth: None,
         }
     }
 

@@ -7,95 +7,40 @@
  */
 
 import type { db as dbClient } from "@/shared/lib/db";
+import type { User } from "@/shared/db/type";
 import { users, zkLoginSessions, walletSessions } from "@/shared/db/schema";
 import { eq, and } from "drizzle-orm";
-import type { ZkProofData } from "@/shared/db/type";
 
 type DbClient = typeof dbClient;
 
 // ══════════════════════════════════════════════════════════════
-// ZKLOGIN USER MANAGEMENT
+// SAFE USER DTO
 // ══════════════════════════════════════════════════════════════
 
 /**
- * Create or update user from zkLogin authentication
- * Returns existing user if suiAddress matches, otherwise creates new user
+ * The subset of a user row that is safe to hand back to the client.
+ * Deliberately omits secrets (delegatePrivateKey) and PII the client
+ * has no need for (email, providerSub).
  */
-export async function upsertZkLoginUser(
-  db: DbClient,
-  input: {
-    suiAddress: string;
-    provider: string;
-    providerSub: string;
-    name: string | null;
-    email: string | null;
-    avatar: string | null;
-  }
-) {
-  // Check if user exists
-  const [existingUser] = await db
-    .select()
-    .from(users)
-    .where(eq(users.suiAddress, input.suiAddress))
-    .limit(1);
+export type SafeUser = {
+  id: string;
+  suiAddress: string;
+  name: string | null;
+  avatar: string | null;
+  authMethod: string;
+  delegateAccountId: string | null;
+};
 
-  if (existingUser) {
-    // Update existing user
-    const [user] = await db
-      .update(users)
-      .set({
-        authMethod: "zklogin",
-        provider: input.provider,
-        name: input.name,
-        email: input.email,
-        avatar: input.avatar,
-        lastSeenAt: new Date(),
-      })
-      .where(eq(users.id, existingUser.id))
-      .returning();
-    return user;
-  }
-
-  // Create new user
-  const [user] = await db
-    .insert(users)
-    .values({
-      suiAddress: input.suiAddress,
-      authMethod: "zklogin",
-      provider: input.provider,
-      providerSub: input.providerSub,
-      name: input.name,
-      email: input.email,
-      avatar: input.avatar,
-      lastSeenAt: new Date(),
-    })
-    .returning();
-  return user;
-}
-
-// ══════════════════════════════════════════════════════════════
-// ZKLOGIN SESSION MANAGEMENT
-// ══════════════════════════════════════════════════════════════
-
-/**
- * Update zkLogin session with userId and proof after authentication completes
- * Called after successful OAuth callback and proof generation
- */
-export async function updateZkLoginSession(
-  db: DbClient,
-  input: {
-    sessionId: string;
-    userId: string;
-    zkProof: ZkProofData;
-  }
-) {
-  await db
-    .update(zkLoginSessions)
-    .set({
-      userId: input.userId,
-      zkProof: input.zkProof,
-    })
-    .where(eq(zkLoginSessions.id, input.sessionId));
+/** Project a raw user row down to the client-safe DTO. */
+export function toSafeUser(user: User): SafeUser {
+  return {
+    id: user.id,
+    suiAddress: user.suiAddress,
+    name: user.name ?? null,
+    avatar: user.avatar ?? null,
+    authMethod: user.authMethod,
+    delegateAccountId: user.delegateAccountId ?? null,
+  };
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -149,35 +94,11 @@ export async function upsertWalletUser(
 // ══════════════════════════════════════════════════════════════
 
 /**
- * Get active session by ID (supports both zkLogin and wallet sessions)
- * Returns null if session doesn't exist, is expired, or has no associated user
+ * Get active session by ID (wallet / enoki sessions only).
+ * Returns null if the session doesn't exist, is expired, or has no associated
+ * user. The legacy zklogin_sessions table is no longer trusted.
  */
 export async function getActiveSession(db: DbClient, sessionId: string) {
-  // Try zkLogin session first
-  const [zkSession] = await db
-    .select()
-    .from(zkLoginSessions)
-    .where(eq(zkLoginSessions.id, sessionId))
-    .limit(1);
-
-  if (zkSession?.userId && zkSession.expiresAt > new Date()) {
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, zkSession.userId))
-      .limit(1);
-
-    if (user) {
-      return {
-        user,
-        sessionId: zkSession.id,
-        suiAddress: user.suiAddress,
-        expiresAt: zkSession.expiresAt,
-      };
-    }
-  }
-
-  // Try wallet session
   const [walletSession] = await db
     .select()
     .from(walletSessions)
@@ -193,7 +114,7 @@ export async function getActiveSession(db: DbClient, sessionId: string) {
 
     if (user) {
       return {
-        user,
+        user: toSafeUser(user),
         sessionId: walletSession.id,
         suiAddress: user.suiAddress,
         expiresAt: walletSession.expiresAt,
@@ -207,6 +128,18 @@ export async function getActiveSession(db: DbClient, sessionId: string) {
 // ══════════════════════════════════════════════════════════════
 // ENOKI USER MANAGEMENT
 // ══════════════════════════════════════════════════════════════
+
+/**
+ * Thrown when a registration attempt would clobber delegate credentials that
+ * are already provisioned for a user under an incompatible auth method. The
+ * route layer maps this to a 409/CONFLICT-style response.
+ */
+export class DelegateCredentialConflictError extends Error {
+  constructor() {
+    super("Delegate credentials already provisioned for this address");
+    this.name = "DelegateCredentialConflictError";
+  }
+}
 
 /** Create or update user from Enoki zkLogin. Stores delegate key for returning-user fast path. */
 export async function upsertEnokiUser(
@@ -224,6 +157,17 @@ export async function upsertEnokiUser(
     .limit(1);
 
   if (existingUser) {
+    // Credential provisioning is insert-only: once a row has a delegate key, the
+    // connect/register path must never overwrite it with caller-supplied values
+    // (the server can't verify the delegate key/account binding here, so an
+    // overwrite would let a caller replace an existing owner's stored key).
+    // Rotation, if ever needed, must be a separate authenticated, on-chain-verified
+    // flow. Registering again for an already-provisioned address is a no-op that
+    // returns the existing row.
+    if (existingUser.delegatePrivateKey) {
+      throw new DelegateCredentialConflictError();
+    }
+
     const [user] = await db
       .update(users)
       .set({
@@ -265,6 +209,43 @@ export async function getEnokiUserBySuiAddress(db: DbClient, suiAddress: string)
     return user;
   }
   return null;
+}
+
+/**
+ * Return the delegate key material for a verified owner, scoped strictly to the
+ * given suiAddress. This is the ONLY path that exposes the private key, and it
+ * must be gated by a proven ownership challenge at the route layer.
+ */
+export async function getDelegateKeyForOwner(
+  db: DbClient,
+  suiAddress: string
+): Promise<{ delegatePrivateKey: string; delegateAccountId: string } | null> {
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.suiAddress, suiAddress))
+    .limit(1);
+
+  if (user?.delegatePrivateKey && user?.delegateAccountId) {
+    return {
+      delegatePrivateKey: user.delegatePrivateKey,
+      delegateAccountId: user.delegateAccountId,
+    };
+  }
+  return null;
+}
+
+/** Look up a user's Sui address by id (used to bind an export to its session). */
+export async function getUserAddressById(
+  db: DbClient,
+  userId: string
+): Promise<string | null> {
+  const [user] = await db
+    .select({ suiAddress: users.suiAddress })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return user?.suiAddress ?? null;
 }
 
 /** Create an Enoki session. Reuses walletSessions table with walletType "enoki". */

@@ -696,7 +696,7 @@ const job = await memwal.remember("I'm allergic to peanuts")
 await memwal.waitForRememberJob(job.job_id)
 
 // Recall memories
-const result = await memwal.recall("food allergies")
+const result = await memwal.recall({ query: "food allergies" })
 console.log(result.results[0].text)`
 
     const sdkPythonSnippet = `import asyncio
@@ -712,7 +712,7 @@ async def main():
 
     await memwal.remember_and_wait("I'm allergic to peanuts")
 
-    result = await memwal.recall("food allergies")
+    result = await memwal.recall(query="food allergies")
     print(result.results[0].text)
 
     await memwal.close()

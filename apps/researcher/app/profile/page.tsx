@@ -4,11 +4,8 @@ import {
   ArrowLeft,
   Copy,
   Check,
-  KeyRound,
   Shield,
   User,
-  Eye,
-  EyeOff,
   ExternalLink,
 } from "lucide-react";
 import Link from "next/link";
@@ -54,9 +51,6 @@ function truncateAddress(addr: string): string {
 export default function ProfilePage() {
   const [profile, setProfile] = useState<ProfileData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showKey, setShowKey] = useState(false);
-  const [privateKey, setPrivateKey] = useState<string | null>(null);
-  const [keyLoading, setKeyLoading] = useState(false);
 
   useEffect(() => {
     fetch("/api/auth/profile")
@@ -65,28 +59,6 @@ export default function ProfilePage() {
       .catch(() => setProfile(null))
       .finally(() => setLoading(false));
   }, []);
-
-  const handleExportKey = async () => {
-    if (privateKey) {
-      setShowKey(!showKey);
-      return;
-    }
-    setKeyLoading(true);
-    try {
-      const res = await fetch("/api/auth/profile/export-key", {
-        method: "POST",
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setPrivateKey(data.privateKey);
-        setShowKey(true);
-      }
-    } catch {
-      // silently fail
-    } finally {
-      setKeyLoading(false);
-    }
-  };
 
   if (loading) {
     return (
@@ -213,58 +185,6 @@ export default function ProfilePage() {
             )}
           </div>
         </div>
-
-        {/* Export delegate key card */}
-        {profile.hasPrivateKey && (
-          <div className="mb-4 rounded-xl border bg-card shadow-sm">
-            <div className="border-b px-5 py-3">
-              <h2 className="flex items-center gap-2 font-medium text-sm">
-                <KeyRound className="size-3.5 text-muted-foreground" />
-                Delegate Key
-              </h2>
-            </div>
-
-            <div className="px-5 py-4">
-              <p className="mb-3 text-muted-foreground text-xs leading-relaxed">
-                Use this key to connect other apps (chatbot, CLI, OpenClaw) to
-                your Walrus Memory account. Keep it private.
-              </p>
-
-              {showKey && privateKey ? (
-                <div className="mb-3 rounded-lg border bg-muted/50 p-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <code className="break-all font-mono text-xs leading-relaxed">
-                      {privateKey}
-                    </code>
-                    <CopyButton value={privateKey} label="Private Key" />
-                  </div>
-                </div>
-              ) : null}
-
-              <Button
-                className="w-full"
-                disabled={keyLoading}
-                onClick={handleExportKey}
-                size="sm"
-                variant="outline"
-              >
-                {keyLoading ? (
-                  "Loading..."
-                ) : showKey ? (
-                  <>
-                    <EyeOff className="size-3.5" />
-                    Hide Key
-                  </>
-                ) : (
-                  <>
-                    <Eye className="size-3.5" />
-                    Reveal Delegate Key
-                  </>
-                )}
-              </Button>
-            </div>
-          </div>
-        )}
 
         {/* Session actions */}
         <div className="rounded-xl border bg-card px-5 py-3 shadow-sm">

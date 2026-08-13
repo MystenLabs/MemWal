@@ -1,9 +1,8 @@
 /**
  * Walrus Memory CLIENT — Server-side SDK wrapper
  *
- * Creates per-request Walrus Memory clients using the authenticated user's
- * delegate key (from tRPC context). Falls back to env vars for backward
- * compatibility.
+ * Creates per-request Walrus Memory clients using credentials bound to the
+ * authenticated user. Shared process credentials are never accepted.
  */
 
 import { MemWal } from "@mysten-incubation/memwal";
@@ -21,24 +20,21 @@ export function createMemWalClient(key: string, accountId: string): MemWal {
 }
 
 /**
- * Get a Walrus Memory client using provided credentials or env var fallback.
- * Throws if no key is available.
+ * Get a Walrus Memory client using explicit session-bound credentials.
+ * Throws if either credential is unavailable.
  */
 export function getMemWalClient(
   key?: string | null,
   accountId?: string | null,
 ): MemWal {
-  const resolvedKey = key || process.env.MEMWAL_PRIVATE_KEY;
-  const resolvedAccountId = accountId || process.env.MEMWAL_ACCOUNT_ID;
-
-  if (!resolvedKey) {
-    throw new Error("[Walrus Memory] No key configured — sign in with Enoki or set MEMWAL_PRIVATE_KEY in .env");
+  if (!key) {
+    throw new Error("[Walrus Memory] Session has no delegate key");
   }
-  if (!resolvedAccountId) {
-    throw new Error("[Walrus Memory] No accountId configured — sign in with Enoki or set MEMWAL_ACCOUNT_ID in .env");
+  if (!accountId) {
+    throw new Error("[Walrus Memory] Session has no account ID");
   }
 
-  return createMemWalClient(resolvedKey, resolvedAccountId);
+  return createMemWalClient(key, accountId);
 }
 
 /** Extract memories from text using Walrus Memory analyze endpoint. */

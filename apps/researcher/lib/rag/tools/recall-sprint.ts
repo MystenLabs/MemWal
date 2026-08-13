@@ -3,7 +3,7 @@ import { tool } from "ai";
 import { recallFromMemWal } from "@/lib/sprint/memwal";
 import { UNTRUSTED_TOOL_DATA_NOTICE } from "./security";
 
-export function recallSprintTool({ memwalKey, accountId }: { memwalKey: string; accountId?: string }) {
+export function recallSprintTool({ memwalKey, accountId }: { memwalKey: string; accountId: string }) {
   console.log(`[tool:recallSprint] Tool created with memwalKey=${memwalKey ? memwalKey.slice(0, 8) + "..." : "MISSING"}`);
 
   return tool({

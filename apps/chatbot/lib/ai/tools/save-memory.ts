@@ -3,9 +3,11 @@ import { z } from "zod";
 import { MemWal } from "@mysten-incubation/memwal";
 
 export const saveMemory = ({
+  namespace,
   memwalKey,
   memwalAccountId,
 }: {
+  namespace: string;
   memwalKey?: string;
   memwalAccountId?: string;
 }) =>
@@ -31,9 +33,16 @@ export const saveMemory = ({
           error: "Walrus Memory not configured — MEMWAL_PRIVATE_KEY or MEMWAL_ACCOUNT_ID missing",
         };
       }
+      if (!namespace.trim()) {
+        return {
+          saved: false,
+          text,
+          error: "Walrus Memory authenticated user namespace missing",
+        };
+      }
 
       try {
-        const memwal = MemWal.create({ key, accountId, serverUrl });
+        const memwal = MemWal.create({ key, accountId, serverUrl, namespace });
         await memwal.rememberAndWait(text);
         return { saved: true, text };
       } catch (error) {

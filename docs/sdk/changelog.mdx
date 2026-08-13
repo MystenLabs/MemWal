@@ -28,8 +28,31 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The MemWal TypeScript SDK changelog tracks releases from 0.0.1 (initial release with MemWal, MemWalManual, withMemWal, and account management) through 0.0.6 (RecallParams and deprecated positional recall). Key additions include bulk remember helpers, async job workflows, relayer compatibility checks, SEAL committee configuration, and per-request nonce signing for replay protection.
+  The latest TypeScript SDK release is 0.1.2. It adds deterministic offline mocks and idempotent remember retries, isolates foreign manual-recall blobs, safely encodes large encrypted payloads, and supports Zod 3 and Zod 4.
 ---
+
+## 0.1.2
+
+### Added
+
+- Added deterministic offline mock clients for credential-free tests.
+- Added idempotency keys to collapse retries onto one paid remember job.
+
+### Fixed
+
+- Isolated foreign manual-recall blobs and encoded large encrypted payloads safely.
+- Added Zod 3 and Zod 4 peer compatibility.
+
+## 0.1.1
+
+### Added
+
+- Added `flush()` for pending `withMemWal` auto-saves.
+- Added `truncated` to restore results for incomplete recovery.
+
+### Fixed
+
+- Linked `AUTH_REJECTED` errors to troubleshooting guidance.
 
 ## 0.1.0
 
