@@ -1698,7 +1698,7 @@ async fn execute_upload_and_transfer_locked(
     );
 
     if let Some(ref jid) = remember_job_id {
-        return execute_durable_upload(
+        return match execute_durable_upload(
             state,
             wallet_index,
             &encrypted,
@@ -1713,7 +1713,46 @@ async fn execute_upload_and_transfer_locked(
             jid,
             epochs,
         )
-        .await;
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // execute_durable_upload's own error path does not classify
+                // or persist to remember_jobs (see its doc comment) — do both
+                // here, mirroring the base64-decode-failure handling just
+                // above. Without this, a durable-upload failure was silently
+                // dropped: remember_jobs stayed at status='running' with no
+                // error_msg until the unrelated 10-minute staleness sweep in
+                // fail_stale_remember_jobs() eventually force-failed it,
+                // making every such failure look "stuck" for up to ~25
+                // minutes (MAX_ATTEMPTS retries at the 300s sidecar timeout)
+                // instead of surfacing immediately.
+                // execute_durable_upload only ever returns `Transient` today;
+                // unwrap its inner (unprefixed) message so classify_sidecar_error
+                // sees the raw sidecar/HTTP error text, not WalletJobError's
+                // Display-wrapped "wallet job error (transient): ..." form.
+                let msg = match &err {
+                    WalletJobError::Transient(m) => m.clone(),
+                    other => other.to_string(),
+                };
+                let classified = WalletJobError::classify_sidecar_error(&msg);
+                update_remember_job_after_wallet_error(
+                    state,
+                    Some(jid.as_str()),
+                    &classified,
+                    &msg,
+                )
+                .await;
+                tracing::error!(
+                    "[wallet-job:upload] job_id={} {} classification={} retryable={}",
+                    jid,
+                    msg,
+                    classified.kind(),
+                    !classified.aborts_retries()
+                );
+                Err(classified)
+            }
+        };
     }
 
     // Legacy untracked jobs retain the atomic sidecar route.
