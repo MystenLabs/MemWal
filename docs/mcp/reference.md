@@ -41,7 +41,7 @@ The MCP server exposes **eight tools**: six **relayer tools** (memory operations
 
 ## First-run behavior
 
-When `~/.memwal/credentials.json` is missing, the stdio package does **not** exit immediately if an MCP host launched it.
+When `~/.memwal/credentials.json` does not exist, the stdio package does **not** exit immediately if an MCP host launched it.
 
 Instead it starts in an auth-required mode that:
 
@@ -90,12 +90,14 @@ Extract memorable facts from a longer passage of text (preferences, habits, biog
 
 ### memwal_restore
 
-Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts only (`restored` / `skipped` / `total`), does **not** return memory texts. Call `memwal_recall` afterwards to query the rebuilt index.
+Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts (`restored` / `skipped` / `total`) plus `truncated`, and does **not** return memory texts. Call `memwal_recall` afterwards to query the rebuilt index.
+
+`truncated=true` means the bounded restore did not reach the end of the namespace, so the index is still incomplete. Raising `limit` helps when your own limit was the bound; past the sidecar's own cap it does not, and only a cursor-based restore would.
 
 | **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
 | `namespace` | string | yes | Namespace bucket to restore. |
-| `limit` | integer (1–500) | no | Max memories to re-index. Default `10`. |
+| `limit` | integer (1–100) | no | Max memories to re-index. Default `10`. The relayer clamps values outside that range. |
 
 ### memwal_health
 
@@ -395,7 +397,7 @@ The relayer computes these, so they need no configuration.
 | `MCP_OAUTH_SESSION_TTL_SECS` | `900` | OAuth session lifetime |
 | `MCP_OAUTH_ALLOWED_REGISTRATION_HOSTS` | `claude.ai` | Redirect URI allowlist |
 | `MCP_OAUTH_REGISTRATION_PER_HOUR_PER_IP` | `20` | DCR rate limit |
-| `MCP_OAUTH_REGISTRATION_TRUSTED_CIDRS` | `160.79.104.0/21` | Networks that might register a client. The default is Anthropic's documented connector egress range. |
+| `MCP_OAUTH_REGISTRATION_TRUSTED_CIDRS` | `160.79.104.0/21` | Networks exempt from the per-IP registration throttle. Requests from other addresses still register when the redirect URI passes the allowlist and they stay inside the rate limit. The default is Anthropic's documented connector egress range. |
 
 ## Logout semantics
 

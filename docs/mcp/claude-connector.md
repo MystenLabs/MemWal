@@ -32,8 +32,9 @@ questions:
   - Who holds the delegate key when I connect Walrus Memory to Claude?
   - How do I disconnect the Walrus Memory connector from Claude?
 answer: >-
-  Add Walrus Memory in Claude's custom connector settings by pasting the relayer
-  MCP URL, for example https://relayer.memory.walrus.xyz/api/mcp. Claude
+  Add Walrus Memory in Claude's custom connector settings by pasting the MCP URL
+  of a relayer that has OAuth enabled. Staging and dev serve the discovery routes
+  today; production is not enabled yet. Claude
   discovers the authorization server, registers itself, and opens the Walrus
   Memory consent screen, where you connect your Sui wallet and authorize a
   delegate key onchain. The relayer generates and custodies that delegate key,
@@ -58,17 +59,23 @@ The connector flow needs a relayer that has OAuth turned on. Confirm the endpoin
 
 The OAuth path and the header path reach the same tools through the same relayer. They differ in who holds the delegate key, which [What you approve](#what-you-approve) explains.
 
+The relayer's redirect allowlist accepts RFC 8252 loopback addresses, so a native-app OAuth client such as Claude Code can complete the same flow against a loopback callback.
+
 ## Prerequisites
 
 - A Sui wallet in the browser you use for the consent screen.
 - A Walrus Memory account that the wallet owns. If the wallet owns no account yet, the consent screen sends you through the one-time setup and returns you to the connector flow.
 - The MCP URL of a relayer that has OAuth turned on.
 
-| **Environment** | **Connector URL** |
-| --- | --- |
-| Production (Mainnet) | `https://relayer.memory.walrus.xyz/api/mcp` |
-| Staging (Testnet) | `https://relayer-staging.memory.walrus.xyz/api/mcp` |
-| Dev | `https://relayer.dev.memwal.ai/api/mcp` |
+| **Environment** | **Connector URL** | **OAuth status** |
+| --- | --- | --- |
+| Staging (Testnet) | `https://relayer-staging.memory.walrus.xyz/api/mcp` | Discovery routes serve traffic |
+| Dev | `https://relayer.dev.memwal.ai/api/mcp` | Discovery routes serve traffic |
+| Production (Mainnet) | `https://relayer.memory.walrus.xyz/api/mcp` | Not enabled yet. Both discovery routes return `404`, so the connector cannot complete. |
+
+<Warning>
+Do not hand the production URL to users until its discovery routes answer. Confirm with `curl -i https://relayer.memory.walrus.xyz/.well-known/oauth-authorization-server` first.
+</Warning>
 
 ## Add the connector
 
@@ -95,7 +102,7 @@ The OAuth path and the header path reach the same tools through the same relayer
 
     Connect the Sui wallet that owns your Walrus Memory account. Approve the `add_delegate_key` transaction, which records onchain that this delegate can act for your account. Walrus Memory sponsors the transaction through Enoki, so you pay no gas.
 
-    If you already granted this client access before, the relayer reuses the delegate it minted then and skips the transaction.
+    If your account already has an active OAuth delegate from an earlier grant, the relayer reuses it and skips the transaction. The reuse is per account, not per client, so a second connector can end up sharing a delegate with the first.
   </Step>
 
   <Step>
@@ -107,11 +114,11 @@ The OAuth path and the header path reach the same tools through the same relayer
 
 ## What you approve
 
-The grant covers three scopes:
+The relayer supports three scopes, and a client requests the subset it needs. The consent screen shows what the client actually asked for, so read it there rather than assuming all three:
 
 1. `memwal:read`, which lets the client recall memories.
 2. `memwal:write`, which lets the client store memories.
-3. `offline_access`, which lets Claude refresh its access token without sending you back through consent.
+3. `offline_access`, which lets a client refresh its access token without sending you back through consent.
 
 Access tokens last 1 hour and refresh tokens last 30 days by default. A self-hosted relayer can change both. See [MCP OAuth 2.1 configuration](/mcp/reference#mcp-oauth-2-1-configuration).
 
@@ -123,7 +130,7 @@ The connector flow puts a delegate private key on the server. Claude cannot hold
 
 Disconnecting takes two steps, because removing the connector does not remove the onchain delegate.
 
-1. **Remove the connector in Claude.** Claude revokes its tokens against the relayer. Revoking a refresh token ends the whole grant, so the access tokens issued under it stop working too.
+1. **Remove the connector in Claude.** This stops Claude from using it. Whether Claude also calls the relayer's revoke endpoint is not documented, so do not rely on removal alone to end the grant. On the relayer side, revoking a refresh token ends the whole grant and every access token issued under it, while revoking an access token ends only that token.
 2. **Remove the delegate key in the dashboard.** Open [memory.walrus.xyz](https://memory.walrus.xyz), find the delegate that matches the address the consent screen showed, and remove it. Until you do, the delegate remains authorized on your account onchain.
 
 <Note>
@@ -132,7 +139,14 @@ The same split applies to the stdio client: `memwal_logout` clears local credent
 
 ## Troubleshooting
 
-- **Claude reports that it cannot find an authorization server.** The relayer has no OAuth configuration. Check `GET /.well-known/oauth-authorization-server` on that host, and see [MCP OAuth 2.1 configuration](/mcp/reference#mcp-oauth-2-1-configuration) for what an operator sets.
-- **The consent screen says the link is missing or malformed.** The session ID never arrived or the relayer already expired it. Consent sessions last 15 minutes by default. Start the connector flow again from Claude.
-- **The consent screen asks you to create an account.** The connected wallet owns no Walrus Memory account. Follow the setup link, create the account, and the app returns you to the connector flow.
-- **Claude connects but the tools never appear.** Restart the client. MCP clients load their tool list at startup.
+**Claude reports that it cannot find an authorization server.**
+That relayer has no OAuth configuration, which is the expected result on production today. Check `GET /.well-known/oauth-authorization-server` on the host, and see [MCP OAuth 2.1 configuration](/mcp/reference#mcp-oauth-2-1-configuration) for what an operator sets to enable it.
+
+**The consent screen rejects the link.**
+The session ID never arrived, or the relayer already expired it. Consent sessions last 15 minutes by default. Start the connector flow again from Claude.
+
+**The consent screen asks you to create an account.**
+The connected wallet owns no Walrus Memory account. Follow the setup link, create the account, and the app returns you to the connector flow.
+
+**Claude connects but the tools never appear.**
+Restart the client. MCP clients load their tool list at startup.
