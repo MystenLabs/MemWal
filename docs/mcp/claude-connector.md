@@ -34,11 +34,11 @@ questions:
 answer: >-
   Add Walrus Memory in Claude's custom connector settings by pasting the MCP URL
   of a relayer that has OAuth enabled. Staging and dev serve the discovery routes
-  today; production is not enabled yet. Claude
+  today; the production relayer has not enabled OAuth yet. Claude
   discovers the authorization server, registers itself, and opens the Walrus
   Memory consent screen, where you connect your Sui wallet and authorize a
-  delegate key onchain. The relayer generates and custodies that delegate key,
-  encrypted at rest, because Claude cannot hold a Sui wallet key itself. To
+  delegate key onchain. The relayer generates that delegate key, encrypts it at rest, and
+  custodies it, because Claude cannot hold a Sui wallet key itself. To
   disconnect, remove the connector in Claude, then remove the delegate key from
   the Walrus Memory dashboard.
 ---
@@ -54,12 +54,12 @@ The connector flow needs a relayer that has OAuth turned on. Confirm the endpoin
 | **Client** | **Flow** | **Where to look** |
 | --- | --- | --- |
 | Claude web and Claude Desktop | Custom connector over OAuth | The steps below |
-| Claude Code | Header authentication, or the same OAuth flow over an RFC 8252 loopback redirect | [Claude Code](/mcp/claude-code) |
+| Claude Code | Header authentication, the verified path | [Claude Code](/mcp/claude-code) |
 | Cursor, Codex, Antigravity, OpenCode | stdio MCP server | [Overview](/mcp/overview) |
 
 The OAuth path and the header path reach the same tools through the same relayer. They differ in who holds the delegate key, which [What you approve](#what-you-approve) explains.
 
-The relayer's redirect allowlist accepts RFC 8252 loopback addresses, so a native-app OAuth client such as Claude Code can complete the same flow against a loopback callback.
+The relayer's redirect allowlist accepts RFC 8252 loopback addresses and unit tests cover that path, so a native-app OAuth client such as Claude Code can complete the same flow against a loopback callback. Nobody has run a Claude Code OAuth connection end to end yet, so header authentication stays the documented path for Claude Code until someone does.
 
 ## Prerequisites
 
@@ -71,7 +71,7 @@ The relayer's redirect allowlist accepts RFC 8252 loopback addresses, so a nativ
 | --- | --- | --- |
 | Staging (Testnet) | `https://relayer-staging.memory.walrus.xyz/api/mcp` | Discovery routes serve traffic |
 | Dev | `https://relayer.dev.memwal.ai/api/mcp` | Discovery routes serve traffic |
-| Production (Mainnet) | `https://relayer.memory.walrus.xyz/api/mcp` | Not enabled yet. Both discovery routes return `404`, so the connector cannot complete. |
+| Production (Mainnet) | `https://relayer.memory.walrus.xyz/api/mcp` | The operator has not enabled OAuth here yet. Both discovery routes return `404`, so the connector cannot complete. |
 
 <Warning>
 Do not hand the production URL to users until its discovery routes answer. Confirm with `curl -i https://relayer.memory.walrus.xyz/.well-known/oauth-authorization-server` first.
@@ -131,7 +131,7 @@ The connector flow puts a delegate private key on the server. Claude cannot hold
 Disconnecting takes two steps, because removing the connector does not remove the onchain delegate.
 
 1. **Remove the connector in Claude.** This stops Claude from using it. Whether Claude also calls the relayer's revoke endpoint is not documented, so do not rely on removal alone to end the grant. On the relayer side, revoking a refresh token ends the whole grant and every access token issued under it, while revoking an access token ends only that token.
-2. **Remove the delegate key in the dashboard.** Open [memory.walrus.xyz](https://memory.walrus.xyz), find the delegate that matches the address the consent screen showed, and remove it. Until you do, the delegate remains authorized on your account onchain.
+2. **Remove the delegate key in the dashboard.** Open [memory.walrus.xyz](https://memory.walrus.xyz), find the delegate that matches the address the consent screen showed, and remove it. Until you do, that delegate keeps its onchain authorization on your account.
 
 <Note>
 The same split applies to the stdio client: `memwal_logout` clears local credentials but leaves the onchain delegate in place. See [Logout semantics](/mcp/reference#logout-semantics).

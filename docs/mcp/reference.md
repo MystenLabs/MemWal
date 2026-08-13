@@ -259,14 +259,14 @@ If your client cannot attach headers from the CLI, edit the generated MCP config
 
 Claude's native "Add custom connector" flow speaks OAuth 2.1 rather than the explicit-header model above. Claude discovers an authorization server, registers itself as a client, and sends the user through a hosted consent screen instead of expecting a pasted bearer token. For the end-user steps, see [Claude custom connector](/mcp/claude-connector).
 
-When configured, the hosted relayer additionally exposes:
+When an operator configures OAuth, the hosted relayer additionally exposes:
 
 - `GET /.well-known/oauth-protected-resource` (+ the `/api/mcp`-suffixed variant Claude probes first), RFC 9728 resource metadata.
 - `GET /.well-known/oauth-authorization-server`, RFC 8414 metadata, advertising `code_challenge_methods_supported: ["S256"]` and `offline_access` (the scope that triggers Claude to request a refresh token).
 - `POST /oauth/register`, RFC 7591 dynamic client registration. The relayer checks every redirect URI against an allowlist (Anthropic's own callback domain, plus RFC 8252 loopback for Claude Code) rather than accepting any host, so no client can self-register an arbitrary redirect target.
 - `GET /oauth/authorize`, `POST /oauth/token`, `POST /oauth/revoke`, the standard authorization-code + PKCE + refresh flow (RFC 6749/7636/7009). `/oauth/token` accepts both `application/x-www-form-urlencoded` (the spec-required content type) and `application/json`.
 
-Unlike the explicit-header and stdio flows, the OAuth path has the relayer generate and custody a delegate key on the user's behalf, encrypted at rest as `v1.<nonce>.<ciphertext>` with AES-256-GCM. Claude cannot hold a Sui wallet key itself, so something server-side has to sign for it. The consent screen states this plainly, and the user can revoke the delegate key from the dashboard like any other.
+Unlike the explicit-header and stdio flows, the OAuth path has the relayer generate and custody a delegate key on the user's behalf, which it stores as `v1.<nonce>.<ciphertext>` under AES-256-GCM. Claude cannot hold a Sui wallet key itself, so something server-side has to sign for it. The consent screen states this plainly, and the user can revoke the delegate key from the dashboard like any other.
 
 To add the connector in Claude, paste the relayer's MCP URL as the connector URL. Claude handles discovery, registration, and consent from there.
 
