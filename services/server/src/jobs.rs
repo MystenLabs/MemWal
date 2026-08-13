@@ -1305,7 +1305,7 @@ async fn execute_durable_upload(
             journal,
         )
         .await
-        .map_err(|e| WalletJobError::Transient(e.to_string()))?;
+        .map_err(|e| WalletJobError::classify_sidecar_error(&e.to_string()))?;
 
         match advanced {
             DurableUploadAdvance::Prepared(next) => {
@@ -1739,40 +1739,21 @@ async fn execute_upload_and_transfer_locked(
         {
             Ok(()) => Ok(()),
             Err(err) => {
-                // execute_durable_upload's own error path does not classify
-                // or persist to remember_jobs (see its doc comment) — do both
-                // here, mirroring the base64-decode-failure handling just
-                // above. Without this, a durable-upload failure was silently
-                // dropped: remember_jobs stayed at status='running' with no
-                // error_msg until the unrelated 10-minute staleness sweep in
-                // fail_stale_remember_jobs() eventually force-failed it,
-                // making every such failure look "stuck" for up to ~25
-                // minutes (MAX_ATTEMPTS retries at the 300s sidecar timeout)
-                // instead of surfacing immediately.
-                // execute_durable_upload only ever returns `Transient` today;
-                // unwrap its inner (unprefixed) message so classify_sidecar_error
-                // sees the raw sidecar/HTTP error text, not WalletJobError's
-                // Display-wrapped "wallet job error (transient): ..." form.
-                let msg = match &err {
-                    WalletJobError::Transient(m) => m.clone(),
-                    other => other.to_string(),
-                };
-                let classified = WalletJobError::classify_sidecar_error(&msg);
-                update_remember_job_after_wallet_error(
-                    state,
-                    Some(jid.as_str()),
-                    &classified,
-                    &msg,
-                )
-                .await;
+                // Sidecar failures are classified where they originate inside
+                // execute_durable_upload. Preserve that classification here:
+                // journal/state validation can already return Permanent, and
+                // reclassifying its display text would incorrectly make it
+                // retryable and leave the polling row running.
+                let msg = err.message().to_string();
+                update_remember_job_after_wallet_error(state, Some(jid.as_str()), &err, &msg).await;
                 tracing::error!(
                     "[wallet-job:upload] job_id={} {} classification={} retryable={}",
                     jid,
                     msg,
-                    classified.kind(),
-                    !classified.aborts_retries()
+                    err.kind(),
+                    !err.aborts_retries()
                 );
-                Err(classified)
+                Err(err)
             }
         };
     }
@@ -2441,6 +2422,17 @@ pub enum WalletJobError {
 }
 
 impl WalletJobError {
+    fn message(&self) -> &str {
+        match self {
+            WalletJobError::Transient(msg)
+            | WalletJobError::Permanent(msg)
+            | WalletJobError::WalrusBalanceLow(msg)
+            | WalletJobError::ObjectLockedUntilEpoch(msg)
+            | WalletJobError::GasPoolExhausted(msg)
+            | WalletJobError::UploadSlotCongestion(msg) => msg,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             WalletJobError::Transient(_) => "transient",
@@ -2829,14 +2821,14 @@ mod tests {
 
     use super::{
         backoff_duration, build_resume_transfer_job, classify_wallet_remember_handoff_failure,
-        congestion_backoff_secs, consume_preparation_claim, escalate_if_gas_pool_exhausted,
-        gas_pool_exhaustion_threshold, is_walrus_package_version_mismatch, load_upload_journal,
-        lock_outcome, mark_remember_job_failed, parse_locked_object_info,
-        parse_wal_balance_alert_info, persist_upload_journal, persist_uploaded_state,
-        recovery_seal_persistence, upload_resume_disposition, wallet_index_for_upload_attempt,
-        wallet_job_request, JobUploadLock, LockOutcome, UploadResume, WalletJob,
-        WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
-        MAX_CONGESTION_REQUEUES,
+        congestion_backoff_secs, consume_preparation_claim, durable_step_field,
+        escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
+        is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
+        mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
+        persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
+        upload_resume_disposition, wallet_index_for_upload_attempt, wallet_job_request,
+        JobUploadLock, LockOutcome, UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError,
+        WalletOperation, MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
     };
     use crate::storage::walrus::{
         PreparedRegisterTransaction, UploadExecutionIdentity, UploadJournal,
@@ -2974,6 +2966,20 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             classified,
             WalletJobError::UploadSlotCongestion(_)
         ));
+    }
+
+    #[test]
+    fn durable_upload_preserves_preclassified_errors() {
+        let permanent = durable_step_field(&serde_json::json!({}), "blobId").unwrap_err();
+        assert!(matches!(permanent, WalletJobError::Permanent(_)));
+        assert!(permanent.aborts_retries());
+        assert_eq!(
+            permanent.message(),
+            "durable upload step is missing required field blobId"
+        );
+
+        let sidecar = WalletJobError::classify_sidecar_error(PROD_CONGESTION_ERROR);
+        assert!(matches!(sidecar, WalletJobError::UploadSlotCongestion(_)));
     }
 
     #[test]
