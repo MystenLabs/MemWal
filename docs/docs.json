@@ -66,6 +66,20 @@
         ]
       },
       {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/returning-user",
+              "guides/manage-your-memory",
+              "guides/delete-old-memories",
+              "guides/delete-memories-programmatically"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "Fundamentals",
         "groups": [
           {
@@ -84,6 +98,7 @@
               "fundamentals/architecture/core-components",
               "fundamentals/architecture/how-storage-works",
               "fundamentals/architecture/funding-storage",
+              "fundamentals/architecture/tracking-agent-storage",
               "fundamentals/architecture/data-flow-security-model"
             ]
           }
