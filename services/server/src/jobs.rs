@@ -349,7 +349,6 @@ fn congestion_backoff_secs(requeues: u32) -> u64 {
 }
 
 /// Exponential back-off: attempt 1→2s, 2→4s, 3→8s, 4→16s, 5→32s.
-#[allow(dead_code)]
 pub fn backoff_duration(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(2u64.pow(attempt))
 }
@@ -1306,7 +1305,7 @@ async fn execute_durable_upload(
             journal,
         )
         .await
-        .map_err(|e| WalletJobError::Transient(e.to_string()))?;
+        .map_err(|e| WalletJobError::classify_sidecar_error(&e.to_string()))?;
 
         match advanced {
             DurableUploadAdvance::Prepared(next) => {
@@ -1396,14 +1395,37 @@ async fn execute_upload_and_transfer(
         match lock_outcome(acquired, jid) {
             LockOutcome::Proceed(lock) => Some(lock),
             // Deferred or fail-closed: in BOTH cases we must NOT upload — return
-            // the retriable error so Apalis re-tries later (by which point the
-            // holder will have persisted `uploaded`, or the pool is reachable).
+            // the retriable error so Apalis re-tries later, by which point the
+            // holder should have persisted `uploaded`, or the pool should be
+            // reachable again.
+            //
+            // "Later" is not automatic: no WorkerBuilder in main.rs attaches a
+            // retry/backoff layer, so a bare `Err` here gets re-polled almost
+            // immediately (observed on staging: all 5 attempts of one job
+            // exhausted in ~124ms). That races the actual lock holder — a real
+            // upload can take seconds — and burns the whole attempt budget
+            // before the holder has any chance to finish, leaving the row
+            // silently `running` with no error_msg until the unrelated
+            // 10-minute staleness sweep force-fails it. Sleep with the
+            // existing (previously unused) exponential backoff before
+            // returning, and persist a visible error_msg immediately instead
+            // of leaving the row silent for the sweep to eventually catch.
             LockOutcome::Defer(err) => {
                 tracing::warn!(
-                    "[wallet-job:upload] job_id={} deferring upload: {}",
+                    "[wallet-job:upload] job_id={} deferring upload (attempt {}/{}): {}",
                     jid,
+                    attempt_info.current,
+                    attempt_info.max,
                     err,
                 );
+                update_remember_job_after_wallet_error(
+                    state,
+                    Some(jid.as_str()),
+                    &err,
+                    &err.to_string(),
+                )
+                .await;
+                tokio::time::sleep(backoff_duration(attempt_info.current as u32)).await;
                 return Err(err);
             }
         }
@@ -1698,7 +1720,7 @@ async fn execute_upload_and_transfer_locked(
     );
 
     if let Some(ref jid) = remember_job_id {
-        return execute_durable_upload(
+        return match execute_durable_upload(
             state,
             wallet_index,
             &encrypted,
@@ -1713,7 +1735,27 @@ async fn execute_upload_and_transfer_locked(
             jid,
             epochs,
         )
-        .await;
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // Sidecar failures are classified where they originate inside
+                // execute_durable_upload. Preserve that classification here:
+                // journal/state validation can already return Permanent, and
+                // reclassifying its display text would incorrectly make it
+                // retryable and leave the polling row running.
+                let msg = err.message().to_string();
+                update_remember_job_after_wallet_error(state, Some(jid.as_str()), &err, &msg).await;
+                tracing::error!(
+                    "[wallet-job:upload] job_id={} {} classification={} retryable={}",
+                    jid,
+                    msg,
+                    err.kind(),
+                    !err.aborts_retries()
+                );
+                Err(err)
+            }
+        };
     }
 
     // Legacy untracked jobs retain the atomic sidecar route.
@@ -2317,9 +2359,13 @@ async fn maybe_alert_walrus_upload_exhausted(
 
 /// Failure classification for `WalletJob` handlers.
 ///
-/// Apalis re-queues with exponential backoff on `Transient`. `Permanent`
-/// errors are returned as-is so the job is marked Dead immediately and we
-/// don't burn retry budget on inputs that can never succeed.
+/// Apalis re-queues `Transient` for another attempt, up to `MAX_ATTEMPTS`.
+/// No WorkerBuilder attaches a retry/backoff layer, so that re-queue has no
+/// inherent delay — callers that need real spacing between attempts (lock
+/// contention, congestion) must enforce it themselves (see `backoff_duration`,
+/// `congestion_backoff_secs`). `Permanent` errors are returned as-is so the
+/// job is marked Dead immediately and we don't burn retry budget on inputs
+/// that can never succeed.
 ///
 /// Mapping rules (enforced at the point of error origination):
 /// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
@@ -2376,6 +2422,17 @@ pub enum WalletJobError {
 }
 
 impl WalletJobError {
+    fn message(&self) -> &str {
+        match self {
+            WalletJobError::Transient(msg)
+            | WalletJobError::Permanent(msg)
+            | WalletJobError::WalrusBalanceLow(msg)
+            | WalletJobError::ObjectLockedUntilEpoch(msg)
+            | WalletJobError::GasPoolExhausted(msg)
+            | WalletJobError::UploadSlotCongestion(msg) => msg,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             WalletJobError::Transient(_) => "transient",
@@ -2763,15 +2820,15 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        build_resume_transfer_job, classify_wallet_remember_handoff_failure,
-        congestion_backoff_secs, consume_preparation_claim, escalate_if_gas_pool_exhausted,
-        gas_pool_exhaustion_threshold, is_walrus_package_version_mismatch, load_upload_journal,
-        lock_outcome, mark_remember_job_failed, parse_locked_object_info,
-        parse_wal_balance_alert_info, persist_upload_journal, persist_uploaded_state,
-        recovery_seal_persistence, upload_resume_disposition, wallet_index_for_upload_attempt,
-        wallet_job_request, JobUploadLock, LockOutcome, UploadResume, WalletJob,
-        WalletJobAttemptInfo, WalletJobError, WalletOperation, MAX_ATTEMPTS,
-        MAX_CONGESTION_REQUEUES,
+        backoff_duration, build_resume_transfer_job, classify_wallet_remember_handoff_failure,
+        congestion_backoff_secs, consume_preparation_claim, durable_step_field,
+        escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
+        is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
+        mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
+        persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
+        upload_resume_disposition, wallet_index_for_upload_attempt, wallet_job_request,
+        JobUploadLock, LockOutcome, UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError,
+        WalletOperation, MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
     };
     use crate::storage::walrus::{
         PreparedRegisterTransaction, UploadExecutionIdentity, UploadJournal,
@@ -2909,6 +2966,33 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             classified,
             WalletJobError::UploadSlotCongestion(_)
         ));
+    }
+
+    #[test]
+    fn durable_upload_preserves_preclassified_errors() {
+        let permanent = durable_step_field(&serde_json::json!({}), "blobId").unwrap_err();
+        assert!(matches!(permanent, WalletJobError::Permanent(_)));
+        assert!(permanent.aborts_retries());
+        assert_eq!(
+            permanent.message(),
+            "durable upload step is missing required field blobId"
+        );
+
+        let sidecar = WalletJobError::classify_sidecar_error(PROD_CONGESTION_ERROR);
+        assert!(matches!(sidecar, WalletJobError::UploadSlotCongestion(_)));
+    }
+
+    #[test]
+    fn lock_defer_backoff_matches_documented_schedule() {
+        // 1→2s, 2→4s, 3→8s, 4→16s, 5→32s — see backoff_duration's doc comment.
+        // Wired into the lock-contention Defer path so a job that repeatedly
+        // loses the per-job advisory lock gets real spacing between attempts
+        // instead of exhausting MAX_ATTEMPTS in milliseconds.
+        assert_eq!(backoff_duration(1), std::time::Duration::from_secs(2));
+        assert_eq!(backoff_duration(2), std::time::Duration::from_secs(4));
+        assert_eq!(backoff_duration(3), std::time::Duration::from_secs(8));
+        assert_eq!(backoff_duration(4), std::time::Duration::from_secs(16));
+        assert_eq!(backoff_duration(5), std::time::Duration::from_secs(32));
     }
 
     #[test]
