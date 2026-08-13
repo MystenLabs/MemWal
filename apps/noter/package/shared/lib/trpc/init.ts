@@ -2,42 +2,27 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import { FetchCreateContextFnOptions } from "@trpc/server/adapters/fetch";
 import superjson from "superjson";
 import { db } from "@/shared/lib/db";
-import { walletSessions, users } from "@/shared/db/schema";
+import { walletSessions } from "@/shared/db/schema";
 import { eq } from "drizzle-orm";
 
 export type Context = {
   db: typeof db;
+  request: Request;
   userId: string | null;
-  /** Per-user Walrus Memory delegate key (null if user has no stored key). */
-  memwalKey: string | null;
-  /** Per-user Walrus Memory account ID (null if user has no stored account). */
-  memwalAccountId: string | null;
 };
 
 function getSessionIdFromRequest(req: Request): string | null {
   return req.headers.get("x-session-id");
 }
 
-/** Load user's Walrus Memory delegate key from the users table. Falls back to env vars. */
-async function loadUserMemwalKey(userId: string) {
-  try {
-    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    return {
-      memwalKey: user?.delegatePrivateKey ?? process.env.MEMWAL_PRIVATE_KEY ?? null,
-      memwalAccountId: user?.delegateAccountId ?? process.env.MEMWAL_ACCOUNT_ID ?? null,
-    };
-  } catch {
-    return {
-      memwalKey: process.env.MEMWAL_PRIVATE_KEY ?? null,
-      memwalAccountId: process.env.MEMWAL_ACCOUNT_ID ?? null,
-    };
-  }
-}
-
 export const createContext = async (
   opts: FetchCreateContextFnOptions
 ): Promise<Context> => {
-  const noAuth: Context = { db, userId: null, memwalKey: null, memwalAccountId: null };
+  const noAuth: Context = {
+    db,
+    request: opts.req,
+    userId: null,
+  };
   const sessionId = getSessionIdFromRequest(opts.req);
   if (!sessionId) return noAuth;
 
@@ -52,8 +37,7 @@ export const createContext = async (
     .limit(1);
 
   if (walletSession?.userId && walletSession.expiresAt > new Date()) {
-    const keys = await loadUserMemwalKey(walletSession.userId);
-    return { db, userId: walletSession.userId, ...keys };
+    return { db, request: opts.req, userId: walletSession.userId };
   }
 
   return noAuth;

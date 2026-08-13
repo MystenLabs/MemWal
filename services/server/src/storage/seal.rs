@@ -72,6 +72,8 @@ struct SealEncryptRequest {
     owner: String,
     package_id: String,
     account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_seal_committee_identity: Option<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -137,6 +139,7 @@ pub async fn seal_encrypt(
     owner_address: &str,
     account_id: &str,
     package_id: &str,
+    expected_seal_committee_identity: Option<&serde_json::Value>,
 ) -> Result<Vec<u8>, AppError> {
     let url = format!("{}/seal/encrypt", sidecar_url);
     let data_b64 = BASE64.encode(data);
@@ -146,6 +149,7 @@ pub async fn seal_encrypt(
         owner: owner_address.to_string(),
         package_id: package_id.to_string(),
         account_id: account_id.to_string(),
+        expected_seal_committee_identity: expected_seal_committee_identity.cloned(),
     });
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
@@ -540,12 +544,17 @@ mod tests {
             owner: "0x1".into(),
             package_id: "0x2".into(),
             account_id: "0x3".into(),
+            expected_seal_committee_identity: Some(serde_json::json!({
+                "servers": [{ "objectId": "0x4", "weight": 1 }],
+                "threshold": 1,
+            })),
         })
         .expect("serialize encrypt request");
         // The sidecar reads access_counter_version off this object to build the
         // SEAL identity; without it POST /seal/encrypt is a 400 and every
         // remember/analyze write fails.
         assert_eq!(value["accountId"], "0x3");
+        assert_eq!(value["expectedSealCommitteeIdentity"]["threshold"], 1);
     }
 
     #[test]

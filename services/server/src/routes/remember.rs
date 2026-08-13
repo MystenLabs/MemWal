@@ -143,6 +143,7 @@ fn spawn_prepare_remember_job(
                     &owner,
                     &account_id,
                     &state.config.package_id,
+                    state.config.seal_expected_committee_identity.as_ref(),
                 );
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
                 let vector = vector_result?;
@@ -285,6 +286,7 @@ fn spawn_prepare_bulk_remember_job(
                                 &owner,
                                 &account_id,
                                 &state.config.package_id,
+                                state.config.seal_expected_committee_identity.as_ref(),
                             );
                             let (vector_result, encrypted_result) =
                                 tokio::join!(embed_fut, encrypt_fut);
@@ -1962,6 +1964,7 @@ mod tests {
             registry_scan_max_pages: crate::types::DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9003".to_string(),
             sidecar_secret: None,
+            seal_expected_committee_identity: None,
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             accounts_rate_limit: crate::types::AccountsRateLimitConfig::default(),

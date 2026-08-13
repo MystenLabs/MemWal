@@ -19,6 +19,15 @@ import {
   verifyAndConsumeEnokiChallenge,
 } from "../lib/enoki-challenge";
 import { SharedRedisUnavailableError } from "@/shared/lib/shared-redis";
+import {
+  assertDelegateAccountBinding,
+  DelegateAccountBindingError,
+  deriveDelegatePublicKeyHex,
+} from "../lib/delegate-account";
+import {
+  AuthRateLimitError,
+  checkPublicAuthRateLimit,
+} from "../lib/auth-rate-limit";
 
 // Canonical Sui address: 0x + 64 hex. Reject malformed input at the boundary so
 // it never reaches normalizeSuiAddress (which would silently left-pad garbage
@@ -155,8 +164,8 @@ export const authRouter = router({
       suiAddress: suiAddressSchema,
       challengeId: z.string().min(1),
       signature: z.string().min(1),
-      privateKey: z.string().optional(),
-      accountId: z.string().optional(),
+      privateKey: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
+      accountId: suiAddressSchema.optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const { challengeId, signature, privateKey, accountId } = input;
@@ -214,6 +223,13 @@ export const authRouter = router({
           throw new TRPCError({ code: "BAD_REQUEST", message: "privateKey and accountId required" });
         }
 
+        const delegatePublicKey = await deriveDelegatePublicKeyHex(privateKey);
+        await assertDelegateAccountBinding({
+          accountId,
+          owner: suiAddress,
+          publicKeyHex: delegatePublicKey,
+        });
+
         const user = await authService.upsertEnokiUser(ctx.db, {
           suiAddress, delegatePrivateKey: privateKey, delegateAccountId: accountId,
         });
@@ -233,6 +249,9 @@ export const authRouter = router({
         if (error instanceof TRPCError) throw error;
         if (error instanceof DelegateCredentialConflictError) {
           throw new TRPCError({ code: "CONFLICT", message: error.message });
+        }
+        if (error instanceof DelegateAccountBindingError) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: error.message });
         }
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
@@ -353,27 +372,19 @@ export const authRouter = router({
   connectDelegateKey: procedure
     .input(z.object({
       privateKey: z.string().regex(/^[0-9a-f]{64}$/i, "Must be 64 hex characters"),
-      accountId: z.string().min(1),
+      accountId: suiAddressSchema,
     }))
     .mutation(async ({ ctx, input }) => {
       const { privateKey, accountId } = input;
 
       try {
-        // Derive Sui address from private key
-        const ed = await import("@noble/ed25519");
-        const { sha512 } = await import("@noble/hashes/sha2.js");
-        if (!(ed.etc as any).sha512Sync) {
-          (ed.etc as any).sha512Sync = (...m: Uint8Array[]) => {
-            const h = sha512.create();
-            for (const msg of m) h.update(msg);
-            return h.digest();
-          };
-        }
-
-        const privKeyBytes = Uint8Array.from(
-          privateKey.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+        await checkPublicAuthRateLimit(ctx.request);
+        // Derive Sui address and binding key from the same private key.
+        const publicKeyHex = await deriveDelegatePublicKeyHex(privateKey);
+        const pubKeyBytes = Uint8Array.from(
+          publicKeyHex.match(/.{2}/g)!.map((byte) => Number.parseInt(byte, 16))
         );
-        const pubKeyBytes = ed.getPublicKey(privKeyBytes);
+        await assertDelegateAccountBinding({ accountId, publicKeyHex });
 
         const { blake2b } = await import("@noble/hashes/blake2.js");
         const addrInput = new Uint8Array(33);
@@ -399,8 +410,14 @@ export const authRouter = router({
         };
       } catch (error) {
         if (error instanceof TRPCError) throw error;
+        if (error instanceof AuthRateLimitError) {
+          throw new TRPCError({ code: error.code, message: error.message });
+        }
         if (error instanceof DelegateCredentialConflictError) {
           throw new TRPCError({ code: "CONFLICT", message: error.message });
+        }
+        if (error instanceof DelegateAccountBindingError) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: error.message });
         }
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",

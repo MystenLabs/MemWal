@@ -1,20 +1,30 @@
 "use client";
 
-/**
- * memwal Status Hook
- *
- * Simple hook to check if Walrus Memory is configured (MEMWAL_PRIVATE_KEY set).
- * No client-side SDK needed — all operations go through server.
- */
+/** Check the authenticated user's Walrus Memory connection. */
 
 import { useState, useEffect } from "react";
+import { STORAGE_KEYS } from "@/feature/auth/constant";
+import type { SessionData } from "@/feature/auth/domain/type";
+
+function getSessionId(): string | null {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEYS.sessionId);
+    return raw ? (JSON.parse(raw) as SessionData).sessionId : null;
+  } catch {
+    return null;
+  }
+}
 
 export function useMemWalStatus() {
   const [isConfigured, setIsConfigured] = useState(false);
 
   useEffect(() => {
-    // Check server health to see if Walrus Memory is configured
-    fetch("/api/memory/health")
+    const sessionId = getSessionId();
+    if (!sessionId) return;
+
+    fetch("/api/memory/health", {
+      headers: { "x-session-id": sessionId },
+    })
       .then((res) => {
         setIsConfigured(res.ok);
       })

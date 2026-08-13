@@ -304,6 +304,9 @@ pub struct Config {
     pub sidecar_url: String,
     /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
     pub sidecar_secret: Option<String>,
+    /// Reviewed SEAL committee identity pinned on every encryption request.
+    /// The sidecar compares this JSON object to its effective key-server config.
+    pub seal_expected_committee_identity: Option<serde_json::Value>,
     /// Rate limiting configuration
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
@@ -395,6 +398,21 @@ impl Config {
         let package_id = std::env::var("MEMWAL_PACKAGE_ID").expect("MEMWAL_PACKAGE_ID must be set");
         let seal_policy_package_id =
             nonempty_env("MEMWAL_SEAL_POLICY_PACKAGE_ID").unwrap_or_else(|| package_id.clone());
+        let seal_expected_committee_identity = nonempty_env("SEAL_EXPECTED_COMMITTEE_IDENTITY")
+            .map(|raw| {
+                serde_json::from_str(&raw).unwrap_or_else(|error| {
+                    panic!(
+                        "SEAL_EXPECTED_COMMITTEE_IDENTITY must be valid JSON: {}",
+                        error
+                    )
+                })
+            });
+        if env_bool("SEAL_REQUIRE_COMMITTEE_IDENTITY") && seal_expected_committee_identity.is_none()
+        {
+            panic!(
+                "SEAL_EXPECTED_COMMITTEE_IDENTITY must be set when SEAL_REQUIRE_COMMITTEE_IDENTITY=true"
+            );
+        }
 
         Self {
             port: std::env::var("PORT")
@@ -439,8 +457,7 @@ impl Config {
             },
             package_id,
             seal_policy_package_id,
-            registry_id: std::env::var("MEMWAL_REGISTRY_ID")
-                .expect("MEMWAL_REGISTRY_ID must be set"),
+            registry_id: normalize_object_id_env("MEMWAL_REGISTRY_ID"),
             registry_scan_max_pages: std::env::var("MEMWAL_REGISTRY_SCAN_MAX_PAGES")
                 .ok()
                 .and_then(|v| v.trim().parse::<u32>().ok())
@@ -451,6 +468,7 @@ impl Config {
             sidecar_url: std::env::var("SIDECAR_URL")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
+            seal_expected_committee_identity,
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             accounts_rate_limit: AccountsRateLimitConfig::from_env(),
@@ -703,6 +721,14 @@ pub fn validate_security_delete_config(config: &Config) -> Result<(), String> {
 
 pub fn security_delete_routes_enabled(config: &Config) -> bool {
     config.enable_memory_deletion && config.enable_security_delete
+}
+
+fn normalize_object_id_env(name: &str) -> String {
+    let raw = std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set"));
+    raw.trim()
+        .parse::<sui_sdk_types::Address>()
+        .unwrap_or_else(|error| panic!("{name} must be a valid Sui object ID: {error}"))
+        .to_string()
 }
 
 fn env_bool(name: &str) -> bool {
@@ -1814,6 +1840,7 @@ mod tests {
             registry_scan_max_pages: DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9000".into(),
             sidecar_secret: None,
+            seal_expected_committee_identity: None,
             rate_limit: RateLimitConfig::default(),
             sponsor_rate_limit: SponsorRateLimitConfig::default(),
             accounts_rate_limit: AccountsRateLimitConfig::default(),

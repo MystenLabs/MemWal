@@ -76,8 +76,6 @@ OPENROUTER_API_KEY=...
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 
 # Walrus Memory
-MEMWAL_PRIVATE_KEY=...
-MEMWAL_ACCOUNT_ID=0x...
 MEMWAL_SERVER_URL=http://localhost:8000
 ```
 
@@ -87,9 +85,9 @@ and the `MEMWAL_*` package/registry IDs identify the on-chain account contract.
 `REDIS_URL` backs the single-use ownership challenge issued during sign-in — sign-in
 fails closed if it is unset or unreachable.
 
-`MEMWAL_PRIVATE_KEY` is the delegate private key from the Walrus Memory dashboard and
-must stay server-side. Run `pnpm verify:memwal` before starting the app to
-derive the public key locally and catch obvious credential mismatches.
+Walrus Memory credentials are registered per authenticated user after wallet
+ownership and on-chain account/delegate verification. Shared process-wide delegate
+credentials are intentionally unsupported.
 
 ### Getting OAuth credentials
 

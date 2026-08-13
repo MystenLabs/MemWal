@@ -17,6 +17,7 @@
         "db:up": "drizzle-kit up",
         "verify:memwal": "tsx ../../scripts/verify-memwal-credentials.ts",
         "test:redis-outage": "node --conditions=react-server --test --import tsx lib/shared-redis.test.ts",
+        "test:unit": "node --test --import tsx 'lib/**/*.unit.test.ts'",
         "test": "export PLAYWRIGHT=True && pnpm exec playwright test"
     },
     "dependencies": {
