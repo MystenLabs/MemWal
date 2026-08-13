@@ -72,7 +72,7 @@ A memory persists on Walrus for the number of epochs you paid for. An epoch is a
 
 Renewal covers two cases:
 
-1. **Console uploads:** New assets that you upload through the console renew automatically; Oyster handles the extension for you.
+1. **Console uploads:** New assets that you upload through the console renew automatically.
 2. **Self-managed and agent-owned assets:** Renew at the storage layer by extending the `Blob` object on Walrus. For how expiry and extension work, and how an autonomous agent runs an extend-before-expiry loop, see [Tracking Agent-Owned Blobs and Storage](/fundamentals/architecture/tracking-agent-storage) and [How an Agent Funds Walrus Storage](/fundamentals/architecture/funding-storage).
 
 <Warning>
