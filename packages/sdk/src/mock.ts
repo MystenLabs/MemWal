@@ -110,7 +110,8 @@ export class MemWalMock {
 
     async rememberAsync(
         text: string,
-        namespace?: string
+        namespace?: string,
+        _options: { idempotencyKey?: string } = {}
     ): Promise<RememberAcceptedResult> {
         const memory = this.store(text, namespace);
         return { job_id: memory.jobId, status: "done" };
@@ -118,9 +119,10 @@ export class MemWalMock {
 
     async remember(
         text: string,
-        namespace?: string
+        namespace?: string,
+        options: { idempotencyKey?: string } = {}
     ): Promise<RememberAcceptedResult> {
-        return this.rememberAsync(text, namespace);
+        return this.rememberAsync(text, namespace, options);
     }
 
     async getRememberStatus(jobId: string): Promise<RememberJobStatus> {
@@ -147,9 +149,11 @@ export class MemWalMock {
     async rememberAndWait(
         text: string,
         namespace?: string,
-        opts: { pollIntervalMs?: number; timeoutMs?: number } = {}
+        opts: { pollIntervalMs?: number; timeoutMs?: number; idempotencyKey?: string } = {}
     ): Promise<RememberResult> {
-        const accepted = await this.rememberAsync(text, namespace);
+        const accepted = await this.rememberAsync(text, namespace, {
+            idempotencyKey: opts.idempotencyKey,
+        });
         return this.waitForRememberJob(accepted.job_id, opts);
     }
 
