@@ -821,7 +821,8 @@ async fn insert_vector_and_mark_remember_done(
     {
         let msg = format!("insert_vector failed: {}", e);
         let classified = WalletJobError::classify_sidecar_error(&msg);
-        update_remember_job_after_wallet_error(state.db.pool(), remember_job_id, &classified, &msg).await;
+        update_remember_job_after_wallet_error(state.db.pool(), remember_job_id, &classified, &msg)
+            .await;
         tracing::error!(
             "[wallet-job:upload] job_id={} {} classification={} retryable={}",
             remember_job_id.unwrap_or("-"),
@@ -915,14 +916,9 @@ enum UploadResume {
     /// pre-`blob_object_id` legacy row). The blob exists and is transferred, only
     /// the vector index may be missing — resume indexing, NEVER re-upload.
     ResumeIndex { blob_id: String },
-    /// No prior attempt could have minted (pending / failed-with-NULL-blob /
-    /// missing row). Proceed with a normal upload — no reconcile needed.
+    /// No paid blob is recorded in the durable job row. Proceed with a normal
+    /// upload; the per-job advisory lock prevents concurrent attempts.
     Upload,
-    /// A `running` row with NULL blob_id: a prior attempt was in-flight and may
-    /// have minted a blob whose record was lost to a crash before it persisted.
-    /// The caller must reconcile on-chain (find a blob tagged with this job)
-    /// BEFORE uploading — adopt it if found, upload only if not.
-    ReconcileThenUpload,
     /// The status lookup itself failed. We CANNOT tell whether a paid blob exists,
     /// so we must not upload (fail closed) — the caller returns a retriable error
     /// and Apalis re-reads on the next attempt.
@@ -934,11 +930,9 @@ enum UploadResume {
 /// A row **never re-uploads once a paid blob is recorded** (any non-NULL
 /// `blob_id`): `done` → `AlreadyDone`; `uploaded` + object_id → `ResumeTransfer`;
 /// `uploaded` without object_id → `ResumeIndex` (the blob is minted+transferred,
-/// only indexing may be pending). A `running` row with a NULL `blob_id` →
-/// `ReconcileThenUpload`: a prior attempt was in-flight and may have minted a
-/// blob whose record was lost, so the caller reconciles on-chain before
-/// uploading. Only genuinely pre-mint states — `pending`, `failed` with a NULL
-/// `blob_id`, or a missing row — `Upload`.
+/// only indexing may be pending). Any row with a NULL `blob_id` → `Upload`: the
+/// database is the source of truth, and the per-job advisory lock prevents two
+/// live attempts from entering the paid upload concurrently.
 ///
 /// A lookup **error** returns `Indeterminate` (fail closed): after a possible
 /// mint we must not re-upload on a transient read failure, so the caller retries
@@ -965,25 +959,26 @@ async fn upload_resume_disposition(pool: &sqlx::PgPool, job_id: &str) -> UploadR
             blob_object_id,
         },
         Some((_, Some(blob_id), None)) => UploadResume::ResumeIndex { blob_id },
-        // A `running` row with no blob → a prior attempt was in-flight; a mint may
-        // have landed but its record was lost. Reconcile on-chain before uploading.
-        Some((status, None, _)) if status == "running" => UploadResume::ReconcileThenUpload,
-        // pending / failed with no blob, or missing row → nothing was ever minted.
+        // No durable blob record means there is nothing to resume. Trust the DB;
+        // scanning every historical server-wallet Blob is both redundant and too
+        // slow for the sidecar read deadline.
         _ => UploadResume::Upload,
     }
 }
 
 /// Per-job upload mutex, held for the guard-read → mint → persist critical
-/// section of `execute_upload_and_transfer`. Backed by a session-level Postgres
-/// advisory lock (`pg_try_advisory_lock` — non-blocking) on a hash of the job id,
-/// taken on a dedicated connection from `wallet_lock_pool`. If another attempt of
-/// the SAME job already holds it, acquisition returns `None` and the caller must
-/// NOT upload (it re-tries later, by which point the holder has persisted
-/// `uploaded`). Different jobs hash to different keys and never contend. Unlocks
-/// on `release()`; on a panic the connection returns to the pool and its
-/// reset clears the session lock.
+/// section of `execute_upload_and_transfer`. Backed by a transaction-level
+/// Postgres advisory lock (`pg_try_advisory_xact_lock` — non-blocking) on a hash
+/// of the job id, taken on a dedicated connection from `wallet_lock_pool`. If
+/// another attempt of the SAME job already holds it, acquisition returns `None`
+/// and the caller must NOT upload. Different jobs never contend.
+///
+/// A transaction lock is cancellation-safe: SQLx queues a rollback when a
+/// dropped transaction returns its connection to the pool, and PostgreSQL
+/// releases the advisory lock with that transaction. A session advisory lock
+/// can survive cancellation and leak into an unrelated pooled borrower.
 struct JobUploadLock {
-    conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    transaction: sqlx::Transaction<'static, sqlx::Postgres>,
 }
 
 impl JobUploadLock {
@@ -991,26 +986,24 @@ impl JobUploadLock {
     /// `Ok(None)` = another attempt of this job holds it (do not upload);
     /// `Err` = could not reach the lock pool (fail closed — treat like held).
     async fn try_acquire(pool: &sqlx::PgPool, job_id: &str) -> Result<Option<Self>, sqlx::Error> {
-        let mut conn = pool.acquire().await?;
+        let mut transaction = pool.begin().await?;
         // hashtext() → int4; advisory locks take int8. Deterministic per job id.
         let acquired: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtext($1)::bigint)")
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint)")
                 .bind(job_id)
-                .fetch_one(&mut *conn)
+                .fetch_one(&mut *transaction)
                 .await?;
         if acquired {
-            Ok(Some(JobUploadLock { conn }))
+            Ok(Some(JobUploadLock { transaction }))
         } else {
             Ok(None)
         }
     }
 
-    /// Explicitly release before drop so the unlock is awaited (Drop can't await).
-    async fn release(mut self, job_id: &str) {
-        let _ = sqlx::query("SELECT pg_advisory_unlock(hashtext($1)::bigint)")
-            .bind(job_id)
-            .execute(&mut *self.conn)
-            .await;
+    /// Commit the lock-only transaction on the normal path. Cancellation drops
+    /// it instead, and SQLx rolls it back before the connection is reused.
+    async fn release(self, _job_id: &str) {
+        let _ = self.transaction.commit().await;
     }
 }
 
@@ -1603,90 +1596,6 @@ async fn execute_upload_and_transfer_locked(
                     jid
                 )));
             }
-            UploadResume::ReconcileThenUpload => {
-                // A prior attempt was `running` and may have minted a blob whose
-                // record was lost to a crash. Ask the chain (by the memwal_job_id
-                // tag) before re-uploading; adopt an existing blob instead of
-                // minting a duplicate. If the reconcile READ fails, fail closed —
-                // don't risk a re-mint on a transient error.
-                match crate::storage::walrus::find_blob_by_job(
-                    &state.http_client,
-                    &state.config.sidecar_url,
-                    state.config.sidecar_secret.as_deref(),
-                    &owner,
-                    jid,
-                )
-                .await
-                {
-                    Ok(Some(found)) => {
-                        tracing::warn!(
-                            "[wallet-job:upload] job_id={} reconciled an already-minted blob (blob_id={}) — adopting, not re-uploading",
-                            jid,
-                            found.blob_id,
-                        );
-                        persist_uploaded_state(
-                            state.db.pool(),
-                            jid,
-                            &found.blob_id,
-                            found.object_id.as_deref(),
-                        )
-                        .await?;
-                        let blob_size_bytes = base64::engine::general_purpose::STANDARD
-                            .decode(&encrypted_b64)
-                            .map_err(|e| {
-                                WalletJobError::Permanent(format!(
-                                    "reconcile: encrypted_b64 no longer decodes for job {}: {}",
-                                    jid, e
-                                ))
-                            })?
-                            .len() as i64;
-                        return match found.object_id {
-                            Some(object_id) => {
-                                resume_metadata_and_transfer(
-                                    state,
-                                    wallet_index,
-                                    jid,
-                                    &found.blob_id,
-                                    object_id,
-                                    &owner,
-                                    &namespace,
-                                    &package_id,
-                                    &account_id,
-                                    agent_public_key.as_deref(),
-                                    &encrypted_b64,
-                                    &vector,
-                                    blob_size_bytes,
-                                    importance,
-                                )
-                                .await
-                            }
-                            None => {
-                                insert_vector_and_mark_remember_done(
-                                    state,
-                                    Some(jid),
-                                    &owner,
-                                    &namespace,
-                                    &found.blob_id,
-                                    &vector,
-                                    blob_size_bytes,
-                                    importance,
-                                    wallet_index,
-                                )
-                                .await
-                            }
-                        };
-                    }
-                    Ok(None) => {
-                        // No blob minted for this job yet — upload normally.
-                    }
-                    Err(e) => {
-                        return Err(WalletJobError::Transient(format!(
-                            "reconcile lookup failed for job {} — retrying without re-upload: {}",
-                            jid, e
-                        )));
-                    }
-                }
-            }
             UploadResume::Upload => {}
         }
     }
@@ -1758,7 +1667,13 @@ async fn execute_upload_and_transfer_locked(
                 // reclassifying its display text would incorrectly make it
                 // retryable and leave the polling row running.
                 let msg = err.message().to_string();
-                update_remember_job_after_wallet_error(state.db.pool(), Some(jid.as_str()), &err, &msg).await;
+                update_remember_job_after_wallet_error(
+                    state.db.pool(),
+                    Some(jid.as_str()),
+                    &err,
+                    &msg,
+                )
+                .await;
                 tracing::error!(
                     "[wallet-job:upload] job_id={} {} classification={} retryable={}",
                     jid,
@@ -3574,16 +3489,15 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     }
 
     #[tokio::test]
-    async fn upload_resume_uploads_only_for_pre_mint_states() {
+    async fn upload_resume_uploads_when_no_blob_is_recorded() {
         let pool = test_pool().await;
-        // running with no blob_id yet → a prior attempt never landed an upload.
+        // The DB is authoritative: running + NULL blob means there is no paid
+        // upload to resume, and the advisory lock prevents concurrent uploads.
         let running = format!("remember-job-{}", uuid::Uuid::new_v4());
         insert_job_with_status(&pool, &running, "running", None).await;
-        // running + NULL blob → a prior attempt was in-flight; reconcile on-chain
-        // (find a blob tagged with this job) before re-uploading.
         assert_eq!(
             upload_resume_disposition(&pool, &running).await,
-            UploadResume::ReconcileThenUpload,
+            UploadResume::Upload,
         );
 
         // pending → fresh job.
@@ -3688,6 +3602,33 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 .is_some(),
             "lock must be re-acquirable after release",
         );
+    }
+
+    // A wallet-job future can be cancelled at any await point, which drops its
+    // transaction without calling the async release method. SQLx must roll it
+    // back and release the transaction lock before the connection is reused.
+    #[tokio::test]
+    async fn upload_lock_transaction_rolls_back_when_guard_is_dropped() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+
+        let lock = JobUploadLock::try_acquire(&pool, &job_id)
+            .await
+            .unwrap()
+            .expect("first acquire should succeed");
+        drop(lock); // Simulate cancellation: no explicit async release.
+
+        let reacquired = JobUploadLock::try_acquire(&pool, &job_id).await.unwrap();
+        assert!(
+            reacquired.is_some(),
+            "dropping a cancelled guard must roll back and release the lock"
+        );
+        reacquired.unwrap().release(&job_id).await;
     }
 
     // RC-3 wiring: the caller must NOT upload when the lock is contended or the
@@ -3888,13 +3829,12 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         )
         .await;
 
-        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT status, error_msg, blob_id FROM remember_jobs WHERE id = $1",
-        )
-        .bind(&job_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let row: (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg, blob_id FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             row.0, "uploaded",
             "a lock-contention loser must not clobber a row the winner already finished"
