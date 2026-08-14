@@ -18,7 +18,9 @@
 
 mod accounts;
 mod admin;
+pub mod admin_dashboard;
 mod analyze;
+pub mod oauth;
 mod recall;
 mod remember;
 pub mod security_delete;

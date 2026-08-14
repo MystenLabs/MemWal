@@ -73,6 +73,41 @@ export async function createUserByPublicKey(publicKey: string): Promise<User> {
   }
 }
 
+/** Persist manual-login credentials server-side so session JWTs stay identity-only. */
+export async function upsertDelegateCredentialsByPublicKey({
+  publicKey,
+  delegatePrivateKey,
+  accountId,
+}: {
+  publicKey: string;
+  delegatePrivateKey: string;
+  accountId: string;
+}): Promise<User> {
+  const existing = await getUserByPublicKey(publicKey);
+  try {
+    if (existing) {
+      const [updated] = await db
+        .update(user)
+        .set({ delegatePrivateKey, accountId })
+        .where(eq(user.id, existing.id))
+        .returning();
+      return updated;
+    }
+
+    const email = `key-${publicKey.slice(0, 8)}@ed25519`;
+    const [created] = await db
+      .insert(user)
+      .values({ email, publicKey, delegatePrivateKey, accountId })
+      .returning();
+    return created;
+  } catch (_error) {
+    throw new ChatbotError(
+      "bad_request:database",
+      "Failed to store delegate credentials"
+    );
+  }
+}
+
 /** Look up an Enoki user by their stable zkLogin Sui address. */
 export async function getUserBySuiAddress(suiAddress: string): Promise<User | null> {
   try {

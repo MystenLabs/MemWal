@@ -88,7 +88,6 @@ export async function POST(request: Request) {
         await createSession(
           existing.id,
           existing.publicKey,
-          existing.delegatePrivateKey,
           existing.accountId,
         );
         return Response.json({ success: true, needsSetup: false });
@@ -133,7 +132,7 @@ export async function POST(request: Request) {
         delegatePrivateKey: privateKey,
         accountId,
       });
-      await createSession(existing.id, derivedPublicKey, privateKey, accountId);
+      await createSession(existing.id, derivedPublicKey, accountId);
     } else {
       // Create new user
       const created = await createEnokiUser({
@@ -142,7 +141,7 @@ export async function POST(request: Request) {
         delegatePrivateKey: privateKey,
         accountId,
       });
-      await createSession(created.id, derivedPublicKey, privateKey, accountId);
+      await createSession(created.id, derivedPublicKey, accountId);
     }
 
     return Response.json({ success: true, needsSetup: false });

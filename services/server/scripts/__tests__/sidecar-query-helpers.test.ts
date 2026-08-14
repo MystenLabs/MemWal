@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-import { Transaction, TransactionDataBuilder } from "@mysten/sui/transactions";
+import { Inputs, Transaction, TransactionDataBuilder } from "@mysten/sui/transactions";
 import {
     assertCompletionBlobObject,
     assertCompletionBlobResponse,
@@ -9,18 +9,27 @@ import {
     blobIdMatchesRequested,
     blobObjectMatchesRegistration,
     chainBlobIdFromRaw,
+    filterTrustedBlobCandidates,
+    findBlobCreationSender,
     isSourceCapped,
     isWalrusBlobObjectType,
     isVerifiedNonexistentSource,
     ownerMatchesRecipient,
     readBlobObject,
     strictWalrusEpoch,
+    trustedBlobCandidate,
 } from "../sidecar/routes/walrus-query.js";
 import { assertSuccessfulMetadataTransfer, extractBlobObjectId } from "../sidecar/blob-metadata.js";
-import { parseDurableWalrusEpochs, SUI_TYPE, WALRUS_PACKAGE_ID } from "../sidecar/config.js";
+import {
+    ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    parseDurableWalrusEpochs,
+    SUI_TYPE,
+    WALRUS_PACKAGE_ID,
+} from "../sidecar/config.js";
 import {
     assertAddressBalanceRegisterTransaction,
     createdBlobObjectIdFromTransaction,
+    durableRegisterDirectSigningAllowed,
     executePreparedRegisterTransaction,
     readUploadBlobObject,
     type PreparedRegisterTransaction,
@@ -30,7 +39,11 @@ import { classifyDurableSideEffectError, NoSideEffectError } from "../sidecar/re
 import { uploadWalrusBlobWithEffectsRetry } from "../sidecar/routes/walrus-upload.js";
 import { metadataReceiptAlreadyApplied } from "../sidecar/routes/walrus-metadata.js";
 import { sidecarMetrics } from "../sidecar/state.js";
-import { DURABLE_WALLET_FALLBACK_POLICY } from "../sidecar/wallet.js";
+import {
+    ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+    DURABLE_WALLET_FALLBACK_POLICY,
+} from "../sidecar/wallet.js";
+import { enforceAddressBalanceCoinIntents } from "../sidecar/address-balance.js";
 
 async function preparedRegisterFixture(funding: "addressBalance" | "coin" | "mixedLegacy" = "addressBalance"): Promise<{
     signer: Ed25519Keypair;
@@ -109,6 +122,20 @@ test("durable submissions direct-sign only when sponsorship is unconfigured", ()
         directSignAfterSponsorFailure: false,
         gasMode: "addressBalance",
     });
+});
+
+test("legacy uploads preserve fallback behavior while using address balances", () => {
+    assert.deepEqual(ADDRESS_BALANCE_WALLET_FALLBACK_POLICY, {
+        directSignIfUnconfigured: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+        directSignAfterSponsorFailure: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+        gasMode: "addressBalance",
+    });
+});
+
+test("durable register preparation honors the configured direct-sign fallback", () => {
+    assert.equal(durableRegisterDirectSigningAllowed(false, false), true);
+    assert.equal(durableRegisterDirectSigningAllowed(true, false), false);
+    assert.equal(durableRegisterDirectSigningAllowed(true, true), true);
 });
 
 test("prepared registration rejects tampered digest, signature, and wallet", async () => {
@@ -211,6 +238,171 @@ test("the pinned Sui SDK resolves WAL payment and relay SUI tip from address bal
     assert.equal(assertAddressBalanceRegisterTransaction(resolved), 2n);
     const withdrawals = resolved.inputs.filter((input) => input.$kind === "FundsWithdrawal");
     assert.equal(withdrawals.length, 2, "WAL payment and relay SUI tip both use address balances");
+});
+
+test("address-balance uploads fail instead of falling back to owned coins", async () => {
+    const signer = new Ed25519Keypair();
+    const walType = `0x${"2".repeat(64)}::wal::WAL`;
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.coin({ type: walType, balance: 1n, useGasCoin: false });
+    enforceAddressBalanceCoinIntents(transaction);
+
+    let balanceCalls = 0;
+    const client = {
+        core: {
+            async getBalance() {
+                balanceCalls += 1;
+                return {
+                    balance: {
+                        balance: "1",
+                        addressBalance: balanceCalls === 1 ? "1" : "0",
+                        coinBalance: balanceCalls === 1 ? "0" : "1",
+                    },
+                };
+            },
+            async listCoins() {
+                return {
+                    objects: [{
+                        objectId: `0x${"1".repeat(64)}`,
+                        version: "1",
+                        digest: "11111111111111111111111111111111",
+                        balance: "1",
+                        coinType: walType,
+                    }],
+                    cursor: null,
+                    hasNextPage: false,
+                };
+            },
+            async getObjects({ objectIds }: { objectIds: string[] }) {
+                return {
+                    objects: objectIds.map((objectId) => ({
+                        objectId,
+                        type: `0x2::coin::Coin<${walType}>`,
+                    })),
+                };
+            },
+        },
+    };
+    await assert.rejects(
+        transaction.prepareForSerialization({ client: client as never }),
+        /Address-balance upload resolved owned coin objects/,
+    );
+    await assert.rejects(
+        transaction.prepareForSerialization({ client: client as never }),
+        /Address-balance upload resolved owned coin objects/,
+    );
+});
+
+test("address-balance enforcement permits newly resolved non-coin objects", async () => {
+    const signer = new Ed25519Keypair();
+    const walType = `0x${"2".repeat(64)}::wal::WAL`;
+    const objectId = `0x${"6".repeat(64)}`;
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.coin({ type: walType, balance: 1n, useGasCoin: false });
+    enforceAddressBalanceCoinIntents(transaction);
+    transaction.addSerializationPlugin(async (transactionData, _options, next) => {
+        transactionData.addInput("object", Inputs.ObjectRef({
+            objectId,
+            version: "1",
+            digest: "33333333333333333333333333333333",
+        }));
+        await next();
+    });
+
+    const client = {
+        core: {
+            async getBalance() {
+                return {
+                    balance: {
+                        balance: "1",
+                        addressBalance: "1",
+                        coinBalance: "0",
+                    },
+                };
+            },
+            async listCoins() {
+                return { objects: [], cursor: null, hasNextPage: false };
+            },
+            async getObjects() {
+                return {
+                    objects: [{
+                        objectId,
+                        type: `${WALRUS_PACKAGE_ID}::blob::Blob`,
+                    }],
+                };
+            },
+        },
+    };
+
+    await assert.doesNotReject(
+        transaction.prepareForSerialization({ client: client as never }),
+    );
+});
+
+test("address-balance uploads reject owned gas resolved during build", async () => {
+    const signer = new Ed25519Keypair();
+    const gasObjectId = `0x${"4".repeat(64)}`;
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.setGasBudget(1n);
+    transaction.setGasPrice(1n);
+    transaction.transferObjects(
+        [transaction.objectRef({
+            objectId: `0x${"5".repeat(64)}`,
+            version: "1",
+            digest: "11111111111111111111111111111111",
+        })],
+        signer.toSuiAddress(),
+    );
+    enforceAddressBalanceCoinIntents(transaction);
+
+    const client = {
+        core: {
+            resolveTransactionPlugin() {
+                return async (
+                    transactionData: TransactionDataBuilder,
+                    _options: unknown,
+                    next: () => Promise<void>,
+                ) => {
+                    transactionData.gasData.payment = [{
+                        objectId: gasObjectId,
+                        version: "1",
+                        digest: "22222222222222222222222222222222",
+                    }];
+                    await next();
+                };
+            },
+        },
+    };
+
+    await assert.rejects(
+        transaction.build({ client: client as never }),
+        /Address-balance upload resolved gas from an owned coin/,
+    );
+});
+
+test("address-balance enforcement preserves async object inputs across rebuilds", async () => {
+    const signer = new Ed25519Keypair();
+    const objectId = `0x${"3".repeat(64)}`;
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.add(async (tx) => {
+        await Promise.resolve();
+        tx.transferObjects(
+            [tx.objectRef({
+                objectId,
+                version: "1",
+                digest: "11111111111111111111111111111111",
+            })],
+            signer.toSuiAddress(),
+        );
+    });
+    enforceAddressBalanceCoinIntents(transaction);
+
+    await assert.doesNotReject(transaction.build({ onlyTransactionKind: true }));
+    await assert.doesNotReject(transaction.build({ onlyTransactionKind: true }));
 });
 
 test("migration source status trusts only verified nonexistent blobs", () => {
@@ -457,6 +649,87 @@ test("ownerMatchesRecipient handles string and object owner encodings", () => {
     assert.equal(ownerMatchesRecipient({ AddressOwner: "0xb" }, "0xa"), false);
     assert.equal(ownerMatchesRecipient(null, "0xa"), false);
     assert.equal(ownerMatchesRecipient(42, "0xa"), false);
+});
+
+test("blob provenance uses the archival creation transaction, not the latest transfer", async () => {
+    const objectId = `0x${"1".repeat(64)}`;
+    const trusted = `0x${"2".repeat(64)}`;
+    const attacker = `0x${"3".repeat(64)}`;
+    const client = {
+        async getCreationTransaction() {
+            return "create-tx";
+        },
+        async getTransaction(digest: string) {
+            assert.equal(digest, "create-tx");
+            return {
+                status: { success: true },
+                transaction: { sender: trusted },
+                effects: { changedObjects: [{ objectId, idOperation: "Created" }] },
+            };
+        },
+    };
+
+    assert.equal(await findBlobCreationSender({ objectId, previousTransaction: "attacker-transfer-tx" }, client), trusted);
+    assert.deepEqual(
+        await trustedBlobCandidate(
+            { objectId, owner: { AddressOwner: attacker }, previousTransaction: "transfer-tx" },
+            attacker,
+            new Set([trusted]),
+            client
+        ),
+        { trusted: true, reason: "trusted", uploader: trusted }
+    );
+});
+
+test("blob provenance excludes external creators and fails closed on incomplete history", async () => {
+    const objectId = `0x${"1".repeat(64)}`;
+    const recipient = `0x${"2".repeat(64)}`;
+    const attacker = `0x${"3".repeat(64)}`;
+    const creationClient = {
+        async getTransaction() {
+            return {
+                status: { success: true },
+                transaction: { sender: attacker },
+                effects: { changedObjects: [{ objectId, idOperation: "Created" }] },
+            };
+        },
+        async getCreationTransaction() {
+            return "create-tx";
+        },
+    };
+    const blob = { objectId, owner: { AddressOwner: recipient }, previousTransaction: "create-tx" };
+    assert.deepEqual(await trustedBlobCandidate(blob, recipient, new Set([recipient]), creationClient), {
+        trusted: false,
+        reason: "provenance",
+        uploader: attacker,
+    });
+    const unavailableClient = { ...creationClient, getCreationTransaction: async () => null };
+    assert.equal(await findBlobCreationSender(blob, unavailableClient), null);
+    assert.deepEqual(await trustedBlobCandidate(blob, recipient, new Set([attacker]), unavailableClient), {
+        trusted: false,
+        reason: "provenance",
+        uploader: null,
+    });
+    assert.deepEqual(await trustedBlobCandidate({ ...blob, owner: { AddressOwner: attacker } }, recipient, new Set(), creationClient), {
+        trusted: false,
+        reason: "owner",
+        uploader: null,
+    });
+});
+
+test("provenance transport failures fail the query instead of silently dropping blobs", async () => {
+    const recipient = `0x${"2".repeat(64)}`;
+    const blob = {
+        objectId: `0x${"1".repeat(64)}`,
+        owner: { AddressOwner: recipient },
+        previousTransaction: "create-tx",
+    };
+    await assert.rejects(
+        filterTrustedBlobCandidates([blob], recipient, "test-request", async () => {
+            throw new Error("archive timeout");
+        }),
+        /unable to verify creation provenance.*archive timeout/
+    );
 });
 
 test("ownerMatchesRecipient compares canonicalized addresses, not exact strings", () => {

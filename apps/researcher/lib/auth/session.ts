@@ -1,25 +1,45 @@
 import "server-only";
 
-import { SignJWT, jwtVerify } from "jose";
+import { jwtVerify } from "jose";
 import { cookies } from "next/headers";
+import { getUserById } from "@/lib/db/queries";
+import {
+  SESSION_MAX_AGE_SECONDS,
+  signSessionIdentity,
+} from "@/lib/auth/session-token";
 
 const COOKIE_NAME = "session";
 const secret = new TextEncoder().encode(process.env.AUTH_SECRET);
 
-export async function getSession(): Promise<{
-  user: { id: string; publicKey: string; privateKey: string; accountId: string };
-} | null> {
+type SessionUser = {
+  id: string;
+  publicKey: string;
+  privateKey: string;
+  accountId: string;
+};
+
+/**
+ * Verify the identity-only JWT, then load reusable credentials from the
+ * server-side user row. Delegate private keys are never encoded in cookies.
+ */
+export async function getSession(): Promise<{ user: SessionUser } | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
   if (!token) return null;
+
   try {
     const { payload } = await jwtVerify(token, secret);
+    if (typeof payload.userId !== "string") return null;
+
+    const user = await getUserById(payload.userId);
+    if (!user || !user.publicKey) return null;
+
     return {
       user: {
-        id: payload.userId as string,
-        publicKey: payload.publicKey as string,
-        privateKey: payload.privateKey as string,
-        accountId: (payload.accountId as string) || '',
+        id: user.id,
+        publicKey: user.publicKey,
+        privateKey: user.delegatePrivateKey ?? "",
+        accountId: user.accountId ?? "",
       },
     };
   } catch {
@@ -27,22 +47,22 @@ export async function getSession(): Promise<{
   }
 }
 
+/** Create a short-lived identity session; credentials remain server-side. */
 export async function createSession(
   userId: string,
   publicKey: string,
-  privateKey: string,
   accountId: string
 ): Promise<void> {
-  const token = await new SignJWT({ userId, publicKey, privateKey, accountId })
-    .setProtectedHeader({ alg: "HS256" })
-    .setExpirationTime("30d")
-    .sign(secret);
+  const token = await signSessionIdentity(
+    { userId, publicKey, accountId },
+    secret
+  );
   const cookieStore = await cookies();
   cookieStore.set(COOKIE_NAME, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
-    maxAge: 30 * 24 * 60 * 60,
+    maxAge: SESSION_MAX_AGE_SECONDS,
   });
 }
 

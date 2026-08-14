@@ -1,0 +1,115 @@
+import { SuiGrpcClient } from "@mysten/sui/grpc";
+import { fromBase64, normalizeSuiAddress, toHex } from "@mysten/sui/utils";
+import { enokiConfig } from "@/lib/enoki/config";
+
+export class DelegateAccountBindingError extends Error {
+  constructor(
+    message = "Delegate credentials do not match the Walrus Memory account"
+  ) {
+    super(message);
+    this.name = "DelegateAccountBindingError";
+  }
+}
+
+function publicKeyHex(value: unknown): string | null {
+  if (typeof value === "string" && /^[0-9a-f]{64}$/i.test(value)) {
+    return value.toLowerCase();
+  }
+  if (typeof value === "string") {
+    try {
+      const decoded = fromBase64(value);
+      return decoded.length === 32 ? toHex(decoded).toLowerCase() : null;
+    } catch {
+      return null;
+    }
+  }
+  if (
+    Array.isArray(value) &&
+    value.length === 32 &&
+    value.every(
+      (byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255
+    )
+  ) {
+    return toHex(new Uint8Array(value)).toLowerCase();
+  }
+  return null;
+}
+
+export function delegateAccountBindingError(
+  objectType: unknown,
+  fields: unknown,
+  expected: { publicKeyHex: string; packageId: string }
+): string | null {
+  if (typeof objectType !== "string") return "Account object has no Move type";
+  const [typePackage, moduleName, structName] = objectType.split("::");
+  if (
+    !typePackage ||
+    normalizeSuiAddress(typePackage) !==
+      normalizeSuiAddress(expected.packageId) ||
+    moduleName !== "account" ||
+    structName !== "MemWalAccount"
+  ) {
+    return "Object is not a configured MemWalAccount";
+  }
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+    return "Account object has no readable fields";
+  }
+
+  const account = fields as Record<string, unknown>;
+  if (account.active !== true) return "Walrus Memory account is inactive";
+  if (!Array.isArray(account.delegate_keys)) {
+    return "Walrus Memory account has no delegate key list";
+  }
+  const expectedKey = expected.publicKeyHex.toLowerCase();
+  const registered = account.delegate_keys.some((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    return (
+      publicKeyHex((entry as Record<string, unknown>).public_key) === expectedKey
+    );
+  });
+  return registered
+    ? null
+    : "Delegate key is not registered on the Walrus Memory account";
+}
+
+export async function assertDelegateAccountBinding(input: {
+  accountId: string;
+  publicKeyHex: string;
+}): Promise<void> {
+  if (!/^0x[0-9a-f]{64}$/i.test(input.accountId)) {
+    throw new DelegateAccountBindingError("Invalid Walrus Memory account ID");
+  }
+  if (!enokiConfig.memwalPackageId) {
+    throw new DelegateAccountBindingError(
+      "Walrus Memory package is not configured"
+    );
+  }
+
+  const network = enokiConfig.suiNetwork;
+  const client = new SuiGrpcClient({
+    network,
+    baseUrl:
+      process.env.SUI_GRPC_URL || `https://fullnode.${network}.sui.io:443`,
+  });
+  let response: Awaited<ReturnType<typeof client.getObject>>;
+  try {
+    response = await client.getObject({
+      objectId: input.accountId,
+      include: { json: true },
+    });
+  } catch {
+    throw new DelegateAccountBindingError(
+      "Unable to verify Walrus Memory account"
+    );
+  }
+
+  const error = delegateAccountBindingError(
+    response.object?.type,
+    response.object?.json,
+    {
+      publicKeyHex: input.publicKeyHex,
+      packageId: enokiConfig.memwalPackageId,
+    }
+  );
+  if (error) throw new DelegateAccountBindingError(error);
+}

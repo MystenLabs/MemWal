@@ -21,6 +21,7 @@ import {
     ENOKI_TRANSIENT_MAX_DELAY_MS,
 } from "./config.js";
 import { suiClient } from "./clients.js";
+import { enforceAddressBalanceCoinIntents } from "./address-balance.js";
 import { errorMessage, truncateForLog } from "./util.js";
 
 type EnokiDataWrapper<T> = { data: T };
@@ -29,12 +30,13 @@ export type EnokiExecuteResponse = { digest: string };
 export type EnokiFallbackPolicy = {
     directSignIfUnconfigured: boolean;
     directSignAfterSponsorFailure: boolean;
-    gasMode?: "auto" | "addressBalance";
+    gasMode: "auto" | "addressBalance";
 };
 
 const DEFAULT_FALLBACK_POLICY: EnokiFallbackPolicy = {
     directSignIfUnconfigured: ENOKI_FALLBACK_TO_DIRECT_SIGN,
     directSignAfterSponsorFailure: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    gasMode: "addressBalance",
 };
 
 // The migrator's controller lease reserves 60s for one Enoki call plus 10s
@@ -239,6 +241,7 @@ export async function executeWithEnokiSponsor(
     onSubmissionStarted: () => void = () => {},
 ): Promise<string> {
     if (fallbackPolicy.gasMode === "addressBalance") {
+        enforceAddressBalanceCoinIntents(tx);
         tx.setGasPayment([]);
     }
 

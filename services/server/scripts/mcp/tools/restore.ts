@@ -12,9 +12,9 @@ const RESTORE_INPUT = {
         .number()
         .int()
         .min(1)
-        .max(500)
+        .max(100)
         .default(10)
-        .describe("Max number of memories to re-index (1-500)."),
+        .describe("Max number of memories to re-index (1-100)."),
 } as const;
 
 /**
@@ -23,16 +23,31 @@ const RESTORE_INPUT = {
  *
  * Use when: the user's local search index is empty / corrupted, or when
  * switching servers. After restore, `memwal_recall` returns fresh results.
- * The tool returns counts only (restored / skipped / total); it does NOT
+ * The tool returns counts and the API's truncation signal; it does NOT
  * stream back the decrypted memory texts.
  */
+export function formatRestoreResult(result: {
+    namespace: string;
+    total: number;
+    restored: number;
+    skipped: number;
+    truncated?: boolean;
+}): string {
+    const truncated = result.truncated === true;
+    return (
+        `${truncated ? "Restore partially complete" : "Restore complete"} for namespace "${result.namespace}":\n` +
+        `  total=${result.total}  restored=${result.restored}  skipped=${result.skipped}  truncated=${truncated}` +
+        (truncated ? "\n  ⚠️ More blobs remain to restore — increase limit and call again." : "")
+    );
+}
+
 export function registerRestoreTool(
     server: McpServer,
     session: MemWalSession
 ): void {
     server.tool(
         "memwal_restore",
-        "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts only (restored / skipped / total) — does not return memory texts. Call memwal_recall afterwards to query the rebuilt index.",
+        "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status — does not return memory texts. If truncated=true, increase limit and call again. Call memwal_recall afterwards to query the rebuilt index.",
         RESTORE_INPUT,
         wrapTool<{ namespace: string; limit: number }>(async ({ namespace, limit }) => {
             const result = await session.memwal.restore(namespace, limit);
@@ -40,9 +55,7 @@ export function registerRestoreTool(
                 content: [
                     {
                         type: "text",
-                        text:
-                            `Restore complete for namespace "${result.namespace}":\n` +
-                            `  total=${result.total}  restored=${result.restored}  skipped=${result.skipped}`,
+                        text: formatRestoreResult(result),
                     },
                 ],
             };

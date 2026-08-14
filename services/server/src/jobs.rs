@@ -23,7 +23,10 @@ use crate::alerts::{
     WalrusGasPoolExhaustedAlert, WalrusObjectLockedAlert, WalrusPackageUpgradeDetectedAlert,
     WalrusUploadExhaustedAlert, WalrusWalletBalanceLowAlert, SIDECAR_WALRUS_DEP_VERSION,
 };
-use crate::storage::walrus::{SetMetadataBatchEntry, UploadBlobError};
+use crate::storage::walrus::{
+    DurableUploadAdvance, PreparedRegisterTransaction, SetMetadataBatchEntry, UploadBlobError,
+    UploadExecutionIdentity, UploadJournal,
+};
 use crate::types::{configured_walrus_storage_epochs, AppState, BLOB_CACHE_KEY_PREFIX};
 
 // ============================================================
@@ -63,6 +66,9 @@ pub enum WalletOperation {
         agent_public_key: Option<String>,
         /// `remember_jobs` row ID to update with status/blob_id.
         remember_job_id: Option<String>,
+        /// Fences stale preparation workers after their lease is reclaimed.
+        #[serde(default)]
+        prepare_claim_token: Option<String>,
         /// Storage epochs for Walrus upload.
         #[serde(default = "default_epochs")]
         epochs: u32,
@@ -170,7 +176,7 @@ pub(crate) async fn warm_blob_cache_after_upload(
 }
 
 async fn update_remember_job_after_wallet_error(
-    state: &AppState,
+    pool: &sqlx::PgPool,
     remember_job_id: Option<&str>,
     error: &WalletJobError,
     msg: &str,
@@ -190,13 +196,26 @@ async fn update_remember_job_after_wallet_error(
         "running"
     };
 
+    // Guard against downgrading a row a concurrent attempt already finished.
+    // Every pre-existing caller only runs while holding the per-job upload
+    // lock (JobUploadLock), so it was never the current status writer's own
+    // race to lose — but LockOutcome::Defer calls this specifically when it
+    // does NOT hold the lock, i.e. exactly while another attempt of the same
+    // job may be concurrently writing 'uploaded'/'done' via
+    // persist_uploaded_state or insert_vector_and_mark_remember_done. Without
+    // this guard, a loser's write landing after the winner's can clobber a
+    // genuinely-succeeding row back to 'running' with a stale
+    // lock-contention error_msg — status/error_msg only, blob_id/
+    // blob_object_id are untouched, so no data loss, but a client polling
+    // GET /api/remember/:job_id (routes/remember.rs) would see a
+    // misleadingly stuck row until the unrelated staleness sweep.
     let _ = sqlx::query(
-        "UPDATE remember_jobs SET status = $1, error_msg = $2, updated_at = NOW() WHERE id = $3",
+        "UPDATE remember_jobs SET status = $1, error_msg = $2, updated_at = NOW() WHERE id = $3 AND status NOT IN ('uploaded', 'done')",
     )
     .bind(status)
     .bind(msg)
     .bind(jid)
-    .execute(state.db.pool())
+    .execute(pool)
     .await;
 }
 
@@ -343,7 +362,6 @@ fn congestion_backoff_secs(requeues: u32) -> u64 {
 }
 
 /// Exponential back-off: attempt 1→2s, 2→4s, 3→8s, 4→16s, 5→32s.
-#[allow(dead_code)]
 pub fn backoff_duration(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(2u64.pow(attempt))
 }
@@ -452,6 +470,7 @@ pub(crate) async fn execute_wallet_job(
             account_id,
             agent_public_key,
             remember_job_id,
+            prepare_claim_token,
             epochs,
         } => {
             let wallet_index = match wallet_index_for_upload_attempt(
@@ -477,6 +496,31 @@ pub(crate) async fn execute_wallet_job(
                     attempt_info.max,
                 );
             }
+            if let (Some(job_id), Some(token)) =
+                (remember_job_id.as_deref(), prepare_claim_token.as_deref())
+            {
+                let owns_claim: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM remember_jobs WHERE id = $1 AND prepare_claim_token = $2)",
+                )
+                .bind(job_id)
+                .bind(token)
+                .fetch_one(state.db.pool())
+                .await
+                .map_err(|e| {
+                    WalletJobError::Transient(format!(
+                        "failed to verify preparation fencing token: {}",
+                        e
+                    ))
+                    .into_apalis_error()
+                })?;
+                if !owns_claim {
+                    tracing::warn!(
+                        "[wallet-job:upload] job_id={} stale preparation payload fenced before wallet execution",
+                        job_id
+                    );
+                    return Ok(());
+                }
+            }
             execute_upload_and_transfer(
                 state,
                 wallet_index,
@@ -489,6 +533,7 @@ pub(crate) async fn execute_wallet_job(
                 account_id,
                 agent_public_key,
                 remember_job_id,
+                prepare_claim_token,
                 epochs,
                 congestion_requeues,
                 attempt_info,
@@ -601,7 +646,7 @@ pub(crate) async fn execute_wallet_job(
                     )
                     .await;
                     update_remember_job_after_wallet_error(
-                        state,
+                        state.db.pool(),
                         remember_job_id.as_deref(),
                         &err,
                         &msg,
@@ -776,7 +821,8 @@ async fn insert_vector_and_mark_remember_done(
     {
         let msg = format!("insert_vector failed: {}", e);
         let classified = WalletJobError::classify_sidecar_error(&msg);
-        update_remember_job_after_wallet_error(state, remember_job_id, &classified, &msg).await;
+        update_remember_job_after_wallet_error(state.db.pool(), remember_job_id, &classified, &msg)
+            .await;
         tracing::error!(
             "[wallet-job:upload] job_id={} {} classification={} retryable={}",
             remember_job_id.unwrap_or("-"),
@@ -789,7 +835,7 @@ async fn insert_vector_and_mark_remember_done(
 
     if let Some(jid) = remember_job_id {
         let _ = sqlx::query(
-            "UPDATE remember_jobs SET status = 'done', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
+            "UPDATE remember_jobs SET status = 'done', blob_id = $1, prepare_claimed_at = NULL, prepare_claim_token = NULL, recovery_claimed_at = NULL, recovery_claim_token = NULL, error_msg = NULL, updated_at = NOW() WHERE id = $2",
         )
         .bind(blob_id)
         .bind(jid)
@@ -850,6 +896,483 @@ async fn enqueue_finalize_uploaded_blob(
 // ────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
+/// What `execute_upload_and_transfer` should do given a job's already-persisted
+/// state — the idempotency decision, split out so it can be unit-tested against
+/// the real `remember_jobs` table without a live Walrus sidecar.
+#[derive(Debug, PartialEq, Eq)]
+enum UploadResume {
+    /// Job already reached its terminal `done` state — nothing to redo.
+    AlreadyDone { blob_id: String },
+    /// Paid blob already minted AND its object id is known, but metadata/transfer
+    /// (and indexing) may not have finished. Resume via the metadata/transfer
+    /// recovery path with the stored object id — never re-mint, never prematurely
+    /// finalize an un-transferred blob.
+    ResumeTransfer {
+        blob_id: String,
+        blob_object_id: String,
+    },
+    /// Paid blob already minted but no object id was recorded (a full-success
+    /// upload where the sidecar already did metadata+transfer atomically, or a
+    /// pre-`blob_object_id` legacy row). The blob exists and is transferred, only
+    /// the vector index may be missing — resume indexing, NEVER re-upload.
+    ResumeIndex { blob_id: String },
+    /// No paid blob is recorded in the durable job row. Proceed with a normal
+    /// upload; the per-job advisory lock prevents concurrent attempts.
+    Upload,
+    /// The status lookup itself failed. We CANNOT tell whether a paid blob exists,
+    /// so we must not upload (fail closed) — the caller returns a retriable error
+    /// and Apalis re-reads on the next attempt.
+    Indeterminate,
+}
+
+/// Decide whether a (possibly retried) upload job should re-upload or resume.
+///
+/// A row **never re-uploads once a paid blob is recorded** (any non-NULL
+/// `blob_id`): `done` → `AlreadyDone`; `uploaded` + object_id → `ResumeTransfer`;
+/// `uploaded` without object_id → `ResumeIndex` (the blob is minted+transferred,
+/// only indexing may be pending). Any row with a NULL `blob_id` → `Upload`: the
+/// database is the source of truth, and the per-job advisory lock prevents two
+/// live attempts from entering the paid upload concurrently.
+///
+/// A lookup **error** returns `Indeterminate` (fail closed): after a possible
+/// mint we must not re-upload on a transient read failure, so the caller retries
+/// without uploading rather than risking a duplicate paid blob.
+async fn upload_resume_disposition(pool: &sqlx::PgPool, job_id: &str) -> UploadResume {
+    let looked_up: Result<Option<(String, Option<String>, Option<String>)>, sqlx::Error> =
+        sqlx::query_as("SELECT status, blob_id, blob_object_id FROM remember_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(pool)
+            .await;
+
+    let existing = match looked_up {
+        Ok(row) => row,
+        Err(_) => return UploadResume::Indeterminate,
+    };
+
+    match existing {
+        // Any recorded blob_id means the paid mint already happened → never upload.
+        Some((status, Some(blob_id), _)) if status == "done" => {
+            UploadResume::AlreadyDone { blob_id }
+        }
+        Some((_, Some(blob_id), Some(blob_object_id))) => UploadResume::ResumeTransfer {
+            blob_id,
+            blob_object_id,
+        },
+        Some((_, Some(blob_id), None)) => UploadResume::ResumeIndex { blob_id },
+        // No durable blob record means there is nothing to resume. Trust the DB;
+        // scanning every historical server-wallet Blob is both redundant and too
+        // slow for the sidecar read deadline.
+        _ => UploadResume::Upload,
+    }
+}
+
+/// Per-job upload mutex, held for the guard-read → mint → persist critical
+/// section of `execute_upload_and_transfer`. Backed by a transaction-level
+/// Postgres advisory lock (`pg_try_advisory_xact_lock` — non-blocking) on a hash
+/// of the job id, taken on a dedicated connection from `wallet_lock_pool`. If
+/// another attempt of the SAME job already holds it, acquisition returns `None`
+/// and the caller must NOT upload. Different jobs never contend.
+///
+/// A transaction lock is cancellation-safe: SQLx queues a rollback when a
+/// dropped transaction returns its connection to the pool, and PostgreSQL
+/// releases the advisory lock with that transaction. A session advisory lock
+/// can survive cancellation and leak into an unrelated pooled borrower.
+struct JobUploadLock {
+    transaction: sqlx::Transaction<'static, sqlx::Postgres>,
+}
+
+impl JobUploadLock {
+    /// Try to acquire the per-job lock. `Ok(Some(lock))` = acquired (proceed);
+    /// `Ok(None)` = another attempt of this job holds it (do not upload);
+    /// `Err` = could not reach the lock pool (fail closed — treat like held).
+    async fn try_acquire(pool: &sqlx::PgPool, job_id: &str) -> Result<Option<Self>, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        // hashtext() → int4; advisory locks take int8. Deterministic per job id.
+        let acquired: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint)")
+                .bind(job_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if acquired {
+            Ok(Some(JobUploadLock { transaction }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Commit the lock-only transaction on the normal path. Cancellation drops
+    /// it instead, and SQLx rolls it back before the connection is reused.
+    async fn release(self, _job_id: &str) {
+        let _ = self.transaction.commit().await;
+    }
+}
+
+/// Decision derived from a `JobUploadLock::try_acquire` result: either we hold
+/// the lock and may proceed, or we must NOT upload (deferred because another
+/// attempt holds it, or fail-closed because the lock pool was unreachable — both
+/// return a retriable error). Split out so the "never mint without the lock"
+/// rule is unit-testable without a live pool.
+enum LockOutcome {
+    Proceed(JobUploadLock),
+    Defer(WalletJobError),
+}
+
+fn lock_outcome(acquired: Result<Option<JobUploadLock>, sqlx::Error>, job_id: &str) -> LockOutcome {
+    match acquired {
+        Ok(Some(lock)) => LockOutcome::Proceed(lock),
+        Ok(None) => LockOutcome::Defer(WalletJobError::Transient(format!(
+            "another attempt of upload job {} is in progress",
+            job_id
+        ))),
+        Err(e) => LockOutcome::Defer(WalletJobError::Transient(format!(
+            "could not acquire upload lock for job {}: {}",
+            job_id, e
+        ))),
+    }
+}
+
+/// Durably persist the `uploaded` state (status + blob_id + blob_object_id) that
+/// records a completed paid mint. Unlike the surrounding best-effort status
+/// writes, a failure here is returned as a **retriable** error: the mint already
+/// happened and is irreversible, so if we can't record it we must let Apalis
+/// retry (the idempotency guard will then see the state on the next attempt)
+/// rather than press on and risk the record being lost — which would let a later
+/// retry re-mint. `blob_object_id` is stored so a retry can resume transfer.
+#[derive(sqlx::FromRow)]
+struct StoredUploadJournal {
+    upload_wallet_index: Option<i32>,
+    upload_wallet_address: Option<String>,
+    upload_execution_identity: Option<serde_json::Value>,
+    upload_resume_step: Option<serde_json::Value>,
+    upload_register_transaction: Option<serde_json::Value>,
+}
+
+fn parse_journal_value<T: serde::de::DeserializeOwned>(
+    value: Option<serde_json::Value>,
+) -> Result<Option<T>, WalletJobError> {
+    value
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| WalletJobError::Permanent(format!("invalid persisted upload journal: {}", e)))
+}
+
+async fn load_upload_journal(
+    pool: &sqlx::PgPool,
+    job_id: &str,
+    fallback_wallet_index: usize,
+) -> Result<UploadJournal, WalletJobError> {
+    let stored = sqlx::query_as::<_, StoredUploadJournal>(
+        "SELECT upload_wallet_index, upload_wallet_address, upload_execution_identity, upload_resume_step, upload_register_transaction FROM remember_jobs WHERE id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| WalletJobError::Transient(format!("failed to load upload journal: {}", e)))?;
+
+    Ok(UploadJournal {
+        wallet_index: stored
+            .upload_wallet_index
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(fallback_wallet_index),
+        wallet_address: stored.upload_wallet_address,
+        execution_identity: parse_journal_value(stored.upload_execution_identity)?,
+        resume_step: stored.upload_resume_step,
+        register_transaction: parse_journal_value(stored.upload_register_transaction)?,
+    })
+}
+
+async fn persist_upload_journal(
+    pool: &sqlx::PgPool,
+    job_id: &str,
+    journal: &UploadJournal,
+) -> Result<(), WalletJobError> {
+    let wallet_index = i32::try_from(journal.wallet_index)
+        .map_err(|_| WalletJobError::Permanent("wallet index exceeds i32".into()))?;
+    let identity = journal
+        .execution_identity
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| {
+            WalletJobError::Permanent(format!("failed to encode upload identity: {}", e))
+        })?;
+    let register = journal
+        .register_transaction
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| {
+            WalletJobError::Permanent(format!("failed to encode register journal: {}", e))
+        })?;
+    sqlx::query(
+        "UPDATE remember_jobs SET upload_wallet_index = $1, upload_wallet_address = $2, upload_execution_identity = $3, upload_resume_step = $4, upload_register_transaction = $5, updated_at = NOW() WHERE id = $6",
+    )
+    .bind(wallet_index)
+    .bind(&journal.wallet_address)
+    .bind(identity)
+    .bind(&journal.resume_step)
+    .bind(register)
+    .bind(job_id)
+    .execute(pool)
+    .await
+    .map_err(|e| WalletJobError::Transient(format!("failed to persist upload journal: {}", e)))?;
+    Ok(())
+}
+
+async fn consume_preparation_claim(
+    pool: &sqlx::PgPool,
+    job_id: &str,
+    token: &str,
+) -> Result<bool, WalletJobError> {
+    let consumed = sqlx::query(
+        "UPDATE remember_jobs SET status = 'running', prepare_claimed_at = NULL, updated_at = NOW() WHERE id = $1 AND prepare_claim_token = $2 AND blob_id IS NULL AND status IN ('pending', 'running')",
+    )
+    .bind(job_id)
+    .bind(token)
+    .execute(pool)
+    .await
+    .map_err(|e| WalletJobError::Transient(format!("failed to consume preparation claim: {}", e)))?;
+    Ok(consumed.rows_affected() == 1)
+}
+
+async fn persist_uploaded_state(
+    pool: &sqlx::PgPool,
+    remember_job_id: &str,
+    blob_id: &str,
+    blob_object_id: Option<&str>,
+) -> Result<(), WalletJobError> {
+    sqlx::query(
+        "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, blob_object_id = $2, prepare_claimed_at = NULL, prepare_claim_token = NULL, error_msg = NULL, updated_at = NOW() WHERE id = $3",
+    )
+    .bind(blob_id)
+    .bind(blob_object_id)
+    .bind(remember_job_id)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        WalletJobError::Transient(format!(
+            "failed to persist uploaded state for job {} (blob minted, must retry to record): {}",
+            remember_job_id, e
+        ))
+    })?;
+    Ok(())
+}
+
+/// Resume an `uploaded`-but-not-`done` job by re-enqueuing the metadata/transfer
+/// Build the `SetMetadataAndTransfer` job that resumes an `uploaded`-but-pending
+/// write. Pure (no I/O) so a test can assert the resume routes to the transfer
+/// recovery op — carrying the stored blob object id — rather than an index/`done`
+/// finalize, which would prematurely complete an un-transferred blob.
+#[allow(clippy::too_many_arguments)]
+fn build_resume_transfer_job(
+    wallet_index: usize,
+    remember_job_id: &str,
+    blob_id: &str,
+    blob_object_id: String,
+    owner: &str,
+    namespace: &str,
+    package_id: &str,
+    account_id: &str,
+    agent_public_key: Option<&str>,
+    encrypted_b64: &str,
+    vector: &[f32],
+    blob_size_bytes: i64,
+    importance: f32,
+    seal_policy_package_id: &str,
+) -> WalletJob {
+    WalletJob {
+        wallet_index,
+        congestion_requeues: 0,
+        operation: WalletOperation::SetMetadataAndTransfer {
+            blob_object_id,
+            owner: owner.to_string(),
+            namespace: namespace.to_string(),
+            package_id: Some(package_id.to_string()),
+            agent_id: agent_public_key.map(str::to_string),
+            remember_job_id: Some(remember_job_id.to_string()),
+            blob_id: Some(blob_id.to_string()),
+            vector: Some(vector.to_vec()),
+            blob_size_bytes: Some(blob_size_bytes),
+            importance,
+            encrypted_b64: Some(encrypted_b64.to_string()),
+            account_id: Some(account_id.to_string()),
+            policy_package_id: Some(seal_policy_package_id.to_string()),
+        },
+    }
+}
+
+/// recovery job with the stored blob object id — the same handoff the
+/// upload-then-metadata-failed path uses. This never re-mints the (already paid)
+/// blob and never marks the row `done` while its transfer is still outstanding;
+/// `SetMetadataAndTransfer` finishes the transfer and only then indexes + marks
+/// `done`.
+#[allow(clippy::too_many_arguments)]
+async fn resume_metadata_and_transfer(
+    state: &AppState,
+    wallet_index: usize,
+    remember_job_id: &str,
+    blob_id: &str,
+    blob_object_id: String,
+    owner: &str,
+    namespace: &str,
+    package_id: &str,
+    account_id: &str,
+    agent_public_key: Option<&str>,
+    encrypted_b64: &str,
+    vector: &[f32],
+    blob_size_bytes: i64,
+    importance: f32,
+) -> Result<(), WalletJobError> {
+    let job = build_resume_transfer_job(
+        wallet_index,
+        remember_job_id,
+        blob_id,
+        blob_object_id,
+        owner,
+        namespace,
+        package_id,
+        account_id,
+        agent_public_key,
+        encrypted_b64,
+        vector,
+        blob_size_bytes,
+        importance,
+        &state.config.seal_policy_package_id,
+    );
+    let mut storage = state.wallet_storage.clone();
+    if let Err(e) = storage.push_request(wallet_job_request(job)).await {
+        let classified = classify_wallet_remember_handoff_failure(
+            state.db.pool(),
+            Some(remember_job_id),
+            format!("failed to enqueue metadata/transfer recovery job: {}", e),
+        )
+        .await;
+        tracing::error!(
+            "[wallet-job:upload] job_id={} {}",
+            remember_job_id,
+            classified,
+        );
+        return Err(classified);
+    }
+    tracing::info!(
+        "[wallet-job:upload] job_id={} resume enqueued metadata/transfer for blob_id={} key={}",
+        remember_job_id,
+        blob_id,
+        wallet_index,
+    );
+    Ok(())
+}
+
+fn durable_step_field(step: &serde_json::Value, field: &str) -> Result<String, WalletJobError> {
+    step.get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            WalletJobError::Permanent(format!(
+                "durable upload step is missing required field {}",
+                field
+            ))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_durable_upload(
+    state: &AppState,
+    fallback_wallet_index: usize,
+    encrypted: &[u8],
+    encrypted_b64: &str,
+    vector: &[f32],
+    importance: f32,
+    owner: &str,
+    namespace: &str,
+    package_id: &str,
+    account_id: &str,
+    agent_public_key: Option<&str>,
+    remember_job_id: &str,
+    epochs: u32,
+) -> Result<(), WalletJobError> {
+    let mut journal =
+        load_upload_journal(state.db.pool(), remember_job_id, fallback_wallet_index).await?;
+
+    // Each sidecar call advances one checkpointable step. Persist the returned
+    // checkpoint before asking the sidecar to perform the next side effect.
+    for _ in 0..6 {
+        let advanced = crate::storage::walrus::advance_durable_upload(
+            &state.http_client,
+            &state.config.sidecar_url,
+            state.config.sidecar_secret.as_deref(),
+            encrypted,
+            epochs as u64,
+            owner,
+            namespace,
+            package_id,
+            remember_job_id,
+            journal,
+        )
+        .await
+        .map_err(|e| WalletJobError::classify_sidecar_error(&e.to_string()))?;
+
+        match advanced {
+            DurableUploadAdvance::Prepared(next) => {
+                // This is the critical pre-submit barrier: exact signed bytes
+                // and digest are durable before the next request can submit.
+                persist_upload_journal(state.db.pool(), remember_job_id, &next).await?;
+                journal = next;
+            }
+            DurableUploadAdvance::Step {
+                journal: mut next,
+                step,
+            } => {
+                next.resume_step = Some(step.clone());
+                persist_upload_journal(state.db.pool(), remember_job_id, &next).await?;
+                let kind = step
+                    .get("step")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if kind != "certified" {
+                    journal = next;
+                    continue;
+                }
+
+                let blob_id = durable_step_field(&step, "blobId")?;
+                let object_id = durable_step_field(&step, "blobObjectId")?;
+                persist_uploaded_state(
+                    state.db.pool(),
+                    remember_job_id,
+                    &blob_id,
+                    Some(&object_id),
+                )
+                .await?;
+                warm_blob_cache_after_upload(state, &blob_id, encrypted).await;
+                return resume_metadata_and_transfer(
+                    state,
+                    next.wallet_index,
+                    remember_job_id,
+                    &blob_id,
+                    object_id,
+                    owner,
+                    namespace,
+                    package_id,
+                    account_id,
+                    agent_public_key,
+                    encrypted_b64,
+                    vector,
+                    encrypted.len() as i64,
+                    importance,
+                )
+                .await;
+            }
+        }
+    }
+
+    Err(WalletJobError::Transient(format!(
+        "durable upload for job {} exceeded step budget",
+        remember_job_id
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn execute_upload_and_transfer(
     state: &AppState,
     wallet_index: usize,
@@ -862,10 +1385,221 @@ async fn execute_upload_and_transfer(
     account_id: String,
     agent_public_key: Option<String>,
     remember_job_id: Option<String>,
+    prepare_claim_token: Option<String>,
     epochs: u32,
     congestion_requeues: u32,
     attempt_info: WalletJobAttemptInfo,
 ) -> Result<(), WalletJobError> {
+    // ── Per-job upload mutex ───────────────────────────────────
+    // Guard-read + mint + persist must be atomic per job: the wallet queue runs
+    // up to WALLET_JOB_CONCURRENCY workers, and Apalis's orphan-reenqueue can
+    // re-dispatch a still-Running job (stale worker heartbeat) so two attempts of
+    // the SAME job can run at once — both would read `running`/NULL and both mint.
+    // A per-job advisory lock serializes them; the loser bails without uploading.
+    let mut upload_lock = if let Some(ref jid) = remember_job_id {
+        let acquired = JobUploadLock::try_acquire(&state.wallet_lock_pool, jid).await;
+        match lock_outcome(acquired, jid) {
+            LockOutcome::Proceed(lock) => Some(lock),
+            // Deferred or fail-closed: in BOTH cases we must NOT upload — return
+            // the retriable error so Apalis re-tries later, by which point the
+            // holder should have persisted `uploaded`, or the pool should be
+            // reachable again.
+            //
+            // "Later" is not automatic: no WorkerBuilder in main.rs attaches a
+            // retry/backoff layer, so a bare `Err` here gets re-polled almost
+            // immediately (observed on staging: all 5 attempts of one job
+            // exhausted in ~124ms). That races the actual lock holder — a real
+            // upload can take seconds — and burns the whole attempt budget
+            // before the holder has any chance to finish, leaving the row
+            // silently `running` with no error_msg until the unrelated
+            // 10-minute staleness sweep force-fails it. Sleep with the
+            // existing (previously unused) exponential backoff before
+            // returning, and persist a visible error_msg immediately instead
+            // of leaving the row silent for the sweep to eventually catch.
+            LockOutcome::Defer(err) => {
+                tracing::warn!(
+                    "[wallet-job:upload] job_id={} deferring upload (attempt {}/{}): {}",
+                    jid,
+                    attempt_info.current,
+                    attempt_info.max,
+                    err,
+                );
+                update_remember_job_after_wallet_error(
+                    state.db.pool(),
+                    Some(jid.as_str()),
+                    &err,
+                    err.message(),
+                )
+                .await;
+                tokio::time::sleep(backoff_duration(attempt_info.current as u32)).await;
+                return Err(err);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Consume the preparation claim while holding the per-job upload lock,
+    // immediately before any wallet side effect. This closes the TOCTOU window:
+    // once consumed, the row is no longer reclaimable and a stale token cannot
+    // pass even if its lease expired after an earlier queue-time check.
+    if let (Some(jid), Some(token)) = (remember_job_id.as_deref(), prepare_claim_token.as_deref()) {
+        if !consume_preparation_claim(state.db.pool(), jid, token).await? {
+            tracing::warn!(
+                "[wallet-job:upload] job_id={} stale preparation fenced inside upload lock",
+                jid
+            );
+            if let Some(lock) = upload_lock.take() {
+                lock.release(jid).await;
+            }
+            return Ok(());
+        }
+    }
+
+    let result = execute_upload_and_transfer_locked(
+        state,
+        wallet_index,
+        encrypted_b64,
+        vector,
+        importance,
+        owner,
+        namespace,
+        package_id,
+        account_id,
+        agent_public_key,
+        remember_job_id.clone(),
+        prepare_claim_token,
+        epochs,
+        congestion_requeues,
+        attempt_info,
+    )
+    .await;
+
+    if let (Some(lock), Some(jid)) = (upload_lock, remember_job_id.as_deref()) {
+        lock.release(jid).await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_upload_and_transfer_locked(
+    state: &AppState,
+    wallet_index: usize,
+    encrypted_b64: String,
+    vector: Vec<f32>,
+    importance: f32,
+    owner: String,
+    namespace: String,
+    package_id: String,
+    account_id: String,
+    agent_public_key: Option<String>,
+    remember_job_id: Option<String>,
+    prepare_claim_token: Option<String>,
+    epochs: u32,
+    congestion_requeues: u32,
+    attempt_info: WalletJobAttemptInfo,
+) -> Result<(), WalletJobError> {
+    // ── Idempotency guard ──────────────────────────────────────
+    // `upload_blob` mints a paid on-chain Walrus Blob. On a retry (Apalis
+    // re-run, or an ambiguous client timeout that requeued the job) the blob
+    // may already have been uploaded and its id persisted. Re-uploading would
+    // mint a *second* paid blob for the same write. Consult the job's persisted
+    // state and resume from the point after the upload instead of redoing it.
+    // (This runs under the per-job advisory lock taken by the caller.)
+    if let Some(ref jid) = remember_job_id {
+        match upload_resume_disposition(state.db.pool(), jid).await {
+            UploadResume::AlreadyDone { blob_id } => {
+                tracing::info!(
+                    "[wallet-job:upload] job_id={} already done (blob_id={}) — skipping re-upload",
+                    jid,
+                    blob_id,
+                );
+                return Ok(());
+            }
+            UploadResume::ResumeTransfer {
+                blob_id,
+                blob_object_id,
+            } => {
+                tracing::info!(
+                    "[wallet-job:upload] job_id={} already uploaded (blob_id={}) — skipping re-upload, resuming metadata/transfer",
+                    jid,
+                    blob_id,
+                );
+                // Decode only to recover the ciphertext byte length for quota
+                // accounting; the bytes themselves aren't re-uploaded. A decode
+                // failure here is a real error (the row says `uploaded`, so it
+                // decoded once) — never silently record a zero-size row.
+                let blob_size_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&encrypted_b64)
+                    .map_err(|e| {
+                        WalletJobError::Permanent(format!(
+                            "resume: encrypted_b64 no longer decodes for job {}: {}",
+                            jid, e
+                        ))
+                    })?
+                    .len() as i64;
+                return resume_metadata_and_transfer(
+                    state,
+                    wallet_index,
+                    jid,
+                    &blob_id,
+                    blob_object_id,
+                    &owner,
+                    &namespace,
+                    &package_id,
+                    &account_id,
+                    agent_public_key.as_deref(),
+                    &encrypted_b64,
+                    &vector,
+                    blob_size_bytes,
+                    importance,
+                )
+                .await;
+            }
+            UploadResume::ResumeIndex { blob_id } => {
+                // Paid blob exists and (per the full-success route) was already
+                // transferred; only indexing may be missing. Finish it — never
+                // re-upload — with the stored blob_id.
+                tracing::info!(
+                    "[wallet-job:upload] job_id={} already uploaded (blob_id={}, no object id) — skipping re-upload, resuming indexing",
+                    jid,
+                    blob_id,
+                );
+                let blob_size_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&encrypted_b64)
+                    .map_err(|e| {
+                        WalletJobError::Permanent(format!(
+                            "resume: encrypted_b64 no longer decodes for job {}: {}",
+                            jid, e
+                        ))
+                    })?
+                    .len() as i64;
+                return insert_vector_and_mark_remember_done(
+                    state,
+                    Some(jid),
+                    &owner,
+                    &namespace,
+                    &blob_id,
+                    &vector,
+                    blob_size_bytes,
+                    importance,
+                    wallet_index,
+                )
+                .await;
+            }
+            UploadResume::Indeterminate => {
+                // Couldn't read the job's state → can't tell whether a paid blob
+                // already exists. Fail closed: retry without uploading rather than
+                // risk a duplicate mint.
+                return Err(WalletJobError::Transient(format!(
+                    "could not read upload state for job {} — retrying without re-upload",
+                    jid
+                )));
+            }
+            UploadResume::Upload => {}
+        }
+    }
+
     // ── Mark running ───────────────────────────────────────────
     if let Some(ref jid) = remember_job_id {
         let _ = sqlx::query(
@@ -883,7 +1617,7 @@ async fn execute_upload_and_transfer(
             let msg = format!("base64 decode failed: {}", e);
             let classified = WalletJobError::Permanent(msg.clone());
             update_remember_job_after_wallet_error(
-                state,
+                state.db.pool(),
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
@@ -907,7 +1641,52 @@ async fn execute_upload_and_transfer(
         encrypted.len(),
     );
 
-    // ── Upload to Walrus via sidecar (using pinned wallet_index) ─
+    if let Some(ref jid) = remember_job_id {
+        return match execute_durable_upload(
+            state,
+            wallet_index,
+            &encrypted,
+            &encrypted_b64,
+            &vector,
+            importance,
+            &owner,
+            &namespace,
+            &package_id,
+            &account_id,
+            agent_public_key.as_deref(),
+            jid,
+            epochs,
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // Sidecar failures are classified where they originate inside
+                // execute_durable_upload. Preserve that classification here:
+                // journal/state validation can already return Permanent, and
+                // reclassifying its display text would incorrectly make it
+                // retryable and leave the polling row running.
+                let msg = err.message().to_string();
+                update_remember_job_after_wallet_error(
+                    state.db.pool(),
+                    Some(jid.as_str()),
+                    &err,
+                    &msg,
+                )
+                .await;
+                tracing::error!(
+                    "[wallet-job:upload] job_id={} {} classification={} retryable={}",
+                    jid,
+                    msg,
+                    err.kind(),
+                    !err.aborts_retries()
+                );
+                Err(err)
+            }
+        };
+    }
+
+    // Legacy untracked jobs retain the atomic sidecar route.
     let upload_result = crate::storage::walrus::upload_blob(
         &state.http_client,
         &state.config.sidecar_url,
@@ -943,14 +1722,11 @@ async fn execute_upload_and_transfer(
 
             warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
 
+            // Durably record the paid mint + its object id before handing off to
+            // the recovery job (see persist_uploaded_state). A retry that lands
+            // here reads this to resume the transfer instead of re-minting.
             if let Some(ref jid) = remember_job_id {
-                let _ = sqlx::query(
-                    "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
-                )
-                .bind(&blob_id)
-                .bind(jid)
-                .execute(state.db.pool())
-                .await;
+                persist_uploaded_state(state.db.pool(), jid, &blob_id, Some(&object_id)).await?;
             }
 
             let job_id_for_log = remember_job_id.as_deref().unwrap_or("-").to_string();
@@ -1023,7 +1799,7 @@ async fn execute_upload_and_transfer(
                 // Keep the polling row alive ('running' + congestion message)
                 // while the requeued copy waits out the backlog.
                 update_remember_job_after_wallet_error(
-                    state,
+                    state.db.pool(),
                     remember_job_id.as_deref(),
                     &classified,
                     &msg,
@@ -1050,6 +1826,7 @@ async fn execute_upload_and_transfer(
                                 account_id,
                                 agent_public_key,
                                 remember_job_id,
+                                prepare_claim_token,
                                 epochs,
                             },
                         }),
@@ -1136,7 +1913,7 @@ async fn execute_upload_and_transfer(
             )
             .await;
             update_remember_job_after_wallet_error(
-                state,
+                state.db.pool(),
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
@@ -1156,14 +1933,14 @@ async fn execute_upload_and_transfer(
 
     warm_blob_cache_after_upload(state, &blob_id, &encrypted).await;
 
+    // Persist the paid mint durably BEFORE indexing. This UPDATE is the record
+    // the idempotency guard reads on a retry; if it were lost, a retry would see
+    // no blob_id and re-mint. Treat a persist failure as retriable (the mint is
+    // irreversible, so we must not proceed as if it never happened) rather than
+    // the old fire-and-forget `let _ =`. Also stores blob_object_id so an
+    // uploaded-but-not-done retry can resume the transfer without re-minting.
     if let Some(ref jid) = remember_job_id {
-        let _ = sqlx::query(
-            "UPDATE remember_jobs SET status = 'uploaded', blob_id = $1, error_msg = NULL, updated_at = NOW() WHERE id = $2",
-        )
-        .bind(&blob_id)
-        .bind(jid)
-        .execute(state.db.pool())
-        .await;
+        persist_uploaded_state(state.db.pool(), jid, &blob_id, upload.object_id.as_deref()).await?;
     }
 
     // The sidecar's `/walrus/upload` endpoint already performs metadata+transfer
@@ -1510,9 +2287,13 @@ async fn maybe_alert_walrus_upload_exhausted(
 
 /// Failure classification for `WalletJob` handlers.
 ///
-/// Apalis re-queues with exponential backoff on `Transient`. `Permanent`
-/// errors are returned as-is so the job is marked Dead immediately and we
-/// don't burn retry budget on inputs that can never succeed.
+/// Apalis re-queues `Transient` for another attempt, up to `MAX_ATTEMPTS`.
+/// No WorkerBuilder attaches a retry/backoff layer, so that re-queue has no
+/// inherent delay — callers that need real spacing between attempts (lock
+/// contention, congestion) must enforce it themselves (see `backoff_duration`,
+/// `congestion_backoff_secs`). `Permanent` errors are returned as-is so the
+/// job is marked Dead immediately and we don't burn retry budget on inputs
+/// that can never succeed.
 ///
 /// Mapping rules (enforced at the point of error origination):
 /// - `MoveAbort(_)` → `Permanent` (deterministic Move-level failure)
@@ -1569,6 +2350,17 @@ pub enum WalletJobError {
 }
 
 impl WalletJobError {
+    fn message(&self) -> &str {
+        match self {
+            WalletJobError::Transient(msg)
+            | WalletJobError::Permanent(msg)
+            | WalletJobError::WalrusBalanceLow(msg)
+            | WalletJobError::ObjectLockedUntilEpoch(msg)
+            | WalletJobError::GasPoolExhausted(msg)
+            | WalletJobError::UploadSlotCongestion(msg) => msg,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             WalletJobError::Transient(_) => "transient",
@@ -1924,6 +2716,7 @@ pub async fn execute_bulk_remember(
                     account_id: job.account_id.clone(),
                     agent_public_key: job.agent_public_key.clone(),
                     remember_job_id: Some(job_id.clone()),
+                    prepare_claim_token: None,
                     epochs: job.epochs,
                 },
             }))
@@ -1955,12 +2748,19 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        classify_wallet_remember_handoff_failure, congestion_backoff_secs,
+        backoff_duration, build_resume_transfer_job, classify_wallet_remember_handoff_failure,
+        congestion_backoff_secs, consume_preparation_claim, durable_step_field,
         escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
-        is_walrus_package_version_mismatch, mark_remember_job_failed, parse_locked_object_info,
-        parse_wal_balance_alert_info, recovery_seal_persistence, wallet_index_for_upload_attempt,
-        wallet_job_request, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
+        is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
+        mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
+        persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
+        update_remember_job_after_wallet_error, upload_resume_disposition,
+        wallet_index_for_upload_attempt, wallet_job_request, JobUploadLock, LockOutcome,
+        UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
         MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
+    };
+    use crate::storage::walrus::{
+        PreparedRegisterTransaction, UploadExecutionIdentity, UploadJournal,
     };
 
     /// The exact production error string from the object-lock incident
@@ -1996,6 +2796,18 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../migrations/012_remember_write_idempotency.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../migrations/013_remember_write_idempotency_index.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
 
         pool
     }
@@ -2083,6 +2895,33 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             classified,
             WalletJobError::UploadSlotCongestion(_)
         ));
+    }
+
+    #[test]
+    fn durable_upload_preserves_preclassified_errors() {
+        let permanent = durable_step_field(&serde_json::json!({}), "blobId").unwrap_err();
+        assert!(matches!(permanent, WalletJobError::Permanent(_)));
+        assert!(permanent.aborts_retries());
+        assert_eq!(
+            permanent.message(),
+            "durable upload step is missing required field blobId"
+        );
+
+        let sidecar = WalletJobError::classify_sidecar_error(PROD_CONGESTION_ERROR);
+        assert!(matches!(sidecar, WalletJobError::UploadSlotCongestion(_)));
+    }
+
+    #[test]
+    fn lock_defer_backoff_matches_documented_schedule() {
+        // 1→2s, 2→4s, 3→8s, 4→16s, 5→32s — see backoff_duration's doc comment.
+        // Wired into the lock-contention Defer path so a job that repeatedly
+        // loses the per-job advisory lock gets real spacing between attempts
+        // instead of exhausting MAX_ATTEMPTS in milliseconds.
+        assert_eq!(backoff_duration(1), std::time::Duration::from_secs(2));
+        assert_eq!(backoff_duration(2), std::time::Duration::from_secs(4));
+        assert_eq!(backoff_duration(3), std::time::Duration::from_secs(8));
+        assert_eq!(backoff_duration(4), std::time::Duration::from_secs(16));
+        assert_eq!(backoff_duration(5), std::time::Duration::from_secs(32));
     }
 
     #[test]
@@ -2531,6 +3370,527 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         });
 
         assert_eq!(req.parts.context.max_attempts(), MAX_ATTEMPTS as i32);
+    }
+
+    async fn insert_job_full(
+        pool: &sqlx::PgPool,
+        job_id: &str,
+        status: &str,
+        blob_id: Option<&str>,
+        blob_object_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, blob_id, blob_object_id) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(job_id)
+        .bind("0xtest-owner")
+        .bind("test-ns")
+        .bind(status)
+        .bind(blob_id)
+        .bind(blob_object_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_job_with_status(
+        pool: &sqlx::PgPool,
+        job_id: &str,
+        status: &str,
+        blob_id: Option<&str>,
+    ) {
+        insert_job_full(pool, job_id, status, blob_id, None).await;
+    }
+
+    // GH #477: a retried upload job must not re-mint a paid Walrus blob. These
+    // pin the idempotency decision that gates the (paid) upload_blob call.
+    #[tokio::test]
+    async fn upload_resume_resumes_transfer_when_uploaded_with_object_id() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        // uploaded WITH a stored object id → resume the transfer, never re-mint.
+        insert_job_full(
+            &pool,
+            &job_id,
+            "uploaded",
+            Some("blob-abc"),
+            Some("0xobj-abc"),
+        )
+        .await;
+
+        assert_eq!(
+            upload_resume_disposition(&pool, &job_id).await,
+            UploadResume::ResumeTransfer {
+                blob_id: "blob-abc".into(),
+                blob_object_id: "0xobj-abc".into(),
+            },
+        );
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn upload_resume_indexes_when_uploaded_without_object_id() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        // uploaded but no object id (full-success route / legacy row): the paid
+        // blob exists and is transferred → resume INDEXING, never re-upload.
+        insert_job_full(&pool, &job_id, "uploaded", Some("blob-legacy"), None).await;
+
+        assert_eq!(
+            upload_resume_disposition(&pool, &job_id).await,
+            UploadResume::ResumeIndex {
+                blob_id: "blob-legacy".into()
+            },
+        );
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn upload_resume_fails_closed_on_lookup_error() {
+        // A closed pool makes the guard SELECT error → Indeterminate, so the
+        // caller retries WITHOUT uploading (never a fail-open re-mint).
+        let dead = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        dead.close().await;
+        assert_eq!(
+            upload_resume_disposition(&dead, "any-job").await,
+            UploadResume::Indeterminate,
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_resume_is_noop_when_already_done() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &job_id, "done", Some("blob-xyz")).await;
+
+        assert_eq!(
+            upload_resume_disposition(&pool, &job_id).await,
+            UploadResume::AlreadyDone {
+                blob_id: "blob-xyz".into()
+            },
+        );
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn upload_resume_uploads_when_no_blob_is_recorded() {
+        let pool = test_pool().await;
+        // The DB is authoritative: running + NULL blob means there is no paid
+        // upload to resume, and the advisory lock prevents concurrent uploads.
+        let running = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &running, "running", None).await;
+        assert_eq!(
+            upload_resume_disposition(&pool, &running).await,
+            UploadResume::Upload,
+        );
+
+        // pending → fresh job.
+        let pending = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &pending, "pending", None).await;
+        assert_eq!(
+            upload_resume_disposition(&pool, &pending).await,
+            UploadResume::Upload
+        );
+
+        // failed with NO blob → no paid mint recorded, so upload.
+        let failed = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &failed, "failed", None).await;
+        assert_eq!(
+            upload_resume_disposition(&pool, &failed).await,
+            UploadResume::Upload
+        );
+
+        // #3: a FAILED row that DOES carry a blob_id was marked failed after a
+        // successful mint (recovery-handoff failure / stale sweeper) → resume,
+        // NEVER re-upload and discard the paid blob.
+        let failed_with_blob = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_full(
+            &pool,
+            &failed_with_blob,
+            "failed",
+            Some("blob-paid"),
+            Some("0xobj"),
+        )
+        .await;
+        assert_eq!(
+            upload_resume_disposition(&pool, &failed_with_blob).await,
+            UploadResume::ResumeTransfer {
+                blob_id: "blob-paid".into(),
+                blob_object_id: "0xobj".into()
+            },
+        );
+
+        // unknown job id → Upload (no row = no write ever happened).
+        let missing = format!("remember-job-{}", uuid::Uuid::new_v4());
+        assert_eq!(
+            upload_resume_disposition(&pool, &missing).await,
+            UploadResume::Upload
+        );
+
+        for id in [&running, &pending, &failed, &failed_with_blob] {
+            let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await;
+        }
+    }
+
+    // GH #477 RC-3: two concurrent attempts of the SAME job must not both mint.
+    // The per-job advisory lock is the mutex; this proves the second acquirer is
+    // refused while the first holds it, and succeeds again after release.
+    #[tokio::test]
+    async fn upload_lock_is_mutually_exclusive_per_job() {
+        // Needs >1 connection: the holder pins one while a second attempt tries to
+        // acquire on another (the real cross-session advisory-lock behavior). The
+        // shared test_pool is max_connections(1), which would deadlock here.
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+
+        // First attempt acquires the lock.
+        let lock = JobUploadLock::try_acquire(&pool, &job_id)
+            .await
+            .unwrap()
+            .expect("first acquire should succeed");
+
+        // A concurrent second attempt of the SAME job is refused → it must NOT
+        // upload (returns None, which the caller turns into a Transient defer).
+        assert!(
+            JobUploadLock::try_acquire(&pool, &job_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "second concurrent acquire of the same job must be refused",
+        );
+
+        // A DIFFERENT job never contends.
+        let other = format!("remember-job-{}", uuid::Uuid::new_v4());
+        assert!(
+            JobUploadLock::try_acquire(&pool, &other)
+                .await
+                .unwrap()
+                .is_some(),
+            "a different job must be able to acquire its own lock",
+        );
+
+        // After the holder releases, the job is acquirable again.
+        lock.release(&job_id).await;
+        assert!(
+            JobUploadLock::try_acquire(&pool, &job_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "lock must be re-acquirable after release",
+        );
+    }
+
+    // A wallet-job future can be cancelled at any await point, which drops its
+    // transaction without calling the async release method. SQLx must roll it
+    // back and release the transaction lock before the connection is reused.
+    #[tokio::test]
+    async fn upload_lock_transaction_rolls_back_when_guard_is_dropped() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+
+        let lock = JobUploadLock::try_acquire(&pool, &job_id)
+            .await
+            .unwrap()
+            .expect("first acquire should succeed");
+        drop(lock); // Simulate cancellation: no explicit async release.
+
+        let reacquired = JobUploadLock::try_acquire(&pool, &job_id).await.unwrap();
+        assert!(
+            reacquired.is_some(),
+            "dropping a cancelled guard must roll back and release the lock"
+        );
+        reacquired.unwrap().release(&job_id).await;
+    }
+
+    // RC-3 wiring: the caller must NOT upload when the lock is contended or the
+    // lock pool is unreachable. lock_outcome is the decision the outer fn keys on;
+    // a regression that treated either as "proceed" would double-mint.
+    #[test]
+    fn lock_outcome_defers_when_contended_and_fails_closed_on_error() {
+        // Contended (Ok(None)) → Defer with a retriable error, never Proceed.
+        match lock_outcome(Ok(None), "job-x") {
+            LockOutcome::Defer(WalletJobError::Transient(msg)) => {
+                assert!(msg.contains("in progress"), "contended message: {msg}");
+            }
+            _ => panic!("contended lock must Defer(Transient), never Proceed"),
+        }
+        // Lock-pool error → fail closed to a retriable Defer, never Proceed.
+        match lock_outcome(Err(sqlx::Error::PoolClosed), "job-y") {
+            LockOutcome::Defer(WalletJobError::Transient(msg)) => {
+                assert!(msg.contains("could not acquire"), "error message: {msg}");
+            }
+            _ => panic!("lock-pool error must fail closed to Defer(Transient)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lock_outcome_proceeds_when_acquired() {
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        let acquired = JobUploadLock::try_acquire(&pool, &job_id).await;
+        match lock_outcome(acquired, &job_id) {
+            LockOutcome::Proceed(lock) => lock.release(&job_id).await,
+            LockOutcome::Defer(_) => panic!("a free lock must Proceed"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_register_journal_round_trips_before_submission() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &job_id, "running", None).await;
+        let expected = UploadJournal {
+            wallet_index: 2,
+            wallet_address: Some(format!("0x{}", "1".repeat(64))),
+            execution_identity: Some(UploadExecutionIdentity {
+                chain_identifier: "testnet-chain".into(),
+                walrus_package_id: format!("0x{}", "2".repeat(64)),
+            }),
+            resume_step: Some(serde_json::json!({
+                "step": "encoded",
+                "blobId": "blob-1",
+                "rootHash": "root",
+                "unencodedSize": 42
+            })),
+            register_transaction: Some(PreparedRegisterTransaction {
+                transaction_bytes: "dHgtYnl0ZXM=".into(),
+                signature: "signature".into(),
+                digest: "digest-1".into(),
+            }),
+        };
+
+        persist_upload_journal(&pool, &job_id, &expected)
+            .await
+            .unwrap();
+        let loaded = load_upload_journal(&pool, &job_id, 0).await.unwrap();
+        assert_eq!(loaded.wallet_index, 2);
+        assert_eq!(loaded.wallet_address, expected.wallet_address);
+        assert_eq!(
+            loaded.register_transaction.unwrap().digest,
+            "digest-1",
+            "the exact prepared digest must survive the pre-submit checkpoint"
+        );
+        assert_eq!(
+            loaded.resume_step.unwrap()["step"],
+            "encoded",
+            "encoded intent must be replayed with the prepared transaction"
+        );
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn consumed_generation_remains_valid_for_durable_retry() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        let token = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, prepare_claim_token, prepare_claimed_at) VALUES ($1, '0xowner', 'ns', 'pending', $2, NOW())",
+        )
+        .bind(&job_id)
+        .bind(&token)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(consume_preparation_claim(&pool, &job_id, &token)
+            .await
+            .unwrap());
+        assert!(
+            consume_preparation_claim(&pool, &job_id, &token)
+                .await
+                .unwrap(),
+            "same durable generation must remain retryable after pending → running"
+        );
+        let stored: (String, Option<String>) =
+            sqlx::query_as("SELECT status, prepare_claim_token FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.0, "running");
+        assert_eq!(stored.1.as_deref(), Some(token.as_str()));
+
+        assert!(
+            !consume_preparation_claim(&pool, &job_id, "superseding-token")
+                .await
+                .unwrap(),
+            "a different generation must remain fenced"
+        );
+    }
+
+    // RC-2: the durable persist must (a) actually store blob_object_id on success
+    // and (b) return a RETRIABLE error on DB failure — never swallow it, or a lost
+    // `uploaded` record lets a retry re-mint.
+    #[tokio::test]
+    async fn persist_uploaded_state_stores_object_id_and_is_retriable_on_failure() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &job_id, "running", None).await;
+
+        persist_uploaded_state(&pool, &job_id, "blob-1", Some("0xobj-1"))
+            .await
+            .expect("persist should succeed");
+
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, blob_id, blob_object_id FROM remember_jobs WHERE id = $1",
+        )
+        .bind(&job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "uploaded");
+        assert_eq!(row.1.as_deref(), Some("blob-1"));
+        assert_eq!(
+            row.2.as_deref(),
+            Some("0xobj-1"),
+            "blob_object_id must be persisted for RC-4 resume"
+        );
+
+        // A closed pool → the mint record can't be written → must be retriable.
+        let dead = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        dead.close().await;
+        match persist_uploaded_state(&dead, &job_id, "blob-1", Some("0xobj-1")).await {
+            Err(WalletJobError::Transient(msg)) => {
+                assert!(
+                    msg.contains("must retry to record"),
+                    "retriable persist failure: {msg}"
+                );
+            }
+            other => panic!("persist failure must be Transient (retriable), got {other:?}"),
+        }
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn wallet_error_persist_does_not_clobber_a_row_a_concurrent_attempt_already_finished() {
+        // Regression for a race the lock-contention backoff introduced:
+        // LockOutcome::Defer calls update_remember_job_after_wallet_error
+        // specifically when this worker does NOT hold the per-job upload
+        // lock — i.e. exactly while another attempt of the same job may be
+        // concurrently writing 'uploaded' (persist_uploaded_state) or 'done'
+        // (insert_vector_and_mark_remember_done). Without a status guard, a
+        // loser's write landing after the winner's downgrades a genuinely-
+        // succeeding row back to 'running' with a stale error_msg.
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &job_id, "uploaded", Some("blob-winner")).await;
+
+        update_remember_job_after_wallet_error(
+            &pool,
+            Some(job_id.as_str()),
+            &WalletJobError::Transient("another attempt of upload job is in progress".into()),
+            "another attempt of upload job is in progress",
+        )
+        .await;
+
+        let row: (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg, blob_id FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row.0, "uploaded",
+            "a lock-contention loser must not clobber a row the winner already finished"
+        );
+        assert_eq!(row.1, None, "error_msg must not be overwritten either");
+        assert_eq!(row.2.as_deref(), Some("blob-winner"));
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    // RC-4: an uploaded-but-pending resume must route to the TRANSFER recovery op
+    // (carrying the stored object id), NOT to an index/done finalize — otherwise a
+    // never-transferred blob is prematurely marked done.
+    #[test]
+    fn resume_builds_a_set_metadata_and_transfer_job_with_object_id() {
+        let job = build_resume_transfer_job(
+            3,
+            "job-abc",
+            "blob-abc",
+            "0xobj-abc".into(),
+            "0xowner",
+            "ns",
+            "0xpkg",
+            "0xacct",
+            Some("0xagent"),
+            "ciphertext-b64",
+            &[0.1, 0.2, 0.3],
+            123,
+            0.5,
+            "0xpolicy",
+        );
+        match job.operation {
+            WalletOperation::SetMetadataAndTransfer {
+                blob_object_id,
+                blob_id,
+                remember_job_id,
+                encrypted_b64,
+                ..
+            } => {
+                assert_eq!(
+                    blob_object_id, "0xobj-abc",
+                    "must carry the stored object id"
+                );
+                assert_eq!(blob_id.as_deref(), Some("blob-abc"));
+                assert_eq!(remember_job_id.as_deref(), Some("job-abc"));
+                assert_eq!(
+                    encrypted_b64.as_deref(),
+                    Some("ciphertext-b64"),
+                    "ciphertext needed for SEAL persistence"
+                );
+            }
+            other => panic!("resume must build SetMetadataAndTransfer, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -13,10 +13,12 @@ export async function saveSprint({
   chatId,
   userId,
   memwalKey,
+  memwalAccountId,
 }: {
   chatId: string;
   userId: string;
   memwalKey: string;
+  memwalAccountId: string;
 }): Promise<SaveSprintResult> {
   console.log(`[sprint:save] Starting sprint save for chat=${chatId}`);
 
@@ -70,6 +72,7 @@ export async function saveSprint({
   console.log("[sprint:save] Storing in Walrus Memory...");
   const memwalResult = await rememberSprintReport({
     key: memwalKey,
+    accountId: memwalAccountId,
     title: report.title,
     content: report.content,
     citations: report.citations,

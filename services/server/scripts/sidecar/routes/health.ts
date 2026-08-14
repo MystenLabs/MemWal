@@ -3,7 +3,8 @@
  *
  * All are registered BEFORE the shared-secret middleware (see app.ts):
  * /health is local liveness, /ready validates upload execution identity, and
- * /metrics/wallet is scraped by operators without a token.
+ * /metrics/wallet exposes aggregate metrics to unauthenticated scrapers.
+ * Per-wallet addresses and balances are served separately behind sidecar auth.
  */
 
 import type { Express, Request, Response as ExpressResponse } from "express";
@@ -22,7 +23,7 @@ import {
     WALRUS_UPLOAD_MAX_CONCURRENCY,
     WALRUS_UPLOAD_PER_WALLET_CONCURRENCY,
 } from "../config.js";
-import { getWalletBalanceSnapshot, getWalrusClient, suiClient } from "../clients.js";
+import { getWalletBalanceSnapshot, getWalrusClient, suiClient, suiGraphqlClient } from "../clients.js";
 import { getUploadCounts } from "../concurrency.js";
 import { sidecarLog } from "../log.js";
 import { sidecarStartedAtMs, sidecarStateSnapshot } from "../state.js";
@@ -88,7 +89,18 @@ export async function assertUploadExecutionIdentity(
     );
 }
 
-export function registerHealthRoute(app: Express): void {
+async function assertProvenanceEndpointIdentity(): Promise<void> {
+    const result = await suiGraphqlClient.query<{ chainIdentifier?: string }>({
+        query: "query ProvenanceReadiness { chainIdentifier }",
+        variables: {},
+        signal: AbortSignal.timeout(READINESS_RPC_TIMEOUT_MS),
+    });
+    if (result.errors?.length || result.data?.chainIdentifier !== SUI_CHAIN_IDENTIFIER) {
+        throw new Error(`Sui archival GraphQL endpoint does not match ${SUI_NETWORK}`);
+    }
+}
+
+export function registerHealthRoute(app: Express, requireProvenance = true): void {
     app.get("/health", (_req: Request, res: ExpressResponse) => {
         res.json({ status: "ok", uptimeMs: Date.now() - sidecarStartedAtMs });
     });
@@ -96,6 +108,7 @@ export function registerHealthRoute(app: Express): void {
     app.get("/ready", async (_req: Request, res: ExpressResponse) => {
         try {
             const identity = await executionIdentity();
+            if (requireProvenance) await assertProvenanceEndpointIdentity();
             const uploads = getUploadCounts();
             res.json({
                 status: "ok",
@@ -138,11 +151,28 @@ export function registerWalletMetricsRoute(app: Express): void {
     app.get("/metrics/wallet", async (_req: Request, res: ExpressResponse) => {
         const snapshot = sidecarStateSnapshot();
         try {
-            const balances = await getWalletBalanceSnapshot(SERVER_SUI_ADDRESSES);
+            const balances: Partial<Awaited<ReturnType<typeof getWalletBalanceSnapshot>>> = {
+                ...await getWalletBalanceSnapshot(SERVER_SUI_ADDRESSES),
+            };
+            delete balances.perWallet;
             res.json({ ...snapshot, ...balances });
         } catch (error) {
             sidecarLog("warn", "wallet_balance_metrics_failed", { error: errorMessage(error) });
             res.json(snapshot);
+        }
+    });
+}
+
+// Operational wallet details. Register this route only after
+// sharedSecretAuthMiddleware in app.ts.
+export function registerInternalWalletBalancesRoute(app: Express): void {
+    app.get("/internal/wallet-balances", async (_req: Request, res: ExpressResponse) => {
+        try {
+            const { perWallet } = await getWalletBalanceSnapshot(SERVER_SUI_ADDRESSES);
+            res.json({ perWallet });
+        } catch (error) {
+            sidecarLog("warn", "internal_wallet_balances_failed", { error: errorMessage(error) });
+            res.status(503).json({ error: "Wallet balances unavailable" });
         }
     });
 }

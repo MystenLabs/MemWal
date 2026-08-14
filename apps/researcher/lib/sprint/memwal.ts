@@ -4,10 +4,10 @@ import { MemWal } from "@mysten-incubation/memwal";
 import type { RememberResult } from "@mysten-incubation/memwal";
 import type { Citation, SourceMeta } from "./types";
 
-function getMemWalClient(key: string, accountId?: string) {
+function getMemWalClient(key: string, accountId: string) {
   return MemWal.create({
     key,
-    accountId: accountId || process.env.MEMWAL_ACCOUNT_ID!,
+    accountId,
     serverUrl: process.env.MEMWAL_SERVER_URL,
   });
 }
@@ -21,7 +21,7 @@ export async function rememberSprintReport({
   sources,
 }: {
   key: string;
-  accountId?: string;
+  accountId: string;
   title: string;
   content: string;
   citations: Citation[];
@@ -58,7 +58,7 @@ export async function recallFromMemWal(
   key: string,
   query: string,
   limit: number = 5,
-  accountId?: string
+  accountId: string
 ) {
   const memwal = getMemWalClient(key, accountId);
   const { results } = await memwal.recall(query, limit);
