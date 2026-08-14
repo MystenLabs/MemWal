@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
+import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, walruscanBlobUrl } from "./util.js";
 
 const REMEMBER_INPUT = {
@@ -31,10 +32,14 @@ export function registerRememberTool(
     server: McpServer,
     session: MemWalSession
 ): void {
-    server.tool(
+    server.registerTool(
         "memwal_remember",
-        "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever you learn something worth remembering across sessions — a stated preference, decision, constraint, correction, identity detail, or recurring workflow — even if the user did not explicitly say 'remember this'. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
-        REMEMBER_INPUT,
+        {
+            ...TOOL_METADATA.memwal_remember,
+            description:
+                "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever you learn something worth remembering across sessions — a stated preference, decision, constraint, correction, identity detail, or recurring workflow — even if the user did not explicitly say 'remember this'. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
+            inputSchema: REMEMBER_INPUT,
+        },
         wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {
             const result = await session.memwal.rememberAndWait(
                 text,
