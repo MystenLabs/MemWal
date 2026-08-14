@@ -34,7 +34,7 @@ test("tools/list publishes safe titles and behavior annotations for every remote
             },
             memwal_analyze: {
                 title: "Analyze and Remember",
-                annotations: { readOnlyHint: false, destructiveHint: false },
+                annotations: { readOnlyHint: false, destructiveHint: true },
             },
             memwal_restore: {
                 title: "Restore Memory Index",
@@ -42,7 +42,7 @@ test("tools/list publishes safe titles and behavior annotations for every remote
             },
             memwal_recall: {
                 title: "Recall Memories",
-                annotations: { readOnlyHint: true, destructiveHint: false },
+                annotations: { readOnlyHint: false, destructiveHint: true },
             },
             memwal_health: {
                 title: "Check Walrus Memory Health",
