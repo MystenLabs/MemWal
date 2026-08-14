@@ -176,7 +176,7 @@ pub(crate) async fn warm_blob_cache_after_upload(
 }
 
 async fn update_remember_job_after_wallet_error(
-    state: &AppState,
+    pool: &sqlx::PgPool,
     remember_job_id: Option<&str>,
     error: &WalletJobError,
     msg: &str,
@@ -196,13 +196,26 @@ async fn update_remember_job_after_wallet_error(
         "running"
     };
 
+    // Guard against downgrading a row a concurrent attempt already finished.
+    // Every pre-existing caller only runs while holding the per-job upload
+    // lock (JobUploadLock), so it was never the current status writer's own
+    // race to lose — but LockOutcome::Defer calls this specifically when it
+    // does NOT hold the lock, i.e. exactly while another attempt of the same
+    // job may be concurrently writing 'uploaded'/'done' via
+    // persist_uploaded_state or insert_vector_and_mark_remember_done. Without
+    // this guard, a loser's write landing after the winner's can clobber a
+    // genuinely-succeeding row back to 'running' with a stale
+    // lock-contention error_msg — status/error_msg only, blob_id/
+    // blob_object_id are untouched, so no data loss, but a client polling
+    // GET /api/remember/:job_id (routes/remember.rs) would see a
+    // misleadingly stuck row until the unrelated staleness sweep.
     let _ = sqlx::query(
-        "UPDATE remember_jobs SET status = $1, error_msg = $2, updated_at = NOW() WHERE id = $3",
+        "UPDATE remember_jobs SET status = $1, error_msg = $2, updated_at = NOW() WHERE id = $3 AND status NOT IN ('uploaded', 'done')",
     )
     .bind(status)
     .bind(msg)
     .bind(jid)
-    .execute(state.db.pool())
+    .execute(pool)
     .await;
 }
 
@@ -633,7 +646,7 @@ pub(crate) async fn execute_wallet_job(
                     )
                     .await;
                     update_remember_job_after_wallet_error(
-                        state,
+                        state.db.pool(),
                         remember_job_id.as_deref(),
                         &err,
                         &msg,
@@ -808,7 +821,7 @@ async fn insert_vector_and_mark_remember_done(
     {
         let msg = format!("insert_vector failed: {}", e);
         let classified = WalletJobError::classify_sidecar_error(&msg);
-        update_remember_job_after_wallet_error(state, remember_job_id, &classified, &msg).await;
+        update_remember_job_after_wallet_error(state.db.pool(), remember_job_id, &classified, &msg).await;
         tracing::error!(
             "[wallet-job:upload] job_id={} {} classification={} retryable={}",
             remember_job_id.unwrap_or("-"),
@@ -1419,10 +1432,10 @@ async fn execute_upload_and_transfer(
                     err,
                 );
                 update_remember_job_after_wallet_error(
-                    state,
+                    state.db.pool(),
                     Some(jid.as_str()),
                     &err,
-                    &err.to_string(),
+                    err.message(),
                 )
                 .await;
                 tokio::time::sleep(backoff_duration(attempt_info.current as u32)).await;
@@ -1695,7 +1708,7 @@ async fn execute_upload_and_transfer_locked(
             let msg = format!("base64 decode failed: {}", e);
             let classified = WalletJobError::Permanent(msg.clone());
             update_remember_job_after_wallet_error(
-                state,
+                state.db.pool(),
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
@@ -1745,7 +1758,7 @@ async fn execute_upload_and_transfer_locked(
                 // reclassifying its display text would incorrectly make it
                 // retryable and leave the polling row running.
                 let msg = err.message().to_string();
-                update_remember_job_after_wallet_error(state, Some(jid.as_str()), &err, &msg).await;
+                update_remember_job_after_wallet_error(state.db.pool(), Some(jid.as_str()), &err, &msg).await;
                 tracing::error!(
                     "[wallet-job:upload] job_id={} {} classification={} retryable={}",
                     jid,
@@ -1871,7 +1884,7 @@ async fn execute_upload_and_transfer_locked(
                 // Keep the polling row alive ('running' + congestion message)
                 // while the requeued copy waits out the backlog.
                 update_remember_job_after_wallet_error(
-                    state,
+                    state.db.pool(),
                     remember_job_id.as_deref(),
                     &classified,
                     &msg,
@@ -1985,7 +1998,7 @@ async fn execute_upload_and_transfer_locked(
             )
             .await;
             update_remember_job_after_wallet_error(
-                state,
+                state.db.pool(),
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
@@ -2826,9 +2839,10 @@ mod tests {
         is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
         mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
         persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
-        upload_resume_disposition, wallet_index_for_upload_attempt, wallet_job_request,
-        JobUploadLock, LockOutcome, UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError,
-        WalletOperation, MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
+        update_remember_job_after_wallet_error, upload_resume_disposition,
+        wallet_index_for_upload_attempt, wallet_job_request, JobUploadLock, LockOutcome,
+        UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
+        MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
     };
     use crate::storage::walrus::{
         PreparedRegisterTransaction, UploadExecutionIdentity, UploadJournal,
@@ -3845,6 +3859,48 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             }
             other => panic!("persist failure must be Transient (retriable), got {other:?}"),
         }
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn wallet_error_persist_does_not_clobber_a_row_a_concurrent_attempt_already_finished() {
+        // Regression for a race the lock-contention backoff introduced:
+        // LockOutcome::Defer calls update_remember_job_after_wallet_error
+        // specifically when this worker does NOT hold the per-job upload
+        // lock — i.e. exactly while another attempt of the same job may be
+        // concurrently writing 'uploaded' (persist_uploaded_state) or 'done'
+        // (insert_vector_and_mark_remember_done). Without a status guard, a
+        // loser's write landing after the winner's downgrades a genuinely-
+        // succeeding row back to 'running' with a stale error_msg.
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &job_id, "uploaded", Some("blob-winner")).await;
+
+        update_remember_job_after_wallet_error(
+            &pool,
+            Some(job_id.as_str()),
+            &WalletJobError::Transient("another attempt of upload job is in progress".into()),
+            "another attempt of upload job is in progress",
+        )
+        .await;
+
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, error_msg, blob_id FROM remember_jobs WHERE id = $1",
+        )
+        .bind(&job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.0, "uploaded",
+            "a lock-contention loser must not clobber a row the winner already finished"
+        );
+        assert_eq!(row.1, None, "error_msg must not be overwritten either");
+        assert_eq!(row.2.as_deref(), Some("blob-winner"));
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
             .bind(&job_id)
