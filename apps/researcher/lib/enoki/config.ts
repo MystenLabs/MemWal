@@ -5,6 +5,7 @@ export const enokiConfig = {
   suiNetwork: (process.env.NEXT_PUBLIC_SUI_NETWORK || "testnet") as
     | "testnet"
     | "mainnet",
+  suiGrpcUrl: process.env.NEXT_PUBLIC_SUI_GRPC_URL || "",
   memwalPackageId: process.env.NEXT_PUBLIC_MEMWAL_PACKAGE_ID || "",
   memwalRegistryId: process.env.NEXT_PUBLIC_MEMWAL_REGISTRY_ID || "",
   memwalServerUrl:

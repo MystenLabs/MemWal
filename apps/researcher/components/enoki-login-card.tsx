@@ -16,6 +16,10 @@ import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { enokiConfig } from "@/lib/enoki/config";
+import {
+  fetchAccountIdForOwner,
+  findCreatedObjectByType,
+} from "@/lib/sui-client-compat";
 
 type Step =
   | "idle"
@@ -222,30 +226,11 @@ export function EnokiLoginCard() {
 
         // Check if a Walrus Memory account already exists for this address
         try {
-          const registryObj = await suiClient.getObject({
-            id: enokiConfig.memwalRegistryId,
-            options: { showContent: true },
-          });
-          if (
-            registryObj?.data?.content &&
-            "fields" in registryObj.data.content
-          ) {
-            const fields = registryObj.data.content.fields as any;
-            const tableId = fields?.accounts?.fields?.id?.id;
-            if (tableId) {
-              const dynField = await suiClient.getDynamicFieldObject({
-                parentId: tableId,
-                name: { type: "address", value: address },
-              });
-              if (
-                dynField?.data?.content &&
-                "fields" in dynField.data.content
-              ) {
-                knownAccountId = (dynField.data.content.fields as any)
-                  .value as string;
-              }
-            }
-          }
+          knownAccountId = await fetchAccountIdForOwner(
+            suiClient,
+            enokiConfig.memwalRegistryId,
+            address,
+          );
         } catch {
           // Dynamic field not found → no account yet
         }
@@ -298,19 +283,11 @@ export function EnokiLoginCard() {
           });
 
           // Find the created account object
-          const txDetails = await suiClient.getTransactionBlock({
-            digest: createResult.digest,
-            options: { showObjectChanges: true },
-          });
-          const createdObj = txDetails.objectChanges?.find(
-            (c) =>
-              c.type === "created" &&
-              "objectType" in c &&
-              c.objectType.includes("MemWalAccount"),
+          knownAccountId = await findCreatedObjectByType(
+            suiClient,
+            createResult.digest,
+            "MemWalAccount",
           );
-          if (createdObj && "objectId" in createdObj) {
-            knownAccountId = createdObj.objectId;
-          }
 
           if (!knownAccountId) {
             throw new Error(
