@@ -21,6 +21,7 @@ import {
     DEFAULT_WALRUS_EPOCHS,
     DURABLE_UPLOAD_PROTOCOL_VERSION,
     ENOKI_API_KEY,
+    ENOKI_FALLBACK_TO_DIRECT_SIGN,
     JSON_LIMIT_WALRUS_UPLOAD,
     MAX_WALRUS_EPOCHS,
     SERVER_SUI_PRIVATE_KEYS,
@@ -123,6 +124,13 @@ async function certifiedStep(
     if (certifiedEpoch === null) return null;
     const blobObject = { ...json, id: blobObjectId, certified_epoch: certifiedEpoch };
     return { step: "certified", blobId, blobObjectId, blobObject };
+}
+
+export function durableRegisterDirectSigningAllowed(
+    enokiConfigured: boolean,
+    fallbackToDirectSign: boolean,
+): boolean {
+    return !enokiConfigured || fallbackToDirectSign;
 }
 
 export function createdBlobObjectIdFromTransaction(result: any): string {
@@ -537,7 +545,10 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                                 blobId: encoded.blobId,
                             });
                         }
-                        if (ENOKI_API_KEY) {
+                        if (!durableRegisterDirectSigningAllowed(
+                            !!ENOKI_API_KEY,
+                            ENOKI_FALLBACK_TO_DIRECT_SIGN,
+                        )) {
                             return res.status(409).json({
                                 error: "durable register replay requires direct signing",
                                 code: "DURABLE_REGISTER_REPLAY_REQUIRES_DIRECT_SIGN",

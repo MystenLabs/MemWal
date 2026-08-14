@@ -435,6 +435,21 @@ async fn upload_blob_inner(
     })
 }
 
+fn register_transaction_for_resume<'a>(
+    resume_step: Option<&serde_json::Value>,
+    register_transaction: Option<&'a PreparedRegisterTransaction>,
+) -> Option<&'a PreparedRegisterTransaction> {
+    // The prepared transaction is consumed by the encoded → registered
+    // transition. Keeping it in the journal after that step makes the next
+    // request internally inconsistent (`registerTransaction` with a registered,
+    // uploaded, or certified resume step), which the sidecar correctly rejects.
+    let is_encoded = resume_step
+        .and_then(|step| step.get("step"))
+        .and_then(serde_json::Value::as_str)
+        == Some("encoded");
+    is_encoded.then_some(register_transaction).flatten()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn advance_durable_upload(
     client: &reqwest::Client,
@@ -460,7 +475,10 @@ pub async fn advance_durable_upload(
         upload_protocol_version: DURABLE_UPLOAD_PROTOCOL_VERSION,
         upload_execution_identity: journal.execution_identity.as_ref(),
         resume_step: journal.resume_step.as_ref(),
-        register_transaction: journal.register_transaction.as_ref(),
+        register_transaction: register_transaction_for_resume(
+            journal.resume_step.as_ref(),
+            journal.register_transaction.as_ref(),
+        ),
         epochs,
     });
     if let Some(secret) = sidecar_secret {
@@ -482,14 +500,23 @@ pub async fn advance_durable_upload(
     let parsed: DurableUploadResponse = serde_json::from_str(&body).map_err(|e| {
         AppError::Internal(format!("invalid durable Walrus upload response: {}", e))
     })?;
+    let returned_step = parsed.step.as_ref();
+    let next_resume_step = parsed.resume_step.or(journal.resume_step);
+    let next_register_transaction = if returned_step.is_some() {
+        // A returned checkpoint consumed any prepared transaction. The only
+        // returned step before preparation is `encoded`, when none exists yet.
+        parsed.register_transaction
+    } else {
+        parsed.register_transaction.or(journal.register_transaction)
+    };
     let next = UploadJournal {
         wallet_index: journal.wallet_index,
         wallet_address: parsed.wallet_address.or(journal.wallet_address),
         execution_identity: parsed
             .upload_execution_identity
             .or(journal.execution_identity),
-        resume_step: parsed.resume_step.or(journal.resume_step),
-        register_transaction: parsed.register_transaction.or(journal.register_transaction),
+        resume_step: next_resume_step,
+        register_transaction: next_register_transaction,
     };
     if let Some(step) = parsed.step {
         Ok(DurableUploadAdvance::Step {
@@ -1004,8 +1031,26 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 
 #[cfg(test)]
 mod tests {
-    use super::{aggregate_download_errors, is_valid_blob_id, QueryBlobsResponse};
+    use super::{
+        aggregate_download_errors, is_valid_blob_id, register_transaction_for_resume,
+        PreparedRegisterTransaction, QueryBlobsResponse,
+    };
     use crate::types::AppError;
+
+    #[test]
+    fn prepared_register_transaction_is_sent_only_with_encoded_resume() {
+        let prepared = PreparedRegisterTransaction {
+            transaction_bytes: "bytes".into(),
+            signature: "signature".into(),
+            digest: "digest".into(),
+        };
+        let encoded = serde_json::json!({ "step": "encoded" });
+        let registered = serde_json::json!({ "step": "registered" });
+
+        assert!(register_transaction_for_resume(Some(&encoded), Some(&prepared)).is_some());
+        assert!(register_transaction_for_resume(Some(&registered), Some(&prepared)).is_none());
+        assert!(register_transaction_for_resume(None, Some(&prepared)).is_none());
+    }
 
     // ── QueryBlobsResponse.source_capped (WALM-319) ──────────────────────
 

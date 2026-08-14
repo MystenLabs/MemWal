@@ -29,6 +29,7 @@ import {
 import {
     assertAddressBalanceRegisterTransaction,
     createdBlobObjectIdFromTransaction,
+    durableRegisterDirectSigningAllowed,
     executePreparedRegisterTransaction,
     readUploadBlobObject,
     type PreparedRegisterTransaction,
@@ -129,6 +130,12 @@ test("legacy uploads preserve fallback behavior while using address balances", (
         directSignAfterSponsorFailure: ENOKI_FALLBACK_TO_DIRECT_SIGN,
         gasMode: "addressBalance",
     });
+});
+
+test("durable register preparation honors the configured direct-sign fallback", () => {
+    assert.equal(durableRegisterDirectSigningAllowed(false, false), true);
+    assert.equal(durableRegisterDirectSigningAllowed(true, false), false);
+    assert.equal(durableRegisterDirectSigningAllowed(true, true), true);
 });
 
 test("prepared registration rejects tampered digest, signature, and wallet", async () => {
