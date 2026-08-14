@@ -17,7 +17,8 @@ export const TOOL_METADATA = {
     },
     memwal_analyze: {
         title: "Analyze and Remember",
-        annotations: { readOnlyHint: false, destructiveHint: false },
+        // Context recall may remove stale vector rows for blobs confirmed absent.
+        annotations: { readOnlyHint: false, destructiveHint: true },
     },
     memwal_restore: {
         title: "Restore Memory Index",
@@ -25,7 +26,8 @@ export const TOOL_METADATA = {
     },
     memwal_recall: {
         title: "Recall Memories",
-        annotations: { readOnlyHint: true, destructiveHint: false },
+        // Recall cleans stale index rows when Walrus confirms a blob is absent.
+        annotations: { readOnlyHint: false, destructiveHint: true },
     },
     memwal_health: {
         title: "Check Walrus Memory Health",
