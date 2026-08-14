@@ -33,9 +33,9 @@ questions:
   - How do I disconnect the Walrus Memory connector from Claude?
 answer: >-
   Add Walrus Memory in Claude's custom connector settings by pasting the MCP URL
-  of a relayer that has OAuth enabled. Staging and dev serve the discovery routes
-  today; the production relayer has not enabled OAuth yet. Claude
-  discovers the authorization server, registers itself, and opens the Walrus
+  of a relayer that has OAuth enabled. Production, staging, and dev serve the
+  discovery routes today. Claude discovers the authorization server, registers
+  itself, and opens the Walrus
   Memory consent screen, where you connect your Sui wallet and authorize a
   delegate key onchain. The relayer generates that delegate key, encrypts it at rest, and
   custodies it, because Claude cannot hold a Sui wallet key itself. To
@@ -71,11 +71,7 @@ The relayer's redirect allowlist accepts RFC 8252 loopback addresses and unit te
 | --- | --- | --- |
 | Staging (Testnet) | `https://relayer-staging.memory.walrus.xyz/api/mcp` | Discovery routes serve traffic |
 | Dev | `https://relayer.dev.memwal.ai/api/mcp` | Discovery routes serve traffic |
-| Production (Mainnet) | `https://relayer.memory.walrus.xyz/api/mcp` | The operator has not enabled OAuth here yet. Both discovery routes return `404`, so the connector cannot complete. |
-
-<Warning>
-Do not hand the production URL to users until its discovery routes answer. Confirm with `curl -i https://relayer.memory.walrus.xyz/.well-known/oauth-authorization-server` first.
-</Warning>
+| Production (Mainnet) | `https://relayer.memory.walrus.xyz/api/mcp` | OAuth is live and the discovery routes serve traffic |
 
 ## Add the connector
 
@@ -140,7 +136,7 @@ The same split applies to the stdio client: `memwal_logout` clears local credent
 ## Troubleshooting
 
 **Claude reports that it cannot find an authorization server.**
-That relayer has no OAuth configuration, which is the expected result on production today. Check `GET /.well-known/oauth-authorization-server` on the host, and see [MCP OAuth 2.1 configuration](/mcp/reference#mcp-oauth-2-1-configuration) for what an operator sets to enable it.
+That relayer may have no OAuth configuration. Check `GET /.well-known/oauth-authorization-server` on the host, and see [MCP OAuth 2.1 configuration](/mcp/reference#mcp-oauth-2-1-configuration) for what an operator sets to enable it.
 
 **The consent screen rejects the link.**
 The session ID never arrived, or the relayer already expired it. Consent sessions last 15 minutes by default. Start the connector flow again from Claude.
