@@ -30,7 +30,7 @@ import {
   SIDECAR_ENABLE_MIGRATION_SEAL_ROUTE,
 } from "../config.js";
 import { sealCommitteeIdentityMatches, type SealCommitteeIdentity } from "../../seal-config.js";
-import { createSealClient, sealEncryptClient, suiClient } from "../clients.js";
+import { createSealDecryptClient, sealEncryptClient, suiClient } from "../clients.js";
 import { buildSealEncryptId, fetchSealEncryptIdentity, type SealEncryptPurpose } from "../seal-identity.js";
 import {
   buildSealApproveTx,
@@ -181,6 +181,8 @@ export function parseSealDecryptBatchItems(items: unknown[], packageId: string) 
     index: number;
     encryptedData: Uint8Array;
     fullId: string;
+    threshold: number;
+    serviceIds: string[];
   }[] = [];
   const errors: { index: number; code: string; error: string }[] = [];
 
@@ -196,7 +198,13 @@ export function parseSealDecryptBatchItems(items: unknown[], packageId: string) 
         });
         continue;
       }
-      parsedItems.push({ index: i, encryptedData, fullId: parsed.id });
+      parsedItems.push({
+        index: i,
+        encryptedData,
+        fullId: parsed.id,
+        threshold: parsed.threshold,
+        serviceIds: parsed.services.map(([objectId]) => objectId),
+      });
     } catch (err: any) {
       errors.push({
         index: i,
@@ -330,13 +338,17 @@ export function registerSealRoutes(app: Express, policy = DEFAULT_SEAL_ROUTE_POL
             ]);
 
         phase = "fetch_keys";
-            const sealClient = createSealClient();
-        // Fetch keys from key servers
+            const sealClient = createSealDecryptClient(
+              parsed.services.map(([objectId]) => objectId)
+            );
+        // The ciphertext records both its key servers and threshold. Use only
+        // that committee so unrelated active servers cannot satisfy fetchKeys
+        // before enough matching legacy shares have arrived.
         await sealClient.fetchKeys({
           ids: [fullId],
           txBytes,
           sessionKey,
-          threshold: SEAL_THRESHOLD,
+          threshold: parsed.threshold,
         });
 
         phase = "decrypt";
@@ -419,57 +431,73 @@ export function registerSealRoutes(app: Express, policy = DEFAULT_SEAL_ROUTE_POL
         );
 
         phase = "fetch_keys";
-            const sealClient = createSealClient();
-        // ONE fetchKeys call for ALL IDs
-        try {
-          await sealClient.fetchKeys({
-            ids: allIds,
-            txBytes,
-            sessionKey,
-            threshold: SEAL_THRESHOLD,
-          });
-        } catch (err: any) {
-          const traceId = randomUUID();
-          const message = formattedError(err);
-          const error = `fetch_keys failed: ${message} (traceId=${traceId}, timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS})`;
-          console.error(
-            `[seal/decrypt-batch] [${traceId}] phase=fetch_keys items=${parsedItems.length} uniqueIds=${allIds.length} timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS} error: ${message}`,
-            err
-          );
-          return res.json({
-            results: [],
-            errors: [
-              ...errors,
-              ...parsedItems.map((item) => ({
+        // A batch can span ciphertexts from before and after a committee
+        // migration. Isolate each embedded committee and threshold so an
+        // unrelated active server cannot count toward a legacy threshold.
+        const committeeGroups = new Map<string, typeof parsedItems>();
+        for (const item of parsedItems) {
+          const key = JSON.stringify([item.threshold, item.serviceIds]);
+          const group = committeeGroups.get(key) ?? [];
+          group.push(item);
+          committeeGroups.set(key, group);
+        }
+        const readyGroups: Array<{
+          items: typeof parsedItems;
+          sealClient: ReturnType<typeof createSealDecryptClient>;
+        }> = [];
+        for (const group of committeeGroups.values()) {
+          const { threshold, serviceIds } = group[0];
+          const ids = [...new Set(group.map((item) => item.fullId))];
+          const sealClient = createSealDecryptClient(serviceIds);
+          try {
+            await sealClient.fetchKeys({
+              ids,
+              txBytes,
+              sessionKey,
+              threshold,
+            });
+            readyGroups.push({ items: group, sealClient });
+          } catch (err: any) {
+            const traceId = randomUUID();
+            const message = formattedError(err);
+            const error = `fetch_keys failed: ${message} (traceId=${traceId}, timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS})`;
+            console.error(
+              `[seal/decrypt-batch] [${traceId}] phase=fetch_keys items=${group.length} uniqueIds=${ids.length} threshold=${threshold} timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS} error: ${message}`,
+              err
+            );
+            errors.push(
+              ...group.map((item) => ({
                 index: item.index,
                 code: sealKeyFetchErrorCode(err),
                 error,
-              })),
-            ],
-          });
+              }))
+            );
+          }
         }
 
         phase = "decrypt";
-        // Decrypt each blob using the shared sessionKey
+        // Decrypt each blob with the client scoped to its embedded committee.
         const results: { index: number; decryptedData: string }[] = [];
 
-        for (const item of parsedItems) {
-          try {
-            const decrypted = await sealClient.decrypt({
-              data: item.encryptedData,
-              sessionKey,
-              txBytes,
-            });
-            results.push({
-              index: item.index,
-              decryptedData: Buffer.from(decrypted).toString("base64"),
-            });
-          } catch (err: any) {
-            errors.push({
-              index: item.index,
-              code: "DECRYPT_FAILED",
-              error: `decrypt failed: ${formattedError(err)}`,
-            });
+        for (const { items: group, sealClient } of readyGroups) {
+          for (const item of group) {
+            try {
+              const decrypted = await sealClient.decrypt({
+                data: item.encryptedData,
+                sessionKey,
+                txBytes,
+              });
+              results.push({
+                index: item.index,
+                decryptedData: Buffer.from(decrypted).toString("base64"),
+              });
+            } catch (err: any) {
+              errors.push({
+                index: item.index,
+                code: "DECRYPT_FAILED",
+                error: `decrypt failed: ${formattedError(err)}`,
+              });
+            }
           }
         }
 

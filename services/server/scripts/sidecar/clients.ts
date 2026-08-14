@@ -13,6 +13,7 @@ import { normalizeStructTag } from "@mysten/sui/utils";
 import { SealClient } from "@mysten/seal";
 import { WalrusClient, type WalrusClientConfig } from "@mysten/walrus";
 import {
+    SEAL_DECRYPT_SERVER_CONFIGS,
     SEAL_KEY_SERVER_TIMEOUT_MS,
     SEAL_SERVER_CONFIGS,
     SUI_GRAPHQL_URL,
@@ -48,13 +49,24 @@ export const suiGraphqlClient = new SuiGraphQLClient({
     fetch: archivalFetch,
 });
 
-export function createSealClient(): SealClient {
+function createSealClientWithConfigs(serverConfigs: typeof SEAL_SERVER_CONFIGS): SealClient {
     return new SealClient({
         suiClient: suiClient as any,
-        serverConfigs: SEAL_SERVER_CONFIGS,
+        serverConfigs,
         verifyKeyServers: true,
         timeout: SEAL_KEY_SERVER_TIMEOUT_MS,
     });
+}
+
+export function createSealClient(): SealClient {
+    return createSealClientWithConfigs(SEAL_SERVER_CONFIGS);
+}
+
+export function createSealDecryptClient(serviceIds: Iterable<string>): SealClient {
+    const requiredIds = new Set(serviceIds);
+    return createSealClientWithConfigs(
+        SEAL_DECRYPT_SERVER_CONFIGS.filter(({ objectId }) => requiredIds.has(objectId))
+    );
 }
 
 // Encryption caches public key-server metadata only. Decrypt routes must use a

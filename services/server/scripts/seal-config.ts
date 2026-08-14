@@ -200,6 +200,25 @@ export function getSealServerConfigsFromEnv(
   return configs;
 }
 
+export function getSealDecryptServerConfigsFromEnv(
+  activeConfigs: SealServerConfig[],
+  env: Env = process.env
+): SealServerConfig[] {
+  const legacyConfigs = parseLegacyKeyServers(
+    env.SEAL_LEGACY_DECRYPT_KEY_SERVERS
+  );
+  const configs = [...activeConfigs];
+  const objectIds = new Set(configs.map(({ objectId }) => objectId));
+  for (const config of legacyConfigs) {
+    if (!objectIds.has(config.objectId)) {
+      configs.push(config);
+      objectIds.add(config.objectId);
+    }
+  }
+  sealTotalWeight(configs);
+  return configs;
+}
+
 export function getSealThresholdFromEnv(
   configs: SealServerConfig[],
   env: Env = process.env

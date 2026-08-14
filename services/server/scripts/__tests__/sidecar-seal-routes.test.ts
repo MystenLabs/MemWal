@@ -65,14 +65,14 @@ const ACC = `0x${"3".repeat(64)}`;
 const REG = `0x${"9".repeat(64)}`;
 const PERSISTENCE_POLICY = { allowLegacySealAbi: false, policyPackageId: POLICY_PKG };
 
-function ciphertext(packageId: string): string {
+function ciphertext(packageId: string, threshold = 1): string {
     return Buffer.from(
         EncryptedObject.serialize({
             version: 0,
             packageId,
             id: "aabb",
             services: [[ACC, 1]],
-            threshold: 1,
+            threshold,
             encryptedShares: {
                 BonehFranklinBLS12381: {
                     nonce: new Uint8Array(96),
@@ -346,11 +346,13 @@ test("/seal/decrypt rejects a SessionKey from another immutable package", async 
 });
 
 test("batch parsing quarantines a foreign package and preserves the valid subset", () => {
-    const parsed = parseSealDecryptBatchItems([ciphertext(PKG), ciphertext(OTHER_PKG)], PKG);
+    const parsed = parseSealDecryptBatchItems([ciphertext(PKG, 2), ciphertext(OTHER_PKG)], PKG);
     assert.deepEqual(
         parsed.parsedItems.map((item: { index: number }) => item.index),
         [0]
     );
+    assert.equal(parsed.parsedItems[0].threshold, 2);
+    assert.deepEqual(parsed.parsedItems[0].serviceIds, [ACC]);
     assert.equal(parsed.errors.length, 1);
     assert.equal(parsed.errors[0].index, 1);
     assert.equal(parsed.errors[0].code, "CORRUPT_CIPHERTEXT");

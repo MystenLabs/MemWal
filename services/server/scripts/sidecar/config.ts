@@ -8,7 +8,12 @@
 
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-import { getSealCommitteeIdentity, getSealServerConfigsFromEnv, getSealThresholdFromEnv } from "../seal-config.js";
+import {
+    getSealCommitteeIdentity,
+    getSealDecryptServerConfigsFromEnv,
+    getSealServerConfigsFromEnv,
+    getSealThresholdFromEnv,
+} from "../seal-config.js";
 import { parseSuiNetwork } from "./sui-transport-policy.js";
 
 export function parsePositiveIntEnv(name: string, fallback: number, min: number, max: number): number {
@@ -52,6 +57,7 @@ export const SUI_TYPE = "0x2::sui::SUI";
 // ============================================================
 
 export const SEAL_SERVER_CONFIGS = getSealServerConfigsFromEnv();
+export const SEAL_DECRYPT_SERVER_CONFIGS = getSealDecryptServerConfigsFromEnv(SEAL_SERVER_CONFIGS);
 export const SEAL_THRESHOLD = getSealThresholdFromEnv(SEAL_SERVER_CONFIGS);
 export const SEAL_COMMITTEE_IDENTITY = getSealCommitteeIdentity(SEAL_SERVER_CONFIGS, SEAL_THRESHOLD);
 export const SEAL_KEY_SERVER_TIMEOUT_MS = parsePositiveIntEnv("SEAL_KEY_SERVER_TIMEOUT_MS", 25_000, 1_000, 120_000);

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   getSealCommitteeIdentity,
+  getSealDecryptServerConfigsFromEnv,
   getSealServerConfigsFromEnv,
   getSealThresholdFromEnv,
   sealCommitteeIdentityMatches,
@@ -69,6 +70,30 @@ test("SEAL_KEY_SERVERS remains the legacy independent-server override", () => {
     { objectId: ID_ONE, weight: 1 },
     { objectId: ID_TWO, weight: 1 },
   ]);
+});
+
+test("legacy decrypt servers extend rather than replace the active committee", () => {
+  const active = [
+    {
+      objectId: ID_ONE,
+      weight: 1,
+      aggregatorUrl: "https://seal.example.com",
+      apiKeyName: "x-api-key",
+      apiKey: "secret",
+    },
+  ];
+
+  assert.deepEqual(
+    getSealDecryptServerConfigsFromEnv(active, {
+      SEAL_LEGACY_DECRYPT_KEY_SERVERS: "0x2,0x3,0x01",
+    }),
+    [
+      active[0],
+      { objectId: ID_TWO, weight: 1 },
+      { objectId: ID_THREE, weight: 1 },
+    ]
+  );
+  assert.deepEqual(getSealDecryptServerConfigsFromEnv(active, {}), active);
 });
 
 test("duplicate and aliased SEAL server object IDs are rejected", () => {

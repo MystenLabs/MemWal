@@ -126,7 +126,9 @@ These are not all enforced at boot, but most real deployments need them.
 | `WALRUS_UPLOAD_RELAY_URL` | network default | Override the Walrus upload relay used by the sidecar |
 | `SEAL_SERVER_CONFIGS` | network default | Optional JSON SEAL server config override for independent or committee servers |
 | `SEAL_KEY_SERVERS` | network default | Legacy comma-separated independent SEAL key server override. Used only when `SEAL_SERVER_CONFIGS` is unset. Deprecated but supported through relayer API `1.x` |
-| `SEAL_THRESHOLD` | `min(2, total configured weight)` | Required configured server weight for SEAL encrypt/decrypt |
+| `SEAL_LEGACY_DECRYPT_KEY_SERVERS` | unset | Optional comma-separated independent SEAL servers retained only for decrypting ciphertexts created before a committee migration |
+| `SEAL_THRESHOLD` | `min(2, total configured weight)` | Required configured server weight for SEAL encryption |
+
 | `ENOKI_API_KEY` | none | Optional Enoki key for sponsored sidecar transactions |
 | `ENOKI_NETWORK` | `mainnet` | Network used for Enoki-sponsored flows |
 | `ENOKI_FALLBACK_TO_DIRECT_SIGN` | `false` | If true, sidecar pays gas directly with the server wallet when Enoki sponsorship fails or is not configured |
@@ -157,6 +159,7 @@ These are not all enforced at boot, but most real deployments need them.
 - `SEAL_KEY_SERVERS` is the legacy comma-separated independent key server list. It is only used when `SEAL_SERVER_CONFIGS` is unset, is advertised as deprecated in `/version`, and will not be removed before relayer API `2.0.0`.
 - If neither SEAL variable is set, the sidecar uses built-in defaults for `SUI_NETWORK`: the original Mysten independent key server pair on `testnet`, and the legacy independent key server pair on `mainnet` until an official mainnet committee aggregator is available.
 - Use `SEAL_SERVER_CONFIGS` to opt into a committee key server by providing `objectId`, `weight`, and `aggregatorUrl`. Mysten's testnet committee aggregator is `0xb012378c9f3799fb5b1a7083da74a4069e3c3f1c93de0b27212a5799ce1e1e98` with `https://seal-aggregator-testnet.mystenlabs.com`.
+- When migrating an existing deployment to a committee, keep the old independent server IDs in `SEAL_LEGACY_DECRYPT_KEY_SERVERS`. They are added to the decrypt-only client, while new encryption continues to use only `SEAL_SERVER_CONFIGS`; omit the variable after all legacy ciphertexts have been re-encrypted.
 - The Mysten testnet committee aggregator is a single logical server config from the SDK's point of view. Its 3-of-5 committee threshold is handled by the aggregator, so leave `SEAL_THRESHOLD` unset or set it to `1` when opting into that committee config.
 - Keep the independent testnet defaults, or pin `SEAL_KEY_SERVERS=0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75,0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8`, for deployments with existing memories encrypted by those key servers until the data is migrated or re-encrypted.
 - The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network: `50` on `testnet` (about 50 days) and `2` on `mainnet` (about 4 weeks), unless the request explicitly passes `epochs`.
