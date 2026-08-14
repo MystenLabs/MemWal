@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.8
+
+### Added
+
+- Human-readable tool titles and MCP behavior annotations (`readOnlyHint`, `destructiveHint`) for all remote Walrus Memory tools for Claude custom connector compliance.
+
 ## 0.0.7
 
 ### Fixed
