@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
+import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool } from "./util.js";
 
 const RESTORE_INPUT = {
@@ -45,10 +46,14 @@ export function registerRestoreTool(
     server: McpServer,
     session: MemWalSession
 ): void {
-    server.tool(
+    server.registerTool(
         "memwal_restore",
-        "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status — does not return memory texts. If truncated=true, increase limit and call again. Call memwal_recall afterwards to query the rebuilt index.",
-        RESTORE_INPUT,
+        {
+            ...TOOL_METADATA.memwal_restore,
+            description:
+                "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status — does not return memory texts. If truncated=true, increase limit and call again. Call memwal_recall afterwards to query the rebuilt index.",
+            inputSchema: RESTORE_INPUT,
+        },
         wrapTool<{ namespace: string; limit: number }>(async ({ namespace, limit }) => {
             const result = await session.memwal.restore(namespace, limit);
             return {
