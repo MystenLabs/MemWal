@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
+import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
 
 const ANALYZE_INPUT = {
@@ -27,10 +28,14 @@ export function registerAnalyzeTool(
     server: McpServer,
     session: MemWalSession
 ): void {
-    server.tool(
+    server.registerTool(
         "memwal_analyze",
-        "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead.",
-        ANALYZE_INPUT,
+        {
+            ...TOOL_METADATA.memwal_analyze,
+            description:
+                "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead.",
+            inputSchema: ANALYZE_INPUT,
+        },
         wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {
             const result = await session.memwal.analyzeAndWait(text, namespace, {
                 timeoutMs: 180_000,

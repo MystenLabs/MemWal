@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.8
+
+### Added
+
+- Human-readable tool titles and explicit `readOnlyHint` / `destructiveHint` metadata during pre-login tool discovery, matching the remote relayer metadata used by Claude connectors.
+
 ## 0.0.7
 
 ### Fixed

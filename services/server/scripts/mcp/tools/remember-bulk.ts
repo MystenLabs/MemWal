@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
+import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
 
 const REMEMBER_BULK_INPUT = {
@@ -30,10 +31,14 @@ export function registerRememberBulkTool(
     server: McpServer,
     session: MemWalSession
 ): void {
-    server.tool(
+    server.registerTool(
         "memwal_remember_bulk",
-        "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
-        REMEMBER_BULK_INPUT,
+        {
+            ...TOOL_METADATA.memwal_remember_bulk,
+            description:
+                "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
+            inputSchema: REMEMBER_BULK_INPUT,
+        },
         wrapTool<{ facts: string[]; namespace?: string }>(async ({ facts, namespace }) => {
             const items = facts.map((text) => ({ text, namespace }));
             const result = await session.memwal.rememberBulkAndWait(items, {
