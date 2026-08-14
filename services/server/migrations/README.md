@@ -19,19 +19,19 @@ migration briefly needs (ACCESS EXCLUSIVE for a plain `ALTER TABLE`,
 SHARE UPDATE EXCLUSIVE for `VALIDATE CONSTRAINT`) short and isolated
 instead of held for the duration of a slow operation elsewhere in the
 same file. See each file's own header comment for its specific
-reasoning — migrations 010/012/013/016 walk through a full example of
+reasoning — migrations 014/015/016/019 walk through a full example of
 this pattern for one column.
 
 ## The `updated_at` backfill
 
-Migrations 010, 012, 013, and 016 add and finalize
+Migrations 014, 015, 016, and 019 add and finalize
 `vector_entries.updated_at` (the cursor column the owner-scoped read
 API's keyset pagination depends on). Backfilling that column for
 existing rows — copying `created_at` into `updated_at` wherever it's
 still `NULL` — is **not** one of those SQL files. It runs as Rust code:
 `backfill_updated_at()` in `services/server/src/storage/db.rs`, called
-from `VectorDb::new()` right after migration 010 and before migration
-012.
+from `VectorDb::new()` right after migration 014 and before migration
+015.
 
 It has to be Rust rather than SQL because the backfill needs to commit
 in batches, and Postgres has no way to `COMMIT` partway through a
@@ -60,8 +60,8 @@ health-check / deploy-timeout windows. Once every row has a non-NULL
 `updated_at`, later boots pay only the cost of one `SELECT` per file
 that finds nothing left to update.
 
-Migration 011 was deleted. An earlier version of the backfill lived
-there as a plain unbatched `UPDATE`; once it moved into Rust, the file
-became a permanent no-op (`SELECT 1;`). Rather than keep a dead file
-or renumber every migration after it, the placeholder was removed — see
-`backfill_updated_at()`'s doc comment for the full history.
+An earlier version of this backfill lived in its own migration file as
+a plain unbatched `UPDATE`; once it moved into Rust, that file's number
+was freed up rather than kept as a permanent no-op. It was later reused
+by the unrelated MCP OAuth migration (`011_mcp_oauth.sql`) — see
+`backfill_updated_at()`'s doc comment for the backfill's own history.

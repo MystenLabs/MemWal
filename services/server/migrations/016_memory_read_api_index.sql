@@ -1,4 +1,4 @@
--- services/server/migrations/013_memory_read_api_index.sql
+-- services/server/migrations/016_memory_read_api_index.sql
 --
 -- Keyset pagination for GET /v1/owners/{owner}/memories needs
 -- (owner, updated_at, id) so ORDER BY updated_at, id can use an index

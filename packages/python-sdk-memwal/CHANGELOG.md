@@ -1,5 +1,12 @@
 # memwal
 
+## 0.1.7
+
+### Added
+
+- Added deterministic async and sync mock clients for credential-free tests.
+- Added idempotency keys to collapse retries onto one paid remember job.
+
 ## 0.1.6
 
 ### Added

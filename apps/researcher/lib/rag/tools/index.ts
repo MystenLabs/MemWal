@@ -33,7 +33,7 @@ export function getResearchTools({
     getSourceContext: getSourceContextTool({ userId }),
   };
 
-  if (memwalKey) {
+  if (memwalKey && accountId) {
     tools.recallSprint = recallSprintTool({ memwalKey, accountId });
   }
 

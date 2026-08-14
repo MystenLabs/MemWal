@@ -63,7 +63,13 @@ export function useAuth() {
 
   /** Connect with Enoki zkLogin (two-phase: check returning user, then register). */
   const connectEnoki = useCallback(
-    async (params: { suiAddress: string; privateKey?: string; accountId?: string }) => {
+    async (params: {
+      suiAddress: string;
+      challengeId: string;
+      signature: string;
+      privateKey?: string;
+      accountId?: string;
+    }) => {
       try {
         setLoading(true);
         const result = await connectEnokiMutation.mutateAsync(params);

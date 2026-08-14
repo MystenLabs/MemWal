@@ -30,6 +30,9 @@ export function sealApproveArgsError(body: {
     if (typeof packageId !== "string" || !/^0x[0-9a-fA-F]{1,64}$/.test(packageId)) {
         return "Invalid packageId format";
     }
+    if (typeof accountId !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(accountId)) {
+        return "Invalid accountId format";
+    }
     if (
         policyPackageId !== undefined
         && (typeof policyPackageId !== "string" || !/^0x[0-9a-fA-F]{1,64}$/.test(policyPackageId))
@@ -49,6 +52,9 @@ export function sealApproveArgsError(body: {
     }
     if (sealAbi === "v1-new") {
         if (!registryId) return "Missing registryId (required when sealAbi=v1-new)";
+        if (typeof registryId !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(registryId)) {
+            return "Invalid registryId format";
+        }
         if (!/^0x[0-9a-fA-F]{1,64}$/.test(policy.policyPackageId)) {
             return "Sidecar SEAL policy package is not configured";
         }

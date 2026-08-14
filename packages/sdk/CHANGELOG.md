@@ -1,5 +1,17 @@
 # @mysten-incubation/memwal
 
+## 0.1.2
+
+### Added
+
+- Added deterministic offline mock clients for credential-free tests.
+- Added idempotency keys to collapse retries onto one paid remember job.
+
+### Fixed
+
+- Isolated foreign manual-recall blobs and encoded large encrypted payloads safely.
+- Added Zod 3 and Zod 4 peer compatibility.
+
 ## 0.1.1
 
 ### Added

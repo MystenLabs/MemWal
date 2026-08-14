@@ -73,12 +73,28 @@ export function getArtifactModel() {
  * Wrap a language model with Walrus Memory layer.
  * Requires MEMWAL_PRIVATE_KEY env var. Falls back to base model if not configured.
  */
-export function getMemWalModel(modelId: string, memwalKey?: string, memwalAccountId?: string) {
+export function getMemWalModel(
+  modelId: string,
+  {
+    namespace,
+    memwalKey,
+    memwalAccountId,
+  }: {
+    namespace: string;
+    memwalKey?: string;
+    memwalAccountId?: string;
+  }
+) {
   const baseModel = getLanguageModel(modelId);
 
   const key = memwalKey || process.env.MEMWAL_PRIVATE_KEY;
   const memwalServerUrl = process.env.MEMWAL_SERVER_URL;
   const accountId = memwalAccountId || process.env.MEMWAL_ACCOUNT_ID;
+
+  if (!namespace.trim()) {
+    console.warn("[Walrus Memory] authenticated user namespace missing — memory layer disabled");
+    return baseModel;
+  }
 
   if (!key) {
     console.warn("[Walrus Memory] MEMWAL_PRIVATE_KEY not set — memory layer disabled");
@@ -94,6 +110,7 @@ export function getMemWalModel(modelId: string, memwalKey?: string, memwalAccoun
     key,
     accountId,
     serverUrl: memwalServerUrl || "http://localhost:8000",
+    namespace,
     maxMemories: 5,
     autoSave: true,
     minRelevance: 0,

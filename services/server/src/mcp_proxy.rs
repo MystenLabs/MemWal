@@ -99,6 +99,121 @@ fn out_set(
     }
 }
 
+// ---------------------------------------------------------------------
+// MCP OAuth bearer resolution (Claude custom connectors). Runs before the
+// sidecar ever sees the request: classifies the inbound bearer, and when
+// it's an OAuth access token, translates it into the legacy
+// `Authorization: Bearer <delegate-key-hex>` + `X-MemWal-Account-Id` shape
+// the sidecar's `resolveAuth()` already accepts — so the sidecar itself
+// needs zero changes. See `oauth.rs` for the crypto/DB side.
+// ---------------------------------------------------------------------
+
+enum McpAuthOutcome {
+    /// The bearer is the legacy 64-hex delegate key — forward exactly as
+    /// today, byte for byte (OAuth tokens are never valid here).
+    Passthrough,
+    Oauth(Box<crate::oauth::ResolvedOAuthIdentity>),
+    /// OAuth is enabled and the bearer is missing/malformed/expired/
+    /// revoked — respond with the RFC 9728 challenge ourselves instead of
+    /// forwarding to the sidecar (which wouldn't know how to build the
+    /// `resource_metadata` pointer anyway).
+    Unauthorized(Option<crate::oauth::OAuthBearerError>),
+}
+
+fn is_legacy_delegate_bearer(token: &str) -> bool {
+    let hex_part = token.strip_prefix("0x").unwrap_or(token);
+    hex_part.len() == 64 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+async fn classify_and_resolve(state: &AppState, headers: &HeaderMap) -> McpAuthOutcome {
+    if state.config.mcp_oauth.is_none() {
+        return McpAuthOutcome::Passthrough;
+    }
+    let Some(auth_value) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return McpAuthOutcome::Unauthorized(None);
+    };
+    let Some(token) = auth_value
+        .strip_prefix("Bearer ")
+        .or_else(|| auth_value.strip_prefix("bearer "))
+        .map(str::trim)
+    else {
+        return McpAuthOutcome::Unauthorized(None);
+    };
+
+    if is_legacy_delegate_bearer(token) {
+        return McpAuthOutcome::Passthrough;
+    }
+
+    match crate::oauth::resolve_oauth_bearer(state, token).await {
+        Ok(identity) => McpAuthOutcome::Oauth(Box::new(identity)),
+        Err(crate::oauth::OAuthBearerError::NotOAuthToken) => McpAuthOutcome::Unauthorized(None),
+        Err(err) => {
+            tracing::debug!("mcp_proxy oauth bearer rejected: {:?}", err);
+            McpAuthOutcome::Unauthorized(Some(err))
+        }
+    }
+}
+
+/// Overwrite (never merge) `authorization` + `x-memwal-account-id` on the
+/// outbound headers. This MUST be an overwrite: `build_forwarded_headers`
+/// already copies any client-supplied `x-memwal-*` header verbatim (that's
+/// how the legacy explicit-header flow works), so a caller presenting a
+/// valid OAuth token alongside a forged `X-MemWal-Account-Id` must have the
+/// forged value discarded, not merged with the token's real account.
+fn apply_oauth_headers(
+    forwarded: &mut reqwest::header::HeaderMap,
+    identity: &crate::oauth::ResolvedOAuthIdentity,
+) {
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!(
+        "Bearer {}",
+        identity.delegate_private_key.as_str()
+    )) {
+        forwarded.insert(reqwest::header::AUTHORIZATION, v);
+    }
+    if let (Ok(name), Ok(v)) = (
+        reqwest::header::HeaderName::from_bytes(b"x-memwal-account-id"),
+        reqwest::header::HeaderValue::from_str(&identity.account_id),
+    ) {
+        forwarded.insert(name, v);
+    }
+    // This header is never copied from inbound traffic. Only the relayer can
+    // add it on the loopback request after resolving a valid OAuth token.
+    if let (Ok(name), Ok(v)) = (
+        reqwest::header::HeaderName::from_bytes(b"x-memwal-internal-oauth-scope"),
+        reqwest::header::HeaderValue::from_str(&identity.scope),
+    ) {
+        forwarded.insert(name, v);
+    }
+}
+
+/// RFC 9728 401 challenge. `state.config.mcp_oauth` must be `Some` — only
+/// called from `classify_and_resolve`'s `Unauthorized` arm, which only
+/// returns that when OAuth is enabled.
+fn oauth_unauthorized_response(
+    state: &AppState,
+    err: Option<&crate::oauth::OAuthBearerError>,
+) -> Response {
+    let Some(cfg) = state.config.mcp_oauth.as_ref() else {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    };
+    let mut challenge = format!(
+        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+        cfg.issuer
+    );
+    if let Some(err) = err {
+        challenge.push_str(&format!(", error=\"{}\"", err.error_code()));
+    }
+    let mut resp = (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    if let Ok(v) = HeaderValue::from_str(&challenge) {
+        resp.headers_mut()
+            .insert(axum::http::header::WWW_AUTHENTICATE, v);
+    }
+    resp
+}
+
 /// `GET /api/mcp/sse` — open the SSE stream to the sidecar and stream the
 /// response body back to the client without buffering. The sidecar emits an
 /// `event: endpoint` line carrying `/api/mcp/messages?sessionId=…`; the
@@ -123,6 +238,13 @@ pub async fn sse_proxy(
         peer,
         state.config.trusted_proxy_hops,
     );
+    match classify_and_resolve(&state, &headers).await {
+        McpAuthOutcome::Passthrough => {}
+        McpAuthOutcome::Oauth(identity) => apply_oauth_headers(&mut forwarded, &identity),
+        McpAuthOutcome::Unauthorized(err) => {
+            return oauth_unauthorized_response(&state, err.as_ref())
+        }
+    }
     let req = state
         .http_client
         .get(&url)
@@ -219,6 +341,13 @@ pub async fn messages_proxy(
         peer,
         state.config.trusted_proxy_hops,
     );
+    match classify_and_resolve(&state, &headers).await {
+        McpAuthOutcome::Passthrough => {}
+        McpAuthOutcome::Oauth(identity) => apply_oauth_headers(&mut forwarded, &identity),
+        McpAuthOutcome::Unauthorized(err) => {
+            return oauth_unauthorized_response(&state, err.as_ref())
+        }
+    }
     let upstream = state
         .http_client
         .post(&url)
@@ -322,6 +451,13 @@ pub async fn streamable_proxy(
         peer,
         state.config.trusted_proxy_hops,
     );
+    match classify_and_resolve(&state, &headers).await {
+        McpAuthOutcome::Passthrough => {}
+        McpAuthOutcome::Oauth(identity) => apply_oauth_headers(&mut forwarded, &identity),
+        McpAuthOutcome::Unauthorized(err) => {
+            return oauth_unauthorized_response(&state, err.as_ref())
+        }
+    }
     req = req.headers(forwarded);
 
     // Same 24h request timeout as the SSE proxy — a streamable response
@@ -500,5 +636,61 @@ mod tests {
         );
         assert!(out.get("cookie").is_none(), "cookie must not be forwarded");
         assert!(out.get("host").is_none(), "host must not be forwarded");
+    }
+
+    // -- MCP OAuth bearer classification ---------------------------------
+
+    #[test]
+    fn legacy_bearer_classification_accepts_64_hex_with_or_without_0x() {
+        let hex64 = "a".repeat(64);
+        assert!(is_legacy_delegate_bearer(&hex64));
+        assert!(is_legacy_delegate_bearer(&format!("0x{hex64}")));
+    }
+
+    #[test]
+    fn legacy_bearer_classification_rejects_oauth_and_garbage_tokens() {
+        assert!(!is_legacy_delegate_bearer("mwo_abcdefgh"));
+        assert!(!is_legacy_delegate_bearer("not-hex-at-all"));
+        assert!(!is_legacy_delegate_bearer(&"a".repeat(63))); // one short
+        assert!(!is_legacy_delegate_bearer(&"a".repeat(65))); // one long
+    }
+
+    #[test]
+    fn apply_oauth_headers_overwrites_forwarded_authorization_and_account_id() {
+        // Simulates the case build_forwarded_headers already copied a
+        // client-supplied (potentially forged) x-memwal-account-id — the
+        // OAuth resolution must win, not merge.
+        let mut forwarded = reqwest::header::HeaderMap::new();
+        forwarded.insert(
+            reqwest::header::AUTHORIZATION,
+            "Bearer mwo_whatever".parse().unwrap(),
+        );
+        forwarded.insert(
+            reqwest::header::HeaderName::from_bytes(b"x-memwal-account-id").unwrap(),
+            "0xforged".parse().unwrap(),
+        );
+
+        let key = [3u8; 32];
+        let envelope = crate::oauth::encrypt_delegate_private_key(&key, &"b".repeat(64)).unwrap();
+        let secret = crate::oauth::decrypt_delegate_private_key(&key, &envelope).unwrap();
+        let identity = crate::oauth::ResolvedOAuthIdentity {
+            account_id: "0xrealaccount".to_string(),
+            delegate_private_key: secret,
+            grant_id: "mwg_test".to_string(),
+            scope: "memwal:read".to_string(),
+        };
+
+        apply_oauth_headers(&mut forwarded, &identity);
+
+        assert_eq!(
+            forwarded.get("authorization").and_then(|v| v.to_str().ok()),
+            Some(format!("Bearer {}", "b".repeat(64)).as_str())
+        );
+        assert_eq!(
+            forwarded
+                .get("x-memwal-account-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("0xrealaccount")
+        );
     }
 }

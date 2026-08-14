@@ -29,6 +29,7 @@ mod admin;
 pub mod admin_dashboard;
 mod analyze;
 mod memory_read;
+pub mod oauth;
 pub mod owner_token;
 mod recall;
 mod remember;

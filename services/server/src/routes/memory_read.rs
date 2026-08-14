@@ -646,11 +646,11 @@ mod tests {
             include_str!("../../migrations/003_rate_limiter.sql"),
             include_str!("../../migrations/008_benchmark_plaintext.sql"),
             include_str!("../../migrations/009_importance_signal.sql"),
-            include_str!("../../migrations/010_memory_read_api_columns.sql"),
-            include_str!("../../migrations/012_memory_read_api_updated_at_not_null.sql"),
-            include_str!("../../migrations/013_memory_read_api_index.sql"),
-            include_str!("../../migrations/014_memory_expiry_columns.sql"),
-            include_str!("../../migrations/015_memory_expiry_synced_at_index.sql"),
+            include_str!("../../migrations/014_memory_read_api_columns.sql"),
+            include_str!("../../migrations/015_memory_read_api_updated_at_not_null.sql"),
+            include_str!("../../migrations/016_memory_read_api_index.sql"),
+            include_str!("../../migrations/017_memory_expiry_columns.sql"),
+            include_str!("../../migrations/018_memory_expiry_synced_at_index.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }

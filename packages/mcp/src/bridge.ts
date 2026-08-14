@@ -387,7 +387,10 @@ function writeStdoutMessage(msg: RpcMessage): void {
  * mode, but available even when creds already exist (so user can re-login,
  * switch wallets, or refresh). Returns a click-able URL near-instantly;
  * listener stays alive in the background until callback or timeout. */
-async function handleLocalLogin(config: BridgeConfig): Promise<{ text: string; isError: boolean }> {
+async function handleLocalLogin(
+    config: BridgeConfig,
+    onCredentials: (creds: MemWalCredentials) => Promise<void>,
+): Promise<{ text: string; isError: boolean }> {
     const urlReady = new Promise<string>((resolve) => {
         loginFlow({
             relayerUrl: config.relayerUrl,
@@ -397,7 +400,8 @@ async function handleLocalLogin(config: BridgeConfig): Promise<{ text: string; i
             openBrowser: false,
             onUrl: (url) => resolve(url),
         })
-            .then((creds) => {
+            .then(async (creds) => {
+                await onCredentials(creds);
                 log.info("memwal_login.bridge.success", {
                     accountId: creds.accountId,
                     delegateAddress: creds.delegateAddress,
@@ -514,8 +518,10 @@ export async function runBridge(
     log.info("bridge.connected", { relayer: creds.relayerUrl });
 
     let stdinClosed = false;
-    let reconnecting = false;
     let reconnectAttempt = 0;
+    let reconnectPromise: Promise<void> | null = null;
+    let credentialGeneration = 0;
+    let activeCredentialGeneration = 0;
 
     // In-flight requests pending a response. We replay them after a forced
     // reconnect so a server-side session swap doesn't strand a tool call
@@ -529,47 +535,138 @@ export async function runBridge(
      * client surfaces them in its tool palette. */
     const pendingListIds = new Set<string | number>();
 
-    async function reconnect(reason: string): Promise<void> {
-        if (stdinClosed || reconnecting) return;
-        reconnecting = true;
-        try {
-            sse.abort();
-        } catch {
-            /* already dead */
-        }
-        const backoff = Math.min(15_000, 500 * Math.pow(2, reconnectAttempt));
-        reconnectAttempt += 1;
-        log.warn("bridge.reconnecting", { reason, backoffMs: backoff, attempt: reconnectAttempt });
-        await new Promise((r) => setTimeout(r, backoff));
-        try {
-            sse = await openSseStream(creds.relayerUrl, creds);
-            reconnectAttempt = 0;
-            log.info("bridge.reconnected", {
-                relayer: creds.relayerUrl,
-                replayCount: inFlight.size,
-            });
-            // Replay any requests that haven't been answered yet against the
-            // fresh session. Iterate over a snapshot — postMessage is async
-            // and the SSE pump may delete entries concurrently as replies
-            // start arriving on the new session.
-            for (const [id, msg] of Array.from(inFlight.entries())) {
-                try {
-                    const status = await postMessage(sse.postUrl, msg, creds);
-                    log.info("bridge.replayed", { id, status });
-                } catch (err) {
-                    log.error("bridge.replay_failed", {
-                        id,
-                        err: err instanceof Error ? err.message : String(err),
-                    });
-                }
+    async function reconnect(reason: string, immediate = false): Promise<void> {
+        if (stdinClosed) return;
+        // All callers await the same reconnect. Returning immediately while a
+        // reconnect is active lets the server pump spin on the aborted stream
+        // and lets client messages race the stale POST URL.
+        if (reconnectPromise) return reconnectPromise;
+
+        reconnectPromise = (async () => {
+            try {
+                sse.abort();
+            } catch {
+                /* already dead */
             }
-        } catch (err) {
-            log.error("bridge.reconnect_failed", {
-                err: err instanceof Error ? err.message : String(err),
+            const backoff = immediate
+                ? 0
+                : Math.min(15_000, 500 * Math.pow(2, reconnectAttempt));
+            reconnectAttempt += 1;
+            log.warn("bridge.reconnecting", {
+                reason,
+                backoffMs: backoff,
+                attempt: reconnectAttempt,
             });
-            // Try again on the next stdin message rather than spinning.
+            if (backoff > 0) await new Promise((r) => setTimeout(r, backoff));
+            try {
+                while (!stdinClosed) {
+                    const openingGeneration = credentialGeneration;
+                    const openingCreds = creds;
+                    const candidate = await openSseStream(
+                        openingCreds.relayerUrl,
+                        openingCreds,
+                    );
+
+                    // Login can finish while an older handshake is awaiting its
+                    // endpoint event. Never publish that stale session: its GET
+                    // used the old key, while subsequent POSTs would use the new
+                    // key and fail session authentication.
+                    if (openingGeneration !== credentialGeneration) {
+                        candidate.abort();
+                        log.info("bridge.reconnect_discarded_stale_credentials", {
+                            openingGeneration,
+                            credentialGeneration,
+                        });
+                        continue;
+                    }
+
+                    sse = candidate;
+                    activeCredentialGeneration = openingGeneration;
+                    reconnectAttempt = 0;
+                    log.info("bridge.reconnected", {
+                        relayer: openingCreds.relayerUrl,
+                        replayCount: inFlight.size,
+                    });
+                    // Replay any requests that haven't been answered yet against the
+                    // fresh session. Iterate over a snapshot — postMessage is async
+                    // and the SSE pump may delete entries concurrently as replies
+                    // start arriving on the new session.
+                    for (const [id, msg] of Array.from(inFlight.entries())) {
+                        try {
+                            const status = await postMessage(sse.postUrl, msg, openingCreds);
+                            log.info("bridge.replayed", { id, status });
+                        } catch (err) {
+                            log.error("bridge.replay_failed", {
+                                id,
+                                err: err instanceof Error ? err.message : String(err),
+                            });
+                        }
+                    }
+                    // Credentials can also rotate while replay awaits POSTs.
+                    // In that case this candidate is already stale even though
+                    // it passed the first generation check.
+                    if (openingGeneration !== credentialGeneration) {
+                        candidate.abort();
+                        continue;
+                    }
+                    break;
+                }
+            } catch (err) {
+                log.error("bridge.reconnect_failed", {
+                    err: err instanceof Error ? err.message : String(err),
+                });
+                // Try again on the next stdin message rather than spinning.
+            }
+        })();
+
+        try {
+            await reconnectPromise;
         } finally {
-            reconnecting = false;
+            reconnectPromise = null;
+        }
+    }
+
+    async function adoptCredentials(nextCreds: MemWalCredentials): Promise<void> {
+        const previousAccountId = creds.accountId;
+        const accountChanged = previousAccountId !== nextCreds.accountId;
+
+        // Never replay an operation authorized for account A against account B.
+        // Return explicit retryable errors instead; the caller can decide which
+        // operations belong in the newly-selected account.
+        if (accountChanged) {
+            try {
+                sse.abort();
+            } catch {
+                /* already dead */
+            }
+            for (const [id] of Array.from(inFlight.entries())) {
+                writeStdoutMessage({
+                    jsonrpc: "2.0",
+                    id,
+                    error: {
+                        code: -32001,
+                        message:
+                            "Walrus Memory account changed during login; retry this request for the new account",
+                    },
+                });
+                pendingListIds.delete(id);
+            }
+            inFlight.clear();
+        }
+
+        creds = nextCreds;
+        credentialGeneration += 1;
+        reconnectAttempt = 0;
+        log.info("bridge.credentials_updated", {
+            previousAccountId,
+            accountId: creds.accountId,
+            delegate: creds.delegateAddress,
+        });
+        await reconnect("login-credentials-updated", true);
+        // Covers the narrow case where this update joined a reconnect just as
+        // its promise was resolving, after its final generation check.
+        if (activeCredentialGeneration !== credentialGeneration) {
+            await reconnect("login-credentials-generation-mismatch", true);
         }
     }
 
@@ -635,7 +732,7 @@ export async function runBridge(
                 if (msg.method === "tools/call" && msg.id != null) {
                     const params = (msg.params ?? {}) as { name?: string };
                     if (params.name === "memwal_login") {
-                        const result = await handleLocalLogin(config);
+                        const result = await handleLocalLogin(config, adoptCredentials);
                         writeStdoutMessage({
                             jsonrpc: "2.0",
                             id: msg.id,
@@ -680,6 +777,13 @@ export async function runBridge(
                     msg.id !== null
                 ) {
                     inFlight.set(msg.id, msg);
+                }
+                // A successful background login swaps credentials and SSE
+                // sessions asynchronously. Wait for that swap before sending a
+                // new request so it cannot race the stale session URL/key.
+                if (reconnectPromise) await reconnectPromise;
+                if (activeCredentialGeneration !== credentialGeneration) {
+                    await reconnect("post-credential-generation-mismatch", true);
                 }
                 const status = await postMessage(sse.postUrl, msg, creds);
                 if (status === 404) {

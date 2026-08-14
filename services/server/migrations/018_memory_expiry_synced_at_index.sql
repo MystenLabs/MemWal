@@ -1,9 +1,9 @@
--- services/server/migrations/015_memory_expiry_synced_at_index.sql
+-- services/server/migrations/018_memory_expiry_synced_at_index.sql
 --
 -- Index vector_entries.expiry_synced_at so the periodic expiry
 -- refresh sweep (main.rs) doesn't full-scan the table every 300s.
 -- CREATE INDEX CONCURRENTLY cannot run inside a transaction, so this is
--- its own migration file (mirrors migration 013's same requirement).
+-- its own migration file (mirrors migration 016's same requirement).
 --
 -- NULLS FIRST: rows_needing_expiry_refresh() orders
 -- `ASC NULLS FIRST` (unsynced rows first), but Postgres btree indexes

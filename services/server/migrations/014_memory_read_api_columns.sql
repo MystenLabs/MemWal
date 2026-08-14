@@ -1,4 +1,4 @@
--- services/server/migrations/010_memory_read_api_columns.sql
+-- services/server/migrations/014_memory_read_api_columns.sql
 --
 -- The owner-scoped read API needs a real "what changed since X" cursor.
 -- vector_entries had no updated_at (only created_at, set once at
@@ -9,10 +9,10 @@
 -- non-volatile default is a metadata-only change in Postgres — no table
 -- rewrite, no long lock). The backfill (batched Rust code,
 -- `backfill_updated_at()` in `db.rs`) and the NOT NULL constraint
--- (migration 012) are deliberately kept out of this statement so the
+-- (migration 015) are deliberately kept out of this statement so the
 -- expensive parts don't run under the ACCESS EXCLUSIVE lock this
 -- statement briefly holds — see `backfill_updated_at()`'s doc comment
--- and 012's header comment. Do not re-merge these into one file/
+-- and 015's header comment. Do not re-merge these into one file/
 -- transaction.
 --
 -- No DB trigger: vector_entries has zero UPDATE statements in this
@@ -38,7 +38,7 @@
 -- including from code unaware `updated_at` exists at all — gets a real
 -- timestamp instead of NULL. That closes the rolling-deploy race where
 -- an old-code replica's INSERT lands between the backfill and
--- migration 012's `SET NOT NULL`, which would otherwise crash-loop
+-- migration 015's `SET NOT NULL`, which would otherwise crash-loop
 -- every replica still applying migrations. `VectorDb::insert_vector`
 -- never sets `updated_at` explicitly — it relies entirely on this
 -- column-level default.

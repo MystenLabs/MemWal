@@ -1,4 +1,4 @@
--- services/server/migrations/014_memory_expiry_columns.sql
+-- services/server/migrations/017_memory_expiry_columns.sql
 --
 -- Per-memory storage expiry. end_epoch is the on-chain Walrus epoch the
 -- blob's storage lease ends at; expires_at is the computed wall-clock
@@ -9,7 +9,7 @@
 --
 -- All three columns are nullable with no non-volatile default, so this
 -- ADD COLUMN is metadata-only (no table rewrite, no long lock) — unlike
--- the updated_at migration (010), no backfill/NOT NULL step is needed
+-- the updated_at migration (014), no backfill/NOT NULL step is needed
 -- here, so a single transaction is safe.
 
 ALTER TABLE vector_entries ADD COLUMN IF NOT EXISTS end_epoch INTEGER NULL;

@@ -24,6 +24,7 @@ export interface MemWalSession {
     namespace?: string;
     memwal: MemWal;
     authMethod: "delegate-key";
+    oauthScope?: string;
 }
 
 export interface AuthResolution {
@@ -107,6 +108,7 @@ export async function resolveAuth(
     }
 
     const namespace = headers.get("x-memwal-namespace") ?? undefined;
+    const oauthScope = headers.get("x-memwal-internal-oauth-scope") ?? undefined;
     const delegatePubKeyHex = await publicKeyHex(delegateKeyHex);
 
     const memwal = MemWal.create({
@@ -123,6 +125,7 @@ export async function resolveAuth(
         namespace,
         memwal,
         authMethod: "delegate-key",
+        oauthScope,
     };
 
     // Session key stable across reconnects from same {account, delegate}. We

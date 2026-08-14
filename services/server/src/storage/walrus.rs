@@ -5,6 +5,7 @@ use std::time::Duration;
 
 const SIDECAR_WALRUS_TIMEOUT: Duration = Duration::from_secs(300);
 const WALRUS_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
+const DURABLE_UPLOAD_PROTOCOL_VERSION: u32 = 3;
 
 /// Result of a Walrus blob upload
 pub struct UploadResult {
@@ -15,6 +16,38 @@ pub struct UploadResult {
     pub object_id: Option<String>,
     /// Walrus epoch at which the blob's storage expires
     pub end_epoch: Option<i32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedRegisterTransaction {
+    pub transaction_bytes: String,
+    pub signature: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadExecutionIdentity {
+    pub chain_identifier: String,
+    pub walrus_package_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UploadJournal {
+    pub wallet_index: usize,
+    pub wallet_address: Option<String>,
+    pub execution_identity: Option<UploadExecutionIdentity>,
+    pub resume_step: Option<serde_json::Value>,
+    pub register_transaction: Option<PreparedRegisterTransaction>,
+}
+
+pub enum DurableUploadAdvance {
+    Prepared(UploadJournal),
+    Step {
+        journal: UploadJournal,
+        step: serde_json::Value,
+    },
 }
 
 #[derive(Debug)]
@@ -189,6 +222,42 @@ struct WalrusUploadErrorResponse {
     /// here, so serde silently dropped it despite the sidecar sending it.
     #[serde(default)]
     end_epoch: Option<i32>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DurableUploadRequest<'a> {
+    data: String,
+    key_index: usize,
+    job_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wallet_address: Option<&'a str>,
+    owner: &'a str,
+    namespace: &'a str,
+    package_id: &'a str,
+    upload_protocol_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upload_execution_identity: Option<&'a UploadExecutionIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_step: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    register_transaction: Option<&'a PreparedRegisterTransaction>,
+    epochs: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DurableUploadResponse {
+    #[serde(default)]
+    register_transaction: Option<PreparedRegisterTransaction>,
+    #[serde(default)]
+    resume_step: Option<serde_json::Value>,
+    #[serde(default)]
+    wallet_address: Option<String>,
+    #[serde(default)]
+    upload_execution_identity: Option<UploadExecutionIdentity>,
+    #[serde(default)]
+    step: Option<serde_json::Value>,
 }
 
 #[derive(serde::Serialize)]
@@ -434,6 +503,103 @@ async fn upload_blob_inner(
     })
 }
 
+fn register_transaction_for_resume<'a>(
+    resume_step: Option<&serde_json::Value>,
+    register_transaction: Option<&'a PreparedRegisterTransaction>,
+) -> Option<&'a PreparedRegisterTransaction> {
+    // The prepared transaction is consumed by the encoded → registered
+    // transition. Keeping it in the journal after that step makes the next
+    // request internally inconsistent (`registerTransaction` with a registered,
+    // uploaded, or certified resume step), which the sidecar correctly rejects.
+    let is_encoded = resume_step
+        .and_then(|step| step.get("step"))
+        .and_then(serde_json::Value::as_str)
+        == Some("encoded");
+    is_encoded.then_some(register_transaction).flatten()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn advance_durable_upload(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    data: &[u8],
+    epochs: u64,
+    owner: &str,
+    namespace: &str,
+    package_id: &str,
+    job_id: &str,
+    journal: UploadJournal,
+) -> Result<DurableUploadAdvance, AppError> {
+    let url = format!("{}/walrus/upload-step-v3", sidecar_url);
+    let mut req = client.post(&url).json(&DurableUploadRequest {
+        data: BASE64.encode(data),
+        key_index: journal.wallet_index,
+        job_id,
+        wallet_address: journal.wallet_address.as_deref(),
+        owner,
+        namespace,
+        package_id,
+        upload_protocol_version: DURABLE_UPLOAD_PROTOCOL_VERSION,
+        upload_execution_identity: journal.execution_identity.as_ref(),
+        resume_step: journal.resume_step.as_ref(),
+        register_transaction: register_transaction_for_resume(
+            journal.resume_step.as_ref(),
+            journal.register_transaction.as_ref(),
+        ),
+        epochs,
+    });
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let response = crate::observability::apply_request_id_header(req)
+        .timeout(SIDECAR_WALRUS_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("durable Walrus upload request failed: {}", e)))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(AppError::Internal(format!(
+            "durable Walrus upload failed ({}): {}",
+            status, body
+        )));
+    }
+    let parsed: DurableUploadResponse = serde_json::from_str(&body).map_err(|e| {
+        AppError::Internal(format!("invalid durable Walrus upload response: {}", e))
+    })?;
+    let returned_step = parsed.step.as_ref();
+    let next_resume_step = parsed.resume_step.or(journal.resume_step);
+    let next_register_transaction = if returned_step.is_some() {
+        // A returned checkpoint consumed any prepared transaction. The only
+        // returned step before preparation is `encoded`, when none exists yet.
+        parsed.register_transaction
+    } else {
+        parsed.register_transaction.or(journal.register_transaction)
+    };
+    let next = UploadJournal {
+        wallet_index: journal.wallet_index,
+        wallet_address: parsed.wallet_address.or(journal.wallet_address),
+        execution_identity: parsed
+            .upload_execution_identity
+            .or(journal.execution_identity),
+        resume_step: next_resume_step,
+        register_transaction: next_register_transaction,
+    };
+    if let Some(step) = parsed.step {
+        Ok(DurableUploadAdvance::Step {
+            journal: next,
+            step,
+        })
+    } else if next.register_transaction.is_some() {
+        Ok(DurableUploadAdvance::Prepared(next))
+    } else {
+        Err(AppError::Internal(
+            "durable Walrus upload response contained neither step nor prepared transaction".into(),
+        ))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn set_metadata_batch(
     client: &reqwest::Client,
@@ -515,6 +681,89 @@ pub async fn set_metadata_batch(
         ))
     })?;
     Ok(result.transferred)
+}
+
+/// Blob a prior write minted for a remember job, discovered on-chain by the
+/// `memwal_job_id` tag (GH #477 crash-window reconciliation).
+pub struct FoundBlobByJob {
+    pub blob_id: String,
+    pub object_id: Option<String>,
+}
+
+/// Ask the sidecar whether `owner` already has a blob tagged with `job_id`.
+/// Used before re-uploading a `running` job that may have minted (and lost the
+/// record) so the relayer can adopt the blob instead of re-minting. `Ok(None)`
+/// means no such blob is visible yet (upload normally).
+pub async fn find_blob_by_job(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    owner: &str,
+    job_id: &str,
+) -> Result<Option<FoundBlobByJob>, AppError> {
+    let url = format!("{}/walrus/find-blob-by-job", sidecar_url);
+    let mut req = client.post(&url).json(&serde_json::json!({
+        "owner": owner,
+        "jobId": job_id,
+    }));
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let req = crate::observability::apply_request_id_header(req);
+
+    let started = std::time::Instant::now();
+    // A read against the chain — bounded, not the long upload timeout.
+    let resp = req
+        .timeout(WALRUS_DOWNLOAD_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| {
+            crate::observability::observe_external(
+                "sidecar",
+                "walrus_find_blob_by_job",
+                "transport_error",
+                started.elapsed(),
+            );
+            crate::observability::record_sidecar_failure(
+                "walrus_find_blob_by_job",
+                "transport_error",
+            );
+            AppError::Internal(format!(
+                "Sidecar walrus/find-blob-by-job request failed: {}",
+                e
+            ))
+        })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "walrus_find_blob_by_job",
+        &status_label,
+        started.elapsed(),
+    );
+    if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure("walrus_find_blob_by_job", "http_error");
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "walrus find-blob-by-job failed: {}",
+            body
+        )));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FindBlobResp {
+        blob_id: Option<String>,
+        object_id: Option<String>,
+    }
+    let parsed: FindBlobResp = resp.json().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to parse walrus/find-blob-by-job response: {}",
+            e
+        ))
+    })?;
+    Ok(parsed.blob_id.map(|blob_id| FoundBlobByJob {
+        blob_id,
+        object_id: parsed.object_id,
+    }))
 }
 
 /// Query user's Walrus Blob objects from the Sui chain via sidecar.
@@ -945,7 +1194,8 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_download_errors, is_valid_blob_id, QueryBlobsResponse, WalrusUploadErrorResponse,
+        aggregate_download_errors, is_valid_blob_id, register_transaction_for_resume,
+        PreparedRegisterTransaction, QueryBlobsResponse, WalrusUploadErrorResponse,
     };
     use crate::types::AppError;
 
@@ -984,7 +1234,22 @@ mod tests {
         assert_eq!(parsed.end_epoch, None);
     }
 
-    // ── QueryBlobsResponse.source_capped ─────────────────────────────────
+    #[test]
+    fn prepared_register_transaction_is_sent_only_with_encoded_resume() {
+        let prepared = PreparedRegisterTransaction {
+            transaction_bytes: "bytes".into(),
+            signature: "signature".into(),
+            digest: "digest".into(),
+        };
+        let encoded = serde_json::json!({ "step": "encoded" });
+        let registered = serde_json::json!({ "step": "registered" });
+
+        assert!(register_transaction_for_resume(Some(&encoded), Some(&prepared)).is_some());
+        assert!(register_transaction_for_resume(Some(&registered), Some(&prepared)).is_none());
+        assert!(register_transaction_for_resume(None, Some(&prepared)).is_none());
+    }
+
+    // ── QueryBlobsResponse.source_capped (WALM-319) ──────────────────────
 
     #[test]
     fn query_blobs_response_reads_source_capped_when_present() {
@@ -1128,5 +1393,104 @@ mod tests {
         );
         assert_eq!(parsed.blobs[0].object_id, "0xdead");
         assert_eq!(parsed.blobs[0].storage_end_epoch, 457);
+    }
+
+    // GH #477 reconcile client. The fail-closed contract is funds-critical: a
+    // sidecar error / 409-indeterminate must become Err (caller retries WITHOUT
+    // uploading), never Ok(None) (which would re-mint). Drive it against a local
+    // mock so each branch is pinned.
+    async fn mock_find_blob_server(
+        status: axum::http::StatusCode,
+        body: serde_json::Value,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let app = axum::Router::new().route(
+            "/walrus/find-blob-by-job",
+            axum::routing::post({
+                let seen = std::sync::Arc::clone(&seen);
+                move |axum::Json(req): axum::Json<serde_json::Value>| {
+                    let seen = std::sync::Arc::clone(&seen);
+                    let body = body.clone();
+                    async move {
+                        *seen.lock().unwrap() = Some(req);
+                        (status, axum::Json(body))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{}", addr), handle, seen)
+    }
+
+    #[tokio::test]
+    async fn find_blob_by_job_returns_found() {
+        let (url, server, seen) = mock_find_blob_server(
+            axum::http::StatusCode::OK,
+            serde_json::json!({ "blob_id": "blob-x", "object_id": "0xobj" }),
+        )
+        .await;
+        let out = super::find_blob_by_job(&reqwest::Client::new(), &url, None, "0xowner", "job-1")
+            .await
+            .unwrap();
+        server.abort();
+        let found = out.expect("should be Some");
+        assert_eq!(found.blob_id, "blob-x");
+        assert_eq!(found.object_id.as_deref(), Some("0xobj"));
+        // request carried owner + jobId
+        let req = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(req["owner"], "0xowner");
+        assert_eq!(req["jobId"], "job-1");
+    }
+
+    #[tokio::test]
+    async fn find_blob_by_job_null_is_none() {
+        let (url, server, _seen) = mock_find_blob_server(
+            axum::http::StatusCode::OK,
+            serde_json::json!({ "blob_id": null, "object_id": null }),
+        )
+        .await;
+        let out = super::find_blob_by_job(&reqwest::Client::new(), &url, None, "0xowner", "job-1")
+            .await
+            .unwrap();
+        server.abort();
+        assert!(out.is_none(), "blob_id:null → Ok(None) → upload normally");
+    }
+
+    #[tokio::test]
+    async fn find_blob_by_job_indeterminate_409_fails_closed() {
+        let (url, server, _seen) = mock_find_blob_server(
+            axum::http::StatusCode::CONFLICT,
+            serde_json::json!({ "error": "indeterminate", "indeterminate": true }),
+        )
+        .await;
+        let out =
+            super::find_blob_by_job(&reqwest::Client::new(), &url, None, "0xowner", "job-1").await;
+        server.abort();
+        assert!(
+            out.is_err(),
+            "409 indeterminate must be Err (fail closed), NEVER Ok(None)"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_blob_by_job_server_error_fails_closed() {
+        let (url, server, _seen) = mock_find_blob_server(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({ "error": "boom" }),
+        )
+        .await;
+        let out =
+            super::find_blob_by_job(&reqwest::Client::new(), &url, None, "0xowner", "job-1").await;
+        server.abort();
+        assert!(
+            out.is_err(),
+            "5xx must be Err (fail closed), never Ok(None)"
+        );
     }
 }

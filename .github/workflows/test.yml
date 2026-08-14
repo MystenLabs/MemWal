@@ -32,6 +32,23 @@ jobs:
       - name: Check compatibility contract
         run: node scripts/check-compatibility-contract.mjs
 
+  docs-freshness:
+    name: Docs / Freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check docs freshness
+        run: node scripts/check-docs-freshness.mjs
+
   mcp-tests:
     name: MCP / Integration (login handoff)
     runs-on: ubuntu-latest
@@ -322,6 +339,36 @@ jobs:
         # Bypass the package.json `build` script's `tsx lib/db/migrate` step —
         # we aren't running a server here, just verifying the build + types.
         run: pnpm exec next build
+
+  noter-checks:
+    name: Noter / Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SDK (workspace dep of noter)
+        run: pnpm build:sdk
+
+      # Fast unit tests (vitest, no DB/browser). Covers the Enoki auth security
+      # properties: ownership-challenge purpose scoping, single-use/replay, and
+      # the insert-only delegate-credential guard. Fails the job on a regression.
+      - name: Unit tests (vitest)
+        run: pnpm --filter @memwal/noter test:unit
 
   server-checks:
     name: Server / Clippy + Unit tests

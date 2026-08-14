@@ -1,14 +1,15 @@
-import { getSession } from "@/lib/auth/session";
-
-/** POST /api/auth/profile/export-key — Returns the delegate private key from the active session. Requires authentication. */
-export async function POST() {
-  const session = await getSession();
-  if (!session?.user?.privateKey) {
-    return Response.json({ error: "Not authenticated" }, { status: 401 });
-  }
-
-  return Response.json({
-    privateKey: session.user.privateKey,
-    accountId: session.user.accountId,
-  });
+/**
+ * Delegate-key export is intentionally disabled.
+ *
+ * Researcher is a demo app and must not become a credential recovery service:
+ * an authenticated browser session is sufficient to use server-side memory
+ * operations, but it cannot retrieve reusable private-key material.
+ */
+export async function GET() {
+  return Response.json(
+    { error: "Delegate private-key export is disabled" },
+    { status: 410 }
+  );
 }
+
+export const POST = GET;
