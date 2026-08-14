@@ -28,14 +28,14 @@ questions:
   - What changed in the MemWal MCP changelog?
   - When was the automatic memory plugin added to MemWal MCP?
 answer: >-
-  The latest MCP package release is 0.0.8. It adds human-readable tool titles and MCP behavior annotations (`readOnlyHint`, `destructiveHint`) for Claude custom connector compliance, alongside 0.0.7 improvements to credential reload and bounded restore error handling.
+  The latest MCP package release is 0.0.8. It adds human-readable tool titles and explicit `readOnlyHint` / `destructiveHint` metadata during pre-login discovery, matching the remote relayer metadata used by Claude connectors. Version 0.0.7 added credential reload and bounded restore error handling.
 ---
 
 ## 0.0.8
 
 ### Added
 
-- Human-readable tool titles and MCP behavior annotations (`readOnlyHint`, `destructiveHint`) for all remote Walrus Memory tools for Claude custom connector compliance.
+- Human-readable tool titles and explicit `readOnlyHint` / `destructiveHint` metadata during pre-login tool discovery, matching the remote relayer metadata used by Claude connectors.
 
 ## 0.0.7
 

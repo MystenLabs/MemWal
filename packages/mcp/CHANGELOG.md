@@ -4,7 +4,7 @@
 
 ### Added
 
-- Human-readable tool titles and MCP behavior annotations (`readOnlyHint`, `destructiveHint`) for all remote Walrus Memory tools for Claude custom connector compliance.
+- Human-readable tool titles and explicit `readOnlyHint` / `destructiveHint` metadata during pre-login tool discovery, matching the remote relayer metadata used by Claude connectors.
 
 ## 0.0.7
 

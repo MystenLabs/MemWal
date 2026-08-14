@@ -206,7 +206,7 @@ What merging to `dev` triggers, and how to try the result end-to-end.
 
 | Surface | Trigger | Result |
 |---|---|---|
-| npm prerelease | `release-mcp.yml` (path `packages/mcp/**`) | `@mysten-incubation/memwal-mcp@0.0.8-dev.N` under the `dev` dist-tag (`latest` stays 0.0.5 until `main`) |
+| npm prerelease | `release-mcp.yml` (path `packages/mcp/**`) | `@mysten-incubation/memwal-mcp@0.0.8-dev.N` under the `dev` dist-tag (`latest` stays 0.0.7 until `main`) |
 | Plugin marketplace | none needed — `dev` is the repo's **default branch** | `/plugin marketplace add MystenLabs/MemWal` serves the new plugin immediately after merge |
 | Sidecar tools (Layer 1) | Railway image rebuild (`services/server/Dockerfile` copies `scripts/mcp/`) | New agentic descriptions + `memwal_remember_bulk`/`memwal_health` on `relayer.dev.memwal.ai` — **verify the Railway dev environment actually redeployed**; this is not a repo workflow |
 
