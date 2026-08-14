@@ -136,7 +136,7 @@ The same split applies to the stdio client: `memwal_logout` clears local credent
 ## Troubleshooting
 
 **Claude reports that it cannot find an authorization server.**
-That relayer may have no OAuth configuration. Check `GET /.well-known/oauth-authorization-server` on the host, and see [MCP OAuth 2.1 configuration](/mcp/reference#mcp-oauth-2-1-configuration) for what an operator sets to enable it.
+That relayer might have no OAuth configuration. Check `GET /.well-known/oauth-authorization-server` on the host, and see [MCP OAuth 2.1 configuration](/mcp/reference#mcp-oauth-2-1-configuration) for what an operator sets to enable it.
 
 **The consent screen rejects the link.**
 The session ID never arrived, or the relayer already expired it. Consent sessions last 15 minutes by default. Start the connector flow again from Claude.
