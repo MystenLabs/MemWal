@@ -403,24 +403,20 @@ def with_memwal_langchain(
 
         return result
 
+    def _run_memwal(coro_factory: Callable[[], Any]) -> Any:
+        # Keep httpx clients bound to the short-lived loop that uses them.
+        return _run_blocking(lambda: _with_fresh_http_client(memwal, coro_factory()))
+
     def patched_generate(
         messages: List[List[BaseMessage]], *args: Any, **kwargs: Any
     ) -> ChatResult:
-        # For sync generate, we inject memories synchronously via asyncio.run
-        import asyncio
-
+        # Inject via _run_blocking so recall still runs when a loop is already
+        # running (notebooks, async hosts) — the same helper the sync OpenAI
+        # wrapper uses. Passing the messages through untouched there made
+        # Walrus Memory look connected while recall silently never ran.
         enriched = []
         for msg_list in messages:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop is not None and loop.is_running():
-                # Already in async context -- cannot use asyncio.run
-                enriched.append(msg_list)
-            else:
-                enriched.append(asyncio.run(_inject_memories(msg_list)))
+            enriched.append(_run_memwal(lambda: _inject_memories(msg_list)))
 
         result = original_generate(enriched, *args, **kwargs)
 
