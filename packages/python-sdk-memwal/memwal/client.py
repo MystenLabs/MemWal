@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import random
 import time
 import uuid
@@ -88,6 +89,9 @@ AUTH_REJECTED_MESSAGE = (
     "and dashboard credentials. Full troubleshooting: "
     "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
+
+
+logger = logging.getLogger("memwal")
 
 
 # ============================================================
@@ -1277,6 +1281,38 @@ class MemWalRememberJobTimeout(MemWalError):
         self.timeout_ms = timeout_ms
 
 
+async def _discard_http_client(memwal: MemWal) -> None:
+    """Close the cached httpx client, and drop it either way.
+
+    ``close()`` can fail when the client belongs to an event loop that has
+    already finished — the caller still needs ``_client`` cleared so the next
+    request builds one in a loop that is actually running.
+    """
+    try:
+        await memwal.close()
+    except Exception:
+        logger.debug("Closing the cached HTTP client failed", exc_info=True)
+    finally:
+        memwal._client = None
+
+
+async def _with_fresh_http_client(memwal: MemWal, coro: Any) -> Any:
+    """Run ``coro`` with an httpx client owned by the *current* event loop.
+
+    The sync entry points execute each coroutine in a throwaway ``asyncio.run()``
+    loop, and an ``httpx.AsyncClient`` is bound to the loop that created it, so
+    one can never be reused across calls. Both ends are closed rather than just
+    dropped (GH #606): on the way in for anything an earlier loop left behind —
+    e.g. a caller mixing ``await memwal.recall()`` with the sync wrapper — and in
+    ``finally`` for the client this call created, while its loop is still alive.
+    """
+    await _discard_http_client(memwal)
+    try:
+        return await coro
+    finally:
+        await _discard_http_client(memwal)
+
+
 class MemWalSync:
     """Synchronous wrapper around the async :class:`MemWal` client.
 
@@ -1326,11 +1362,10 @@ class MemWalSync:
         except RuntimeError:
             loop = None
 
-        # Reset the httpx client before every asyncio.run() path so it is
-        # recreated inside the loop that will use it. This matters in
-        # notebooks/Jupyter where the sync wrapper runs coroutines in worker
-        # threads with short-lived event loops.
-        self._inner._client = None
+        # The httpx client is created and closed inside the same short-lived
+        # loop that uses it. This matters in notebooks/Jupyter where the sync
+        # wrapper runs coroutines in worker threads with their own event loops.
+        wrapped = _with_fresh_http_client(self._inner, coro)
 
         if loop is not None and loop.is_running():
             # Already inside an event loop (e.g. Jupyter).
@@ -1338,9 +1373,9 @@ class MemWalSync:
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, coro).result()
+                return pool.submit(asyncio.run, wrapped).result()
         else:
-            return asyncio.run(coro)
+            return asyncio.run(wrapped)
 
     def remember(
         self,

@@ -54,7 +54,7 @@ from typing import (
     Optional,
 )
 
-from .client import MemWal
+from .client import MemWal, _with_fresh_http_client
 from .types import RecallMemory
 
 if TYPE_CHECKING:
@@ -579,8 +579,7 @@ def _wrap_sync_openai(
 
     def _run_memwal(coro_factory: Callable[[], Any]) -> Any:
         # Keep httpx clients bound to the short-lived loop that uses them.
-        memwal._client = None
-        return _run_blocking(coro_factory)
+        return _run_blocking(lambda: _with_fresh_http_client(memwal, coro_factory()))
 
     def patched_create(*args: Any, **kwargs: Any) -> Any:
         messages = kwargs.get("messages") or (args[0] if args else None)
