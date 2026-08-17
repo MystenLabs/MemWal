@@ -102,7 +102,7 @@ The OAuth path and the header path reach the same tools through the same relayer
   <Step>
     ### Finish in Claude
 
-    The relayer verifies the transaction onchain and hands control back to Claude. The `memwal_*` tools appear in the session. Ask Claude what tools it has to confirm, then state a durable fact and check that it calls `memwal_remember`.
+    The relayer verifies the transaction onchain and hands control back to Claude. The `memwal_*` tools appear in the session. Ask Claude what tools it has to confirm. To check that the grant reached your account, open the [Walrus Memory dashboard](https://memory.walrus.xyz) and look for a delegate at the address the consent screen showed.
   </Step>
 </Steps>
 
