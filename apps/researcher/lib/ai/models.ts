@@ -1,6 +1,16 @@
 // Curated list of models available on OpenRouter
 export const DEFAULT_CHAT_MODEL = "google/gemini-2.5-flash";
 
+/**
+ * Model used for background chat-title generation.
+ *
+ * Declared here beside the curated list rather than hardcoded at the call site:
+ * the previous inline "google/gemini-2.0-flash-001" was retired upstream and
+ * returned 404 on every chat, and nothing tied it back to the models we
+ * actually support. Keep this pointing at a model present in `chatModels`.
+ */
+export const TITLE_MODEL = "google/gemini-2.5-flash";
+
 export type ChatModel = {
   id: string;
   name: string;
@@ -15,25 +25,6 @@ export const chatModels: ChatModel[] = [
     name: "Gemini 2.5 Flash",
     provider: "google",
     description: "Fast and capable — great for research tasks",
-  },
-  {
-    id: "google/gemini-2.0-flash-001",
-    name: "Gemini 2.0 Flash",
-    provider: "google",
-    description: "Ultra fast and affordable",
-  },
-  // Anthropic
-  {
-    id: "anthropic/claude-3.5-haiku",
-    name: "Claude 3.5 Haiku",
-    provider: "anthropic",
-    description: "Fast and affordable, great for everyday tasks",
-  },
-  {
-    id: "anthropic/claude-3.5-sonnet",
-    name: "Claude 3.5 Sonnet",
-    provider: "anthropic",
-    description: "Best balance of speed and intelligence",
   },
   // OpenAI
   {
