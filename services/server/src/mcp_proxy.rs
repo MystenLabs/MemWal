@@ -39,7 +39,12 @@ use crate::{client_ip::canonical_client_ip, types::AppState};
 /// Header names that we forward verbatim from the inbound client request to
 /// the sidecar. Anything else is dropped — we never proxy cookies, host, or
 /// any infra header that would confuse the sidecar.
+///
+/// Internal headers (starting with `x-memwal-internal-`) are strictly reserved
+/// for trusted relayer-to-sidecar communication and must NEVER be forwarded
+/// from untrusted client requests.
 const FORWARD_HEADER_PREFIXES: &[&str] = &["x-memwal-"];
+const INTERNAL_HEADER_PREFIXES: &[&str] = &["x-memwal-internal-"];
 const FORWARD_HEADER_EXACT: &[&str] = &[
     "authorization",
     "content-type",
@@ -55,6 +60,9 @@ const FORWARD_HEADER_EXACT: &[&str] = &[
 
 fn should_forward(name: &HeaderName) -> bool {
     let s = name.as_str().to_ascii_lowercase();
+    if INTERNAL_HEADER_PREFIXES.iter().any(|p| s.starts_with(p)) {
+        return false;
+    }
     FORWARD_HEADER_EXACT.iter().any(|h| *h == s)
         || FORWARD_HEADER_PREFIXES.iter().any(|p| s.starts_with(p))
 }
@@ -572,6 +580,19 @@ mod tests {
     }
 
     #[test]
+    fn should_forward_blocks_internal_headers() {
+        for h in [
+            "x-memwal-internal-oauth-scope",
+            "x-memwal-internal-auth",
+            "x-memwal-internal-test",
+            "X-MemWal-Internal-Oauth-Scope",
+        ] {
+            let name = AxumHeaderName::from_bytes(h.as_bytes()).unwrap();
+            assert!(!should_forward(&name), "must not forward internal header {h}");
+        }
+    }
+
+    #[test]
     fn forwarded_client_ip_sets_peer_when_inbound_missing() {
         let mut out = reqwest::header::HeaderMap::new();
         let inbound = axum_headers(&[]);
@@ -621,6 +642,7 @@ mod tests {
             ("authorization", "Bearer abc"),
             ("cookie", "session=evil"),
             ("x-memwal-account-id", "0xdeadbeef"),
+            ("x-memwal-internal-oauth-scope", "memwal:write"),
             ("host", "evil.example"),
         ]);
 
@@ -636,6 +658,10 @@ mod tests {
         );
         assert!(out.get("cookie").is_none(), "cookie must not be forwarded");
         assert!(out.get("host").is_none(), "host must not be forwarded");
+        assert!(
+            out.get("x-memwal-internal-oauth-scope").is_none(),
+            "inbound internal oauth scope header must be dropped"
+        );
     }
 
     // -- MCP OAuth bearer classification ---------------------------------
