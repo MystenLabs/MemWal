@@ -211,6 +211,17 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                 );
                                     continue;
                                 };
+                                let Some(sui_balance) = wallet
+                                    .get("suiMist")
+                                    .and_then(|value| value.as_str())
+                                    .and_then(|value| value.parse::<u64>().ok())
+                                else {
+                                    tracing::warn!(
+                                        address,
+                                        "balance_monitor: wallet metrics entry has invalid suiMist"
+                                    );
+                                    continue;
+                                };
 
                                 if wal_balance < state.config.wallet_balance_low_threshold_wal {
                                     tracing::warn!(
@@ -240,6 +251,37 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                         address,
                                         balance = wal_balance,
                                         "balance_monitor: uploader wallet WAL balance ok"
+                                    );
+                                }
+
+                                if sui_balance < state.config.wallet_balance_low_threshold_sui {
+                                    tracing::warn!(
+                                        address,
+                                        balance = sui_balance,
+                                        threshold = state.config.wallet_balance_low_threshold_sui,
+                                        "balance_monitor: uploader wallet SUI balance below threshold"
+                                    );
+                                    let alert = alerts::WalletBalanceLowAlert {
+                                        wallet_type: "uploader".to_string(),
+                                        address: address.to_string(),
+                                        balance: sui_balance,
+                                        threshold: state.config.wallet_balance_low_threshold_sui,
+                                        token: "SUI".to_string(),
+                                    };
+                                    if let Err(err) =
+                                        state.alerts.notify_wallet_balance_low(alert).await
+                                    {
+                                        tracing::warn!(
+                                            address,
+                                            "balance_monitor: failed to send uploader SUI alert: {}",
+                                            err
+                                        );
+                                    }
+                                } else {
+                                    tracing::debug!(
+                                        address,
+                                        balance = sui_balance,
+                                        "balance_monitor: uploader wallet SUI balance ok"
                                     );
                                 }
                             }
@@ -1177,9 +1219,10 @@ async fn main() {
         let balance_monitor_state = state.clone();
         let balance_monitor_interval_secs = config.balance_monitor_interval_secs;
         tracing::info!(
-            "  balance monitor: starting with interval={}s, wallet_threshold_wal={}, sponsor_threshold_sui={}",
+            "  balance monitor: starting with interval={}s, wallet_threshold_wal={}, wallet_threshold_sui={}, sponsor_threshold_sui={}",
             balance_monitor_interval_secs,
             config.wallet_balance_low_threshold_wal,
+            config.wallet_balance_low_threshold_sui,
             config.sponsor_balance_low_threshold_sui,
         );
         tokio::spawn(async move {

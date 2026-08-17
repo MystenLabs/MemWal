@@ -1997,8 +1997,9 @@ mod tests {
             walrus_system_object_id: String::new(),
             restore_requests_per_owner_per_minute: 10,
             balance_monitor_interval_secs: 900,
-            wallet_balance_low_threshold_wal: 1_000_000,
-            sponsor_balance_low_threshold_sui: 100_000_000,
+            wallet_balance_low_threshold_wal: 50_000_000_000,
+            wallet_balance_low_threshold_sui: 5_000_000_000,
+            sponsor_balance_low_threshold_sui: 5_000_000_000,
             mcp_oauth: None,
         }
     }
