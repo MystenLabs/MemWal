@@ -209,7 +209,7 @@ test("auth-required mode picks up credentials mid-session without a restart", as
         },
         memwal_logout: {
             title: "Sign Out of Walrus Memory",
-            annotations: { readOnlyHint: false, destructiveHint: false },
+            annotations: { readOnlyHint: false, destructiveHint: true },
         },
     });
 

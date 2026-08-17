@@ -597,8 +597,9 @@ export function SuccessCard({
                 <div className="card setup-classic-feature-card">
                     <p style={cardLabelStyle}>Enable proactive memory</p>
                     <p style={{ ...detailValueStyle, marginBottom: '12px' }}>
-                        Paste this into Claude or ChatGPT <strong>Custom Instructions</strong>{' '}
-                        so the assistant saves useful facts without waiting for an explicit request.
+                        Paste this into your connected MCP client's{' '}
+                        <strong>Custom Instructions</strong> (for example, Claude) so the assistant
+                        saves useful facts without waiting for an explicit request.
                     </p>
                     <div style={instructionsStyle}>
                         {PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS}

@@ -180,7 +180,7 @@ const TOOL_DEFINITIONS = [
     {
         name: "memwal_logout",
         title: "Sign Out of Walrus Memory",
-        annotations: { readOnlyHint: false, destructiveHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description:
             "Remove saved Walrus Memory credentials from this machine. The on-chain delegate registration is not revoked.",
         inputSchema: {

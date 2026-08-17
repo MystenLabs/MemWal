@@ -109,7 +109,7 @@ See [Reference](/mcp/reference) for full parameters.
 
 ```
 You:   I prefer pnpm and always use TypeScript strict mode.
-Agent: (calls auto_save_user_facts_to_memory on its own to store both preferences)
+Agent: (calls memwal_remember_bulk on its own to store both preferences)
 ```
 
 **Session 2: a brand-new chat**

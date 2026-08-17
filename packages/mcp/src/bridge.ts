@@ -98,7 +98,7 @@ const LOCAL_TOOL_DEFINITIONS = [
     {
         name: "memwal_logout",
         title: "Sign Out of Walrus Memory",
-        annotations: { readOnlyHint: false, destructiveHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description:
             "Remove the saved Walrus Memory credentials from this machine (~/.memwal/credentials.json). The on-chain delegate key registration is NOT revoked — visit the Walrus Memory dashboard to remove it from your account if needed.",
         inputSchema: {
