@@ -3,16 +3,13 @@
 import type { UseChatHelpers } from "@ai-sdk/react";
 import { motion } from "framer-motion";
 import { memo } from "react";
+// DEFAULT_SUGGESTIONS is imported rather than redeclared: this file used to
+// keep a byte-identical copy that was never reachable, because
+// useSprintGreeting always supplies the fallback via sprintSuggestions.
+import { DEFAULT_SUGGESTIONS } from "@/hooks/use-sprint-greeting";
 import type { ChatMessage } from "@/lib/types";
 import { Suggestion } from "../elements/suggestion";
 import type { VisibilityType } from "./visibility-selector";
-
-const DEFAULT_SUGGESTIONS = [
-  "What sources do I have?",
-  "Help me research the latest advances in decentralized storage",
-  "Compare SEAL encryption with traditional approaches",
-  "Summarize my research on blockchain scalability",
-];
 
 type SuggestedActionsProps = {
   chatId: string;
@@ -66,7 +63,7 @@ function PureSuggestedActions({
           transition={{ delay: 0.05 * index }}
         >
           <Suggestion
-            className="h-auto w-full whitespace-normal p-3 text-left"
+            className="h-[42px] w-full whitespace-nowrap p-3"
             onClick={(suggestion) => {
               window.history.pushState({}, "", `/chat/${chatId}`);
               sendMessage({
@@ -75,8 +72,12 @@ function PureSuggestedActions({
               });
             }}
             suggestion={suggestedAction}
+            title={suggestedAction}
           >
-            {suggestedAction}
+            {/* min-w-0 lets truncate work inside the button's flex layout, so an
+                over-long sprint suggestion ellipsises instead of wrapping and
+                making one pill taller than the rest. Full text is in `title`. */}
+            <span className="min-w-0 truncate">{suggestedAction}</span>
           </Suggestion>
         </motion.div>
       ))}
