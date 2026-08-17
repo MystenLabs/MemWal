@@ -71,7 +71,13 @@ async function ChatPage({ params }: { params: Promise<{ id: string }> }) {
   return (
     <>
       <Chat
-        autoResume={true}
+        // Resumable streaming is not implemented — api/chat/[id]/stream is a
+        // stub that always returns 204. With autoResume on, reopening a chat
+        // whose last message is from the user fired resumeStream() against
+        // that stub; overlapping attempts (easy under dev double-effects) race
+        // inside AI SDK 6.0.37 and throw "Cannot read properties of undefined
+        // (reading 'state')". Re-enable only once the stream route is real.
+        autoResume={false}
         id={chat.id}
         initialChatModel={chatModel}
         initialMessages={uiMessages}
