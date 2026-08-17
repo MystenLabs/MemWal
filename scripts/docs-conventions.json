@@ -1,0 +1,37 @@
+{
+    "$comment": "Configuration for scripts/check-docs-conventions.mjs. Extend the term map as canonical pages appear; internal targets are validated against docs/docs.json on every run.",
+    "linkTerms": [
+        {
+            "term": "OAuth 2.1",
+            "target": "https://oauth.net/2.1/",
+            "note": "Requested in review on MemWal#603."
+        },
+        {
+            "term": "Sui wallet",
+            "target": "https://docs.sui.io/guides/developer/wallets/what-is-a-wallet",
+            "note": "The URL the walrus docs already use for this concept."
+        },
+        {
+            "term": "zkLogin",
+            "target": "https://docs.sui.io/concepts/cryptography/zklogin",
+            "note": "Already cited in docs/reference/console-identity-link.md."
+        },
+        {
+            "term": "Walrus Memory account",
+            "target": "/fundamentals/concepts/ownership-and-access",
+            "note": "Requested in review on MemWal#603."
+        },
+        {
+            "term": "memory space",
+            "target": "/fundamentals/concepts/memory-space"
+        }
+    ],
+    "uiVerbs": [
+        "click",
+        "choose",
+        "select",
+        "press",
+        "tap"
+    ],
+    "prBodyMarker": "UI verification:"
+}
