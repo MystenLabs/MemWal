@@ -349,7 +349,9 @@ export function ConsentCard({
     onCancel: () => void
 }) {
     const [instructionsCopied, setInstructionsCopied] = useState(false)
+    const canRead = session.scopes.includes('memwal:read')
     const canWrite = session.scopes.includes('memwal:write')
+    const canUseProactiveInstructions = canRead && canWrite
 
     const copyInstructions = useCallback(async () => {
         try {
@@ -376,7 +378,7 @@ export function ConsentCard({
             <div className="card setup-classic-feature-card">
                 <p style={cardLabelStyle}>This grants persistent access, until you revoke it</p>
                 <ul style={permListStyle}>
-                    {session.scopes.includes('memwal:read') && <li>✓ Read your memories</li>}
+                    {canRead && <li>✓ Read your memories</li>}
                     {canWrite && (
                         <li>
                             ✓ Proactively save durable preferences, decisions, constraints, and
@@ -403,13 +405,13 @@ export function ConsentCard({
                 </div>
             </div>
 
-            {canWrite && (
+            {canUseProactiveInstructions && (
                 <div className="card setup-classic-feature-card">
                     <p style={cardLabelStyle}>Enable proactive memory</p>
                     <p style={{ ...detailValueStyle, marginBottom: '12px' }}>
-                        After connecting, paste this into Claude or ChatGPT{' '}
-                        <strong>Custom Instructions</strong> so the assistant consistently uses
-                        Walrus Memory proactively.
+                        Before approving, copy this text. After connecting, paste it into Claude
+                        or ChatGPT <strong>Custom Instructions</strong> so the assistant
+                        consistently uses Walrus Memory proactively.
                     </p>
                     <div style={instructionsStyle}>
                         {PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS}

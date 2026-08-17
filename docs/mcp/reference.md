@@ -125,7 +125,7 @@ Both session tools (`memwal_login`, `memwal_logout`) are intercepted locally by 
 
 ## Prompt template
 
-MCP clients that support prompts expose `proactive_walrus_memory` as **Use Walrus Memory Proactively**. Invoke it once per conversation from the client's prompt menu (often with `/`) to add the complete proactive policy: focused recall before relevant work, automatic durable-fact saving, bulk saving, secret filtering, and index recovery.
+MCP clients that support prompts expose `proactive_walrus_memory` as **Use Walrus Memory Proactively** when the connection has both `memwal:read` and `memwal:write` scopes (local delegate-key sessions are unrestricted). Invoke it once per conversation from the client's prompt menu (often with `/`) to add the complete proactive policy: focused recall before relevant work, automatic durable-fact saving, bulk saving, secret filtering, and index recovery.
 
 ## CLI
 
@@ -147,7 +147,8 @@ Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
 
 Set a default memory namespace once in your client config instead of having
 the agent pass `namespace` on every call. The package injects it into
-`auto_save_user_facts_to_memory`, `memwal_recall`, `memwal_analyze`, and `memwal_restore`
+`auto_save_user_facts_to_memory`, deprecated `memwal_remember`,
+`memwal_remember_bulk`, `memwal_recall`, `memwal_analyze`, and `memwal_restore`
 calls that don't already carry one.
 
 Precedence, highest first:

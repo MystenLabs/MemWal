@@ -85,6 +85,27 @@ const TOOL_DEFINITIONS = [
         },
     },
     {
+        name: "memwal_remember_bulk",
+        title: "Remember Multiple Facts",
+        annotations: { readOnlyHint: false, destructiveHint: false },
+        description:
+            "Save multiple complete durable facts in one call. Prefer this over repeated single-fact calls.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                facts: {
+                    type: "array",
+                    items: { type: "string", minLength: 1 },
+                    minItems: 1,
+                    maxItems: 20,
+                },
+                namespace: { type: "string" },
+            },
+            required: ["facts"],
+            additionalProperties: false,
+        },
+    },
+    {
         name: "memwal_recall",
         title: "Recall Memories",
         annotations: { readOnlyHint: false, destructiveHint: true },
@@ -134,11 +155,34 @@ const TOOL_DEFINITIONS = [
         },
     },
     {
+        name: "memwal_health",
+        title: "Check Walrus Memory Health",
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        description: "Check whether the Walrus Memory relayer is reachable.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+        },
+    },
+    {
         name: "memwal_login",
         title: "Sign In to Walrus Memory",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
             "Sign this MCP client into your Walrus Memory account by opening a browser. Run once when the agent reports Walrus Memory is not signed in. Opens the dashboard in the default browser, waits for wallet approval, then writes credentials to ~/.memwal/credentials.json. Other Walrus Memory tools become usable on the next call after a successful login.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+        },
+    },
+    {
+        name: "memwal_logout",
+        title: "Sign Out of Walrus Memory",
+        annotations: { readOnlyHint: false, destructiveHint: false },
+        description:
+            "Remove saved Walrus Memory credentials from this machine. The on-chain delegate registration is not revoked.",
         inputSchema: {
             type: "object",
             properties: {},

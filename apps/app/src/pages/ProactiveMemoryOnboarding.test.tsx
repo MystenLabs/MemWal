@@ -51,6 +51,13 @@ it('shows proactive-write disclosure and instructions only for OAuth write scope
     expect(screen.queryByText(/Proactively save durable preferences/)).not.toBeInTheDocument()
 
     rerender(
+        <ConsentCard session={{ ...baseSession, scopes: ['memwal:write'] }} {...props} />,
+    )
+
+    expect(screen.queryByText('Enable proactive memory')).not.toBeInTheDocument()
+    expect(screen.getByText(/Proactively save durable preferences/)).toBeInTheDocument()
+
+    rerender(
         <ConsentCard
             session={{ ...baseSession, scopes: ['memwal:read', 'memwal:write'] }}
             {...props}

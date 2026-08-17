@@ -55,3 +55,42 @@ test("tools/list publishes safe titles and behavior annotations for every remote
         }
     );
 });
+
+test("deprecated memwal_remember alias preserves the single-fact call contract", async (t) => {
+    const calls: Array<[string, string | undefined, { timeoutMs: number }]> = [];
+    const rememberAndWait = async (
+        text: string,
+        namespace: string | undefined,
+        options: { timeoutMs: number }
+    ) => {
+        calls.push([text, namespace, options]);
+        return { blob_id: `blob-${calls.length}`, namespace: namespace ?? "default" };
+    };
+    const session = {
+        memwal: { rememberAndWait },
+    } as unknown as MemWalSession;
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer(session);
+    const client = new Client({ name: "remember-alias-test", version: "1.0.0" });
+
+    t.after(async () => {
+        await client.close();
+        await server.close();
+    });
+
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    await client.callTool({
+        name: "auto_save_user_facts_to_memory",
+        arguments: { text: "primary fact", namespace: "work" },
+    });
+    await client.callTool({
+        name: "memwal_remember",
+        arguments: { text: "legacy fact", namespace: "legacy" },
+    });
+
+    assert.deepEqual(calls, [
+        ["primary fact", "work", { timeoutMs: 90_000 }],
+        ["legacy fact", "legacy", { timeoutMs: 90_000 }],
+    ]);
+});

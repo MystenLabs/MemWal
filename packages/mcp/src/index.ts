@@ -261,6 +261,7 @@ function printHelp(): void {
         '                                   "Walrus Memory MCP"',
         "  --namespace <name>               Default memory namespace applied",
         "                                   to auto_save_user_facts_to_memory,",
+        "                                   deprecated memwal_remember, bulk,",
         "                                   recall, analyze, or restore when",
         "                                   the agent omits one. An explicit",
         "                                   namespace always wins. Unset →",

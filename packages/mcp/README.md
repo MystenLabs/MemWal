@@ -59,7 +59,8 @@ Enable verbose stderr logging with `MEMWAL_MCP_DEBUG=1`.
 
 By default the MCP tool schemas expose an optional `namespace` argument and the
 agent has to pass it on every `auto_save_user_facts_to_memory` (or deprecated
-`memwal_remember` alias) / `memwal_recall` / `memwal_analyze` call (and `memwal_restore` requires it). Set a default once in
+`memwal_remember` alias) / `memwal_remember_bulk` / `memwal_recall` /
+`memwal_analyze` call (and `memwal_restore` requires it). Set a default once in
 your client config instead:
 
 ```json

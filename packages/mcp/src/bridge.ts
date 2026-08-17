@@ -85,6 +85,8 @@ export function applyDefaultNamespace(msg: RpcMessage, namespace?: string): RpcM
 const LOCAL_TOOL_DEFINITIONS = [
     {
         name: "memwal_login",
+        title: "Sign In to Walrus Memory",
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description:
             "Sign in (or re-sign in) to Walrus Memory by opening a browser. Use to switch wallets, refresh credentials, or sign in for the first time. Returns a click-able URL — the user must approve in their browser.",
         inputSchema: {
@@ -95,6 +97,8 @@ const LOCAL_TOOL_DEFINITIONS = [
     },
     {
         name: "memwal_logout",
+        title: "Sign Out of Walrus Memory",
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description:
             "Remove the saved Walrus Memory credentials from this machine (~/.memwal/credentials.json). The on-chain delegate key registration is NOT revoked — visit the Walrus Memory dashboard to remove it from your account if needed.",
         inputSchema: {
