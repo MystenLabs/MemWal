@@ -92,6 +92,12 @@ fn feature_flags() -> BTreeMap<String, bool> {
 fn deprecations() -> Vec<DeprecationNotice> {
     vec![
         DeprecationNotice {
+            surface: "mcp-tool:memwal_remember".to_string(),
+            deprecated_since: "1.0.0".to_string(),
+            removal_api_version: "2.0.0".to_string(),
+            guidance: "Use auto_save_user_facts_to_memory. The deprecated alias remains callable throughout API 1.x.".to_string(),
+        },
+        DeprecationNotice {
             surface: "header:x-delegate-key".to_string(),
             deprecated_since: "1.0.0".to_string(),
             removal_api_version: "2.0.0".to_string(),
@@ -150,5 +156,14 @@ mod tests {
             .deprecations
             .iter()
             .any(|notice| notice.surface == "header:x-delegate-key"));
+        let remember_alias = response
+            .deprecations
+            .iter()
+            .find(|notice| notice.surface == "mcp-tool:memwal_remember")
+            .expect("remember alias deprecation must be advertised");
+        assert_eq!(remember_alias.removal_api_version, "2.0.0");
+        assert!(remember_alias
+            .guidance
+            .contains("auto_save_user_facts_to_memory"));
     }
 }

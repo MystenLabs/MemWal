@@ -11,6 +11,10 @@ export const TOOL_METADATA = {
         title: "Auto-save a User Fact",
         annotations: { readOnlyHint: false, destructiveHint: false },
     },
+    memwal_remember: {
+        title: "Remember a Fact (Deprecated)",
+        annotations: { readOnlyHint: false, destructiveHint: false },
+    },
     memwal_remember_bulk: {
         title: "Remember Multiple Facts",
         annotations: { readOnlyHint: false, destructiveHint: false },

@@ -1,0 +1,2 @@
+export const PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS =
+    'Use Walrus Memory as my primary cross-session memory. Proactively call auto_save_user_facts_to_memory whenever I share a durable preference, decision, constraint, correction, identity detail, project convention, or recurring workflow—even if I do not explicitly ask you to remember it. Use memwal_remember_bulk when I share several distinct facts. Before relevant tasks, or when I refer to past work, call memwal_recall with one focused query. Do not save passwords, private keys, access tokens, or transient details.'

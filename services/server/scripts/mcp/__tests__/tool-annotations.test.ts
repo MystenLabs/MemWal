@@ -28,6 +28,10 @@ test("tools/list publishes safe titles and behavior annotations for every remote
                 title: "Auto-save a User Fact",
                 annotations: { readOnlyHint: false, destructiveHint: false },
             },
+            memwal_remember: {
+                title: "Remember a Fact (Deprecated)",
+                annotations: { readOnlyHint: false, destructiveHint: false },
+            },
             memwal_remember_bulk: {
                 title: "Remember Multiple Facts",
                 annotations: { readOnlyHint: false, destructiveHint: false },

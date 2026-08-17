@@ -12,6 +12,14 @@ import { registerTools } from "./tools/index.js";
  * session-scoped Walrus Memory SDK client so each call signs with the caller's
  * delegate key, not a shared server key.
  */
+export function shouldRegisterProactiveMemoryPrompt(
+    oauthScope: string | undefined
+): boolean {
+    if (oauthScope === undefined) return true;
+    const granted = new Set(oauthScope.split(/\s+/).filter(Boolean));
+    return granted.has("memwal:read") && granted.has("memwal:write");
+}
+
 export function createMcpServer(session: MemWalSession): McpServer {
     const server = new McpServer({
         name: "memwal",
@@ -19,7 +27,9 @@ export function createMcpServer(session: MemWalSession): McpServer {
     });
 
     registerTools(server, session);
-    registerProactiveMemoryPrompt(server);
+    if (shouldRegisterProactiveMemoryPrompt(session.oauthScope)) {
+        registerProactiveMemoryPrompt(server);
+    }
 
     return server;
 }

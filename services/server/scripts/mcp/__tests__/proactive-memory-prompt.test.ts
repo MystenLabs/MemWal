@@ -3,7 +3,19 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { MemWalSession } from "../auth.js";
-import { createMcpServer } from "../server.js";
+import {
+    createMcpServer,
+    shouldRegisterProactiveMemoryPrompt,
+} from "../server.js";
+
+test("registers proactive prompt only when both memory scopes are available", () => {
+    assert.equal(shouldRegisterProactiveMemoryPrompt(undefined), true);
+    assert.equal(shouldRegisterProactiveMemoryPrompt("memwal:read memwal:write"), true);
+    assert.equal(shouldRegisterProactiveMemoryPrompt("memwal:write memwal:read"), true);
+    assert.equal(shouldRegisterProactiveMemoryPrompt("memwal:read"), false);
+    assert.equal(shouldRegisterProactiveMemoryPrompt("memwal:write"), false);
+    assert.equal(shouldRegisterProactiveMemoryPrompt(""), false);
+});
 
 test("publishes proactive Walrus Memory instructions as an MCP prompt", async (t) => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

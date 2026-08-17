@@ -66,7 +66,7 @@ $INSP --method tools/call --tool-name memwal_recall --tool-arg query="coding pre
 $INSP --method tools/call --tool-name auto_save_user_facts_to_memory --tool-arg text="I prefer pnpm"
 ```
 
-- [ ] `tools/list` shows all 6 tools (`auto_save_user_facts_to_memory`, `memwal_remember_bulk`, `memwal_recall`, `memwal_analyze`, `memwal_restore`, `memwal_health`) with the new proactive descriptions
+- [ ] `tools/list` shows all 7 relayer tools (`auto_save_user_facts_to_memory`, deprecated `memwal_remember`, `memwal_remember_bulk`, `memwal_recall`, `memwal_analyze`, `memwal_restore`, `memwal_health`) with the new proactive descriptions
 - [ ] `memwal_health` returns `status=ok` instantly
 - [ ] `memwal_recall` returns (read path — no on-chain write)
 
@@ -220,7 +220,7 @@ npx @modelcontextprotocol/inspector --cli \
   --method tools/list
 ```
 
-- [ ] 8 tools listed, including `auto_save_user_facts_to_memory`, `memwal_remember_bulk`, and `memwal_health`
+- [ ] 9 tools listed, including `auto_save_user_facts_to_memory`, deprecated `memwal_remember`, `memwal_remember_bulk`, and `memwal_health`
 - [ ] `auto_save_user_facts_to_memory` description says "proactively" (proves the new sidecar is deployed)
 
 If the new tools are missing → the Railway dev service hasn't redeployed; trigger it from the Railway dashboard.

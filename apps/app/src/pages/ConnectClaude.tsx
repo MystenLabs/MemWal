@@ -39,6 +39,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { config } from '../config'
+import { PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS } from '../constants/proactiveMemory'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 
@@ -336,7 +337,7 @@ export default function ConnectClaude() {
     )
 }
 
-function ConsentCard({
+export function ConsentCard({
     session,
     wallet,
     onConnect,
@@ -347,6 +348,22 @@ function ConsentCard({
     onConnect: () => void
     onCancel: () => void
 }) {
+    const [instructionsCopied, setInstructionsCopied] = useState(false)
+    const canWrite = session.scopes.includes('memwal:write')
+
+    const copyInstructions = useCallback(async () => {
+        try {
+            await navigator.clipboard.writeText(PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS)
+            setInstructionsCopied(true)
+            trackEvent('cta_click', {
+                cta: 'oauth_copy_custom_instructions',
+                location: 'connect_claude',
+            })
+        } catch {
+            setInstructionsCopied(false)
+        }
+    }, [])
+
     return (
         <div className="setup-classic-intro">
             <h2 className="setup-classic-title">Connect to Walrus Memory</h2>
@@ -360,7 +377,12 @@ function ConsentCard({
                 <p style={cardLabelStyle}>This grants persistent access, until you revoke it</p>
                 <ul style={permListStyle}>
                     {session.scopes.includes('memwal:read') && <li>✓ Read your memories</li>}
-                    {session.scopes.includes('memwal:write') && <li>✓ Save new memories</li>}
+                    {canWrite && (
+                        <li>
+                            ✓ Proactively save durable preferences, decisions, constraints, and
+                            other useful facts—even when you do not explicitly ask
+                        </li>
+                    )}
                     <li>✓ Walrus Memory will hold an encrypted key on your behalf to authorize these actions — it never leaves our servers, and you can revoke it from the dashboard at any time</li>
                 </ul>
 
@@ -380,6 +402,28 @@ function ConsentCard({
                     </span>
                 </div>
             </div>
+
+            {canWrite && (
+                <div className="card setup-classic-feature-card">
+                    <p style={cardLabelStyle}>Enable proactive memory</p>
+                    <p style={{ ...detailValueStyle, marginBottom: '12px' }}>
+                        After connecting, paste this into Claude or ChatGPT{' '}
+                        <strong>Custom Instructions</strong> so the assistant consistently uses
+                        Walrus Memory proactively.
+                    </p>
+                    <div style={instructionsStyle}>
+                        {PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS}
+                    </div>
+                    <button
+                        type="button"
+                        className="lp-btn-yellow"
+                        onClick={() => void copyInstructions()}
+                        style={{ marginTop: '14px' }}
+                    >
+                        {instructionsCopied ? '✓ Instructions copied' : 'Copy instructions'}
+                    </button>
+                </div>
+            )}
 
             <div className="setup-classic-actions" style={{ display: 'flex', gap: 12 }}>
                 <button onClick={onConnect} className="lp-btn-yellow">
@@ -410,6 +454,19 @@ const permListStyle: React.CSSProperties = {
     lineHeight: 1.7,
     fontSize: '0.9rem',
     color: '#faf8f5',
+}
+
+const instructionsStyle: React.CSSProperties = {
+    padding: '12px',
+    border: '1px solid #3f4245',
+    borderRadius: '8px',
+    background: '#17191b',
+    color: '#faf8f5',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.78rem',
+    lineHeight: 1.6,
+    whiteSpace: 'pre-wrap',
+    userSelect: 'text',
 }
 
 const dividerStyle: React.CSSProperties = {

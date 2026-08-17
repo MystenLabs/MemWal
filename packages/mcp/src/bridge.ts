@@ -35,13 +35,15 @@ export interface BridgeConfig {
 }
 
 /** Memory tools that take a `namespace` argument.
- * `auto_save_user_facts_to_memory`, `memwal_remember_bulk`, `memwal_recall`,
+ * `auto_save_user_facts_to_memory`, its deprecated `memwal_remember` alias,
+ * `memwal_remember_bulk`, `memwal_recall`,
  * and `memwal_analyze` treat it as optional; `memwal_restore`
  * requires it (its upstream schema still lists `namespace` as required, so
  * agents normally pass one — but a configured default is filled in if the
  * agent calls it without). */
 const NAMESPACE_TOOLS = new Set([
     "auto_save_user_facts_to_memory",
+    "memwal_remember",
     "memwal_remember_bulk",
     "memwal_recall",
     "memwal_analyze",

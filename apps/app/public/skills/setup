@@ -226,6 +226,7 @@ What MCP tools do you have available?
 Expected Walrus Memory tools:
 
 - `auto_save_user_facts_to_memory`
+- `memwal_remember` (deprecated compatibility alias)
 - `memwal_remember_bulk`
 - `memwal_recall`
 - `memwal_analyze`

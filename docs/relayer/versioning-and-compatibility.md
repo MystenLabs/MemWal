@@ -79,6 +79,12 @@ Modern relayers expose compatibility metadata at `GET /version` and include the 
   },
   "deprecations": [
     {
+      "surface": "mcp-tool:memwal_remember",
+      "deprecatedSince": "1.0.0",
+      "removalApiVersion": "2.0.0",
+      "guidance": "Use auto_save_user_facts_to_memory. The deprecated alias remains callable throughout API 1.x."
+    },
+    {
       "surface": "header:x-delegate-key",
       "deprecatedSince": "1.0.0",
       "removalApiVersion": "2.0.0",
@@ -104,7 +110,7 @@ Breaking changes must follow this process unless there is an active security inc
 4. Add or update contract tests and docs in the same PR.
 5. Remove the surface only in the next API major.
 
-This process applies to headers, routes, environment variables, response fields, feature flags, and MCP transport behavior.
+This process applies to headers, routes, environment variables, response fields, feature flags, tools, and MCP transport behavior. `memwal_remember` is currently a deprecated compatibility alias for `auto_save_user_facts_to_memory` and remains callable through relayer API `1.x`.
 
 ## Environment Variables
 

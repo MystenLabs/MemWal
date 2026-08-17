@@ -179,6 +179,10 @@ test("auth-required mode picks up credentials mid-session without a restart", as
             title: "Auto-save a User Fact",
             annotations: { readOnlyHint: false, destructiveHint: false },
         },
+        memwal_remember: {
+            title: "Remember a Fact (Deprecated)",
+            annotations: { readOnlyHint: false, destructiveHint: false },
+        },
         memwal_recall: {
             title: "Recall Memories",
             annotations: { readOnlyHint: false, destructiveHint: true },

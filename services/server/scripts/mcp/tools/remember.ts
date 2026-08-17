@@ -33,15 +33,8 @@ export function registerRememberTool(
     server: McpServer,
     session: MemWalSession
 ): void {
-    server.registerTool(
-        "auto_save_user_facts_to_memory",
-        {
-            ...TOOL_METADATA.auto_save_user_facts_to_memory,
-            description:
-                "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever you learn something worth remembering across sessions — a stated preference, decision, constraint, correction, identity detail, or recurring workflow — even if the user did not explicitly say 'remember this'. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
-            inputSchema: REMEMBER_INPUT,
-        },
-        wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {
+    const saveFact = wrapTool<{ text: string; namespace?: string }>(
+        async ({ text, namespace }) => {
             const result = await session.memwal.rememberAndWait(
                 text,
                 namespace,
@@ -55,6 +48,30 @@ export function registerRememberTool(
                     },
                 ],
             };
-        })
+        }
+    );
+
+    server.registerTool(
+        "auto_save_user_facts_to_memory",
+        {
+            ...TOOL_METADATA.auto_save_user_facts_to_memory,
+            description:
+                "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever you learn something worth remembering across sessions — a stated preference, decision, constraint, correction, identity detail, or recurring workflow — even if the user did not explicitly say 'remember this'. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
+            inputSchema: REMEMBER_INPUT,
+        },
+        saveFact
+    );
+
+    // API 1.x compatibility alias. Keep this callable until the documented
+    // 2.0.0 removal so existing clients and saved instructions do not break.
+    server.registerTool(
+        "memwal_remember",
+        {
+            ...TOOL_METADATA.memwal_remember,
+            description:
+                "Deprecated compatibility alias for auto_save_user_facts_to_memory. Continue to save the requested complete fact, but use auto_save_user_facts_to_memory for new integrations.",
+            inputSchema: REMEMBER_INPUT,
+        },
+        saveFact
     );
 }

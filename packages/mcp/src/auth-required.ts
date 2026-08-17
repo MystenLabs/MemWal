@@ -69,6 +69,22 @@ const TOOL_DEFINITIONS = [
         },
     },
     {
+        name: "memwal_remember",
+        title: "Remember a Fact (Deprecated)",
+        annotations: { readOnlyHint: false, destructiveHint: false },
+        description:
+            "Deprecated compatibility alias for auto_save_user_facts_to_memory. Saves one complete durable fact; use auto_save_user_facts_to_memory for new integrations.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                text: { type: "string", minLength: 1 },
+                namespace: { type: "string" },
+            },
+            required: ["text"],
+            additionalProperties: false,
+        },
+    },
+    {
         name: "memwal_recall",
         title: "Recall Memories",
         annotations: { readOnlyHint: false, destructiveHint: true },

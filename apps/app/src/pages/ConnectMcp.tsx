@@ -40,14 +40,12 @@ import { Ed25519PublicKey } from '@mysten/sui/keypairs/ed25519'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { config } from '../config'
+import { PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS } from '../constants/proactiveMemory'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 
 // Walrus Memory wordmark (public asset, same one the dashboard nav uses).
 const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
-
-export const PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS =
-    'Use Walrus Memory as my primary cross-session memory. Proactively call auto_save_user_facts_to_memory whenever I share a durable preference, decision, constraint, correction, identity detail, project convention, or recurring workflow—even if I do not explicitly ask you to remember it. Use memwal_remember_bulk when I share several distinct facts. Before relevant tasks, or when I refer to past work, call memwal_recall with one focused query. Do not save passwords, private keys, access tokens, or transient details.'
 
 type Step =
     | 'verifying'
@@ -549,7 +547,7 @@ function ConsentCard({
     )
 }
 
-function SuccessCard({
+export function SuccessCard({
     payload,
     callbackDelivered,
     port,
@@ -595,24 +593,26 @@ function SuccessCard({
                     <span style={detailValueStyle}>{payload.accountId}</span>
                 </div>
             </div>
-            <div className="card setup-classic-feature-card">
-                <p style={cardLabelStyle}>Enable proactive memory</p>
-                <p style={{ ...detailValueStyle, marginBottom: '12px' }}>
-                    Paste this into Claude or ChatGPT <strong>Custom Instructions</strong>{' '}
-                    so the assistant saves useful facts without waiting for an explicit request.
-                </p>
-                <div style={instructionsStyle}>
-                    {PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS}
+            {callbackDelivered === true && (
+                <div className="card setup-classic-feature-card">
+                    <p style={cardLabelStyle}>Enable proactive memory</p>
+                    <p style={{ ...detailValueStyle, marginBottom: '12px' }}>
+                        Paste this into Claude or ChatGPT <strong>Custom Instructions</strong>{' '}
+                        so the assistant saves useful facts without waiting for an explicit request.
+                    </p>
+                    <div style={instructionsStyle}>
+                        {PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS}
+                    </div>
+                    <button
+                        type="button"
+                        className="lp-btn-yellow"
+                        onClick={() => void copyInstructions()}
+                        style={{ marginTop: '14px' }}
+                    >
+                        {instructionsCopied ? '✓ Instructions copied' : 'Copy instructions'}
+                    </button>
                 </div>
-                <button
-                    type="button"
-                    className="lp-btn-yellow"
-                    onClick={() => void copyInstructions()}
-                    style={{ marginTop: '14px' }}
-                >
-                    {instructionsCopied ? '✓ Instructions copied' : 'Copy instructions'}
-                </button>
-            </div>
+            )}
             <div className="setup-classic-actions">
                 <Link
                     to="/dashboard"

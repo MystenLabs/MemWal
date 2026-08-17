@@ -55,6 +55,7 @@ The proactive behavior comes from the tool layer, so it works on both installati
 | Tool | Description |
 |------|-------------|
 | `auto_save_user_facts_to_memory` | Proactively save a durable user or project fact (preference, decision, constraint, identity). |
+| `memwal_remember` | Deprecated API 1.x compatibility alias for the single-fact save tool. |
 | `memwal_remember_bulk` | Save several distinct facts in one call. |
 | `memwal_recall` | Semantic search across stored memories for relevant context. |
 | `memwal_analyze` | Extract and save multiple facts from a passage of text. |

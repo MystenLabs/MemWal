@@ -2,7 +2,7 @@
 title: Reference
 description: >-
   Complete reference for Walrus Memory MCP tools, CLI flags, environment presets, transport routes, and self-hosting.
-  Covers all eight tools, credential management, stdio and HTTP transports, and runtime safety details.
+  Covers all nine tools, including the deprecated compatibility alias, credential management, stdio and HTTP transports, and runtime safety details.
 keywords:
   - MCP
   - Walrus Memory
@@ -30,14 +30,14 @@ questions:
   - How do I configure the MemWal MCP CLI flags and environment variables?
   - How do I set up Streamable HTTP transport for Walrus Memory MCP?
 answer: >-
-  The MemWal MCP reference documents eight tools (auto_save_user_facts_to_memory, memwal_remember_bulk, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, memwal_logout) with full parameter details. It covers CLI flags (--relayer, --namespace, --label, etc.), environment presets (prod, staging, local), two transport modes (stdio and Streamable HTTP), credential file format, default namespace precedence, self-hosting configuration, and runtime safety notes for 401 handling and relayer overrides.
+  The MemWal MCP reference documents nine tools (auto_save_user_facts_to_memory, the deprecated memwal_remember alias, memwal_remember_bulk, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, memwal_logout) with full parameter details. It covers CLI flags (--relayer, --namespace, --label, etc.), environment presets (prod, staging, local), two transport modes (stdio and Streamable HTTP), credential file format, default namespace precedence, self-hosting configuration, and runtime safety notes for 401 handling and relayer overrides.
 ---
 
 This page documents every tool, flag, environment variable, and transport route the Walrus Memory MCP package exposes. For per-client setup, start with the [MCP overview](/mcp/overview).
 
 ## Tools
 
-The MCP server exposes **eight tools**: six **relayer tools** (memory operations plus a health check) and two **session tools** served locally by the stdio package. For the lifecycle hooks that drive these tools automatically, see [Claude Code](/mcp/claude-code) or [Codex](/mcp/codex).
+The MCP server exposes **nine tools**: seven **relayer tools** (including one deprecated compatibility alias) and two **session tools** served locally by the stdio package. For the lifecycle hooks that drive these tools automatically, see [Claude Code](/mcp/claude-code) or [Codex](/mcp/codex).
 
 ## First-run behavior
 
@@ -59,6 +59,10 @@ Save a durable fact to the user's Walrus Memory. The agent calls this **proactiv
 | --- | --- | --- | --- |
 | `text` | string | yes | The complete fact to save. |
 | `namespace` | string | no | Namespace bucket. Defaults to the session namespace. |
+
+### memwal_remember (deprecated)
+
+Compatibility alias for `auto_save_user_facts_to_memory`. Existing clients can continue calling it throughout relayer API `1.x`; new integrations should use the imperative tool name. It is scheduled for removal in API `2.0.0`.
 
 ### memwal_remember_bulk
 
