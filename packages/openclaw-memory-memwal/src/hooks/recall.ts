@@ -1,9 +1,5 @@
 /**
  * Auto-recall hook — before_prompt_build.
- *
- * Searches Walrus Memory for memories relevant to the user's prompt and injects
- * them into the LLM context. Also injects a namespace instruction so
- * tools scope to the correct agent's memory.
  */
 
 import type { MemWal } from "@mysten-incubation/memwal";
@@ -16,41 +12,63 @@ import { MIN_PROMPT_LENGTH } from "../constants.js";
 /** Register the before_prompt_build hook for auto-recall. */
 export function registerRecallHook(api: any, client: MemWal, config: PluginConfig): void {
   api.on("before_prompt_build", async (event: any, ctx: any) => {
-    // Skip trivial prompts ("ok", "y") — not worth a server round-trip
     if (!event.prompt || event.prompt.length < MIN_PROMPT_LENGTH) return;
 
-    const { namespace, agentName } = resolveAgent(config.defaultNamespace, ctx?.sessionKey);
-
-    // The LLM doesn't know which agent it is. This instruction guides
-    // memory_search/memory_store tool calls to the correct namespace.
-    // Returned via appendSystemContext in ALL code paths (including errors)
-    // so tools still scope correctly even when recall itself fails.
+    const { namespace, legacyNamespace, agentName } = resolveAgent(config.defaultNamespace, ctx?.sessionKey);
     const namespaceInstruction =
       `When using memory_search or memory_store tools, ` +
-      `pass namespace="${namespace}" to scope operations to the current agent's memory.`;
+      `pass namespace=${JSON.stringify(namespace)} to scope operations to the current agent's memory.`;
 
     try {
-      const result = await client.recall(
-        event.prompt,
-        config.maxRecallResults,
-        namespace,
-      );
+      const recallPromises = [
+        client.recall(event.prompt, config.maxRecallResults, namespace),
+      ];
 
-      if (!result.results?.length) {
+      if (legacyNamespace && legacyNamespace !== namespace) {
+        recallPromises.push(
+          client.recall(event.prompt, config.maxRecallResults, legacyNamespace),
+        );
+      }
+
+      const resultsList = await Promise.allSettled(recallPromises);
+      const primaryResult = resultsList[0];
+      if (primaryResult?.status === "rejected") {
+        api.logger.warn(
+          `memory-memwal: canonical recall failed: ${String(primaryResult.reason)}`,
+        );
+      }
+
+      const candidates: any[] = [];
+      const seen = new Set<string>();
+
+      for (const res of resultsList) {
+        if (res.status === "fulfilled" && res.value?.results?.length) {
+          for (const item of res.value.results) {
+            const key = item.blob_id || item.text;
+            if (!seen.has(key)) {
+              seen.add(key);
+              candidates.push(item);
+            }
+          }
+        }
+      }
+
+      if (!candidates.length) {
         return { appendSystemContext: namespaceInstruction };
       }
 
-      // Two filters: relevance threshold (drop noise) and injection
-      // detection (drop memories containing prompt manipulation attempts)
-      const relevant = result.results.filter(
+      const filtered = candidates.filter(
         (r: any) =>
           (1 - r.distance) >= config.minRelevance &&
           !looksLikeInjection(r.text),
       );
 
-      if (!relevant.length) {
+      if (!filtered.length) {
         return { appendSystemContext: namespaceInstruction };
       }
+
+      filtered.sort((a: any, b: any) => a.distance - b.distance);
+      const relevant = filtered.slice(0, config.maxRecallResults);
 
       api.logger.info(
         `memory-memwal: auto-recall injected ${relevant.length} memories ` +
