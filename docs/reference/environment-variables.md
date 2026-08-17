@@ -49,7 +49,7 @@ The TypeScript SDK (`MemWal.create()` and `withMemWal()`) and the Python SDK tak
 | `MEMWAL_PRIVATE_KEY` | `key` | none | Delegate private key in hex. The fundamentals and Python examples use this name |
 | `MEMWAL_KEY` | `key` | none | The same delegate private key under a shorter name used by the getting-started and SDK quick-starts. Pick one name per project |
 | `MEMWAL_ACCOUNT_ID` | `accountId` | none | `MemWalAccount` object ID on Sui |
-| `MEMWAL_SERVER_URL` | `serverUrl` | SDK-specific | Relayer base URL. The TypeScript SDK defaults to `https://relayer.memwal.ai`; the Python SDK defaults to `http://localhost:8000` unless `env="prod"` selects the hosted relayer |
+| `MEMWAL_SERVER_URL` | `serverUrl` | SDK-specific | Relayer base URL. The TypeScript SDK defaults to `https://relayer.memory.walrus.xyz`; the Python SDK defaults to `http://localhost:8000` unless `env="prod"` selects the hosted relayer |
 | `SUI_PRIVATE_KEY` | `suiPrivateKey` | none | Sui signer key for `MemWalManual` local signing, in `suiprivkey1...` format |
 | `OPENAI_API_KEY` | `embeddingApiKey` (manual client only) | none | Embedding and fact-extraction provider key. Only the `MemWalManual` client takes it as `embeddingApiKey`. The standard `MemWal` and Python SDKs let the relayer handle embeddings, so this is needed only for optional OpenAI middleware or demos |
 | `OPENAI_BASE_URL` | `embeddingApiBase` (manual client only) | `https://api.openai.com/v1` | Base URL for an OpenAI-compatible provider such as OpenRouter, in the same manual-client and optional-middleware contexts as `OPENAI_API_KEY` |
