@@ -22,6 +22,9 @@ pub struct PreparedRegisterTransaction {
     pub transaction_bytes: String,
     pub signature: String,
     pub digest: String,
+    /// Enoki sponsorship handle. Absent for legacy/direct-signed journals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sponsor_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1043,6 +1046,7 @@ mod tests {
             transaction_bytes: "bytes".into(),
             signature: "signature".into(),
             digest: "digest".into(),
+            sponsor_digest: None,
         };
         let encoded = serde_json::json!({ "step": "encoded" });
         let registered = serde_json::json!({ "step": "registered" });

@@ -366,6 +366,7 @@ pub struct Config {
     /// Balance monitoring (proactive alerts)
     pub balance_monitor_interval_secs: u64,
     pub wallet_balance_low_threshold_wal: u64,
+    pub wallet_balance_low_threshold_sui: u64,
     pub sponsor_balance_low_threshold_sui: u64,
     /// MCP OAuth 2.1 support for Claude (and future) native custom
     /// connectors. `None` when required env vars are unset — routes still
@@ -533,8 +534,19 @@ impl Config {
                 "BALANCE_MONITOR_INTERVAL_SECS",
                 900,
             )),
-            wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
-            sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
+            // Both WAL and SUI use 9 decimal places (FROST/MIST).
+            wallet_balance_low_threshold_wal: env_number(
+                "WALLET_BALANCE_LOW_THRESHOLD_WAL",
+                50_000_000_000,
+            ),
+            wallet_balance_low_threshold_sui: env_number(
+                "WALLET_BALANCE_LOW_THRESHOLD_SUI",
+                5_000_000_000,
+            ),
+            sponsor_balance_low_threshold_sui: env_number(
+                "SPONSOR_BALANCE_LOW_THRESHOLD_SUI",
+                5_000_000_000,
+            ),
             mcp_oauth: crate::oauth::McpOAuthConfig::from_env(),
         }
     }
@@ -1873,8 +1885,9 @@ mod tests {
             walrus_system_object_id: "0x4".into(),
             restore_requests_per_owner_per_minute: 10,
             balance_monitor_interval_secs: 900,
-            wallet_balance_low_threshold_wal: 1_000_000,
-            sponsor_balance_low_threshold_sui: 100_000_000,
+            wallet_balance_low_threshold_wal: 50_000_000_000,
+            wallet_balance_low_threshold_sui: 5_000_000_000,
+            sponsor_balance_low_threshold_sui: 5_000_000_000,
             mcp_oauth: None,
         }
     }
