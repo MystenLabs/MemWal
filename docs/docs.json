@@ -190,6 +190,7 @@
               "mcp/codex",
               "mcp/cursor",
               "mcp/claude-desktop",
+              "mcp/claude-connector",
               "mcp/antigravity",
               "mcp/opencode",
               "mcp/reference",
