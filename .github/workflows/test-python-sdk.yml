@@ -1,0 +1,145 @@
+name: Test Python SDK
+
+on:
+  pull_request:
+    paths:
+      - 'packages/python-sdk-memwal/**'
+      - '.github/workflows/test-python-sdk.yml'
+  push:
+    branches:
+      - main
+      - staging
+      - dev
+    paths:
+      - 'packages/python-sdk-memwal/**'
+      - '.github/workflows/test-python-sdk.yml'
+  workflow_dispatch:
+  schedule:
+    # Catches relayer drift with no code change to trigger it.
+    - cron: '17 9 * * 1'
+
+concurrency:
+  group: test-python-sdk-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: packages/python-sdk-memwal
+
+jobs:
+  unit:
+    name: Unit / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Tracks requires-python and the pyproject classifiers.
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build and install from source
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Lint
+        run: python -m ruff check memwal/ tests/
+
+      - name: Unit tests
+        run: python -m pytest tests/ -m "not integration" -q
+
+  e2e:
+    name: E2E / dev relayer
+    runs-on: ubuntu-latest
+    needs: unit
+    timeout-minutes: 30
+
+    # Dev only for now; staging and production follow once their credentials
+    # exist. Pull requests are excluded because environment secrets are
+    # withheld from fork PRs, and every authenticated run writes real memories.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' && github.ref_name == 'dev')
+
+    # Reuses the credentials benchmark-live.yml already relies on, so this
+    # needs no new secrets. Safe to share: the benchmark writes to the
+    # `benchmark` namespace while these tests use `sdk-test`, `default` and a
+    # per-run `sdk-e2e-<uuid>`.
+    environment: benchmark-dev
+
+    env:
+      # BENCH_DELEGATE_KEY is the delegate private key the SDK signs with,
+      # which test_integration.py reads as MEMWAL_PRIVATE_KEY.
+      MEMWAL_PRIVATE_KEY: ${{ secrets.BENCH_DELEGATE_KEY }}
+      MEMWAL_ACCOUNT_ID: ${{ secrets.BENCH_ACCOUNT_ID }}
+      # Public URL (docs/relayer/benchmark-ci-setup.md), defaulted so a missing
+      # variable cannot silently point the run at the wrong relayer.
+      MEMWAL_SERVER_URL: ${{ vars.BENCH_SERVER_URL || 'https://relayer.dev.memwal.ai' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build and install from source
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Check credentials
+        id: config
+        run: |
+          # `requires_key` self-skips, so a half-configured environment still
+          # gets the unauthenticated coverage instead of nothing.
+          if [ -n "${MEMWAL_PRIVATE_KEY:-}" ] && [ -n "${MEMWAL_ACCOUNT_ID:-}" ]; then
+            echo "authenticated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "authenticated=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::BENCH_DELEGATE_KEY / BENCH_ACCOUNT_ID are not set on this environment — authenticated e2e tests will be skipped."
+          fi
+
+      - name: E2E tests
+        id: e2e
+        run: |
+          python -m pytest tests/test_integration.py -m integration \
+            -v --junit-xml=e2e-results.xml
+
+      - name: Write run summary
+        if: always()
+        run: |
+          {
+            echo "## Python SDK e2e"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Relayer | \`${MEMWAL_SERVER_URL}\` |"
+            echo "| Authenticated | ${{ steps.config.outputs.authenticated }} |"
+            echo "| Result | ${{ steps.e2e.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload e2e results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-sdk-e2e-${{ github.run_id }}
+          path: packages/python-sdk-memwal/e2e-results.xml
+          if-no-files-found: warn
+          retention-days: 14

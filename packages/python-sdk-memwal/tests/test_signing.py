@@ -144,7 +144,10 @@ class TestBuildSignatureMessage:
             nonce="550e8400-e29b-41d4-a716-446655440000",
             account_id="0xabc123",
         )
-        assert result == "1700000000.POST./api/remember.abc123.550e8400-e29b-41d4-a716-446655440000.0xabc123"
+        assert result == (
+            "1700000000.POST./api/remember.abc123"
+            ".550e8400-e29b-41d4-a716-446655440000.0xabc123"
+        )
 
     def test_get_method(self) -> None:
         result = build_signature_message(
@@ -175,7 +178,9 @@ class TestBuildSignatureMessage:
         nonce = "550e8400-e29b-41d4-a716-446655440000"
         account_id = "0xabc123"
 
-        message = build_signature_message(timestamp, method, path, body_hash, nonce=nonce, account_id=account_id)
+        message = build_signature_message(
+            timestamp, method, path, body_hash, nonce=nonce, account_id=account_id
+        )
         sig_hex, pub_hex = sign_message(message, signing_key)
 
         # Verify (as the server would)
@@ -239,8 +244,9 @@ class TestDelegateKeyUtils:
 
     def test_sui_address_matches_typescript_sdk(self):
         """Verify blake2b-256(0x00 || pubkey) matches TS delegateKeyToSuiAddress output."""
-        from memwal.utils import delegate_key_to_public_key, delegate_key_to_sui_address
         import hashlib
+
+        from memwal.utils import delegate_key_to_public_key, delegate_key_to_sui_address
 
         pub = delegate_key_to_public_key(self._KEY)
         scheme_input = bytes([0x00]) + pub
