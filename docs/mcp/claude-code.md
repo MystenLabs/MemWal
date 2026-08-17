@@ -39,7 +39,7 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
 
 - Install Node.js 20+ with `npx` on your `PATH`; check with `node --version`.
 - Use a Claude Code version with plugin support if you want the plugin install; the `/plugin` command confirms support, and MCP-only works on any version with `claude mcp add`.
-- Have a Walrus Memory account ready. An unauthenticated memory-tool call returns sign-in instructions rather than signing you in, so ask the agent to run `memwal_login` and open the URL it returns. You can create the account during that flow at [memory.walrus.xyz](https://memory.walrus.xyz). Config files carry no keys: credentials land in `~/.memwal/credentials.json` after sign-in.
+- Have a [Walrus Memory account](/fundamentals/concepts/ownership-and-access) ready. An unauthenticated memory-tool call returns sign-in instructions rather than signing you in, so ask the agent to run `memwal_login` and open the URL it returns. You can create the account during that flow at [memory.walrus.xyz](https://memory.walrus.xyz). Config files carry no keys: credentials land in `~/.memwal/credentials.json` after sign-in.
 
 ## Installation
 
@@ -126,9 +126,25 @@ Agent: (calls memwal_recall, finds your preferences)
 
 Work through these three checks in order; each one isolates a different layer.
 
-1. **Server connected.** Run `/mcp` and confirm the list reports `memwal` as Connected. Expand its tools and confirm the list includes `memwal_remember_bulk` and `memwal_health`.
-2. **Relayer reachable.** Ask the agent to run `memwal_health`. A healthy response returns within a few seconds; anything else points at network access to `relayer.memory.walrus.xyz`.
-3. **End to end.** State a durable fact, for example a package-manager preference, confirm the agent calls `memwal_remember`, then open a brand-new session and confirm `memwal_recall` surfaces it.
+<Steps>
+  <Step>
+    ### Server connected
+
+    Run `/mcp` and confirm the list reports `memwal` as Connected. Expand its tools and confirm the list includes `memwal_remember_bulk` and `memwal_health`.
+  </Step>
+
+  <Step>
+    ### Relayer reachable
+
+    Ask the agent to run `memwal_health`. A healthy response returns within a few seconds; anything else points at network access to `relayer.memory.walrus.xyz`.
+  </Step>
+
+  <Step>
+    ### End to end
+
+    State a durable fact, for example a package-manager preference, confirm the agent calls `memwal_remember`, then open a brand-new session and confirm `memwal_recall` surfaces it.
+  </Step>
+</Steps>
 
 ## Troubleshooting FAQ
 
