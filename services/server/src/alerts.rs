@@ -259,7 +259,10 @@ impl AlertManager {
         // Dedup by the full address; abbreviating here could make two distinct
         // wallets with the same prefix/suffix suppress each other's alerts.
         let key = (
-            format!("{}:{}", alert.wallet_type, alert.token),
+            format!(
+                "{}:{}:{}",
+                alert.sui_network, alert.wallet_type, alert.token
+            ),
             alert.address.clone(),
         );
         if self.wallet_balance_low_dedup.should_suppress(key) {
@@ -435,6 +438,8 @@ pub struct WalletBalanceLowAlert {
     pub balance: u64,
     pub threshold: u64,
     pub token: String,
+    pub sui_network: String,
+    pub wallet_index: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -783,15 +788,21 @@ If the wallet is being topped up, rotate or temporarily remove that key from poo
         };
         let summary = format!(
             "Wallet balance alert on {}: {} balance is {} {}, below threshold of {} {} ({:.1}% remaining)",
-            alert.wallet_type, abbrev_address, balance_amount, alert.token, threshold_amount, alert.token, percent_remaining
+            alert.sui_network, abbrev_address, balance_amount, alert.token, threshold_amount, alert.token, percent_remaining
         );
         let action = format!(
             "*Action (ops):* Top up the {} wallet at {} with {} tokens.",
             alert.wallet_type, abbrev_address, alert.token
         );
+        let wallet_index = alert
+            .wallet_index
+            .map(|index| index.to_string())
+            .unwrap_or_else(|| "-".to_string());
         let details = format!(
-            "*Wallet type:* `{}`\n*Address:* `{}`\n*Balance:* {} {}\n*Threshold:* {} {}\n*Remaining:* {:.1}%",
+            "*Network:* `{}`\n*Wallet type:* `{}`\n*Wallet index:* `{}`\n*Address:* `{}`\n*Address balance:* {} {}\n*Threshold:* {} {}\n*Remaining:* {:.1}%",
+            alert.sui_network,
             alert.wallet_type,
+            wallet_index,
             alert.address,
             balance_amount,
             alert.token,
@@ -1176,6 +1187,8 @@ mod tests {
             balance: 500_000_000,
             threshold: 1_000_000_000,
             token: "SUI".to_string(),
+            sui_network: "mainnet".to_string(),
+            wallet_index: None,
         });
 
         let json = serde_json::to_string(&payload).unwrap();
@@ -1195,11 +1208,16 @@ mod tests {
             balance: 250_000_000,
             threshold: 1_000_000_000,
             token: "WAL".to_string(),
+            sui_network: "testnet".to_string(),
+            wallet_index: Some(2),
         });
 
         let json = serde_json::to_string(&payload).unwrap();
-        // 250M / 1B = 25%
+        // 250M / 1B = 25%; routing context is actionable in Slack.
         assert!(json.contains("25.0"));
+        assert!(json.contains("testnet"));
+        assert!(json.contains("Wallet index"));
+        assert!(json.contains("`2`"));
     }
 
     #[test]
@@ -1211,6 +1229,8 @@ mod tests {
             balance: 10_000_000,
             threshold: 100_000_000,
             token: "SUI".to_string(),
+            sui_network: "mainnet".to_string(),
+            wallet_index: None,
         });
 
         let json = serde_json::to_string(&payload).unwrap();
@@ -1223,12 +1243,13 @@ mod tests {
         let dedup = AlertDedup::new(Duration::from_secs(600));
         let address = "0x1234...abcd".to_string();
         // First WAL alert should fire, then repeat WAL should be suppressed.
-        assert!(!dedup.should_suppress(("uploader:WAL".to_string(), address.clone())));
-        assert!(dedup.should_suppress(("uploader:WAL".to_string(), address.clone())));
+        assert!(!dedup.should_suppress(("mainnet:uploader:WAL".to_string(), address.clone())));
+        assert!(dedup.should_suppress(("mainnet:uploader:WAL".to_string(), address.clone())));
         // SUI for the same uploader remains an independent actionable alert.
-        assert!(!dedup.should_suppress(("uploader:SUI".to_string(), address.clone())));
-        // Sponsor SUI is also independent.
-        assert!(!dedup.should_suppress(("sponsor:SUI".to_string(), address)));
+        assert!(!dedup.should_suppress(("mainnet:uploader:SUI".to_string(), address.clone())));
+        // Networks and sponsor SUI are also independent.
+        assert!(!dedup.should_suppress(("testnet:uploader:SUI".to_string(), address.clone())));
+        assert!(!dedup.should_suppress(("mainnet:sponsor:SUI".to_string(), address)));
     }
 
     #[test]

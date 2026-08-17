@@ -28,6 +28,7 @@ import {
 } from "../sidecar/config.js";
 import {
     assertAddressBalanceRegisterTransaction,
+    assertSponsoredRegisterTransactionKind,
     createdBlobObjectIdFromTransaction,
     durableRegisterDirectSigningAllowed,
     executePreparedRegisterTransaction,
@@ -132,9 +133,9 @@ test("legacy uploads preserve fallback behavior while using address balances", (
     });
 });
 
-test("durable register never direct-signs when Enoki is configured", () => {
+test("durable register sponsorship uses an explicit two-phase rollout gate", () => {
     assert.equal(durableRegisterDirectSigningAllowed(false, false), true);
-    assert.equal(durableRegisterDirectSigningAllowed(true, false), false);
+    assert.equal(durableRegisterDirectSigningAllowed(true, false), true);
     assert.equal(durableRegisterDirectSigningAllowed(true, true), false);
 });
 
@@ -175,6 +176,20 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
 
     const validated = await validatePreparedRegisterTransaction(prepared, signer.toSuiAddress());
     assert.equal(validated.sponsorDigest, digest);
+    const expectedKind = TransactionDataBuilder.fromBytes(bytes).build({ onlyTransactionKind: true });
+    assert.doesNotThrow(() => assertSponsoredRegisterTransactionKind(
+        TransactionDataBuilder.fromBytes(bytes),
+        expectedKind,
+    ));
+    const tamperedKind = expectedKind.slice();
+    tamperedKind[tamperedKind.length - 1] ^= 1;
+    assert.throws(
+        () => assertSponsoredRegisterTransactionKind(
+            TransactionDataBuilder.fromBytes(bytes),
+            tamperedKind,
+        ),
+        /kind differs/,
+    );
 
     let submitted = false;
     let directExecutions = 0;
@@ -204,6 +219,21 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
     );
     assert.equal(result, finalized);
     assert.equal(directExecutions, 0);
+
+    submitted = false;
+    await assert.rejects(
+        executePreparedRegisterTransaction(
+            validated,
+            client,
+            () => {},
+            async () => 1n,
+            false,
+            async () => {
+                throw new Error('Enoki API error (400): {"errors":[{"code":"expired"}]}');
+            },
+        ),
+        (error: unknown) => error instanceof NoSideEffectError && /rebuild sponsorship/.test(error.message),
+    );
 });
 
 test("prepared registration rejects tampered digest, signature, and wallet", async () => {

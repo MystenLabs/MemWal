@@ -198,6 +198,13 @@ struct DurableUploadResponse {
     step: Option<serde_json::Value>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DurableUploadErrorResponse {
+    #[serde(default)]
+    code: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetMetadataBatchEntry {
@@ -453,6 +460,13 @@ fn register_transaction_for_resume<'a>(
     is_encoded.then_some(register_transaction).flatten()
 }
 
+fn should_reset_prepared_register(
+    error_code: Option<&str>,
+    prepared: Option<&PreparedRegisterTransaction>,
+) -> bool {
+    matches!(error_code, Some("NO_SIDE_EFFECT")) && prepared.is_some()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn advance_durable_upload(
     client: &reqwest::Client,
@@ -464,7 +478,7 @@ pub async fn advance_durable_upload(
     namespace: &str,
     package_id: &str,
     job_id: &str,
-    journal: UploadJournal,
+    mut journal: UploadJournal,
 ) -> Result<DurableUploadAdvance, AppError> {
     let url = format!("{}/walrus/upload-step-v3", sidecar_url);
     let mut req = client.post(&url).json(&DurableUploadRequest {
@@ -495,6 +509,20 @@ pub async fn advance_durable_upload(
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
+        let error_code = serde_json::from_str::<DurableUploadErrorResponse>(&body)
+            .ok()
+            .and_then(|error| error.code);
+        let reset_safe = should_reset_prepared_register(
+            error_code.as_deref(),
+            journal.register_transaction.as_ref(),
+        );
+        if reset_safe {
+            // NO_SIDE_EFFECT means the sidecar proved the digest absent (for
+            // example after Enoki invalidated its sponsorship), so replacing
+            // these exact bytes cannot duplicate an on-chain registration.
+            journal.register_transaction = None;
+            return Ok(DurableUploadAdvance::Prepared(journal));
+        }
         return Err(AppError::Internal(format!(
             "durable Walrus upload failed ({}): {}",
             status, body
@@ -1036,7 +1064,7 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 mod tests {
     use super::{
         aggregate_download_errors, is_valid_blob_id, register_transaction_for_resume,
-        PreparedRegisterTransaction, QueryBlobsResponse,
+        should_reset_prepared_register, PreparedRegisterTransaction, QueryBlobsResponse,
     };
     use crate::types::AppError;
 
@@ -1054,6 +1082,33 @@ mod tests {
         assert!(register_transaction_for_resume(Some(&encoded), Some(&prepared)).is_some());
         assert!(register_transaction_for_resume(Some(&registered), Some(&prepared)).is_none());
         assert!(register_transaction_for_resume(None, Some(&prepared)).is_none());
+    }
+
+    #[test]
+    fn prepared_register_reset_requires_proof_of_no_effect() {
+        let direct = PreparedRegisterTransaction {
+            transaction_bytes: "bytes".into(),
+            signature: "signature".into(),
+            digest: "digest".into(),
+            sponsor_digest: None,
+        };
+        let sponsored = PreparedRegisterTransaction {
+            sponsor_digest: Some("sponsor".into()),
+            ..direct.clone()
+        };
+
+        assert!(should_reset_prepared_register(
+            Some("NO_SIDE_EFFECT"),
+            Some(&direct)
+        ));
+        assert!(!should_reset_prepared_register(
+            Some("INVALID_PREPARED_REGISTER_TRANSACTION"),
+            Some(&sponsored),
+        ));
+        assert!(!should_reset_prepared_register(
+            Some("DURABLE_SIDE_EFFECT_VERIFY_FAILED"),
+            Some(&sponsored),
+        ));
     }
 
     // ── QueryBlobsResponse.source_capped (WALM-319) ──────────────────────

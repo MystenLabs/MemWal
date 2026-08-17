@@ -19,9 +19,9 @@ import { normalizeStructTag, normalizeSuiAddress } from "@mysten/sui/utils";
 import { verifyTransactionSignature } from "@mysten/sui/verify";
 import {
     DEFAULT_WALRUS_EPOCHS,
+    DURABLE_ENOKI_REGISTER_ENABLED,
     DURABLE_UPLOAD_PROTOCOL_VERSION,
     ENOKI_API_KEY,
-    ENOKI_FALLBACK_TO_DIRECT_SIGN,
     ENOKI_NETWORK,
     JSON_LIMIT_WALRUS_UPLOAD,
     MAX_WALRUS_EPOCHS,
@@ -65,6 +65,7 @@ import {
     type EnokiExecuteResponse,
     type EnokiSponsorResponse,
 } from "../enoki.js";
+import { isSponsoredTransactionInvalidatedMessage } from "../../enoki-retry.js";
 import {
     assertUploadExecutionIdentity,
     executionIdentity,
@@ -135,12 +136,12 @@ async function certifiedStep(
 
 export function durableRegisterDirectSigningAllowed(
     enokiConfigured: boolean,
-    _fallbackToDirectSign: boolean,
+    durableSponsorshipEnabled: boolean,
 ): boolean {
-    // When Enoki is configured, durable registration must fail closed rather
-    // than silently draining the upload wallet after a sponsor outage. Direct
-    // signing remains available only for deployments without Enoki (local/dev).
-    return !enokiConfigured;
+    // The explicit rollout gate keeps newly deployed replicas journal-compatible
+    // with pre-sponsorship replicas. Once enabled, an Enoki-configured service
+    // fails closed instead of silently draining the upload wallet on outage.
+    return !durableSponsorshipEnabled || !enokiConfigured;
 }
 
 export function createdBlobObjectIdFromTransaction(result: any): string {
@@ -262,7 +263,7 @@ export async function prepareRegisterTransaction(
     const signerAddress = signer.toSuiAddress();
     transaction.setSenderIfNotSet(signerAddress);
 
-    if (ENOKI_API_KEY) {
+    if (ENOKI_API_KEY && DURABLE_ENOKI_REGISTER_ENABLED) {
         // Journal the exact sponsored bytes before execution. Replays use the
         // Enoki sponsorship handle below, so the upload remains idempotent
         // without making the sender wallet the gas owner.
@@ -285,6 +286,7 @@ export async function prepareRegisterTransaction(
         }
         const transactionData = TransactionDataBuilder.fromBytes(bytes);
         assertSponsoredRegisterTransaction(transactionData, signerAddress);
+        assertSponsoredRegisterTransactionKind(transactionData, transactionKind);
         const digest = TransactionDataBuilder.getDigestFromBytes(bytes);
         const signed = await signer.signTransaction(bytes);
         return {
@@ -295,7 +297,10 @@ export async function prepareRegisterTransaction(
         };
     }
 
-    if (!durableRegisterDirectSigningAllowed(false, ENOKI_FALLBACK_TO_DIRECT_SIGN)) {
+    if (!durableRegisterDirectSigningAllowed(
+        !!ENOKI_API_KEY,
+        DURABLE_ENOKI_REGISTER_ENABLED,
+    )) {
         throw new Error("durable register requires Enoki sponsorship");
     }
     transaction.setGasPayment([]);
@@ -334,6 +339,16 @@ function assertRegisterTransactionUsesAddressBalanceWal(
     );
     if (!hasWalWithdrawal) {
         throw new Error("registerTransaction has no WAL address-balance withdrawal");
+    }
+}
+
+export function assertSponsoredRegisterTransactionKind(
+    transactionData: TransactionDataBuilder,
+    expectedKindBytes: Uint8Array,
+): void {
+    const returnedKindBytes = transactionData.build({ onlyTransactionKind: true });
+    if (!Buffer.from(returnedKindBytes).equals(Buffer.from(expectedKindBytes))) {
+        throw new Error("Enoki returned a sponsored transaction whose kind differs from the requested transaction");
     }
 }
 
@@ -468,9 +483,28 @@ export async function executePreparedRegisterTransaction(
     // signed payload can only submit the already-journaled digest.
     onTransactionObservedOrSubmitted();
     if (prepared.sponsorDigest) {
-        const executed = await trackWalletSubmission(() =>
-            executeSponsored(prepared.sponsorDigest!, prepared.signature),
-        );
+        let executed: EnokiExecuteResponse;
+        try {
+            executed = await trackWalletSubmission(() =>
+                executeSponsored(prepared.sponsorDigest!, prepared.signature),
+            );
+        } catch (error: unknown) {
+            if (!isSponsoredTransactionInvalidatedMessage(errorMessage(error))) throw error;
+
+            // Enoki sponsorship handles are disposable. Only discard this one
+            // after a second digest lookup proves the journaled Sui transaction
+            // never landed; the Rust writer will then clear the prepared bytes
+            // and build a fresh sponsorship on its next checkpoint.
+            try {
+                const finalized = await client.getTransaction({ digest: prepared.digest, include });
+                return assertExpectedDigest(finalized);
+            } catch (lookupError: any) {
+                if (lookupError?.code !== "NOT_FOUND") throw lookupError;
+            }
+            throw new NoSideEffectError(
+                `sponsored register transaction ${prepared.digest} was invalidated and is not on chain; rebuild sponsorship`,
+            );
+        }
         if (executed.digest !== prepared.digest) {
             throw new Error(
                 `Enoki executed unexpected register digest: expected ${prepared.digest}, got ${executed.digest}`,
@@ -679,7 +713,7 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                             },
                         });
                         enforceAddressBalanceCoinIntents(registerTx);
-                        const tipRecipient = ENOKI_API_KEY
+                        const tipRecipient = ENOKI_API_KEY && DURABLE_ENOKI_REGISTER_ENABLED
                             ? await getUploadRelayTipAddress()
                             : null;
                         const allowedAddresses = [...new Set(

@@ -129,7 +129,8 @@ These are not all enforced at boot, but most real deployments need them.
 | `SEAL_THRESHOLD` | `min(2, total configured weight)` | Required configured server weight for SEAL encrypt/decrypt |
 | `ENOKI_API_KEY` | none | Optional Enoki key for sponsored sidecar transactions |
 | `ENOKI_NETWORK` | `mainnet` | Network used for Enoki-sponsored flows |
-| `ENOKI_FALLBACK_TO_DIRECT_SIGN` | `false` | If true, sidecar pays gas directly with the server wallet when Enoki sponsorship fails or is not configured |
+| `DURABLE_ENOKI_REGISTER_ENABLED` | `false` | Enables Enoki sponsorship for durable Walrus registration. Deploy all replicas with this off first, then enable it after old replicas drain |
+| `ENOKI_FALLBACK_TO_DIRECT_SIGN` | `false` | If true, rebuildable Enoki flows may pay gas directly with the server wallet. Durable registration fails closed after `DURABLE_ENOKI_REGISTER_ENABLED=true` |
 | `ENOKI_TRANSIENT_MAX_ATTEMPTS` | `2` | Attempts for sidecar-level retries of transient Enoki failures (`429`, `5xx`, network errors) before failing the wallet job |
 | `ENOKI_TRANSIENT_BASE_DELAY_MS` | `5000` | Base delay for transient Enoki retries when the response does not include `Retry-After` or a retry hint |
 | `ENOKI_TRANSIENT_MAX_DELAY_MS` | `30000` | Maximum delay for one transient Enoki retry, including parsed retry hints such as “try again in 30 seconds” |
@@ -145,7 +146,8 @@ These are not all enforced at boot, but most real deployments need them.
 ### Notes
 
 - If both `SERVER_SUI_PRIVATE_KEYS` and `SERVER_SUI_PRIVATE_KEY` are set, the key pool takes priority for uploads. Upload jobs use the pool in round-robin order.
-- Keep `ENOKI_FALLBACK_TO_DIRECT_SIGN=false` in production if the server wallet should not pay gas when sponsorship is missing, expired, or rejected.
+- Roll out durable registration sponsorship in two phases: first deploy all replicas with `DURABLE_ENOKI_REGISTER_ENABLED=false`; after old replicas have drained, set it to `true`. This prevents mixed-version workers from rejecting persisted sponsored journals.
+- Keep `ENOKI_FALLBACK_TO_DIRECT_SIGN=false` in production if the server wallet should not pay gas for rebuildable Enoki flows when sponsorship is missing, expired, or rejected. Durable registration does not fall back after its rollout gate is enabled.
 - `OPENAI_API_KEY` and `OPENAI_API_BASE` control the embedding and fact-extraction provider used by `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
 - `WALRUS_AGGREGATOR_URLS` is only used after the Redis ciphertext cache misses. Put low-latency cache/proxy endpoints first after the primary and keep 404/5xx cache TTLs short in your proxy.
 - `WALRUS_SKIP_CONSISTENCY_CHECK=true` should only be used for trusted blobs written by the relayer. Restore keeps consistency checks enabled for on-chain-discovered blobs.
