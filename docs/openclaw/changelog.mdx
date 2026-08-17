@@ -28,8 +28,42 @@ questions:
   - What changed in the MemWal OpenClaw plugin changelog?
   - When was the MemWal OpenClaw plugin first released?
 answer: >-
-  The MemWal OpenClaw plugin (@mysten-incubation/oc-memwal) changelog tracks releases from the initial 0.0.1 through 0.0.2. The initial release included automatic memory recall via before_prompt_build hook, fact capture via agent_end hook, session summary on before_reset, CLI commands (stats, search), and LLM tools (memory_search, memory_store). Version 0.0.2 updated the @mysten-incubation/memwal dependency.
+  The MemWal OpenClaw plugin (@mysten-incubation/oc-memwal) changelog tracks releases from the initial 0.0.1 through the current 0.0.5. The initial release included automatic memory recall via before_prompt_build hook, fact capture via agent_end hook, session summary on before_reset, CLI commands (stats, search), and LLM tools (memory_search, memory_store). Version 0.0.3 rebranded MemWal to Walrus Memory, 0.0.4 added temporal anchoring via the occurredAt argument, and 0.0.5 fixed an unresolvable workspace dependency that broke installs outside the monorepo.
 ---
+
+## 0.0.5
+
+### Fixed
+
+- Fixed an unresolvable `workspace:*` dependency in the published package. The release
+  workflow used `npm publish`, which ships `package.json` verbatim and cannot rewrite the
+  `workspace:` protocol, so the published artifact carried
+  `"@mysten-incubation/memwal": "workspace:*"` and failed to install outside the monorepo
+  with `Unsupported URL Type 'workspace:'`. The release workflows now use `pnpm publish`,
+  which rewrites `workspace:*` to the concrete dependency version at pack time.
+
+## 0.0.4
+
+### Added
+
+- The `memory_store` tool now accepts an optional `occurredAt` argument (RFC-3339 /
+  ISO-8601) so agents can anchor recounted past events to the date they actually happened.
+  The tool description tells the model to omit it when unknown rather than guess.
+
+### Changed
+
+- The auto-capture hook (`agent_end`) now passes the current time as `occurredAt` to
+  `analyze()`. Captured conversations get temporal anchoring automatically — the server
+  extractor resolves in-turn relative references such as "yesterday" or "last Friday" into
+  absolute dates inside the stored fact text.
+- Bumped the `@mysten-incubation/memwal` dependency to `0.0.7` for the new `AnalyzeOptions`
+  signature.
+
+## 0.0.3
+
+### Changed
+
+- Rebranded package metadata and documentation from MemWal to Walrus Memory.
 
 ## 0.0.2
 

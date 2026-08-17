@@ -134,8 +134,8 @@ You'll also need a **delegate key**, **account ID**, and **relayer URL** from Wa
     You should see in the logs:
 
     ```
-    oc-memwal: registered (server: https://..., key: e21d...ed9b, namespace: default)
-    oc-memwal: connected (status: ok, version: ...)
+    memory-memwal: registered (server: https://..., key: e21d...ed9b, namespace: default)
+    memory-memwal: connected (status: ok, version: ...)
     ```
 
     <Tip>
@@ -169,7 +169,7 @@ Bot: (responds normally)
 
 Check logs — you should see:
 ```
-oc-memwal: auto-captured 1 facts (agent: main, namespace: default)
+memory-memwal: auto-captured 1 facts (agent: main, namespace: default)
 ```
 
 **2. Recall it** — in a **new conversation**, ask about it:
@@ -180,7 +180,7 @@ You: What programming languages do I like?
 
 Check logs — you should see:
 ```
-oc-memwal: auto-recall injected 1 memories (agent: main, namespace: default)
+memory-memwal: auto-recall injected 1 memories (agent: main, namespace: default)
 ```
 
 **3. Search from terminal** — confirm the memory exists via CLI:
