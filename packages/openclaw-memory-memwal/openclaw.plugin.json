@@ -3,6 +3,9 @@
   "kind": "memory",
   "name": "Walrus Memory",
   "description": "Encrypted, decentralized long-term memory via Walrus Memory",
+  "contracts": {
+    "tools": ["memory_search", "memory_store"]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

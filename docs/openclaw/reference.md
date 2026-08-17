@@ -162,7 +162,7 @@ Tools are optional. Hooks handle the common case — memories are recalled and c
 
 ## CLI
 
-Terminal commands for debugging and inspection. Available when the OpenClaw gateway is running.
+Terminal commands for debugging and inspection. They talk to the relayer directly, so they work whether or not the gateway is running.
 
 ### search
 

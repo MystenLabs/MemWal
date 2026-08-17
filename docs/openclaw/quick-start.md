@@ -95,10 +95,13 @@ You'll also need a **delegate key**, **account ID**, and **relayer URL** from Wa
     ```jsonc
     {
       "plugins": {
-        "slots": { "memory": "oc-memwal" },
+        "slots": { "memory": "memory-memwal" },
         "entries": {
-          "oc-memwal": {
+          "memory-memwal": {
             "enabled": true,
+            // Required for auto-capture. OpenClaw blocks the agent_end hook for
+            // non-bundled plugins unless conversation access is granted here.
+            "hooks": { "allowConversationAccess": true },
             "config": {
               "privateKey": "${MEMWAL_PRIVATE_KEY}",           // References the env var
               "accountId": "0x3247e3da...",                     // Your account ID from the dashboard
@@ -109,6 +112,17 @@ You'll also need a **delegate key**, **account ID**, and **relayer URL** from Wa
       }
     }
     ```
+
+    <Warning>
+    The config key is **`memory-memwal`** — the plugin's manifest id — not the npm
+    package name `oc-memwal`. The installer reports this as
+    *"using manifest id as the config key"*. Using `oc-memwal` leaves the plugin
+    unbound and it will never load.
+
+    `hooks.allowConversationAccess` is equally load-bearing: without it OpenClaw
+    logs `typed hook "agent_end" blocked` at startup and **auto-capture silently
+    never runs**, even though the gateway reports the plugin as connected.
+    </Warning>
 
     <Accordion title="Optional settings">
       You can add these to the `config` block to tune behavior. The defaults work well for most setups.
