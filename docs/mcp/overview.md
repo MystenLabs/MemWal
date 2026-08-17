@@ -29,7 +29,7 @@ questions:
   - What is the difference between the MemWal plugin and MCP-only installation?
   - Which MCP clients support the MemWal automatic memory plugin?
 answer: >-
-  The MemWal MCP server exposes portable Walrus Memory as Model Context Protocol tools so AI agents can save and recall memories on their own. It can be installed as a plugin (with lifecycle hooks for automatic memory) on Claude Code, Codex, Cursor, and Antigravity, or as an MCP-only server on any MCP-aware client. Available tools include memwal_remember, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, and memwal_logout.
+  The MemWal MCP server exposes portable Walrus Memory as Model Context Protocol tools so AI agents can save and recall memories on their own. It can be installed as a plugin (with lifecycle hooks for automatic memory) on Claude Code, Codex, Cursor, and Antigravity, or as an MCP-only server on any MCP-aware client. Available tools include auto_save_user_facts_to_memory, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, and memwal_logout.
 ---
 
 The **MemWal MCP server** exposes your portable Walrus Memory as Model Context Protocol tools, so an AI agent can decide when to save and recall memories on its own. It works with any MCP-aware client, and on **Claude Code**, **Codex**, **Cursor**, and **Antigravity** it can be installed as a **plugin** that adds automatic memory through lifecycle hooks.
@@ -40,7 +40,7 @@ There are two ways to use MemWal. The difference is whether you also get the **l
 
 | Component | **Plugin** | **MCP-only** |
 |---|:-:|:-:|
-| MemWal MCP: memory tools (`memwal_remember`, `memwal_recall`, …) | ✓ | ✓ |
+| MemWal MCP: memory tools (`auto_save_user_facts_to_memory`, `memwal_recall`, …) | ✓ | ✓ |
 | Lifecycle hooks: automatic recall/save reminders | ✓ | ✗ |
 
 - **MCP-only** gives the agent the memory tools. Because the tool descriptions encourage proactive use, the agent already saves and recalls on its own; you just do not get the hooks. Available on **every** MCP client.
@@ -54,7 +54,7 @@ The proactive behavior comes from the tool layer, so it works on both installati
 
 | Tool | Description |
 |------|-------------|
-| `memwal_remember` | Save a durable fact for the user (preference, decision, constraint, identity). |
+| `auto_save_user_facts_to_memory` | Proactively save a durable user or project fact (preference, decision, constraint, identity). |
 | `memwal_remember_bulk` | Save several distinct facts in one call. |
 | `memwal_recall` | Semantic search across stored memories for relevant context. |
 | `memwal_analyze` | Extract and save multiple facts from a passage of text. |
@@ -82,7 +82,7 @@ flowchart TD
 
 - **First run (no credentials):** the server still starts and exposes `memwal_login`, so the agent signs you in inline instead of failing with a vague startup error. The login tool returns a clickable URL (valid 5 minutes); after you approve in the browser, the next tool call picks up the credentials automatically.
 - **Credential file:** login writes `~/.memwal/credentials.json` (mode `0600`) containing your delegate key and account metadata. The delegate private key is a sensitive, long-lived credential; treat it like an API key.
-- **Local vs remote tools:** the package handles `memwal_login` / `memwal_logout` locally (they never reach the relayer) and forwards all memory tools (`memwal_remember`, `memwal_recall`, …) to the relayer over an authenticated session.
+- **Local vs remote tools:** the package handles `memwal_login` / `memwal_logout` locally (they never reach the relayer) and forwards all memory tools (`auto_save_user_facts_to_memory`, `memwal_recall`, …) to the relayer over an authenticated session.
 - **Logout** deletes only the local credential file. To fully revoke access, also remove the delegate key from the dashboard.
 
 See [Reference](/mcp/reference) for the credential file contents, transports (stdio vs HTTP), and runtime safety details.
@@ -119,7 +119,9 @@ Ask the agent in any conversation:
 
 > What MCP tools do you have available?
 
-You should see the `memwal_*` tools. Then state a durable fact (for example, a preferred package manager) and confirm the agent saves it with `memwal_remember` and recalls it in a later session.
+You should see the Walrus Memory tools. Then state a durable fact (for example, a preferred package manager) and confirm the agent saves it with `auto_save_user_facts_to_memory` and recalls it in a later session.
+
+Clients that support MCP prompts also show **Use Walrus Memory Proactively** in their prompt menu (often opened with `/`). Invoke it once per conversation for the full proactive recall/save rubric.
 
 ## Quick recovery
 

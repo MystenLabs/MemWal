@@ -46,6 +46,9 @@ import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 // Walrus Memory wordmark (public asset, same one the dashboard nav uses).
 const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
 
+export const PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS =
+    'Use Walrus Memory as my primary cross-session memory. Proactively call auto_save_user_facts_to_memory whenever I share a durable preference, decision, constraint, correction, identity detail, project convention, or recurring workflow—even if I do not explicitly ask you to remember it. Use memwal_remember_bulk when I share several distinct facts. Before relevant tasks, or when I refer to past work, call memwal_recall with one focused query. Do not save passwords, private keys, access tokens, or transient details.'
+
 type Step =
     | 'verifying'
     | 'consent'
@@ -509,7 +512,7 @@ function ConsentCard({
                 <p style={cardLabelStyle}>Permissions requested</p>
                 <ul style={permListStyle}>
                     <li>✓ Read and decrypt all your memories (<code style={codeStyle}>memwal_recall</code>)</li>
-                    <li>✓ Write new memories (<code style={codeStyle}>memwal_remember</code>)</li>
+                    <li>✓ Proactively save new memories (<code style={codeStyle}>auto_save_user_facts_to_memory</code>)</li>
                     <li>✓ Extract facts from text (<code style={codeStyle}>memwal_analyze</code>)</li>
                     <li>✓ Re-index from Walrus (<code style={codeStyle}>memwal_restore</code>)</li>
                 </ul>
@@ -555,6 +558,21 @@ function SuccessCard({
     callbackDelivered: boolean | null
     port: string
 }) {
+    const [instructionsCopied, setInstructionsCopied] = useState(false)
+
+    const copyInstructions = useCallback(async () => {
+        try {
+            await navigator.clipboard.writeText(PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS)
+            setInstructionsCopied(true)
+            trackEvent('cta_click', {
+                cta: 'mcp_copy_custom_instructions',
+                location: 'connect_mcp',
+            })
+        } catch {
+            setInstructionsCopied(false)
+        }
+    }, [])
+
     return (
         <div className="setup-classic-intro">
             <h2 className="setup-classic-title">
@@ -576,6 +594,24 @@ function SuccessCard({
                     <span style={detailLabelStyle}>Account</span>
                     <span style={detailValueStyle}>{payload.accountId}</span>
                 </div>
+            </div>
+            <div className="card setup-classic-feature-card">
+                <p style={cardLabelStyle}>Enable proactive memory</p>
+                <p style={{ ...detailValueStyle, marginBottom: '12px' }}>
+                    Paste this into Claude or ChatGPT <strong>Custom Instructions</strong>{' '}
+                    so the assistant saves useful facts without waiting for an explicit request.
+                </p>
+                <div style={instructionsStyle}>
+                    {PROACTIVE_MEMORY_CUSTOM_INSTRUCTIONS}
+                </div>
+                <button
+                    type="button"
+                    className="lp-btn-yellow"
+                    onClick={() => void copyInstructions()}
+                    style={{ marginTop: '14px' }}
+                >
+                    {instructionsCopied ? '✓ Instructions copied' : 'Copy instructions'}
+                </button>
             </div>
             <div className="setup-classic-actions">
                 <Link
@@ -613,6 +649,19 @@ const permListStyle: React.CSSProperties = {
     lineHeight: 2,
     fontSize: '0.9rem',
     color: '#faf8f5',
+}
+
+const instructionsStyle: React.CSSProperties = {
+    padding: '12px',
+    border: '1px solid #3f4245',
+    borderRadius: '8px',
+    background: '#17191b',
+    color: '#faf8f5',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.78rem',
+    lineHeight: 1.6,
+    whiteSpace: 'pre-wrap',
+    userSelect: 'text',
 }
 
 const codeStyle: React.CSSProperties = {

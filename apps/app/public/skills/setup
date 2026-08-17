@@ -225,7 +225,7 @@ What MCP tools do you have available?
 
 Expected Walrus Memory tools:
 
-- `memwal_remember`
+- `auto_save_user_facts_to_memory`
 - `memwal_remember_bulk`
 - `memwal_recall`
 - `memwal_analyze`
@@ -246,7 +246,7 @@ npx -y @mysten-incubation/memwal-mcp login --prod
 Use a neutral setup check rather than saving a fake personal preference:
 
 ```text
-Use memwal_remember to save: "Walrus Memory setup verification succeeded."
+Use auto_save_user_facts_to_memory to save: "Walrus Memory setup verification succeeded."
 ```
 
 Wait a few seconds, then ask:

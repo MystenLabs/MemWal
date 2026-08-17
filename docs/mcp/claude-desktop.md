@@ -67,7 +67,7 @@ Quit and reopen Claude Desktop (`Cmd+Q` on macOS; closing the window is not enou
 
 | Tool | Description |
 |------|-------------|
-| `memwal_remember` | Save a durable fact (preference, decision, constraint, identity). |
+| `auto_save_user_facts_to_memory` | Proactively save a durable fact (preference, decision, constraint, identity). |
 | `memwal_remember_bulk` | Save several distinct facts in one call. |
 | `memwal_recall` | Semantic search across stored memories for relevant context. |
 | `memwal_analyze` | Extract and save multiple facts from a passage of text. |
@@ -79,7 +79,7 @@ The tool descriptions tell the agent to save and recall proactively. See [Refere
 
 ## Verify
 
-Ask the agent what MCP tools it has available. You should see the `memwal_*` tools. State a durable fact and confirm the agent saves it with `memwal_remember`.
+Ask the agent what MCP tools it has available. You should see the Walrus Memory tools. State a durable fact and confirm the agent saves it with `auto_save_user_facts_to_memory`. If your version exposes MCP prompts, invoke **Use Walrus Memory Proactively** from the `/` menu once per chat.
 
 ## Troubleshooting
 

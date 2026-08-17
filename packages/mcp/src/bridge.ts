@@ -34,13 +34,15 @@ export interface BridgeConfig {
     namespace?: string;
 }
 
-/** Memory tools that take a `namespace` argument. `memwal_remember`,
- * `memwal_recall`, and `memwal_analyze` treat it as optional; `memwal_restore`
+/** Memory tools that take a `namespace` argument.
+ * `auto_save_user_facts_to_memory`, `memwal_remember_bulk`, `memwal_recall`,
+ * and `memwal_analyze` treat it as optional; `memwal_restore`
  * requires it (its upstream schema still lists `namespace` as required, so
  * agents normally pass one — but a configured default is filled in if the
  * agent calls it without). */
 const NAMESPACE_TOOLS = new Set([
-    "memwal_remember",
+    "auto_save_user_facts_to_memory",
+    "memwal_remember_bulk",
     "memwal_recall",
     "memwal_analyze",
     "memwal_restore",
@@ -75,8 +77,8 @@ export function applyDefaultNamespace(msg: RpcMessage, namespace?: string): RpcM
 }
 
 /** Tools we serve LOCALLY (not forwarded to the relayer) so the user can
- * re-auth or sign out without leaving the MCP client. The 4 memwal_*
- * tools registered on the relayer side still come from `tools/list`
+ * re-auth or sign out without leaving the MCP client. The memory tools
+ * registered on the relayer side still come from `tools/list`
  * upstream — we splice these in. */
 const LOCAL_TOOL_DEFINITIONS = [
     {

@@ -85,7 +85,7 @@ MCP-only still saves and recalls on its own because the tools are proactive. The
 
 | Tool | Description |
 |------|-------------|
-| `memwal_remember` | Save a durable fact (preference, decision, constraint, identity). |
+| `auto_save_user_facts_to_memory` | Proactively save a durable fact (preference, decision, constraint, identity). |
 | `memwal_remember_bulk` | Save several distinct facts in one call. |
 | `memwal_recall` | Semantic search across stored memories for relevant context. |
 | `memwal_analyze` | Extract and save multiple facts from a passage of text. |
@@ -99,7 +99,7 @@ See [Reference](/mcp/reference) for full parameters.
 
 | Hook | Event | What it does |
 |------|-------|--------------|
-| Session start | `SessionStart` | Announces that memory is active and reminds the agent to use the `memwal_*` tools (preferring them over any built-in memory). |
+| Session start | `SessionStart` | Announces that memory is active and reminds the agent to use the Walrus Memory tools (preferring them over any built-in memory). |
 | User prompt | `UserPromptSubmit` | Detects when your message references past work or states a durable fact, and reminds the agent to recall or save. |
 | Post-tool | `PostToolUse` (Bash) | When a command's output looks like an error, reminds the agent to recall prior fixes and save the resolution. |
 
@@ -109,7 +109,7 @@ See [Reference](/mcp/reference) for full parameters.
 
 ```
 You:   I prefer pnpm and always use TypeScript strict mode.
-Agent: (calls memwal_remember on its own to store both preferences)
+Agent: (calls auto_save_user_facts_to_memory on its own to store both preferences)
 ```
 
 **Session 2: a brand-new chat**
@@ -126,7 +126,7 @@ Agent: (calls memwal_recall, finds your preferences)
 /mcp          → "memwal" should be Connected
 ```
 
-Expand its tools and confirm the list includes `memwal_remember_bulk` and `memwal_health`. Then state a durable fact and check that the agent saves it with `memwal_remember`.
+Expand its tools and confirm the list includes `auto_save_user_facts_to_memory`, `memwal_remember_bulk`, and `memwal_health`. Then state a durable fact and check that the agent saves it with `auto_save_user_facts_to_memory`. If your version exposes MCP prompts, invoke **Use Walrus Memory Proactively** from the `/` menu once per chat.
 
 ## Troubleshooting
 

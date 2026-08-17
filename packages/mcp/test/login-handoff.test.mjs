@@ -175,8 +175,8 @@ test("auth-required mode picks up credentials mid-session without a restart", as
         listed.result.tools.map(({ name, title, annotations }) => [name, { title, annotations }]),
     );
     assert.deepEqual(metadata, {
-        memwal_remember: {
-            title: "Remember a Fact",
+        auto_save_user_facts_to_memory: {
+            title: "Auto-save a User Fact",
             annotations: { readOnlyHint: false, destructiveHint: false },
         },
         memwal_recall: {
@@ -196,6 +196,29 @@ test("auth-required mode picks up credentials mid-session without a restart", as
             annotations: { readOnlyHint: false, destructiveHint: false },
         },
     });
+
+    // Prompt discovery works before login because the proactive instructions
+    // do not require account access.
+    send({ jsonrpc: "2.0", id: 11, method: "prompts/list", params: {} });
+    const promptList = await waitFor((m) => m.id === 11 && m.result);
+    assert.deepEqual(promptList.result.prompts, [
+        {
+            name: "proactive_walrus_memory",
+            title: "Use Walrus Memory Proactively",
+            description:
+                "Make Walrus Memory the primary memory for this conversation, with proactive recall and durable-fact saving.",
+        },
+    ]);
+
+    send({
+        jsonrpc: "2.0",
+        id: 12,
+        method: "prompts/get",
+        params: { name: "proactive_walrus_memory" },
+    });
+    const prompt = await waitFor((m) => m.id === 12 && m.result);
+    assert.match(JSON.stringify(prompt.result), /auto_save_user_facts_to_memory/);
+    assert.match(JSON.stringify(prompt.result), /memwal_recall/);
 
     // 2. recall before login → not-signed-in instruction.
     send({

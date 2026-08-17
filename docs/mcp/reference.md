@@ -30,7 +30,7 @@ questions:
   - How do I configure the MemWal MCP CLI flags and environment variables?
   - How do I set up Streamable HTTP transport for Walrus Memory MCP?
 answer: >-
-  The MemWal MCP reference documents eight tools (memwal_remember, memwal_remember_bulk, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, memwal_logout) with full parameter details. It covers CLI flags (--relayer, --namespace, --label, etc.), environment presets (prod, staging, local), two transport modes (stdio and Streamable HTTP), credential file format, default namespace precedence, self-hosting configuration, and runtime safety notes for 401 handling and relayer overrides.
+  The MemWal MCP reference documents eight tools (auto_save_user_facts_to_memory, memwal_remember_bulk, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, memwal_logout) with full parameter details. It covers CLI flags (--relayer, --namespace, --label, etc.), environment presets (prod, staging, local), two transport modes (stdio and Streamable HTTP), credential file format, default namespace precedence, self-hosting configuration, and runtime safety notes for 401 handling and relayer overrides.
 ---
 
 This page documents every tool, flag, environment variable, and transport route the Walrus Memory MCP package exposes. For per-client setup, start with the [MCP overview](/mcp/overview).
@@ -51,7 +51,7 @@ Instead it starts in an auth-required mode that:
 
 This is why many first-run sessions show `memwal_login` before the other tools are actually usable.
 
-### memwal_remember
+### auto_save_user_facts_to_memory
 
 Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** whenever it learns something worth remembering across sessions (preference, decision, constraint, correction, identity), not only when the user explicitly asks. Pass the full statement; do not summarize.
 
@@ -62,7 +62,7 @@ Save a durable fact to the user's Walrus Memory. The agent calls this **proactiv
 
 ### memwal_remember_bulk
 
-Save several durable facts in one batched call. Prefer this over repeated `memwal_remember` calls when the agent learns multiple distinct facts at once.
+Save several durable facts in one batched call. Prefer this over repeated `auto_save_user_facts_to_memory` calls when the agent learns multiple distinct facts at once.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -119,6 +119,10 @@ The on-chain delegate key registration is **not** revoked by `memwal_logout`, on
 Both session tools (`memwal_login`, `memwal_logout`) are intercepted locally by the stdio package and never reach the relayer. They read and write files on the client machine only.
 </Note>
 
+## Prompt template
+
+MCP clients that support prompts expose `proactive_walrus_memory` as **Use Walrus Memory Proactively**. Invoke it once per conversation from the client's prompt menu (often with `/`) to add the complete proactive policy: focused recall before relevant work, automatic durable-fact saving, bulk saving, secret filtering, and index recovery.
+
 ## CLI
 
 The stdio package accepts CLI flags and environment variables. **CLI takes precedence** when both are set.
@@ -139,7 +143,7 @@ Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
 
 Set a default memory namespace once in your client config instead of having
 the agent pass `namespace` on every call. The package injects it into
-`memwal_remember`, `memwal_recall`, `memwal_analyze`, and `memwal_restore`
+`auto_save_user_facts_to_memory`, `memwal_recall`, `memwal_analyze`, and `memwal_restore`
 calls that don't already carry one.
 
 Precedence, highest first:
@@ -419,7 +423,7 @@ The URL is valid for **5 minutes**. Call the tool again to mint a fresh one. Mak
 
 ### Recall returns "No matching memories found" right after a remember
 
-`memwal_remember` waits for the Walrus upload to finish before returning, but under load the embedding/indexing step can lag a few seconds behind. Wait briefly, then retry the recall.
+`auto_save_user_facts_to_memory` waits for the Walrus upload to finish before returning, but under load the embedding/indexing step can lag a few seconds behind. Wait briefly, then retry the recall.
 
 ### 401 Unauthorized from the relayer
 

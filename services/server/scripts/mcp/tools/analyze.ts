@@ -33,7 +33,7 @@ export function registerAnalyzeTool(
         {
             ...TOOL_METADATA.memwal_analyze,
             description:
-                "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead.",
+                "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use auto_save_user_facts_to_memory or memwal_remember_bulk instead.",
             inputSchema: ANALYZE_INPUT,
         },
         wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {

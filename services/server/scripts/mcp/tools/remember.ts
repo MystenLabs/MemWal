@@ -20,8 +20,9 @@ const REMEMBER_INPUT = {
 } as const;
 
 /**
- * memwal_remember — persist a durable fact to MemWal and return only when the
- * blob is written end-to-end (embed → SEAL encrypt → Walrus upload → on-chain).
+ * auto_save_user_facts_to_memory — persist a durable fact to MemWal and return
+ * only when the blob is written end-to-end (embed → SEAL encrypt → Walrus
+ * upload → on-chain).
  *
  * Call this PROACTIVELY whenever the user reveals a durable fact about
  * themselves or the project (preference, decision, constraint, correction,
@@ -33,9 +34,9 @@ export function registerRememberTool(
     session: MemWalSession
 ): void {
     server.registerTool(
-        "memwal_remember",
+        "auto_save_user_facts_to_memory",
         {
-            ...TOOL_METADATA.memwal_remember,
+            ...TOOL_METADATA.auto_save_user_facts_to_memory,
             description:
                 "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever you learn something worth remembering across sessions — a stated preference, decision, constraint, correction, identity detail, or recurring workflow — even if the user did not explicitly say 'remember this'. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
             inputSchema: REMEMBER_INPUT,

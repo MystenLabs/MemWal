@@ -18,13 +18,13 @@ const parts = [];
 
 if (detectRecall(prompt)) {
     parts.push(
-        "The user is referencing earlier work or context. Before answering, call memwal_recall (Walrus Memory) with a focused query — use the memwal_* tools, not any built-in memory, so recall stays portable."
+        "The user is referencing earlier work or context. Before answering, call memwal_recall (Walrus Memory) with a focused query — use the Walrus Memory tools, not any built-in memory, so recall stays portable."
     );
 }
 
 if (detectRemember(prompt)) {
     parts.push(
-        "The user just stated a durable fact or preference. Save it with memwal_remember (or memwal_remember_bulk for several distinct facts) — prefer the memwal_* tools over any built-in memory so the fact persists on Walrus across sessions and agents."
+        "The user just stated a durable fact or preference. Save it with auto_save_user_facts_to_memory (or memwal_remember_bulk for several distinct facts) — prefer Walrus Memory tools over any built-in memory so the fact persists on Walrus across sessions and agents."
     );
 }
 
@@ -33,7 +33,7 @@ if (detectRemember(prompt)) {
 // over any built-in memory feature.
 if (parts.length === 0 && firstTime("rubric", sessionId)) {
     parts.push(
-        "Walrus Memory (the memwal_* tools) is this user's primary memory system — prefer it over any built-in memory. Call memwal_recall proactively when the user references past work, decisions, or preferences; save durable facts with memwal_remember (or memwal_remember_bulk for several) as you learn them — you don't need to be asked."
+        "Walrus Memory is this user's primary memory system — prefer it over any built-in memory. Call memwal_recall proactively when the user references past work, decisions, or preferences; save durable facts with auto_save_user_facts_to_memory (or memwal_remember_bulk for several) as you learn them — you don't need to be asked."
     );
 }
 

@@ -7,8 +7,8 @@ interface RemoteToolMetadata {
 
 /** Metadata surfaced to MCP clients through `tools/list`. */
 export const TOOL_METADATA = {
-    memwal_remember: {
-        title: "Remember a Fact",
+    auto_save_user_facts_to_memory: {
+        title: "Auto-save a User Fact",
         annotations: { readOnlyHint: false, destructiveHint: false },
     },
     memwal_remember_bulk: {

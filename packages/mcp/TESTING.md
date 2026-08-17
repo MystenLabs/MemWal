@@ -37,7 +37,7 @@ Run these in any connected client (e.g. Claude Code `memwal-local`). They prove 
 | # | Action / prompt | Expect | OK? |
 |---|---|---|---|
 | 1 | `check Walrus Memory health` | Calls `memwal_health`, returns `status=ok version=…` in ~ms (not a slow recall) | [ ] |
-| 2 | `I prefer pnpm and always use TypeScript strict mode.` | Agent calls `memwal_remember` on its own | [ ] |
+| 2 | `I prefer pnpm and always use TypeScript strict mode.` | Agent calls `auto_save_user_facts_to_memory` on its own | [ ] |
 | 3 | `A few things about me: I'm a backend dev in Vietnam, I'm allergic to peanuts, and I drink black coffee.` | Agent calls `memwal_remember_bulk` (one call, several facts) | [ ] |
 | 4 | *(new chat)* `What do you remember about my preferences?` | Calls `memwal_recall` **once** (no redundant repeat searches), returns the facts | [ ] |
 | 5 | Paste a short paragraph of mixed facts and ask to "save what's worth keeping" | Agent uses `memwal_analyze` (or `memwal_remember_bulk`) | [ ] |
@@ -63,16 +63,16 @@ INSP="npx -y @modelcontextprotocol/inspector --cli node $BIN --local"
 $INSP --method tools/list                                     # 6 tools w/ agentic descriptions
 $INSP --method tools/call --tool-name memwal_health           # status=ok (~ms)
 $INSP --method tools/call --tool-name memwal_recall --tool-arg query="coding preferences"
-$INSP --method tools/call --tool-name memwal_remember --tool-arg text="I prefer pnpm"
+$INSP --method tools/call --tool-name auto_save_user_facts_to_memory --tool-arg text="I prefer pnpm"
 ```
 
-- [ ] `tools/list` shows all 6 tools (`memwal_remember`, `_remember_bulk`, `_recall`, `_analyze`, `_restore`, `_health`) with the new proactive descriptions
+- [ ] `tools/list` shows all 6 tools (`auto_save_user_facts_to_memory`, `memwal_remember_bulk`, `memwal_recall`, `memwal_analyze`, `memwal_restore`, `memwal_health`) with the new proactive descriptions
 - [ ] `memwal_health` returns `status=ok` instantly
 - [ ] `memwal_recall` returns (read path — no on-chain write)
 
 Notes:
 - `tools/list`, `memwal_health`, `memwal_recall` return instantly — they don't write on-chain, so they work regardless of the Enoki/gas state.
-- `memwal_remember` / `memwal_remember_bulk` still go through the on-chain write — they only complete once the relayer is up with `ENOKI_FALLBACK_TO_DIRECT_SIGN=true` (or Enoki testnet quota is available).
+- `auto_save_user_facts_to_memory` / `memwal_remember_bulk` still go through the on-chain write — they only complete once the relayer is up with `ENOKI_FALLBACK_TO_DIRECT_SIGN=true` (or Enoki testnet quota is available).
 - For array args (`memwal_remember_bulk` → `facts`), use the **Web UI** form — it handles arrays cleanly.
 
 ---
@@ -91,7 +91,7 @@ Notes:
 - [ ] In Claude Code: `/plugin marketplace add /Users/uydev/code/MemWal`
 - [ ] In Claude Code: `/plugin install memwal@memwal-plugins`
 - [ ] Restart Claude Code → `/mcp` shows **memwal: Connected**; tools include `memwal_remember_bulk` + `memwal_health`
-- [ ] Type `I prefer pnpm and TypeScript strict mode.` → agent calls **`memwal_remember`** (NOT the built-in "wrote N memories") — this proves the hook steer
+- [ ] Type `I prefer pnpm and TypeScript strict mode.` → agent calls **`auto_save_user_facts_to_memory`** (NOT the built-in "wrote N memories") — this proves the hook steer
 - [ ] Run the Section 1 prompts → all behave
 
 ### 2B. Claude Code — MCP-only (Layer 1 without hooks)
@@ -114,7 +114,7 @@ Notes:
   }
   ```
 - [ ] **Cmd+Q** (full quit) and reopen Claude Desktop
-- [ ] Ask `what MCP tools do you have available?` → see the `memwal_*` tools
+- [ ] Ask `what MCP tools do you have available?` → see the Walrus Memory tools
 - [ ] Run Section 1 prompts (Layer 1 only — no hooks on Claude Desktop)
 
 ### 2D. Codex — Plugin (hooks)
@@ -186,7 +186,7 @@ Notes:
 ## 3. Sign-off
 
 - [ ] Section 1 (tool layer) passes
-- [ ] Claude Code plugin (2A) shows the agent preferring `memwal_*` over built-in memory
+- [ ] Claude Code plugin (2A) shows the agent preferring Walrus Memory over built-in memory
 - [ ] At least one MCP-only client (2B/2C) saves & recalls via MemWal
 - [ ] Recorded which hosts I could NOT verify (Codex/Cursor/Antigravity/OpenCode)
 
@@ -220,8 +220,8 @@ npx @modelcontextprotocol/inspector --cli \
   --method tools/list
 ```
 
-- [ ] 8 tools listed, including `memwal_remember_bulk` and `memwal_health`
-- [ ] `memwal_remember` description says "proactively" (proves the new sidecar is deployed)
+- [ ] 8 tools listed, including `auto_save_user_facts_to_memory`, `memwal_remember_bulk`, and `memwal_health`
+- [ ] `auto_save_user_facts_to_memory` description says "proactively" (proves the new sidecar is deployed)
 
 If the new tools are missing → the Railway dev service hasn't redeployed; trigger it from the Railway dashboard.
 

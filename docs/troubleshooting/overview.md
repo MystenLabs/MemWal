@@ -93,7 +93,7 @@ A client-side timeout does not mean the save failed. The relayer accepts the wor
 **Fix:**
 
 1. Confirm the result instead of resubmitting. Wait a few seconds, because indexing can lag briefly under load, then run `memwal_recall` for the fact you tried to save. If the fact is present, the save succeeded despite the timeout.
-2. Match the tool to the task. To save one discrete fact, such as a milestone, use `memwal_remember`, which performs a single write. Reserve `memwal_analyze` for longer passages where you want several facts extracted, and keep those passages a reasonable size.
+2. Match the tool to the task. To save one discrete fact, such as a milestone, use `auto_save_user_facts_to_memory`, which performs a single write. Reserve `memwal_analyze` for longer passages where you want several facts extracted, and keep those passages a reasonable size.
 3. Confirm connectivity first. Run `memwal_health`, which calls the unauthenticated health endpoint and is the fastest way to confirm the relayer is reachable.
 4. Wait correctly in the SDK. The `remember` and `analyze` methods return immediately with job IDs, so wait with `waitForRememberJob` or `analyzeAndWait` and a sensible timeout, or poll the job status, rather than wrapping the whole operation in one short blocking call.
 5. Collect logs if the problem persists. Set `MEMWAL_MCP_DEBUG=1` for the MCP server, or pass `debug: true` to the `withMemWal()` AI middleware, and capture the per-request output. The core SDK (`MemWal.create()`) has no built-in debug flag.
@@ -140,7 +140,7 @@ No. Accounts and delegate keys are specific to each network. A key created on st
 
 ### My save timed out, so did I lose the memory?
 
-Probably not. The relayer processes saves as background jobs and keeps working after the client times out. Do not save again right away, because that can duplicate the memory. Wait a few seconds and recall it to confirm. To save a single fact, use `memwal_remember` rather than `memwal_analyze`, which extracts and stores many facts at once and is the slowest operation.
+Probably not. The relayer processes saves as background jobs and keeps working after the client times out. Do not save again right away, because that can duplicate the memory. Wait a few seconds and recall it to confirm. To save a single fact, use `auto_save_user_facts_to_memory` rather than `memwal_analyze`, which extracts and stores many facts at once and is the slowest operation.
 
 ### Why does recall feel instant while saving feels slow?
 

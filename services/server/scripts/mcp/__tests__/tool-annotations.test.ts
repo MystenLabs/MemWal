@@ -24,8 +24,8 @@ test("tools/list publishes safe titles and behavior annotations for every remote
             tools.map(({ name, title, annotations }) => [name, { title, annotations }])
         ),
         {
-            memwal_remember: {
-                title: "Remember a Fact",
+            auto_save_user_facts_to_memory: {
+                title: "Auto-save a User Fact",
                 annotations: { readOnlyHint: false, destructiveHint: false },
             },
             memwal_remember_bulk: {

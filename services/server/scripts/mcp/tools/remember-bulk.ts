@@ -24,8 +24,9 @@ const REMEMBER_BULK_INPUT = {
  * memwal_remember_bulk — persist several durable facts in one batched request
  * and return only once every job reaches a terminal state. Wraps the SDK's
  * `rememberBulkAndWait` (embed + SEAL-encrypt all items concurrently, upload
- * N blobs in parallel). Prefer this over N separate `memwal_remember` calls
- * when you learned multiple distinct facts at once.
+ * N blobs in parallel). Prefer this over N separate
+ * `auto_save_user_facts_to_memory` calls when you learned multiple distinct
+ * facts at once.
  */
 export function registerRememberBulkTool(
     server: McpServer,
@@ -36,7 +37,7 @@ export function registerRememberBulkTool(
         {
             ...TOOL_METADATA.memwal_remember_bulk,
             description:
-                "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
+                "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated auto_save_user_facts_to_memory calls.",
             inputSchema: REMEMBER_BULK_INPUT,
         },
         wrapTool<{ facts: string[]; namespace?: string }>(async ({ facts, namespace }) => {

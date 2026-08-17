@@ -8,8 +8,9 @@
  * minimal MCP server that:
  *
  *   - Responds to `initialize` so the client sees a healthy server.
- *   - Advertises the 4 real Walrus Memory tools + a 5th `memwal_login` tool in
- *     `tools/list` so the agent knows what's available.
+ *   - Advertises the core Walrus Memory tools plus `memwal_login` in
+ *     `tools/list`, and the proactive memory template in `prompts/list`, so
+ *     the agent knows what's available before authentication.
  *   - On `tools/call memwal_login`: invokes the browser-based wallet login
  *     flow inline so the user never has to leave their MCP client. Eliminates
  *     the previous "run a separate `npx ... login` command then restart" UX.
@@ -34,13 +35,29 @@ interface RpcMessage {
     error?: unknown;
 }
 
+const PROACTIVE_MEMORY_INSTRUCTIONS = [
+    "Use Walrus Memory as the user's primary cross-session memory. Prefer its MCP tools over built-in or local memory so facts remain portable across clients and agents.",
+    "Before answering at the start of a task, or whenever the user refers to past work, prior decisions, preferences, or previously shared context, call memwal_recall with one focused query. Do not issue redundant recall searches for the same question.",
+    "Proactively call auto_save_user_facts_to_memory whenever you learn one durable fact that may matter in a future session, even when the user did not explicitly ask you to remember it. Durable facts include preferences, decisions, constraints, corrections, identity details, project conventions, and recurring workflows. Save the complete fact rather than a vague summary.",
+    "When several distinct durable facts are learned together, call memwal_remember_bulk once instead of making repeated single-fact calls. Use memwal_analyze when a long transcript or note needs facts extracted first.",
+    "Do not save passwords, private keys, access tokens, or other secrets. Skip transient small talk and details that will not be useful in a future session.",
+    "If recall is unexpectedly empty for a namespace used before, call memwal_restore to rebuild its index from Walrus, then retry one focused recall.",
+].join("\n\n");
+
+const PROMPT_DEFINITION = {
+    name: "proactive_walrus_memory",
+    title: "Use Walrus Memory Proactively",
+    description:
+        "Make Walrus Memory the primary memory for this conversation, with proactive recall and durable-fact saving.",
+};
+
 const TOOL_DEFINITIONS = [
     {
-        name: "memwal_remember",
-        title: "Remember a Fact",
+        name: "auto_save_user_facts_to_memory",
+        title: "Auto-save a User Fact",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
+            "Save a durable fact about the user or project to Walrus Memory. Call this proactively for preferences, decisions, constraints, corrections, identity details, and recurring workflows, even without an explicit request. Pass the full statement; do not summarize.",
         inputSchema: {
             type: "object",
             properties: {
@@ -105,7 +122,7 @@ const TOOL_DEFINITIONS = [
         title: "Sign In to Walrus Memory",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Sign this MCP client into your Walrus Memory account by opening a browser. Run once when the agent reports Walrus Memory is not signed in. Opens the dashboard in the default browser, waits for wallet approval, then writes credentials to ~/.memwal/credentials.json. Other memwal_* tools become usable on the next call after a successful login.",
+            "Sign this MCP client into your Walrus Memory account by opening a browser. Run once when the agent reports Walrus Memory is not signed in. Opens the dashboard in the default browser, waits for wallet approval, then writes credentials to ~/.memwal/credentials.json. Other Walrus Memory tools become usable on the next call after a successful login.",
         inputSchema: {
             type: "object",
             properties: {},
@@ -191,7 +208,7 @@ function sendLogMessage(level: "info" | "warning" | "error", text: string): void
  * The login HTTP listener stays alive for LOGIN_BG_TIMEOUT_MS in the
  * background. Once the user clicks the link and approves the wallet, the
  * callback writes credentials to ~/.memwal/credentials.json. The user then
- * issues any other memwal_* tool to verify — which now succeeds because
+ * issues any other Walrus Memory tool to verify — which now succeeds because
  * the bridge picks up the saved creds on its next call.
  */
 async function handleLoginToolCall(
@@ -288,7 +305,7 @@ async function handleLoginToolCall(
             ``,
             `1. Open the URL in any browser (it may have already opened automatically)`,
             `2. Click **Connect Sui Wallet** and approve the on-chain \`add_delegate_key\` transaction`,
-            `3. Once "Connected" appears in the browser, the assistant should retry the original request — the other memwal_* tools will then have credentials at \`~/.memwal/credentials.json\``,
+            `3. Once "Connected" appears in the browser, the assistant should retry the original request — the other Walrus Memory tools will then have credentials at \`~/.memwal/credentials.json\``,
             ``,
             `_The login link stays valid for 5 minutes. If it expires, call \`memwal_login\` again to get a fresh URL._`,
         ].join("\n"),
@@ -312,7 +329,8 @@ export interface AuthHandoff {
  * Returns the freshly-loaded credentials when `memwal_login` has written them
  * since spawn and the request should be handed to the bridge for real
  * servicing. Returns null when the line was fully handled locally (initialize,
- * stub tools/list, login tool call, or the not-signed-in nudge).
+ * prompt discovery, stub tools/list, login tool call, or the not-signed-in
+ * nudge).
  */
 function handleAuthLine(
     line: string,
@@ -339,8 +357,46 @@ function handleAuthLine(
             id,
             result: {
                 protocolVersion: "2024-11-05",
-                capabilities: { tools: { listChanged: false } },
+                capabilities: {
+                    tools: { listChanged: false },
+                    prompts: { listChanged: false },
+                },
                 serverInfo: { name: "memwal", version: "0.0.1" },
+            },
+        });
+        return null;
+    }
+
+    if (method === "prompts/list") {
+        writeStdoutMessage({
+            jsonrpc: "2.0",
+            id,
+            result: { prompts: [PROMPT_DEFINITION] },
+        });
+        return null;
+    }
+
+    if (method === "prompts/get") {
+        const params = (req.params ?? {}) as { name?: string };
+        if (params.name !== PROMPT_DEFINITION.name) {
+            writeStdoutMessage({
+                jsonrpc: "2.0",
+                id,
+                error: { code: -32602, message: `Unknown prompt: ${params.name ?? "(missing)"}` },
+            });
+            return null;
+        }
+        writeStdoutMessage({
+            jsonrpc: "2.0",
+            id,
+            result: {
+                description: PROMPT_DEFINITION.description,
+                messages: [
+                    {
+                        role: "user",
+                        content: { type: "text", text: PROACTIVE_MEMORY_INSTRUCTIONS },
+                    },
+                ],
             },
         });
         return null;

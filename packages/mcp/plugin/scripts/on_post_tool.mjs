@@ -16,7 +16,7 @@ if (!output || output.length < 50) process.exit(0);
 if (detectError(output)) {
     emitContext(
         "PostToolUse",
-        "That command produced an error. Consider calling memwal_recall to check for a prior fix to a similar error; once you resolve it, save the fix with memwal_remember so it's available next time."
+        "That command produced an error. Consider calling memwal_recall to check for a prior fix to a similar error; once you resolve it, save the fix with auto_save_user_facts_to_memory so it's available next time."
     );
 }
 

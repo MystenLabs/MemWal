@@ -16,7 +16,7 @@ was never exposed as a tool.
 
 ## Architecture — three layers
 
-1. **Agentic tool descriptions + `memwal_remember_bulk`** — `services/server/scripts/mcp/tools/`.
+1. **Agentic tool names/descriptions + `memwal_remember_bulk`** — `services/server/scripts/mcp/tools/`.
    The foundation: the agent *knows* when to act from the descriptions. Server-side,
    so it benefits every MCP client (Claude Code, Codex, Cursor).
 2. **Decision hooks** — `packages/mcp/plugin/` (this package). Lifecycle hooks
@@ -43,7 +43,7 @@ was never exposed as a tool.
 | Auth | `MEM0_API_KEY` | Ed25519 delegate key (`~/.memwal/credentials.json`, browser login) |
 | Hook runtime | bash + Python (venv) | Node-only `.mjs` (no venv) |
 | Recall | hooks inject a search rubric (+ direct search on strong signals) | hooks inject a directive; agent calls `memwal_recall` (no hook-side fetch) |
-| Save | direct API on Stop/PreCompact (`infer`, `run_id`, 90d expiry) | agent calls `memwal_remember`/`_bulk`; hooks only remind |
+| Save | direct API on Stop/PreCompact (`infer`, `run_id`, 90d expiry) | agent calls `auto_save_user_facts_to_memory`/`memwal_remember_bulk`; hooks only remind |
 | Tools | 9 (CRUD + entities, incl. delete/update) | 5 memory tools + `memwal_health` utility, **append-only** (no forget/update) |
 | Scope | `user_id` + `app_id` + `run_id` | single `namespace` (global `default`; `MEMWAL_NAMESPACE` overrides) |
 | Guardrail hooks | PreToolUse enforce-metadata / block writes | dropped (nothing to enforce) |

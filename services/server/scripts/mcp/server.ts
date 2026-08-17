@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "./auth.js";
+import { registerProactiveMemoryPrompt } from "./prompts/proactive-memory.js";
 import { registerTools } from "./tools/index.js";
 
 /**
@@ -18,6 +19,7 @@ export function createMcpServer(session: MemWalSession): McpServer {
     });
 
     registerTools(server, session);
+    registerProactiveMemoryPrompt(server);
 
     return server;
 }
