@@ -94,9 +94,8 @@ pub struct AlertManager {
     /// and the monitor keeps polling every interval while the backlog lasts,
     /// so one notification per network per window is enough.
     walrus_queue_saturation_dedup: AlertDedup,
-    /// Suppresses wallet balance low spam. Keyed by `(wallet_type, address)`
-    /// so each wallet only alerts once per dedup window even if the monitor
-    /// runs many times.
+    /// Suppresses wallet balance low spam. Keyed by `(wallet_type:token, address)`
+    /// so WAL and SUI can each alert once for the same wallet per dedup window.
     wallet_balance_low_dedup: AlertDedup,
 }
 
@@ -259,7 +258,10 @@ impl AlertManager {
         };
         // Dedup by the full address; abbreviating here could make two distinct
         // wallets with the same prefix/suffix suppress each other's alerts.
-        let key = (alert.wallet_type.clone(), alert.address.clone());
+        let key = (
+            format!("{}:{}", alert.wallet_type, alert.token),
+            alert.address.clone(),
+        );
         if self.wallet_balance_low_dedup.should_suppress(key) {
             return Ok(());
         }
@@ -1219,12 +1221,14 @@ mod tests {
     #[test]
     fn wallet_balance_low_dedup_key_formation() {
         let dedup = AlertDedup::new(Duration::from_secs(600));
-        // First alert should fire
-        assert!(!dedup.should_suppress(("sponsor".to_string(), "0x1234...abcd".to_string())));
-        // Second alert with same key should be suppressed
-        assert!(dedup.should_suppress(("sponsor".to_string(), "0x1234...abcd".to_string())));
-        // Different wallet type should not be suppressed
-        assert!(!dedup.should_suppress(("uploader_pool".to_string(), "0x1234...abcd".to_string())));
+        let address = "0x1234...abcd".to_string();
+        // First WAL alert should fire, then repeat WAL should be suppressed.
+        assert!(!dedup.should_suppress(("uploader:WAL".to_string(), address.clone())));
+        assert!(dedup.should_suppress(("uploader:WAL".to_string(), address.clone())));
+        // SUI for the same uploader remains an independent actionable alert.
+        assert!(!dedup.should_suppress(("uploader:SUI".to_string(), address.clone())));
+        // Sponsor SUI is also independent.
+        assert!(!dedup.should_suppress(("sponsor:SUI".to_string(), address)));
     }
 
     #[test]

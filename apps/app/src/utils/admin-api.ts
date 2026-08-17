@@ -25,6 +25,7 @@ export interface UploadError {
 export interface AdminConfig {
   balanceMonitorIntervalSecs: number
   uploaderWalLowThresholdFrost: bigint
+  uploaderSuiLowThresholdMist: bigint
   sponsorSuiLowThresholdMist: bigint
 }
 
@@ -115,6 +116,7 @@ interface RawWalletsResponse {
   uploader_pool: {
     wallets: RawWalletBalance[]
     wal_threshold: string
+    sui_threshold: string
     last_updated: string
   }
   sponsor_wallet: {
@@ -145,6 +147,7 @@ interface RawUploadErrorsResponse {
 interface RawConfigResponse {
   balance_monitor_interval_secs: number
   wallet_wal_low_threshold_frost: string
+  wallet_sui_low_threshold_mist: string
   sponsor_sui_low_threshold_mist: string
 }
 
@@ -212,6 +215,7 @@ export async function fetchAdminConfig(
   return {
     balanceMonitorIntervalSecs: raw.balance_monitor_interval_secs,
     uploaderWalLowThresholdFrost: BigInt(raw.wallet_wal_low_threshold_frost),
+    uploaderSuiLowThresholdMist: BigInt(raw.wallet_sui_low_threshold_mist),
     sponsorSuiLowThresholdMist: BigInt(raw.sponsor_sui_low_threshold_mist),
   }
 }

@@ -25,6 +25,7 @@ pub struct WalletBalance {
 pub struct UploaderPool {
     pub wallets: Vec<WalletBalance>,
     pub wal_threshold: String,
+    pub sui_threshold: String,
     pub last_updated: String,
 }
 
@@ -65,6 +66,7 @@ pub struct UploadErrorsResponse {
 pub struct ConfigResponse {
     pub balance_monitor_interval_secs: u64,
     pub wallet_wal_low_threshold_frost: String,
+    pub wallet_sui_low_threshold_mist: String,
     pub sponsor_sui_low_threshold_mist: String,
 }
 
@@ -82,8 +84,13 @@ struct SidecarWalletMetrics {
     per_wallet: Vec<SidecarWalletBalance>,
 }
 
-fn wallet_status(wal_frost: u64, threshold: u64) -> &'static str {
-    if wal_frost < threshold {
+fn wallet_status(
+    wal_frost: u64,
+    wal_threshold: u64,
+    sui_mist: u64,
+    sui_threshold: u64,
+) -> &'static str {
+    if wal_frost < wal_threshold || sui_mist < sui_threshold {
         "low"
     } else {
         "ok"
@@ -118,6 +125,7 @@ pub async fn get_wallets(
         .map_err(|e| AppError::Internal(format!("Invalid sidecar wallet metrics: {}", e)))?;
 
     let wal_threshold = state.config.wallet_balance_low_threshold_wal;
+    let sui_threshold = state.config.wallet_balance_low_threshold_sui;
     let wallets: Vec<WalletBalance> = sidecar_data
         .per_wallet
         .into_iter()
@@ -141,7 +149,7 @@ pub async fn get_wallets(
                 address: entry.address,
                 sui: sui.to_string(),
                 wal: wal.to_string(),
-                status: wallet_status(wal, wal_threshold).to_string(),
+                status: wallet_status(wal, wal_threshold, sui, sui_threshold).to_string(),
             })
         })
         .collect::<Result<_, AppError>>()?;
@@ -176,6 +184,7 @@ pub async fn get_wallets(
         uploader_pool: UploaderPool {
             wallets,
             wal_threshold: wal_threshold.to_string(),
+            sui_threshold: sui_threshold.to_string(),
             last_updated: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         },
         sponsor_wallet: SponsorWallet {
@@ -245,6 +254,7 @@ pub async fn get_admin_config(
     Ok(Json(ConfigResponse {
         balance_monitor_interval_secs: state.config.balance_monitor_interval_secs,
         wallet_wal_low_threshold_frost: state.config.wallet_balance_low_threshold_wal.to_string(),
+        wallet_sui_low_threshold_mist: state.config.wallet_balance_low_threshold_sui.to_string(),
         sponsor_sui_low_threshold_mist: state.config.sponsor_balance_low_threshold_sui.to_string(),
     }))
 }
@@ -258,9 +268,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wallet_status_respects_the_configured_threshold() {
-        assert_eq!(wallet_status(999, 1_000), "low");
-        assert_eq!(wallet_status(1_000, 1_000), "ok");
+    fn wallet_status_respects_the_50_wal_and_5_sui_thresholds() {
+        const WAL_50: u64 = 50_000_000_000;
+        const SUI_5: u64 = 5_000_000_000;
+        assert_eq!(wallet_status(WAL_50 - 1, WAL_50, SUI_5, SUI_5), "low");
+        assert_eq!(wallet_status(WAL_50, WAL_50, SUI_5 - 1, SUI_5), "low");
+        assert_eq!(wallet_status(WAL_50, WAL_50, SUI_5, SUI_5), "ok");
     }
 
     #[test]
@@ -317,20 +330,22 @@ mod tests {
                     wal: "2000000000".to_string(),
                     status: "ok".to_string(),
                 }],
-                wal_threshold: "1000000".to_string(),
+                wal_threshold: "50000000000".to_string(),
+                sui_threshold: "5000000000".to_string(),
                 last_updated: "2026-08-10T00:00:00Z".to_string(),
             },
             sponsor_wallet: SponsorWallet {
                 address: Some("0x456".to_string()),
                 sui: "3000000000".to_string(),
-                sui_threshold: "100000000".to_string(),
+                sui_threshold: "5000000000".to_string(),
                 status: "ok".to_string(),
             },
         };
 
         let json = serde_json::to_value(response).unwrap();
         assert_eq!(json["uploader_pool"]["wallets"][0]["wal"], "2000000000");
-        assert_eq!(json["sponsor_wallet"]["sui_threshold"], "100000000");
+        assert_eq!(json["uploader_pool"]["sui_threshold"], "5000000000");
+        assert_eq!(json["sponsor_wallet"]["sui_threshold"], "5000000000");
     }
 
     #[test]
@@ -362,12 +377,14 @@ mod tests {
         let response = ConfigResponse {
             balance_monitor_interval_secs: 900,
             wallet_wal_low_threshold_frost: u64::MAX.to_string(),
-            sponsor_sui_low_threshold_mist: "100000000".to_string(),
+            wallet_sui_low_threshold_mist: "5000000000".to_string(),
+            sponsor_sui_low_threshold_mist: "5000000000".to_string(),
         };
 
         let json = serde_json::to_value(response).unwrap();
         assert_eq!(json["wallet_wal_low_threshold_frost"], u64::MAX.to_string());
         assert!(json["wallet_wal_low_threshold_frost"].is_string());
+        assert!(json["wallet_sui_low_threshold_mist"].is_string());
         assert!(json["sponsor_sui_low_threshold_mist"].is_string());
     }
 }

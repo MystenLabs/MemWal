@@ -3690,6 +3690,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 transaction_bytes: "dHgtYnl0ZXM=".into(),
                 signature: "signature".into(),
                 digest: "digest-1".into(),
+                sponsor_digest: None,
             }),
         };
 

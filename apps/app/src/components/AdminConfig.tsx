@@ -68,6 +68,13 @@ export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
         </div>
 
         <div className="admin-config-item">
+          <span className="admin-config-label">Uploader SUI Low Threshold</span>
+          <code className="admin-config-value" title={`${data.uploaderSuiLowThresholdMist} mist`}>
+            {formatTokenAmount(data.uploaderSuiLowThresholdMist)} SUI
+          </code>
+        </div>
+
+        <div className="admin-config-item">
           <span className="admin-config-label">Sponsor SUI Low Threshold</span>
           <code className="admin-config-value" title={`${data.sponsorSuiLowThresholdMist} mist`}>
             {formatTokenAmount(data.sponsorSuiLowThresholdMist)} SUI
