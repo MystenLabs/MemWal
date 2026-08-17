@@ -19,7 +19,12 @@ const { createSealClient } = await import("../sidecar/clients.js");
 const { appendSealPersistenceFence, InvalidSealPersistenceFenceError, parseSealPersistenceFence } = await import(
     "../sidecar/blob-metadata.js"
 );
-const { parseSealDecryptBatchItems, registerSealRoutes } = await import("../sidecar/routes/seal.js");
+const {
+    parseSealDecryptBatchItems,
+    registerSealRoutes,
+    sealEncryptCommitteeFailure,
+} = await import("../sidecar/routes/seal.js");
+const { SEAL_COMMITTEE_IDENTITY } = await import("../sidecar/config.js");
 
 const ROUTE_POLICY = {
     enableMigrationSealRoute: true,
@@ -217,6 +222,32 @@ test("the opt-in legacy seed encrypt route is registered", async () => {
     });
 });
 
+test("/seal/encrypt enforces the pinned committee before RPC work", async () => {
+    const missing = sealEncryptCommitteeFailure(
+        undefined,
+        true,
+        SEAL_COMMITTEE_IDENTITY
+    );
+    assert.equal(missing?.status, 400);
+
+    const mismatch = sealEncryptCommitteeFailure(
+        { ...SEAL_COMMITTEE_IDENTITY, threshold: SEAL_COMMITTEE_IDENTITY.threshold + 1 },
+        true,
+        SEAL_COMMITTEE_IDENTITY
+    );
+    assert.equal(mismatch?.status, 409);
+    assert.equal(mismatch?.body.code, "SEAL_COMMITTEE_MISMATCH");
+
+    assert.equal(
+        sealEncryptCommitteeFailure(
+            SEAL_COMMITTEE_IDENTITY,
+            true,
+            SEAL_COMMITTEE_IDENTITY
+        ),
+        null
+    );
+});
+
 test("the migration encrypt route is absent unless the sidecar opts in", async () => {
     const { server, baseUrl } = await listen({ ...ROUTE_POLICY, enableMigrationSealRoute: false });
     try {
@@ -237,6 +268,30 @@ test("/seal/decrypt 400s when sealAbi=v1-new omits registryId", async () => {
         });
         assert.equal(r.status, 400);
         assert.match(r.body.error!, /registryId/);
+    });
+});
+
+test("/seal/decrypt rejects malformed account and registry IDs during validation", async () => {
+    await withServer(async (baseUrl) => {
+        const badAccount = await post(baseUrl, "/seal/decrypt", {
+            data: DATA,
+            packageId: PKG,
+            accountId: "not-an-object-id",
+            sealAbi: "v1",
+        });
+        assert.equal(badAccount.status, 400);
+        assert.match(badAccount.body.error!, /accountId format/);
+
+        const badRegistry = await post(baseUrl, "/seal/decrypt-batch", {
+            items: [DATA],
+            packageId: PKG,
+            policyPackageId: ROUTE_POLICY.sealPolicyPackageId,
+            accountId: ACC,
+            registryId: `0x${"1".repeat(65)}`,
+            sealAbi: "v1-new",
+        });
+        assert.equal(badRegistry.status, 400);
+        assert.match(badRegistry.body.error!, /registryId format/);
     });
 });
 

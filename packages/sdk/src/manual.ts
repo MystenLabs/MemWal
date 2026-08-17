@@ -131,6 +131,16 @@ function sealServerConfigTotalWeight(configs: ResolvedSealServerConfig[]): numbe
     return configs.reduce((sum, config) => sum + config.weight, 0);
 }
 
+/** Encode arbitrary-size bytes without passing the whole payload as function arguments. */
+function bytesToBase64(bytes: Uint8Array): string {
+    const chunkSize = 0x8000;
+    const chunks: string[] = [];
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
+    }
+    return btoa(chunks.join(""));
+}
+
 // ============================================================
 // MemWalManual Client
 // ============================================================
@@ -349,7 +359,7 @@ export class MemWalManual {
 
         // Step 3: Send encrypted bytes (base64) + vector to server.
         // Server will upload to Walrus via upload-relay and return the blob_id.
-        const encryptedBase64 = btoa(String.fromCharCode(...encrypted));
+        const encryptedBase64 = bytesToBase64(encrypted);
         return this.signedRequest<RememberManualResult>("POST", "/api/remember/manual", {
             encrypted_data: encryptedBase64,
             vector,
@@ -444,10 +454,11 @@ export class MemWalManual {
                 continue;
             }
             if (normalizeSuiAddress(parsed.packageId) !== immutablePackageId) {
-                throw new Error(
-                    `MemWalManual: ciphertext ${blob.blob_id} packageId does not match ` +
+                console.error(
+                    `[MemWalManual] Skipping ciphertext ${blob.blob_id}: packageId does not match ` +
                         "the configured immutable packageId"
                 );
+                continue;
             }
             parsedBlobs.push({ ...blob, parsed });
         }
@@ -896,9 +907,13 @@ export class MemWalManual {
      * @returns RestoreResult with count of restored entries
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
-        return this.signedRequest<RestoreResult>("POST", "/api/restore", {
+        const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,
         });
+        // Relayers older than WALM-319 omit `truncated` entirely — treat
+        // "not present" as "not known to be truncated" rather than drop
+        // the field or require every relayer version to send it.
+        return { ...result, truncated: result.truncated ?? false };
     }
 }

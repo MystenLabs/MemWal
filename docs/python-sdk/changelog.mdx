@@ -29,15 +29,30 @@ questions:
   - What changes were made in memwal 0.1.4?
   - Where can I find the release history for the Walrus Memory Python SDK?
 answer: >-
-  The memwal changelog tracks all releases of the Walrus Memory Python SDK. Key milestones
-  include the 0.1.0 initial release with async/sync clients and middleware, 0.1.2 adding
-  max_distance to recall, 0.1.3 introducing RecallParams, and 0.1.4 adding temporal
-  anchoring with occurred_at for analyze methods.
+  The latest Python SDK release is 0.1.7. It adds deterministic async and sync mock clients and idempotency keys that make remember retries reuse the accepted paid job.
 ---
 
 Track what's new, changed, and fixed in `memwal` (Python).
 
 For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
+
+## 0.1.7
+
+### Added
+
+- Added deterministic async and sync mock clients for credential-free tests.
+- Added idempotency keys to collapse retries onto one paid remember job.
+
+## 0.1.6
+
+### Added
+
+- Added flush helpers for pending middleware auto-saves.
+- Added `truncated` to restore results for incomplete recovery.
+
+### Fixed
+
+- Linked `AUTH_REJECTED` errors to troubleshooting guidance.
 
 ## 0.1.5
 

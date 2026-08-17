@@ -1,21 +1,23 @@
-/** Memory Health API — checks if Walrus Memory is configured and server is reachable. */
+/** Memory Health API — checks the authenticated user's Memory connection. */
 
-import { getMemWalClient } from "@/feature/note/lib/pdw-client";
+import { authorizeMemoryRequest } from "@/feature/note/api/memory-request";
+import { createMemWalClient } from "@/feature/note/lib/pdw-client";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    // Try with env fallback (no per-user key needed for health check)
-    const memwal = getMemWalClient();
-    try {
-      const health = await memwal.health();
-      return Response.json({ ...health, status: "ok" });
-    } catch {
-      return Response.json({ status: "ok", server: "unreachable" });
-    }
+    const { key, accountId } = await authorizeMemoryRequest(request);
+    const health = await createMemWalClient(key, accountId).health();
+    return Response.json({ ...health, status: "ok" });
   } catch (error) {
     return Response.json(
-      { status: "not_configured", message: error instanceof Error ? error.message : "Walrus Memory not configured" },
-      { status: 503 },
+      {
+        status: "not_configured",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Walrus Memory credentials unavailable",
+      },
+      { status: 503 }
     );
   }
 }

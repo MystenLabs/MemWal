@@ -24,7 +24,10 @@ import {
     setMetadataAndTransferBlobs,
     type MetadataTransferBlob,
 } from "../blob-metadata.js";
-import { DURABLE_WALLET_FALLBACK_POLICY } from "../wallet.js";
+import {
+    ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+    DURABLE_WALLET_FALLBACK_POLICY,
+} from "../wallet.js";
 import { ownerMatchesRecipient, readBlobObject } from "./walrus-query.js";
 import { assertUploadExecutionIdentity, parseUploadExecutionIdentity } from "./health.js";
 
@@ -104,7 +107,15 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
             releaseWalrusUploadSlots = await acquireWalrusUploadSlots(keySlot, traceId);
             const { secretKey } = decodeSuiPrivateKey(privateKey);
             const signer = Ed25519Keypair.fromSecretKey(secretKey);
-            const digest = await setMetadataAndTransferBlobs(signer, normalized, targetOwner, packageId, agentId);
+            const digest = await setMetadataAndTransferBlobs(
+                signer,
+                normalized,
+                targetOwner,
+                packageId,
+                agentId,
+                {},
+                ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+            );
             console.log(`[walrus/set-metadata-batch] transferred ${normalized.length} blobs to owner`);
             res.json({ transferred: normalized.length, digest });
         } catch (err: any) {

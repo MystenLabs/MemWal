@@ -90,7 +90,7 @@ Extract memorable facts from a longer passage of text (preferences, habits, biog
 
 ### memwal_restore
 
-Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts only (`restored` / `skipped` / `total`) — does **not** return memory texts. Call `memwal_recall` afterwards to query the rebuilt index.
+Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts only (`restored` / `skipped` / `total`), does **not** return memory texts. Call `memwal_recall` afterwards to query the rebuilt index.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -112,7 +112,7 @@ Returns a one-time URL valid for **5 minutes**. If it expires, call the tool aga
 Remove the saved credentials from this machine (`~/.memwal/credentials.json`). Takes no parameters.
 
 <Warning>
-The on-chain delegate key registration is **not** revoked by `memwal_logout` — only the local file is wiped. Visit the [Walrus Memory dashboard](https://memory.walrus.xyz) to remove the delegate key from your account.
+The on-chain delegate key registration is **not** revoked by `memwal_logout`, only the local file is wiped. Visit the [Walrus Memory dashboard](https://memory.walrus.xyz) to remove the delegate key from your account.
 </Warning>
 
 <Note>
@@ -129,9 +129,9 @@ The stdio package accepts CLI flags and environment variables. **CLI takes prece
 | `--web-url <url>` | `MEMWAL_WEB_URL` | Override the dashboard URL used during login. |
 | `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in the Walrus Memory dashboard. |
 | `--namespace <name>` (alias `--ns`) | `MEMWAL_NAMESPACE` | Default memory namespace injected into memory tool calls that omit one. See [Default namespace](#default-namespace). |
-| `--login` (or `login` subcommand) | — | Force a re-login even when credentials exist. |
-| `--logout` | — | Wipe `~/.memwal/credentials.json` and exit. |
-| `--help`, `-h` | — | Print usage and exit. |
+| `--login` (or `login` subcommand) | Not applicable | Force a re-login even when credentials exist. |
+| `--logout` | Not applicable | Wipe `~/.memwal/credentials.json` and exit. |
+| `--help`, `-h` | Not applicable | Print usage and exit. |
 
 Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
 
@@ -144,11 +144,11 @@ calls that don't already carry one.
 
 Precedence, highest first:
 
-1. **Explicit per-call `namespace`** — a non-empty `namespace` in the tool
+1. **Explicit per-call `namespace`**, a non-empty `namespace` in the tool
    call is used as-is. The configured default never overrides it.
 2. **`--namespace` CLI flag** (alias `--ns`).
 3. **`MEMWAL_NAMESPACE` environment variable**.
-4. **Unset** — the call is forwarded without a `namespace` and the relayer
+4. **Unset**, the call is forwarded without a `namespace` and the relayer
    applies its own `"default"` namespace.
 
 CLI wins over the environment variable when both are set, matching every other
@@ -160,7 +160,7 @@ so agents normally pass one explicitly. A configured default is only used as a
 fallback if the agent calls `memwal_restore` without a namespace.
 </Note>
 
-Example — pin every memory call to a `work` namespace:
+Example, pin every memory call to a `work` namespace:
 
 ```json
 {
@@ -261,6 +261,21 @@ claude mcp add --transport http memwal https://relayer.memory.walrus.xyz/api/mcp
 
 If your client cannot attach headers from the CLI, edit the generated MCP config file to add them manually.
 
+### OAuth (Claude custom connectors)
+
+Claude's native "Add custom connector" flow speaks OAuth 2.1, not the explicit-header model above, it discovers an authorization server, dynamically registers itself as a client, and drives the user through a hosted consent screen instead of expecting a pasted bearer token.
+
+When configured, the hosted relayer additionally exposes:
+
+- `GET /.well-known/oauth-protected-resource` (+ the `/api/mcp`-suffixed variant Claude probes first), RFC 9728 resource metadata.
+- `GET /.well-known/oauth-authorization-server`, RFC 8414 metadata, advertising `code_challenge_methods_supported: ["S256"]` and `offline_access` (the scope that triggers Claude to request a refresh token).
+- `POST /oauth/register`, RFC 7591 dynamic client registration. Redirect URIs are checked against an allowlist (Anthropic's own callback domain, plus RFC 8252 loopback for Claude Code) rather than accepted from anywhere, self-serve registration for an *arbitrary* redirect target is not offered.
+- `GET /oauth/authorize`, `POST /oauth/token`, `POST /oauth/revoke`, the standard authorization-code + PKCE + refresh flow (RFC 6749/7636/7009). `/oauth/token` accepts both `application/x-www-form-urlencoded` (the spec-required content type) and `application/json`.
+
+Unlike the explicit-header and stdio flows, the OAuth path has the server generate and custody an encrypted delegate key on the user's behalf (`v1.<nonce>.<ciphertext>`, AES-256-GCM), Claude cannot hold a Sui wallet key itself, so something server-side has to be able to sign on its behalf. The consent screen states this plainly; the underlying delegate key is still revocable from the dashboard like any other.
+
+Adding the connector in Claude: use the hosted MCP URL (`https://relayer.memory.walrus.xyz/api/mcp`) as the connector URL, Claude handles discovery, registration, and consent automatically from there.
+
 ### When to prefer HTTP vs stdio
 
 Prefer **stdio** when:
@@ -286,6 +301,10 @@ The hosted relayer (and any self-hosted relayer) exposes the same MCP routes:
 | `GET /api/mcp` | Streamable HTTP server-to-client stream |
 | `POST /api/mcp` | Streamable HTTP JSON-RPC messages |
 | `DELETE /api/mcp` | Close a Streamable HTTP session |
+| `GET /.well-known/oauth-protected-resource` | OAuth resource metadata (RFC 9728, when configured) |
+| `GET /.well-known/oauth-authorization-server` | OAuth authorization-server metadata (RFC 8414) |
+| `POST /oauth/register` | Dynamic client registration (RFC 7591) |
+| `GET /oauth/authorize`, `POST /oauth/token`, `POST /oauth/revoke` | Authorization-code + PKCE + refresh flow |
 
 The Rust relayer auto-starts a TypeScript sidecar and forwards MCP traffic to it over loopback. The sidecar resolves MCP bearer credentials into normal Walrus Memory SDK sessions, so MCP tool calls go through the **same SEAL, Walrus, and pgvector paths** as direct SDK calls.
 
@@ -317,6 +336,62 @@ Self-hosted relayers expose the same public MCP routes as the hosted relayer. Th
 
 See [Environment Variables](/reference/environment-variables) for the full list including SEAL, Walrus, embeddings, and database settings.
 
+### MCP OAuth 2.1 Configuration
+
+Claude custom connector support uses OAuth 2.1. Most values are derived from `MEMWAL_RELAYER_URL`, only one secret is required.
+
+#### Required delegate encryption key
+
+| Variable | Description |
+| --- | --- |
+| `MCP_OAUTH_DELEGATE_ENCRYPTION_KEY` | AES-256-GCM key (32 bytes, base64url-encoded, no padding) |
+
+**Why is this needed?**
+
+Claude Code (an AI agent) cannot hold a Sui wallet private key itself. The OAuth flow solves this:
+
+```
+1. User clicks "Add connector" in Claude
+2. Browser generates a delegate key pair (private key NEVER leaves the browser)
+3. Browser encrypts the private key with the server's key → sends to server
+4. Server stores the encrypted key in the database
+5. When an OAuth token is verified → server decrypts the private key
+6. Server uses the private key to sign MCP requests on behalf of the user
+```
+
+The `MCP_OAUTH_DELEGATE_ENCRYPTION_KEY` is the **server's symmetric encryption key** used to encrypt/decrypt every user's delegate private keys stored in the database.
+
+**Generate a key:**
+
+```bash
+openssl rand -base64 32 | tr -d '=' | tr '+/' '-_'
+# Output example: GxK9pL2mQr8vN3jF5Ys7hT6wZ1cD4eR8
+```
+
+**Important:**
+- Generate once and persist, changing this key invalidates all existing OAuth tokens
+- The key never leaves the server
+- Delegate private keys are encrypted at rest and only decrypted in-memory when signing
+
+#### Derived Values (no config needed)
+
+| From | Value |
+| --- | --- |
+| `MEMWAL_RELAYER_URL` | `issuer` |
+| `issuer + "/api/mcp"` | `resource` |
+| `issuer` (relayer → memory) | `consent_url` |
+
+#### Optional Overrides
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MCP_OAUTH_ACCESS_TTL_SECS` | `3600` | Access token lifetime |
+| `MCP_OAUTH_REFRESH_TTL_SECS` | `2592000` | Refresh token lifetime (30 days) |
+| `MCP_OAUTH_CODE_TTL_SECS` | `300` | Authorization code lifetime |
+| `MCP_OAUTH_SESSION_TTL_SECS` | `900` | OAuth session lifetime |
+| `MCP_OAUTH_ALLOWED_REGISTRATION_HOSTS` | `claude.ai` | Redirect URI allowlist |
+| `MCP_OAUTH_REGISTRATION_PER_HOUR_PER_IP` | `20` | DCR rate limit |
+
 ## Logout semantics
 
 `memwal_logout` and `--logout` only delete local credentials from this machine.
@@ -332,7 +407,7 @@ If the delegate itself should stop working, revoke it from the dashboard too.
 
 ### Tools aren't visible to the agent
 
-Quit and relaunch your MCP client — MCP servers only load at startup. If you used `claude mcp add`, run `claude mcp list` to confirm `memwal` is registered before restarting Claude Code.
+Quit and relaunch your MCP client, MCP servers only load at startup. If you used `claude mcp add`, run `claude mcp list` to confirm `memwal` is registered before restarting Claude Code.
 
 ### Only `memwal_login` shows up
 

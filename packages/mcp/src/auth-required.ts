@@ -37,6 +37,8 @@ interface RpcMessage {
 const TOOL_DEFINITIONS = [
     {
         name: "memwal_remember",
+        title: "Remember a Fact",
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description:
             "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
         inputSchema: {
@@ -51,6 +53,8 @@ const TOOL_DEFINITIONS = [
     },
     {
         name: "memwal_recall",
+        title: "Recall Memories",
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description:
             "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.",
         inputSchema: {
@@ -66,6 +70,8 @@ const TOOL_DEFINITIONS = [
     },
     {
         name: "memwal_analyze",
+        title: "Analyze and Remember",
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description:
             "Extract memorable facts from a passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory.",
         inputSchema: {
@@ -80,13 +86,15 @@ const TOOL_DEFINITIONS = [
     },
     {
         name: "memwal_restore",
+        title: "Restore Memory Index",
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts only.",
+            "Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts and truncated status; call again with a higher limit when truncated=true.",
         inputSchema: {
             type: "object",
             properties: {
                 namespace: { type: "string", minLength: 1 },
-                limit: { type: "integer", minimum: 1, maximum: 500, default: 10 },
+                limit: { type: "integer", minimum: 1, maximum: 100, default: 10 },
             },
             required: ["namespace"],
             additionalProperties: false,
@@ -94,6 +102,8 @@ const TOOL_DEFINITIONS = [
     },
     {
         name: "memwal_login",
+        title: "Sign In to Walrus Memory",
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description:
             "Sign this MCP client into your Walrus Memory account by opening a browser. Run once when the agent reports Walrus Memory is not signed in. Opens the dashboard in the default browser, waits for wallet approval, then writes credentials to ~/.memwal/credentials.json. Other memwal_* tools become usable on the next call after a successful login.",
         inputSchema: {

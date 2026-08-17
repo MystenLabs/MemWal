@@ -19,6 +19,28 @@ import {
 } from "./input";
 import { detectMemoriesForLexical } from "../lib/memory-detector";
 import { generateNoteTitle } from "../domain/note";
+import {
+  authorizeMemoryRequest,
+  MemoryRequestError,
+} from "./memory-request";
+import { memoryTextWithinLimit } from "./memory-policy";
+
+function memoryRequestTrpcError(error: unknown): never {
+  if (!(error instanceof MemoryRequestError)) throw error;
+  const code = {
+    400: "BAD_REQUEST",
+    401: "UNAUTHORIZED",
+    413: "PAYLOAD_TOO_LARGE",
+    429: "TOO_MANY_REQUESTS",
+    503: "SERVICE_UNAVAILABLE",
+  }[error.status] as
+    | "BAD_REQUEST"
+    | "UNAUTHORIZED"
+    | "PAYLOAD_TOO_LARGE"
+    | "TOO_MANY_REQUESTS"
+    | "SERVICE_UNAVAILABLE";
+  throw new TRPCError({ code, message: error.message });
+}
 
 export const noteRouter = router({
   // ═══════════════════════════════════════════════════════════════
@@ -175,6 +197,15 @@ export const noteRouter = router({
   detectMemories: protectedProcedure
     .input(detectMemoriesInput)
     .mutation(async ({ ctx, input }) => {
+      // Revalidate the active session and consume the same Redis-backed write
+      // budget as the REST memory routes before any note or outbound work.
+      let credentials: { key: string; accountId: string };
+      try {
+        credentials = await authorizeMemoryRequest(ctx.request);
+      } catch (error) {
+        memoryRequestTrpcError(error);
+      }
+
       // Verify note ownership
       const note = await ctx.db.query.notes.findFirst({
         where: eq(notes.id, input.noteId),
@@ -190,9 +221,21 @@ export const noteRouter = router({
 
       // Use provided plainText (current editor content) or fall back to database
       const plainText = input.plainText ?? note.plainText;
+      if (!memoryTextWithinLimit(plainText)) {
+        throw new TRPCError({
+          code: "PAYLOAD_TOO_LARGE",
+          message: "Memory text is too large",
+        });
+      }
 
-      // Extract memories using AI
-      const memories = await detectMemoriesForLexical(ctx.userId, plainText, ctx.memwalKey, ctx.memwalAccountId);
+      // analyze() persists extracted facts, so it must use only the credentials
+      // returned by the session-bound memory-write authorization above.
+      const memories = await detectMemoriesForLexical(
+        ctx.userId,
+        plainText,
+        credentials.key,
+        credentials.accountId
+      );
 
       // Return memory data (client will inject as Lexical nodes)
       return {

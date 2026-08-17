@@ -17,6 +17,8 @@ const WALRUS_LOW_BALANCE_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(600
 const WALRUS_QUEUE_SATURATION_ALERT_DEDUP_SECS_ENV: &str =
     "WALRUS_QUEUE_SATURATION_ALERT_DEDUP_SECS";
 const WALRUS_QUEUE_SATURATION_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(1800);
+const WALLET_BALANCE_LOW_ALERT_DEDUP_SECS_ENV: &str = "WALLET_BALANCE_LOW_ALERT_DEDUP_SECS";
+const WALLET_BALANCE_LOW_ALERT_DEDUP_DEFAULT: Duration = Duration::from_secs(43200);
 
 /// Mirrors the `@mysten/walrus` dep version in
 /// `services/server/scripts/package.json`. Bump this constant in lockstep
@@ -92,6 +94,9 @@ pub struct AlertManager {
     /// and the monitor keeps polling every interval while the backlog lasts,
     /// so one notification per network per window is enough.
     walrus_queue_saturation_dedup: AlertDedup,
+    /// Suppresses wallet balance low spam. Keyed by `(wallet_type:token, address)`
+    /// so WAL and SUI can each alert once for the same wallet per dedup window.
+    wallet_balance_low_dedup: AlertDedup,
 }
 
 impl AlertManager {
@@ -121,6 +126,10 @@ impl AlertManager {
             walrus_queue_saturation_dedup: AlertDedup::new(dedup_window_from_env(
                 WALRUS_QUEUE_SATURATION_ALERT_DEDUP_SECS_ENV,
                 WALRUS_QUEUE_SATURATION_ALERT_DEDUP_DEFAULT,
+            )),
+            wallet_balance_low_dedup: AlertDedup::new(dedup_window_from_env(
+                WALLET_BALANCE_LOW_ALERT_DEDUP_SECS_ENV,
+                WALLET_BALANCE_LOW_ALERT_DEDUP_DEFAULT,
             )),
         }
     }
@@ -237,6 +246,26 @@ impl AlertManager {
             return Ok(());
         }
         let payload = SlackPayload::for_walrus_upload_queue_saturated(&alert);
+        slack.send_payload(&payload).await
+    }
+
+    pub async fn notify_wallet_balance_low(
+        &self,
+        alert: WalletBalanceLowAlert,
+    ) -> Result<(), AlertError> {
+        let Some(slack) = &self.slack else {
+            return Ok(());
+        };
+        // Dedup by the full address; abbreviating here could make two distinct
+        // wallets with the same prefix/suffix suppress each other's alerts.
+        let key = (
+            format!("{}:{}", alert.wallet_type, alert.token),
+            alert.address.clone(),
+        );
+        if self.wallet_balance_low_dedup.should_suppress(key) {
+            return Ok(());
+        }
+        let payload = SlackPayload::for_wallet_balance_low(&alert);
         slack.send_payload(&payload).await
     }
 }
@@ -394,6 +423,18 @@ pub struct WalrusWalletBalanceLowAlert {
     pub wallet_index: usize,
     pub configured_wallets: usize,
     pub error: String,
+}
+
+/// Fired when a wallet balance falls below a configured threshold during
+/// proactive monitoring (not during a transaction failure). This is a
+/// forward-looking alert distinct from the in-flight Walrus job failures.
+#[derive(Debug, Clone)]
+pub struct WalletBalanceLowAlert {
+    pub wallet_type: String,
+    pub address: String,
+    pub balance: u64,
+    pub threshold: u64,
+    pub token: String,
 }
 
 #[derive(Debug)]
@@ -726,6 +767,57 @@ If the wallet is being topped up, rotate or temporarily remove that key from poo
             ],
         }
     }
+
+    fn for_wallet_balance_low(alert: &WalletBalanceLowAlert) -> Self {
+        let title = format!(
+            "⚠️ Wallet Balance Low: {} {}",
+            alert.wallet_type, alert.token
+        );
+        let abbrev_address = short_address(&alert.address);
+        let balance_amount = format_token_amount(alert.balance);
+        let threshold_amount = format_token_amount(alert.threshold);
+        let percent_remaining = if alert.threshold > 0 {
+            (alert.balance as f64 / alert.threshold as f64) * 100.0
+        } else {
+            0.0
+        };
+        let summary = format!(
+            "Wallet balance alert on {}: {} balance is {} {}, below threshold of {} {} ({:.1}% remaining)",
+            alert.wallet_type, abbrev_address, balance_amount, alert.token, threshold_amount, alert.token, percent_remaining
+        );
+        let action = format!(
+            "*Action (ops):* Top up the {} wallet at {} with {} tokens.",
+            alert.wallet_type, abbrev_address, alert.token
+        );
+        let details = format!(
+            "*Wallet type:* `{}`\n*Address:* `{}`\n*Balance:* {} {}\n*Threshold:* {} {}\n*Remaining:* {:.1}%",
+            alert.wallet_type,
+            alert.address,
+            balance_amount,
+            alert.token,
+            threshold_amount,
+            alert.token,
+            percent_remaining
+        );
+
+        Self {
+            text: summary.clone(),
+            blocks: vec![
+                SlackBlock::Header {
+                    text: plain_text(title),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(summary),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(action),
+                },
+                SlackBlock::Section {
+                    text: mrkdwn(details),
+                },
+            ],
+        }
+    }
 }
 
 fn plain_text(text: String) -> SlackText {
@@ -765,6 +857,23 @@ fn truncate(value: &str, max_len: usize) -> String {
 }
 
 fn format_wal_amount(mist: u64) -> String {
+    let integer = mist / 1_000_000_000;
+    let mut fractional = format!("{:09}", mist % 1_000_000_000);
+
+    while fractional.ends_with('0') {
+        fractional.pop();
+    }
+
+    if fractional.is_empty() {
+        format!("{}.0", integer)
+    } else {
+        format!("{}.{}", integer, fractional)
+    }
+}
+
+/// Format a token amount (mist/frost) to human-readable form.
+/// Generic for any token that uses 9 decimal places (SUI, WAL, etc).
+fn format_token_amount(mist: u64) -> String {
     let integer = mist / 1_000_000_000;
     let mut fractional = format!("{:09}", mist % 1_000_000_000);
 
@@ -1056,5 +1165,93 @@ mod tests {
         assert!(json.contains("default"));
         assert!(json.contains("low-wal-1"));
         assert!(json.contains("wallet"));
+    }
+
+    #[test]
+    fn wallet_balance_low_payload_includes_balance_and_threshold() {
+        let payload = SlackPayload::for_wallet_balance_low(&WalletBalanceLowAlert {
+            wallet_type: "sponsor".to_string(),
+            address: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                .to_string(),
+            balance: 500_000_000,
+            threshold: 1_000_000_000,
+            token: "SUI".to_string(),
+        });
+
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("sponsor"));
+        assert!(json.contains("SUI"));
+        assert!(json.contains("0.5"));
+        assert!(json.contains("1.0"));
+        assert!(json.to_lowercase().contains("balance"));
+        assert!(json.contains("Top up"));
+    }
+
+    #[test]
+    fn wallet_balance_low_payload_calculates_percentage_correctly() {
+        let payload = SlackPayload::for_wallet_balance_low(&WalletBalanceLowAlert {
+            wallet_type: "uploader_pool".to_string(),
+            address: "0xabcdef".to_string(),
+            balance: 250_000_000,
+            threshold: 1_000_000_000,
+            token: "WAL".to_string(),
+        });
+
+        let json = serde_json::to_string(&payload).unwrap();
+        // 250M / 1B = 25%
+        assert!(json.contains("25.0"));
+    }
+
+    #[test]
+    fn wallet_balance_low_payload_abbreviates_address() {
+        let full_address = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        let payload = SlackPayload::for_wallet_balance_low(&WalletBalanceLowAlert {
+            wallet_type: "sponsor".to_string(),
+            address: full_address.to_string(),
+            balance: 10_000_000,
+            threshold: 100_000_000,
+            token: "SUI".to_string(),
+        });
+
+        let json = serde_json::to_string(&payload).unwrap();
+        // Should show full address in details but abbreviated in summary
+        assert!(json.contains(full_address));
+    }
+
+    #[test]
+    fn wallet_balance_low_dedup_key_formation() {
+        let dedup = AlertDedup::new(Duration::from_secs(600));
+        let address = "0x1234...abcd".to_string();
+        // First WAL alert should fire, then repeat WAL should be suppressed.
+        assert!(!dedup.should_suppress(("uploader:WAL".to_string(), address.clone())));
+        assert!(dedup.should_suppress(("uploader:WAL".to_string(), address.clone())));
+        // SUI for the same uploader remains an independent actionable alert.
+        assert!(!dedup.should_suppress(("uploader:SUI".to_string(), address.clone())));
+        // Sponsor SUI is also independent.
+        assert!(!dedup.should_suppress(("sponsor:SUI".to_string(), address)));
+    }
+
+    #[test]
+    fn format_token_amount_handles_zero() {
+        let amount = format_token_amount(0);
+        assert_eq!(amount, "0.0");
+    }
+
+    #[test]
+    fn format_token_amount_handles_whole_numbers() {
+        let amount = format_token_amount(1_000_000_000);
+        assert_eq!(amount, "1.0");
+    }
+
+    #[test]
+    fn format_token_amount_handles_fractions() {
+        let amount = format_token_amount(1_500_000_000);
+        assert_eq!(amount, "1.5");
+    }
+
+    #[test]
+    fn format_token_amount_strips_trailing_zeros() {
+        let amount = format_token_amount(1_100_000_000);
+        assert_eq!(amount, "1.1");
     }
 }

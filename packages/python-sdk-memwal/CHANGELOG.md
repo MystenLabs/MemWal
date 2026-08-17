@@ -1,5 +1,23 @@
 # memwal
 
+## 0.1.7
+
+### Added
+
+- Added deterministic async and sync mock clients for credential-free tests.
+- Added idempotency keys to collapse retries onto one paid remember job.
+
+## 0.1.6
+
+### Added
+
+- Added flush helpers for pending middleware auto-saves.
+- Added `truncated` to restore results for incomplete recovery.
+
+### Fixed
+
+- Linked `AUTH_REJECTED` errors to troubleshooting guidance.
+
 ## 0.1.5
 
 ### Added

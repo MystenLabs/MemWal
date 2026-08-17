@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
+import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool } from "./util.js";
 
 const RECALL_INPUT = {
@@ -37,10 +38,14 @@ export function registerRecallTool(
     server: McpServer,
     session: MemWalSession
 ): void {
-    server.tool(
+    server.registerTool(
         "memwal_recall",
-        "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by relevance.",
-        RECALL_INPUT,
+        {
+            ...TOOL_METADATA.memwal_recall,
+            description:
+                "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by relevance.",
+            inputSchema: RECALL_INPUT,
+        },
         wrapTool<{ query: string; limit: number; namespace?: string }>(async ({ query, limit, namespace }) => {
             const result = await session.memwal.recall(query, limit, namespace);
             if (result.results.length === 0) {

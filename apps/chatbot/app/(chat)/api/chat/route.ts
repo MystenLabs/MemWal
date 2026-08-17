@@ -15,6 +15,7 @@ import { after } from "next/server";
 import { createResumableStreamContext } from "resumable-stream";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
+import { memoryNamespaceForUser } from "@/lib/ai/memory-namespace";
 import { allowedModelIds } from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel, getMemWalModel } from "@/lib/ai/providers";
@@ -44,6 +45,29 @@ import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
 export const maxDuration = 60;
+
+/**
+ * Summarize an error for logging without the full object. AI SDK errors
+ * thrown from a provider call (title generation, or the main streamText
+ * call) are commonly APICallError-shaped and carry requestBodyValues /
+ * responseBody — the actual outgoing prompt, which for the main chat can
+ * include memory content withMemWal injected via recall. `console.error`
+ * prints an Error's own enumerable extra properties alongside the message,
+ * so logging the raw object would put full conversation (and recalled
+ * memory) content into server logs on every upstream provider hiccup.
+ * message/name/statusCode are enough to debug from.
+ */
+function summarizeErrorForLogging(error: unknown): unknown {
+  if (!(error instanceof Error)) {
+    return error;
+  }
+  const statusCode = (error as { statusCode?: unknown }).statusCode;
+  return {
+    name: error.name,
+    message: error.message,
+    ...(statusCode === undefined ? {} : { statusCode }),
+  };
+}
 
 function getStreamContext() {
   try {
@@ -76,6 +100,10 @@ export async function POST(request: Request) {
     }
 
     if (!session?.user) {
+      return new ChatbotError("unauthorized:chat").toResponse();
+    }
+    const memoryNamespace = memoryNamespaceForUser(session.user.id);
+    if (!memoryNamespace) {
       return new ChatbotError("unauthorized:chat").toResponse();
     }
 
@@ -160,7 +188,13 @@ export async function POST(request: Request) {
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
       execute: async ({ writer: dataStream }) => {
         const result = streamText({
-          model: useMemWal !== false ? getMemWalModel(selectedChatModel, memwalKey, memwalAccountId) : getLanguageModel(selectedChatModel),
+          model: useMemWal !== false
+            ? getMemWalModel(selectedChatModel, {
+                namespace: memoryNamespace,
+                memwalKey,
+                memwalAccountId,
+              })
+            : getLanguageModel(selectedChatModel),
           system: systemPrompt({ selectedChatModel, requestHints }),
           messages: modelMessages,
           stopWhen: stepCountIs(5),
@@ -185,7 +219,11 @@ export async function POST(request: Request) {
             createDocument: createDocument({ session, dataStream }),
             updateDocument: updateDocument({ session, dataStream }),
             requestSuggestions: requestSuggestions({ session, dataStream }),
-            saveMemory: saveMemory({ memwalKey, memwalAccountId }),
+            saveMemory: saveMemory({
+              namespace: memoryNamespace,
+              memwalKey,
+              memwalAccountId,
+            }),
           },
           experimental_telemetry: {
             isEnabled: isProductionEnvironment,
@@ -198,9 +236,24 @@ export async function POST(request: Request) {
         );
 
         if (titlePromise) {
-          const title = await titlePromise;
-          dataStream.write({ type: "data-chat-title", data: title });
-          updateChatTitleById({ chatId: id, title });
+          try {
+            const title = await titlePromise;
+            dataStream.write({ type: "data-chat-title", data: title });
+            updateChatTitleById({ chatId: id, title });
+          } catch (error) {
+            // Title generation is a non-fatal side effect of the response
+            // already being streamed below it (dataStream.merge above).
+            // Left unguarded, a title-model failure (bad slug, no credits,
+            // upstream 5xx) threw here and was caught by createUIMessageStream's
+            // own onError below, which turned an unrelated, recoverable
+            // title-gen failure into a fatal "error" part on the whole chat
+            // response — even though the real answer above continued to
+            // stream successfully. The chat still works without a title.
+            console.error(
+              "[chat] title generation failed:",
+              summarizeErrorForLogging(error)
+            );
+          }
         }
       },
       generateId: generateUUID,
@@ -242,6 +295,10 @@ export async function POST(request: Request) {
         }
       },
       onError: (error) => {
+        console.error(
+          "[chat] stream execute() error:",
+          summarizeErrorForLogging(error)
+        );
         if (
           error instanceof Error &&
           error.message?.includes(

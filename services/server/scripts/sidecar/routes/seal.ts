@@ -46,13 +46,13 @@ export function sealKeyFetchErrorCode(err: unknown): "SHARED_SERVICE_UNAVAILABLE
     return isRetryableRpcError(err) ? "SHARED_SERVICE_UNAVAILABLE" : "KEY_FETCH_FAILED";
 }
 
-// SEAL_REQUIRE_COMMITTEE_IDENTITY=true (or 1/yes) makes /seal/encrypt reject
+// SEAL_REQUIRE_COMMITTEE_IDENTITY=true (or 1/yes/on) makes /seal/encrypt reject
 // requests that omit expectedSealCommitteeIdentity, so migration deployments
 // can enforce the "the Rust caller always pins the committee" contract.
 // Parsed once at module load, following config.ts boolean conventions.
 export const SEAL_REQUIRE_COMMITTEE_IDENTITY = (() => {
     const raw = (process.env.SEAL_REQUIRE_COMMITTEE_IDENTITY || "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes";
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
 })();
 
 const SIDECAR_ENABLE_LEGACY_SEED_ROUTE = (() => {

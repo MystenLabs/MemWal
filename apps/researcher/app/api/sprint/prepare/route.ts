@@ -1,6 +1,7 @@
 import { generateObject } from "ai";
 import { z } from "zod";
 import { getSession } from "@/lib/auth/session";
+import { sessionMemoryCredentials } from "@/lib/auth/session-memory";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { getSprintsByIds, saveChat, updateChatSprintContext } from "@/lib/db/queries";
 import { recallFromMemWal } from "@/lib/sprint/memwal";
@@ -45,15 +46,15 @@ export async function POST(request: Request) {
   }
 
   const { chatId, sprintIds, visibility = "private" } = body;
-  const memwalKey = session.user.privateKey || process.env.MEMWAL_PRIVATE_KEY;
-  const memwalAccountId = session.user.accountId || process.env.MEMWAL_ACCOUNT_ID;
+  const credentials = sessionMemoryCredentials(session.user);
   const userId = session.user.id;
 
-  if (!memwalKey) {
-    return new ChatbotError("bad_request:api", "Walrus Memory key is required for sprint preparation").toResponse();
+  if (!credentials) {
+    return new ChatbotError("bad_request:api", "Session has no Walrus Memory credentials").toResponse();
   }
 
-  console.log(`[sprint:prepare] memwalKey source=${session.user.privateKey ? "session" : "env"}, key=${memwalKey.slice(0, 8)}...`);
+  const { key: memwalKey, accountId: memwalAccountId } = credentials;
+  console.log("[sprint:prepare] using session-bound Walrus Memory credentials");
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({

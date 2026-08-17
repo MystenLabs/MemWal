@@ -115,6 +115,18 @@ test("sealApproveArgsError enforces the ids and the sealAbi/registryId pairing",
     assert.match(sealApproveArgsError({ ...base, sealAbi: undefined }, POLICY)!, /sealAbi/, "sealAbi is required");
     assert.match(sealApproveArgsError({ sealAbi: "v1" }, POLICY)!, /packageId/, "packageId and accountId are required");
     assert.match(sealApproveArgsError({ ...base, packageId: "bad", sealAbi: "v1" }, POLICY)!, /packageId format/);
+    for (const accountId of ["bad", "0x", `0x${"1".repeat(65)}`, 123, {}]) {
+        assert.match(
+            sealApproveArgsError({ ...base, accountId, sealAbi: "v1" } as any, POLICY)!,
+            /accountId format/,
+        );
+    }
+    for (const registryId of ["bad", "0x", `0x${"1".repeat(65)}`, 123, {}]) {
+        assert.match(
+            sealApproveArgsError({ ...base, registryId, sealAbi: "v1-new" } as any, POLICY)!,
+            /registryId format/,
+        );
+    }
     assert.match(sealApproveArgsError({ ...base, sealAbi: "v1" }, { ...POLICY, allowLegacySealAbi: false })!, /disabled/);
     assert.match(sealApproveArgsError({ ...base, sealAbi: "v1-new", registryId: REG, policyPackageId: PKG }, POLICY)!, /configured/);
 });

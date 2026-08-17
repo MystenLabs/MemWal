@@ -2,58 +2,34 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import { FetchCreateContextFnOptions } from "@trpc/server/adapters/fetch";
 import superjson from "superjson";
 import { db } from "@/shared/lib/db";
-import { zkLoginSessions, walletSessions, users } from "@/shared/db/schema";
+import { walletSessions } from "@/shared/db/schema";
 import { eq } from "drizzle-orm";
 
 export type Context = {
   db: typeof db;
+  request: Request;
   userId: string | null;
-  /** Per-user Walrus Memory delegate key (null if user has no stored key). */
-  memwalKey: string | null;
-  /** Per-user Walrus Memory account ID (null if user has no stored account). */
-  memwalAccountId: string | null;
 };
 
 function getSessionIdFromRequest(req: Request): string | null {
   return req.headers.get("x-session-id");
 }
 
-/** Load user's Walrus Memory delegate key from the users table. Falls back to env vars. */
-async function loadUserMemwalKey(userId: string) {
-  try {
-    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    return {
-      memwalKey: user?.delegatePrivateKey ?? process.env.MEMWAL_PRIVATE_KEY ?? null,
-      memwalAccountId: user?.delegateAccountId ?? process.env.MEMWAL_ACCOUNT_ID ?? null,
-    };
-  } catch {
-    return {
-      memwalKey: process.env.MEMWAL_PRIVATE_KEY ?? null,
-      memwalAccountId: process.env.MEMWAL_ACCOUNT_ID ?? null,
-    };
-  }
-}
-
 export const createContext = async (
   opts: FetchCreateContextFnOptions
 ): Promise<Context> => {
-  const noAuth: Context = { db, userId: null, memwalKey: null, memwalAccountId: null };
+  const noAuth: Context = {
+    db,
+    request: opts.req,
+    userId: null,
+  };
   const sessionId = getSessionIdFromRequest(opts.req);
   if (!sessionId) return noAuth;
 
-  // Try zkLogin session first
-  const [zkSession] = await db
-    .select()
-    .from(zkLoginSessions)
-    .where(eq(zkLoginSessions.id, sessionId))
-    .limit(1);
-
-  if (zkSession?.userId && zkSession.expiresAt > new Date()) {
-    const keys = await loadUserMemwalKey(zkSession.userId);
-    return { db, userId: zkSession.userId, ...keys };
-  }
-
-  // Try wallet/enoki session
+  // Sessions are resolved only from wallet/enoki sessions, which require proof
+  // of address ownership to create. The legacy zklogin_sessions table (written
+  // by the removed custom zkLogin flow) is deliberately no longer trusted here,
+  // so a leftover or re-introduced row can never authenticate a request.
   const [walletSession] = await db
     .select()
     .from(walletSessions)
@@ -61,8 +37,7 @@ export const createContext = async (
     .limit(1);
 
   if (walletSession?.userId && walletSession.expiresAt > new Date()) {
-    const keys = await loadUserMemwalKey(walletSession.userId);
-    return { db, userId: walletSession.userId, ...keys };
+    return { db, request: opts.req, userId: walletSession.userId };
   }
 
   return noAuth;

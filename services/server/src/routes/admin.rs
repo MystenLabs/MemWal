@@ -121,6 +121,13 @@ pub async fn stats(
 // ============================================================
 
 /// GET /health
+///
+/// Public and unauthenticated by design (registered under `public_routes`
+/// in `main.rs`) — it does not accept or validate credentials, so a `200`
+/// here means only "the server process is up," not "your delegate
+/// key/account ID are valid." A caller preflighting credentials before a
+/// signed call should not treat this as a substitute for that call
+/// succeeding (WALM-318).
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -413,6 +420,34 @@ pub async fn ask(
 // /api/restore
 // ============================================================
 
+/// Slice `all_missing` to at most `limit` entries, reporting whether more
+/// than `limit` were available. Kept as its own function (rather than a
+/// slice plus a separately-derived boolean inline in `restore()`) so the
+/// pairing is computed — and tested — as one unit: a caller of this
+/// function cannot get the returned page out of sync with whether it was
+/// truncated.
+///
+/// This only sees truncation applied *after* `query_blobs_by_owner`
+/// returns: that sidecar call itself bounds the raw candidates it fetches
+/// (shared across the owner's namespaces, hard-capped regardless of
+/// `limit`), so `truncated == false` here does not guarantee every missing
+/// blob in the namespace was found — see WALM-317's PR discussion.
+fn paginate_missing_blobs(all_missing: Vec<String>, limit: usize) -> (Vec<String>, bool) {
+    let truncated = all_missing.len() > limit;
+    let page = all_missing.into_iter().take(limit).collect();
+    (page, truncated)
+}
+
+/// Clamp `/api/restore`'s `body.limit` to a sane range (GH #501 / WALM-299).
+///
+/// Ceiling of 100 mirrors `/api/ask`'s `body.limit.unwrap_or(5).min(100)`.
+/// Floor of 1 matters too: the sidecar's query-blobs route treats `limit: 0`
+/// as "no limit supplied" and falls back to an *unbounded* raw chain scan,
+/// so passing 0 straight through would defeat this clamp's entire purpose.
+fn clamp_restore_limit(limit: usize) -> usize {
+    limit.clamp(1, 100)
+}
+
 /// POST /api/restore
 ///
 /// Restore a namespace from Walrus:
@@ -430,7 +465,18 @@ pub async fn restore(
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
-    let limit = body.limit;
+
+    // GH #501 / WALM-299: owner-scoped call-frequency guard, applied before
+    // any Walrus/SEAL work so a caller that's already hammering restore()
+    // fails cheaply. See `rate_limit::check_restore_call_rate_limit` for why
+    // this is on top of the generic account rate limiter.
+    crate::rate_limit::check_restore_call_rate_limit(&state, owner).await?;
+
+    // GH #501 / WALM-299: without this, a misbehaving or malicious caller
+    // could request an unbounded number of blobs to download + SEAL-decrypt
+    // in a single call. See `clamp_restore_limit` for why both a floor and
+    // a ceiling are required.
+    let limit = clamp_restore_limit(body.limit);
     tracing::info!("restore: owner={} ns={} limit={}", owner, namespace, limit);
 
     // Prefer the client-built SessionKey; fall back to legacy
@@ -453,7 +499,7 @@ pub async fn restore(
         owner,
         namespace
     );
-    let on_chain_blobs = walrus::query_blobs_by_owner(
+    let (on_chain_blobs, source_capped) = walrus::query_blobs_by_owner(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
@@ -467,36 +513,61 @@ pub async fn restore(
     let total = all_blob_ids.len();
 
     if total == 0 {
+        // source_capped, not unconditionally false: the raw candidate fetch
+        // can hit its cap fulfilling OTHER namespaces before this one is
+        // even filtered out, so zero found here doesn't rule out more
+        // existing that were never fetched (WALM-319).
         return Ok(Json(RestoreResponse {
             restored: 0,
             skipped: 0,
             total: 0,
             namespace: namespace.clone(),
             owner: owner.clone(),
+            truncated: source_capped,
         }));
     }
 
-    // Step 2: Check which blobs already exist in local DB → only restore missing ones
+    // Step 2: Check which blobs already exist in local DB → only restore missing ones.
+    // Also exclude blob_ids that have permanently failed to restore before
+    // (GH #501 / WALM-299 negative cache — see `db.record_restore_failure`).
+    // A foreign/attacker blob that already failed SEAL decrypt or UTF-8
+    // validation for this owner+namespace is never re-downloaded and
+    // re-decrypt-attempted on a later call; it's already correctly reported
+    // as "skipped", same as any other missing-but-excluded blob.
     let existing_blob_ids = state.db.get_blobs_by_namespace(owner, namespace).await?;
-    let existing_set: std::collections::HashSet<&str> =
-        existing_blob_ids.iter().map(|s| s.as_str()).collect();
+    let failed_blob_ids = state.db.get_failed_blob_ids(owner, namespace).await?;
+    let existing_set: std::collections::HashSet<&str> = existing_blob_ids
+        .iter()
+        .map(|s| s.as_str())
+        .chain(failed_blob_ids.iter().map(|s| s.as_str()))
+        .collect();
     let all_missing: Vec<String> = all_blob_ids
         .iter()
         .filter(|id| !existing_set.contains(id.as_str()))
         .cloned()
         .collect();
-    // Apply limit — query-blobs returns newest-first for restore's recent
-    // transaction path, so keep the first N missing blobs. If fewer than N
+    // Apply limit — query-blobs' on-chain ordering is unspecified (the
+    // gRPC `listOwnedObjects` path replaced the old, genuinely newest-first
+    // `queryTransactionBlocks` scan; see walrus-query.ts's own doc-comment).
+    // This cap exists purely to bound how many blobs a single call can
+    // download + decrypt, not to prioritize recency. If fewer than N
     // candidates match after namespace/package filtering, restore returns a
     // partial result instead of scanning the whole wallet.
-    let missing_blob_ids: Vec<String> = all_missing.into_iter().take(limit).collect();
+    let (missing_blob_ids, limit_truncated) = paginate_missing_blobs(all_missing, limit);
+    // OR in source_capped (WALM-319): the local limit-slice check alone
+    // can't see truncation that already happened one layer up, in the
+    // sidecar's raw candidate fetch.
+    let truncated = limit_truncated || source_capped;
     let skipped = total - missing_blob_ids.len();
     tracing::info!(
-        "restore: total={} on-chain, existing={}, missing={} (limited to {}) for ns={}",
+        "restore: total={} on-chain, existing={}, negative-cached={}, missing={} (limited to {}, truncated={}, source_capped={}) for ns={}",
         total,
         existing_blob_ids.len(),
+        failed_blob_ids.len(),
         missing_blob_ids.len(),
         limit,
+        truncated,
+        source_capped,
         namespace
     );
 
@@ -507,6 +578,7 @@ pub async fn restore(
             total,
             namespace: namespace.clone(),
             owner: owner.clone(),
+            truncated,
         }));
     }
 
@@ -577,6 +649,7 @@ pub async fn restore(
             total,
             namespace: namespace.clone(),
             owner: owner.clone(),
+            truncated,
         }));
     }
 
@@ -597,6 +670,8 @@ pub async fn restore(
             let policy_package_id = state.config.seal_policy_package_id.clone();
             let registry_id = state.config.registry_id.clone();
             let account_id = auth.account_id.clone();
+            let owner = owner.clone();
+            let namespace = namespace.clone();
             async move {
                 match seal::seal_decrypt(
                     http_client,
@@ -615,11 +690,47 @@ pub async fn restore(
                         Ok(text) => Some((blob_id, text)),
                         Err(e) => {
                             tracing::warn!("restore: invalid UTF-8 for {}: {}", blob_id, e);
+                            // Decrypt already succeeded here, so invalid UTF-8
+                            // is inherently deterministic for this blob — always
+                            // safe to negative-cache (GH #501 / WALM-299).
+                            if let Err(db_err) = db
+                                .record_restore_failure(&owner, &namespace, &blob_id, "invalid_utf8")
+                                .await
+                            {
+                                tracing::warn!(
+                                    "restore: failed to record invalid-UTF-8 negative cache for {}: {}",
+                                    blob_id,
+                                    db_err
+                                );
+                            }
                             None
                         }
                     },
                     Err(e) => {
                         tracing::warn!("restore: decrypt failed for {}: {}", blob_id, e);
+                        // Only negative-cache *permanent* decrypt failures
+                        // (wrong key/policy — will never succeed for this
+                        // owner). Transient failures (SEAL timeout, 429/503,
+                        // rate limit) must keep being retried; caching those
+                        // could permanently and wrongly blacklist a
+                        // legitimate blob during an infra blip.
+                        if seal::DecryptOutcome::permanent_from_error(&e.to_string()) {
+                            if let Err(db_err) = db
+                                .record_restore_failure(
+                                    &owner,
+                                    &namespace,
+                                    &blob_id,
+                                    "decrypt_permanent",
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    "restore: failed to record decrypt-permanent negative cache for {}: {}",
+                                    blob_id,
+                                    db_err
+                                );
+                            }
+                        }
                         None
                     }
                 }
@@ -706,13 +817,14 @@ pub async fn restore(
         total,
         namespace: namespace.clone(),
         owner: owner.clone(),
+        truncated,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::encode_untrusted_memory_context;
-    use crate::types::RecallResult;
+    use crate::types::{RecallResult, RestoreResponse};
 
     // ── Memory context stays structured, untrusted JSON ──────────
 
@@ -767,6 +879,75 @@ mod tests {
                 input, expected, clamped
             );
         }
+    }
+
+    // ── /api/restore body.limit cap (GH #501 / WALM-299) ────────────────
+    //
+    // `RestoreRequest.limit` (plain `usize`, serde default 10 — unlike
+    // `/api/ask`'s `Option<usize>`) previously had no upper bound in
+    // `restore()`. Calls the real `super::clamp_restore_limit` production
+    // function directly, so a regression in the clamp itself fails this
+    // test rather than a hand-copied assertion of the same expression.
+
+    #[test]
+    fn restore_limit_clamps_to_one_hundred_with_a_floor_of_one() {
+        for (input, expected) in [
+            (10, 10), // serde default, unclamped
+            (0, 1),   // 0 must not pass through: the sidecar treats
+            // `limit: 0` as "unbounded", so the floor is required
+            (1, 1),     // at floor
+            (50, 50),   // under cap
+            (100, 100), // at cap
+            (101, 100), // over cap → clamped
+            (10_000, 100),
+            (usize::MAX, 100),
+        ] {
+            let clamped = super::clamp_restore_limit(input);
+            assert_eq!(
+                clamped, expected,
+                "restore limit clamp: input={} expected={} got={}",
+                input, expected, clamped
+            );
+        }
+    }
+
+    // ── restore() missing-blob pagination (WALM-317 / GH #501) ──────────
+    //
+    // restore()'s on-chain-missing-blob list is sliced to `limit` before
+    // being restored, with no signal to the caller when there was more to
+    // restore than fit. Exercises the real production function directly
+    // (rather than re-deriving `len() > limit` as a standalone predicate)
+    // so a wiring bug in that function fails this test, not just a
+    // hand-copied assertion of the same expression.
+
+    #[test]
+    fn paginate_missing_blobs_flags_truncation_and_slices_to_limit() {
+        let all_missing: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+
+        let (page, truncated) = super::paginate_missing_blobs(all_missing.clone(), 2);
+        assert_eq!(page, vec!["a".to_string(), "b".to_string()]);
+        assert!(truncated, "more missing than limit must flag truncated");
+
+        let (page, truncated) = super::paginate_missing_blobs(all_missing.clone(), 3);
+        assert_eq!(page, all_missing, "exactly at limit returns everything");
+        assert!(!truncated);
+
+        let (page, truncated) = super::paginate_missing_blobs(all_missing, 10);
+        assert_eq!(page.len(), 3, "under limit returns everything");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn restore_response_carries_truncated_field() {
+        let resp = RestoreResponse {
+            restored: 5,
+            skipped: 2,
+            total: 20,
+            namespace: "ns".to_string(),
+            owner: "0xabc".to_string(),
+            truncated: true,
+        };
+        assert!(resp.truncated);
     }
 
     // ── /api/forget + /api/stats empty-namespace validation ─────────────
