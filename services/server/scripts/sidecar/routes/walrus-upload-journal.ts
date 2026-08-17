@@ -22,6 +22,7 @@ import {
     DURABLE_UPLOAD_PROTOCOL_VERSION,
     ENOKI_API_KEY,
     ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    ENOKI_NETWORK,
     JSON_LIMIT_WALRUS_UPLOAD,
     MAX_WALRUS_EPOCHS,
     SERVER_SUI_PRIVATE_KEYS,
@@ -31,6 +32,7 @@ import {
     parseDurableWalrusEpochs,
 } from "../config.js";
 import {
+    getUploadRelayTipAddress,
     getWalrusClient,
     refreshWalrusClientIfStale,
     suiClient,
@@ -58,6 +60,11 @@ import {
 } from "./walrus-query.js";
 import { uploadWalrusBlobWithEffectsRetry } from "./walrus-upload.js";
 import { enforceAddressBalanceCoinIntents } from "../address-balance.js";
+import {
+    callEnoki,
+    type EnokiExecuteResponse,
+    type EnokiSponsorResponse,
+} from "../enoki.js";
 import {
     assertUploadExecutionIdentity,
     executionIdentity,
@@ -128,9 +135,12 @@ async function certifiedStep(
 
 export function durableRegisterDirectSigningAllowed(
     enokiConfigured: boolean,
-    fallbackToDirectSign: boolean,
+    _fallbackToDirectSign: boolean,
 ): boolean {
-    return !enokiConfigured || fallbackToDirectSign;
+    // When Enoki is configured, durable registration must fail closed rather
+    // than silently draining the upload wallet after a sponsor outage. Direct
+    // signing remains available only for deployments without Enoki (local/dev).
+    return !enokiConfigured;
 }
 
 export function createdBlobObjectIdFromTransaction(result: any): string {
@@ -186,6 +196,8 @@ export type PreparedRegisterTransaction = {
     transactionBytes: string;
     signature: string;
     digest: string;
+    /** Enoki's sponsorship handle. Absent on legacy/direct-signed journals. */
+    sponsorDigest?: string;
 };
 
 export type ValidatedPreparedRegisterTransaction = PreparedRegisterTransaction & {
@@ -205,25 +217,87 @@ type PreparedRegisterClient = {
     }): Promise<unknown>;
 };
 
+type PreparedRegisterSponsorExecutor = (
+    sponsorDigest: string,
+    signature: string,
+) => Promise<EnokiExecuteResponse>;
+
+async function executePreparedRegisterWithEnoki(
+    sponsorDigest: string,
+    signature: string,
+): Promise<EnokiExecuteResponse> {
+    return callEnoki<EnokiExecuteResponse>(
+        `/transaction-blocks/sponsor/${encodeURIComponent(sponsorDigest)}`,
+        { digest: sponsorDigest, signature },
+    );
+}
+
 function parsePreparedRegisterTransaction(raw: unknown): PreparedRegisterTransaction | null {
     if (raw === null || raw === undefined) return null;
     if (!raw || typeof raw !== "object") {
         throw new Error("registerTransaction must be an object");
     }
-    const { transactionBytes, signature, digest } = raw as Record<string, unknown>;
+    const { transactionBytes, signature, digest, sponsorDigest } = raw as Record<string, unknown>;
     if (typeof transactionBytes !== "string" || !transactionBytes
         || typeof signature !== "string" || !signature
         || typeof digest !== "string" || !digest) {
         throw new Error("registerTransaction requires transactionBytes, signature, and digest");
     }
-    return { transactionBytes, signature, digest };
+    if (sponsorDigest !== undefined && (typeof sponsorDigest !== "string" || !sponsorDigest)) {
+        throw new Error("registerTransaction.sponsorDigest must be a non-empty string");
+    }
+    return {
+        transactionBytes,
+        signature,
+        digest,
+        ...(typeof sponsorDigest === "string" ? { sponsorDigest } : {}),
+    };
 }
 
-async function prepareRegisterTransaction(
+export async function prepareRegisterTransaction(
     transaction: Transaction,
     signer: Ed25519Keypair,
+    allowedAddresses: string[] = [signer.toSuiAddress()],
 ): Promise<PreparedRegisterTransaction> {
-    transaction.setSenderIfNotSet(signer.toSuiAddress());
+    const signerAddress = signer.toSuiAddress();
+    transaction.setSenderIfNotSet(signerAddress);
+
+    if (ENOKI_API_KEY) {
+        // Journal the exact sponsored bytes before execution. Replays use the
+        // Enoki sponsorship handle below, so the upload remains idempotent
+        // without making the sender wallet the gas owner.
+        const transactionKind = await transaction.build({
+            client: suiClient as any,
+            onlyTransactionKind: true,
+        });
+        const sponsored = await callEnoki<EnokiSponsorResponse>(
+            "/transaction-blocks/sponsor",
+            {
+                network: ENOKI_NETWORK,
+                transactionBlockKindBytes: Buffer.from(transactionKind).toString("base64"),
+                sender: signerAddress,
+                ...(allowedAddresses.length ? { allowedAddresses } : {}),
+            },
+        );
+        const bytes = new Uint8Array(Buffer.from(sponsored.bytes, "base64"));
+        if (!bytes.length || Buffer.from(bytes).toString("base64") !== sponsored.bytes) {
+            throw new Error("Enoki returned non-canonical sponsored transaction bytes");
+        }
+        const transactionData = TransactionDataBuilder.fromBytes(bytes);
+        assertSponsoredRegisterTransaction(transactionData, signerAddress);
+        const digest = TransactionDataBuilder.getDigestFromBytes(bytes);
+        const signed = await signer.signTransaction(bytes);
+        return {
+            transactionBytes: signed.bytes,
+            signature: signed.signature,
+            digest,
+            sponsorDigest: sponsored.digest,
+        };
+    }
+
+    if (!durableRegisterDirectSigningAllowed(false, ENOKI_FALLBACK_TO_DIRECT_SIGN)) {
+        throw new Error("durable register requires Enoki sponsorship");
+    }
     transaction.setGasPayment([]);
     const bytes = await transaction.build({ client: suiClient });
     assertAddressBalanceRegisterTransaction(TransactionDataBuilder.fromBytes(bytes));
@@ -235,22 +309,9 @@ async function prepareRegisterTransaction(
     };
 }
 
-export function assertAddressBalanceRegisterTransaction(
+function assertRegisterTransactionUsesAddressBalanceWal(
     transactionData: TransactionDataBuilder,
-): bigint {
-    if (transactionData.gasData.payment?.length !== 0) {
-        throw new Error("registerTransaction must pay gas from the address balance");
-    }
-
-    const expiration = transactionData.expiration;
-    if (
-        expiration?.$kind !== "ValidDuring"
-        || expiration.ValidDuring.minTimestamp !== null
-        || expiration.ValidDuring.maxTimestamp !== null
-    ) {
-        throw new Error("registerTransaction must use a ValidDuring address-balance expiration");
-    }
-
+): void {
     let usesGasCoin = false;
     transactionData.mapArguments((argument) => {
         if (argument.$kind === "GasCoin") usesGasCoin = true;
@@ -274,7 +335,41 @@ export function assertAddressBalanceRegisterTransaction(
     if (!hasWalWithdrawal) {
         throw new Error("registerTransaction has no WAL address-balance withdrawal");
     }
+}
 
+export function assertSponsoredRegisterTransaction(
+    transactionData: TransactionDataBuilder,
+    expectedWalletAddress: string,
+): void {
+    const walletAddress = normalizeSuiAddress(expectedWalletAddress);
+    if (!transactionData.sender
+        || normalizeSuiAddress(transactionData.sender) !== walletAddress) {
+        throw new Error("sponsored registerTransaction sender does not match the wallet");
+    }
+    if (!transactionData.gasData.owner
+        || normalizeSuiAddress(transactionData.gasData.owner) === walletAddress) {
+        throw new Error("sponsored registerTransaction must use a distinct gas owner");
+    }
+    assertRegisterTransactionUsesAddressBalanceWal(transactionData);
+}
+
+export function assertAddressBalanceRegisterTransaction(
+    transactionData: TransactionDataBuilder,
+): bigint {
+    if (transactionData.gasData.payment?.length !== 0) {
+        throw new Error("registerTransaction must pay gas from the address balance");
+    }
+
+    const expiration = transactionData.expiration;
+    if (
+        expiration?.$kind !== "ValidDuring"
+        || expiration.ValidDuring.minTimestamp !== null
+        || expiration.ValidDuring.maxTimestamp !== null
+    ) {
+        throw new Error("registerTransaction must use a ValidDuring address-balance expiration");
+    }
+
+    assertRegisterTransactionUsesAddressBalanceWal(transactionData);
     return BigInt(expiration.ValidDuring.maxEpoch);
 }
 
@@ -302,7 +397,9 @@ export async function validatePreparedRegisterTransaction(
         || normalizeSuiAddress(transactionData.sender) !== walletAddress) {
         throw new Error("registerTransaction sender does not match the journaled wallet");
     }
-    if (!transactionData.gasData.owner
+    if (prepared.sponsorDigest) {
+        assertSponsoredRegisterTransaction(transactionData, walletAddress);
+    } else if (!transactionData.gasData.owner
         || normalizeSuiAddress(transactionData.gasData.owner) !== walletAddress) {
         throw new Error("registerTransaction gas owner does not match the journaled wallet");
     }
@@ -333,6 +430,7 @@ export async function executePreparedRegisterTransaction(
     onTransactionObservedOrSubmitted: () => void = () => {},
     getCurrentEpoch: () => Promise<bigint> = currentSuiEpoch,
     mayHaveBeenSubmitted = false,
+    executeSponsored: PreparedRegisterSponsorExecutor = executePreparedRegisterWithEnoki,
 ): Promise<unknown> {
     const include = { effects: true, objectTypes: true } as const;
     const assertExpectedDigest = (result: any): unknown => {
@@ -369,6 +467,30 @@ export async function executePreparedRegisterTransaction(
     // TransactionData bytes determine the Sui digest. Re-executing this exact
     // signed payload can only submit the already-journaled digest.
     onTransactionObservedOrSubmitted();
+    if (prepared.sponsorDigest) {
+        const executed = await trackWalletSubmission(() =>
+            executeSponsored(prepared.sponsorDigest!, prepared.signature),
+        );
+        if (executed.digest !== prepared.digest) {
+            throw new Error(
+                `Enoki executed unexpected register digest: expected ${prepared.digest}, got ${executed.digest}`,
+            );
+        }
+        // Enoki returns only a digest. Read the finalized transaction so the
+        // caller can validate the created Walrus Blob object exactly as it did
+        // for the legacy direct-execution path.
+        for (let attempt = 1; attempt <= 8; attempt += 1) {
+            try {
+                const finalized = await client.getTransaction({ digest: prepared.digest, include });
+                return assertExpectedDigest(finalized);
+            } catch (error: any) {
+                if (error?.code !== "NOT_FOUND" || attempt === 8) throw error;
+                await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+            }
+        }
+        throw new Error(`sponsored register transaction ${prepared.digest} was not found after execution`);
+    }
+
     const result = await trackWalletSubmission(() =>
         client.executeTransaction({
             transaction: prepared.bytes,
@@ -545,16 +667,6 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                                 blobId: encoded.blobId,
                             });
                         }
-                        if (!durableRegisterDirectSigningAllowed(
-                            !!ENOKI_API_KEY,
-                            ENOKI_FALLBACK_TO_DIRECT_SIGN,
-                        )) {
-                            return res.status(409).json({
-                                error: "durable register replay requires direct signing",
-                                code: "DURABLE_REGISTER_REPLAY_REQUIRES_DIRECT_SIGN",
-                                jobId,
-                            });
-                        }
                         const registerTx = flow.register({
                             epochs,
                             owner: signerAddress,
@@ -567,9 +679,17 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                             },
                         });
                         enforceAddressBalanceCoinIntents(registerTx);
+                        const tipRecipient = ENOKI_API_KEY
+                            ? await getUploadRelayTipAddress()
+                            : null;
+                        const allowedAddresses = [...new Set(
+                            [signerAddress, tipRecipient]
+                                .filter((address): address is string => typeof address === "string"),
+                        )];
                         const registerTransaction = await prepareRegisterTransaction(
                             registerTx,
                             signer,
+                            allowedAddresses,
                         );
                         console.log(`[walrus/upload-step-v3] [${traceId}] prepared ${JSON.stringify({
                             jobId,
@@ -577,6 +697,7 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                             step: "register_prepared",
                             blobId: encoded.blobId,
                             digest: registerTransaction.digest,
+                            sponsored: !!registerTransaction.sponsorDigest,
                         })}`);
                         return res.json({
                             registerTransaction,

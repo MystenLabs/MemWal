@@ -132,10 +132,78 @@ test("legacy uploads preserve fallback behavior while using address balances", (
     });
 });
 
-test("durable register preparation honors the configured direct-sign fallback", () => {
+test("durable register never direct-signs when Enoki is configured", () => {
     assert.equal(durableRegisterDirectSigningAllowed(false, false), true);
     assert.equal(durableRegisterDirectSigningAllowed(true, false), false);
-    assert.equal(durableRegisterDirectSigningAllowed(true, true), true);
+    assert.equal(durableRegisterDirectSigningAllowed(true, true), false);
+});
+
+test("sponsored registration keeps WAL on the sender while assigning gas to the sponsor", async () => {
+    const signer = new Ed25519Keypair();
+    const sponsor = new Ed25519Keypair();
+    const walType = `0x${"2".repeat(64)}::wal::WAL`;
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.setGasOwner(sponsor.toSuiAddress());
+    transaction.setGasBudget(10_000_000n);
+    transaction.setGasPrice(1n);
+    transaction.setGasPayment([{
+        objectId: `0x${"1".repeat(64)}`,
+        version: "1",
+        digest: "11111111111111111111111111111111",
+    }]);
+    const withdrawal = transaction.withdrawal({ amount: 1n, type: walType });
+    const wal = transaction.moveCall({
+        target: "0x2::coin::redeem_funds",
+        typeArguments: [walType],
+        arguments: [withdrawal],
+    });
+    transaction.moveCall({
+        target: "0x2::coin::destroy_zero",
+        typeArguments: [walType],
+        arguments: [wal],
+    });
+    const bytes = await transaction.build();
+    const signed = await signer.signTransaction(bytes);
+    const digest = TransactionDataBuilder.getDigestFromBytes(bytes);
+    const prepared: PreparedRegisterTransaction = {
+        transactionBytes: signed.bytes,
+        signature: signed.signature,
+        digest,
+        sponsorDigest: digest,
+    };
+
+    const validated = await validatePreparedRegisterTransaction(prepared, signer.toSuiAddress());
+    assert.equal(validated.sponsorDigest, digest);
+
+    let submitted = false;
+    let directExecutions = 0;
+    const finalized = { Transaction: { digest } };
+    const client = {
+        async getTransaction() {
+            if (!submitted) throw Object.assign(new Error("not found"), { code: "NOT_FOUND" });
+            return finalized;
+        },
+        async executeTransaction() {
+            directExecutions += 1;
+            throw new Error("sponsored journal must not execute directly");
+        },
+    };
+    const result = await executePreparedRegisterTransaction(
+        validated,
+        client,
+        () => {},
+        async () => 1n,
+        false,
+        async (sponsorDigest, signature) => {
+            assert.equal(sponsorDigest, digest);
+            assert.equal(signature, signed.signature);
+            submitted = true;
+            return { digest };
+        },
+    );
+    assert.equal(result, finalized);
+    assert.equal(directExecutions, 0);
 });
 
 test("prepared registration rejects tampered digest, signature, and wallet", async () => {
