@@ -662,6 +662,64 @@ nonce: 00000000-0000-4000-8000-000000000000"
         assert!(validate_sponsor_transaction_kind(&bytes, &package).is_err());
     }
 
+    // ---- fixtures from the browser's own encoder ----
+    //
+    // The fixtures above are built with the Rust BCS types, which cannot catch a
+    // shape mismatch between the two encoders. These were produced by
+    // @mysten/sui 2.8.0 — the exact encoder `apps/app` ships — for the
+    // transactions `Dashboard.tsx` builds: object-ref inputs for the account and
+    // registry, a `vector<u8>` pure arg per key, and one MoveCall per selected
+    // key.
+
+    const FE_PACKAGE: &str = "0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6";
+    const FE_REMOVE_1: &str = "AAMBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwEAzuem/Y3lLOZFw4MyveI9SjD9lCa8RoFAlzPdUJWKJMYHYWNjb3VudBNyZW1vdmVfZGVsZWdhdGVfa2V5AAMBAAABAQABAgA=";
+    const FE_REMOVE_2: &str = "AAQBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAhIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAgDO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50E3JlbW92ZV9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAECAADO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50E3JlbW92ZV9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAEDAA==";
+    const FE_REMOVE_3: &str = "AAUBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAhIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHACEgBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcDAM7npv2N5SzmRcODMr3iPUow/ZQmvEaBQJcz3VCViiTGB2FjY291bnQTcmVtb3ZlX2RlbGVnYXRlX2tleQADAQAAAQEAAQIAAM7npv2N5SzmRcODMr3iPUow/ZQmvEaBQJcz3VCViiTGB2FjY291bnQTcmVtb3ZlX2RlbGVnYXRlX2tleQADAQAAAQEAAQMAAM7npv2N5SzmRcODMr3iPUow/ZQmvEaBQJcz3VCViiTGB2FjY291bnQTcmVtb3ZlX2RlbGVnYXRlX2tleQADAQAAAQEAAQQA";
+    const FE_ADD_1: &str = "AAMBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwEAzuem/Y3lLOZFw4MyveI9SjD9lCa8RoFAlzPdUJWKJMYHYWNjb3VudBBhZGRfZGVsZWdhdGVfa2V5AAMBAAABAQABAgA=";
+    const FE_MIXED_REMOVE_ADD: &str = "AAQBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAhIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAgDO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50E3JlbW92ZV9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAECAADO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50EGFkZF9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAEDAA==";
+    const FE_ADD_TWICE: &str = "AAQBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAhIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAgDO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50EGFkZF9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAECAADO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50EGFkZF9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAEDAA==";
+
+    /// The regression, reproduced from browser-encoded bytes: 2 and 3 keys were
+    /// rejected before this fix, 1 key always passed.
+    #[test]
+    fn validator_accepts_browser_encoded_delegate_key_removals() {
+        for (label, fixture) in [
+            ("1 key", FE_REMOVE_1),
+            ("2 keys", FE_REMOVE_2),
+            ("3 keys", FE_REMOVE_3),
+        ] {
+            let bytes = decode_base64(fixture).expect("fixture must be valid base64");
+            validate_sponsor_transaction_kind(&bytes, FE_PACKAGE)
+                .unwrap_or_else(|e| panic!("{label} from the browser encoder must pass, got {e}"));
+        }
+    }
+
+    #[test]
+    fn validator_accepts_browser_encoded_add_but_rejects_impure_batches() {
+        let add = decode_base64(FE_ADD_1).expect("fixture must be valid base64");
+        validate_sponsor_transaction_kind(&add, FE_PACKAGE).expect("a lone add must pass");
+
+        for (label, fixture) in [
+            ("remove + add", FE_MIXED_REMOVE_ADD),
+            ("add twice", FE_ADD_TWICE),
+        ] {
+            let bytes = decode_base64(fixture).expect("fixture must be valid base64");
+            assert!(
+                validate_sponsor_transaction_kind(&bytes, FE_PACKAGE).is_err(),
+                "{label} must be rejected"
+            );
+        }
+    }
+
+    /// Same real bytes, a different configured package — the package check still
+    /// holds against browser-encoded input.
+    #[test]
+    fn validator_rejects_browser_encoded_removals_for_a_foreign_package() {
+        let bytes = decode_base64(FE_REMOVE_3).expect("fixture must be valid base64");
+        let foreign = format!("0x{}", "c".repeat(64));
+        assert!(validate_sponsor_transaction_kind(&bytes, &foreign).is_err());
+    }
+
     // ---- validate_sui_address ----
 
     #[test]
