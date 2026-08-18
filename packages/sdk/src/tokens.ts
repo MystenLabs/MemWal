@@ -64,21 +64,22 @@ export function truncateToTokenBudget(
     if (!Number.isFinite(maxTokens) || maxTokens <= 0) return "";
     if (countTokens(text) <= maxTokens) return text;
     const chars = [...text];
-    // Start the character cut at min(actual length, the estimate-derived cap).
-    // For the default (~chars/4) estimator this cap fits in one shot. For a
-    // custom counter DENSER than one token per char (e.g. a per-code-point CJK
-    // tokenizer) the estimate-derived cap can exceed the true answer, so we then
-    // shrink to fit below — clamping to `chars.length` first avoids starting the
-    // shrink loop above the string's own length.
-    let capChars = Math.min(chars.length, Math.max(0, Math.floor(maxTokens * CHARS_PER_TOKEN)));
-    let sliced = chars.slice(0, capChars).join("");
-    // Shrink until the (possibly custom) counter agrees the slice fits. Bounded
-    // by capChars; for the default estimator this loop does not run.
-    while (capChars > 0 && countTokens(sliced) > maxTokens) {
-        capChars -= 1;
-        sliced = chars.slice(0, capChars).join("");
+    // Find the longest fitting prefix in logarithmic counter calls. Token counts
+    // for text prefixes are expected to be monotonic for supported counters.
+    // Searching the full string also avoids under-filling the budget for custom
+    // counters whose average characters-per-token differs from the default.
+    let low = 0;
+    let high = chars.length;
+    while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        const candidate = chars.slice(0, mid).join("");
+        if (countTokens(candidate) <= maxTokens) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
     }
-    return sliced;
+    return chars.slice(0, low).join("");
 }
 
 /** Sum of per-hit token estimates for a list of memories. */

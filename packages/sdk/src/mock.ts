@@ -19,6 +19,7 @@ import type {
     RememberResult,
     RestoreResult,
 } from "./types.js";
+import { applyTokenBudget } from "./tokens.js";
 
 export interface MemWalMockSeed {
     text: string;
@@ -281,6 +282,17 @@ export class MemWalMock {
                 text: memory.text,
                 distance: memoryDistance,
             }));
+
+        if (typeof options.maxTokens === "number") {
+            const { results, meta } = applyTokenBudget(
+                ranked,
+                options.maxTokens,
+                options.truncationStrategy,
+                options.countTokens
+            );
+            return { results, total: results.length, meta };
+        }
+
         return { results: ranked, total: ranked.length };
     }
 

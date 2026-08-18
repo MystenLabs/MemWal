@@ -224,6 +224,19 @@ test("dense custom counter (tokens > chars) still fits the budget and terminates
     assert.ok(meta.tokenEstimate <= 6);
 });
 
+test("custom counter truncation uses logarithmic counter calls", () => {
+    const text = "漢".repeat(100_000);
+    let calls = 0;
+    const dense = (value) => {
+        calls += 1;
+        return [...value].length * 2;
+    };
+
+    const out = truncateToTokenBudget(text, 10_000, dense);
+    assert.equal([...out].length, 5_000);
+    assert.ok(calls <= 20, `expected logarithmic counter calls, got ${calls}`);
+});
+
 test("fractional budget behaves consistently across strategies", () => {
     // budget 2.5: high-relevance-only drops a 3-tok hit (0 results);
     // per-hit-cap gives floor(2.5/2)=1 tok/hit; drop-tail truncates the tail.
