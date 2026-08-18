@@ -27,6 +27,17 @@ export const authAtom = atom<AuthState>({
 /**
  * Current session data
  * Persisted in sessionStorage (browser only)
+ *
+ * getOnInit is true so the session is read synchronously on first render
+ * instead of via atomWithStorage's post-mount onMount effect. With
+ * getOnInit:false, every fresh page load (e.g. the window.location.href
+ * redirect after login, or a plain refresh of /note) renders once with
+ * session=null before the async hydration catches up — and useAuth's own
+ * effect can read that stale null first and conclude "logged out",
+ * bouncing an already-authenticated user back to "/". Safe to read eagerly
+ * here because nothing renders `session` directly: authAtom (a separate,
+ * plain atom that always starts isLoading:true) is what every page branches
+ * on, so there's no server/client markup to mismatch on.
  */
 export const sessionAtom = atomWithStorage<SessionData | null>(
   STORAGE_KEYS.sessionId,
@@ -41,7 +52,7 @@ export const sessionAtom = atomWithStorage<SessionData | null>(
       key: () => null,
     } as Storage)
   ),
-  { getOnInit: false }
+  { getOnInit: true }
 );
 
 // ═══════════════════════════════════════════════════════════════
