@@ -61,6 +61,8 @@ export const TOOL_DEFINITIONS = [
     },
     {
         name: "memwal_remember_bulk",
+        title: "Remember Several Facts",
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description:
             "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
         inputSchema: {
@@ -129,6 +131,8 @@ export const TOOL_DEFINITIONS = [
     },
     {
         name: "memwal_health",
+        title: "Check Relayer Health",
+        annotations: { readOnlyHint: true, destructiveHint: false },
         description:
             "Quick connectivity check for Walrus Memory. Calls the relayer's lightweight health endpoint (no search, no decryption) and returns its status and version. Use this to confirm the server is reachable — do NOT use memwal_recall for health checks, which is a full and slow retrieval.",
         inputSchema: {

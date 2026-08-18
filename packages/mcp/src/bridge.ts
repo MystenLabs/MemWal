@@ -42,6 +42,7 @@ export interface BridgeConfig {
  * agent calls it without). */
 const NAMESPACE_TOOLS = new Set([
     "memwal_remember",
+    "memwal_remember_bulk",
     "memwal_recall",
     "memwal_analyze",
     "memwal_restore",
@@ -146,7 +147,9 @@ const LOCAL_TOOL_NAMES = new Set(LOCAL_TOOL_DEFINITIONS.map((t) => t.name));
  * `LOCAL_TOOL_DEFINITIONS` blindly would advertise `memwal_login` twice. This
  * yields the SAME shape as the post-connect spliced list (upstream memory tools
  * + login + logout, each once), so the static→refreshed transition doesn't
- * change the tool set out from under the client. Refreshed via
+ * change the tool set out from under the client. OAuth-scoped sessions may
+ * over-advertise write tools until `tools/list_changed` refreshes from the
+ * relayer. Refreshed via
  * `tools/list_changed` once the relayer session is up. */
 const LOCAL_TOOLS_LIST = {
     tools: [
@@ -905,8 +908,14 @@ export async function runBridge(
             const purge = (msg: RpcMessage): void => {
                 if (msg.id == null) return; // notification — nothing to reply to
                 pendingListIds.delete(msg.id);
+                if (msg.method === "initialize") {
+                    // Already answered locally. Keep any suppress arm so a
+                    // queued upstream initialize reply is consumed, and record
+                    // closedOutIds so the pump drops it even if the arm is gone.
+                    closedOutIds.add(msg.id);
+                    return;
+                }
                 suppressUpstreamReplies.delete(msg.id);
-                if (msg.method === "initialize") return; // already answered locally
                 // A request can be in BOTH inFlight and pendingForward (cold-start
                 // dual-tracking), so guard against answering the same id twice.
                 if (closedOutIds.has(msg.id)) return;
@@ -1249,9 +1258,6 @@ export async function runBridge(
         });
     }
 
-    /** Fail whatever is still buffered when we give up connecting for good
-     * (stdin closed) — reply to open tool calls with an error envelope instead
-     * of leaving them to hang until the client's own timeout. Skips:
     /** Write the "relayer unavailable" reply for one open request, stop tracking
      * it, and never double-answer a locally-answered request. Shared by the
      * buffered (`failPendingForward`) and in-flight (`failInFlightRequests`)
@@ -1265,10 +1271,11 @@ export async function runBridge(
     function failRequest(msg: RpcMessage, reason: string): void {
         if (msg.id == null) return; // notification — nothing to answer
         if (msg.method === "initialize") {
-            // Locally answered already. Never write a second reply for this id;
-            // just stop tracking it (and clear any pending suppression).
+            // Locally answered already. Never write a second reply for this id.
+            // Keep any suppress arm and record closedOutIds so a late upstream
+            // initialize result is dropped by the pump.
             inFlight.delete(msg.id);
-            suppressUpstreamReplies.delete(msg.id);
+            closedOutIds.add(msg.id);
             return;
         }
         inFlight.delete(msg.id);
@@ -1329,11 +1336,37 @@ export async function runBridge(
     // connect, the client's own per-tool timeout fires (graceful) — and on
     // shutdown `failPendingForward` closes out anything still open. `initialize`
     // is answered locally, so it never blocks and is only forwarded, not failed.
+    // First connect stays on `openSseStream` + `flushPendingForward` so a
+    // flush-time 404 still goes through the existing reconnect/replay path.
+    // It must NOT publish if login already owns `sse`, or if the handshake
+    // finished after `credentialGeneration` moved — that was the double-flush.
     const connectInBackground = (async () => {
         let attempt = 0;
         while (!stdinClosed) {
+            if (reconnectPromise) {
+                await reconnectPromise;
+                continue;
+            }
+            if (sse) {
+                signalFirstConnect();
+                const notifications = pendingForward.filter((m) => m.id == null);
+                pendingForward.length = 0;
+                pendingForward.push(...notifications);
+                await flushPendingForward();
+                return;
+            }
+            const openingGeneration = credentialGeneration;
             try {
-                sse = await openSseStream(creds.relayerUrl, creds);
+                const candidate = await openSseStream(creds.relayerUrl, creds);
+                if (stdinClosed) {
+                    candidate.abort();
+                    break;
+                }
+                if (openingGeneration !== credentialGeneration || sse) {
+                    candidate.abort();
+                    continue;
+                }
+                sse = candidate;
                 note(`Connected. Bridging stdio MCP ↔ ${creds.relayerUrl}`);
                 log.info("bridge.connected", { relayer: creds.relayerUrl });
                 signalFirstConnect();
@@ -1345,10 +1378,6 @@ export async function runBridge(
                 log.error("bridge.initial_connect_failed", { err: reason, attempt });
                 if (stdinClosed) break;
                 const backoff = Math.min(15_000, 500 * Math.pow(2, attempt - 1));
-                // Sleep, but wake immediately if stdin closes mid-backoff so we
-                // don't hold the process open for up to 15s after shutdown. The
-                // timer is unref'd for the same reason (cf. the connect timer /
-                // idle watchdog).
                 await new Promise<void>((resolve) => {
                     const timer = setTimeout(() => {
                         unregister();
@@ -1362,9 +1391,6 @@ export async function runBridge(
                 });
             }
         }
-        // stdin closed before we ever connected — unblock serverPump so the race
-        // can settle, and close out anything still buffered (open tool calls get
-        // an error envelope instead of hanging; initialize/notifications skipped).
         signalFirstConnect();
         failPendingForward("connection not established before shutdown");
     })();

@@ -33,6 +33,7 @@ function makeCreds(relayerUrl) {
 function startMockRelayer() {
     const sessions = new Map();
     const handshakes = [];
+    const posts = [];
     let nextSession = 1;
     let delayNextHandshake = false;
     let delayedHandshake = null;
@@ -98,6 +99,14 @@ function startMockRelayer() {
                 res.writeHead(202);
                 res.end();
                 const msg = JSON.parse(body);
+                posts.push({
+                    sessionId: url.searchParams.get("sessionId"),
+                    bearer: req.headers.authorization,
+                    accountId: req.headers["x-memwal-account-id"],
+                    method: msg.method,
+                    id: msg.id ?? null,
+                    name: msg.params?.name ?? null,
+                });
                 const result =
                     msg.method === "initialize"
                         ? {
@@ -131,6 +140,7 @@ function startMockRelayer() {
                 server,
                 base: `http://127.0.0.1:${port}`,
                 handshakes,
+                posts,
                 delayNextHandshake() {
                     delayNextHandshake = true;
                 },
@@ -371,4 +381,92 @@ test("a request buffered during cold start is NOT flushed to a new account after
         (m) => m.id === 5 && m.result && /account A secret/.test(JSON.stringify(m)),
     );
     assert.ok(!bAccountRecall, "the account-A recall must never be served by account B");
+});
+
+test("same-account login during cold start delivers each buffered call once on the new bearer", async (t) => {
+    // Same-account memwal_login must not let connectInBackground flush
+    // pendingForward after reconnect() already replayed inFlight.
+    const mock = await startMockRelayer();
+    const home = mkdtempSync(join(tmpdir(), "memwal-same-account-coldstart-"));
+    const credentialsPath = join(home, ".memwal", "credentials.json");
+    mkdirSync(dirname(credentialsPath), { recursive: true });
+    writeFileSync(credentialsPath, JSON.stringify(makeCreds(mock.base)), { mode: 0o600 });
+
+    mock.delayNextHandshake();
+
+    const child = spawn(process.execPath, [BIN, "--relayer", mock.base, "--web-url", mock.base], {
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+    const bridge = collectMessages(child);
+    t.after(() => {
+        child.kill("SIGKILL");
+        mock.server.close();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    bridge.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    await bridge.waitFor((message) => message.id === 1 && message.result);
+    await waitUntil(() => mock.handshakes.length >= 1);
+
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: { name: "memwal_recall", arguments: { query: "same account" } },
+    });
+
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "memwal_login", arguments: {} },
+    });
+    const login = await bridge.waitFor((message) => message.id === 2);
+    const connectUrl = login.result.content[0].text.match(/\*\*URL:\*\* (http[^\n]+)/)?.[1];
+    assert.ok(connectUrl, "memwal_login should return the browser URL");
+    await completeLogin(connectUrl, ACCOUNT_A);
+
+    mock.releaseDelayedHandshake();
+
+    const recall = await bridge.waitFor((message) => message.id === 5);
+    assert.notEqual(recall.result?.isError, true);
+    const saved = JSON.parse(readFileSync(credentialsPath, "utf8"));
+    assert.match(recall.result.content[0].text, new RegExp(`account=${ACCOUNT_A}`));
+    assert.match(
+        recall.result.content[0].text,
+        new RegExp(`bearer=Bearer ${saved.delegatePrivateKey}`),
+    );
+
+    await new Promise((r) => setTimeout(r, 400));
+    const id1 = bridge.received.filter((m) => m.id === 1);
+    const id5 = bridge.received.filter((m) => m.id === 5);
+    assert.equal(id1.length, 1, `initialize answered once, saw ${id1.length}`);
+    assert.equal(id5.length, 1, `recall answered once, saw ${id5.length}`);
+
+    const recallPosts = mock.posts.filter((p) => p.name === "memwal_recall" && p.id === 5);
+    assert.equal(
+        recallPosts.length,
+        1,
+        `recall POSTed once, saw ${recallPosts.length}: ${JSON.stringify(recallPosts)}`,
+    );
+    assert.equal(recallPosts[0].bearer, `Bearer ${saved.delegatePrivateKey}`);
+    assert.equal(recallPosts[0].accountId, ACCOUNT_A);
+
+    const initPosts = mock.posts.filter((p) => p.method === "initialize");
+    assert.equal(initPosts.length, 1, `initialize POSTed once, saw ${JSON.stringify(initPosts)}`);
+    assert.equal(initPosts[0].bearer, `Bearer ${saved.delegatePrivateKey}`);
+
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tools/call",
+        params: { name: "memwal_recall", arguments: { query: "after login" } },
+    });
+    const followUp = await bridge.waitFor((message) => message.id === 6);
+    assert.notEqual(followUp.result?.isError, true);
+    assert.match(
+        followUp.result.content[0].text,
+        new RegExp(`bearer=Bearer ${saved.delegatePrivateKey}`),
+    );
 });

@@ -6,11 +6,14 @@
 
 - Human-readable tool titles and explicit `readOnlyHint` / `destructiveHint` metadata during pre-login tool discovery, matching the remote relayer metadata used by Claude connectors.
 
+### Fixed
+
+- Answer the MCP `initialize` handshake locally and connect the relayer in the background, so a slow cold start no longer trips the client's 30s connection timeout and leaves the session with no memory tools. Tool discovery is served immediately and refreshed once the relayer is up; a hung relayer now degrades to a tool-call error instead of a failed startup. (#415)
+
 ## 0.0.7
 
 ### Fixed
 
-- Answer the MCP `initialize` handshake locally and connect the relayer in the background, so a slow cold start no longer trips the client's 30s connection timeout and leaves the session with no memory tools. Tool discovery is served immediately and refreshed once the relayer is up; a hung relayer now degrades to a tool-call error instead of a failed startup. (#415)
 - Reload credentials after browser login without restarting the MCP client.
 - Reject stale handshakes and prevent request replay across account changes.
 - Report truncated restores and enforce the relayer's bounded restore limit.
