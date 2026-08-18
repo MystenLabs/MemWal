@@ -1,5 +1,37 @@
 # @mysten-incubation/oc-memwal
 
+## 0.0.6
+
+### Fixed
+
+- `openclaw plugins install` now succeeds. The manifest marked `privateKey`, `accountId`
+  and `serverUrl` as required in `configSchema`, so OpenClaw rejected the config entry the
+  installer writes before credentials exist (`must have required property 'privateKey'`),
+  while pre-creating that entry failed the other way (`plugins.slots.memory: plugin not
+  found`). Validation stays in `parseConfig`, which reports clearer per-field errors at
+  register time and leaves the gateway running.
+- Every relayer call now runs under a deadline via `withTimeout`. A relayer that accepts
+  the connection without replying previously left the recall hook pending indefinitely and
+  blocked the agent turn. In auto-capture the deadline sits inside the retry, so each
+  attempt gets its own.
+
+### Added
+
+- `contracts.tools` declaring `memory_search` and `memory_store`. Without it the gateway
+  logged `plugin must declare contracts.tools before registering agent tools` and neither
+  tool registered, which also made the documented `tools.allow` step unreachable.
+- `requestTimeoutMs` config option (default 10000, range 1000 to 60000).
+- `test/plugin.test.mjs`, covering config validation, key masking, timeout and retry
+  behaviour, hook degradation under a hung relayer, and the escaping and tag-stripping
+  paths.
+
+### Changed
+
+- Documented `hooks.allowConversationAccess`, which OpenClaw requires before running the
+  `agent_end` hook for a non-bundled plugin. Without it, auto-capture never fires.
+- Corrected the documented config key. Both `plugins.slots.memory` and the
+  `plugins.entries` key take the manifest id `memory-memwal`.
+
 ## 0.0.5
 
 ### Patch Changes

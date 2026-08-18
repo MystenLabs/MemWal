@@ -114,12 +114,12 @@ You'll also need a **delegate key**, **account ID**, and **relayer URL** from Wa
     ```
 
     <Warning>
-    The config key is **`memory-memwal`** — the plugin's manifest id — not the npm
+    The config key is **`memory-memwal`**, the plugin's manifest id, not the npm
     package name `oc-memwal`. The installer reports this as
-    *"using manifest id as the config key"*. Using `oc-memwal` leaves the plugin
-    unbound and it will never load.
+    `using manifest id as the config key`. Using `oc-memwal` leaves the plugin
+    unbound, and it never loads.
 
-    `hooks.allowConversationAccess` is equally load-bearing: without it OpenClaw
+    `hooks.allowConversationAccess` is equally load-bearing. Without it, OpenClaw
     logs `typed hook "agent_end" blocked` at startup and **auto-capture silently
     never runs**, even though the gateway reports the plugin as connected.
     </Warning>
