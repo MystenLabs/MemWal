@@ -2001,6 +2001,7 @@ mod tests {
             wallet_balance_low_threshold_sui: 5_000_000_000,
             sponsor_balance_low_threshold_sui: 5_000_000_000,
             mcp_oauth: None,
+            auth_max_clock_drift_secs: crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS,
         }
     }
 

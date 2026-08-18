@@ -1189,6 +1189,16 @@ class MemWal:
                     f"(HTTP 426 Upgrade Required). Relayer response: "
                     f"{err_text[:300] or 'upgrade required'}"
                 )
+            # A stale/future-dated signature is rejected with 401 + a machine-
+            # readable reason header. Surface it as an actionable clock-drift
+            # error rather than an opaque 401 so the caller can fix node time.
+            if response.headers.get("x-auth-error") == "ERR_TIMESTAMP_OUT_OF_BOUNDS":
+                raise MemWalClockDriftError(
+                    "Request rejected: signed timestamp is outside the relayer's "
+                    "accepted clock-drift window. Synchronize this client's clock "
+                    "(NTP); if the deployment needs a wider tolerance, raise "
+                    "AUTH_MAX_CLOCK_DRIFT_SECS on the relayer."
+                )
             raise _HttpStatusError(
                 status=response.status_code,
                 body=err_text,
@@ -1205,6 +1215,15 @@ class MemWalError(Exception):
 
 class MemWalCompatibilityError(MemWalError):
     """Raised when the SDK and relayer API contract are incompatible."""
+
+    pass
+
+
+class MemWalClockDriftError(MemWalError):
+    """Raised when the relayer rejects a request because the signed timestamp is
+    outside its accepted clock-drift window (401 + ``x-auth-error:
+    ERR_TIMESTAMP_OUT_OF_BOUNDS``). Indicates the client's clock is skewed
+    relative to the relayer; sync via NTP or widen the relayer's window."""
 
     pass
 

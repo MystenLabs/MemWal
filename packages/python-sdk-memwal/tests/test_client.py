@@ -17,7 +17,13 @@ import nacl.signing
 import pytest
 import respx
 
-from memwal.client import MemWal, MemWalCompatibilityError, MemWalError, MemWalSync
+from memwal.client import (
+    MemWal,
+    MemWalClockDriftError,
+    MemWalCompatibilityError,
+    MemWalError,
+    MemWalSync,
+)
 from memwal.types import (
     RecallManualOptions,
     RecallParams,
@@ -467,6 +473,24 @@ class TestErrorHandling:
             match="wrong private key.*account ID mismatch.*staging/mainnet mismatch",
         ):
             await memwal_client.recall("test")
+
+    @respx.mock
+    async def test_clock_drift_header_raises_clock_drift_error(
+        self, memwal_client: MemWal
+    ) -> None:
+        """A 401 carrying x-auth-error: ERR_TIMESTAMP_OUT_OF_BOUNDS should surface
+        as an actionable MemWalClockDriftError, not an opaque HTTP error."""
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/remember").mock(
+            return_value=httpx.Response(
+                401,
+                headers={"x-auth-error": "ERR_TIMESTAMP_OUT_OF_BOUNDS"},
+                text="",
+            )
+        )
+
+        with pytest.raises(MemWalClockDriftError, match="clock-drift window"):
+            await memwal_client.remember("test")
 
     @respx.mock
     async def test_500_raises_memwal_error(self, memwal_client: MemWal) -> None:

@@ -24,6 +24,7 @@ Quick start::
 
 from .client import (
     MemWal,
+    MemWalClockDriftError,
     MemWalCompatibilityError,
     MemWalError,
     MemWalRememberJobFailed,
@@ -78,6 +79,7 @@ __all__ = [
     "MemWalMockSeed",
     "MemWalError",
     "MemWalCompatibilityError",
+    "MemWalClockDriftError",
     "MemWalRememberJobFailed",
     "MemWalRememberJobNotFound",
     "MemWalRememberJobTimeout",

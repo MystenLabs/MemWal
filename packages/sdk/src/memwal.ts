@@ -62,6 +62,7 @@ import {
     bytesToHex,
     normalizeServerUrl,
     sanitizeServerError,
+    clockDriftErrorFromResponse,
     scoringWeightsToWire,
 } from "./utils.js";
 import {
@@ -1266,6 +1267,12 @@ export class MemWal {
             const raw = await res.text();
             const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
             if (compatibilityError) throw compatibilityError;
+
+            // A stale/future-dated signature is rejected with 401 + a machine-
+            // readable reason header. Surface it as an actionable clock-drift
+            // error rather than an opaque 401 so the caller can fix node time.
+            const clockDriftError = clockDriftErrorFromResponse(res);
+            if (clockDriftError) throw clockDriftError;
 
             const { message, serverCode } = sanitizeServerError(res.status, raw);
             const err = new Error(message) as Error & {
