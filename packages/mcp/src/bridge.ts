@@ -18,8 +18,10 @@ import type { MemWalCredentials } from "./auth.js";
 import { clearCreds, credsPath } from "./auth.js";
 import { TOOL_DEFINITIONS } from "./auth-required.js";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
+import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
 import { loginFlow } from "./login.js";
 import { log, note } from "./logger.js";
+import { MEMWAL_MCP_VERSION } from "./version.js";
 
 /** Bridge mode runtime config — the URLs / label resolved at boot from
  * `--dev` / `--staging` / etc. Needed so `memwal_login` (re-auth) opens
@@ -122,6 +124,7 @@ function buildLocalInitializeResult(params: unknown): {
     protocolVersion: string;
     capabilities: { tools: { listChanged: boolean } };
     serverInfo: { name: string; version: string };
+    instructions: string;
 } {
     const requested = (params as { protocolVersion?: unknown } | undefined)?.protocolVersion;
     const protocolVersion =
@@ -131,7 +134,12 @@ function buildLocalInitializeResult(params: unknown): {
     return {
         protocolVersion,
         capabilities: { tools: { listChanged: true } },
-        serverInfo: { name: "memwal", version: "0.0.1" },
+        serverInfo: { name: "memwal", version: MEMWAL_MCP_VERSION },
+        // The relayer sets `instructions` too, but that reply never reaches the
+        // client: this local answer wins and the upstream initialize reply is
+        // suppressed. Omitting it here silently strips the proactive contract
+        // from every stdio client, which is the WALM-324 regression itself.
+        instructions: PROACTIVE_INSTRUCTIONS,
     };
 }
 

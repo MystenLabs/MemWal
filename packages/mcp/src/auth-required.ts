@@ -24,6 +24,8 @@
 import { loadCreds, type MemWalCredentials } from "./auth.js";
 import { log } from "./logger.js";
 import { loginFlow } from "./login.js";
+import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
+import { MEMWAL_MCP_VERSION } from "./version.js";
 
 interface RpcMessage {
     jsonrpc: "2.0";
@@ -387,7 +389,8 @@ function handleAuthLine(
                 // the real upstream tools (or `memwal_logout`). Advertise the
                 // capability the handoff depends on.
                 capabilities: { tools: { listChanged: true } },
-                serverInfo: { name: "memwal", version: "0.0.1" },
+                serverInfo: { name: "memwal", version: MEMWAL_MCP_VERSION },
+                instructions: AUTH_REQUIRED_INSTRUCTIONS,
             },
         });
         return null;

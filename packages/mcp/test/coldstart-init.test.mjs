@@ -304,6 +304,21 @@ test("initialize is answered locally during a slow relayer cold start; tools/cal
         "2025-06-18",
         `expected the local initialize to echo the requested protocolVersion, got ${init.result.protocolVersion}`,
     );
+    // The relayer sets `instructions` too, but this local answer wins and the
+    // upstream initialize reply is suppressed, so omitting it here strips the
+    // proactive contract from every stdio client. That is the WALM-324
+    // regression, and it is invisible to every other assertion in this file.
+    assert.ok(
+        typeof init.result.instructions === "string" && init.result.instructions.length > 0,
+        "local initialize must carry instructions; without it lazy-loading clients never learn the memwal_* tools are relevant",
+    );
+    assert.match(init.result.instructions, /memwal_recall/);
+    assert.match(init.result.instructions, /memwal_remember/);
+    assert.notEqual(
+        init.result.serverInfo.version,
+        "0.0.1",
+        "serverInfo.version must track package.json, not the old hardcoded stub",
+    );
     assert.ok(
         initElapsed < SSE_DELAY_MS - 500,
         `initialize took ${initElapsed}ms — expected it answered locally, well before the ${SSE_DELAY_MS}ms relayer connect`,
