@@ -258,16 +258,27 @@ impl AlertManager {
         };
         // Dedup by the full address; abbreviating here could make two distinct
         // wallets with the same prefix/suffix suppress each other's alerts.
-        let key = (
-            format!("{}:{}", alert.wallet_type, alert.token),
-            alert.address.clone(),
-        );
-        if self.wallet_balance_low_dedup.should_suppress(key) {
+        if self.should_suppress_wallet_balance_low(&alert) {
             return Ok(());
         }
         let payload = SlackPayload::for_wallet_balance_low(&alert);
         slack.send_payload(&payload).await
     }
+
+    fn should_suppress_wallet_balance_low(&self, alert: &WalletBalanceLowAlert) -> bool {
+        self.wallet_balance_low_dedup
+            .should_suppress(wallet_balance_low_dedup_key(alert))
+    }
+}
+
+fn wallet_balance_low_dedup_key(alert: &WalletBalanceLowAlert) -> (String, String) {
+    (
+        format!(
+            "{}:{}:{}",
+            alert.sui_network, alert.wallet_type, alert.token
+        ),
+        alert.address.clone(),
+    )
 }
 
 /// Read a dedup window (seconds) from `env_var`, falling back to `default`
@@ -435,6 +446,8 @@ pub struct WalletBalanceLowAlert {
     pub balance: u64,
     pub threshold: u64,
     pub token: String,
+    pub sui_network: String,
+    pub wallet_index: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -783,15 +796,21 @@ If the wallet is being topped up, rotate or temporarily remove that key from poo
         };
         let summary = format!(
             "Wallet balance alert on {}: {} balance is {} {}, below threshold of {} {} ({:.1}% remaining)",
-            alert.wallet_type, abbrev_address, balance_amount, alert.token, threshold_amount, alert.token, percent_remaining
+            alert.sui_network, abbrev_address, balance_amount, alert.token, threshold_amount, alert.token, percent_remaining
         );
         let action = format!(
             "*Action (ops):* Top up the {} wallet at {} with {} tokens.",
             alert.wallet_type, abbrev_address, alert.token
         );
+        let wallet_index = alert
+            .wallet_index
+            .map(|index| index.to_string())
+            .unwrap_or_else(|| "-".to_string());
         let details = format!(
-            "*Wallet type:* `{}`\n*Address:* `{}`\n*Balance:* {} {}\n*Threshold:* {} {}\n*Remaining:* {:.1}%",
+            "*Network:* `{}`\n*Wallet type:* `{}`\n*Wallet index:* `{}`\n*Address:* `{}`\n*Address balance:* {} {}\n*Threshold:* {} {}\n*Remaining:* {:.1}%",
+            alert.sui_network,
             alert.wallet_type,
+            wallet_index,
             alert.address,
             balance_amount,
             alert.token,
@@ -1176,6 +1195,8 @@ mod tests {
             balance: 500_000_000,
             threshold: 1_000_000_000,
             token: "SUI".to_string(),
+            sui_network: "mainnet".to_string(),
+            wallet_index: None,
         });
 
         let json = serde_json::to_string(&payload).unwrap();
@@ -1195,11 +1216,16 @@ mod tests {
             balance: 250_000_000,
             threshold: 1_000_000_000,
             token: "WAL".to_string(),
+            sui_network: "testnet".to_string(),
+            wallet_index: Some(2),
         });
 
         let json = serde_json::to_string(&payload).unwrap();
-        // 250M / 1B = 25%
+        // 250M / 1B = 25%; routing context is actionable in Slack.
         assert!(json.contains("25.0"));
+        assert!(json.contains("testnet"));
+        assert!(json.contains("Wallet index"));
+        assert!(json.contains("`2`"));
     }
 
     #[test]
@@ -1211,6 +1237,8 @@ mod tests {
             balance: 10_000_000,
             threshold: 100_000_000,
             token: "SUI".to_string(),
+            sui_network: "mainnet".to_string(),
+            wallet_index: None,
         });
 
         let json = serde_json::to_string(&payload).unwrap();
@@ -1220,15 +1248,54 @@ mod tests {
 
     #[test]
     fn wallet_balance_low_dedup_key_formation() {
-        let dedup = AlertDedup::new(Duration::from_secs(600));
         let address = "0x1234...abcd".to_string();
-        // First WAL alert should fire, then repeat WAL should be suppressed.
-        assert!(!dedup.should_suppress(("uploader:WAL".to_string(), address.clone())));
-        assert!(dedup.should_suppress(("uploader:WAL".to_string(), address.clone())));
-        // SUI for the same uploader remains an independent actionable alert.
-        assert!(!dedup.should_suppress(("uploader:SUI".to_string(), address.clone())));
-        // Sponsor SUI is also independent.
-        assert!(!dedup.should_suppress(("sponsor:SUI".to_string(), address)));
+        let wal = WalletBalanceLowAlert {
+            wallet_type: "uploader".to_string(),
+            address: address.clone(),
+            balance: 1,
+            threshold: 2,
+            token: "WAL".to_string(),
+            sui_network: "mainnet".to_string(),
+            wallet_index: Some(0),
+        };
+        let sui = WalletBalanceLowAlert {
+            token: "SUI".to_string(),
+            ..wal.clone()
+        };
+        let testnet = WalletBalanceLowAlert {
+            sui_network: "testnet".to_string(),
+            ..sui.clone()
+        };
+        let sponsor = WalletBalanceLowAlert {
+            wallet_type: "sponsor".to_string(),
+            wallet_index: None,
+            ..sui.clone()
+        };
+
+        assert_eq!(
+            wallet_balance_low_dedup_key(&wal),
+            ("mainnet:uploader:WAL".to_string(), address.clone())
+        );
+        assert_eq!(
+            wallet_balance_low_dedup_key(&sui),
+            ("mainnet:uploader:SUI".to_string(), address.clone())
+        );
+        assert_eq!(
+            wallet_balance_low_dedup_key(&testnet),
+            ("testnet:uploader:SUI".to_string(), address.clone())
+        );
+        assert_eq!(
+            wallet_balance_low_dedup_key(&sponsor),
+            ("mainnet:sponsor:SUI".to_string(), address)
+        );
+
+        let manager = AlertManager::from_env(reqwest::Client::new());
+        let first = manager.should_suppress_wallet_balance_low(&wal);
+        let repeat = manager.should_suppress_wallet_balance_low(&wal);
+        let other_token = manager.should_suppress_wallet_balance_low(&sui);
+        assert!(!first);
+        assert!(repeat);
+        assert!(!other_token);
     }
 
     #[test]

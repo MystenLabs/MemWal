@@ -249,6 +249,10 @@ export const ENOKI_NETWORK = (process.env.ENOKI_NETWORK || process.env.SUI_NETWO
     | "mainnet"
     | "testnet"
     | "devnet";
+// Roll out durable-register sponsorship in two phases: deploy this code with
+// the gate off so old and new replicas both understand persisted journals,
+// then enable it after the old replica set has drained.
+export const DURABLE_ENOKI_REGISTER_ENABLED = parseBooleanEnv("DURABLE_ENOKI_REGISTER_ENABLED", false);
 export const ENOKI_FALLBACK_TO_DIRECT_SIGN = (() => {
     const raw = (process.env.ENOKI_FALLBACK_TO_DIRECT_SIGN || "false").trim().toLowerCase();
     return raw !== "0" && raw !== "false" && raw !== "no";

@@ -4,6 +4,8 @@ export interface WalletBalance {
   address: string
   suiBalance: bigint
   walBalance: bigint
+  suiTotal: bigint
+  walTotal: bigint
   status: 'healthy' | 'warning' | 'critical'
 }
 
@@ -109,6 +111,8 @@ interface RawWalletBalance {
   address: string
   sui: string
   wal: string
+  sui_total?: string
+  wal_total?: string
   status: string
 }
 
@@ -167,6 +171,8 @@ export async function fetchAdminWallets(
       address: wallet.address,
       suiBalance: BigInt(wallet.sui || '0'),
       walBalance: BigInt(wallet.wal || '0'),
+      suiTotal: BigInt(wallet.sui_total || wallet.sui || '0'),
+      walTotal: BigInt(wallet.wal_total || wallet.wal || '0'),
       status: toBadgeStatus(wallet.status),
     })),
     sponsorWallet: {
