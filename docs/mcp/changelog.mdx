@@ -28,8 +28,15 @@ questions:
   - What changed in the MemWal MCP changelog?
   - When was the automatic memory plugin added to MemWal MCP?
 answer: >-
-  The latest MCP package release is 0.0.8. It adds human-readable tool titles and explicit `readOnlyHint` / `destructiveHint` metadata during pre-login discovery, matching the remote relayer metadata used by Claude connectors. Version 0.0.7 added credential reload and bounded restore error handling.
+  The latest MCP package release is 0.0.9. It answers the MCP initialize handshake locally and connects the relayer in the background so a slow cold start no longer trips the client's 30s timeout. Version 0.0.8 added human-readable tool titles and explicit `readOnlyHint` / `destructiveHint` metadata during pre-login discovery.
 ---
+
+## 0.0.9
+
+### Fixed
+
+- Answer the MCP `initialize` handshake locally and connect the relayer in the background, so a slow cold start no longer trips the client's 30s connection timeout and leaves the session with no memory tools. Tool discovery is served immediately and refreshed once the relayer is up; a hung relayer now degrades to a tool-call error instead of a failed startup. (#415)
+- Drop buffered tool calls on a same-account login reconnect and keep the `initialize` request id reusable, so a login handoff cannot publish stale cold-start traffic or break the client's handshake.
 
 ## 0.0.8
 
