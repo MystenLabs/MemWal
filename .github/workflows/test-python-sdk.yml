@@ -106,15 +106,24 @@ jobs:
 
       - name: Check credentials
         id: config
+        shell: bash
         run: |
-          # `requires_key` self-skips, so a half-configured environment still
-          # gets the unauthenticated coverage instead of nothing.
-          if [ -n "${MEMWAL_PRIVATE_KEY:-}" ] && [ -n "${MEMWAL_ACCOUNT_ID:-}" ]; then
-            echo "authenticated=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "authenticated=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::BENCH_DELEGATE_KEY / BENCH_ACCOUNT_ID are not set on this environment — authenticated e2e tests will be skipped."
+          set -euo pipefail
+
+          # Without these the `requires_key` marker skips every authenticated
+          # test, and the job would report success having never called the
+          # relayer. Fail instead of reporting a green run that proved nothing.
+          missing=0
+          for name in MEMWAL_PRIVATE_KEY MEMWAL_ACCOUNT_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is empty — set BENCH_DELEGATE_KEY / BENCH_ACCOUNT_ID on the benchmark-dev environment."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
           fi
+          echo "authenticated=true" >> "$GITHUB_OUTPUT"
 
       - name: E2E tests
         id: e2e
