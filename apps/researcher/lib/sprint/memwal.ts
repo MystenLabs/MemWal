@@ -1,10 +1,20 @@
 import "server-only";
 
-import { MemWal } from "@mysten-incubation/memwal";
+import { MemWal, MemWalMock } from "@mysten-incubation/memwal";
 import type { RememberResult } from "@mysten-incubation/memwal";
+import { isTestEnvironment } from "@/lib/constants";
 import type { Citation, SourceMeta } from "./types";
 
-function getMemWalClient(key: string, accountId: string) {
+// Shared across requests so a sprint remembered in one Playwright request is
+// recallable in the next — and so test runs can never write to the real
+// relayer configured in MEMWAL_SERVER_URL.
+let testMemWalClient: MemWalMock | null = null;
+
+function getMemWalClient(key: string, accountId: string): MemWal | MemWalMock {
+  if (isTestEnvironment) {
+    testMemWalClient ??= MemWalMock.create({ owner: "playwright" });
+    return testMemWalClient;
+  }
   return MemWal.create({
     key,
     accountId,

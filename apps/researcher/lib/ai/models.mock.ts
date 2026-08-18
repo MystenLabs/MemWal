@@ -121,6 +121,21 @@ const createMockReasoningModel = (): LanguageModel => {
   } as unknown as LanguageModel;
 };
 
+/**
+ * When a user message contains this sentinel, the mock title model rejects.
+ * The e2e suite uses it to reproduce the retired-title-model production
+ * failure and assert the chat stream still completes without an error part
+ * (the try/catch guard in app/(chat)/api/chat/route.ts).
+ * Mirrored in tests/playwright/helpers.ts — keep the two in sync.
+ */
+export const TITLE_FAILURE_SENTINEL = "FAIL_TITLE_GENERATION";
+
+function assertTitlePromptOk(prompt: unknown): void {
+  if (JSON.stringify(prompt).includes(TITLE_FAILURE_SENTINEL)) {
+    throw new Error("Mock title model failure (TITLE_FAILURE_SENTINEL)");
+  }
+}
+
 const createMockTitleModel = (): LanguageModel => {
   return {
     specificationVersion: "v3",
@@ -128,18 +143,22 @@ const createMockTitleModel = (): LanguageModel => {
     modelId: "mock-title-model",
     defaultObjectGenerationMode: "tool",
     supportedUrls: {},
-    doGenerate: async () => ({
-      finishReason: "stop",
-      usage: {
-        inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
-        outputTokens: { total: 5, text: 5, reasoning: 0 },
-      },
-      content: [{ type: "text", text: "Test Conversation" }],
-      warnings: [],
-    }),
-    doStream: () => ({
+    doGenerate: async ({ prompt }: { prompt: unknown }) => {
+      assertTitlePromptOk(prompt);
+      return {
+        finishReason: "stop",
+        usage: {
+          inputTokens: { total: 5, noCache: 5, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 5, text: 5, reasoning: 0 },
+        },
+        content: [{ type: "text", text: "Test Conversation" }],
+        warnings: [],
+      };
+    },
+    doStream: ({ prompt }: { prompt: unknown }) => ({
       stream: new ReadableStream({
         start(controller) {
+          assertTitlePromptOk(prompt);
           controller.enqueue({ type: "text-start", id: "t1" });
           controller.enqueue({
             type: "text-delta",

@@ -155,6 +155,92 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  researcher-e2e:
+    name: Researcher / Unit + Playwright E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: memwal
+          POSTGRES_PASSWORD: memwal_secret
+          POSTGRES_DB: memwal
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U memwal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_URL: postgresql://memwal:memwal_secret@localhost:5432/memwal
+      REDIS_URL: redis://localhost:6379
+      AUTH_SECRET: ci-test-secret-not-for-production
+      OPENROUTER_API_KEY: mock-not-used-tests-use-local-mocks
+      # Only read by the delegate-account binding mock to fabricate the
+      # MemWalAccount type; any non-empty 0x id works.
+      NEXT_PUBLIC_MEMWAL_PACKAGE_ID: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      PORT: "3000"
+      PLAYWRIGHT: "True"
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Test and build SDK (workspace dep of researcher)
+        run: pnpm --filter @mysten-incubation/memwal test
+
+      # Fast node:test unit tests (no DB/browser). Includes the retired-model
+      # regression tests for the title-model production incident.
+      - name: Unit tests
+        run: pnpm --filter researcher test:unit
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pw-${{ runner.os }}-
+
+      - name: Install Playwright (Chromium + OS deps)
+        run: pnpm --filter researcher playwright:install
+
+      - name: Run Playwright E2E
+        run: pnpm --filter researcher test:e2e
+
+      - name: Upload Playwright report + traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-researcher
+          path: |
+            apps/researcher/playwright-report
+            apps/researcher/test-results
+          retention-days: 14
+          if-no-files-found: ignore
+
   server-e2e:
     name: Server / E2E
     runs-on: ubuntu-latest
