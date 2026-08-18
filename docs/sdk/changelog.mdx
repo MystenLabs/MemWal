@@ -28,8 +28,18 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.2. It adds deterministic offline mocks and idempotent remember retries, isolates foreign manual-recall blobs, safely encodes large encrypted payloads, and supports Zod 3 and Zod 4.
+  The latest TypeScript SDK release is 0.1.3. It adds client-side token estimation and recall token budgets with configurable truncation strategies, and updates the default relayer URL.
 ---
+
+## 0.1.3
+
+### Added
+
+- Added client-side token estimation and recall token budgets with configurable truncation strategies.
+
+### Fixed
+
+- Updated the default SDK relayer URL to `https://relayer.memory.walrus.xyz`.
 
 ## 0.1.2
 

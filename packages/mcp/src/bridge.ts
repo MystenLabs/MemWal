@@ -16,9 +16,12 @@
  */
 import type { MemWalCredentials } from "./auth.js";
 import { clearCreds, credsPath } from "./auth.js";
-import { ensureCompatibleRelayer } from "./compatibility.js";
+import { TOOL_DEFINITIONS } from "./auth-required.js";
+import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
+import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
 import { loginFlow } from "./login.js";
 import { log, note } from "./logger.js";
+import { MEMWAL_MCP_VERSION } from "./version.js";
 
 /** Bridge mode runtime config — the URLs / label resolved at boot from
  * `--dev` / `--staging` / etc. Needed so `memwal_login` (re-auth) opens
@@ -41,6 +44,7 @@ export interface BridgeConfig {
  * agent calls it without). */
 const NAMESPACE_TOOLS = new Set([
     "memwal_remember",
+    "memwal_remember_bulk",
     "memwal_recall",
     "memwal_analyze",
     "memwal_restore",
@@ -101,6 +105,67 @@ const LOCAL_TOOL_DEFINITIONS = [
     },
 ];
 
+/** Protocol versions this local `initialize` responder can speak. We echo the
+ * client's requested version when it's one of these, else fall back to our
+ * baseline — the same negotiation shape a real MCP server does. */
+const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
+const FALLBACK_PROTOCOL_VERSION = "2024-11-05";
+
+/** Build the `initialize` result we answer LOCALLY and instantly, before the
+ * relayer session is up. Echoes the client's requested protocolVersion when we
+ * support it (otherwise the baseline) instead of hard-coding one and ignoring
+ * the request. `tools.listChanged: true` is a deliberate difference from
+ * auth-required mode: the bridge serves a static `tools/list` at cold start and
+ * then emits `notifications/tools/list_changed` once the background relayer
+ * connect completes, so the client re-lists and picks up the real upstream tool
+ * set. Advertising `listChanged: false` (as auth-required does, since it never
+ * refreshes) would let a client ignore that notification. */
+function buildLocalInitializeResult(params: unknown): {
+    protocolVersion: string;
+    capabilities: { tools: { listChanged: boolean } };
+    serverInfo: { name: string; version: string };
+    instructions: string;
+} {
+    const requested = (params as { protocolVersion?: unknown } | undefined)?.protocolVersion;
+    const protocolVersion =
+        typeof requested === "string" && SUPPORTED_PROTOCOL_VERSIONS.has(requested)
+            ? requested
+            : FALLBACK_PROTOCOL_VERSION;
+    return {
+        protocolVersion,
+        capabilities: { tools: { listChanged: true } },
+        serverInfo: { name: "memwal", version: MEMWAL_MCP_VERSION },
+        // The relayer sets `instructions` too, but that reply never reaches the
+        // client: this local answer wins and the upstream initialize reply is
+        // suppressed. Omitting it here silently strips the proactive contract
+        // from every stdio client, which is the WALM-324 regression itself.
+        instructions: PROACTIVE_INSTRUCTIONS,
+    };
+}
+
+/** Names of the tools we serve locally, so we can de-dup them out of the
+ * imported memory-tool list (which already carries its own `memwal_login`
+ * entry) before appending our canonical definitions. */
+const LOCAL_TOOL_NAMES = new Set(LOCAL_TOOL_DEFINITIONS.map((t) => t.name));
+
+/** The `tools/list` we serve LOCALLY at cold start: the memory tools (from the
+ * same source as auth-required mode) plus the locally-handled login/logout
+ * tools. We strip any locally-served name from the imported list first —
+ * `TOOL_DEFINITIONS` bundles its own `memwal_login`, and concatenating
+ * `LOCAL_TOOL_DEFINITIONS` blindly would advertise `memwal_login` twice. This
+ * yields the SAME shape as the post-connect spliced list (upstream memory tools
+ * + login + logout, each once), so the static→refreshed transition doesn't
+ * change the tool set out from under the client. OAuth-scoped sessions may
+ * over-advertise write tools until `tools/list_changed` refreshes from the
+ * relayer. Refreshed via
+ * `tools/list_changed` once the relayer session is up. */
+const LOCAL_TOOLS_LIST = {
+    tools: [
+        ...TOOL_DEFINITIONS.filter((t) => !LOCAL_TOOL_NAMES.has(t.name)),
+        ...LOCAL_TOOL_DEFINITIONS,
+    ],
+};
+
 const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
 const URL_READY_TIMEOUT_MS = 5_000;
 
@@ -149,22 +214,65 @@ async function openSseStream(
     relayerUrl: string,
     creds: MemWalCredentials,
 ): Promise<SseHandshakeResult> {
-    await ensureCompatibleRelayer(relayerUrl);
+    const connectTimeoutMs = resolveConnectTimeoutMs();
+    // One shared budget for the WHOLE attempt: the compatibility check (GET
+    // /version + /health fallback) and the SSE connect below both honour this
+    // single deadline, so an attempt is bounded by connectTimeoutMs in total
+    // rather than each step getting its own (which could sum to 2–3×).
+    const budgetSignal = AbortSignal.timeout(connectTimeoutMs);
+    await ensureCompatibleRelayer(relayerUrl, budgetSignal);
 
     const url = `${relayerUrl.replace(/\/+$/, "")}/api/mcp/sse`;
     const controller = new AbortController();
 
-    const resp = await fetch(url, {
-        method: "GET",
-        headers: {
-            ...mcpAuthHeaders(creds),
-            accept: "text/event-stream",
-            "cache-control": "no-cache",
-        },
-        signal: controller.signal,
-    });
+    // Bound the INITIAL connect (headers + the wait-for-`endpoint`-event loop
+    // below) on the SAME shared budget as the compat check above, so a hung
+    // relayer aborts well before the MCP client's ~30s timeout and one attempt
+    // never exceeds connectTimeoutMs total. This is distinct from the idle
+    // watchdog, which only bounds silence AFTER the stream is up. When the
+    // budget fires we abort `controller` (so the in-flight fetch/read unwinds);
+    // we detach the listener the instant the endpoint resolves — past that
+    // point the idle watchdog owns liveness and this must never fire, or it
+    // would tear down a healthy stream.
+    let connectTimedOut = false;
+    const onBudgetExpired = (): void => {
+        if (!controller.signal.aborted) {
+            connectTimedOut = true;
+            log.warn("bridge.connect_timeout", { url, timeoutMs: connectTimeoutMs });
+            controller.abort();
+        }
+    };
+    // If the compat check already burned the whole budget, `budgetSignal` is
+    // already aborted — fire synchronously so we don't even attempt the SSE GET.
+    if (budgetSignal.aborted) onBudgetExpired();
+    else budgetSignal.addEventListener("abort", onBudgetExpired, { once: true });
+    const clearConnectTimer = (): void =>
+        budgetSignal.removeEventListener("abort", onBudgetExpired);
+
+    let resp: Response;
+    try {
+        resp = await fetch(url, {
+            method: "GET",
+            headers: {
+                ...mcpAuthHeaders(creds),
+                accept: "text/event-stream",
+                "cache-control": "no-cache",
+            },
+            signal: controller.signal,
+        });
+    } catch (err) {
+        clearConnectTimer();
+        if (connectTimedOut) {
+            throw new Error(
+                `Walrus Memory relayer SSE connect timed out after ${connectTimeoutMs}ms ` +
+                    `(${url}). The relayer may be slow, cold-starting, or unreachable.`
+            );
+        }
+        throw err;
+    }
 
     if (resp.status === 401) {
+        clearConnectTimer();
         controller.abort();
         log.warn("bridge.unauthorized", { url });
         // DO NOT wipe creds here. A 401 from the relayer is *evidence* of
@@ -184,6 +292,7 @@ async function openSseStream(
         );
     }
     if (!resp.ok || !resp.body) {
+        clearConnectTimer();
         const body = resp.body ? await resp.text() : "";
         controller.abort();
         throw new Error(
@@ -193,6 +302,7 @@ async function openSseStream(
 
     const ct = resp.headers.get("content-type") ?? "";
     if (!ct.includes("event-stream")) {
+        clearConnectTimer();
         controller.abort();
         throw new Error(
             `Walrus Memory relayer returned unexpected content-type "${ct}" for SSE endpoint`
@@ -306,13 +416,26 @@ async function openSseStream(
     // Wait for the `endpoint` event (or first message) before returning.
     while (!endpointResolved) {
         if (streamEnded) {
+            clearConnectTimer();
             controller.abort();
+            if (connectTimedOut) {
+                throw new Error(
+                    `Walrus Memory relayer SSE connect timed out after ${connectTimeoutMs}ms ` +
+                        `(${url}) waiting for the endpoint event. The relayer may be slow, ` +
+                        `cold-starting, or unreachable.`
+                );
+            }
             throw new Error(
                 `Walrus Memory relayer SSE handshake ended before endpoint event${streamError ? `: ${streamError}` : ""}`
             );
         }
         await new Promise<void>((r) => (queueResolver = r));
     }
+
+    // Endpoint resolved — the stream is up. Hand liveness over to the idle
+    // watchdog and disarm the connect timer so it can never abort a healthy
+    // stream.
+    clearConnectTimer();
 
     const iter: AsyncIterator<RpcMessage> = {
         async next(): Promise<IteratorResult<RpcMessage>> {
@@ -513,15 +636,112 @@ export async function runBridge(
     });
 
     // Live handle to the current SSE stream — replaced whenever we reconnect.
-    let sse = await openSseStream(creds.relayerUrl, creds);
-    note(`Connected. Bridging stdio MCP ↔ ${creds.relayerUrl}`);
-    log.info("bridge.connected", { relayer: creds.relayerUrl });
+    // Starts null: we answer `initialize` / `tools/list` LOCALLY and wire stdin
+    // BEFORE the relayer session exists, so the MCP client's handshake never
+    // waits on a (possibly slow / cold) relayer round-trip. The connect runs in
+    // the background; anything that must reach the relayer (`tools/call`) is
+    // buffered in `pendingForward` until `sse` is live, then flushed.
+    let sse: SseHandshakeResult | null = null;
 
     let stdinClosed = false;
     let reconnectAttempt = 0;
     let reconnectPromise: Promise<void> | null = null;
     let credentialGeneration = 0;
     let activeCredentialGeneration = 0;
+
+    /** Callbacks to run once, the moment stdin closes — used to wake anything
+     * parked on a timer (e.g. the connect-retry backoff) so shutdown is prompt
+     * instead of waiting out the timer. `markStdinClosed` is the single writer
+     * of `stdinClosed`; call it instead of assigning the flag directly. */
+    const stdinCloseListeners = new Set<() => void>();
+    /** Register a shutdown callback. Returns an unregister fn so a caller that
+     * only cares about shutdown *while it's parked* (e.g. one backoff sleep) can
+     * detach when it wakes normally — otherwise the set would grow one stale
+     * closure per retry for the whole session. Fires immediately if already
+     * closed (unregister is then a no-op). */
+    function onStdinClose(fn: () => void): () => void {
+        if (stdinClosed) {
+            fn();
+            return () => {};
+        }
+        stdinCloseListeners.add(fn);
+        return () => stdinCloseListeners.delete(fn);
+    }
+    function markStdinClosed(): void {
+        if (stdinClosed) return;
+        stdinClosed = true;
+        for (const fn of stdinCloseListeners) {
+            try {
+                fn();
+            } catch {
+                /* listener failure must not block shutdown */
+            }
+        }
+        stdinCloseListeners.clear();
+    }
+
+    /** Requests that arrived before the relayer session came up. Held here and
+     * flushed in order once `sse` is live. `tools/call` (and any other request
+     * that must reach the relayer) lands here; `tools/list` and
+     * `memwal_login|logout` are answered locally and never buffered. `initialize`
+     * IS buffered (to forward upstream for capability negotiation) but is never
+     * failed back — `failRequest` skips `method === "initialize"`. */
+    const pendingForward: RpcMessage[] = [];
+
+    /** True while `flushPendingForward` is draining the buffer after the first
+     * connect. New stdin requests that arrive mid-drain must keep buffering
+     * rather than posting directly, or they'd overtake still-queued items and
+     * break arrival order. */
+    let flushing = false;
+
+    /** Resolves the first time the SSE stream is up (or when stdin closes before
+     * that ever happens). `serverPump` waits on this before reading from
+     * `sse.iter`; after it resolves, `sse` is either a live handle or null
+     * (stdin closed) — the pump loop guards on both. Idempotent. */
+    let signalFirstConnect: () => void = () => {};
+    let firstConnectSignaled = false;
+    const firstConnect = new Promise<void>((r) => {
+        signalFirstConnect = () => {
+            if (firstConnectSignaled) return;
+            firstConnectSignaled = true;
+            r();
+        };
+    });
+
+    /** Expected-suppression COUNT per id, for requests we answered locally but
+     * still forwarded upstream (currently just `initialize`, so the relayer
+     * session negotiates capabilities). The upstream reply must be dropped in
+     * the pump — the client already has our local reply, and a second response
+     * for the same id corrupts its JSON-RPC state.
+     *
+     * A count (not a bare Set) so suppression is EXACT and self-limiting: we
+     * expect exactly one upstream reply per forward, so we increment on each
+     * forward (initial + every reconnect replay) and decrement on each dropped
+     * reply, removing the id at zero. Once the initialize replies are all
+     * consumed, the id stops suppressing — so a client that later REUSES the
+     * initialize id for a real request gets that request's genuine reply
+     * (result OR error) through, instead of it being swallowed forever. */
+    const suppressUpstreamReplies = new Map<string | number, number>();
+
+    /** IDs we've already answered with a shutdown "unavailable" envelope
+     * (`failRequest`). If a late upstream reply for one of these still arrives —
+     * e.g. a flush-404 reconnect re-posted the request onto a live session that
+     * answers just as we were closing out at shutdown — the pump must DROP it,
+     * or the client would get two responses for one id. */
+    const closedOutIds = new Set<string | number>();
+
+    const expectSuppressedReply = (id: string | number): void => {
+        suppressUpstreamReplies.set(id, (suppressUpstreamReplies.get(id) ?? 0) + 1);
+    };
+    /** Consume one expected suppression for `id`. Returns true if the reply
+     * should be dropped (an outstanding local-answer suppression existed). */
+    const consumeSuppressedReply = (id: string | number): boolean => {
+        const n = suppressUpstreamReplies.get(id);
+        if (!n) return false;
+        if (n <= 1) suppressUpstreamReplies.delete(id);
+        else suppressUpstreamReplies.set(id, n - 1);
+        return true;
+    };
 
     // In-flight requests pending a response. We replay them after a forced
     // reconnect so a server-side session swap doesn't strand a tool call
@@ -535,16 +755,22 @@ export async function runBridge(
      * client surfaces them in its tool palette. */
     const pendingListIds = new Set<string | number>();
 
+    /** Reopen the SSE stream and replay outstanding `inFlight` requests against
+     * the fresh session. All callers await the SAME reconnect via
+     * `reconnectPromise` — returning immediately while one is active would let
+     * the server pump spin on the aborted stream and let client messages race
+     * the stale POST URL. Any reconnect replays the WHOLE `inFlight` map, so
+     * callers must treat every id-bearing request as reconnect-owned and never
+     * re-post it themselves. `immediate` skips the backoff (used right after a
+     * login credential swap). Credential-generation checks discard a session
+     * whose key rotated mid-handshake. */
     async function reconnect(reason: string, immediate = false): Promise<void> {
         if (stdinClosed) return;
-        // All callers await the same reconnect. Returning immediately while a
-        // reconnect is active lets the server pump spin on the aborted stream
-        // and lets client messages race the stale POST URL.
         if (reconnectPromise) return reconnectPromise;
 
         reconnectPromise = (async () => {
             try {
-                sse.abort();
+                sse?.abort();
             } catch {
                 /* already dead */
             }
@@ -557,7 +783,22 @@ export async function runBridge(
                 backoffMs: backoff,
                 attempt: reconnectAttempt,
             });
-            if (backoff > 0) await new Promise((r) => setTimeout(r, backoff));
+            // Sleep, but wake immediately on stdin close so shutdown isn't held
+            // up for the whole backoff; unref'd so the timer never keeps the
+            // event loop alive on its own (mirrors the connect-retry backoff).
+            if (backoff > 0) {
+                await new Promise<void>((resolve) => {
+                    const timer = setTimeout(() => {
+                        unregister();
+                        resolve();
+                    }, backoff);
+                    timer.unref?.();
+                    const unregister = onStdinClose(() => {
+                        clearTimeout(timer);
+                        resolve();
+                    });
+                });
+            }
             try {
                 while (!stdinClosed) {
                     const openingGeneration = credentialGeneration;
@@ -593,6 +834,19 @@ export async function runBridge(
                     // start arriving on the new session.
                     for (const [id, msg] of Array.from(inFlight.entries())) {
                         try {
+                            // A replayed `initialize` produces a fresh upstream
+                            // reply on the NEW session that must also be dropped.
+                            // REPLACE (not stack) any pending suppression for this
+                            // id: the old session was aborted, so its initialize
+                            // reply will never arrive to consume its own arm.
+                            // Re-arming without clearing would leave that orphaned
+                            // arm forever, and a later reused id would have its
+                            // real reply wrongly dropped. Reset to exactly one —
+                            // the single reply the new session will send.
+                            if (msg.method === "initialize" && msg.id != null) {
+                                suppressUpstreamReplies.delete(msg.id);
+                                expectSuppressedReply(msg.id);
+                            }
                             const status = await postMessage(sse.postUrl, msg, openingCreds);
                             log.info("bridge.replayed", { id, status });
                         } catch (err) {
@@ -607,6 +861,17 @@ export async function runBridge(
                     // it passed the first generation check.
                     if (openingGeneration !== credentialGeneration) {
                         candidate.abort();
+                        // The replay above armed one initialize suppression for
+                        // THIS (now-discarded) candidate; its reply will never
+                        // arrive to consume it. Clear those arms so the count
+                        // doesn't leak if the loop exits before another replay
+                        // re-arms (a leaked arm would swallow a later reused-id
+                        // reply). A surviving candidate re-arms fresh next pass.
+                        for (const [, msg] of inFlight) {
+                            if (msg.method === "initialize" && msg.id != null) {
+                                suppressUpstreamReplies.delete(msg.id);
+                            }
+                        }
                         continue;
                     }
                     break;
@@ -635,23 +900,54 @@ export async function runBridge(
         // operations belong in the newly-selected account.
         if (accountChanged) {
             try {
-                sse.abort();
+                sse?.abort();
             } catch {
                 /* already dead */
             }
-            for (const [id] of Array.from(inFlight.entries())) {
+            // Purge EVERY structure that holds an account-A request. `inFlight`
+            // (tracked requests) AND `pendingForward` (cold-start / mid-flush
+            // buffered requests) — the latter is unique to the cold-start path
+            // and would otherwise be flushed to account B's session (a
+            // cross-account replay) since the flush posts with the current
+            // `creds`. For each, reply once with a retryable error and stop
+            // tracking; never write a second reply for a locally-answered
+            // `initialize`. Keep its one-shot suppress arm so a queued
+            // upstream initialize reply is consumed. Do not put initialize in
+            // closedOutIds — a later reused id must still get a real reply.
+            const purge = (msg: RpcMessage): void => {
+                if (msg.id == null) return; // notification — nothing to reply to
+                pendingListIds.delete(msg.id);
+                if (msg.method === "initialize") {
+                    return;
+                }
+                suppressUpstreamReplies.delete(msg.id);
+                // A request can be in BOTH inFlight and pendingForward (cold-start
+                // dual-tracking), so guard against answering the same id twice.
+                if (closedOutIds.has(msg.id)) return;
+                // Record the id so a late reply for it (e.g. one already
+                // in-flight on the aborted session, or a racing replay) is
+                // dropped by the pump rather than becoming a second response.
+                closedOutIds.add(msg.id);
                 writeStdoutMessage({
                     jsonrpc: "2.0",
-                    id,
+                    id: msg.id,
                     error: {
                         code: -32001,
                         message:
                             "Walrus Memory account changed during login; retry this request for the new account",
                     },
                 });
-                pendingListIds.delete(id);
-            }
+            };
+            for (const [, msg] of Array.from(inFlight.entries())) purge(msg);
             inFlight.clear();
+            for (const msg of pendingForward.splice(0, pendingForward.length)) purge(msg);
+        } else {
+            // Same account: reconnect() owns inFlight. Drop id-bearing
+            // pendingForward so a login mid-flush cannot POST the same
+            // remember/recall again after replay.
+            const leftover = pendingForward.filter((m) => m.id == null);
+            pendingForward.length = 0;
+            pendingForward.push(...leftover);
         }
 
         creds = nextCreds;
@@ -673,11 +969,57 @@ export async function runBridge(
     // Server → client: stream SSE messages to stdout. Loop forever, restart
     // pump on stream end (which means SSE got cut → we already reconnected).
     const serverPump = (async () => {
+        // Nothing to pump until the first relayer session is up. `firstConnect`
+        // resolves only on a SUCCESSFUL connect (the background connector
+        // retries failures with backoff), unless stdin closed first — in which
+        // case `sse` stays null and we exit the loop immediately.
+        await firstConnect;
         while (!stdinClosed) {
             try {
+                // Snapshot the current stream. `sse` is non-null here: set before
+                // signalFirstConnect(), and reconnect() only ever replaces it with
+                // another live handle. Reading through a local keeps us on one
+                // stream for the duration of this drain; a reconnect swaps `sse`
+                // and we pick up the new handle on the next outer iteration.
+                // Cast: TS control-flow narrows `sse` to `null` in the outer
+                // scope because every non-null assignment happens inside a
+                // sibling closure (connectInBackground / reconnect) that TS
+                // analyzes independently. At runtime `sse` is a live handle here.
+                const stream = sse as SseHandshakeResult | null;
+                if (!stream) break; // stdin closed before we ever connected
                 while (true) {
-                    const { value, done } = await sse.iter.next();
+                    const { value, done } = await stream.iter.next();
                     if (done) break;
+                    // Drop the upstream reply to a request we already answered
+                    // locally (e.g. `initialize`). Writing it would be a second
+                    // response for the same id. We consume exactly ONE expected
+                    // suppression per id (see suppressUpstreamReplies), so once
+                    // the initialize reply(s) are drained the id stops
+                    // suppressing — a client that later reuses that id for a real
+                    // request still gets THAT request's reply (result or error).
+                    if (
+                        value &&
+                        value.id !== undefined &&
+                        value.id !== null &&
+                        (value.result !== undefined || value.error !== undefined) &&
+                        consumeSuppressedReply(value.id)
+                    ) {
+                        inFlight.delete(value.id);
+                        continue;
+                    }
+                    // Drop a late reply for an id we already closed out at
+                    // shutdown — writing it would be a second response for that
+                    // id (see closedOutIds / failRequest).
+                    if (
+                        value &&
+                        value.id !== undefined &&
+                        value.id !== null &&
+                        (value.result !== undefined || value.error !== undefined) &&
+                        closedOutIds.has(value.id)
+                    ) {
+                        inFlight.delete(value.id);
+                        continue;
+                    }
                     // Clear in-flight tracking once the response lands.
                     if (
                         value &&
@@ -701,7 +1043,14 @@ export async function runBridge(
                         pendingListIds.delete(value.id);
                         const result = value.result as { tools?: unknown };
                         if (Array.isArray(result.tools)) {
-                            result.tools = [...result.tools, ...LOCAL_TOOL_DEFINITIONS];
+                            // Strip any locally-served name from the upstream set
+                            // before appending ours, so a relayer that ever
+                            // advertises login/logout itself can't produce a
+                            // duplicate tool name. Mirrors LOCAL_TOOLS_LIST.
+                            const upstream = (result.tools as { name?: string }[]).filter(
+                                (t) => !LOCAL_TOOL_NAMES.has(t.name ?? ""),
+                            );
+                            result.tools = [...upstream, ...LOCAL_TOOL_DEFINITIONS];
                         }
                     }
                     writeStdoutMessage(value);
@@ -712,7 +1061,13 @@ export async function runBridge(
                 });
             }
             if (stdinClosed) break;
-            // Stream ended unexpectedly — reconnect and resume.
+            // Stream ended. If a reconnect is ALREADY in progress (e.g. the
+            // flush hit a 404), await THAT one rather than hammering reconnect()
+            // — otherwise this loop would spin on the dead stream's immediate
+            // `done`. reconnect() itself returns the shared reconnectPromise when
+            // one is active, so awaiting it here is enough; on the next
+            // iteration `sse` has been swapped to the fresh session and we
+            // resume reading. If no reconnect is in progress, this starts one.
             await reconnect("server-pump-eof");
         }
     })();
@@ -724,6 +1079,36 @@ export async function runBridge(
         void (async () => {
             try {
                 const msg = JSON.parse(line) as RpcMessage;
+
+                // Answer `initialize` LOCALLY and instantly so the MCP client's
+                // handshake never waits on the relayer connect (the cold-start
+                // bug). We STILL forward it upstream (below) so the relayer
+                // session negotiates capabilities — but suppress that upstream
+                // reply, since the client already has this one.
+                if (msg.method === "initialize" && msg.id != null) {
+                    writeStdoutMessage({
+                        jsonrpc: "2.0",
+                        id: msg.id,
+                        result: buildLocalInitializeResult(msg.params),
+                    });
+                    // Expect exactly one upstream reply to drop for this forward.
+                    expectSuppressedReply(msg.id);
+                    // Fall through: forward/buffer the initialize upstream too.
+                }
+
+                // Answer `tools/list` LOCALLY at cold start (before the relayer
+                // session exists) so tool discovery unblocks immediately. Once
+                // connected we emit `notifications/tools/list_changed` and the
+                // client re-lists — that re-list is forwarded upstream and gets
+                // the real tool set spliced (handled further down + in the pump).
+                if (msg.method === "tools/list" && msg.id != null && sse === null) {
+                    writeStdoutMessage({
+                        jsonrpc: "2.0",
+                        id: msg.id,
+                        result: LOCAL_TOOLS_LIST,
+                    });
+                    return;
+                }
 
                 // Local interception: `memwal_login` and `memwal_logout`
                 // are handled here, never sent to the relayer. The user
@@ -778,6 +1163,20 @@ export async function runBridge(
                 ) {
                     inFlight.set(msg.id, msg);
                 }
+                // Relayer session not up yet, OR the post-connect flush is still
+                // draining — buffer so this request stays behind everything that
+                // arrived before it (posting directly here would let it overtake
+                // a still-queued buffered item). The flush (or the next connect)
+                // forwards it in order. Dropping it would strand the request.
+                if (sse === null || flushing) {
+                    pendingForward.push(msg);
+                    log.info("bridge.buffered_pre_connect", {
+                        method: msg.method,
+                        id: msg.id ?? null,
+                    });
+                    return;
+                }
+
                 // A successful background login swaps credentials and SSE
                 // sessions asynchronously. Wait for that swap before sending a
                 // new request so it cannot race the stale session URL/key.
@@ -798,21 +1197,234 @@ export async function runBridge(
         })();
     };
 
+    /** Flush everything buffered before the session came up, in arrival order,
+     * then announce the real tool set. Called once, right after the first
+     * successful connect. `flushing` keeps concurrently-arriving stdin requests
+     * buffering (rather than posting directly and overtaking the queue); we
+     * drain until the buffer is empty so those late arrivals are forwarded too. */
+    async function flushPendingForward(): Promise<void> {
+        flushing = true;
+        try {
+            if (pendingForward.length > 0) {
+                log.info("bridge.flushing_pre_connect", { count: pendingForward.length });
+            }
+            while (pendingForward.length > 0) {
+                if (stdinClosed) {
+                    // Shutting down mid-flush: don't post to a torn-down session.
+                    // Everything still buffered (plus what we've already shifted
+                    // into inFlight but not delivered) is closed out below.
+                    break;
+                }
+                if (!sse) break; // lost the session; reconnect replays inFlight
+                const msg = pendingForward.shift()!;
+                try {
+                    const status = await postMessage(sse.postUrl, msg, creds);
+                    if (status === 404) {
+                        // Stale session right after connect. EVERY id-bearing
+                        // request is in `inFlight`, and ANY reconnect — this
+                        // flush's own, or a concurrent `server-pump-eof` one that
+                        // shares the same `reconnectPromise` — replays the whole
+                        // `inFlight` map against the fresh session. So id-bearing
+                        // items are owned by reconnect, period; re-posting them
+                        // from the flush would duplicate them (double write +
+                        // two replies for one id). We therefore drop ALL
+                        // id-bearing items from the queue after reconnect and
+                        // keep only id-less notifications (never in `inFlight`,
+                        // so no reconnect carries them) to re-drain. `await
+                        // reconnect()` resolves the shared reconnectPromise, so
+                        // `inFlight` has been fully replayed by the time we
+                        // decide what's left to send — no matter which caller
+                        // owns the reconnect.
+                        log.warn("bridge.session_stale", { sessionUrl: sse.postUrl });
+                        if (msg.id == null) pendingForward.unshift(msg);
+                        await reconnect("post-404");
+                        const notifications = pendingForward.filter((m) => m.id == null);
+                        pendingForward.length = 0;
+                        pendingForward.push(...notifications);
+                        continue;
+                    }
+                } catch (err) {
+                    log.error("bridge.flush_failed", {
+                        id: msg.id ?? null,
+                        err: err instanceof Error ? err.message : String(err),
+                    });
+                }
+            }
+        } finally {
+            flushing = false;
+        }
+        // If stdin closed while we were draining, close out anything still open
+        // (buffered + already-in-inFlight-but-undelivered) so those calls get an
+        // error envelope instead of hanging until the client's own timeout.
+        if (stdinClosed) {
+            failPendingForward("connection lost during shutdown");
+            failInFlightRequests("connection lost during shutdown");
+            return;
+        }
+        // The client discovered tools from our static `tools/list`. Now that the
+        // real relayer session is up, tell it to re-list so it picks up the
+        // authoritative upstream set (spliced with login/logout in the pump).
+        writeStdoutMessage({
+            jsonrpc: "2.0",
+            method: "notifications/tools/list_changed",
+        });
+    }
+
+    /** Write the "relayer unavailable" reply for one open request, stop tracking
+     * it, and never double-answer a locally-answered request. Shared by the
+     * buffered (`failPendingForward`) and in-flight (`failInFlightRequests`)
+     * close-outs. Skips:
+     *   - notifications (no id → nothing to reply to; also unforwardable now).
+     *   - `initialize` (we already answered it locally; a second response for
+     *     that id would corrupt the client's JSON-RPC state — just untrack).
+     * Only `tools/call` shaped requests get the tool-result error envelope; any
+     * other id-bearing request gets a JSON-RPC error object (the correct shape
+     * for a non-tool request). */
+    function failRequest(msg: RpcMessage, reason: string): void {
+        if (msg.id == null) return; // notification — nothing to answer
+        if (msg.method === "initialize") {
+            // Locally answered already. Never write a second reply for this id.
+            // Keep any suppress arm so a late upstream initialize result is
+            // consumed; do not closedOut the id (clients may reuse it later).
+            inFlight.delete(msg.id);
+            return;
+        }
+        inFlight.delete(msg.id);
+        // Remember we answered this id, so a late genuine reply (e.g. from a
+        // flush-404 reconnect that re-posted onto a live session) is dropped by
+        // the pump instead of becoming a second response for the same id.
+        closedOutIds.add(msg.id);
+        if (msg.method === "tools/call") {
+            writeStdoutMessage({
+                jsonrpc: "2.0",
+                id: msg.id,
+                result: {
+                    content: [
+                        {
+                            type: "text",
+                            text: `❌ Walrus Memory relayer unavailable: ${reason}. The memory tool could not run. Please retry shortly.`,
+                        },
+                    ],
+                    isError: true,
+                },
+            });
+        } else {
+            writeStdoutMessage({
+                jsonrpc: "2.0",
+                id: msg.id,
+                error: {
+                    code: -32000,
+                    message: `Walrus Memory relayer unavailable: ${reason}`,
+                },
+            });
+        }
+    }
+
+    function failPendingForward(reason: string): void {
+        const queued = pendingForward.splice(0, pendingForward.length);
+        for (const msg of queued) failRequest(msg, reason);
+    }
+
+    /** Close out requests that reached `inFlight` but were never delivered a
+     * reply — the shutdown counterpart of `failPendingForward`. Used when stdin
+     * closes mid-flush: items already shifted out of `pendingForward` and posted
+     * to a torn-down session would otherwise hang, since no upstream reply is
+     * coming. Idempotent w.r.t. ids already closed out (delete-then-skip). */
+    function failInFlightRequests(reason: string): void {
+        for (const msg of Array.from(inFlight.values())) failRequest(msg, reason);
+    }
+
+    // Kick off the relayer connect in the BACKGROUND — do NOT await it before
+    // wiring stdin below. This is the whole fix: `initialize` / `tools/list` are
+    // answered locally the moment they arrive, while the (possibly slow / cold)
+    // relayer round-trip proceeds off the handshake's critical path.
+    //
+    // Retry with backoff so a cold-starting relayer eventually connects. We do
+    // NOT fail buffered requests between attempts: a request that the next
+    // attempt would serve must not get a spurious "unavailable" error (that
+    // would also drop the auth-required hot-handoff request). Buffered tool
+    // calls stay queued and are flushed on the first SUCCESS; if they never
+    // connect, the client's own per-tool timeout fires (graceful) — and on
+    // shutdown `failPendingForward` closes out anything still open. `initialize`
+    // is answered locally, so it never blocks and is only forwarded, not failed.
+    // First connect stays on `openSseStream` + `flushPendingForward` so a
+    // flush-time 404 still goes through the existing reconnect/replay path.
+    // It must NOT publish if login already owns `sse`, or if the handshake
+    // finished after `credentialGeneration` moved — that was the double-flush.
+    const connectInBackground = (async () => {
+        let attempt = 0;
+        while (!stdinClosed) {
+            if (reconnectPromise) {
+                await reconnectPromise;
+                continue;
+            }
+            if (sse) {
+                signalFirstConnect();
+                const notifications = pendingForward.filter((m) => m.id == null);
+                pendingForward.length = 0;
+                pendingForward.push(...notifications);
+                await flushPendingForward();
+                return;
+            }
+            const openingGeneration = credentialGeneration;
+            try {
+                const candidate = await openSseStream(creds.relayerUrl, creds);
+                if (stdinClosed) {
+                    candidate.abort();
+                    break;
+                }
+                if (openingGeneration !== credentialGeneration || sse) {
+                    candidate.abort();
+                    continue;
+                }
+                sse = candidate;
+                note(`Connected. Bridging stdio MCP ↔ ${creds.relayerUrl}`);
+                log.info("bridge.connected", { relayer: creds.relayerUrl });
+                signalFirstConnect();
+                await flushPendingForward();
+                return;
+            } catch (err) {
+                const reason = err instanceof Error ? err.message : String(err);
+                attempt += 1;
+                log.error("bridge.initial_connect_failed", { err: reason, attempt });
+                if (stdinClosed) break;
+                const backoff = Math.min(15_000, 500 * Math.pow(2, attempt - 1));
+                await new Promise<void>((resolve) => {
+                    const timer = setTimeout(() => {
+                        unregister();
+                        resolve();
+                    }, backoff);
+                    timer.unref?.();
+                    const unregister = onStdinClose(() => {
+                        clearTimeout(timer);
+                        resolve();
+                    });
+                });
+            }
+        }
+        signalFirstConnect();
+        failPendingForward("connection not established before shutdown");
+    })();
+
     // Replay anything the auth-required server handed off (the tool call that
-    // triggered the hot-handoff, plus anything buffered behind it) now that the
-    // SSE stream is connected. Without this the triggering request is dropped in
-    // the mode switch and the user has to retry / restart.
+    // triggered the hot-handoff, plus anything buffered behind it). These run
+    // through handleClientLine, which buffers them into pendingForward until the
+    // background connect lands — so the triggering request is served for real
+    // instead of being dropped in the mode switch.
     if (pendingLines.length > 0) {
         log.info("bridge.replaying_handoff", { count: pendingLines.length });
         for (const line of pendingLines) handleClientLine(line);
     }
 
     const clientPump = readStdinLines(handleClientLine).then(() => {
-        stdinClosed = true;
-        sse.abort();
+        markStdinClosed();
+        sse?.abort();
     });
 
     await Promise.race([serverPump, clientPump]);
-    sse.abort();
+    markStdinClosed();
+    const finalStream = sse as SseHandshakeResult | null;
+    finalStream?.abort();
+    await connectInBackground.catch(() => {});
     log.info("bridge.closed", {});
 }

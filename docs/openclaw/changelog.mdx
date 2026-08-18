@@ -28,10 +28,91 @@ questions:
   - What changed in the MemWal OpenClaw plugin changelog?
   - When was the MemWal OpenClaw plugin first released?
 answer: >-
-  The MemWal OpenClaw plugin (@mysten-incubation/oc-memwal) changelog tracks releases from the initial 0.0.1 through 0.0.2. The initial release included automatic memory recall via before_prompt_build hook, fact capture via agent_end hook, session summary on before_reset, CLI commands (stats, search), and LLM tools (memory_search, memory_store). Version 0.0.2 updated the @mysten-incubation/memwal dependency.
+  The MemWal OpenClaw plugin (@mysten-incubation/oc-memwal) changelog tracks releases from the initial 0.0.1 through the current 0.0.6. The initial release included automatic memory recall via before_prompt_build hook, fact capture via agent_end hook, CLI commands (stats, search), and LLM tools (memory_search, memory_store). Version 0.0.3 rebranded MemWal to Walrus Memory, 0.0.4 added temporal anchoring via the occurredAt argument, 0.0.5 fixed an unresolvable workspace dependency that broke installs outside the monorepo, and 0.0.6 made openclaw plugins install succeed, registered the agent tools, and added a request timeout so a stalled relayer cannot block an agent turn.
 ---
 
+## 0.0.6
+
+This release makes the plugin installable through the documented flow and stops a
+stalled relayer from blocking an agent turn.
+
+### Fixed
+
+- `openclaw plugins install` now succeeds. The manifest previously marked `privateKey`,
+  `accountId` and `serverUrl` as required, so OpenClaw rejected the config entry the
+  installer writes before credentials exist, and pre-creating that entry failed the other
+  way with `plugin not found`. Validation stays in the plugin, which reports clearer
+  per-field errors when the gateway loads it.
+- Relayer calls now run under a deadline. A relayer that accepts the connection without
+  replying previously left the recall hook pending forever and blocked the turn. Set the
+  deadline with `requestTimeoutMs`, which defaults to 10 seconds.
+- Ordinary statements are no longer discarded as prompt injection. Phrases such as "I run
+  the deploy command every Friday" matched the injection filter and were dropped silently,
+  with nothing surfaced to the user. The two broadest patterns now only apply when the
+  text addresses the model, which cuts false positives from 7 in 12 to 1 in 12 on a corpus
+  of realistic developer statements without weakening the attack coverage.
+
+### Added
+
+- `memory_search` and `memory_store` are declared in the manifest, so OpenClaw registers
+  them as agent tools. Without that declaration the gateway refused to register either
+  tool, which also made the documented `tools.allow` step impossible.
+- `requestTimeoutMs` config option, accepting 1000 to 60000 milliseconds.
+- Test suite covering config validation, timeout and retry behaviour, hook degradation,
+  and the prompt-injection escaping paths.
+
+### Changed
+
+- Documented `hooks.allowConversationAccess`, which OpenClaw requires before it runs the
+  `agent_end` hook for a non-bundled plugin. Without it, fact capture never runs.
+- Corrected the config key in the setup guide. Both `plugins.slots.memory` and the
+  `plugins.entries` key take the manifest id `memory-memwal`, not the package name.
+
+## 0.0.5
+
+One packaging fix that unblocked installing the plugin outside the monorepo.
+
+### Fixed
+
+- Fixed an unresolvable `workspace:*` dependency in the published package. The release
+  workflow used `npm publish`, which ships `package.json` verbatim and cannot rewrite the
+  `workspace:` protocol, so the published artifact carried
+  `"@mysten-incubation/memwal": "workspace:*"` and failed to install outside the monorepo
+  with `Unsupported URL Type 'workspace:'`. The release workflows now use `pnpm publish`,
+  which rewrites `workspace:*` to the concrete dependency version at pack time.
+
+## 0.0.4
+
+Temporal anchoring reached the agent-side memory tools in this release.
+
+### Added
+
+- The `memory_store` tool now accepts an optional `occurredAt` argument (RFC-3339 /
+  ISO-8601) so agents can anchor recounted past events to the date they actually happened.
+  The tool description tells the model to omit it when unknown rather than guess.
+
+### Changed
+
+- The auto-capture hook (`agent_end`) now passes the current time as `occurredAt` to
+  `analyze()`. Captured conversations get temporal anchoring automatically. The server
+  extractor resolves in-turn relative references such as "yesterday" or "last Friday" into
+  absolute dates inside the stored fact text.
+- Pointed the `@mysten-incubation/memwal` dependency at the workspace copy (`workspace:*`) to
+  pick up the new `AnalyzeOptions` signature, resolving to SDK 0.0.7 inside the monorepo. The
+  published 0.0.4 artifact shipped that `workspace:*` string literally, which is the install
+  failure fixed in 0.0.5 below.
+
+## 0.0.3
+
+This release aligned the package with the Walrus Memory brand.
+
+### Changed
+
+- Rebranded package metadata and documentation from MemWal to Walrus Memory.
+
 ## 0.0.2
+
+A dependency refresh with no behaviour change.
 
 ### Internal
 
@@ -39,11 +120,12 @@ answer: >-
 
 ## 0.0.1
 
+The first published release of the plugin.
+
 ### Initial Release
 
 - NemoClaw/OpenClaw memory plugin powered by MemWal
 - Automatic memory recall via `before_prompt_build` hook
 - Automatic fact capture via `agent_end` hook
-- Session summary on `before_reset` hook
 - CLI commands: `openclaw memwal stats`, `openclaw memwal search`
 - LLM tools: `memory_search`, `memory_store`

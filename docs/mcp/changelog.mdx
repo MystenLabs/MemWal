@@ -28,8 +28,23 @@ questions:
   - What changed in the MemWal MCP changelog?
   - When was the automatic memory plugin added to MemWal MCP?
 answer: >-
-  The latest MCP package release is 0.0.8. It adds human-readable tool titles and explicit `readOnlyHint` / `destructiveHint` metadata during pre-login discovery, matching the remote relayer metadata used by Claude connectors. Version 0.0.7 added credential reload and bounded restore error handling.
+  The latest MCP package release is 0.0.10. It sends proactive-usage instructions in the MCP initialize handshake so the model knows when to save and recall without being asked, which lazy tool loading had broken. Version 0.0.9 answered the initialize handshake locally and connected the relayer in the background so a slow cold start no longer trips the client's 30s timeout.
 ---
+
+## 0.0.10
+
+### Fixed
+
+- Send proactive-usage instructions in the MCP `initialize` handshake, so the model knows when to save and recall without being asked. Clients moved to lazy tool loading, which keeps tool descriptions out of the model's context until a tool is explicitly loaded; the guidance lived only in those descriptions, so the model stopped using memory on its own and would offer its built-in memory or deny the tool existed. `instructions` travels with `initialize`, before any `tools/list`, so lazy loading cannot strip it. (#681)
+- Carry those instructions through the bridge's local `initialize`. The bridge answers the handshake itself at cold start and suppresses the relayer's reply, so the relayer's instructions never reached a stdio client. Signed-out sessions instead get guidance pointing at `memwal_login`, since every memory tool fails without credentials.
+- Report the real package version in `serverInfo.version` instead of a hardcoded `0.0.1`, so handshake logs identify which build a user is running.
+
+## 0.0.9
+
+### Fixed
+
+- Answer the MCP `initialize` handshake locally and connect the relayer in the background, so a slow cold start no longer trips the client's 30s connection timeout and leaves the session with no memory tools. Tool discovery is served immediately and refreshed once the relayer is up; a hung relayer now degrades to a tool-call error instead of a failed startup. (#415)
+- Drop buffered tool calls on a same-account login reconnect and keep the `initialize` request id reusable, so a login handoff cannot publish stale cold-start traffic or break the client's handshake.
 
 ## 0.0.8
 
