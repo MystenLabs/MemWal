@@ -19,6 +19,8 @@ test("applyDefaultNamespace injects configured namespace into memwal_remember_bu
     const updated = applyDefaultNamespace(msg, "project-alpha");
     assert.equal(updated.params.arguments.namespace, "project-alpha");
     assert.deepEqual(updated.params.arguments.facts, ["fact 1", "fact 2"]);
+    // The call site ignores the return value — in-place mutation is the real contract.
+    assert.equal(msg.params.arguments.namespace, "project-alpha");
 });
 
 test("applyDefaultNamespace respects explicit namespace on memwal_remember_bulk", () => {
@@ -85,8 +87,37 @@ test("applyDefaultNamespace does not touch unrelated tools or non-call RPC messa
         jsonrpc: "2.0",
         id: 5,
         method: "tools/list",
-        params: {},
+        params: { name: "memwal_remember_bulk", arguments: {} },
     };
     const updatedList = applyDefaultNamespace(listMsg, "test-ns");
-    assert.equal(updatedList.params.arguments, undefined);
+    assert.equal(updatedList.params.arguments.namespace, undefined);
+});
+
+test("applyDefaultNamespace is a no-op when no default is configured", () => {
+    const msg = {
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tools/call",
+        params: { name: "memwal_remember_bulk", arguments: { facts: ["fact 1"] } },
+    };
+
+    applyDefaultNamespace(msg, undefined);
+    assert.equal(msg.params.arguments.namespace, undefined);
+});
+
+test("applyDefaultNamespace overrides a blank explicit namespace", () => {
+    for (const blank of ["", "   "]) {
+        const msg = {
+            jsonrpc: "2.0",
+            id: 7,
+            method: "tools/call",
+            params: {
+                name: "memwal_remember_bulk",
+                arguments: { facts: ["fact 1"], namespace: blank },
+            },
+        };
+
+        applyDefaultNamespace(msg, "project-alpha");
+        assert.equal(msg.params.arguments.namespace, "project-alpha");
+    }
 });
