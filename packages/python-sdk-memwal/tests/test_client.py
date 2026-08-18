@@ -120,9 +120,26 @@ def memwal_client() -> MemWal:
 # ============================================================
 
 
-class _SyncRunInner:
+class _FakeHttpClient:
+    """Stand-in for httpx.AsyncClient, tracking whether it was closed."""
+
     def __init__(self) -> None:
-        self._client = object()
+        self.is_closed = False
+
+    async def aclose(self) -> None:
+        self.is_closed = True
+
+
+class _SyncRunInner:
+    """Minimal stand-in mirroring MemWal's httpx client lifecycle."""
+
+    def __init__(self) -> None:
+        self._client: Any = _FakeHttpClient()
+
+    async def close(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
 
 class TestMemWalSyncRun:
@@ -136,6 +153,57 @@ class TestMemWalSyncRun:
         result = sync._run(operation())
 
         assert result == "ok"
+        assert inner._client is None
+
+    async def test_closes_the_client_it_replaces(self) -> None:
+        """GH #606: _run() used to null out _client without closing it, leaking
+        the connection pool of every client an earlier event loop left behind."""
+        inner = _SyncRunInner()
+        orphan = inner._client
+        sync = MemWalSync(inner)  # type: ignore[arg-type]
+
+        async def operation() -> str:
+            return "ok"
+
+        assert not orphan.is_closed
+        assert sync._run(operation()) == "ok"
+
+        assert orphan.is_closed, "the replaced httpx client was never closed"
+        assert inner._client is None
+
+    async def test_closes_the_client_created_during_the_call(self) -> None:
+        """The per-call client is closed inside the loop that created it, so
+        repeated sync calls do not accumulate open pools."""
+        inner = _SyncRunInner()
+        await inner.close()
+        sync = MemWalSync(inner)  # type: ignore[arg-type]
+        created: list = []
+
+        async def operation() -> str:
+            # Stands in for the lazy `_http` property building a client inside
+            # whichever loop is currently running.
+            inner._client = _FakeHttpClient()
+            created.append(inner._client)
+            return "ok"
+
+        assert sync._run(operation()) == "ok"
+
+        assert len(created) == 1
+        assert created[0].is_closed, "the per-call httpx client was left open"
+        assert inner._client is None
+
+    async def test_closes_client_even_when_the_operation_raises(self) -> None:
+        inner = _SyncRunInner()
+        orphan = inner._client
+        sync = MemWalSync(inner)  # type: ignore[arg-type]
+
+        async def failing() -> str:
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError, match="boom"):
+            sync._run(failing())
+
+        assert orphan.is_closed
         assert inner._client is None
 
 
