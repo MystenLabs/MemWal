@@ -52,6 +52,23 @@ function fakeCreds(): { bearer: string; accountId: string } {
 
 let server: Server;
 let baseUrl: string;
+const apiLog: Array<{ path: string; status: number }> = [];
+
+/** Wait for the bridge's own upstream request to land on the /api mount. */
+async function waitForApi(
+    pred: (entry: { path: string; status: number }) => boolean,
+    timeoutMs = 5000,
+): Promise<{ path: string; status: number }> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const hit = apiLog.find(pred);
+        if (hit) return hit;
+        if (Date.now() > deadline) {
+            throw new Error(`no matching /api request within ${timeoutMs}ms; saw ${JSON.stringify(apiLog)}`);
+        }
+        await new Promise((r) => setTimeout(r, 25));
+    }
+}
 
 before(async () => {
     const app = express();
@@ -67,6 +84,30 @@ before(async () => {
     // routes. Mount the real handlers under /api as well so the official
     // stdio bridge can exercise its production URLs without a proxy stub.
     const publicApi = express.Router();
+    // Record what the bridge actually got back. A tools/list assertion cannot
+    // tell upstream from the bridge's local auth-required fallback, because
+    // that fallback advertises the same tool names — so the only honest signal
+    // that the upstream connection worked is the response status here.
+    publicApi.use((req, res, next) => {
+        // Capture the status as headers are written, not on "finish": an SSE
+        // response stays open, so "finish" never fires for /mcp/sse.
+        const writeHead = res.writeHead.bind(res);
+        res.writeHead = ((...args: Parameters<typeof writeHead>) => {
+            apiLog.push({ path: req.path, status: args[0] as number });
+            return writeHead(...args);
+        }) as typeof res.writeHead;
+        next();
+    });
+    // Stand in for the Rust relayer's `apply_internal_headers`. In production
+    // /api/mcp/* is served by the proxy, which states the sidecar token and the
+    // caller's granted scope on every forwarded request. Without this the
+    // official bridge cannot authenticate against the sidecar at all, and the
+    // test would silently fall back to the bridge's local tool list.
+    publicApi.use((req, _res, next) => {
+        req.headers["x-memwal-internal-sidecar-token"] = INTERNAL_TOKEN;
+        req.headers["x-memwal-internal-oauth-scope"] = "memwal:read memwal:write";
+        next();
+    });
     mountMcpRoutes(publicApi, { relayerUrl: "http://localhost:1" });
     app.use("/api", publicApi);
     await new Promise<void>((resolve) => {
@@ -103,6 +144,7 @@ function mcpHeaders(opts: {
     accountId: string;
     xff: string;
     sessionId?: string;
+    scope?: string;
 }): Record<string, string> {
     const h: Record<string, string> = {
         "content-type": "application/json",
@@ -113,6 +155,7 @@ function mcpHeaders(opts: {
         [INTERNAL_TOKEN_HEADER]: INTERNAL_TOKEN,
     };
     if (opts.sessionId) h["mcp-session-id"] = opts.sessionId;
+    if (opts.scope !== undefined) h["x-memwal-internal-oauth-scope"] = opts.scope;
     return h;
 }
 
@@ -121,6 +164,7 @@ async function postInit(opts: {
     accountId: string;
     xff: string;
     sessionId?: string;
+    scope?: string;
     id?: number;
 }): Promise<{ status: number; sessionId: string | null; bodyText: string }> {
     const res = await fetch(`${baseUrl}/mcp`, {
@@ -231,6 +275,46 @@ test("reusing mcp-session-id under a different bearer returns 403", async () => 
     const json = await stolen.json();
     assert.equal((json as any).error.code, -32603);
     assert.match((json as any).error.message, /does not match authenticated caller/);
+});
+
+test("reusing mcp-session-id under a narrower scope returns 403", async () => {
+    // The tool set is bound at session-open time, so a session opened with
+    // write scope keeps its write tools registered. If the session key ignores
+    // scope, a later read-only request routes into that write-capable
+    // transport and the fail-closed guarantee stops holding after init.
+    const xff = "192.0.2.80";
+    const creds = fakeCreds();
+
+    const opened = await postInit({ ...creds, xff, scope: "memwal:read memwal:write" });
+    assert.equal(opened.status, 200);
+    const sid = opened.sessionId;
+    assert.ok(sid);
+
+    const narrowed = await fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: mcpHeaders({ ...creds, xff, sessionId: sid!, scope: "memwal:read" }),
+        body: JSON.stringify({ jsonrpc: "2.0", id: 98, method: "ping" }),
+    });
+
+    assert.equal(narrowed.status, 403, `expected 403, got ${narrowed.status}`);
+});
+
+test("reusing mcp-session-id with the scope header dropped returns 403", async () => {
+    const xff = "192.0.2.81";
+    const creds = fakeCreds();
+
+    const opened = await postInit({ ...creds, xff, scope: "memwal:read memwal:write" });
+    assert.equal(opened.status, 200);
+    const sid = opened.sessionId;
+    assert.ok(sid);
+
+    const dropped = await fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: mcpHeaders({ ...creds, xff, sessionId: sid! }),
+        body: JSON.stringify({ jsonrpc: "2.0", id: 97, method: "ping" }),
+    });
+
+    assert.equal(dropped.status, 403, `expected 403, got ${dropped.status}`);
 });
 
 test("reusing mcp-session-id under SAME bearer is accepted (sanity check)", async () => {
@@ -421,12 +505,25 @@ test("official stdio bridge authenticates SSE message POSTs", async (t) => {
     assert(initialized.result, JSON.stringify(initialized));
 
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+    // Wait for the upstream SSE BEFORE asking for tools. The bridge answers
+    // tools/list from its coldstart path while the connection is still in
+    // flight, and its local fallback advertises the same tool names as the
+    // relayer — so a list requested too early cannot distinguish the two.
+    const sse = await waitForApi((entry) => entry.path.includes("/mcp/sse"));
+    assert.equal(sse.status, 200, `upstream SSE was rejected: ${JSON.stringify(apiLog)}`);
+
     send({ jsonrpc: "2.0", id: 902, method: "tools/list", params: {} });
     const tools = await waitFor((message) => message.id === 902);
     assert(Array.isArray(tools.result?.tools), JSON.stringify(tools));
+
+    // Require the relayer-registered tools. These appear only when the proxy
+    // stated a scope wide enough for `registerTools` to register them, so this
+    // fails if the simulated proxy stops sending either internal header.
+    const names = new Set(tools.result.tools.map((tool: { name?: string }) => tool.name));
     assert(
-        tools.result.tools.some((tool: { name?: string }) => tool.name === "memwal_login"),
-        "bridge should receive the authenticated tools/list response",
+        ["memwal_recall", "memwal_health", "memwal_remember"].every((n) => names.has(n)),
+        `bridge should receive the authenticated upstream tools/list response, got: ${[...names].join(", ")}`,
     );
 
     child.stdin.end();

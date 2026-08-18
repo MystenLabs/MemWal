@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { McpAuthError, resolveAuth } from "../auth.js";
+import { McpAuthError, normalizeScope, resolveAuth } from "../auth.js";
 
 const TOKEN = "test-sidecar-token-0123456789";
 const DELEGATE_KEY = "a".repeat(64);
@@ -44,4 +44,40 @@ test("resolveAuth reads the OAuth scope once the origin is verified", async () =
     );
 
     assert.equal(session.oauthScope, "memwal:read");
+});
+
+test("normalizeScope is order- and duplicate-insensitive", () => {
+    // The session key embeds this, so two spellings of the same grant must not
+    // open two distinct sessions.
+    assert.equal(
+        normalizeScope("memwal:write memwal:read"),
+        normalizeScope("memwal:read memwal:write")
+    );
+    assert.equal(normalizeScope("memwal:read memwal:read"), "memwal:read");
+    assert.equal(normalizeScope("  memwal:read   memwal:write  "), "memwal:read memwal:write");
+});
+
+test("normalizeScope collapses an absent or blank scope to the empty string", () => {
+    assert.equal(normalizeScope(undefined), "");
+    assert.equal(normalizeScope(""), "");
+    assert.equal(normalizeScope("   "), "");
+});
+
+test("sessionKey is stable across scope orderings but differs by granted scope", async () => {
+    process.env.SIDECAR_AUTH_TOKEN = TOKEN;
+
+    const keyFor = async (scope: string) =>
+        (await resolveAuth(mcpHeaders({ "x-memwal-internal-oauth-scope": scope }), SERVER_URL))
+            .sessionKey;
+
+    assert.equal(
+        await keyFor("memwal:write memwal:read"),
+        await keyFor("memwal:read memwal:write"),
+        "reordering the same grant must not fork the session"
+    );
+    assert.notEqual(
+        await keyFor("memwal:read memwal:write"),
+        await keyFor("memwal:read"),
+        "a narrower grant must not reuse a wider grant's session"
+    );
 });

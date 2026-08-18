@@ -45,6 +45,16 @@ export class McpAuthError extends Error {
 const HEX64_RE = /^(0x)?[0-9a-fA-F]{64}$/;
 
 /**
+ * Canonical form of a scope string for use in the session key: deduplicated,
+ * sorted, single-space separated. Order and repetition carry no meaning, so
+ * `"memwal:write memwal:read"` and `"memwal:read memwal:read memwal:write"`
+ * must not open two distinct sessions. Absent scope collapses to `""`.
+ */
+export function normalizeScope(scope: string | undefined): string {
+    return [...new Set(scope?.split(/\s+/).filter(Boolean) ?? [])].sort().join(" ");
+}
+
+/**
  * Derive the Ed25519 public-key hex from a private-key hex (32-byte seed).
  * Lazy import so we don't pull crypto into module init.
  */
@@ -145,10 +155,19 @@ export async function resolveAuth(
         oauthScope,
     };
 
-    // Session key stable across reconnects from same {account, delegate}. We
-    // don't include namespace because the same client can call multiple
-    // namespaces in one session via per-tool overrides.
-    const sessionKey = `delegate:${accountId}:${delegatePubKeyHex}`;
+    // Session key stable across reconnects from same {account, delegate,
+    // scope}. We don't include namespace because the same client can call
+    // multiple namespaces in one session via per-tool overrides.
+    //
+    // The scope IS included: `registerTools` binds the tool set at session-open
+    // time, so a session opened with write scope keeps its write tools for its
+    // whole life. Without the scope in the key, a later read-only (or
+    // scope-less) request would pass the session-binding check and drive that
+    // write-capable transport — which would leave the fail-closed guarantee
+    // holding only until initialization. Delegate keys are reused across grants
+    // for the same account (`find_reusable_oauth_delegate`), so {account,
+    // delegate} alone does not distinguish two grants of differing scope.
+    const sessionKey = `delegate:${accountId}:${delegatePubKeyHex}:${normalizeScope(oauthScope)}`;
 
     return { session, sessionKey };
 }
