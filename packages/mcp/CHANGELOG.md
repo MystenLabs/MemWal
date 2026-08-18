@@ -1,5 +1,13 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.10
+
+### Fixed
+
+- Send proactive-usage instructions in the MCP `initialize` handshake, so the model knows when to save and recall without being asked. Clients moved to lazy tool loading, which keeps tool descriptions out of the model's context until a tool is explicitly loaded; the guidance lived only in those descriptions, so the model stopped using memory on its own and would offer its built-in memory or deny the tool existed. `instructions` travels with `initialize`, before any `tools/list`, so lazy loading cannot strip it. (#681)
+- Carry those instructions through the bridge's local `initialize`. The bridge answers the handshake itself at cold start and suppresses the relayer's reply, so the relayer's instructions never reached a stdio client. Signed-out sessions instead get guidance pointing at `memwal_login`, since every memory tool fails without credentials.
+- Report the real package version in `serverInfo.version` instead of a hardcoded `0.0.1`, so handshake logs identify which build a user is running.
+
 ## 0.0.9
 
 ### Fixed
