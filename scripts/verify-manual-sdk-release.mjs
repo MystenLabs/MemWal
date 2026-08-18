@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 const releases = [
     {
         name: "TypeScript SDK",
-        version: "0.1.2",
+        version: "0.1.3",
         manifests: [["packages/sdk/package.json", "version"]],
         changelogs: ["packages/sdk/CHANGELOG.md", "docs/sdk/changelog.mdx"],
     },
@@ -23,7 +23,7 @@ const releases = [
     },
     {
         name: "MCP package",
-        version: "0.0.8",
+        version: "0.0.9",
         manifests: [
             ["packages/mcp/package.json", "version"],
             [".claude-plugin/marketplace.json", "plugin-version"],

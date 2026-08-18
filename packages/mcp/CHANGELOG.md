@@ -1,14 +1,17 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.9
+
+### Fixed
+
+- Answer the MCP `initialize` handshake locally and connect the relayer in the background, so a slow cold start no longer trips the client's 30s connection timeout and leaves the session with no memory tools. Tool discovery is served immediately and refreshed once the relayer is up; a hung relayer now degrades to a tool-call error instead of a failed startup. (#415)
+- Drop buffered tool calls on a same-account login reconnect and keep the `initialize` request id reusable, so a login handoff cannot publish stale cold-start traffic or break the client's handshake.
+
 ## 0.0.8
 
 ### Added
 
 - Human-readable tool titles and explicit `readOnlyHint` / `destructiveHint` metadata during pre-login tool discovery, matching the remote relayer metadata used by Claude connectors.
-
-### Fixed
-
-- Answer the MCP `initialize` handshake locally and connect the relayer in the background, so a slow cold start no longer trips the client's 30s connection timeout and leaves the session with no memory tools. Tool discovery is served immediately and refreshed once the relayer is up; a hung relayer now degrades to a tool-call error instead of a failed startup. (#415)
 
 ## 0.0.7
 
