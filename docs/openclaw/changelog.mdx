@@ -46,6 +46,11 @@ stalled relayer from blocking an agent turn.
 - Relayer calls now run under a deadline. A relayer that accepts the connection without
   replying previously left the recall hook pending forever and blocked the turn. Set the
   deadline with `requestTimeoutMs`, which defaults to 10 seconds.
+- Ordinary statements are no longer discarded as prompt injection. Phrases such as "I run
+  the deploy command every Friday" matched the injection filter and were dropped silently,
+  with nothing surfaced to the user. The two broadest patterns now only apply when the
+  text addresses the model, which cuts false positives from 7 in 12 to 1 in 12 on a corpus
+  of realistic developer statements without weakening the attack coverage.
 
 ### Added
 

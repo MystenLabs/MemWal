@@ -14,6 +14,13 @@
   the connection without replying previously left the recall hook pending indefinitely and
   blocked the agent turn. In auto-capture the deadline sits inside the retry, so each
   attempt gets its own.
+- Ordinary statements are no longer discarded as prompt injection. The patterns matching
+  `run|execute|call|invoke … tool|command|shell|bash` and `forget … everything … before`
+  also match normal speech, so "I run the deploy command every Friday" was silently
+  dropped with no error shown. Those two now only count when the text actually addresses
+  the model, by naming it or leading with a bare injection verb. Measured on a corpus of
+  realistic developer statements, false positives fall from 7 of 12 to 1 of 12, with no
+  change to the 15-payload attack set from GH #639.
 
 ### Added
 
