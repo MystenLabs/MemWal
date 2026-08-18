@@ -14,7 +14,7 @@ export interface MemWalConfig {
     key: string | Uint8Array;
     /** Walrus Memory account object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
     accountId: string;
-    /** Server URL (default: https://relayer.memwal.ai) */
+    /** Server URL (default: https://relayer.memory.walrus.xyz) */
     serverUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
@@ -339,7 +339,7 @@ export interface SealServerConfig {
 export interface MemWalManualConfig {
     /** Ed25519 delegate private key (hex or Uint8Array) for server auth */
     key: string | Uint8Array;
-    /** Server URL (default: https://relayer.memwal.ai) */
+    /** Server URL (default: https://relayer.memory.walrus.xyz) */
     serverUrl?: string;
     /**
      * Sui private key (bech32 suiprivkey1...) for SEAL + Walrus signing.

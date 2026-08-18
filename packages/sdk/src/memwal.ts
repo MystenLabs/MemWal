@@ -203,7 +203,7 @@ export class MemWal {
         // LOW-22: default to HTTPS for production usage; normalizeServerUrl
         // warns (does not throw) if a user passes plain http:// for a
         // non-localhost host.
-        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memwal.ai/");
+        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
         this.namespace = config.namespace ?? "default";
     }
 
@@ -211,7 +211,7 @@ export class MemWal {
      * Create a new Walrus Memory client instance.
      *
      * @param config.key - Ed25519 private key (hex string) — the delegate key
-     * @param config.serverUrl - Server URL (default: https://relayer.memwal.ai/)
+     * @param config.serverUrl - Server URL (default: https://relayer.memory.walrus.xyz)
      */
     static create(config: MemWalConfig): MemWal {
         return new MemWal(config);
