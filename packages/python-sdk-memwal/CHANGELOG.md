@@ -1,5 +1,11 @@
 # memwal
 
+## Unreleased
+
+### Added
+
+- Added `MemWalClockDriftError`, raised when the relayer rejects a request because the signed timestamp is outside its accepted clock-drift window (`401` + `x-auth-error: ERR_TIMESTAMP_OUT_OF_BOUNDS`). Surfaces an actionable "synchronize the client clock" message instead of an opaque `401`. Subclasses `MemWalError`, so existing `except MemWalError` handlers still catch it.
+
 ## 0.1.7
 
 ### Added
@@ -23,7 +29,6 @@
 ### Added
 
 - Added a runnable [Walrus Memory Python SDK Colab](https://colab.research.google.com/drive/1SaKjkSp0DXnM_nktWSiEC-l9qGtVr6ph) covering installation, secure `staging` configuration, optional `prod`, `MemWalSync`, health/compatibility checks, delegate public-key/address derivation, `remember`, `remember_async`, async job waiting, `recall`, bulk remember, `remember_bulk_async`, `remember_bulk_and_wait`, optional `ask`, `analyze`, `analyze_and_wait`, `embed`, manual methods with scoring weights, `restore`, optional OpenAI/LangChain middleware, OpenAI-compatible provider settings such as `OPENAI_BASE_URL`, and troubleshooting.
-- Added `MemWalClockDriftError`, raised when the relayer rejects a request because the signed timestamp is outside its accepted clock-drift window (`401` + `x-auth-error: ERR_TIMESTAMP_OUT_OF_BOUNDS`). Surfaces an actionable "synchronize the client clock" message instead of an opaque `401`. Subclasses `MemWalError`, so existing `except MemWalError` handlers still catch it.
 
 ### Fixed
 

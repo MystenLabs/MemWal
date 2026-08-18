@@ -204,6 +204,7 @@ export const ERR_TIMESTAMP_OUT_OF_BOUNDS = "ERR_TIMESTAMP_OUT_OF_BOUNDS";
 export function clockDriftErrorFromResponse(
     res: { status: number; headers: Headers },
 ): (Error & { status?: number; serverCode?: string }) | null {
+    if (res.status !== 401) return null;
     if (res.headers.get("x-auth-error") !== ERR_TIMESTAMP_OUT_OF_BOUNDS) return null;
     const err = new Error(
         "Request rejected: signed timestamp is outside the relayer's accepted clock-drift window. " +
