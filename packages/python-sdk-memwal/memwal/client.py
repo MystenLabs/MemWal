@@ -73,6 +73,7 @@ from .utils import (
     bytes_to_hex,
     delegate_key_to_sui_address,
     encode_sui_private_key,
+    normalize_private_key,
     sha256_hex,
     sign_message,
     sign_sui_personal_message,
@@ -213,8 +214,8 @@ class MemWal:
     """
 
     def __init__(self, config: MemWalConfig) -> None:
-        self._signing_key = build_signing_key(config.key)
-        self._private_key_hex = config.key if not config.key.startswith("0x") else config.key[2:]
+        self._private_key_hex = normalize_private_key(config.key)
+        self._signing_key = build_signing_key(self._private_key_hex)
         self._account_id = config.account_id
         self._server_url = config.server_url.rstrip("/")
         self._namespace = config.namespace

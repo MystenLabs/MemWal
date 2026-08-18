@@ -12,6 +12,7 @@ import hashlib
 import json
 
 import nacl.signing
+import pytest
 
 from memwal.utils import (
     build_seal_session_personal_message,
@@ -278,3 +279,52 @@ class TestSealSessionUtils:
         raw = json.loads(json.dumps(signature))  # assert it's JSON-safe text
         assert isinstance(raw, str)
         assert len(base64.b64decode(signature)) == 97
+
+
+class TestPrivateKeyFormats:
+    """The dashboard hands out `suiprivkey1...`; the SDK must take both forms."""
+
+    _SEED_HEX = "17dc3c1eecfcdc014c0eba65c1f87897abbbd214fa32d4018f48669b5d37c413"
+
+    def test_decode_reverses_encode(self) -> None:
+        from memwal.utils import decode_sui_private_key, encode_sui_private_key
+
+        seed = bytes.fromhex(self._SEED_HEX)
+        assert decode_sui_private_key(encode_sui_private_key(seed)) == seed
+
+    def test_normalize_accepts_every_accepted_form(self) -> None:
+        from memwal.utils import encode_sui_private_key, normalize_private_key
+
+        seed = bytes.fromhex(self._SEED_HEX)
+        for form in (
+            self._SEED_HEX,
+            f"0x{self._SEED_HEX}",
+            encode_sui_private_key(seed),
+            f"  {encode_sui_private_key(seed)}  ",
+        ):
+            assert normalize_private_key(form) == self._SEED_HEX
+
+    def test_bech32_key_produces_the_same_client_identity(self) -> None:
+        from memwal.client import MemWal
+        from memwal.utils import encode_sui_private_key
+
+        bech32 = encode_sui_private_key(bytes.fromhex(self._SEED_HEX))
+        from_hex = MemWal.create(key=self._SEED_HEX, account_id="0xtest")
+        from_bech32 = MemWal.create(key=bech32, account_id="0xtest")
+        assert from_bech32._private_key_hex == from_hex._private_key_hex
+        assert bytes(from_bech32._signing_key) == bytes(from_hex._signing_key)
+
+    def test_rejects_a_non_ed25519_scheme(self) -> None:
+        from memwal.utils import _convertbits, bech32_encode, decode_sui_private_key
+
+        payload = bytes([1]) + bytes.fromhex(self._SEED_HEX)  # scheme flag 1 = secp256k1
+        with pytest.raises(ValueError, match="Ed25519"):
+            decode_sui_private_key(bech32_encode("suiprivkey", _convertbits(payload, 8, 5)))
+
+    def test_rejects_a_corrupted_checksum(self) -> None:
+        from memwal.utils import decode_sui_private_key, encode_sui_private_key
+
+        encoded = encode_sui_private_key(bytes.fromhex(self._SEED_HEX))
+        corrupted = encoded[:-1] + ("q" if encoded[-1] != "q" else "p")
+        with pytest.raises(ValueError, match="checksum"):
+            decode_sui_private_key(corrupted)
