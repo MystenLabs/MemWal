@@ -162,7 +162,18 @@ test("a hung relayer does not break the recall hook", async () => {
   const out = await h.hooks["before_prompt_build"]({ prompt: "what do I prefer for backend?" }, {});
   assert.ok(out?.appendSystemContext, "namespace instruction must survive a failed recall");
   assert.ok(!out?.prependContext);
-  assert.ok(h.logs.some((l) => l.includes("auto-recall failed")));
+  // The deadline must actually fire; that is the behaviour under test.
+  assert.ok(
+    h.logs.some((l) => l.includes("timed out")),
+    `expected a timeout to be logged, got: ${JSON.stringify(h.logs)}`,
+  );
+  // Match either wording: #668 reworks this path to Promise.allSettled and
+  // logs "canonical recall failed" rather than falling through to the outer
+  // catch's "auto-recall failed", so pin the behaviour, not the phrasing.
+  assert.ok(
+    h.logs.some((l) => /auto-recall failed|canonical recall failed/.test(l)),
+    `expected a recall failure log, got: ${JSON.stringify(h.logs)}`,
+  );
 });
 
 test("a hung relayer does not break the capture hook", async () => {
