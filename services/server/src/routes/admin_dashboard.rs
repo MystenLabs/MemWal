@@ -16,8 +16,12 @@ pub struct AdminQuery {
 #[derive(Debug, Serialize)]
 pub struct WalletBalance {
     pub address: String,
+    /// Spendable address balance (what durable registration can withdraw).
     pub sui: String,
     pub wal: String,
+    /// Address balance plus owned coins, for operator context.
+    pub sui_total: String,
+    pub wal_total: String,
     pub status: String,
 }
 
@@ -76,6 +80,8 @@ struct SidecarWalletBalance {
     address: String,
     sui_mist: String,
     wal_frost: String,
+    sui_address_balance_mist: String,
+    wal_address_balance_frost: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,20 +141,35 @@ pub async fn get_wallets(
                     "Sidecar wallet metrics contained an empty address".to_string(),
                 ));
             }
-            let sui = entry.sui_mist.parse::<u64>().map_err(|_| {
+            let sui_total = entry.sui_mist.parse::<u64>().map_err(|_| {
                 AppError::Internal(
                     "Sidecar wallet metrics contained invalid SUI balance".to_string(),
                 )
             })?;
-            let wal = entry.wal_frost.parse::<u64>().map_err(|_| {
+            let wal_total = entry.wal_frost.parse::<u64>().map_err(|_| {
                 AppError::Internal(
                     "Sidecar wallet metrics contained invalid WAL balance".to_string(),
                 )
             })?;
+            let sui = entry.sui_address_balance_mist.parse::<u64>().map_err(|_| {
+                AppError::Internal(
+                    "Sidecar wallet metrics contained invalid SUI address balance".to_string(),
+                )
+            })?;
+            let wal = entry
+                .wal_address_balance_frost
+                .parse::<u64>()
+                .map_err(|_| {
+                    AppError::Internal(
+                        "Sidecar wallet metrics contained invalid WAL address balance".to_string(),
+                    )
+                })?;
             Ok(WalletBalance {
                 address: entry.address,
                 sui: sui.to_string(),
                 wal: wal.to_string(),
+                sui_total: sui_total.to_string(),
+                wal_total: wal_total.to_string(),
                 status: wallet_status(wal, wal_threshold, sui, sui_threshold).to_string(),
             })
         })
@@ -282,7 +303,9 @@ mod tests {
             "perWallet": [{
                 "address": "0x123",
                 "suiMist": "1000000000",
-                "walFrost": "2000000000"
+                "suiAddressBalanceMist": "400000000",
+                "walFrost": "2000000000",
+                "walAddressBalanceFrost": "500000000"
             }]
         });
         let parsed: SidecarWalletMetrics = serde_json::from_value(valid).unwrap();
@@ -326,8 +349,10 @@ mod tests {
             uploader_pool: UploaderPool {
                 wallets: vec![WalletBalance {
                     address: "0x123".to_string(),
-                    sui: "1000000000".to_string(),
-                    wal: "2000000000".to_string(),
+                    sui: "400000000".to_string(),
+                    wal: "500000000".to_string(),
+                    sui_total: "1000000000".to_string(),
+                    wal_total: "2000000000".to_string(),
                     status: "ok".to_string(),
                 }],
                 wal_threshold: "50000000000".to_string(),
@@ -343,7 +368,11 @@ mod tests {
         };
 
         let json = serde_json::to_value(response).unwrap();
-        assert_eq!(json["uploader_pool"]["wallets"][0]["wal"], "2000000000");
+        assert_eq!(json["uploader_pool"]["wallets"][0]["wal"], "500000000");
+        assert_eq!(
+            json["uploader_pool"]["wallets"][0]["wal_total"],
+            "2000000000"
+        );
         assert_eq!(json["uploader_pool"]["sui_threshold"], "5000000000");
         assert_eq!(json["sponsor_wallet"]["sui_threshold"], "5000000000");
     }

@@ -167,15 +167,16 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
     const bytes = await transaction.build();
     const signed = await signer.signTransaction(bytes);
     const digest = TransactionDataBuilder.getDigestFromBytes(bytes);
+    const sponsorDigest = `sponsor-${digest}`;
     const prepared: PreparedRegisterTransaction = {
         transactionBytes: signed.bytes,
         signature: signed.signature,
         digest,
-        sponsorDigest: digest,
+        sponsorDigest,
     };
 
     const validated = await validatePreparedRegisterTransaction(prepared, signer.toSuiAddress());
-    assert.equal(validated.sponsorDigest, digest);
+    assert.equal(validated.sponsorDigest, sponsorDigest);
     const expectedKind = TransactionDataBuilder.fromBytes(bytes).build({ onlyTransactionKind: true });
     assert.doesNotThrow(() => assertSponsoredRegisterTransactionKind(
         TransactionDataBuilder.fromBytes(bytes),
@@ -210,8 +211,8 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
         () => {},
         async () => 1n,
         false,
-        async (sponsorDigest, signature) => {
-            assert.equal(sponsorDigest, digest);
+        async (executedSponsorDigest, signature) => {
+            assert.equal(executedSponsorDigest, sponsorDigest);
             assert.equal(signature, signed.signature);
             submitted = true;
             return { digest };
@@ -231,8 +232,66 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
             async () => {
                 throw new Error('Enoki API error (400): {"errors":[{"code":"expired"}]}');
             },
+            1,
         ),
         (error: unknown) => error instanceof NoSideEffectError && /rebuild sponsorship/.test(error.message),
+    );
+
+    await assert.rejects(
+        executePreparedRegisterTransaction(
+            validated,
+            client,
+            () => {},
+            async () => 1n,
+            false,
+            async () => {
+                throw new Error('Enoki API error (400): {"errors":[{"code":"not_found"}]}');
+            },
+            1,
+        ),
+        /not_found/,
+    );
+
+    let lookups = 0;
+    const retryClient = {
+        async getTransaction() {
+            lookups += 1;
+            if (lookups < 2) throw Object.assign(new Error("not found"), { code: "NOT_FOUND" });
+            return finalized;
+        },
+        async executeTransaction() {
+            throw new Error("sponsored journal must not execute directly");
+        },
+    };
+    const recovered = await executePreparedRegisterTransaction(
+        validated,
+        retryClient,
+        () => {},
+        async () => 1n,
+        false,
+        async () => {
+            throw new Error('Enoki API error (400): {"errors":[{"code":"expired"}]}');
+        },
+        2,
+    );
+    assert.equal(recovered, finalized);
+    assert.equal(lookups, 2);
+
+    await assert.rejects(
+        executePreparedRegisterTransaction(
+            validated,
+            client,
+            () => {},
+            async () => 1n,
+            true,
+            async () => {
+                throw new Error('Enoki API error (400): {"errors":[{"code":"expired"}]}');
+            },
+            1,
+        ),
+        (error: unknown) => error instanceof Error
+            && (error as { code?: string }).code === "UNAVAILABLE"
+            && /ambiguous/.test(error.message),
     );
 });
 

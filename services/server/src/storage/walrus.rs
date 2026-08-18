@@ -44,6 +44,13 @@ pub struct UploadJournal {
 }
 
 pub enum DurableUploadAdvance {
+    /// Ready for another prepare/execute loop.
+    ///
+    /// Two producers:
+    /// - sidecar returned a prepared register (`register_transaction` is Some)
+    /// - a proven reset cleared the journal (`register_transaction` is None);
+    ///   the next loop iteration re-prepares. That reset consumes one of the
+    ///   six advance-loop slots; overflowing the loop is `WalletJobError::Transient`.
     Prepared(UploadJournal),
     Step {
         journal: UploadJournal,
@@ -464,7 +471,13 @@ fn should_reset_prepared_register(
     error_code: Option<&str>,
     prepared: Option<&PreparedRegisterTransaction>,
 ) -> bool {
-    matches!(error_code, Some("NO_SIDE_EFFECT")) && prepared.is_some()
+    // NO_SIDE_EFFECT: sidecar proved the digest absent. INVALID_PREPARED:
+    // this replica refused the journaled bytes before execute (mixed-version
+    // or incompatible sponsorship). Both are safe to rebuild.
+    matches!(
+        error_code,
+        Some("NO_SIDE_EFFECT") | Some("INVALID_PREPARED_REGISTER_TRANSACTION")
+    ) && prepared.is_some()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -517,9 +530,9 @@ pub async fn advance_durable_upload(
             journal.register_transaction.as_ref(),
         );
         if reset_safe {
-            // NO_SIDE_EFFECT means the sidecar proved the digest absent (for
-            // example after Enoki invalidated its sponsorship), so replacing
-            // these exact bytes cannot duplicate an on-chain registration.
+            // Reset-safe codes mean this replica must not execute the journaled
+            // bytes. Replacing them cannot duplicate a registration this replica
+            // submitted.
             journal.register_transaction = None;
             return Ok(DurableUploadAdvance::Prepared(journal));
         }
@@ -1101,7 +1114,7 @@ mod tests {
             Some("NO_SIDE_EFFECT"),
             Some(&direct)
         ));
-        assert!(!should_reset_prepared_register(
+        assert!(should_reset_prepared_register(
             Some("INVALID_PREPARED_REGISTER_TRANSACTION"),
             Some(&sponsored),
         ));

@@ -137,6 +137,11 @@ These are not all enforced at boot, but most real deployments need them.
 | `ENOKI_INVALIDATED_MAX_ATTEMPTS` | `4` | Attempts for rebuildable sponsored transactions invalidated by Enoki `expired` responses or short Sui object visibility lag before failing the wallet job |
 | `ENOKI_INVALIDATED_BASE_DELAY_MS` | `1000` | Base delay for retrying rebuildable sponsored transactions after Enoki invalidation |
 | `ENOKI_INVALIDATED_MAX_DELAY_MS` | `8000` | Maximum delay for one rebuildable sponsored transaction invalidation retry |
+| `BALANCE_MONITOR_INTERVAL_SECS` | `900` | How often the relayer polls uploader and sponsor address balances for low-balance Slack alerts |
+| `WALLET_BALANCE_LOW_THRESHOLD_WAL` | `50000000000` | Uploader WAL address-balance threshold in FROST (50 WAL). Alerts independently of SUI |
+| `WALLET_BALANCE_LOW_THRESHOLD_SUI` | `5000000000` | Uploader SUI address-balance threshold in MIST (5 SUI). Load-bearing during phase 1, when durable register pays gas from the uploader wallet |
+| `SPONSOR_BALANCE_LOW_THRESHOLD_SUI` | `5000000000` | Sponsor wallet SUI address-balance threshold in MIST (5 SUI) |
+| `WALLET_BALANCE_LOW_ALERT_DEDUP_SECS` | `43200` | Dedup window for wallet low-balance Slack alerts, per `(network, wallet type, token, address)` |
 | `MEMWAL_RELAYER_URL` | `http://127.0.0.1:$PORT` | Relayer URL passed from the Rust server to the sidecar for MCP tool calls |
 | `MCP_MAX_TOTAL_SESSIONS` | `1000` | Maximum active MCP sessions across SSE and Streamable HTTP transports |
 | `MCP_MAX_SESSIONS_PER_IP` | `16` | Maximum active MCP sessions from one source IP |
@@ -146,7 +151,7 @@ These are not all enforced at boot, but most real deployments need them.
 ### Notes
 
 - If both `SERVER_SUI_PRIVATE_KEYS` and `SERVER_SUI_PRIVATE_KEY` are set, the key pool takes priority for uploads. Upload jobs use the pool in round-robin order.
-- Roll out durable registration sponsorship in two phases: first deploy all replicas with `DURABLE_ENOKI_REGISTER_ENABLED=false`; after old replicas have drained, set it to `true`. This prevents mixed-version workers from rejecting persisted sponsored journals.
+- Roll out durable registration sponsorship in two phases: first deploy all replicas with `DURABLE_ENOKI_REGISTER_ENABLED=false`; after old replicas have drained, set it to `true`. This prevents mixed-version workers from rejecting persisted sponsored journals. During phase 1, if `ENOKI_API_KEY` is set, durable register **direct-signs and pays gas from the uploader wallet** — the new SUI address-balance alert is load-bearing for that window. After phase 2, drain every replica before rolling the gate back to `false`; otherwise old replicas can 409 sponsored journals as `INVALID_PREPARED_REGISTER_TRANSACTION`.
 - Keep `ENOKI_FALLBACK_TO_DIRECT_SIGN=false` in production if the server wallet should not pay gas for rebuildable Enoki flows when sponsorship is missing, expired, or rejected. Durable registration does not fall back after its rollout gate is enabled.
 - `OPENAI_API_KEY` and `OPENAI_API_BASE` control the embedding and fact-extraction provider used by `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
 - `WALRUS_AGGREGATOR_URLS` is only used after the Redis ciphertext cache misses. Put low-latency cache/proxy endpoints first after the primary and keep 404/5xx cache TTLs short in your proxy.

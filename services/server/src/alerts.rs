@@ -258,19 +258,25 @@ impl AlertManager {
         };
         // Dedup by the full address; abbreviating here could make two distinct
         // wallets with the same prefix/suffix suppress each other's alerts.
-        let key = (
-            format!(
-                "{}:{}:{}",
-                alert.sui_network, alert.wallet_type, alert.token
-            ),
-            alert.address.clone(),
-        );
-        if self.wallet_balance_low_dedup.should_suppress(key) {
+        if self
+            .wallet_balance_low_dedup
+            .should_suppress(wallet_balance_low_dedup_key(&alert))
+        {
             return Ok(());
         }
         let payload = SlackPayload::for_wallet_balance_low(&alert);
         slack.send_payload(&payload).await
     }
+}
+
+fn wallet_balance_low_dedup_key(alert: &WalletBalanceLowAlert) -> (String, String) {
+    (
+        format!(
+            "{}:{}:{}",
+            alert.sui_network, alert.wallet_type, alert.token
+        ),
+        alert.address.clone(),
+    )
 }
 
 /// Read a dedup window (seconds) from `env_var`, falling back to `default`
@@ -1240,16 +1246,60 @@ mod tests {
 
     #[test]
     fn wallet_balance_low_dedup_key_formation() {
-        let dedup = AlertDedup::new(Duration::from_secs(600));
         let address = "0x1234...abcd".to_string();
-        // First WAL alert should fire, then repeat WAL should be suppressed.
-        assert!(!dedup.should_suppress(("mainnet:uploader:WAL".to_string(), address.clone())));
-        assert!(dedup.should_suppress(("mainnet:uploader:WAL".to_string(), address.clone())));
-        // SUI for the same uploader remains an independent actionable alert.
-        assert!(!dedup.should_suppress(("mainnet:uploader:SUI".to_string(), address.clone())));
-        // Networks and sponsor SUI are also independent.
-        assert!(!dedup.should_suppress(("testnet:uploader:SUI".to_string(), address.clone())));
-        assert!(!dedup.should_suppress(("mainnet:sponsor:SUI".to_string(), address)));
+        let wal = WalletBalanceLowAlert {
+            wallet_type: "uploader".to_string(),
+            address: address.clone(),
+            balance: 1,
+            threshold: 2,
+            token: "WAL".to_string(),
+            sui_network: "mainnet".to_string(),
+            wallet_index: Some(0),
+        };
+        let sui = WalletBalanceLowAlert {
+            token: "SUI".to_string(),
+            ..wal.clone()
+        };
+        let testnet = WalletBalanceLowAlert {
+            sui_network: "testnet".to_string(),
+            ..sui.clone()
+        };
+        let sponsor = WalletBalanceLowAlert {
+            wallet_type: "sponsor".to_string(),
+            wallet_index: None,
+            ..sui.clone()
+        };
+
+        assert_eq!(
+            wallet_balance_low_dedup_key(&wal),
+            ("mainnet:uploader:WAL".to_string(), address.clone())
+        );
+        assert_eq!(
+            wallet_balance_low_dedup_key(&sui),
+            ("mainnet:uploader:SUI".to_string(), address.clone())
+        );
+        assert_eq!(
+            wallet_balance_low_dedup_key(&testnet),
+            ("testnet:uploader:SUI".to_string(), address.clone())
+        );
+        assert_eq!(
+            wallet_balance_low_dedup_key(&sponsor),
+            ("mainnet:sponsor:SUI".to_string(), address)
+        );
+
+        let manager = AlertManager::from_env(reqwest::Client::new());
+        let first = manager
+            .wallet_balance_low_dedup
+            .should_suppress(wallet_balance_low_dedup_key(&wal));
+        let repeat = manager
+            .wallet_balance_low_dedup
+            .should_suppress(wallet_balance_low_dedup_key(&wal));
+        let other_token = manager
+            .wallet_balance_low_dedup
+            .should_suppress(wallet_balance_low_dedup_key(&sui));
+        assert!(!first);
+        assert!(repeat);
+        assert!(!other_token);
     }
 
     #[test]

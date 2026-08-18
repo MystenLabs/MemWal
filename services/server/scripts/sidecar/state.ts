@@ -3,6 +3,7 @@
  */
 
 import {
+    DURABLE_ENOKI_REGISTER_ENABLED,
     ENOKI_API_KEY,
     ENOKI_FALLBACK_TO_DIRECT_SIGN,
     ENOKI_INVALIDATED_MAX_ATTEMPTS,
@@ -74,6 +75,7 @@ export function sidecarStateSnapshot(): Record<string, unknown> {
         suiNetwork: SUI_NETWORK,
         enokiNetwork: ENOKI_NETWORK,
         enokiEnabled: !!ENOKI_API_KEY,
+        durableEnokiRegisterEnabled: DURABLE_ENOKI_REGISTER_ENABLED,
         fallbackToDirectSign: ENOKI_FALLBACK_TO_DIRECT_SIGN,
         enokiTransientMaxAttempts: ENOKI_TRANSIENT_MAX_ATTEMPTS,
         enokiInvalidatedMaxAttempts: ENOKI_INVALIDATED_MAX_ATTEMPTS,

@@ -65,7 +65,7 @@ import {
     type EnokiExecuteResponse,
     type EnokiSponsorResponse,
 } from "../enoki.js";
-import { isSponsoredTransactionInvalidatedMessage } from "../../enoki-retry.js";
+import { isEnokiSponsoredTransactionExpired } from "../../walrus-error-detection.js";
 import {
     assertUploadExecutionIdentity,
     executionIdentity,
@@ -297,12 +297,8 @@ export async function prepareRegisterTransaction(
         };
     }
 
-    if (!durableRegisterDirectSigningAllowed(
-        !!ENOKI_API_KEY,
-        DURABLE_ENOKI_REGISTER_ENABLED,
-    )) {
-        throw new Error("durable register requires Enoki sponsorship");
-    }
+    // Fail-closed sponsorship already returned above. Remaining path is the
+    // explicit phase-1 / unconfigured-Enoki direct sign.
     transaction.setGasPayment([]);
     const bytes = await transaction.build({ client: suiClient });
     assertAddressBalanceRegisterTransaction(TransactionDataBuilder.fromBytes(bytes));
@@ -365,6 +361,9 @@ export function assertSponsoredRegisterTransaction(
         || normalizeSuiAddress(transactionData.gasData.owner) === walletAddress) {
         throw new Error("sponsored registerTransaction must use a distinct gas owner");
     }
+    // Enoki-sponsored journals do not carry a ValidDuring maxEpoch. They are
+    // intentionally unbounded and rebuild only via the expired-sponsorship
+    // path below, not the epoch-expiry guard used by direct-signed journals.
     assertRegisterTransactionUsesAddressBalanceWal(transactionData);
 }
 
@@ -439,6 +438,28 @@ async function currentSuiEpoch(): Promise<bigint> {
     return epoch;
 }
 
+async function lookupPreparedRegisterTransaction(
+    client: PreparedRegisterClient,
+    digest: string,
+    include: { effects: true; objectTypes: true },
+    assertExpectedDigest: (result: unknown) => unknown,
+    attempts: number,
+): Promise<unknown | undefined> {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+            return assertExpectedDigest(
+                await client.getTransaction({ digest, include }),
+            );
+        } catch (error: any) {
+            if (error?.code !== "NOT_FOUND") throw error;
+            if (attempt < attempts) {
+                await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+            }
+        }
+    }
+    return undefined;
+}
+
 export async function executePreparedRegisterTransaction(
     prepared: ValidatedPreparedRegisterTransaction,
     client: PreparedRegisterClient = suiClient,
@@ -446,6 +467,7 @@ export async function executePreparedRegisterTransaction(
     getCurrentEpoch: () => Promise<bigint> = currentSuiEpoch,
     mayHaveBeenSubmitted = false,
     executeSponsored: PreparedRegisterSponsorExecutor = executePreparedRegisterWithEnoki,
+    indexAttempts = 8,
 ): Promise<unknown> {
     const include = { effects: true, objectTypes: true } as const;
     const assertExpectedDigest = (result: any): unknown => {
@@ -489,20 +511,28 @@ export async function executePreparedRegisterTransaction(
                 executeSponsored(prepared.sponsorDigest!, prepared.signature),
             );
         } catch (error: unknown) {
-            if (!isSponsoredTransactionInvalidatedMessage(errorMessage(error))) throw error;
+            // `expired` is the only invalidation that proves Enoki never
+            // submitted. `not_found` can mean the handle was already consumed.
+            if (!isEnokiSponsoredTransactionExpired(errorMessage(error))) throw error;
 
-            // Enoki sponsorship handles are disposable. Only discard this one
-            // after a second digest lookup proves the journaled Sui transaction
-            // never landed; the Rust writer will then clear the prepared bytes
-            // and build a fresh sponsorship on its next checkpoint.
-            try {
-                const finalized = await client.getTransaction({ digest: prepared.digest, include });
-                return assertExpectedDigest(finalized);
-            } catch (lookupError: any) {
-                if (lookupError?.code !== "NOT_FOUND") throw lookupError;
+            const finalized = await lookupPreparedRegisterTransaction(
+                client,
+                prepared.digest,
+                include,
+                assertExpectedDigest,
+                indexAttempts,
+            );
+            if (finalized !== undefined) return finalized;
+            if (mayHaveBeenSubmitted) {
+                throw Object.assign(
+                    new Error(
+                        `sponsored register transaction ${prepared.digest} was invalidated but remains ambiguous`,
+                    ),
+                    { code: "UNAVAILABLE" },
+                );
             }
             throw new NoSideEffectError(
-                `sponsored register transaction ${prepared.digest} was invalidated and is not on chain; rebuild sponsorship`,
+                `sponsored register transaction ${prepared.digest} expired and is not on chain; rebuild sponsorship`,
             );
         }
         if (executed.digest !== prepared.digest) {
@@ -513,15 +543,14 @@ export async function executePreparedRegisterTransaction(
         // Enoki returns only a digest. Read the finalized transaction so the
         // caller can validate the created Walrus Blob object exactly as it did
         // for the legacy direct-execution path.
-        for (let attempt = 1; attempt <= 8; attempt += 1) {
-            try {
-                const finalized = await client.getTransaction({ digest: prepared.digest, include });
-                return assertExpectedDigest(finalized);
-            } catch (error: any) {
-                if (error?.code !== "NOT_FOUND" || attempt === 8) throw error;
-                await new Promise((resolve) => setTimeout(resolve, attempt * 250));
-            }
-        }
+        const finalized = await lookupPreparedRegisterTransaction(
+            client,
+            prepared.digest,
+            include,
+            assertExpectedDigest,
+            indexAttempts,
+        );
+        if (finalized !== undefined) return finalized;
         throw new Error(`sponsored register transaction ${prepared.digest} was not found after execution`);
     }
 
