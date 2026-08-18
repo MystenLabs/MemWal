@@ -134,6 +134,42 @@ export function toolError(message: string, err: unknown) {
  * @returns Result of `fn` on first success
  * @throws Last error if all attempts fail
  */
+/**
+ * Race an async operation against a deadline.
+ *
+ * The SDK has no client-side timeout, so a relayer that accepts the socket and
+ * then goes silent leaves the promise pending forever and blocks the agent
+ * turn. An unreachable host fails fast at DNS; a hung one does not. Every
+ * relayer call in the hooks goes through this.
+ *
+ * @param fn - Async function to execute
+ * @param ms - Deadline in milliseconds
+ * @param label - Operation name, used in the timeout error message
+ * @returns Result of `fn` if it settles before the deadline
+ * @throws {Error} `<label> timed out after <ms>ms` if the deadline passes first
+ */
+export async function withTimeout<T>(
+  fn: () => Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${ms}ms`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    // Always clear, or a pending timer keeps the process alive after success
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export async function withRetry<T>(
   fn: () => Promise<T>,
   retries: number = DEFAULT_RETRY_COUNT,

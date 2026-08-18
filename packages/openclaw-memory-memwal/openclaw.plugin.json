@@ -4,7 +4,10 @@
   "name": "Walrus Memory",
   "description": "Encrypted, decentralized long-term memory via Walrus Memory",
   "contracts": {
-    "tools": ["memory_search", "memory_store"]
+    "tools": [
+      "memory_search",
+      "memory_store"
+    ]
   },
   "configSchema": {
     "type": "object",
@@ -51,9 +54,14 @@
         "minimum": 1,
         "maximum": 50,
         "description": "Recent messages window for auto-capture"
+      },
+      "requestTimeoutMs": {
+        "type": "number",
+        "minimum": 1000,
+        "maximum": 60000,
+        "description": "Per-request deadline for relayer calls (default: 10000)"
       }
-    },
-    "required": ["privateKey", "accountId", "serverUrl"]
+    }
   },
   "uiHints": {
     "privateKey": {

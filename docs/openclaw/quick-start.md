@@ -135,6 +135,7 @@ You'll also need a **delegate key**, **account ID**, and **relayer URL** from Wa
       | `minRelevance` | `0.3` | Relevance threshold (0-1) for memory injection |
       | `captureMaxMessages` | `10` | How many recent messages to analyze for facts |
       | `defaultNamespace` | `"default"` | Memory scope for the main agent |
+      | `requestTimeoutMs` | `10000` | Deadline in ms for each relayer call. Raise it for a slow self-hosted relayer |
     </Accordion>
   </Step>
 
