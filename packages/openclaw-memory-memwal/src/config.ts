@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { PluginConfig } from "./types.js";
+import { DEFAULT_REQUEST_TIMEOUT_MS } from "./constants.js";
 
 // ============================================================================
 // Schema
@@ -31,6 +32,7 @@ const ConfigSchema = z.object({
   maxRecallResults: z.number().min(1).max(20).default(5),
   minRelevance: z.number().min(0).max(1).default(0.3),
   captureMaxMessages: z.number().min(1).max(50).default(10),
+  requestTimeoutMs: z.number().min(1000).max(60000).default(DEFAULT_REQUEST_TIMEOUT_MS),
 });
 
 // ============================================================================

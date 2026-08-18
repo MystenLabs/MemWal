@@ -5,7 +5,7 @@
 import type { MemWal } from "@mysten-incubation/memwal";
 import { resolveAgent } from "../config.js";
 import { looksLikeInjection } from "../capture.js";
-import { formatMemoriesForPrompt } from "../format.js";
+import { formatMemoriesForPrompt, withTimeout } from "../format.js";
 import type { PluginConfig } from "../types.js";
 import { MIN_PROMPT_LENGTH } from "../constants.js";
 
@@ -20,13 +20,26 @@ export function registerRecallHook(api: any, client: MemWal, config: PluginConfi
       `pass namespace=${JSON.stringify(namespace)} to scope operations to the current agent's memory.`;
 
     try {
+      // Each read carries its own deadline. `recall()` self-aborts after 15s,
+      // but the compatibility preflight ahead of it does not, and
+      // Promise.allSettled below waits for every promise — so one namespace
+      // holding its socket open would stall the whole turn if the deadline
+      // wrapped the pair instead of each read.
       const recallPromises = [
-        client.recall(event.prompt, config.maxRecallResults, namespace),
+        withTimeout(
+          () => client.recall(event.prompt, config.maxRecallResults, namespace),
+          config.requestTimeoutMs,
+          "auto-recall",
+        ),
       ];
 
       if (legacyNamespace && legacyNamespace !== namespace) {
         recallPromises.push(
-          client.recall(event.prompt, config.maxRecallResults, legacyNamespace),
+          withTimeout(
+            () => client.recall(event.prompt, config.maxRecallResults, legacyNamespace),
+            config.requestTimeoutMs,
+            "auto-recall (legacy namespace)",
+          ),
         );
       }
 

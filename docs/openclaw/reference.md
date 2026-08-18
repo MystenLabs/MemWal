@@ -162,7 +162,7 @@ Tools are optional. Hooks handle the common case — memories are recalled and c
 
 ## CLI
 
-Terminal commands for debugging and inspection. Available when the OpenClaw gateway is running.
+Terminal commands for debugging and inspection. They talk to the relayer directly, so they work whether or not the gateway is running.
 
 ### search
 
@@ -237,6 +237,7 @@ Full list of config options for `openclaw.json`:
 | `maxRecallResults` | number | `5` | No | Max memories per auto-recall |
 | `minRelevance` | number | `0.3` | No | Relevance threshold (0-1) for recall |
 | `captureMaxMessages` | number | `10` | No | Recent messages window for capture |
+| `requestTimeoutMs` | number | `10000` | No | Per-request deadline (ms) for every relayer call, 1000–60000 |
 
 ## Troubleshooting
 
