@@ -903,16 +903,13 @@ export async function runBridge(
             // cross-account replay) since the flush posts with the current
             // `creds`. For each, reply once with a retryable error and stop
             // tracking; never write a second reply for a locally-answered
-            // `initialize`, and clear its suppression arm so a reused id later
-            // isn't silently swallowed.
+            // `initialize`. Keep its one-shot suppress arm so a queued
+            // upstream initialize reply is consumed. Do not put initialize in
+            // closedOutIds — a later reused id must still get a real reply.
             const purge = (msg: RpcMessage): void => {
                 if (msg.id == null) return; // notification — nothing to reply to
                 pendingListIds.delete(msg.id);
                 if (msg.method === "initialize") {
-                    // Already answered locally. Keep any suppress arm so a
-                    // queued upstream initialize reply is consumed, and record
-                    // closedOutIds so the pump drops it even if the arm is gone.
-                    closedOutIds.add(msg.id);
                     return;
                 }
                 suppressUpstreamReplies.delete(msg.id);
@@ -936,6 +933,13 @@ export async function runBridge(
             for (const [, msg] of Array.from(inFlight.entries())) purge(msg);
             inFlight.clear();
             for (const msg of pendingForward.splice(0, pendingForward.length)) purge(msg);
+        } else {
+            // Same account: reconnect() owns inFlight. Drop id-bearing
+            // pendingForward so a login mid-flush cannot POST the same
+            // remember/recall again after replay.
+            const leftover = pendingForward.filter((m) => m.id == null);
+            pendingForward.length = 0;
+            pendingForward.push(...leftover);
         }
 
         creds = nextCreds;
@@ -1272,10 +1276,9 @@ export async function runBridge(
         if (msg.id == null) return; // notification — nothing to answer
         if (msg.method === "initialize") {
             // Locally answered already. Never write a second reply for this id.
-            // Keep any suppress arm and record closedOutIds so a late upstream
-            // initialize result is dropped by the pump.
+            // Keep any suppress arm so a late upstream initialize result is
+            // consumed; do not closedOut the id (clients may reuse it later).
             inFlight.delete(msg.id);
-            closedOutIds.add(msg.id);
             return;
         }
         inFlight.delete(msg.id);

@@ -375,7 +375,9 @@ test("a request buffered during cold start is NOT flushed to a new account after
 
     // No account-B session may have received the account-A recall (id=5), and
     // id=5 must have been answered exactly once (no double response).
+    const id1Replies = bridge.received.filter((m) => m.id === 1);
     const id5Replies = bridge.received.filter((m) => m.id === 5);
+    assert.equal(id1Replies.length, 1, `initialize answered exactly once, saw ${id1Replies.length}`);
     assert.equal(id5Replies.length, 1, `id=5 answered exactly once, saw ${id5Replies.length}: ${JSON.stringify(id5Replies)}`);
     const bAccountRecall = bridge.received.find(
         (m) => m.id === 5 && m.result && /account A secret/.test(JSON.stringify(m)),
