@@ -19,6 +19,7 @@ import type {
     RememberResult,
     RestoreResult,
 } from "./types.js";
+import { applyTokenBudget, estimateTokens } from "./tokens.js";
 
 export interface MemWalMockSeed {
     text: string;
@@ -229,6 +230,10 @@ export class MemWalMock {
         return this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
     }
 
+    countTokens(text: string): number {
+        return estimateTokens(text);
+    }
+
     async recall(params: RecallParams): Promise<RecallResult>;
     async recall(
         query: string,
@@ -285,6 +290,17 @@ export class MemWalMock {
                 text: memory.text,
                 distance: memoryDistance,
             }));
+
+        if (typeof options.maxTokens === "number") {
+            const { results, meta } = applyTokenBudget(
+                ranked,
+                options.maxTokens,
+                options.truncationStrategy,
+                options.countTokens
+            );
+            return { results, total: results.length, meta };
+        }
+
         return { results: ranked, total: ranked.length };
     }
 

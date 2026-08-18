@@ -68,6 +68,7 @@ import {
     assertCompatibleRelayer,
     compatibilityErrorFromStatus,
 } from "./compatibility.js";
+import { applyTokenBudget, estimateTokens } from "./tokens.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -595,6 +596,25 @@ export class MemWal {
      * const result2 = await memwal.recall("food allergies", 5, "profile");
      * ```
      */
+    /**
+     * Estimate the token cost of a string using the SDK's default
+     * character-based approximation (~chars/4, code-point aware). Useful to weigh
+     * a recall payload before injecting it into a model context:
+     *
+     * ```ts
+     * const hits = await memwal.recall({ query, limit: 8 });
+     * const joined = hits.results.map((h) => h.text).join("\n---\n");
+     * if (memwal.countTokens(joined) > 2048) { /* re-query with maxTokens *\/ }
+     * ```
+     *
+     * This is an estimate, not an exact tokenizer count — see `estimateTokens`
+     * for accuracy caveats. For exact counts, pass your own counter to
+     * `recall({ maxTokens, countTokens })`.
+     */
+    countTokens(text: string): number {
+        return estimateTokens(text);
+    }
+
     async recall(params: RecallParams): Promise<RecallResult>;
     /**
      * @deprecated Positional `recall(query, limit, namespace)` is easy to
@@ -640,18 +660,38 @@ export class MemWal {
                 namespace: resolvedNamespace,
             }, { signal: ac.signal });
 
+            let processed = result;
             if (typeof options.maxDistance === "number") {
                 const filtered = result.results.filter(
                     (memory) => memory.distance < options.maxDistance!,
                 );
-                return {
-                    ...result,
+                processed = {
+                    ...processed,
                     results: filtered,
                     total: filtered.length,
                 };
             }
 
-            return result;
+            // Client-side token budgeting: trim the (already distance-sorted)
+            // payload to fit maxTokens per the chosen strategy, and attach the
+            // token estimate + truncated flag. Omitting maxTokens leaves the
+            // result byte-identical to the pre-budget behavior (no meta).
+            if (typeof options.maxTokens === "number") {
+                const { results: budgeted, meta } = applyTokenBudget(
+                    processed.results,
+                    options.maxTokens,
+                    options.truncationStrategy,
+                    options.countTokens,
+                );
+                processed = {
+                    ...processed,
+                    results: budgeted,
+                    total: budgeted.length,
+                    meta,
+                };
+            }
+
+            return processed;
         } finally {
             clearTimeout(tid);
         }
