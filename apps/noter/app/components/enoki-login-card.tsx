@@ -16,9 +16,10 @@ import {
   useCurrentAccount,
   useSignPersonalMessage,
   useSignTransaction,
-  useSuiClient,
 } from "@mysten/dapp-kit";
 import { isEnokiWallet } from "@mysten/enoki";
+import { bcs } from "@mysten/sui/bcs";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Transaction } from "@mysten/sui/transactions";
 import { createSponsorAuthorization } from "@mysten-incubation/memwal";
 import { Loader2 } from "lucide-react";
@@ -26,6 +27,8 @@ import { Button } from "@/shared/components/ui/button";
 import { enokiConfig } from "@/lib/enoki/config";
 import { useAuth } from "@/feature/auth";
 import { trpc } from "@/shared/lib/trpc/client";
+import { getSuiGrpcClient } from "@/lib/sui/grpc-client";
+import { AccountCreatedBcs, AccountRegistryBcs } from "@/lib/sui/account-bcs";
 
 type Step =
   | "idle"
@@ -62,14 +65,14 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
 async function sponsoredSignAndExecute(
   transaction: Transaction,
   sender: string,
-  suiClient: ReturnType<typeof useSuiClient>,
+  suiClient: SuiGrpcClient,
   signTransaction: (args: {
     transaction: Transaction;
   }) => Promise<{ signature: string }>,
   signPersonalMessage: (message: Uint8Array) => Promise<{ signature: string }>,
 ): Promise<{ digest: string }> {
   const kindBytes = await transaction.build({
-    client: suiClient as any,
+    client: suiClient,
     onlyTransactionKind: true,
   });
   const authorization = await createSponsorAuthorization(
@@ -118,7 +121,7 @@ export function EnokiLoginCard() {
   const wallets = useWallets();
   const { mutateAsync: connect } = useConnectWallet();
   const currentAccount = useCurrentAccount();
-  const suiClient = useSuiClient();
+  const suiClient = getSuiGrpcClient();
   const { mutateAsync: signTransaction } = useSignTransaction();
   const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
   const { connectEnoki } = useAuth();
@@ -197,29 +200,17 @@ export function EnokiLoginCard() {
         let knownAccountId: string | null = null;
 
         try {
-          const registryObj = await suiClient.getObject({
-            id: enokiConfig.memwalRegistryId,
-            options: { showContent: true },
+          const registryRes = await suiClient.getObject({
+            objectId: enokiConfig.memwalRegistryId,
+            include: { content: true },
           });
-          if (
-            registryObj?.data?.content &&
-            "fields" in registryObj.data.content
-          ) {
-            const fields = registryObj.data.content.fields as any;
-            const tableId = fields?.accounts?.fields?.id?.id;
-            if (tableId) {
-              const dynField = await suiClient.getDynamicFieldObject({
-                parentId: tableId,
-                name: { type: "address", value: address },
-              });
-              if (
-                dynField?.data?.content &&
-                "fields" in dynField.data.content
-              ) {
-                knownAccountId = (dynField.data.content.fields as any)
-                  .value as string;
-              }
-            }
+          if (registryRes.object.content) {
+            const registry = AccountRegistryBcs.parse(registryRes.object.content);
+            const dynField = await suiClient.getDynamicField({
+              parentId: registry.accounts.id,
+              name: { type: "address", bcs: bcs.Address.serialize(address).toBytes() },
+            });
+            knownAccountId = bcs.Address.parse(dynField.dynamicField.value.bcs);
           }
         } catch {
           // Dynamic field not found → no account yet
@@ -267,18 +258,17 @@ export function EnokiLoginCard() {
           );
           await suiClient.waitForTransaction({ digest: createResult.digest });
 
-          const txDetails = await suiClient.getTransactionBlock({
+          const txResult = await suiClient.getTransaction({
             digest: createResult.digest,
-            options: { showObjectChanges: true },
+            include: { events: true },
           });
-          const createdObj = txDetails.objectChanges?.find(
-            (c) =>
-              c.type === "created" &&
-              "objectType" in c &&
-              c.objectType.includes("MemWalAccount"),
+          const txDetails =
+            txResult.$kind === "Transaction" ? txResult.Transaction : txResult.FailedTransaction;
+          const createdEvent = txDetails.events?.find((e) =>
+            e.eventType.endsWith("::account::AccountCreated"),
           );
-          if (createdObj && "objectId" in createdObj) {
-            knownAccountId = createdObj.objectId;
+          if (createdEvent) {
+            knownAccountId = AccountCreatedBcs.parse(createdEvent.bcs).account_id;
           }
 
           if (!knownAccountId) {
