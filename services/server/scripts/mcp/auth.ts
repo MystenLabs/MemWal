@@ -16,6 +16,7 @@
  * =============================================================================
  */
 import { MemWal } from "@mysten-incubation/memwal";
+import { verifyInternalOrigin } from "./internal-auth.js";
 
 export interface MemWalSession {
     accountId: string;
@@ -75,10 +76,16 @@ function bytesToHex(b: Uint8Array): string {
  * Resolve auth from incoming HTTP headers.
  *
  * Required headers:
+ *     X-MemWal-Internal-Sidecar-Token: <SIDECAR_AUTH_TOKEN>
  *     Authorization: Bearer <ed25519-private-key-hex>     (64 hex chars)
  *     X-MemWal-Account-Id: 0x<sui-object-id>             (66 chars)
  * Optional:
  *     X-MemWal-Namespace: <namespace>                    (default per-tool)
+ *     X-MemWal-Internal-Oauth-Scope: <space-separated>   (relayer-issued)
+ *
+ * The internal token is checked first: `x-memwal-internal-*` headers state
+ * decisions the relayer already made, so only the relayer may set them. An
+ * absent scope grants no tools — see tools/index.ts.
  *
  * Throws McpAuthError on missing / malformed credentials.
  */
@@ -86,6 +93,16 @@ export async function resolveAuth(
     headers: Headers,
     serverUrl: string
 ): Promise<AuthResolution> {
+    // Runs before anything else reads the request: `x-memwal-internal-*`
+    // headers carry decisions the relayer already made, so a caller that
+    // cannot prove it is the relayer must not be able to state them.
+    if (!verifyInternalOrigin(headers)) {
+        throw new McpAuthError(
+            "Request did not originate from the MemWal relayer",
+            401
+        );
+    }
+
     const authHeader = headers.get("authorization");
     if (!authHeader || !authHeader.toLowerCase().startsWith("bearer ")) {
         throw new McpAuthError(

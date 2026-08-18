@@ -18,6 +18,7 @@
  * IMPORTANT: env vars MUST be set BEFORE importing `mountMcpRoutes` because
  * the rate limiter is constructed at module-load time.
  */
+process.env.SIDECAR_AUTH_TOKEN ??= "instructions-test-sidecar-token";
 process.env.MCP_MAX_TOTAL_SESSIONS = "100";
 process.env.MCP_MAX_SESSIONS_PER_IP = "100";
 process.env.MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN = "100";
@@ -81,6 +82,9 @@ async function initialize(): Promise<Record<string, any>> {
             authorization: `Bearer ${randomBytes(32).toString("hex")}`,
             "x-memwal-account-id": "0x" + randomBytes(32).toString("hex"),
             "x-forwarded-for": "203.0.113.7",
+            // Stands in for the relayer, which proves its origin with the
+            // sidecar shared secret before any internal header is honoured.
+            "x-memwal-internal-sidecar-token": process.env.SIDECAR_AUTH_TOKEN!,
         },
         body: JSON.stringify({
             jsonrpc: "2.0",

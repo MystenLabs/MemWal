@@ -16,6 +16,7 @@
  * IMPORTANT: env vars MUST be set BEFORE importing `mountMcpRoutes` because
  * the rate limiter is constructed at module-load time.
  */
+process.env.SIDECAR_AUTH_TOKEN ??= "integration-test-sidecar-token";
 process.env.MCP_MAX_TOTAL_SESSIONS = "100";
 process.env.MCP_MAX_SESSIONS_PER_IP = "100";
 // Tight burst cap so the test can trip it in 3 calls.
@@ -92,6 +93,11 @@ function initializeBody(id: number) {
     });
 }
 
+// The relayer proves it is the relayer with the sidecar shared secret; every
+// request that expects to get past `resolveAuth` has to carry it.
+const INTERNAL_TOKEN_HEADER = "x-memwal-internal-sidecar-token";
+const INTERNAL_TOKEN = process.env.SIDECAR_AUTH_TOKEN!;
+
 function mcpHeaders(opts: {
     bearer: string;
     accountId: string;
@@ -104,6 +110,7 @@ function mcpHeaders(opts: {
         authorization: `Bearer ${opts.bearer}`,
         "x-memwal-account-id": opts.accountId,
         "x-forwarded-for": opts.xff,
+        [INTERNAL_TOKEN_HEADER]: INTERNAL_TOKEN,
     };
     if (opts.sessionId) h["mcp-session-id"] = opts.sessionId;
     return h;
@@ -142,6 +149,7 @@ async function openSse(opts: {
             authorization: `Bearer ${opts.bearer}`,
             "x-memwal-account-id": opts.accountId,
             "x-forwarded-for": opts.xff,
+            [INTERNAL_TOKEN_HEADER]: INTERNAL_TOKEN,
         },
     });
     assert.equal(response.status, 200);
@@ -258,6 +266,8 @@ test("malformed bearer returns 401, not 429 — auth still runs after rate-limit
             authorization: "Bearer not-a-hex-key",
             "x-memwal-account-id": "0x" + "a".repeat(64),
             "x-forwarded-for": "192.0.2.60",
+            // Origin is verified; the malformed bearer is what must be rejected.
+            [INTERNAL_TOKEN_HEADER]: INTERNAL_TOKEN,
         },
         body: initializeBody(1),
     });
@@ -276,7 +286,11 @@ test("SSE message POST is bound to the principal that opened the session", async
     try {
         const noAuth = await fetch(url, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+                "content-type": "application/json",
+                // Origin is verified; the absent bearer is what must be rejected.
+                [INTERNAL_TOKEN_HEADER]: INTERNAL_TOKEN,
+            },
             body,
         });
         assert.equal(noAuth.status, 401);
