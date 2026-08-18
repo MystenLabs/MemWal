@@ -428,6 +428,51 @@ jobs:
       - name: Unit tests (node:test)
         run: pnpm --filter @mysten-incubation/oc-memwal test
 
+  openclaw-plugin-e2e:
+    name: OpenClaw Plugin / E2E
+    # Merges to staging and main only, never per PR. The live half writes to
+    # Walrus, which is append-only with no per-blob delete, so every run leaves
+    # permanent data and costs gas plus storage. The mock-relayer half needs no
+    # credentials and runs regardless.
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      # Always staging, even on a main merge: the suite stores real memories and
+      # there is no reason to put test data on mainnet.
+      MEMWAL_SERVER_URL: https://relayer-staging.memory.walrus.xyz
+      MEMWAL_PRIVATE_KEY: ${{ secrets.MEMWAL_E2E_PRIVATE_KEY }}
+      MEMWAL_ACCOUNT_ID: ${{ secrets.MEMWAL_E2E_ACCOUNT_ID }}
+      MEMWAL_E2E_WRITE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SDK (workspace dep of the plugin)
+        run: pnpm build:sdk
+
+      # Without the two secrets the live cases skip themselves and only the
+      # mock-relayer cases run, so this job is safe to land before the secrets
+      # exist and will not fail the branch.
+      - name: E2E (mock relayer always, live relayer when secrets are set)
+        run: pnpm --filter @mysten-incubation/oc-memwal test:e2e
+
   server-checks:
     name: Server / Clippy + Unit tests
     runs-on: ubuntu-latest
