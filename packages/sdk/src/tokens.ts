@@ -64,6 +64,13 @@ export function truncateToTokenBudget(
     if (!Number.isFinite(maxTokens) || maxTokens <= 0) return "";
     if (countTokens(text) <= maxTokens) return text;
     const chars = [...text];
+    // The default estimator has an exact closed-form inverse, so avoid slicing
+    // and recounting prefixes on the common path.
+    if (countTokens === estimateTokens) {
+        const cap = Math.min(chars.length, Math.floor(maxTokens) * CHARS_PER_TOKEN);
+        return chars.slice(0, cap).join("");
+    }
+
     // Find the longest fitting prefix in logarithmic counter calls. Token counts
     // for text prefixes are expected to be monotonic for supported counters.
     // Searching the full string also avoids under-filling the budget for custom
@@ -147,7 +154,7 @@ export function applyTokenBudget(
         for (const m of results) {
             if (perHit <= 0) break;
             const text = truncateToTokenBudget(m.text, perHit, countTokens);
-            if ([...text].length > 0) capped.push({ ...m, text });
+            if (text.length > 0) capped.push({ ...m, text });
         }
         return {
             results: capped,
@@ -171,7 +178,7 @@ export function applyTokenBudget(
             const remaining = maxTokens - running;
             if (remaining > 0) {
                 const text = truncateToTokenBudget(m.text, remaining, countTokens);
-                if ([...text].length > 0) {
+                if (text.length > 0) {
                     kept.push({ ...m, text });
                     running += countTokens(text);
                 }

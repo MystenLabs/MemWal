@@ -19,7 +19,7 @@ import type {
     RememberResult,
     RestoreResult,
 } from "./types.js";
-import { applyTokenBudget } from "./tokens.js";
+import { applyTokenBudget, estimateTokens } from "./tokens.js";
 
 export interface MemWalMockSeed {
     text: string;
@@ -224,6 +224,10 @@ export class MemWalMock {
             (item) => item.namespace ?? this.namespace
         );
         return this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
+    }
+
+    countTokens(text: string): number {
+        return estimateTokens(text);
     }
 
     async recall(params: RecallParams): Promise<RecallResult>;

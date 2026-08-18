@@ -93,6 +93,8 @@ test("MemWalMock matches production token-budget behavior", async () => {
         ],
     });
 
+    assert.equal(mock.countTokens("a".repeat(8)), 2);
+
     const unbudgeted = await mock.recall({ query: "a", limit: 2 });
     assert.equal(unbudgeted.results.length, 2);
     assert.equal("meta" in unbudgeted, false);

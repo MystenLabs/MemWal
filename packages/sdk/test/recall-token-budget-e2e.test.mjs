@@ -77,6 +77,30 @@ test("recall with maxTokens: budget applied, total recomputed, meta present", as
     assert.equal(result.meta.tokenEstimate, 10);
 });
 
+test("recall forwards drop-tail strategy and a custom token counter", async () => {
+    const hits = [
+        { blob_id: "b1", text: "one two three four", distance: 0.1 },
+    ];
+    stubRecall(hits);
+    let counterCalls = 0;
+    const wordCount = (text) => {
+        counterCalls += 1;
+        return text.trim() ? text.trim().split(/\s+/).length : 0;
+    };
+
+    const result = await client().recall({
+        query: "x",
+        maxTokens: 2,
+        truncationStrategy: "drop-tail",
+        countTokens: wordCount,
+    });
+    assert.equal(result.results.length, 1);
+    assert.ok(wordCount(result.results[0].text) <= 2);
+    assert.equal(result.meta.truncated, true);
+    assert.equal(result.meta.tokenEstimate, 2);
+    assert.ok(counterCalls > 0, "custom counter was used by recall");
+});
+
 test("recall maxTokens + maxDistance compose (distance filter then budget)", async () => {
     const hits = [
         { blob_id: "b1", text: chars(40), distance: 0.1 },
