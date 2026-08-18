@@ -249,14 +249,18 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
             },
             1,
         ),
-        /not_found/,
+        (error: unknown) => error instanceof Error
+            && (error as { code?: string }).code === "UNAVAILABLE"
+            && /ambiguous/.test(error.message),
     );
 
     let lookups = 0;
     const retryClient = {
         async getTransaction() {
             lookups += 1;
-            if (lookups < 2) throw Object.assign(new Error("not found"), { code: "NOT_FOUND" });
+            // 1 = pre-execute probe. 2 = first expired-path miss. 3 = hit.
+            // A helper that only looks up once would stop after #2 and fail.
+            if (lookups < 3) throw Object.assign(new Error("not found"), { code: "NOT_FOUND" });
             return finalized;
         },
         async executeTransaction() {
@@ -275,7 +279,7 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
         2,
     );
     assert.equal(recovered, finalized);
-    assert.equal(lookups, 2);
+    assert.equal(lookups, 3);
 
     await assert.rejects(
         executePreparedRegisterTransaction(

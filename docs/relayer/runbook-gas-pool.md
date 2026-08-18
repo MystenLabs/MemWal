@@ -28,7 +28,7 @@ questions:
   - "What causes Enoki dry_run_failed errors with balance split on MemWal?"
   - "How do I consolidate SUI gas coins on relayer pool wallets?"
 answer: >-
-  Gas-pool exhaustion occurs when relayer pool wallets have no single SUI coin large enough for Enoki-sponsored Walrus transactions, typically due to coin fragmentation. The fix is to consolidate fragmented coins using sui client merge-coin or pay-all-sui, or top up the wallet with additional SUI so the largest coin exceeds the sponsored budget.
+  Gas ownership depends on DURABLE_ENOKI_REGISTER_ENABLED. Phase 1 (flag false, current default) direct-signs durable register from the uploader wallet address balance — top up that uploader, not an Enoki pool wallet. Phase 2 (flag true) is Enoki-sponsored: exhaustion means a pool wallet has no single SUI coin large enough, typically from fragmentation; consolidate with sui client merge-coin or pay-all-sui, or top up the pool wallet so the largest coin exceeds the sponsored budget.
 ---
 
 When to use this: a **gas-pool alert** fires (the SUI gas pool maintenance

@@ -65,6 +65,7 @@ import {
     type EnokiExecuteResponse,
     type EnokiSponsorResponse,
 } from "../enoki.js";
+import { isSponsoredTransactionInvalidatedMessage } from "../../enoki-retry.js";
 import { isEnokiSponsoredTransactionExpired } from "../../walrus-error-detection.js";
 import {
     assertUploadExecutionIdentity,
@@ -511,9 +512,13 @@ export async function executePreparedRegisterTransaction(
                 executeSponsored(prepared.sponsorDigest!, prepared.signature),
             );
         } catch (error: unknown) {
-            // `expired` is the only invalidation that proves Enoki never
-            // submitted. `not_found` can mean the handle was already consumed.
-            if (!isEnokiSponsoredTransactionExpired(errorMessage(error))) throw error;
+            const message = errorMessage(error);
+            const expired = isEnokiSponsoredTransactionExpired(message);
+            const invalidated = isSponsoredTransactionInvalidatedMessage(message);
+            // `expired` proves Enoki never submitted. `not_found` can mean the
+            // handle was already consumed — look up the digest, then stay
+            // ambiguous instead of clearing the journal.
+            if (!invalidated) throw error;
 
             const finalized = await lookupPreparedRegisterTransaction(
                 client,
@@ -523,7 +528,7 @@ export async function executePreparedRegisterTransaction(
                 indexAttempts,
             );
             if (finalized !== undefined) return finalized;
-            if (mayHaveBeenSubmitted) {
+            if (!expired || mayHaveBeenSubmitted) {
                 throw Object.assign(
                     new Error(
                         `sponsored register transaction ${prepared.digest} was invalidated but remains ambiguous`,

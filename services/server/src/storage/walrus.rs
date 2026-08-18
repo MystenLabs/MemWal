@@ -531,8 +531,9 @@ pub async fn advance_durable_upload(
         );
         if reset_safe {
             // Reset-safe codes mean this replica must not execute the journaled
-            // bytes. Replacing them cannot duplicate a registration this replica
-            // submitted.
+            // bytes. NO_SIDE_EFFECT proved the digest absent. INVALID_PREPARED
+            // means this replica refused the bytes before execute (mixed-version
+            // or incompatible sponsorship) and can rebuild compatible ones.
             journal.register_transaction = None;
             return Ok(DurableUploadAdvance::Prepared(journal));
         }
@@ -1098,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_register_reset_requires_proof_of_no_effect() {
+    fn prepared_register_resets_on_no_side_effect_or_invalid_prepared() {
         let direct = PreparedRegisterTransaction {
             transaction_bytes: "bytes".into(),
             signature: "signature".into(),

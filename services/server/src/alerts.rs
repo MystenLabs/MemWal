@@ -258,14 +258,16 @@ impl AlertManager {
         };
         // Dedup by the full address; abbreviating here could make two distinct
         // wallets with the same prefix/suffix suppress each other's alerts.
-        if self
-            .wallet_balance_low_dedup
-            .should_suppress(wallet_balance_low_dedup_key(&alert))
-        {
+        if self.should_suppress_wallet_balance_low(&alert) {
             return Ok(());
         }
         let payload = SlackPayload::for_wallet_balance_low(&alert);
         slack.send_payload(&payload).await
+    }
+
+    fn should_suppress_wallet_balance_low(&self, alert: &WalletBalanceLowAlert) -> bool {
+        self.wallet_balance_low_dedup
+            .should_suppress(wallet_balance_low_dedup_key(alert))
     }
 }
 
@@ -1288,15 +1290,9 @@ mod tests {
         );
 
         let manager = AlertManager::from_env(reqwest::Client::new());
-        let first = manager
-            .wallet_balance_low_dedup
-            .should_suppress(wallet_balance_low_dedup_key(&wal));
-        let repeat = manager
-            .wallet_balance_low_dedup
-            .should_suppress(wallet_balance_low_dedup_key(&wal));
-        let other_token = manager
-            .wallet_balance_low_dedup
-            .should_suppress(wallet_balance_low_dedup_key(&sui));
+        let first = manager.should_suppress_wallet_balance_low(&wal);
+        let repeat = manager.should_suppress_wallet_balance_low(&wal);
+        let other_token = manager.should_suppress_wallet_balance_low(&sui);
         assert!(!first);
         assert!(repeat);
         assert!(!other_token);
