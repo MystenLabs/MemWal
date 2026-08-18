@@ -185,6 +185,33 @@ function resolveSseIdleMs(): number {
     return n;
 }
 
+/** Longest deadline a server-side tool gives its own work (`analyze`). It
+ * lives in a package this one cannot import from, so raise this whenever that
+ * grows — otherwise the bridge declares healthy requests orphaned while the
+ * relayer is still working. */
+const SLOWEST_SERVER_TOOL_MS = 180_000;
+
+/** 240s as the constants stand. The headroom absorbs the relayer's own
+ * overhead, so expiry means the reply is lost rather than merely late. */
+const DEFAULT_CALL_TIMEOUT_MS = SLOWEST_SERVER_TOOL_MS + 60_000;
+
+/** An override below this is a mistake, not an intent. */
+const MIN_CALL_TIMEOUT_MS = 1_000;
+
+/** Without a cap, a long deadline drifts by a third of itself. */
+const MAX_ORPHAN_SWEEP_MS = 5_000;
+
+/** How long one request might sit unanswered. The idle watchdog above only sees
+ * a silent *stream*, which the keepalive prevents, so a lost reply needs its
+ * own deadline. Override via `MEMWAL_MCP_CALL_TIMEOUT_MS`, mostly for tests. */
+function resolveCallTimeoutMs(): number {
+    const raw = process.env.MEMWAL_MCP_CALL_TIMEOUT_MS;
+    if (!raw) return DEFAULT_CALL_TIMEOUT_MS;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < MIN_CALL_TIMEOUT_MS) return DEFAULT_CALL_TIMEOUT_MS;
+    return n;
+}
+
 interface RpcMessage {
     jsonrpc: "2.0";
     id?: number | string | null;
@@ -192,6 +219,12 @@ interface RpcMessage {
     params?: unknown;
     result?: unknown;
     error?: unknown;
+}
+
+/** A request forwarded upstream and still awaiting its response. */
+interface InFlightEntry {
+    msg: RpcMessage;
+    startedAt: number;
 }
 
 interface SseHandshakeResult {
@@ -747,7 +780,10 @@ export async function runBridge(
     // reconnect so a server-side session swap doesn't strand a tool call
     // forever waiting for a reply that will never come. Notifications
     // (no id) and responses (no method) are not tracked.
-    const inFlight = new Map<string | number, RpcMessage>();
+    // `startedAt` is never refreshed, not even by a replay: a reconnect loop
+    // would otherwise keep pushing the deadline out.
+    const inFlight = new Map<string | number, InFlightEntry>();
+    const callTimeoutMs = resolveCallTimeoutMs();
 
     /** IDs of `tools/list` requests we've forwarded to the relayer. When
      * the response comes back through the SSE pump, we splice in the
@@ -827,12 +863,20 @@ export async function runBridge(
                     log.info("bridge.reconnected", {
                         relayer: openingCreds.relayerUrl,
                         replayCount: inFlight.size,
+                        // The count alone cannot tell "nothing was pending"
+                        // from "the entry was dropped early" — the ambiguity
+                        // behind WALM-328's unexplained `replayCount: 0`.
+                        inFlight: Array.from(inFlight.entries()).map(([id, entry]) => ({
+                            id,
+                            method: entry.msg.method ?? null,
+                        })),
                     });
                     // Replay any requests that haven't been answered yet against the
                     // fresh session. Iterate over a snapshot — postMessage is async
                     // and the SSE pump may delete entries concurrently as replies
                     // start arriving on the new session.
-                    for (const [id, msg] of Array.from(inFlight.entries())) {
+                    for (const [id, entry] of Array.from(inFlight.entries())) {
+                        const msg = entry.msg;
                         try {
                             // A replayed `initialize` produces a fresh upstream
                             // reply on the NEW session that must also be dropped.
@@ -867,9 +911,9 @@ export async function runBridge(
                         // doesn't leak if the loop exits before another replay
                         // re-arms (a leaked arm would swallow a later reused-id
                         // reply). A surviving candidate re-arms fresh next pass.
-                        for (const [, msg] of inFlight) {
-                            if (msg.method === "initialize" && msg.id != null) {
-                                suppressUpstreamReplies.delete(msg.id);
+                        for (const [, entry] of inFlight) {
+                            if (entry.msg.method === "initialize" && entry.msg.id != null) {
+                                suppressUpstreamReplies.delete(entry.msg.id);
                             }
                         }
                         continue;
@@ -938,7 +982,7 @@ export async function runBridge(
                     },
                 });
             };
-            for (const [, msg] of Array.from(inFlight.entries())) purge(msg);
+            for (const [, entry] of Array.from(inFlight.entries())) purge(entry.msg);
             inFlight.clear();
             for (const msg of pendingForward.splice(0, pendingForward.length)) purge(msg);
         } else {
@@ -1161,7 +1205,7 @@ export async function runBridge(
                     msg.id !== undefined &&
                     msg.id !== null
                 ) {
-                    inFlight.set(msg.id, msg);
+                    inFlight.set(msg.id, { msg, startedAt: Date.now() });
                 }
                 // Relayer session not up yet, OR the post-connect flush is still
                 // draining — buffer so this request stays behind everything that
@@ -1270,17 +1314,23 @@ export async function runBridge(
         });
     }
 
-    /** Write the "relayer unavailable" reply for one open request, stop tracking
-     * it, and never double-answer a locally-answered request. Shared by the
-     * buffered (`failPendingForward`) and in-flight (`failInFlightRequests`)
-     * close-outs. Skips:
+    /** Write a failure reply for one open request, stop tracking it, and never
+     * double-answer a locally-answered request. Shared by the buffered
+     * (`failPendingForward`) and in-flight (`failInFlightRequests`) close-outs,
+     * and by the orphan sweeper — which passes `opts` because "relayer
+     * unavailable" would be a lie there: the relayer is fine, one reply just
+     * never arrived. Skips:
      *   - notifications (no id → nothing to reply to; also unforwardable now).
      *   - `initialize` (we already answered it locally; a second response for
      *     that id would corrupt the client's JSON-RPC state — just untrack).
      * Only `tools/call` shaped requests get the tool-result error envelope; any
      * other id-bearing request gets a JSON-RPC error object (the correct shape
      * for a non-tool request). */
-    function failRequest(msg: RpcMessage, reason: string): void {
+    function failRequest(
+        msg: RpcMessage,
+        reason: string,
+        opts: { toolText?: string; errorMessage?: string } = {},
+    ): void {
         if (msg.id == null) return; // notification — nothing to answer
         if (msg.method === "initialize") {
             // Locally answered already. Never write a second reply for this id.
@@ -1302,7 +1352,9 @@ export async function runBridge(
                     content: [
                         {
                             type: "text",
-                            text: `❌ Walrus Memory relayer unavailable: ${reason}. The memory tool could not run. Please retry shortly.`,
+                            text:
+                                opts.toolText ??
+                                `❌ Walrus Memory relayer unavailable: ${reason}. The memory tool could not run. Please retry shortly.`,
                         },
                     ],
                     isError: true,
@@ -1314,7 +1366,9 @@ export async function runBridge(
                 id: msg.id,
                 error: {
                     code: -32000,
-                    message: `Walrus Memory relayer unavailable: ${reason}`,
+                    message:
+                        opts.errorMessage ??
+                        `Walrus Memory relayer unavailable: ${reason}`,
                 },
             });
         }
@@ -1331,8 +1385,38 @@ export async function runBridge(
      * to a torn-down session would otherwise hang, since no upstream reply is
      * coming. Idempotent w.r.t. ids already closed out (delete-then-skip). */
     function failInFlightRequests(reason: string): void {
-        for (const msg of Array.from(inFlight.values())) failRequest(msg, reason);
+        for (const entry of Array.from(inFlight.values())) failRequest(entry.msg, reason);
     }
+
+    /** Close out requests whose deadline has passed. Without this a reply lost
+     * on a still-healthy stream leaves its request tracked forever. */
+    // Same shape as the SSE watchdog's check interval, but capped.
+    const sweepIntervalMs = Math.min(
+        MAX_ORPHAN_SWEEP_MS,
+        Math.max(500, Math.floor(callTimeoutMs / 3)),
+    );
+    const orphanSweeper = setInterval(() => {
+        const now = Date.now();
+        for (const [id, entry] of Array.from(inFlight.entries())) {
+            const elapsedMs = now - entry.startedAt;
+            if (elapsedMs <= callTimeoutMs) continue;
+            log.warn("bridge.call_orphaned", {
+                id,
+                method: entry.msg.method ?? null,
+                elapsedMs,
+            });
+            failRequest(entry.msg, "no response", {
+                toolText:
+                    "❌ Walrus Memory did not answer this call. The connection to " +
+                    "the relayer dropped before the result came back. Please retry.",
+                errorMessage:
+                    "Walrus Memory call was orphaned by a reconnect and never " +
+                    "received a response. Please retry.",
+            });
+        }
+    }, sweepIntervalMs);
+    // unref so the sweeper never holds the event loop open during shutdown.
+    orphanSweeper.unref?.();
 
     // Kick off the relayer connect in the BACKGROUND — do NOT await it before
     // wiring stdin below. This is the whole fix: `initialize` / `tools/list` are
@@ -1421,7 +1505,11 @@ export async function runBridge(
         sse?.abort();
     });
 
-    await Promise.race([serverPump, clientPump]);
+    try {
+        await Promise.race([serverPump, clientPump]);
+    } finally {
+        clearInterval(orphanSweeper);
+    }
     markStdinClosed();
     const finalStream = sse as SseHandshakeResult | null;
     finalStream?.abort();
