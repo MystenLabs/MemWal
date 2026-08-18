@@ -128,8 +128,9 @@ test("withTimeout passes through a fast result", async () => {
 });
 
 test("withTimeout rejects a hung call instead of pending forever", async () => {
-  // The SDK has no client-side timeout: a relayer that accepts the socket and
-  // never replies left the recall hook pending indefinitely, blocking the turn.
+  // A relayer that accepts the socket and never replies left the recall hook
+  // pending indefinitely, blocking the turn. `recall()` self-aborts after 15s,
+  // but the unguarded compatibility preflight ahead of it does not.
   const hang = () => new Promise(() => {});
   await assert.rejects(() => withTimeout(hang, 50, "auto-recall"), /auto-recall timed out after 50ms/);
 });

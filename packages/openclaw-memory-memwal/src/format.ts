@@ -137,10 +137,13 @@ export function toolError(message: string, err: unknown) {
 /**
  * Race an async operation against a deadline.
  *
- * The SDK has no client-side timeout, so a relayer that accepts the socket and
- * then goes silent leaves the promise pending forever and blocks the agent
- * turn. An unreachable host fails fast at DNS; a hung one does not. Every
- * relayer call in the hooks goes through this.
+ * SDK coverage is uneven: `recall()` aborts itself after 15s, but `analyze()`
+ * goes through `signedRequest` with no signal, and the compatibility preflight
+ * (`GET /version`, falling back to `/health`) that runs ahead of every
+ * protected request is unguarded. So a relayer that accepts the socket and then
+ * goes silent stalls in the preflight before `recall()`'s own abort can apply,
+ * and blocks the agent turn. An unreachable host fails fast at DNS; a hung one
+ * does not. This bounds the whole call regardless of which leg stalls.
  *
  * @param fn - Async function to execute
  * @param ms - Deadline in milliseconds
