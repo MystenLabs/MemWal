@@ -34,7 +34,15 @@ interface RpcMessage {
     error?: unknown;
 }
 
-const TOOL_DEFINITIONS = [
+/** The static memory-tool definitions served before a live relayer session
+ * exists. Exported so the bridge can serve the same list instantly at cold
+ * start (refreshed from the real upstream list once connected).
+ *
+ * MUST mirror the tools the relayer sidecar registers
+ * (services/server/scripts/mcp/tools/index.ts) so the cold-start list and the
+ * post-connect list advertise the same set — order and names matched to that
+ * registration (remember, remember_bulk, recall, analyze, restore, health). */
+export const TOOL_DEFINITIONS = [
     {
         name: "memwal_remember",
         title: "Remember a Fact",
@@ -48,6 +56,27 @@ const TOOL_DEFINITIONS = [
                 namespace: { type: "string" },
             },
             required: ["text"],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: "memwal_remember_bulk",
+        title: "Remember Several Facts",
+        annotations: { readOnlyHint: false, destructiveHint: false },
+        description:
+            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                facts: {
+                    type: "array",
+                    items: { type: "string", minLength: 1 },
+                    minItems: 1,
+                    maxItems: 20,
+                },
+                namespace: { type: "string" },
+            },
+            required: ["facts"],
             additionalProperties: false,
         },
     },
@@ -97,6 +126,18 @@ const TOOL_DEFINITIONS = [
                 limit: { type: "integer", minimum: 1, maximum: 100, default: 10 },
             },
             required: ["namespace"],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: "memwal_health",
+        title: "Check Relayer Health",
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        description:
+            "Quick connectivity check for Walrus Memory. Calls the relayer's lightweight health endpoint (no search, no decryption) and returns its status and version. Use this to confirm the server is reachable — do NOT use memwal_recall for health checks, which is a full and slow retrieval.",
+        inputSchema: {
+            type: "object",
+            properties: {},
             additionalProperties: false,
         },
     },
@@ -339,7 +380,13 @@ function handleAuthLine(
             id,
             result: {
                 protocolVersion: "2024-11-05",
-                capabilities: { tools: { listChanged: false } },
+                // listChanged:true because the tool set DOES change after a
+                // mid-session login: the hot-handoff to the bridge emits
+                // `notifications/tools/list_changed`, and a client told
+                // `false` here would be entitled to ignore it and never pick up
+                // the real upstream tools (or `memwal_logout`). Advertise the
+                // capability the handoff depends on.
+                capabilities: { tools: { listChanged: true } },
                 serverInfo: { name: "memwal", version: "0.0.1" },
             },
         });
