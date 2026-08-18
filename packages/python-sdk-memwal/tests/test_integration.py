@@ -58,6 +58,12 @@ SERVER_URL = os.environ.get("MEMWAL_SERVER_URL", "https://relayer-staging.memory
 PRIVATE_KEY_HEX = os.environ.get("MEMWAL_PRIVATE_KEY", "")
 ACCOUNT_ID = os.environ.get("MEMWAL_ACCOUNT_ID", "")
 
+# A live write runs embed -> SEAL encrypt -> Walrus upload -> on-chain metadata.
+# Measured around 44s against the dev relayer, so the SDK's 60s default leaves
+# too little headroom to be reliable in CI. 120s matches what the SDK already
+# uses for bulk pipelines.
+_REMEMBER_TIMEOUT_MS = int(os.environ.get("MEMWAL_REMEMBER_TIMEOUT_MS", "120000"))
+
 HAS_KEY = bool(PRIVATE_KEY_HEX and ACCOUNT_ID)
 
 requires_key = pytest.mark.skipif(
@@ -201,7 +207,11 @@ class TestRemember:
         mw = MemWalSync.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         )
-        result = mw.remember_and_wait("Integration test: the sky is blue", namespace="sdk-test")
+        result = mw.remember_and_wait(
+            "Integration test: the sky is blue",
+            namespace="sdk-test",
+            timeout_ms=_REMEMBER_TIMEOUT_MS,
+        )
         assert result.id is not None and isinstance(result.id, str)
         assert result.blob_id is not None and isinstance(result.blob_id, str)
         assert result.owner.startswith("0x")
@@ -211,14 +221,20 @@ class TestRemember:
         mw = MemWalSync.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         )
-        result = mw.remember_and_wait("Integration test: namespace default")
+        result = mw.remember_and_wait(
+            "Integration test: namespace default", timeout_ms=_REMEMBER_TIMEOUT_MS
+        )
         assert result.namespace == "default"
 
     def test_remember_custom_namespace(self) -> None:
         mw = MemWalSync.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         )
-        result = mw.remember_and_wait("Integration test: custom namespace", namespace="sdk-test")
+        result = mw.remember_and_wait(
+            "Integration test: custom namespace",
+            namespace="sdk-test",
+            timeout_ms=_REMEMBER_TIMEOUT_MS,
+        )
         assert result.namespace == "sdk-test"
 
 
@@ -306,7 +322,7 @@ class TestFullFlow:
         )
 
         # Store a distinctive memory in an isolated namespace
-        mem = mw.remember_and_wait(text, namespace=ns)
+        mem = mw.remember_and_wait(text, namespace=ns, timeout_ms=_REMEMBER_TIMEOUT_MS)
         assert mem.id is not None
 
         # Recall — should find the stored memory
@@ -323,7 +339,11 @@ class TestFullFlow:
         mw = MemWalSync.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         )
-        mw.remember_and_wait("I am allergic to shellfish", namespace="sdk-test")
+        mw.remember_and_wait(
+            "I am allergic to shellfish",
+            namespace="sdk-test",
+            timeout_ms=_REMEMBER_TIMEOUT_MS,
+        )
         result = mw.ask("What are my food allergies?", limit=3, namespace="sdk-test")
         assert isinstance(result.answer, str)
         assert len(result.answer) > 0
@@ -356,7 +376,9 @@ class TestAsync:
         async with MemWal.create(
             key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
         ) as mw:
-            await mw.remember_and_wait("Async SDK test: I enjoy reading")
+            await mw.remember_and_wait(
+                "Async SDK test: I enjoy reading", timeout_ms=_REMEMBER_TIMEOUT_MS
+            )
             result = await mw.recall("reading books", limit=3)
             assert isinstance(result.results, list)
 
