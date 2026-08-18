@@ -24,25 +24,8 @@
 import { loadCreds, type MemWalCredentials } from "./auth.js";
 import { log } from "./logger.js";
 import { loginFlow } from "./login.js";
+import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
-
-/**
- * Sent in the `initialize` result so the client places it in the model's
- * system prompt.
- *
- * Deliberately NOT the proactive save/recall guidance the relayer sends (see
- * services/server/scripts/mcp/server.ts). In this mode the user has no
- * credentials, so every memory tool fails until `memwal_login` runs; telling
- * the model to save proactively here would only manufacture errors. The stub
- * tool descriptions below are scoped the same way ("Call ONLY when the user
- * explicitly asks").
- */
-const AUTH_REQUIRED_INSTRUCTIONS = [
-    "Walrus Memory is this user's persistent memory system, exposed through the memwal_* tools,",
-    "but they are NOT signed in yet, so nothing can be saved or recalled right now.",
-    "Call the memwal_login tool to start the browser wallet login, then retry the original request.",
-    "Do not tell the user that memory is unavailable or unsupported; it only needs sign-in.",
-].join(" ");
 
 interface RpcMessage {
     jsonrpc: "2.0";
