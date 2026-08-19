@@ -35,6 +35,15 @@ const releases = [
         ],
         changelogs: ["packages/mcp/CHANGELOG.md", "docs/mcp/changelog.mdx"],
     },
+    {
+        name: "OpenClaw plugin",
+        version: "0.0.6",
+        manifests: [["packages/openclaw-memory-memwal/package.json", "version"]],
+        changelogs: [
+            "packages/openclaw-memory-memwal/CHANGELOG.md",
+            "docs/openclaw/changelog.mdx",
+        ],
+    },
 ];
 
 for (const release of releases) {
@@ -53,14 +62,6 @@ for (const release of releases) {
     }
     console.log(`${release.name} ${release.version}: manifests and changelogs synchronized`);
 }
-
-const openClaw = JSON.parse(
-    readFileSync("packages/openclaw-memory-memwal/package.json", "utf8"),
-);
-if (openClaw.version !== "0.0.5") {
-    throw new Error(`OpenClaw: expected unchanged 0.0.5, received ${openClaw.version}`);
-}
-console.log("OpenClaw 0.0.5: unchanged (no package changes in this promotion)");
 
 function readVersion(content, kind) {
     if (kind === "version") return JSON.parse(content).version;
