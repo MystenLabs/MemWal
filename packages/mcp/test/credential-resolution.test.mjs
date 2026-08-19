@@ -174,3 +174,31 @@ test("a same-account save reports no replacement and writes no backup", async (t
         .filter((f) => f.startsWith("credentials.backup"));
     assert.equal(backups.length, 0);
 });
+
+test("the replacement notice names both accounts and the backup", async (t) => {
+    const { auth } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+
+    const notice = auth.formatReplacementNotice(
+        {
+            path: "/home/u/.memwal/credentials.json",
+            replacedAccountId: GLOBAL_ACCOUNT,
+            backedUpTo: "/home/u/.memwal/credentials.backup-2026.json",
+        },
+        PROJECT_ACCOUNT,
+    );
+
+    assert.ok(notice, "a replacement must produce a notice");
+    assert.match(notice, new RegExp(GLOBAL_ACCOUNT), "must name the account being replaced");
+    assert.match(notice, new RegExp(PROJECT_ACCOUNT), "must name the incoming account");
+    assert.match(notice, /credentials\.backup-2026\.json/, "must point at the backup");
+});
+
+test("no notice when nothing was replaced", async (t) => {
+    const { auth } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+
+    assert.equal(
+        auth.formatReplacementNotice({ path: "/home/u/.memwal/credentials.json" }, GLOBAL_ACCOUNT),
+        null,
+        "a first sign-in or same-account re-save must stay quiet",
+    );
+});

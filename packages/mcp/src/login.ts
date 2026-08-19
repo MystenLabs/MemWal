@@ -22,7 +22,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import open from "open";
 
 import type { MemWalCredentials } from "./auth.js";
-import { saveCreds } from "./auth.js";
+import { saveCreds, formatReplacementNotice } from "./auth.js";
 import { generateKeypair } from "./crypto.js";
 import { log, note } from "./logger.js";
 
@@ -136,7 +136,10 @@ function normalizeUrl(url: string): string {
     return url.replace(/\/+$/, "");
 }
 
-const SUCCESS_HTML = `<!doctype html>
+/** Built per login: with project-scoped credentials the destination is no
+ * longer always `~/.memwal/credentials.json`, and telling the user the wrong
+ * file is worse than telling them nothing. */
+const SUCCESS_HTML_TEMPLATE = (savedPath: string) => `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -150,7 +153,7 @@ const SUCCESS_HTML = `<!doctype html>
 </head>
 <body>
   <h1><span class="check">✓</span> Walrus Memory MCP connected</h1>
-  <p>Credentials saved to <code>~/.memwal/credentials.json</code>.</p>
+  <p>Credentials saved to <code>${savedPath}</code>.</p>
   <p>You can close this tab — your MCP client will pick up the new credentials automatically.</p>
 </body>
 </html>`;
@@ -404,17 +407,8 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
                     version: 1,
                 };
                 const saved = saveCreds(creds);
-                if (saved.replacedAccountId) {
-                    // Both ids, because "your credentials changed" is useless
-                    // without knowing which account you left and which you are
-                    // now on — the silent swap in GH #628.
-                    note(
-                        `Replaced credentials for a DIFFERENT account in ${saved.path}:\n` +
-                            `  was: ${saved.replacedAccountId}\n` +
-                            `  now: ${creds.accountId}` +
-                            (saved.backedUpTo ? `\n  previous file backed up to ${saved.backedUpTo}` : ""),
-                    );
-                }
+                const replacement = formatReplacementNotice(saved, creds.accountId);
+                if (replacement) note(replacement);
                 log.info("login.success", {
                     accountId: creds.accountId,
                     delegateAddress: creds.delegateAddress,
@@ -422,7 +416,7 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
                 });
 
                 res.writeHead(200, { "content-type": "text/html" });
-                res.end(SUCCESS_HTML);
+                res.end(SUCCESS_HTML_TEMPLATE(saved.path));
                 resolve();
                 // Let the response flush before closing the server.
                 setTimeout(() => server.close(), 100);

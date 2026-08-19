@@ -129,6 +129,29 @@ export interface SaveCredsResult {
     backedUpTo?: string;
 }
 
+/**
+ * The message shown when a sign-in displaced a different account, or null when
+ * nothing was replaced.
+ *
+ * Both ids on purpose: "your credentials changed" is useless without knowing
+ * which account you left and which you are now on — that ambiguity is the whole
+ * of GH #628. Kept here as a pure function so the wording is testable without
+ * driving a browser login.
+ */
+export function formatReplacementNotice(
+    saved: SaveCredsResult,
+    incomingAccountId: string,
+): string | null {
+    if (!saved.replacedAccountId) return null;
+    const lines = [
+        `Replaced credentials for a DIFFERENT account in ${saved.path}:`,
+        `  was: ${saved.replacedAccountId}`,
+        `  now: ${incomingAccountId}`,
+    ];
+    if (saved.backedUpTo) lines.push(`  previous file backed up to ${saved.backedUpTo}`);
+    return lines.join("\n");
+}
+
 /** Copy the current credentials aside when the incoming ones belong to a
  * different account. Best effort: failing to back up must not block a login. */
 function backupIfReplacingAnotherAccount(
