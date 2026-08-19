@@ -49,9 +49,13 @@ function writeCredsAt(root, accountId, label) {
 /** Fresh sandbox: a HOME and a working directory, with the module re-imported
  * so it observes them. Returns the module plus both roots. */
 async function sandbox(t, { global: globalAccount, project: projectAccount }) {
-    // realpath: on macOS `/var` is a symlink to `/private/var`, and
-    // `process.cwd()` reports the resolved form — so the raw mkdtemp path would
-    // never match what the module computes.
+    // Canonicalise both roots: `process.cwd()` and `homedir()` report resolved
+    // paths, so a raw mkdtemp path would not compare equal to what the module
+    // computes. Needed on macOS (`/var` is a symlink to `/private/var`) and
+    // harmless elsewhere.
+    //
+    // Both HOME and USERPROFILE are set because `os.homedir()` reads
+    // USERPROFILE on Windows and HOME on POSIX — this sandbox is portable.
     const home = realpathSync(mkdtempSync(join(tmpdir(), "memwal-creds-home-")));
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "memwal-creds-cwd-")));
     const prevHome = process.env.HOME;
