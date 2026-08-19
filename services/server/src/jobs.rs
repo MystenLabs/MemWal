@@ -219,6 +219,25 @@ async fn update_remember_job_after_wallet_error(
     .await;
 }
 
+/// What the caller is allowed to see for a failed remember job.
+///
+/// `remember_status` hands `error_msg` back verbatim, so this is a user-facing
+/// string, not an internal one. Gas-pool failures name a relayer pool wallet
+/// and its SUI balance — an address chosen by round-robin that the caller does
+/// not own and cannot fund. Passing it through invited exactly the wrong
+/// action (GH #655). Everything else is returned unchanged: those messages are
+/// diagnostics the caller can act on.
+///
+/// Matching happens here, on the ORIGINAL text, precisely because classification
+/// and alerting downstream also read that text — rewriting it earlier would
+/// silently stop the gas-pool ops alert.
+pub(crate) fn user_facing_job_error(msg: &str) -> String {
+    if WalletJobError::is_gas_pool_budget_error(msg) {
+        return crate::storage::walrus::gas_capacity_message();
+    }
+    msg.to_string()
+}
+
 async fn mark_remember_job_failed(
     pool: &sqlx::PgPool,
     remember_job_id: Option<&str>,
@@ -228,10 +247,20 @@ async fn mark_remember_job_failed(
         return Ok(());
     };
 
+    let shown = user_facing_job_error(msg);
+    if shown != msg {
+        // Ops keep the address and abort code; the caller does not.
+        tracing::error!(
+            remember_job_id = %jid,
+            raw = %msg,
+            "remember job failed with a relayer-side capacity error"
+        );
+    }
+
     let result = sqlx::query(
         "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2",
     )
-    .bind(msg)
+    .bind(&shown)
     .bind(jid)
     .execute(pool)
     .await?;
@@ -2397,9 +2426,16 @@ impl WalletJobError {
     /// `GasPoolExhausted` is gated on pool-level confirmation by the caller.
     pub fn is_gas_pool_budget_error(msg: &str) -> bool {
         let lower = msg.to_ascii_lowercase();
-        (lower.contains("moveabort") || lower.contains("move abort"))
+        // Shape 1: the Enoki sponsored dry-run aborting in 0x2::balance::split
+        // (WALM-88). Shape 2: the sidecar failing gas selection outright,
+        // which carries neither "MoveAbort" nor "split" and was therefore
+        // missed entirely — it never escalated and never paged ops, which is
+        // how GH #655 recurred in production unnoticed.
+        let move_abort_split = (lower.contains("moveabort") || lower.contains("move abort"))
             && lower.contains("balance")
-            && lower.contains("split")
+            && lower.contains("split");
+        let gas_selection = lower.contains("gas selection") && lower.contains("insufficient");
+        move_abort_split || gas_selection
     }
 
     /// True if `msg` is the Walrus register PTB's `0x2::coin::destroy_zero`
@@ -2754,7 +2790,7 @@ mod tests {
         is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
         mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
         persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
-        update_remember_job_after_wallet_error, upload_resume_disposition,
+        update_remember_job_after_wallet_error, upload_resume_disposition, user_facing_job_error,
         wallet_index_for_upload_attempt, wallet_job_request, JobUploadLock, LockOutcome,
         UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
         MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
@@ -3148,6 +3184,37 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             assert!(!classified.aborts_retries(), "must retry: {}", msg);
             assert!(WalletJobError::is_gas_pool_budget_error(msg));
         }
+    }
+
+    #[test]
+    fn the_gas_selection_shape_is_recognised_as_a_gas_pool_failure() {
+        // The shape GH #655 actually hit. It carries no "MoveAbort" and no
+        // "split", so the original matcher missed it entirely: the failure
+        // never escalated and ops was never paged, which is why it recurred.
+        let msg = "durable Walrus upload failed (503 Service Unavailable): \
+                   Unable to perform gas selection due to insufficient SUI \
+                   balance for address 0x5166";
+        assert!(WalletJobError::is_gas_pool_budget_error(msg));
+    }
+
+    #[test]
+    fn a_gas_pool_failure_is_not_persisted_with_the_relayer_wallet_address() {
+        // error_msg is handed to the caller verbatim by `remember_status`, and
+        // the address in it is a relayer pool wallet the caller cannot fund.
+        let raw = "Unable to perform gas selection due to insufficient SUI \
+                   balance for address 0x5166277aa0e4f3c9";
+        let shown = user_facing_job_error(raw);
+        assert!(!shown.contains("0x"), "must not name an address: {shown}");
+        assert!(
+            !shown.to_lowercase().contains("gas selection"),
+            "must not echo upstream wording: {shown}"
+        );
+    }
+
+    #[test]
+    fn failures_the_caller_can_act_on_are_persisted_unchanged() {
+        let raw = "blob encoding failed at sliver 3";
+        assert_eq!(user_facing_job_error(raw), raw);
     }
 
     #[test]
