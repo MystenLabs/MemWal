@@ -15,17 +15,35 @@ const sessionId = input.session_id || "default";
 if (prompt.trim().length < 20) process.exit(0);
 
 const parts = [];
-
-if (detectRecall(prompt)) {
-    parts.push(
-        "The user is referencing earlier work or context. Before answering, call memwal_recall (Walrus Memory) with a focused query — use the memwal_* tools, not any built-in memory, so recall stays portable."
+const trimmed = prompt.trim();
+const isQuestion =
+    /\?\s*$/.test(trimmed) ||
+    /^\s*(what|who|when|where|why|how|do you|did you|can you|could you)\b/i.test(
+        trimmed,
     );
-}
+const wantsRecall =
+    detectRecall(prompt) ||
+    (isQuestion && /\b(remember|recall|know about me)\b/i.test(prompt));
+const wantsRemember = detectRemember(prompt);
 
-if (detectRemember(prompt)) {
+// A question about stored facts must recall only. Nested phrasing like
+// "how I like to work" also matches the remember heuristic and used to
+// tell the agent to save on a recall question.
+if (isQuestion && wantsRecall) {
     parts.push(
-        "The user just stated a durable fact or preference. Save it with memwal_remember (or memwal_remember_bulk for several distinct facts) — prefer the memwal_* tools over any built-in memory so the fact persists on Walrus across sessions and agents."
+        "The user is referencing earlier work or context. Before answering, call memwal_recall (Walrus Memory) with a focused query — use the memwal_* tools, not any built-in memory, so recall stays portable.",
     );
+} else {
+    if (wantsRecall) {
+        parts.push(
+            "The user is referencing earlier work or context. Before answering, call memwal_recall (Walrus Memory) with a focused query — use the memwal_* tools, not any built-in memory, so recall stays portable.",
+        );
+    }
+    if (wantsRemember) {
+        parts.push(
+            "The user just stated a durable fact or preference. Save it with memwal_remember (or memwal_remember_bulk for several distinct facts) — prefer the memwal_* tools over any built-in memory so the fact persists on Walrus across sessions and agents.",
+        );
+    }
 }
 
 // When no strong signal fired, inject the general rubric once per session so

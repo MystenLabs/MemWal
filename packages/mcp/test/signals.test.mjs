@@ -20,6 +20,10 @@ test("detectRecall — fires on references to past work / preferences", () => {
         "Last time we decided to use pnpm",
         "What's my usual setup for this?",
         "Can you catch me up on the project?",
+        "What do you remember about how I like to work?",
+        "Do you remember my coffee order?",
+        "What do you know about my setup?",
+        "What's my staging canary nickname?",
     ]) {
         assert.equal(detectRecall(s), true, `should fire: ${s}`);
     }
@@ -57,6 +61,15 @@ test("detectRemember — stays quiet on transient requests", () => {
     ]) {
         assert.equal(detectRemember(s), false, `should stay quiet: ${s}`);
     }
+});
+
+test("canary remember prompt still fires remember", () => {
+    assert.equal(
+        detectRemember(
+            "A few things about how I work: I always use pnpm, TypeScript strict mode, and my coffee order is a matcha oat latte. My staging canary nickname is coral-fox-77.",
+        ),
+        true,
+    );
 });
 
 test("detectError — fires on strong error markers", () => {

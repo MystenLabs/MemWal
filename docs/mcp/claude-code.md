@@ -46,18 +46,22 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
 <Tabs>
   <Tab title="Plugin (recommended)">
     <Steps>
-      <Step title="Add the marketplace">
+      <Step title="Add the marketplace and install">
+        Agents with a terminal should run the CLI, then verify the plugin is enabled. Slash commands are only for a human inside Claude Code.
+
+        ```bash
+        claude plugin marketplace add MystenLabs/MemWal
+        claude plugin install memwal@memwal-plugins -s user
+        claude plugin list
+        ```
+
         ```
         /plugin marketplace add MystenLabs/MemWal
-        ```
-      </Step>
-      <Step title="Install the plugin">
-        ```
         /plugin install memwal@memwal-plugins
         ```
       </Step>
       <Step title="Restart and sign in">
-        Restart Claude Code, then ask the agent to run `memwal_login` and open the URL it returns to connect your wallet.
+        Restart Claude Code, then ask the agent to run `memwal_login` and open the URL it returns to connect your wallet. MCP-only is not a complete Claude Code setup: without the plugin, the agent often writes Claude's built-in `MEMORY.md` instead of calling `memwal_remember`.
       </Step>
     </Steps>
   </Tab>

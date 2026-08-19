@@ -46,8 +46,9 @@ export const PROACTIVE_INSTRUCTIONS = [
 /**
  * Signed-out path (auth-required mode). Deliberately NOT the proactive text:
  * without credentials every memory tool fails, so telling the model to save
- * proactively here would only manufacture errors. The stub tool descriptions
- * are scoped the same way ("Call ONLY when the user explicitly asks").
+ * proactively here would only manufacture errors. Cold-start tool descriptions
+ * still match the sidecar so a signed-in client that has not refreshed
+ * `tools/list` yet does not see the old "call only when asked" wording.
  */
 export const AUTH_REQUIRED_INSTRUCTIONS = [
     "Walrus Memory is this user's persistent memory system, exposed through the memwal_* tools,",

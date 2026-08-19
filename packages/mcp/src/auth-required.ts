@@ -50,7 +50,7 @@ export const TOOL_DEFINITIONS = [
         title: "Remember a Fact",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
+            "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever you learn something worth remembering across sessions — a stated preference, decision, constraint, correction, identity detail, or recurring workflow — even if the user did not explicitly say 'remember this'. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
         inputSchema: {
             type: "object",
             properties: {
@@ -87,7 +87,7 @@ export const TOOL_DEFINITIONS = [
         title: "Recall Memories",
         annotations: { readOnlyHint: false, destructiveHint: true },
         description:
-            "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.",
+            "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by relevance.",
         inputSchema: {
             type: "object",
             properties: {
