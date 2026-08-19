@@ -153,13 +153,17 @@ export function sanitizeServerError(
     status: number,
     rawBody: string,
 ): { message: string; raw: string; serverCode?: string } {
-    if (status === 401) {
+    // Number() so a string "401" (some MCP / HTTP paths) still hits this branch.
+    if (Number(status) === 401) {
+        // Empty body = no-session / bare relayer 401 (#696). Non-empty keeps
+        // the WALM-318 AUTH_REJECTED triage (wrong key / account / network).
+        const empty = !String(rawBody ?? "").trim();
         return {
-            // GH #696: empty/unauthenticated 401s used to surface as
-            // "Walrus Memory server error (401): <no message>". Point first-time
-            // MCP callers at memwal_login instead of a blank body.
-            message:
-                "Walrus Memory isn't signed in. Call the memwal_login tool, then retry.",
+            message: empty
+                ? "Walrus Memory isn't signed in. Call the memwal_login tool, then retry."
+                : "401 from relayer: typically wrong private key, key not registered on this account, " +
+                  "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+                  "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
         };
