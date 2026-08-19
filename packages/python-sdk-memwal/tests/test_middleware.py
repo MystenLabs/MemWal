@@ -447,6 +447,84 @@ class TestWithMemWalLangChain:
         await smart_llm._agenerate([[SystemMessage("only system")]])
         assert not recall_route.called
 
+    def _capturing_generate(self, captured: list):
+        """Replacement for llm._generate that records the batch it received."""
+        from langchain_core.messages import AIMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        def _generate(messages_batch, *a, **kw):
+            captured.extend(messages_batch)
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ok"))]
+            )
+
+        return _generate
+
+    @respx.mock
+    def test_sync_generate_injects_memories(self) -> None:
+        """The plain sync path (no running loop) recalls and injects."""
+        _mock_seal_session_prereqs()
+        from langchain_core.messages import HumanMessage
+
+        llm = self._make_llm()
+        captured: list = []
+        llm._generate = self._capturing_generate(captured)
+
+        recall_route = respx.post(_RECALL_URL).mock(
+            return_value=_mock_recall([
+                {"blob_id": "b1", "text": "User loves coffee", "distance": 0.05}
+            ])
+        )
+
+        smart_llm = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        smart_llm._generate([[HumanMessage("What do I drink?")]])
+
+        assert recall_route.called
+        assert any("User loves coffee" in m.content for m in captured[0])
+
+    @respx.mock
+    async def test_sync_generate_injects_memories_inside_running_loop(self) -> None:
+        """GH #607: sync _generate must still recall when a loop is already
+        running (notebooks, async hosts).
+
+        It used to append the untouched msg_list in that branch, so callers got
+        a normal LLM answer with no memory context and no warning -- Walrus
+        Memory looked connected while recall never ran.
+        """
+        _mock_seal_session_prereqs()
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        llm = self._make_llm()
+        captured: list = []
+        llm._generate = self._capturing_generate(captured)
+
+        recall_route = respx.post(_RECALL_URL).mock(
+            return_value=_mock_recall([
+                {"blob_id": "b1", "text": "User loves coffee", "distance": 0.05}
+            ])
+        )
+
+        smart_llm = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+
+        # An async test body is itself a running loop -- the exact condition
+        # that used to disable injection.
+        assert asyncio.get_running_loop().is_running()
+        smart_llm._generate([[HumanMessage("What do I drink?")]])
+
+        assert recall_route.called, "recall was skipped inside a running loop"
+        assert len(captured) == 1
+        injected = captured[0]
+        assert len(injected) == 3, "guard + memory message were not injected"
+        assert any(
+            isinstance(m, HumanMessage) and "User loves coffee" in m.content
+            for m in injected
+        )
+        assert any(isinstance(m, SystemMessage) for m in injected)
+
     def test_wraps_a_real_pydantic_backed_chat_model(self) -> None:
         """with_memwal_langchain must work on a real BaseChatModel, not just
         a MagicMock. LangChain chat models are Pydantic models that reject

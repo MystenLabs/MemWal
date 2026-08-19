@@ -32,6 +32,29 @@ jobs:
       - name: Check compatibility contract
         run: node scripts/check-compatibility-contract.mjs
 
+  docs-code-sync:
+    name: Docs / Code references match packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Snippets in docs/ are copies (Mintlify cannot import code from
+      # repository files at build time). This validates every docs page
+      # against the workspace: package names and entry points come from each
+      # packages/*/package.json, and MCP config blocks from the packages/mcp
+      # README. Failing the job blocks the merge, so drift is fixed in the
+      # same pull request.
+      - name: Check docs code references against the packages
+        run: node scripts/check-docs-code-sync.mjs
+
   docs-freshness:
     name: Docs / Freshness
     runs-on: ubuntu-latest

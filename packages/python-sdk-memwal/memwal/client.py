@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import random
 import time
 import uuid
@@ -73,6 +74,7 @@ from .utils import (
     bytes_to_hex,
     delegate_key_to_sui_address,
     encode_sui_private_key,
+    normalize_private_key,
     sha256_hex,
     sign_message,
     sign_sui_personal_message,
@@ -87,6 +89,9 @@ AUTH_REJECTED_MESSAGE = (
     "and dashboard credentials. Full troubleshooting: "
     "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
+
+
+logger = logging.getLogger("memwal")
 
 
 # ============================================================
@@ -213,8 +218,8 @@ class MemWal:
     """
 
     def __init__(self, config: MemWalConfig) -> None:
-        self._signing_key = build_signing_key(config.key)
-        self._private_key_hex = config.key if not config.key.startswith("0x") else config.key[2:]
+        self._private_key_hex = normalize_private_key(config.key)
+        self._signing_key = build_signing_key(self._private_key_hex)
         self._account_id = config.account_id
         self._server_url = config.server_url.rstrip("/")
         self._namespace = config.namespace
@@ -1189,6 +1194,16 @@ class MemWal:
                     f"(HTTP 426 Upgrade Required). Relayer response: "
                     f"{err_text[:300] or 'upgrade required'}"
                 )
+            # A stale/future-dated signature is rejected with 401 + a machine-
+            # readable reason header. Surface it as an actionable clock-drift
+            # error rather than an opaque 401 so the caller can fix node time.
+            if response.headers.get("x-auth-error") == "ERR_TIMESTAMP_OUT_OF_BOUNDS":
+                raise MemWalClockDriftError(
+                    "Request rejected: signed timestamp is outside the relayer's "
+                    "accepted clock-drift window. Synchronize this client's clock "
+                    "(NTP); if the deployment needs a wider tolerance, raise "
+                    "AUTH_MAX_CLOCK_DRIFT_SECS on the relayer."
+                )
             raise _HttpStatusError(
                 status=response.status_code,
                 body=err_text,
@@ -1205,6 +1220,15 @@ class MemWalError(Exception):
 
 class MemWalCompatibilityError(MemWalError):
     """Raised when the SDK and relayer API contract are incompatible."""
+
+    pass
+
+
+class MemWalClockDriftError(MemWalError):
+    """Raised when the relayer rejects a request because the signed timestamp is
+    outside its accepted clock-drift window (401 + ``x-auth-error:
+    ERR_TIMESTAMP_OUT_OF_BOUNDS``). Indicates the client's clock is skewed
+    relative to the relayer; sync via NTP or widen the relayer's window."""
 
     pass
 
@@ -1257,6 +1281,38 @@ class MemWalRememberJobTimeout(MemWalError):
         self.timeout_ms = timeout_ms
 
 
+async def _discard_http_client(memwal: MemWal) -> None:
+    """Close the cached httpx client, and drop it either way.
+
+    ``close()`` can fail when the client belongs to an event loop that has
+    already finished — the caller still needs ``_client`` cleared so the next
+    request builds one in a loop that is actually running.
+    """
+    try:
+        await memwal.close()
+    except Exception:
+        logger.debug("Closing the cached HTTP client failed", exc_info=True)
+    finally:
+        memwal._client = None
+
+
+async def _with_fresh_http_client(memwal: MemWal, coro: Any) -> Any:
+    """Run ``coro`` with an httpx client owned by the *current* event loop.
+
+    The sync entry points execute each coroutine in a throwaway ``asyncio.run()``
+    loop, and an ``httpx.AsyncClient`` is bound to the loop that created it, so
+    one can never be reused across calls. Both ends are closed rather than just
+    dropped (GH #606): on the way in for anything an earlier loop left behind —
+    e.g. a caller mixing ``await memwal.recall()`` with the sync wrapper — and in
+    ``finally`` for the client this call created, while its loop is still alive.
+    """
+    await _discard_http_client(memwal)
+    try:
+        return await coro
+    finally:
+        await _discard_http_client(memwal)
+
+
 class MemWalSync:
     """Synchronous wrapper around the async :class:`MemWal` client.
 
@@ -1306,11 +1362,10 @@ class MemWalSync:
         except RuntimeError:
             loop = None
 
-        # Reset the httpx client before every asyncio.run() path so it is
-        # recreated inside the loop that will use it. This matters in
-        # notebooks/Jupyter where the sync wrapper runs coroutines in worker
-        # threads with short-lived event loops.
-        self._inner._client = None
+        # The httpx client is created and closed inside the same short-lived
+        # loop that uses it. This matters in notebooks/Jupyter where the sync
+        # wrapper runs coroutines in worker threads with their own event loops.
+        wrapped = _with_fresh_http_client(self._inner, coro)
 
         if loop is not None and loop.is_running():
             # Already inside an event loop (e.g. Jupyter).
@@ -1318,9 +1373,9 @@ class MemWalSync:
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, coro).result()
+                return pool.submit(asyncio.run, wrapped).result()
         else:
-            return asyncio.run(coro)
+            return asyncio.run(wrapped)
 
     def remember(
         self,

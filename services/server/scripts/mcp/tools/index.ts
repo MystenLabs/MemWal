@@ -15,10 +15,14 @@ import { registerHealthTool } from "./health.js";
  * relayer for SEAL encrypt/decrypt + Walrus storage.
  */
 export function registerTools(server: McpServer, session: MemWalSession): void {
+    // Fail closed: the relayer states the granted scope explicitly on every
+    // forwarded request — the resolved grant for OAuth callers, and the full
+    // read+write scope for legacy delegate-key callers. An absent or empty
+    // scope therefore means the relayer never vouched for this request, so it
+    // grants nothing rather than everything.
     const granted = new Set(session.oauthScope?.split(/\s+/).filter(Boolean));
-    const unrestricted = session.oauthScope === undefined;
-    const canRead = unrestricted || granted.has("memwal:read");
-    const canWrite = unrestricted || granted.has("memwal:write");
+    const canRead = granted.has("memwal:read");
+    const canWrite = granted.has("memwal:write");
 
     if (canWrite) {
         registerRememberTool(server, session);

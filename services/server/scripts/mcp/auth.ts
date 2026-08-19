@@ -16,6 +16,7 @@
  * =============================================================================
  */
 import { MemWal } from "@mysten-incubation/memwal";
+import { verifyInternalOrigin } from "./internal-auth.js";
 
 export interface MemWalSession {
     accountId: string;
@@ -42,6 +43,16 @@ export class McpAuthError extends Error {
 }
 
 const HEX64_RE = /^(0x)?[0-9a-fA-F]{64}$/;
+
+/**
+ * Canonical form of a scope string for use in the session key: deduplicated,
+ * sorted, single-space separated. Order and repetition carry no meaning, so
+ * `"memwal:write memwal:read"` and `"memwal:read memwal:read memwal:write"`
+ * must not open two distinct sessions. Absent scope collapses to `""`.
+ */
+export function normalizeScope(scope: string | undefined): string {
+    return [...new Set(scope?.split(/\s+/).filter(Boolean) ?? [])].sort().join(" ");
+}
 
 /**
  * Derive the Ed25519 public-key hex from a private-key hex (32-byte seed).
@@ -75,10 +86,16 @@ function bytesToHex(b: Uint8Array): string {
  * Resolve auth from incoming HTTP headers.
  *
  * Required headers:
+ *     X-MemWal-Internal-Sidecar-Token: <SIDECAR_AUTH_TOKEN>
  *     Authorization: Bearer <ed25519-private-key-hex>     (64 hex chars)
  *     X-MemWal-Account-Id: 0x<sui-object-id>             (66 chars)
  * Optional:
  *     X-MemWal-Namespace: <namespace>                    (default per-tool)
+ *     X-MemWal-Internal-Oauth-Scope: <space-separated>   (relayer-issued)
+ *
+ * The internal token is checked first: `x-memwal-internal-*` headers state
+ * decisions the relayer already made, so only the relayer may set them. An
+ * absent scope grants no tools — see tools/index.ts.
  *
  * Throws McpAuthError on missing / malformed credentials.
  */
@@ -86,6 +103,16 @@ export async function resolveAuth(
     headers: Headers,
     serverUrl: string
 ): Promise<AuthResolution> {
+    // Runs before anything else reads the request: `x-memwal-internal-*`
+    // headers carry decisions the relayer already made, so a caller that
+    // cannot prove it is the relayer must not be able to state them.
+    if (!verifyInternalOrigin(headers)) {
+        throw new McpAuthError(
+            "Request did not originate from the MemWal relayer",
+            401
+        );
+    }
+
     const authHeader = headers.get("authorization");
     if (!authHeader || !authHeader.toLowerCase().startsWith("bearer ")) {
         throw new McpAuthError(
@@ -128,10 +155,19 @@ export async function resolveAuth(
         oauthScope,
     };
 
-    // Session key stable across reconnects from same {account, delegate}. We
-    // don't include namespace because the same client can call multiple
-    // namespaces in one session via per-tool overrides.
-    const sessionKey = `delegate:${accountId}:${delegatePubKeyHex}`;
+    // Session key stable across reconnects from same {account, delegate,
+    // scope}. We don't include namespace because the same client can call
+    // multiple namespaces in one session via per-tool overrides.
+    //
+    // The scope IS included: `registerTools` binds the tool set at session-open
+    // time, so a session opened with write scope keeps its write tools for its
+    // whole life. Without the scope in the key, a later read-only (or
+    // scope-less) request would pass the session-binding check and drive that
+    // write-capable transport — which would leave the fail-closed guarantee
+    // holding only until initialization. Delegate keys are reused across grants
+    // for the same account (`find_reusable_oauth_delegate`), so {account,
+    // delegate} alone does not distinguish two grants of differing scope.
+    const sessionKey = `delegate:${accountId}:${delegatePubKeyHex}:${normalizeScope(oauthScope)}`;
 
     return { session, sessionKey };
 }

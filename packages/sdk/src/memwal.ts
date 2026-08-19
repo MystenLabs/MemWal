@@ -62,12 +62,14 @@ import {
     bytesToHex,
     normalizeServerUrl,
     sanitizeServerError,
+    clockDriftErrorFromResponse,
     scoringWeightsToWire,
 } from "./utils.js";
 import {
     assertCompatibleRelayer,
     compatibilityErrorFromStatus,
 } from "./compatibility.js";
+import { applyTokenBudget, estimateTokens } from "./tokens.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -203,7 +205,7 @@ export class MemWal {
         // LOW-22: default to HTTPS for production usage; normalizeServerUrl
         // warns (does not throw) if a user passes plain http:// for a
         // non-localhost host.
-        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memwal.ai/");
+        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
         this.namespace = config.namespace ?? "default";
     }
 
@@ -211,7 +213,7 @@ export class MemWal {
      * Create a new Walrus Memory client instance.
      *
      * @param config.key - Ed25519 private key (hex string) — the delegate key
-     * @param config.serverUrl - Server URL (default: https://relayer.memwal.ai/)
+     * @param config.serverUrl - Server URL (default: https://relayer.memory.walrus.xyz)
      */
     static create(config: MemWalConfig): MemWal {
         return new MemWal(config);
@@ -595,6 +597,25 @@ export class MemWal {
      * const result2 = await memwal.recall("food allergies", 5, "profile");
      * ```
      */
+    /**
+     * Estimate the token cost of a string using the SDK's default
+     * character-based approximation (~chars/4, code-point aware). Useful to weigh
+     * a recall payload before injecting it into a model context:
+     *
+     * ```ts
+     * const hits = await memwal.recall({ query, limit: 8 });
+     * const joined = hits.results.map((h) => h.text).join("\n---\n");
+     * if (memwal.countTokens(joined) > 2048) { /* re-query with maxTokens *\/ }
+     * ```
+     *
+     * This is an estimate, not an exact tokenizer count — see `estimateTokens`
+     * for accuracy caveats. For exact counts, pass your own counter to
+     * `recall({ maxTokens, countTokens })`.
+     */
+    countTokens(text: string): number {
+        return estimateTokens(text);
+    }
+
     async recall(params: RecallParams): Promise<RecallResult>;
     /**
      * @deprecated Positional `recall(query, limit, namespace)` is easy to
@@ -640,18 +661,38 @@ export class MemWal {
                 namespace: resolvedNamespace,
             }, { signal: ac.signal });
 
+            let processed = result;
             if (typeof options.maxDistance === "number") {
                 const filtered = result.results.filter(
                     (memory) => memory.distance < options.maxDistance!,
                 );
-                return {
-                    ...result,
+                processed = {
+                    ...processed,
                     results: filtered,
                     total: filtered.length,
                 };
             }
 
-            return result;
+            // Client-side token budgeting: trim the (already distance-sorted)
+            // payload to fit maxTokens per the chosen strategy, and attach the
+            // token estimate + truncated flag. Omitting maxTokens leaves the
+            // result byte-identical to the pre-budget behavior (no meta).
+            if (typeof options.maxTokens === "number") {
+                const { results: budgeted, meta } = applyTokenBudget(
+                    processed.results,
+                    options.maxTokens,
+                    options.truncationStrategy,
+                    options.countTokens,
+                );
+                processed = {
+                    ...processed,
+                    results: budgeted,
+                    total: budgeted.length,
+                    meta,
+                };
+            }
+
+            return processed;
         } finally {
             clearTimeout(tid);
         }
@@ -1226,6 +1267,12 @@ export class MemWal {
             const raw = await res.text();
             const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
             if (compatibilityError) throw compatibilityError;
+
+            // A stale/future-dated signature is rejected with 401 + a machine-
+            // readable reason header. Surface it as an actionable clock-drift
+            // error rather than an opaque 401 so the caller can fix node time.
+            const clockDriftError = clockDriftErrorFromResponse(res);
+            if (clockDriftError) throw clockDriftError;
 
             const { message, serverCode } = sanitizeServerError(res.status, raw);
             const err = new Error(message) as Error & {

@@ -47,8 +47,13 @@ export function createSidecarApp(mode: "full" | "writer" = SIDECAR_ROUTE_MODE): 
     // middleware: MCP traffic is forwarded by the Rust relayer with the end-user's
     // own delegate-key Bearer token in `Authorization`, NOT the sidecar's shared
     // secret. The MCP layer does its own auth (parse delegate key + account id
-    // from request headers). These routes are reachable only from the relayer
-    // over localhost — same trust boundary as the rest of the sidecar.
+    // from request headers).
+    //
+    // Skipping the middleware does NOT mean these routes are unauthenticated:
+    // `resolveAuth` requires the sidecar shared secret in
+    // `x-memwal-internal-sidecar-token` before it will honour any
+    // `x-memwal-internal-*` header, so localhost reachability alone is not
+    // enough to claim relayer-issued privileges (GH #685).
     if (mode === "full") {
         mountMcpRoutes(app, {
             relayerUrl: process.env.MEMWAL_RELAYER_URL ?? "http://localhost:3001",

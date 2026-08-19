@@ -56,5 +56,19 @@ export const DEFAULT_SEARCH_LIMIT = 5;
 /** Default number of retry attempts (1 = 2 total tries). */
 export const DEFAULT_RETRY_COUNT = 1;
 
+// ============================================================================
+// Request timeout (format.ts → withTimeout)
+// ============================================================================
+
+/**
+ * Default per-request deadline in ms.
+ *
+ * A relayer that accepts the connection but never responds would otherwise
+ * block the agent turn forever — an unreachable host fails fast at DNS, but a
+ * slow or overloaded one holds the socket open. Every client call is raced
+ * against this deadline.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
 /** Default delay in ms between retry attempts. */
 export const DEFAULT_RETRY_DELAY_MS = 2000;

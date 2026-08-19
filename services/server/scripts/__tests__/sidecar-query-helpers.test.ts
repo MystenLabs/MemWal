@@ -28,6 +28,7 @@ import {
 } from "../sidecar/config.js";
 import {
     assertAddressBalanceRegisterTransaction,
+    assertSponsoredRegisterTransactionKind,
     createdBlobObjectIdFromTransaction,
     durableRegisterDirectSigningAllowed,
     executePreparedRegisterTransaction,
@@ -132,9 +133,9 @@ test("legacy uploads preserve fallback behavior while using address balances", (
     });
 });
 
-test("durable register never direct-signs when Enoki is configured", () => {
+test("durable register sponsorship uses an explicit two-phase rollout gate", () => {
     assert.equal(durableRegisterDirectSigningAllowed(false, false), true);
-    assert.equal(durableRegisterDirectSigningAllowed(true, false), false);
+    assert.equal(durableRegisterDirectSigningAllowed(true, false), true);
     assert.equal(durableRegisterDirectSigningAllowed(true, true), false);
 });
 
@@ -166,15 +167,30 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
     const bytes = await transaction.build();
     const signed = await signer.signTransaction(bytes);
     const digest = TransactionDataBuilder.getDigestFromBytes(bytes);
+    const sponsorDigest = `sponsor-${digest}`;
     const prepared: PreparedRegisterTransaction = {
         transactionBytes: signed.bytes,
         signature: signed.signature,
         digest,
-        sponsorDigest: digest,
+        sponsorDigest,
     };
 
     const validated = await validatePreparedRegisterTransaction(prepared, signer.toSuiAddress());
-    assert.equal(validated.sponsorDigest, digest);
+    assert.equal(validated.sponsorDigest, sponsorDigest);
+    const expectedKind = TransactionDataBuilder.fromBytes(bytes).build({ onlyTransactionKind: true });
+    assert.doesNotThrow(() => assertSponsoredRegisterTransactionKind(
+        TransactionDataBuilder.fromBytes(bytes),
+        expectedKind,
+    ));
+    const tamperedKind = expectedKind.slice();
+    tamperedKind[tamperedKind.length - 1] ^= 1;
+    assert.throws(
+        () => assertSponsoredRegisterTransactionKind(
+            TransactionDataBuilder.fromBytes(bytes),
+            tamperedKind,
+        ),
+        /kind differs/,
+    );
 
     let submitted = false;
     let directExecutions = 0;
@@ -195,8 +211,8 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
         () => {},
         async () => 1n,
         false,
-        async (sponsorDigest, signature) => {
-            assert.equal(sponsorDigest, digest);
+        async (executedSponsorDigest, signature) => {
+            assert.equal(executedSponsorDigest, sponsorDigest);
             assert.equal(signature, signed.signature);
             submitted = true;
             return { digest };
@@ -204,6 +220,83 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
     );
     assert.equal(result, finalized);
     assert.equal(directExecutions, 0);
+
+    submitted = false;
+    await assert.rejects(
+        executePreparedRegisterTransaction(
+            validated,
+            client,
+            () => {},
+            async () => 1n,
+            false,
+            async () => {
+                throw new Error('Enoki API error (400): {"errors":[{"code":"expired"}]}');
+            },
+            1,
+        ),
+        (error: unknown) => error instanceof NoSideEffectError && /rebuild sponsorship/.test(error.message),
+    );
+
+    await assert.rejects(
+        executePreparedRegisterTransaction(
+            validated,
+            client,
+            () => {},
+            async () => 1n,
+            false,
+            async () => {
+                throw new Error('Enoki API error (400): {"errors":[{"code":"not_found"}]}');
+            },
+            1,
+        ),
+        (error: unknown) => error instanceof Error
+            && (error as { code?: string }).code === "UNAVAILABLE"
+            && /ambiguous/.test(error.message),
+    );
+
+    let lookups = 0;
+    const retryClient = {
+        async getTransaction() {
+            lookups += 1;
+            // 1 = pre-execute probe. 2 = first expired-path miss. 3 = hit.
+            // A helper that only looks up once would stop after #2 and fail.
+            if (lookups < 3) throw Object.assign(new Error("not found"), { code: "NOT_FOUND" });
+            return finalized;
+        },
+        async executeTransaction() {
+            throw new Error("sponsored journal must not execute directly");
+        },
+    };
+    const recovered = await executePreparedRegisterTransaction(
+        validated,
+        retryClient,
+        () => {},
+        async () => 1n,
+        false,
+        async () => {
+            throw new Error('Enoki API error (400): {"errors":[{"code":"expired"}]}');
+        },
+        2,
+    );
+    assert.equal(recovered, finalized);
+    assert.equal(lookups, 3);
+
+    await assert.rejects(
+        executePreparedRegisterTransaction(
+            validated,
+            client,
+            () => {},
+            async () => 1n,
+            true,
+            async () => {
+                throw new Error('Enoki API error (400): {"errors":[{"code":"expired"}]}');
+            },
+            1,
+        ),
+        (error: unknown) => error instanceof Error
+            && (error as { code?: string }).code === "UNAVAILABLE"
+            && /ambiguous/.test(error.message),
+    );
 });
 
 test("prepared registration rejects tampered digest, signature, and wallet", async () => {
