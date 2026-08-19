@@ -142,23 +142,50 @@ export function normalizeServerUrl(url: string): string {
 // ============================================================
 
 /**
+ * User-facing copy for a 401 with no session / empty body (GH #696).
+ * MCP tools should point first-time callers at `memwal_login`.
+ */
+export const UNAUTHENTICATED_LOGIN_MESSAGE =
+    "Not authenticated. Run memwal_login to connect your Sui wallet.";
+
+const AUTH_REJECTED_MESSAGE =
+    "401 from relayer: typically wrong private key, key not registered on this account, " +
+    "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+    "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors";
+
+/**
  * LOW-26: Sanitize a raw server error body before surfacing it to callers.
  *
  * - Strips ASCII control characters.
  * - Truncates to at most 200 chars so stack traces / dumps don't leak.
  * - Leaves the untrimmed payload accessible via the returned `raw`
  *   field for debug logging (never included in the thrown message).
+ * - Empty 401s lead with {@link UNAUTHENTICATED_LOGIN_MESSAGE} so MCP
+ *   callers get a memwal_login hint, then the AUTH_REJECTED triage.
  */
 export function sanitizeServerError(
     status: number,
     rawBody: string,
 ): { message: string; raw: string; serverCode?: string } {
-    if (status === 401) {
+    // Number() so a string "401" still hits this branch — otherwise the
+    // generic path would print `Walrus Memory server error (401): <no message>`.
+    if (Number(status) === 401) {
+        const empty = !String(rawBody ?? "").trim();
+        if (empty) {
+            // Relayer AUTH_REJECTED is a bare 401 (empty body, constant-time).
+            // MCP no-session callers hit the same empty 401. Lead with the
+            // memwal_login hint; keep the WALM-318 key/docs copy so signed
+            // SDK callers still get the AUTH_REJECTED triage.
+            return {
+                message:
+                    `Walrus Memory server error (401): ${UNAUTHENTICATED_LOGIN_MESSAGE} ` +
+                    AUTH_REJECTED_MESSAGE,
+                raw: rawBody,
+                serverCode: "AUTH_REJECTED",
+            };
+        }
         return {
-            message:
-                "401 from relayer: typically wrong private key, key not registered on this account, " +
-                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
-                "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
+            message: AUTH_REJECTED_MESSAGE,
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
         };

@@ -216,6 +216,11 @@ test("auth-required mode picks up credentials mid-session without a restart", as
     assert.equal(before.result.isError, true, "should be an error before login");
     assert.match(
         JSON.stringify(before.result),
+        /Not authenticated\. Run memwal_login to connect your Sui wallet\./,
+        "should return the exact unauthenticated memwal_login hint",
+    );
+    assert.match(
+        JSON.stringify(before.result),
         /isn't signed in|not signed in/i,
         "should nudge the user to log in",
     );

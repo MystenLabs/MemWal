@@ -167,6 +167,8 @@ const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
 const URL_READY_TIMEOUT_MS = 5_000;
 
 const LOGIN_INSTRUCTION = [
+    "Not authenticated. Run memwal_login to connect your Sui wallet.",
+    "",
     "❌ Walrus Memory isn't signed in yet.",
     "",
     "**Easiest fix — call the `memwal_login` tool from this client.** It opens a browser,",
