@@ -130,6 +130,26 @@ export interface SaveCredsResult {
 }
 
 /**
+ * The message shown *before* a sign-in that would overwrite existing
+ * credentials, or null when there is nothing to lose.
+ *
+ * Deliberately shown ahead of the browser step: that is the last moment the
+ * user can back out for free. The incoming account is not known until the
+ * callback arrives, by which point a delegate key has already been registered
+ * on-chain — so a warning that waits for both ids is a warning that arrives
+ * too late to act on.
+ */
+export function formatPendingSignInWarning(): string | null {
+    const current = loadCreds();
+    if (!current) return null;
+    return (
+        `Signing in will replace the credentials in ${credsPath()} ` +
+        `(currently account ${current.accountId}). ` +
+        `The existing file is backed up if the new sign-in is a different account.`
+    );
+}
+
+/**
  * The message shown when a sign-in displaced a different account, or null when
  * nothing was replaced.
  *

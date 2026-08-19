@@ -202,3 +202,22 @@ test("no notice when nothing was replaced", async (t) => {
         "a first sign-in or same-account re-save must stay quiet",
     );
 });
+
+test("a pending sign-in warns which account it will replace, before approval", async (t) => {
+    const { auth, home } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+
+    const warning = auth.formatPendingSignInWarning();
+
+    assert.ok(warning, "an existing sign-in must be announced before it is replaced");
+    assert.match(warning, new RegExp(GLOBAL_ACCOUNT), "must name the account at risk");
+    assert.ok(
+        warning.includes(join(home, ".memwal", "credentials.json")),
+        "must name the file that will be overwritten",
+    );
+});
+
+test("a first sign-in has nothing to warn about", async (t) => {
+    const { auth } = await sandbox(t, {});
+
+    assert.equal(auth.formatPendingSignInWarning(), null);
+});

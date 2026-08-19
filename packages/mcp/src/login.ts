@@ -22,7 +22,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import open from "open";
 
 import type { MemWalCredentials } from "./auth.js";
-import { saveCreds, formatReplacementNotice } from "./auth.js";
+import { saveCreds, formatReplacementNotice, formatPendingSignInWarning } from "./auth.js";
 import { generateKeypair } from "./crypto.js";
 import { log, note } from "./logger.js";
 
@@ -244,6 +244,11 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
     } catch {
         /* caller errors don't break the flow */
     }
+
+    // Announced before the browser step, which is the last point the user can
+    // back out without having registered a delegate key on-chain.
+    const pending = formatPendingSignInWarning();
+    if (pending) note(pending);
 
     let creds: MemWalCredentials | null = null;
     let error: Error | null = null;
