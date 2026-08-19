@@ -50,7 +50,7 @@ export const TOOL_DEFINITIONS = [
         title: "Remember a Fact",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever you learn something worth remembering across sessions — a stated preference, decision, constraint, correction, identity detail, or recurring workflow — even if the user did not explicitly say 'remember this'. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
+            "Save a durable fact about the user or project to their Walrus Memory. Writes are expensive: call this PROACTIVELY but SPARINGLY, and only when the fact will still matter in a later session or on another machine — a stable preference, project decision, hard constraint, correction, or identity. Do not save one-off tasks, the current file or bug, small talk, or something already stored. You do not need the user to say 'remember this'. Pass the full statement; do not summarize. To save several high-value facts at once, use memwal_remember_bulk instead.",
         inputSchema: {
             type: "object",
             properties: {
@@ -66,7 +66,7 @@ export const TOOL_DEFINITIONS = [
         title: "Remember Several Facts",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
+            "Save multiple durable facts in one call. Same high bar as memwal_remember: only facts that will still matter later. Use when several distinct high-value facts arrived at once — not to dump a transcript. Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
         inputSchema: {
             type: "object",
             properties: {

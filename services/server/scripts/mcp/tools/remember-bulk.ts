@@ -36,7 +36,7 @@ export function registerRememberBulkTool(
         {
             ...TOOL_METADATA.memwal_remember_bulk,
             description:
-                "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
+                "Save multiple durable facts in one call. Same high bar as memwal_remember: only facts that will still matter later. Use when several distinct high-value facts arrived at once — not to dump a transcript. Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
             inputSchema: REMEMBER_BULK_INPUT,
         },
         wrapTool<{ facts: string[]; namespace?: string }>(async ({ facts, namespace }) => {

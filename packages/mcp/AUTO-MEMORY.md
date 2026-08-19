@@ -55,6 +55,7 @@ was never exposed as a tool.
 - **Global `default` namespace** — `MEMWAL_NAMESPACE` overrides for per-project scope.
 - **Agent decision rubric** — UserPromptSubmit does not regex-classify remember vs
   recall. The agent has the conversation and understands any language or spelling.
+  Remember is high-bar (still-matters-later) because writes are expensive.
   No `ask`-style LLM judge, no hook-side fetch.
 - **Out of scope** — prefetch/warm-load, a `/api/recent` endpoint, `ask`-style judge,
   background auto-capture. The agentic tools + hooks already deliver auto-memory.

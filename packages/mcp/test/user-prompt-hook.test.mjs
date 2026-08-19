@@ -42,6 +42,8 @@ test("substantive prompts get the decision rubric, not a classified directive", 
         assert.match(ctx, /memwal_recall/);
         assert.match(ctx, /memwal_remember/);
         assert.match(ctx, /any language or spelling/);
+        assert.match(ctx, /Writes are expensive/);
+        assert.match(ctx, /skip one-off tasks/);
         assert.doesNotMatch(ctx, /The user is referencing earlier work/);
         assert.doesNotMatch(ctx, /The user just stated a durable fact/);
     }
