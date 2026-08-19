@@ -142,23 +142,59 @@ export function normalizeServerUrl(url: string): string {
 // ============================================================
 
 /**
+ * GH #696 — user-facing copy when a memwal_* tool is called without a session.
+ * Locked string: do not paraphrase.
+ */
+export const MEMWAL_LOGIN_REQUIRED_MESSAGE =
+    "Walrus Memory isn't signed in. Call the memwal_login tool, then retry.";
+
+const AUTH_REJECTED_MESSAGE =
+    "401 from relayer: typically wrong private key, key not registered on this account, " +
+    "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+    "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors";
+
+/**
+ * Relayer 401s are sometimes forwarded with status as a string (JSON-RPC /
+ * wrapTool / HTTP /api/mcp). Strict `=== 401` skipped the special-case and
+ * produced `Walrus Memory server error (401): <no message>`.
+ */
+function isUnauthorizedStatus(status: number | string): boolean {
+    return Number(status) === 401;
+}
+
+function isEmptyErrorBody(rawBody: string): boolean {
+    // eslint-disable-next-line no-control-regex
+    return !String(rawBody ?? "").replace(/[\u0000-\u001F\u007F]/g, " ").trim();
+}
+
+/**
  * LOW-26: Sanitize a raw server error body before surfacing it to callers.
  *
  * - Strips ASCII control characters.
  * - Truncates to at most 200 chars so stack traces / dumps don't leak.
  * - Leaves the untrimmed payload accessible via the returned `raw`
  *   field for debug logging (never included in the thrown message).
+ * - Empty 401 / string status "401" (no-session) returns
+ *   {@link MEMWAL_LOGIN_REQUIRED_MESSAGE} instead of `<no message>`.
  */
 export function sanitizeServerError(
-    status: number,
+    status: number | string,
     rawBody: string,
 ): { message: string; raw: string; serverCode?: string } {
-    if (status === 401) {
+    if (isUnauthorizedStatus(status)) {
+        // Empty 401 is the relayer's constant-time reject *and* the no-session
+        // case memwal_* callers hit. Distinguish AUTH_REJECTED when the body
+        // carries a rejection signal (WALM-318). Clock-drift 401s never reach
+        // here — signedRequest / manual.ts throw via clockDriftErrorFromResponse.
+        if (isEmptyErrorBody(rawBody)) {
+            return {
+                message: MEMWAL_LOGIN_REQUIRED_MESSAGE,
+                raw: rawBody,
+                serverCode: "UNAUTHENTICATED",
+            };
+        }
         return {
-            message:
-                "401 from relayer: typically wrong private key, key not registered on this account, " +
-                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
-                "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
+            message: AUTH_REJECTED_MESSAGE,
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
         };

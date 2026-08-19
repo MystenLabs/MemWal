@@ -42,6 +42,29 @@ export function explorerFooter(): string {
     return `Explorer: ${walruscanBlobUrl("<blob_id>")} for any blob_id above.`;
 }
 
+/**
+ * GH #696 — same locked copy as SDK `MEMWAL_LOGIN_REQUIRED_MESSAGE`.
+ * wrapTool must return this *without* a "Tool error:" prefix so agents see
+ * the exact instruction.
+ */
+export const MEMWAL_LOGIN_REQUIRED_MESSAGE =
+    "Walrus Memory isn't signed in. Call the memwal_login tool, then retry.";
+
+function isClockDriftError(err: any): boolean {
+    return err?.serverCode === "ERR_TIMESTAMP_OUT_OF_BOUNDS";
+}
+
+/** Empty / string-status 401, AUTH_REJECTED leftover, or `<no message>`. */
+function isLoginRequiredError(err: any): boolean {
+    if (isClockDriftError(err)) return false;
+    if (Number(err?.status) === 401) return true;
+    if (err?.serverCode === "UNAUTHENTICATED" || err?.serverCode === "AUTH_REJECTED") {
+        return true;
+    }
+    const msg = String(err?.message ?? "");
+    return msg.includes("<no message>") && (msg.includes("(401)") || msg.includes("401"));
+}
+
 export function wrapTool<Args>(
     handler: (args: Args) => Promise<ToolResultLike>
 ): (args: Args) => Promise<ToolResultLike> {
@@ -55,6 +78,13 @@ export function wrapTool<Args>(
             const causeStr = cause
                 ? ` | cause: ${cause?.message ?? String(cause)}`
                 : "";
+
+            if (isLoginRequiredError(err)) {
+                return {
+                    content: [{ type: "text", text: MEMWAL_LOGIN_REQUIRED_MESSAGE }],
+                    isError: true,
+                };
+            }
 
             // Operator-side diagnostic — full chain to sidecar stderr.
             console.error(
