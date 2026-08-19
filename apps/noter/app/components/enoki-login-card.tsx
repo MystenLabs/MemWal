@@ -67,7 +67,7 @@ async function sponsoredSignAndExecute(
   sender: string,
   suiClient: SuiGrpcClient,
   signTransaction: (args: {
-    transaction: Transaction;
+    transaction: Transaction | string;
   }) => Promise<{ signature: string }>,
   signPersonalMessage: (message: Uint8Array) => Promise<{ signature: string }>,
 ): Promise<{ digest: string }> {
@@ -98,7 +98,13 @@ async function sponsoredSignAndExecute(
 
   const sponsored = await sponsorRes.json();
   const sponsoredTx = Transaction.from(sponsored.bytes);
-  const { signature } = await signTransaction({ transaction: sponsoredTx });
+  // dapp-kit's useSignTransaction resolves move-call ABIs via the ambient
+  // client from SuiClientProvider, which is JSON-RPC (deprecated, no longer
+  // CORS-enabled for browser origins). Pre-serializing with our gRPC client
+  // and handing off the resulting string short-circuits that internal
+  // resolution — dapp-kit passes a string through as-is.
+  const sponsoredTxJson = await sponsoredTx.toJSON({ client: suiClient });
+  const { signature } = await signTransaction({ transaction: sponsoredTxJson });
 
   const execRes = await fetch(
     `${enokiConfig.memwalServerUrl}/sponsor/execute`,
@@ -217,7 +223,7 @@ export function EnokiLoginCard() {
         }
 
         const pubKeyBytes = Array.from(publicKeyRaw);
-        const sign = (args: { transaction: Transaction }) =>
+        const sign = (args: { transaction: Transaction | string }) =>
           signTransaction(args);
 
         if (knownAccountId) {
