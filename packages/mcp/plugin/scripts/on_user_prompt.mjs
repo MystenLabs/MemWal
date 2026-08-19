@@ -23,7 +23,7 @@ const isQuestion =
     );
 const wantsRecall =
     detectRecall(prompt) ||
-    (isQuestion && /\b(remember|recall|know about me)\b/i.test(prompt));
+    (isQuestion && /\b(recall|know about me)\b/i.test(prompt));
 const wantsRemember = detectRemember(prompt);
 
 // A question about stored facts must recall only. Nested phrasing like

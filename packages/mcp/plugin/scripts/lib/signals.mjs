@@ -6,7 +6,7 @@
 
 // User is referencing earlier context / asking to resume / asking what we know.
 const RECALL_INTENT =
-    /\b(remember when|last time|previously|earlier|where (did|were) we|pick up where|catch me up|as i (said|mentioned|told you)|like i said|we (already|previously) (did|decided|discussed|set up)|my (usual|preferred|preference|setup|config|stack)|what do you remember|do you remember|what have you (saved|stored|remembered)|what do you know about (me|my)|what('s| is) my)\b/i;
+    /\b(remember when|last time|previously|earlier|where (did|were) we|pick up where|catch me up|as i (said|mentioned|told you)|like i said|we (already|previously) (did|decided|discussed|set up)|my (usual|preferred|preference|setup|config|stack)|what do you remember|what you remember|do you remember|what have you (saved|stored|remembered)|what do you know about (me|my)|what('s| is) my)\b/i;
 
 // User is stating a durable fact / preference / correction worth saving.
 const REMEMBER_INTENT =

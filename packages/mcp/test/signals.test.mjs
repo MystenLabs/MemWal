@@ -21,6 +21,7 @@ test("detectRecall — fires on references to past work / preferences", () => {
         "What's my usual setup for this?",
         "Can you catch me up on the project?",
         "What do you remember about how I like to work?",
+        "Tell me what you remember about how I like to work",
         "Do you remember my coffee order?",
         "What do you know about my setup?",
         "What's my staging canary nickname?",

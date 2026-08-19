@@ -38,3 +38,20 @@ test("stated preferences inject memwal_remember", () => {
     assert.match(ctx, /memwal_remember/);
     assert.doesNotMatch(ctx, /memwal_recall/);
 });
+
+test("explicit save request is remember, not recall-only", () => {
+    const ctx = runHook("Can you remember that I always use pnpm?");
+    assert.match(ctx, /memwal_remember/);
+    assert.doesNotMatch(ctx, /memwal_recall/);
+});
+
+test("what's my X is recall", () => {
+    const ctx = runHook("What's my staging canary nickname?");
+    assert.match(ctx, /memwal_recall/);
+    assert.doesNotMatch(ctx, /memwal_remember/);
+});
+
+test("tell me what you remember is recall even without a question mark", () => {
+    const ctx = runHook("Tell me what you remember about how I like to work");
+    assert.match(ctx, /memwal_recall/);
+});
