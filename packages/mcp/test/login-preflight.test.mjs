@@ -5,13 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 test("login requires a matching localhost preflight before browser approval", async () => {
-    const home = mkdtempSync(join(tmpdir(), "memwal-preflight-"));
-    const previousHome = process.env.HOME;
-    process.env.HOME = home;
+    // Imports the credential writer in-process, so the sandbox has to hold
+    // here rather than in a child. MEMWAL_CREDS_DIR avoids mutating HOME, which
+    // os.homedir() ignores on Windows (GH #610).
+    const credsDir = mkdtempSync(join(tmpdir(), "memwal-preflight-"));
+    const previousCredsDir = process.env.MEMWAL_CREDS_DIR;
+    process.env.MEMWAL_CREDS_DIR = credsDir;
 
     const webUrl = "https://memory.example";
     const relayerUrl = "https://relayer.example";
     const { loginFlow } = await import(`../dist/login.js?test=${Date.now()}`);
+    const { credsPath } = await import(`../dist/auth.js?test=${Date.now()}`);
+    // Fail before the flow can write anywhere, not after the real file is gone.
+    assert.equal(credsPath(), join(credsDir, "credentials.json"));
     let publishUrl;
     const urlReady = new Promise((resolve) => {
         publishUrl = resolve;
@@ -56,7 +62,7 @@ test("login requires a matching localhost preflight before browser approval", as
 
         const callbackBeforePreflight = await post(callbackUrl, validCallback);
         assert.equal(callbackBeforePreflight.status, 428);
-        assert.equal(existsSync(join(home, ".memwal", "credentials.json")), false);
+        assert.equal(existsSync(credsPath()), false);
 
         const badOrigin = await post(preflightUrl, { state, publicKey, relayer: relayerUrl }, "https://evil.example");
         assert.equal(badOrigin.status, 403);
@@ -88,9 +94,8 @@ test("login requires a matching localhost preflight before browser approval", as
         assert.equal(callback.status, 200);
         callbackCompleted = true;
         await login;
-        const credentialsPath = join(home, ".memwal", "credentials.json");
-        assert.equal(existsSync(credentialsPath), true);
-        assert.equal(JSON.parse(readFileSync(credentialsPath, "utf8")).label, "Test MCP");
+        assert.equal(existsSync(credsPath()), true);
+        assert.equal(JSON.parse(readFileSync(credsPath(), "utf8")).label, "Test MCP");
     } finally {
         if (!callbackCompleted && callbackUrl && state) {
             await fetch(callbackUrl, {
@@ -105,8 +110,8 @@ test("login requires a matching localhost preflight before browser approval", as
             }).catch(() => undefined);
         }
         await login.catch(() => undefined);
-        if (previousHome === undefined) delete process.env.HOME;
-        else process.env.HOME = previousHome;
-        rmSync(home, { recursive: true, force: true });
+        if (previousCredsDir === undefined) delete process.env.MEMWAL_CREDS_DIR;
+        else process.env.MEMWAL_CREDS_DIR = previousCredsDir;
+        rmSync(credsDir, { recursive: true, force: true });
     }
 });

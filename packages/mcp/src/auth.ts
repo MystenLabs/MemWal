@@ -36,18 +36,24 @@ export interface MemWalCredentials {
     version: 1;
 }
 
-const CREDS_DIR = join(homedir(), ".memwal");
-const CREDS_PATH = join(CREDS_DIR, "credentials.json");
+/** Resolved per call, not frozen at module load: a sandbox that has to be in
+ * place before the first import is a requirement nothing enforces, and missing
+ * it cost a developer their delegate key (GH #610). `MEMWAL_CREDS_DIR` moves
+ * the store with no process-global mutation. */
+function credsDir(): string {
+    return process.env.MEMWAL_CREDS_DIR || join(homedir(), ".memwal");
+}
 
 export function credsPath(): string {
-    return CREDS_PATH;
+    return join(credsDir(), "credentials.json");
 }
 
 /** Load credentials from disk. Returns null if missing or malformed. */
 export function loadCreds(): MemWalCredentials | null {
-    if (!existsSync(CREDS_PATH)) return null;
+    const path = credsPath();
+    if (!existsSync(path)) return null;
     try {
-        const raw = readFileSync(CREDS_PATH, "utf8");
+        const raw = readFileSync(path, "utf8");
         const parsed = JSON.parse(raw);
         if (!isValid(parsed)) return null;
         return parsed as MemWalCredentials;
@@ -58,12 +64,13 @@ export function loadCreds(): MemWalCredentials | null {
 
 /** Write credentials with secure (`0600`) permission. */
 export function saveCreds(creds: MemWalCredentials): void {
-    mkdirSync(dirname(CREDS_PATH), { recursive: true, mode: 0o700 });
-    writeFileSync(CREDS_PATH, JSON.stringify(creds, null, 2), { encoding: "utf8", mode: 0o600 });
+    const path = credsPath();
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, JSON.stringify(creds, null, 2), { encoding: "utf8", mode: 0o600 });
     // writeFileSync's `mode` argument is only honored on file creation; ensure
     // the permission on an existing file matches.
     try {
-        chmodSync(CREDS_PATH, 0o600);
+        chmodSync(path, 0o600);
     } catch {
         /* Windows etc. — best effort */
     }
@@ -71,9 +78,10 @@ export function saveCreds(creds: MemWalCredentials): void {
 
 /** Delete credentials. No-op if the file does not exist. */
 export function clearCreds(): void {
-    if (existsSync(CREDS_PATH)) {
+    const path = credsPath();
+    if (existsSync(path)) {
         try {
-            unlinkSync(CREDS_PATH);
+            unlinkSync(path);
         } catch {
             /* swallow */
         }
