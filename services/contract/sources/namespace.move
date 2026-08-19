@@ -210,8 +210,8 @@ module memwal::namespace {
 
     /// Caller-supplied 32-byte digest emitted as a write receipt. This is not a
     /// verified Walrus blob binding and not a hash-chain node: the contract
-    /// checks length only. WALM-352's relayer/indexer binds the digest to the
-    /// blob and builds the chain off chain.
+    /// checks length only. The relayer binds the digest to the blob and builds
+    /// the chain off chain.
     public struct MemoryWritten has copy, drop {
         namespace_id: ID,
         account_id: ID,
@@ -625,12 +625,12 @@ module memwal::namespace {
     /// new Walrus Blob. It rejects a stale version, enforces effective WRITE,
     /// and emits `MemoryWritten` with the caller-supplied 32-byte digest.
     /// The digest is not hashed or bound to the Seal ID / blob on chain;
-    /// WALM-352 binds it to the Walrus object and extends the hash chain.
+    /// the relayer binds it to the Walrus object and extends the hash chain.
     ///
     /// The ACL `Table` is not enumerable. On-chain authorization is the gate;
-    /// WALM-352's indexer is the display projection. Rebuild that projection
-    /// from genesis or a trusted snapshot — an unchanged grant emits nothing,
-    /// so a mid-stream checkpoint cannot recover the full ACL.
+    /// the indexer is the display projection. Rebuild that projection from
+    /// genesis or a trusted snapshot — an unchanged grant emits nothing, so a
+    /// mid-stream checkpoint cannot recover the full ACL.
     public fun write_fence(
         id: vector<u8>,
         registry: &NamespaceRegistry,
