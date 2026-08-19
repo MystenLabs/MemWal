@@ -57,10 +57,10 @@ for (const release of releases) {
 const openClaw = JSON.parse(
     readFileSync("packages/openclaw-memory-memwal/package.json", "utf8"),
 );
-if (openClaw.version !== "0.0.5") {
-    throw new Error(`OpenClaw: expected unchanged 0.0.5, received ${openClaw.version}`);
+if (openClaw.version !== "0.0.6") {
+    throw new Error(`OpenClaw: expected unchanged 0.0.6, received ${openClaw.version}`);
 }
-console.log("OpenClaw 0.0.5: unchanged (no package changes in this promotion)");
+console.log("OpenClaw 0.0.6: unchanged (no package changes in this promotion)");
 
 function readVersion(content, kind) {
     if (kind === "version") return JSON.parse(content).version;
