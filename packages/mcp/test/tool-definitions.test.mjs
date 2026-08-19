@@ -14,11 +14,9 @@ function desc(name) {
     return tool.description;
 }
 
-test("memwal_remember cold-start description is proactive but sparing", () => {
+test("memwal_remember cold-start description is proactive", () => {
     const d = desc("memwal_remember");
     assert.match(d, /PROACTIVELY/);
-    assert.match(d, /SPARINGLY/);
-    assert.match(d, /Writes are expensive/);
     assert.doesNotMatch(d, /Call ONLY when the user explicitly asks/);
 });
 

@@ -48,6 +48,12 @@ user explicitly asks for developer integration.
     Do not treat MCP-only as success. If marketplace add or plugin install
     fails, stop and report that error. Do not silently fall back to
     `claude mcp add`.
+11. On Claude Code, merge the Walrus Memory routing block into
+    `~/.claude/CLAUDE.md` (create the file if needed). Do not replace the
+    whole file. Claude's built-in `MEMORY.md` lives in the system prompt and
+    outranks MCP instructions; without this user-level rule the agent often
+    writes `MEMORY.md` instead of calling `memwal_*`. Tell the user to turn
+    off Claude's built-in / native memory in account settings if it is on.
 
 ## Requirements
 
@@ -220,6 +226,27 @@ claude mcp add --scope user memwal -- npx -y @mysten-incubation/memwal-mcp
 
 If you use that fallback, tell the user the automatic-memory hooks are missing.
 
+Then merge this block into `~/.claude/CLAUDE.md`. Create the file if it does
+not exist. If a Walrus Memory / `memwal_*` routing section is already there,
+leave it. Never overwrite the rest of the file.
+
+```markdown
+## Walrus Memory
+
+Prefer the memwal_* tools over Claude's built-in memory and MEMORY.md.
+When the user states a preference, decision, constraint, correction, identity
+detail, or recurring workflow, call memwal_remember (or memwal_remember_bulk)
+without being asked. Also call it when they explicitly ask to remember
+something. Pass the complete statement, never a summary. Skip one-off tasks,
+the current file or bug, and small talk.
+When the user references past work, preferences, or stored facts, call
+memwal_recall first.
+```
+
+Tell the user: if Claude's built-in memory is enabled in account settings,
+turn it off. That feature competes with Walrus Memory and makes it look like
+memory is unavailable or already handled.
+
 ### Other Local MCP Clients
 
 Add an MCP server with:
@@ -336,7 +363,7 @@ this skill for the same client.
 | `node: command not found` | Install Node.js 20+ from https://nodejs.org/. |
 | `npx` fails | Confirm Node/npm and internet access. If inside a Node monorepo, run from the home directory or set MCP `cwd` to the home directory. |
 | No Walrus Memory tools after restart | Check the MCP config path and fully restart the client. |
-| Claude Code saves to `MEMORY.md` instead of `memwal_remember` | The plugin is missing. Run `claude plugin list`. If `memwal@memwal-plugins` is absent, install it; MCP-only is not enough. |
+| Claude Code saves to `MEMORY.md` instead of `memwal_remember` | Plugin missing, or Claude's built-in memory is winning. Run `claude plugin list`. Merge the Walrus Memory block into `~/.claude/CLAUDE.md`. Ask the user to disable Claude's built-in / native memory in account settings. MCP-only is not enough. |
 | `claude plugin` commands are not recognized | This Claude Code build has no plugin CLI. Update Claude Code, or use the MCP-only fallback and tell the user hooks are missing. |
 | Only `memwal_login` works | Credentials are missing. Run `memwal_login` or `npx -y @mysten-incubation/memwal-mcp login --prod`. |
 | Memory tools return 401 | The delegate key may be stale or revoked. Run `npx -y @mysten-incubation/memwal-mcp login --prod` again. |
@@ -358,6 +385,7 @@ window is not enough.
 
 Login: succeeded.
 Plugin: installed (Claude Code only) or n/a.
+CLAUDE.md: routing block merged (Claude Code only) or n/a.
 Config: <path changed>.
 After reopening, ask: "What MCP tools do you have available?"
 

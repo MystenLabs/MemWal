@@ -62,6 +62,16 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
       </Step>
       <Step title="Restart and sign in">
         Restart Claude Code, then ask the agent to run `memwal_login` and open the URL it returns to connect your wallet. MCP-only is not a complete Claude Code setup: without the plugin, the agent often writes Claude's built-in `MEMORY.md` instead of calling `memwal_remember`.
+
+        Claude's system prompt still prefers `MEMORY.md` over MCP instructions. Merge this block into `~/.claude/CLAUDE.md` (do not replace the file), and turn off Claude's built-in / native memory in account settings if it is on:
+
+        ```markdown
+        ## Walrus Memory
+
+        Prefer the memwal_* tools over Claude's built-in memory and MEMORY.md.
+        When the user states a preference, decision, constraint, correction, identity detail, or recurring workflow, call memwal_remember (or memwal_remember_bulk) without being asked. Also call it when they explicitly ask to remember something. Pass the complete statement, never a summary. Skip one-off tasks, the current file or bug, and small talk.
+        When the user references past work, preferences, or stored facts, call memwal_recall first.
+        ```
       </Step>
     </Steps>
   </Tab>
@@ -177,6 +187,9 @@ Every recall runs inside one account and namespace. If you set `MEMWAL_NAMESPACE
 
 **Hooks are not firing.**
 The lifecycle hooks ship only with the **plugin** install; MCP-only provides the tools without hooks. Confirm the plugin appears in `/plugin` and restart after installing.
+
+**The agent writes `MEMORY.md` instead of calling `memwal_remember`.**
+Claude Code's built-in memory is in the system prompt and outranks MCP instructions. Confirm the plugin is enabled, merge the Walrus Memory block into `~/.claude/CLAUDE.md`, and turn off Claude's built-in / native memory in account settings.
 
 **Tool calls fail with an authentication error after working before.**
 The stored credential can lapse if you revoked its delegate key from the dashboard. Run `memwal_logout` then `memwal_login` to mint a fresh delegate key.

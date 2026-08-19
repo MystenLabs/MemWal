@@ -23,9 +23,11 @@ const REMEMBER_INPUT = {
  * memwal_remember — persist a durable fact to MemWal and return only when the
  * blob is written end-to-end (embed → SEAL encrypt → Walrus upload → on-chain).
  *
- * Call this PROACTIVELY but SPARINGLY: only a fact that will still matter
- * in a later session or on another machine. Writes are expensive.
- * For several high-value facts at once, prefer `memwal_remember_bulk`.
+ * Call this PROACTIVELY whenever the user reveals a durable fact about
+ * themselves or the project (preference, decision, constraint, correction,
+ * identity, recurring workflow) — you do not need to be explicitly asked.
+ * Skip one-off tasks, the current file or bug, and small talk.
+ * For several facts at once, prefer `memwal_remember_bulk`.
  */
 export function registerRememberTool(
     server: McpServer,
@@ -36,7 +38,7 @@ export function registerRememberTool(
         {
             ...TOOL_METADATA.memwal_remember,
             description:
-                "Save a durable fact about the user or project to their Walrus Memory. Writes are expensive: call this PROACTIVELY but SPARINGLY, and only when the fact will still matter in a later session or on another machine — a stable preference, project decision, hard constraint, correction, or identity. Do not save one-off tasks, the current file or bug, small talk, or something already stored. You do not need the user to say 'remember this'. Pass the full statement; do not summarize. To save several high-value facts at once, use memwal_remember_bulk instead.",
+                "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
             inputSchema: REMEMBER_INPUT,
         },
         wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {
