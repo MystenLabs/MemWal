@@ -1702,6 +1702,16 @@ pub enum AppError {
     /// silently-dropped turn into one retried with exponential backoff —
     /// closing the bench-completion gap diagnosed during the LME v2 run.
     UpstreamUnavailable(String),
+    /// The relayer cannot currently perform a paid write — its own SUI gas
+    /// pool is exhausted or fragmented. Distinct from `UpstreamUnavailable`
+    /// because the cause is OUR infrastructure, not a third-party provider,
+    /// and the message must say so: the upstream body names a relayer
+    /// pool-wallet address, and users reasonably read "insufficient SUI
+    /// balance for address 0x..." as an address they should fund (GH #655).
+    ///
+    /// Maps to 503 with a `Retry-After` past the delegate-key rate-limit
+    /// window, so a client that honours it cannot bounce straight into a 429.
+    CapacityUnavailable(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -1710,6 +1720,7 @@ impl std::fmt::Display for AppError {
             AppError::BadRequest(msg) => write!(f, "Bad Request: {}", msg),
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
+            AppError::CapacityUnavailable(msg) => write!(f, "{}", msg),
             AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
             AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
@@ -1718,6 +1729,13 @@ impl std::fmt::Display for AppError {
         }
     }
 }
+
+/// Seconds advertised in `Retry-After` when the relayer cannot take a paid
+/// write. Must stay above the delegate-key limiter's own 60s window: at or
+/// below it, a client that retries on schedule lands back in the limiter and
+/// sees a 429 instead of a second honest 503 — the sequence reported in
+/// GH #655.
+const CAPACITY_RETRY_AFTER_SECS: u16 = 120;
 
 impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
@@ -1763,10 +1781,29 @@ impl axum::response::IntoResponse for AppError {
                     format!("Upstream temporarily unavailable (traceId: {})", trace_id),
                 )
             }
+            AppError::CapacityUnavailable(msg) => {
+                let trace_id = crate::observability::current_request_id()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                tracing::error!(
+                    request_id = %trace_id,
+                    "Relayer write capacity unavailable: {}",
+                    msg,
+                );
+                // Unlike Internal, the message is NOT replaced: it is already
+                // written for the user and carries no upstream text.
+                (axum::http::StatusCode::SERVICE_UNAVAILABLE, msg.clone())
+            }
         };
 
         let body = serde_json::json!({ "error": message });
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if matches!(self, AppError::CapacityUnavailable(_)) {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from(CAPACITY_RETRY_AFTER_SECS),
+            );
+        }
+        response
     }
 }
 
@@ -1781,6 +1818,7 @@ impl AppError {
             AppError::RateLimited(_) => "rate_limited",
             AppError::QuotaExceeded(_) => "quota_exceeded",
             AppError::UpstreamUnavailable(_) => "upstream_unavailable",
+            AppError::CapacityUnavailable(_) => "capacity_unavailable",
         }
     }
 }
@@ -2332,6 +2370,28 @@ mod tests {
     }
 
     #[test]
+    fn capacity_unavailable_is_503_with_a_retry_after_past_the_rate_limit_window() {
+        // The delegate-key limiter answers 429 with retry_after_seconds: 60.
+        // A Retry-After at or below that lands the client back in the limiter,
+        // which is exactly the 503 -> retry -> 429 sequence reported in GH #655.
+        let err = AppError::CapacityUnavailable("relayer write capacity".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .expect("capacity failures must carry Retry-After")
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .expect("Retry-After must be a number of seconds");
+        assert!(
+            retry_after > 60,
+            "Retry-After ({retry_after}s) must exceed the 60s rate-limit window"
+        );
+    }
+
+    #[test]
     fn app_error_upstream_unavailable_status_is_503_for_retryability() {
         // HTTP 503 is in the SDK + benchmark harness retry
         // set (429, 502, 503, 504). Pinning this so a future change
@@ -2499,7 +2559,10 @@ mod tests {
     #[test]
     fn auth_clock_drift_accepts_exact_ceiling() {
         with_auth_clock_drift_env(Some("900"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), MAX_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                MAX_AUTH_CLOCK_DRIFT_SECS
+            );
         });
     }
 
@@ -2507,24 +2570,36 @@ mod tests {
     fn auth_clock_drift_rejects_just_over_ceiling() {
         // Pin the exact inclusive boundary: 900 accepted, 901 falls back.
         with_auth_clock_drift_env(Some("901"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS
+            );
         });
     }
 
     #[test]
     fn auth_clock_drift_falls_back_when_env_exceeds_cap() {
         with_auth_clock_drift_env(Some("3600"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS
+            );
         });
     }
 
     #[test]
     fn auth_clock_drift_falls_back_on_negative_or_garbage() {
         with_auth_clock_drift_env(Some("-5"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS
+            );
         });
         with_auth_clock_drift_env(Some("not-a-number"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS
+            );
         });
     }
 

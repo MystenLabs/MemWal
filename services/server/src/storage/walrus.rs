@@ -537,6 +537,17 @@ pub async fn advance_durable_upload(
             journal.register_transaction = None;
             return Ok(DurableUploadAdvance::Prepared(journal));
         }
+        if is_gas_capacity_failure(&body) {
+            // Full upstream text to the logs — ops need the wallet address and
+            // abort code — while the caller gets a message that does not read
+            // as "fund this address".
+            tracing::error!(
+                status = %status,
+                body = %body,
+                "durable Walrus upload failed: relayer gas pool exhausted"
+            );
+            return Err(AppError::CapacityUnavailable(gas_capacity_message()));
+        }
         return Err(AppError::Internal(format!(
             "durable Walrus upload failed ({}): {}",
             status, body
@@ -1324,5 +1335,74 @@ mod tests {
             out.is_err(),
             "5xx must be Err (fail closed), never Ok(None)"
         );
+    }
+}
+
+/// The message shown when the relayer cannot fund a paid write.
+///
+/// Deliberately says nothing the user can act on financially. The upstream body
+/// reads "Unable to perform gas selection due to insufficient SUI balance for
+/// address 0x...", and that address is a relayer pool wallet chosen by
+/// round-robin — not the caller's, not their MemWalAccount's, and not
+/// stable between attempts. Passing it through invited users to send SUI to
+/// infrastructure they do not own (GH #655).
+pub(crate) fn gas_capacity_message() -> String {
+    "Walrus Memory cannot complete durable writes right now: the relayer's own \
+     write capacity is temporarily exhausted. This is a server-side problem and \
+     the operators have been alerted — there is nothing to fund on your side. \
+     Please retry in a few minutes."
+        .replace("     ", "")
+}
+
+/// Does this upstream durable-upload body describe the relayer running out of
+/// its own SUI gas?
+///
+/// Narrow on purpose. Other upstream bodies still pass through, because they
+/// carry diagnostics worth having; only this shape is reclassified, because
+/// only this shape is both server-caused and actively misleading.
+pub(crate) fn is_gas_capacity_failure(body: &str) -> bool {
+    let b = body.to_lowercase();
+    (b.contains("gas selection") || b.contains("balance::split") || b.contains("enotenough"))
+        && (b.contains("insufficient") || b.contains("enotenough"))
+}
+
+#[cfg(test)]
+mod gas_capacity_tests {
+    use super::*;
+
+    /// Verbatim shape of what the durable-upload sidecar returned in GH #655.
+    /// It names a relayer pool-wallet address, which the reporter reasonably
+    /// mistook for an address they were supposed to fund.
+    const REPORTED_BODY: &str = r#"{"code":"NO_SIDE_EFFECT","error":"Unable to perform gas selection due to insufficient SUI balance for address 0x51667727aa0e4f3c9e2b1d8a7c6f5e4d3c2b1a09f8e7d6c5b4a3928170604bca2"}"#;
+
+    #[test]
+    fn the_reported_gas_failure_is_recognised() {
+        assert!(is_gas_capacity_failure(REPORTED_BODY));
+    }
+
+    #[test]
+    fn the_user_facing_message_names_no_address_and_no_raw_upstream_text() {
+        let msg = gas_capacity_message();
+        assert!(!msg.contains("0x"), "must not name any address: {msg}");
+        assert!(
+            !msg.to_lowercase().contains("gas selection"),
+            "must not echo the upstream wording: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("relayer") || msg.to_lowercase().contains("service"),
+            "must say the failure is server-side: {msg}"
+        );
+    }
+
+    #[test]
+    fn unrelated_upstream_failures_are_left_alone() {
+        // Mapping everything would cost real diagnostics; only the gas shape
+        // is reclassified.
+        assert!(!is_gas_capacity_failure(
+            r#"{"error":"blob encoding failed"}"#
+        ));
+        assert!(!is_gas_capacity_failure(
+            r#"{"error":"sliver mismatch at index 3"}"#
+        ));
     }
 }
