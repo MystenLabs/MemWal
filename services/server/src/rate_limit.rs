@@ -613,46 +613,68 @@ pub async fn rate_limit_middleware(
 // Storage Quota Check (called from routes, not middleware)
 // ============================================================
 
-/// Check if a user has enough storage quota for a new blob.
+/// How long a storage reservation survives without an explicit release.
 ///
-/// Storage tracking still uses PostgreSQL (it's per-row in vector_entries).
-/// Returns `Ok(())` if within quota, `Err(AppError::QuotaExceeded)` if not.
+/// Only a backstop for a process that dies between admission and insertion.
+/// Sized above the wallet-job upload ceiling described in `AppState`
+/// (`wallet_lock_pool`, up to ~5 minutes) so a slow-but-healthy upload is
+/// never charged twice, while a lost reservation still frees itself.
+const STORAGE_RESERVATION_TTL_SECONDS: i64 = 900;
+
+/// Reserve storage quota for one or more pending writes, atomically.
 ///
-/// Uses PostgreSQL advisory lock per-owner to prevent
-/// TOCTOU race where concurrent requests all pass quota check then
-/// all write, collectively exceeding the limit.
-pub async fn check_storage_quota(
+/// Replaces the former `check_storage_quota`, whose advisory lock covered only
+/// the usage read and was released before the caller inserted, letting
+/// concurrent requests from one owner collectively exceed the quota (GH #532).
+///
+/// Each entry in `items` is `(reservation_id, bytes)`. Admission is
+/// all-or-nothing, preserving the previous behavior where a bulk request
+/// either fully passes or is rejected with a single error.
+///
+/// The caller MUST release each reservation once the row lands or the write
+/// terminally fails, via `release_storage_quota`. Reservations expire on their
+/// own after `STORAGE_RESERVATION_TTL_SECONDS` as a backstop, so a missed
+/// release costs an owner temporary headroom rather than permanent quota.
+pub async fn reserve_storage_quota(
     state: &AppState,
     owner: &str,
-    additional_bytes: i64,
+    items: &[(String, i64)],
 ) -> Result<(), AppError> {
     let max_bytes = state.config.rate_limit.max_storage_bytes;
 
-    // 0 or negative means unlimited
+    // 0 or negative means unlimited. Skip reserving entirely so unlimited
+    // deployments do not accumulate rows they will never read.
     if max_bytes <= 0 {
         return Ok(());
     }
 
-    // Acquire a per-owner PostgreSQL advisory lock.
-    // This serializes concurrent quota checks for the same owner,
-    // preventing TOCTOU race conditions.
-    // We use a stable hash of the owner string as the lock key.
+    // Per-owner advisory lock key. Held across the usage read AND the
+    // reservation insert inside `try_reserve_storage`.
     let lock_key = stable_hash_i64(owner);
 
-    // Use the combined method which uses an explicit transaction and pg_advisory_xact_lock
-    let used = state.db.get_storage_used_with_lock(owner, lock_key).await?;
-    let projected = used + additional_bytes;
+    let outcome = state
+        .db
+        .try_reserve_storage(
+            owner,
+            lock_key,
+            items,
+            max_bytes,
+            STORAGE_RESERVATION_TTL_SECONDS,
+        )
+        .await?;
 
-    if projected > max_bytes {
+    if let Err(used) = outcome {
+        let additional: i64 = items.iter().map(|(_, bytes)| *bytes).sum();
         let used_mb = used as f64 / 1_048_576.0;
         let max_mb = max_bytes as f64 / 1_048_576.0;
         tracing::warn!(
             "storage quota exceeded: owner={} used={:.1}MB + {:.1}MB > max={:.1}MB",
             owner,
             used_mb,
-            additional_bytes as f64 / 1_048_576.0,
+            additional as f64 / 1_048_576.0,
             max_mb
         );
+        // Message shape unchanged so existing clients keep parsing it.
         return Err(AppError::QuotaExceeded(format!(
             "Storage quota exceeded: {:.1}MB used of {:.1}MB allowed",
             used_mb, max_mb
@@ -660,6 +682,39 @@ pub async fn check_storage_quota(
     }
 
     Ok(())
+}
+
+/// Convenience wrapper for the single-write paths.
+pub async fn reserve_storage_quota_one(
+    state: &AppState,
+    owner: &str,
+    reservation_id: &str,
+    additional_bytes: i64,
+) -> Result<(), AppError> {
+    reserve_storage_quota(
+        state,
+        owner,
+        &[(reservation_id.to_string(), additional_bytes)],
+    )
+    .await
+}
+
+/// Release a reservation after the row has landed or the write has failed.
+///
+/// Never propagates an error: a failed release is recoverable (the TTL
+/// backstop reclaims it) and must not turn a successful write into a failed
+/// request, nor mask the original error on a failure path.
+pub async fn release_storage_quota(state: &AppState, reservation_id: &str) {
+    if state.config.rate_limit.max_storage_bytes <= 0 {
+        return;
+    }
+    if let Err(e) = state.db.release_storage_reservation(reservation_id).await {
+        tracing::warn!(
+            "failed to release storage reservation id={} err={} (will expire via TTL)",
+            reservation_id,
+            e
+        );
+    }
 }
 
 /// Compute a stable i64 hash of a string for use as PG advisory lock key.

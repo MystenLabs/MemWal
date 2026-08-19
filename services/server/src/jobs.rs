@@ -175,6 +175,35 @@ pub(crate) async fn warm_blob_cache_after_upload(
     }
 }
 
+/// Release the storage-quota reservation held for `remember_job_id`.
+///
+/// Enqueued writes reserve quota keyed by job id at admission time
+/// (`routes/remember.rs`, `routes/analyze.rs`), because the row is inserted
+/// here in the wallet worker long after the request returned. Releasing on the
+/// same key closes the admission/insert window that GH #532 exploited without
+/// threading a reservation handle through `WalletOperation`.
+///
+/// Best-effort and idempotent: reservations also expire on their own, so a
+/// failed release costs the owner temporary headroom, never a stuck quota.
+/// Callers must invoke this only on TERMINAL outcomes — a retryable failure
+/// still needs its reservation for the next attempt.
+async fn release_job_storage_reservation(pool: &sqlx::PgPool, remember_job_id: Option<&str>) {
+    let Some(jid) = remember_job_id else {
+        return;
+    };
+    if let Err(e) = sqlx::query("DELETE FROM storage_quota_reservations WHERE id = $1")
+        .bind(jid)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(
+            "failed to release storage reservation job_id={} err={} (will expire via TTL)",
+            jid,
+            e
+        );
+    }
+}
+
 async fn update_remember_job_after_wallet_error(
     pool: &sqlx::PgPool,
     remember_job_id: Option<&str>,
@@ -217,6 +246,12 @@ async fn update_remember_job_after_wallet_error(
     .bind(jid)
     .execute(pool)
     .await;
+
+    // Only terminal failures release: a retryable error leaves the row
+    // 'running' and the next attempt still needs its reserved bytes.
+    if error.aborts_retries() {
+        release_job_storage_reservation(pool, remember_job_id).await;
+    }
 }
 
 async fn mark_remember_job_failed(
@@ -239,6 +274,8 @@ async fn mark_remember_job_failed(
     if result.rows_affected() == 0 {
         return Err(sqlx::Error::RowNotFound);
     }
+
+    release_job_storage_reservation(pool, remember_job_id).await;
 
     Ok(())
 }
@@ -832,6 +869,11 @@ async fn insert_vector_and_mark_remember_done(
         );
         return Err(classified);
     }
+
+    // The vector_entries row is committed, so its bytes now count via
+    // SUM(blob_size_bytes). Holding the reservation any longer would
+    // double-charge the owner for this write.
+    release_job_storage_reservation(state.db.pool(), remember_job_id).await;
 
     if let Some(jid) = remember_job_id {
         let _ = sqlx::query(

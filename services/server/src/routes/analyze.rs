@@ -372,8 +372,16 @@ pub async fn analyze(
     if state.config.benchmark_mode {
         // Quota check on plaintext byte length (benchmark mode has no
         // ciphertext — plaintext is the closest analog).
-        let total_plaintext_bytes: i64 = facts.iter().map(|f| f.text.len() as i64).sum();
-        rate_limit::check_storage_quota(&state, owner, total_plaintext_bytes).await?;
+        let quota_items: Vec<(String, i64)> = facts
+            .iter()
+            .map(|f| {
+                (
+                    format!("bench-{}", uuid::Uuid::new_v4()),
+                    f.text.len() as i64,
+                )
+            })
+            .collect();
+        rate_limit::reserve_storage_quota(&state, owner, &quota_items).await?;
 
         let store_tasks: Vec<_> = facts
             .iter()
@@ -413,6 +421,12 @@ pub async fn analyze(
             .collect();
 
         let store_results = collect_bounded_results(store_tasks, ANALYZE_CONCURRENCY).await;
+        // Release before the `?` below: rows that landed now count on their own,
+        // and a partial failure must not leave the owner charged for facts that
+        // were never stored.
+        for (reservation_id, _) in &quota_items {
+            rate_limit::release_storage_quota(&state, reservation_id).await;
+        }
         let mut stored_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(store_results.len());
         for r in store_results {
             stored_facts.push(r?);
@@ -485,24 +499,33 @@ pub async fn analyze(
 
     let prep_results = collect_bounded_results(prep_tasks, ANALYZE_CONCURRENCY).await;
 
-    // Quota check on total ciphertext size
+    // Storage-quota admission on total ciphertext size
     let mut prepared: Vec<(String, f32, Vec<f32>, Vec<u8>)> =
         Vec::with_capacity(prep_results.len());
-    let mut total_encrypted_bytes: i64 = 0;
     for r in prep_results {
         let (fact_text, importance, vector, encrypted) = r?;
-        total_encrypted_bytes += encrypted.len() as i64;
         prepared.push((fact_text, importance, vector, encrypted));
     }
-    rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
+    // Job ids are generated up front so each reservation is keyed by the job
+    // whose wallet worker will release it after the row lands.
+    let pending_job_ids: Vec<String> = prepared
+        .iter()
+        .map(|_| uuid::Uuid::new_v4().to_string())
+        .collect();
+    let quota_items: Vec<(String, i64)> = prepared
+        .iter()
+        .zip(pending_job_ids.iter())
+        .map(|((_, _, _, encrypted), job_id)| (job_id.clone(), encrypted.len() as i64))
+        .collect();
+    rate_limit::reserve_storage_quota(&state, owner, &quota_items).await?;
 
     // Step 3: For each prepared fact — insert remember_jobs row + enqueue WalletJob.
     // Round-robin across wallet pool so facts upload in parallel.
     let mut job_ids: Vec<String> = Vec::with_capacity(prepared.len());
     let mut accepted_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(prepared.len());
-    for (fact_text, importance, vector, encrypted) in prepared {
-        let job_id = uuid::Uuid::new_v4().to_string();
-
+    for ((fact_text, importance, vector, encrypted), job_id) in
+        prepared.into_iter().zip(pending_job_ids.into_iter())
+    {
         // Insert status row
         sqlx::query(
             "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",

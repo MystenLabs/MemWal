@@ -46,6 +46,7 @@ mod tests {
             include_str!("../../migrations/008_benchmark_plaintext.sql"),
             include_str!("../../migrations/009_importance_signal.sql"),
             include_str!("../../migrations/010_restore_failed_blobs.sql"),
+            include_str!("../../migrations/014_storage_quota_reservations.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -344,6 +345,323 @@ mod tests {
             .await
             .unwrap();
     }
+
+    // ============================================================
+    // Storage quota admission atomicity (GH #532 / WALM-359)
+    //
+    // Before the fix these burst tests admitted 12 to 20 of 20 and the owner
+    // finished over quota; the delayed-insert case, which models the enqueued
+    // write paths, reached 20/20. They now assert exactly one admission.
+    // ============================================================
+
+    const QUOTA_TEST_MAX: i64 = 1_073_741_824; // rate_limit.rs default
+    const QUOTA_TEST_REQ: i64 = 1_557_504; // max manual ciphertext
+    const QUOTA_TEST_BURST: usize = 20; // 60 weighted/min ÷ weight 3
+    const QUOTA_TEST_TTL: i64 = 900;
+
+    /// Pool sized like production (`VectorDb::new` uses 10) so the burst is
+    /// genuinely concurrent rather than serialized by pool starvation.
+    async fn quota_test_db() -> Option<VectorDb> {
+        let database_url = test_database_url()?;
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .acquire_timeout(Duration::from_secs(20))
+            .connect(&database_url)
+            .await
+            .expect("test database should be available");
+        let _guard = VECTOR_SCHEMA_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        for migration in [
+            include_str!("../../migrations/001_init.sql"),
+            include_str!("../../migrations/002_add_namespace.sql"),
+            include_str!("../../migrations/003_rate_limiter.sql"),
+            include_str!("../../migrations/008_benchmark_plaintext.sql"),
+            include_str!("../../migrations/009_importance_signal.sql"),
+            include_str!("../../migrations/010_restore_failed_blobs.sql"),
+            include_str!("../../migrations/014_storage_quota_reservations.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        Some(VectorDb { pool })
+    }
+
+    fn quota_lock_key(s: &str) -> i64 {
+        // Mirrors rate_limit::stable_hash_i64 (private to that module).
+        const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+        const FNV_PRIME: u64 = 1_099_511_628_211;
+        let mut hash = FNV_OFFSET;
+        for b in s.as_bytes() {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        (hash & 0x7FFF_FFFF_FFFF_FFFF) as i64
+    }
+
+    /// Seed the owner so exactly ONE more request fits under the quota.
+    async fn quota_seed_one_slot(db: &VectorDb, owner: &str) {
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance)
+             VALUES ($1, $2, 'default', $3, $4, $5, 0.5)",
+        )
+        .bind(format!("seed-{owner}"))
+        .bind(owner)
+        .bind(format!("seedblob-{owner}"))
+        .bind(pgvector::Vector::from(vec![0.05f32; 1536]))
+        .bind(QUOTA_TEST_MAX - QUOTA_TEST_REQ - 1024)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn quota_total(db: &VectorDb, owner: &str) -> i64 {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(blob_size_bytes)::BIGINT, 0) FROM vector_entries WHERE owner = $1",
+        )
+        .bind(owner)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        row.0
+    }
+
+    async fn quota_cleanup(db: &VectorDb, owner: &str) {
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM storage_quota_reservations WHERE owner = $1")
+            .bind(owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    /// Run a concurrent burst. `gap_ms` models the enqueued paths, where the
+    /// insert happens in the wallet worker after a Walrus upload.
+    async fn quota_burst(gap_ms: u64) -> (usize, i64) {
+        let Some(db) = quota_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return (usize::MAX, 0);
+        };
+        let db = std::sync::Arc::new(db);
+        let owner = format!("quota-burst-{}", uuid::Uuid::new_v4());
+        let lock_key = quota_lock_key(&owner);
+        quota_seed_one_slot(&db, &owner).await;
+
+        let mut handles = Vec::new();
+        for i in 0..QUOTA_TEST_BURST {
+            let db = std::sync::Arc::clone(&db);
+            let owner = owner.clone();
+            handles.push(tokio::spawn(async move {
+                let reservation_id = format!("{owner}-{i}");
+                let admitted = db
+                    .try_reserve_storage(
+                        &owner,
+                        lock_key,
+                        &[(reservation_id.clone(), QUOTA_TEST_REQ)],
+                        QUOTA_TEST_MAX,
+                        QUOTA_TEST_TTL,
+                    )
+                    .await
+                    .unwrap();
+                if admitted.is_err() {
+                    return false;
+                }
+                if gap_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(gap_ms)).await;
+                }
+                db.insert_vector(
+                    &reservation_id,
+                    &owner,
+                    "default",
+                    &format!("blob-{reservation_id}"),
+                    &vec![0.1f32; 1536],
+                    QUOTA_TEST_REQ,
+                    0.5,
+                )
+                .await
+                .unwrap();
+                db.release_storage_reservation(&reservation_id)
+                    .await
+                    .unwrap();
+                true
+            }));
+        }
+        let mut admitted = 0usize;
+        for h in handles {
+            if h.await.unwrap() {
+                admitted += 1;
+            }
+        }
+        let total = quota_total(&db, &owner).await;
+        quota_cleanup(&db, &owner).await;
+        (admitted, total)
+    }
+
+    /// Inline write paths (`remember_manual`, benchmark analyze).
+    #[tokio::test]
+    async fn storage_quota_burst_admits_exactly_one_inline() {
+        let (admitted, total) = quota_burst(0).await;
+        if admitted == usize::MAX {
+            return;
+        }
+        assert_eq!(
+            admitted, 1,
+            "expected exactly one admission, got {admitted}"
+        );
+        assert!(
+            total <= QUOTA_TEST_MAX,
+            "quota breached: total={total} max={QUOTA_TEST_MAX}"
+        );
+    }
+
+    /// Enqueued write paths: the insert lands long after admission returns.
+    /// This is the case that reached 20/20 bypass before the fix.
+    #[tokio::test]
+    async fn storage_quota_burst_admits_exactly_one_with_delayed_insert() {
+        let (admitted, total) = quota_burst(150).await;
+        if admitted == usize::MAX {
+            return;
+        }
+        assert_eq!(
+            admitted, 1,
+            "delayed insert must not widen the admission window, got {admitted}"
+        );
+        assert!(
+            total <= QUOTA_TEST_MAX,
+            "quota breached: total={total} max={QUOTA_TEST_MAX}"
+        );
+    }
+
+    /// A released reservation must return its bytes to the owner.
+    #[tokio::test]
+    async fn released_reservation_frees_quota() {
+        let Some(db) = quota_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let owner = format!("quota-release-{}", uuid::Uuid::new_v4());
+        let lock_key = quota_lock_key(&owner);
+        quota_seed_one_slot(&db, &owner).await;
+        let items = vec![("rsv-a".to_string(), QUOTA_TEST_REQ)];
+
+        assert!(db
+            .try_reserve_storage(&owner, lock_key, &items, QUOTA_TEST_MAX, QUOTA_TEST_TTL)
+            .await
+            .unwrap()
+            .is_ok());
+        // Second attempt is refused while the first is outstanding.
+        assert!(db
+            .try_reserve_storage(
+                &owner,
+                lock_key,
+                &[("rsv-b".to_string(), QUOTA_TEST_REQ)],
+                QUOTA_TEST_MAX,
+                QUOTA_TEST_TTL
+            )
+            .await
+            .unwrap()
+            .is_err());
+
+        db.release_storage_reservation("rsv-a").await.unwrap();
+
+        // Freed again once released.
+        assert!(db
+            .try_reserve_storage(
+                &owner,
+                lock_key,
+                &[("rsv-b".to_string(), QUOTA_TEST_REQ)],
+                QUOTA_TEST_MAX,
+                QUOTA_TEST_TTL
+            )
+            .await
+            .unwrap()
+            .is_ok());
+
+        db.release_storage_reservation("rsv-b").await.unwrap();
+        quota_cleanup(&db, &owner).await;
+    }
+
+    /// A reservation whose release was lost must not strand quota forever.
+    #[tokio::test]
+    async fn expired_reservation_does_not_strand_quota() {
+        let Some(db) = quota_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let owner = format!("quota-expiry-{}", uuid::Uuid::new_v4());
+        let lock_key = quota_lock_key(&owner);
+        quota_seed_one_slot(&db, &owner).await;
+
+        // TTL of 0 leaves an already-expired reservation, standing in for a
+        // worker that died between admission and insertion.
+        assert!(db
+            .try_reserve_storage(
+                &owner,
+                lock_key,
+                &[("rsv-stale".to_string(), QUOTA_TEST_REQ)],
+                QUOTA_TEST_MAX,
+                0
+            )
+            .await
+            .unwrap()
+            .is_ok());
+
+        // The next admission sweeps it and succeeds rather than being blocked.
+        assert!(db
+            .try_reserve_storage(
+                &owner,
+                lock_key,
+                &[("rsv-next".to_string(), QUOTA_TEST_REQ)],
+                QUOTA_TEST_MAX,
+                QUOTA_TEST_TTL
+            )
+            .await
+            .unwrap()
+            .is_ok());
+
+        db.release_storage_reservation("rsv-next").await.unwrap();
+        quota_cleanup(&db, &owner).await;
+    }
+
+    /// Bulk admission stays all-or-nothing: a batch that does not fit reserves
+    /// nothing, so a partial batch is never silently admitted.
+    #[tokio::test]
+    async fn bulk_admission_is_all_or_nothing() {
+        let Some(db) = quota_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let owner = format!("quota-bulk-{}", uuid::Uuid::new_v4());
+        let lock_key = quota_lock_key(&owner);
+        quota_seed_one_slot(&db, &owner).await; // room for exactly one
+
+        let two = vec![
+            ("bulk-1".to_string(), QUOTA_TEST_REQ),
+            ("bulk-2".to_string(), QUOTA_TEST_REQ),
+        ];
+        assert!(
+            db.try_reserve_storage(&owner, lock_key, &two, QUOTA_TEST_MAX, QUOTA_TEST_TTL)
+                .await
+                .unwrap()
+                .is_err(),
+            "a batch exceeding the quota must be rejected as a whole"
+        );
+
+        let leaked: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::BIGINT FROM storage_quota_reservations WHERE owner = $1",
+        )
+        .bind(&owner)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(leaked.0, 0, "rejected batch must not leave reservations");
+
+        quota_cleanup(&db, &owner).await;
+    }
 }
 
 fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
@@ -457,6 +775,13 @@ impl VectorDb {
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 013: {}", e)))?;
+
+        // Atomic storage-quota admission (GH #532).
+        let migration_014 = include_str!("../../migrations/014_storage_quota_reservations.sql");
+        sqlx::raw_sql(migration_014)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 014: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
@@ -939,16 +1264,32 @@ impl VectorDb {
     // Storage Quota (still PostgreSQL — tracks per-row blob sizes)
     // ============================================================
 
-    /// Acquire an advisory lock and get storage used within a single transaction.
+    /// Atomically admit `items` against `owner`'s storage quota.
     ///
-    /// Using `pg_advisory_lock` with a connection pool causes deadlocks
-    /// because it's session-level. We use `pg_advisory_xact_lock` inside an explicit
-    /// transaction so the lock is automatically released on commit/rollback.
-    pub async fn get_storage_used_with_lock(
+    /// Holds `pg_advisory_xact_lock` across BOTH the usage read and the
+    /// reservation insert, so concurrent callers for one owner serialize and
+    /// each sees the previous one's commitment. This is the property
+    /// `get_storage_used_with_lock` lacked: it committed (releasing the lock)
+    /// before its caller inserted, so every concurrent caller read the same
+    /// pre-insert total and all passed (GH #532).
+    ///
+    /// Mirrors the shape already used by `security_delete_store::claim_blobs`,
+    /// where `lock_and_check_cap` and `insert_batch` share one transaction.
+    ///
+    /// Admission is all-or-nothing across `items`, preserving the existing
+    /// behavior where a bulk request either fully passes or is rejected.
+    ///
+    /// Returns `Ok(Ok(()))` when admitted, or `Ok(Err(used_bytes))` when the
+    /// request would exceed `max_bytes`, where `used_bytes` is the owner's
+    /// current committed + reserved usage (for the error message).
+    pub async fn try_reserve_storage(
         &self,
         owner: &str,
         lock_key: i64,
-    ) -> Result<i64, AppError> {
+        items: &[(String, i64)],
+        max_bytes: i64,
+        ttl_seconds: i64,
+    ) -> Result<Result<(), i64>, AppError> {
         let started = std::time::Instant::now();
         let mut tx = self
             .pool
@@ -962,7 +1303,17 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to acquire advisory lock: {}", e)))?;
 
-        let row: (i64,) = sqlx::query_as(
+        // Expired reservations must not count against the owner. Sweeping them
+        // inside the lock keeps the read below consistent with the insert.
+        sqlx::query(
+            "DELETE FROM storage_quota_reservations WHERE owner = $1 AND expires_at <= NOW()",
+        )
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to sweep reservations: {}", e)))?;
+
+        let committed: (i64,) = sqlx::query_as(
             "SELECT COALESCE(SUM(blob_size_bytes)::BIGINT, 0) FROM vector_entries WHERE owner = $1",
         )
         .bind(owner)
@@ -970,12 +1321,75 @@ impl VectorDb {
         .await
         .map_err(|e| AppError::Internal(format!("Failed to get storage used: {}", e)))?;
 
+        let reserved: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(bytes)::BIGINT, 0) FROM storage_quota_reservations WHERE owner = $1",
+        )
+        .bind(owner)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get reserved storage: {}", e)))?;
+
+        let used = committed.0 + reserved.0;
+        let additional: i64 = items.iter().map(|(_, bytes)| *bytes).sum();
+
+        if used + additional > max_bytes {
+            // Rollback rather than commit: the sweep above is not worth
+            // persisting on a rejected admission, and it will run again.
+            tx.rollback()
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to rollback tx: {}", e)))?;
+            crate::observability::observe_db(
+                "quota.try_reserve_storage",
+                "rejected",
+                started.elapsed(),
+            );
+            return Ok(Err(used));
+        }
+
+        for (id, bytes) in items {
+            sqlx::query(
+                "INSERT INTO storage_quota_reservations (id, owner, bytes, expires_at)
+                 VALUES ($1, $2, $3, NOW() + ($4 || ' seconds')::INTERVAL)
+                 ON CONFLICT (id) DO UPDATE SET
+                    owner = EXCLUDED.owner,
+                    bytes = EXCLUDED.bytes,
+                    expires_at = EXCLUDED.expires_at",
+            )
+            .bind(id)
+            .bind(owner)
+            .bind(bytes)
+            .bind(ttl_seconds.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to reserve storage: {}", e)))?;
+        }
+
         tx.commit()
             .await
             .map_err(|e| AppError::Internal(format!("Failed to commit tx: {}", e)))?;
 
-        crate::observability::observe_db("quota.storage_used_with_lock", "ok", started.elapsed());
-        Ok(row.0)
+        crate::observability::observe_db("quota.try_reserve_storage", "ok", started.elapsed());
+        Ok(Ok(()))
+    }
+
+    /// Release a storage reservation once the row has landed, or once the
+    /// write has terminally failed. Idempotent: releasing an unknown or
+    /// already-released id is a no-op, so retries and duplicate terminal
+    /// transitions are safe.
+    pub async fn release_storage_reservation(&self, reservation_id: &str) -> Result<(), AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query("DELETE FROM storage_quota_reservations WHERE id = $1")
+            .bind(reservation_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to release reservation: {}", e)));
+        crate::observability::observe_db(
+            "quota.release_reservation",
+            db_status(&result),
+            started.elapsed(),
+        );
+        result?;
+        Ok(())
     }
 
     // ============================================================

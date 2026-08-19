@@ -81,6 +81,11 @@ async fn mark_remember_job_failed(
     .bind(prepare_claim_token)
     .execute(state.db.pool())
     .await;
+
+    // Preparation failed after admission, so the write will never land.
+    // Release the reservation now rather than leaving the owner charged for it
+    // until the TTL backstop expires.
+    rate_limit::release_storage_quota(state, job_id).await;
 }
 
 async fn mark_remember_jobs_failed(state: &AppState, job_ids: &[String], msg: &str) {
@@ -94,6 +99,11 @@ async fn mark_remember_jobs_failed(state: &AppState, job_ids: &[String], msg: &s
     .bind(job_ids)
     .execute(state.db.pool())
     .await;
+
+    // Same as the single-job path: nothing will be inserted for these ids.
+    for job_id in job_ids {
+        rate_limit::release_storage_quota(state, job_id).await;
+    }
 }
 
 // ============================================================
@@ -149,7 +159,15 @@ fn spawn_prepare_remember_job(
                 let vector = vector_result?;
                 let encrypted = encrypted_result?;
 
-                rate_limit::check_storage_quota(&state, &owner, encrypted.len() as i64).await?;
+                // Reservation is keyed by job_id: the wallet worker releases it
+                // once the row lands or the job terminally fails.
+                rate_limit::reserve_storage_quota_one(
+                    &state,
+                    &owner,
+                    &job_id,
+                    encrypted.len() as i64,
+                )
+                .await?;
 
                 let wallet_index = state.key_pool.next_index().ok_or_else(|| {
                     AppError::Internal(
@@ -305,14 +323,21 @@ fn spawn_prepare_bulk_remember_job(
 
                 let mut prepared: Vec<(String, String, Vec<f32>, Vec<u8>)> =
                     Vec::with_capacity(prep_results.len());
-                let mut total_encrypted_bytes: i64 = 0;
                 for result in prep_results {
                     let (job_id, namespace, vector, encrypted) = result?;
-                    total_encrypted_bytes += encrypted.len() as i64;
                     prepared.push((job_id, namespace, vector, encrypted));
                 }
 
-                rate_limit::check_storage_quota(&state, &owner, total_encrypted_bytes).await?;
+                // One reservation per item, admitted all-or-nothing in a single
+                // locked transaction, so bulk keeps its previous semantics while
+                // each item can be released independently by its wallet job.
+                let quota_items: Vec<(String, i64)> = prepared
+                    .iter()
+                    .map(|(job_id, _, _, encrypted)| (job_id.clone(), encrypted.len() as i64))
+                    .collect();
+                let total_encrypted_bytes: i64 =
+                    quota_items.iter().map(|(_, bytes)| *bytes).sum();
+                rate_limit::reserve_storage_quota(&state, &owner, &quota_items).await?;
 
                 let mut bulk_items: Vec<BulkRememberItem> = Vec::with_capacity(prepared.len());
                 for (job_id, namespace, vector, encrypted) in prepared {
@@ -1352,14 +1377,23 @@ pub async fn remember_manual(
         .decode(&body.encrypted_data)
         .map_err(|e| AppError::BadRequest(format!("encrypted_data is not valid base64: {}", e)))?;
 
-    // Check storage quota before upload (quota enforcement stays here —
-    // the engine owns persistence, not policy).
-    rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
+    // Reserve storage quota before upload (quota enforcement stays here —
+    // the engine owns persistence, not policy). This path inserts inline, so
+    // the handler holds the reservation across store_blob and releases it
+    // either way once the row has landed or the write has failed.
+    let reservation_id = format!("manual-{}", uuid::Uuid::new_v4());
+    rate_limit::reserve_storage_quota_one(
+        &state,
+        owner,
+        &reservation_id,
+        encrypted_bytes.len() as i64,
+    )
+    .await?;
 
     // Persist via the storage engine: Walrus upload (pool key pays gas,
     // configured storage epochs, immediate transfer to owner) -> Postgres index row.
     // Same logic as before, now in engine/walrus_seal.rs::store_blob.
-    let mref = state
+    let stored = state
         .engine
         .store_blob(
             owner,
@@ -1374,7 +1408,12 @@ pub async fn remember_manual(
             crate::services::extractor::IMPORTANCE_STANDARD,
             Some(&auth.public_key),
         )
-        .await?;
+        .await;
+    // Release before propagating: on success the row now counts on its own, and
+    // on failure nothing was stored, so holding the reservation would only
+    // charge the owner for a write that never happened.
+    rate_limit::release_storage_quota(&state, &reservation_id).await;
+    let mref = stored?;
     let id = mref.id;
     let blob_id = mref.blob_id;
 
