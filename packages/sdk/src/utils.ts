@@ -159,7 +159,7 @@ export function sanitizeServerError(
             // "Walrus Memory server error (401): <no message>". Point first-time
             // MCP callers at memwal_login instead of a blank body.
             message:
-                "Walrus Memory server error (401): Not authenticated. Run memwal_login to connect your Sui wallet.",
+                "Walrus Memory isn't signed in. Call the memwal_login tool, then retry.",
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
         };

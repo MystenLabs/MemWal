@@ -8,7 +8,7 @@ test("401 without a session points at memwal_login instead of <no message>", () 
     assert.equal(serverCode, "AUTH_REJECTED");
     assert.equal(
         message,
-        "Walrus Memory server error (401): Not authenticated. Run memwal_login to connect your Sui wallet."
+        "Walrus Memory isn't signed in. Call the memwal_login tool, then retry."
     );
     assert.doesNotMatch(message, /<no message>/);
 });
