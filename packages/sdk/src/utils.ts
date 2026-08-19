@@ -155,8 +155,8 @@ export function sanitizeServerError(
 ): { message: string; raw: string; serverCode?: string } {
     // Number() so a string "401" (some MCP / HTTP paths) still hits this branch.
     if (Number(status) === 401) {
-        // Empty body = no-session / bare relayer 401 (#696). Non-empty keeps
-        // the WALM-318 AUTH_REJECTED triage (wrong key / account / network).
+        // Empty body = no-session / bare relayer 401. Non-empty keeps
+        // the AUTH_REJECTED triage (wrong key / account / network).
         const empty = !String(rawBody ?? "").trim();
         return {
             message: empty
