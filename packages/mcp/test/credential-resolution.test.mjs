@@ -1,0 +1,176 @@
+/**
+ * Credential resolution (GH #628 / WALM-361).
+ *
+ * Credentials live in a single global file, so authenticating from one project
+ * silently repoints every other project at a different account and delegate
+ * key. The reporter caught it via the `label` field before writing anything;
+ * had they written, memories would have landed on the wrong account, on
+ * immutable storage, with no delete path.
+ *
+ * Decision recorded on WALM-361: a project-local `.memwal/credentials.json`
+ * takes precedence over `~/.memwal/credentials.json`, npmrc/git-style. Purely
+ * additive — a machine with no project-local file behaves exactly as before.
+ *
+ * `auth.js` resolves paths at call time, so each test sets HOME and cwd first
+ * and then imports with a cache-busting query, the pattern used by
+ * login-preflight.test.mjs.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+
+const GLOBAL_ACCOUNT = "0x" + "a".repeat(64);
+const PROJECT_ACCOUNT = "0x" + "b".repeat(64);
+
+function makeCreds(accountId, label) {
+    return {
+        delegatePrivateKey: "c".repeat(64),
+        delegatePublicKeyHex: "d".repeat(64),
+        delegateAddress: "0x" + "e".repeat(64),
+        walletAddress: "0x" + "f".repeat(64),
+        accountId,
+        packageId: "0x" + "1".repeat(64),
+        relayerUrl: "https://relayer.example",
+        label,
+        createdAt: new Date(0).toISOString(),
+        version: 1,
+    };
+}
+
+function writeCredsAt(root, accountId, label) {
+    const path = join(root, ".memwal", "credentials.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(makeCreds(accountId, label)), { mode: 0o600 });
+    return path;
+}
+
+/** Fresh sandbox: a HOME and a working directory, with the module re-imported
+ * so it observes them. Returns the module plus both roots. */
+async function sandbox(t, { global: globalAccount, project: projectAccount }) {
+    // realpath: on macOS `/var` is a symlink to `/private/var`, and
+    // `process.cwd()` reports the resolved form — so the raw mkdtemp path would
+    // never match what the module computes.
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "memwal-creds-home-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "memwal-creds-cwd-")));
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    const prevCwd = process.cwd();
+
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.chdir(cwd);
+
+    if (globalAccount) writeCredsAt(home, globalAccount, "Global");
+    if (projectAccount) writeCredsAt(cwd, projectAccount, "Project");
+
+    t.after(() => {
+        process.chdir(prevCwd);
+        process.env.HOME = prevHome;
+        process.env.USERPROFILE = prevProfile;
+        rmSync(home, { recursive: true, force: true });
+        rmSync(cwd, { recursive: true, force: true });
+    });
+
+    const auth = await import(`../dist/auth.js?walm361=${Date.now()}-${Math.random()}`);
+    return { auth, home, cwd };
+}
+
+test("a project-local credentials file takes precedence over the global one", async (t) => {
+    const { auth, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+
+    assert.equal(
+        auth.loadCreds()?.accountId,
+        PROJECT_ACCOUNT,
+        "working-directory credentials should win",
+    );
+    assert.equal(auth.credsPath(), join(cwd, ".memwal", "credentials.json"));
+});
+
+test("the global file is still used when the working directory has none", async (t) => {
+    const { auth, home } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+
+    assert.equal(
+        auth.loadCreds()?.accountId,
+        GLOBAL_ACCOUNT,
+        "existing single-file setups must be unaffected",
+    );
+    assert.equal(auth.credsPath(), join(home, ".memwal", "credentials.json"));
+});
+
+test("saveCreds writes back to the project-local file when that is the one in use", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+
+    const updated = makeCreds(PROJECT_ACCOUNT, "Renamed");
+    auth.saveCreds(updated);
+
+    const projectFile = JSON.parse(
+        (await import("node:fs")).readFileSync(join(cwd, ".memwal", "credentials.json"), "utf8"),
+    );
+    const globalFile = JSON.parse(
+        (await import("node:fs")).readFileSync(join(home, ".memwal", "credentials.json"), "utf8"),
+    );
+
+    assert.equal(projectFile.label, "Renamed", "the in-use file should be updated");
+    assert.equal(
+        globalFile.accountId,
+        GLOBAL_ACCOUNT,
+        "the global file must not be touched when a project-local one is in use",
+    );
+});
+
+test("replacing credentials for a different account backs up the outgoing file", async (t) => {
+    const { auth, home } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+
+    auth.saveCreds(makeCreds(PROJECT_ACCOUNT, "Incoming"));
+
+    const dir = join(home, ".memwal");
+    const backups = (await import("node:fs"))
+        .readdirSync(dir)
+        .filter((f) => f.startsWith("credentials.backup"));
+    assert.equal(backups.length, 1, `expected one backup, saw: ${backups.join(", ")}`);
+
+    const backed = JSON.parse(
+        (await import("node:fs")).readFileSync(join(dir, backups[0]), "utf8"),
+    );
+    assert.equal(
+        backed.accountId,
+        GLOBAL_ACCOUNT,
+        "the backup must hold the credentials being replaced",
+    );
+    assert.equal(existsSync(join(dir, "credentials.json")), true);
+});
+
+test("saveCreds reports what it replaced, so callers can warn with both account ids", async (t) => {
+    const { auth, home } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+
+    const result = auth.saveCreds(makeCreds(PROJECT_ACCOUNT, "Incoming"));
+
+    assert.equal(result.path, join(home, ".memwal", "credentials.json"));
+    assert.equal(result.replacedAccountId, GLOBAL_ACCOUNT);
+    assert.ok(
+        result.backedUpTo?.includes("credentials.backup"),
+        `expected a backup path, got ${result.backedUpTo}`,
+    );
+});
+
+test("a same-account save reports no replacement and writes no backup", async (t) => {
+    const { auth, home } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+
+    const result = auth.saveCreds(makeCreds(GLOBAL_ACCOUNT, "Relabelled"));
+
+    assert.equal(result.replacedAccountId, undefined, "same account is not a replacement");
+    assert.equal(result.backedUpTo, undefined, "routine re-saves must not churn backups");
+    const dir = join(home, ".memwal");
+    const backups = (await import("node:fs"))
+        .readdirSync(dir)
+        .filter((f) => f.startsWith("credentials.backup"));
+    assert.equal(backups.length, 0);
+});

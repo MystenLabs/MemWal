@@ -403,7 +403,18 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
                     createdAt: new Date().toISOString(),
                     version: 1,
                 };
-                saveCreds(creds);
+                const saved = saveCreds(creds);
+                if (saved.replacedAccountId) {
+                    // Both ids, because "your credentials changed" is useless
+                    // without knowing which account you left and which you are
+                    // now on — the silent swap in GH #628.
+                    note(
+                        `Replaced credentials for a DIFFERENT account in ${saved.path}:\n` +
+                            `  was: ${saved.replacedAccountId}\n` +
+                            `  now: ${creds.accountId}` +
+                            (saved.backedUpTo ? `\n  previous file backed up to ${saved.backedUpTo}` : ""),
+                    );
+                }
                 log.info("login.success", {
                     accountId: creds.accountId,
                     delegateAddress: creds.delegateAddress,
