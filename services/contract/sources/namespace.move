@@ -48,8 +48,8 @@ module memwal::namespace {
     const ENotCurrentKeyVersion: u64 = 26;
     const ECannotShredCurrentVersion: u64 = 27;
     const EInvalidSealId: u64 = 28;
-    const ETooManyKeyVersions: u64 = 29;
     const EShareRequiresRead: u64 = 30;
+    const EInvalidCommitment: u64 = 31;
 
     /// Global behavior version. Older package bytecode fails after the shared
     /// registry advances; the current package then becomes the only active
@@ -58,8 +58,9 @@ module memwal::namespace {
     const VERSION: u64 = 1;
     const MAX_LABEL_LENGTH: u64 = 64;
     const MAX_WRAPPED_DEK_LENGTH: u64 = 16384;
-    const MAX_KEY_VERSIONS: u64 = 10000;
     const SEAL_ID_VERSION_LENGTH: u64 = 8;
+    /// Blake2b-256 / SHA-256 digest bound for `write_fence` commitments.
+    const COMMITMENT_LENGTH: u64 = 32;
 
     const PERMISSION_READ: u8 = 1;
     const PERMISSION_WRITE: u8 = 2;
@@ -69,8 +70,10 @@ module memwal::namespace {
     public struct NamespaceRegistry has key {
         id: UID,
         /// blake2b256(BCS(account_id) || BCS(label)) -> namespace object ID.
-        /// Entries are permanent tombstones: a destroyed namespace label is not
-        /// reused, preventing old ciphertext from being rebound to new policy.
+        /// Initialized or shredded namespaces stay as permanent tombstones so
+        /// old ciphertext cannot be rebound to a new policy under the same
+        /// label. An uninitialized reservation may be released by
+        /// `cancel_uninitialized_namespace` before any DEK exists.
         namespaces: Table<vector<u8>, ID>,
         version: u64,
     }
@@ -96,8 +99,11 @@ module memwal::namespace {
     ///
     /// Creation and key initialization are intentionally separate: the Seal ID
     /// includes this object's ID, which is only known after creation. `destroyed`
-    /// is a terminal O(1) crypto-shred latch; Seal approval checks it before any
-    /// per-version state.
+    /// is a terminal O(1) policy latch; Seal approval checks it before any
+    /// per-version state. That latch is the namespace-level erasure primitive:
+    /// wrapped DEKs may remain as public Seal ciphertext, but the committee
+    /// will never unwrap them once this bit is set. Per-version shred additionally
+    /// wipes stored bytes for a retired cohort and refunds that field.
     public struct MemoryNamespace has key {
         id: UID,
         account_id: ID,
@@ -126,6 +132,7 @@ module memwal::namespace {
 
     public struct NamespaceInitialized has copy, drop {
         namespace_id: ID,
+        account_id: ID,
         key_version: u64,
         key_commitment: vector<u8>,
         initialized_at_ms: u64,
@@ -133,6 +140,7 @@ module memwal::namespace {
 
     public struct AccessUpdated has copy, drop {
         namespace_id: ID,
+        account_id: ID,
         principal: address,
         old_permissions: u8,
         new_permissions: u8,
@@ -142,6 +150,7 @@ module memwal::namespace {
 
     public struct AccessRevoked has copy, drop {
         namespace_id: ID,
+        account_id: ID,
         principal: address,
         old_permissions: u8,
         revoked_by: address,
@@ -152,6 +161,7 @@ module memwal::namespace {
 
     public struct KeyRotated has copy, drop {
         namespace_id: ID,
+        account_id: ID,
         previous_version: u64,
         new_version: u64,
         key_commitment: vector<u8>,
@@ -161,6 +171,7 @@ module memwal::namespace {
 
     public struct KeyVersionShredded has copy, drop {
         namespace_id: ID,
+        account_id: ID,
         key_version: u64,
         key_commitment: vector<u8>,
         shredded_at_ms: u64,
@@ -168,22 +179,45 @@ module memwal::namespace {
 
     public struct NamespaceDeactivated has copy, drop {
         namespace_id: ID,
+        account_id: ID,
         owner: address,
         deactivated_at_ms: u64,
     }
 
     public struct NamespaceReactivated has copy, drop {
         namespace_id: ID,
+        account_id: ID,
         owner: address,
         reactivated_at_ms: u64,
     }
 
     public struct NamespaceDestroyed has copy, drop {
         namespace_id: ID,
+        account_id: ID,
         owner: address,
         key_initialized: bool,
         last_key_version: u64,
         destroyed_at_ms: u64,
+    }
+
+    public struct NamespaceCancelled has copy, drop {
+        namespace_id: ID,
+        account_id: ID,
+        owner: address,
+        label: String,
+        cancelled_at_ms: u64,
+    }
+
+    /// On-chain write receipt for WALM-352 receipts / hash-chain anchoring.
+    /// The contract stores only the digest; the relayer binds it to the Walrus
+    /// blob in the same PTB.
+    public struct MemoryWritten has copy, drop {
+        namespace_id: ID,
+        account_id: ID,
+        key_version: u64,
+        commitment: vector<u8>,
+        writer: address,
+        written_at_ms: u64,
     }
 
     public struct NamespaceRegistryMigrated has copy, drop {
@@ -300,6 +334,7 @@ module memwal::namespace {
         namespace.active = true;
         event::emit(NamespaceInitialized {
             namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
             key_version: 0,
             key_commitment: commitment,
             initialized_at_ms: now,
@@ -323,6 +358,7 @@ module memwal::namespace {
         namespace.active = false;
         event::emit(NamespaceDeactivated {
             namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
             owner: namespace.owner,
             deactivated_at_ms: clock.timestamp_ms(),
         });
@@ -345,13 +381,18 @@ module memwal::namespace {
         namespace.active = true;
         event::emit(NamespaceReactivated {
             namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
             owner: namespace.owner,
             reactivated_at_ms: clock.timestamp_ms(),
         });
     }
 
-    /// Terminal, constant-cost namespace crypto-shred. All versions are denied
-    /// by `seal_approve` through this latch; no unbounded table walk is needed.
+    /// Terminal, constant-cost namespace crypto-shred. This is a policy latch,
+    /// not a table walk: `destroyed` makes `seal_approve` deny every version, so
+    /// the Seal committee will never unwrap remaining public DEK ciphertext.
+    /// That is the PRD erasure primitive. Per-version shred additionally wipes
+    /// stored bytes for a retired cohort; namespace shred does not, because an
+    /// unbounded dynamic-field walk would make erasure itself DoS-able.
     entry fun crypto_shred_namespace(
         registry: &NamespaceRegistry,
         account_registry: &AccountRegistry,
@@ -368,10 +409,41 @@ module memwal::namespace {
         namespace.destroyed = true;
         event::emit(NamespaceDestroyed {
             namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
             owner: namespace.owner,
             key_initialized: namespace.key_initialized,
             last_key_version: namespace.current_key_version,
             destroyed_at_ms: clock.timestamp_ms(),
+        });
+    }
+
+    /// Release an unused two-phase reservation. Allowed only before
+    /// `initialize_key`: no DEK exists, so no ciphertext can be rebound. The
+    /// registry entry is removed so the label can be reused; the orphaned
+    /// object is latched destroyed so it can never be initialized later.
+    entry fun cancel_uninitialized_namespace(
+        registry: &mut NamespaceRegistry,
+        account_registry: &AccountRegistry,
+        account: &MemWalAccount,
+        namespace: &mut MemoryNamespace,
+        clock: &Clock,
+        ctx: &TxContext,
+    ) {
+        assert_linked(registry, account_registry, account, namespace);
+        assert_owner(namespace, ctx.sender());
+        assert!(!namespace.destroyed, ENamespaceDestroyed);
+        assert!(!namespace.key_initialized, EKeyAlreadyInitialized);
+
+        let uniqueness_key = namespace_key(namespace.account_id, &namespace.label);
+        registry.namespaces.remove(uniqueness_key);
+        namespace.active = false;
+        namespace.destroyed = true;
+        event::emit(NamespaceCancelled {
+            namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
+            owner: namespace.owner,
+            label: namespace.label,
+            cancelled_at_ms: clock.timestamp_ms(),
         });
     }
 
@@ -418,6 +490,7 @@ module memwal::namespace {
         };
         event::emit(AccessUpdated {
             namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
             principal,
             old_permissions,
             new_permissions,
@@ -428,8 +501,14 @@ module memwal::namespace {
 
     /// Remove all permissions and atomically rotate the DEK. Every valid ACL
     /// role contains READ, including SHARE administrators, so every full revoke
-    /// closes future ciphertext access. A non-owner revoker must already have
-    /// READ before it may supply the replacement key.
+    /// closes future ciphertext access.
+    ///
+    /// A non-owner revoker must already have READ before it may supply the
+    /// replacement key. That is an accepted trust assumption, not extra privilege:
+    /// a principal with current READ already holds historical plaintext, so they
+    /// can already leak it off chain. Letting them wrap K_{v+1} only excludes the
+    /// revoked principal from *future* ciphertext. A garbage DEK is owner-recoverable
+    /// via `rotate_key`.
     entry fun revoke_access(
         registry: &NamespaceRegistry,
         account_registry: &AccountRegistry,
@@ -451,6 +530,7 @@ module memwal::namespace {
         rotate_key_internal(namespace, new_wrapped_dek, clock, ctx.sender());
         event::emit(AccessRevoked {
             namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
             principal,
             old_permissions,
             revoked_by: ctx.sender(),
@@ -504,6 +584,7 @@ module memwal::namespace {
         state.shredded_at_ms.fill(now);
         event::emit(KeyVersionShredded {
             namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
             key_version,
             key_commitment: commitment,
             shredded_at_ms: now,
@@ -514,9 +595,14 @@ module memwal::namespace {
     // Seal and write authorization
     // ============================================================
 
-    /// Seal policy for a namespace DEK version. The Seal id ends with
-    /// `BCS(namespace_object_id) || BCS(key_version)`; Seal may prepend its
-    /// immutable package identity.
+    /// Seal policy for a namespace DEK version.
+    ///
+    /// Canonical Seal ID:
+    /// `[optional prefix] || BCS(namespace_object_id) || BCS(key_version)`
+    /// where the mandatory suffix is exactly 40 bytes: 32-byte object ID then
+    /// little-endian BCS `u64` version. Seal may prepend a domain-separation
+    /// prefix (typically `BCS(package_id)`). The contract checks suffix equality
+    /// only; SDKs must use the same BCS encoding (see golden vectors in tests).
     entry fun seal_approve(
         id: vector<u8>,
         registry: &NamespaceRegistry,
@@ -532,20 +618,39 @@ module memwal::namespace {
     }
 
     /// Linearization fence to place in the same PTB that persists/transfers a
-    /// new Walrus Blob. It rejects a stale version and enforces effective WRITE.
+    /// new Walrus Blob. It rejects a stale version, enforces effective WRITE,
+    /// and emits a `MemoryWritten` receipt binding `(namespace, key_version,
+    /// commitment, writer)` for WALM-352 receipts and hash-chain anchoring.
+    /// `commitment` must be a 32-byte content digest; the contract does not
+    /// interpret the bytes beyond that length bound.
+    ///
+    /// The on-chain ACL table is not enumerable. Authorization is authoritative
+    /// here; WALM-352's indexer is the projection/display layer, rebuilt from
+    /// `AccessUpdated` / `AccessRevoked` plus this write receipt stream.
     entry fun write_fence(
         id: vector<u8>,
         registry: &NamespaceRegistry,
         account_registry: &AccountRegistry,
         account: &MemWalAccount,
         namespace: &MemoryNamespace,
+        commitment: vector<u8>,
+        clock: &Clock,
         ctx: &TxContext,
     ) {
         assert_ready(registry, account_registry, account, namespace);
+        assert!(commitment.length() == COMMITMENT_LENGTH, EInvalidCommitment);
         let key_version = assert_seal_id(&id, namespace);
         assert!(key_version == namespace.current_key_version, ENotCurrentKeyVersion);
         assert_key_decryptable(namespace, key_version);
         assert!(can_write(namespace, ctx.sender()), ENoWriteAccess);
+        event::emit(MemoryWritten {
+            namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
+            key_version,
+            commitment,
+            writer: ctx.sender(),
+            written_at_ms: clock.timestamp_ms(),
+        });
     }
 
     // ============================================================
@@ -568,7 +673,7 @@ module memwal::namespace {
     public fun created_at_ms(namespace: &MemoryNamespace): u64 { namespace.created_at_ms }
     public fun registry_version(registry: &NamespaceRegistry): u64 { registry.version }
     public fun current_version(): u64 { VERSION }
-    public fun max_key_versions(): u64 { MAX_KEY_VERSIONS }
+    public fun commitment_length(): u64 { COMMITMENT_LENGTH }
 
     public fun has_namespace(
         registry: &NamespaceRegistry,
@@ -699,7 +804,9 @@ module memwal::namespace {
     }
 
     /// Supplying a new wrapped DEK means choosing its plaintext before Seal
-    /// encryption. Only the owner or an already-readable delegate may rotate.
+    /// encryption. Only the owner or a principal that already has effective READ
+    /// may rotate: they already hold historical plaintext, so wrapping K_{v+1}
+    /// grants no extra confidentiality privilege.
     fun assert_can_supply_key(namespace: &MemoryNamespace, caller: address) {
         if (caller == namespace.owner) return;
         assert!(can_read(namespace, caller), ENoReadAccess);
@@ -733,7 +840,9 @@ module memwal::namespace {
         rotated_by: address,
     ) {
         assert_valid_wrapped_dek(&new_wrapped_dek);
-        assert!(namespace.current_key_version < MAX_KEY_VERSIONS - 1, ETooManyKeyVersions);
+        // No artificial version cap: `Table` is O(1) dynamic fields, and Move
+        // already aborts on u64 overflow. A 10_000 cap would deadlock revoke
+        // (which always rotates) and permanently tombstone the label.
         let now = clock.timestamp_ms();
         let previous_version = namespace.current_key_version;
         namespace.key_versions.borrow_mut(previous_version).retired_at_ms.fill(now);
@@ -749,6 +858,7 @@ module memwal::namespace {
         namespace.current_key_version = new_version;
         event::emit(KeyRotated {
             namespace_id: object::id(namespace),
+            account_id: namespace.account_id,
             previous_version,
             new_version,
             key_commitment: commitment,
@@ -825,6 +935,11 @@ module memwal::namespace {
     #[test_only]
     public fun test_has_suffix(data: &vector<u8>, suffix: &vector<u8>): bool {
         has_suffix(data, suffix)
+    }
+
+    #[test_only]
+    public fun test_decode_trailing_u64(id: &vector<u8>): u64 {
+        decode_trailing_u64(id)
     }
 
     #[test_only]

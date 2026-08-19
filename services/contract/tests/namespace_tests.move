@@ -222,14 +222,18 @@ module memwal::namespace_tests {
             let account_registry = scenario.take_shared<AccountRegistry>();
             let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
             let ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
+            let clock = clock::create_for_testing(scenario.ctx());
             namespace::write_fence(
                 namespace::seal_key_id(namespace_id, key_version),
                 &ns_registry,
                 &account_registry,
                 &managed,
                 &ns,
+                wrapped(1),
+                &clock,
                 scenario.ctx(),
             );
+            clock::destroy_for_testing(clock);
             test_scenario::return_shared(ns);
             test_scenario::return_shared(managed);
             test_scenario::return_shared(account_registry);
@@ -1187,8 +1191,7 @@ module memwal::namespace_tests {
     }
 
     #[test]
-    #[expected_failure(abort_code = namespace::ETooManyKeyVersions)]
-    fun test_key_version_limit_blocks_rotation() {
+    fun test_high_key_version_still_rotates() {
         let mut scenario = test_scenario::begin(OWNER);
         let (account_id, namespace_id) = setup_namespace(&mut scenario);
         scenario.next_tx(OWNER);
@@ -1197,9 +1200,12 @@ module memwal::namespace_tests {
             let account_registry = scenario.take_shared<AccountRegistry>();
             let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
             let mut ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
-            namespace::test_set_current_key_version(&mut ns, namespace::max_key_versions() - 1, wrapped(8));
+            // Artificial 10_000 caps are gone: a high existing version must still
+            // rotate, or revoke would deadlock and tombstone the label.
+            namespace::test_set_current_key_version(&mut ns, 9999, wrapped(8));
             let clock = clock::create_for_testing(scenario.ctx());
             namespace::rotate_key(&ns_registry, &account_registry, &managed, &mut ns, wrapped(9), &clock, scenario.ctx());
+            assert!(namespace::current_key_version(&ns) == 10000);
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(ns);
             test_scenario::return_shared(managed);
@@ -1307,7 +1313,7 @@ module memwal::namespace_tests {
             let mut ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
             // A discontinuous high-version fixture proves destroy does not walk
             // 0..current; production histories stay contiguous.
-            namespace::test_set_current_key_version(&mut ns, namespace::max_key_versions() - 1, wrapped(8));
+            namespace::test_set_current_key_version(&mut ns, 9999, wrapped(8));
             let clock = clock::create_for_testing(scenario.ctx());
             namespace::crypto_shred_namespace(
                 &ns_registry,
@@ -1846,7 +1852,7 @@ module memwal::namespace_tests {
             assert!(namespace::permissions(&ns, D3) == 0);
             assert!(namespace::current_key_version(&ns) == 0);
             assert!(namespace::current_version() == 1);
-            assert!(namespace::max_key_versions() == 10000);
+            assert!(namespace::commitment_length() == 32);
             assert!(namespace::has_namespace(&registry, account_id, namespace::label(&ns)));
             test_scenario::return_shared(ns);
             test_scenario::return_shared(registry);
@@ -2123,5 +2129,131 @@ module memwal::namespace_tests {
         };
         initialize_namespace(&mut scenario, account_id, namespace_id, wrapped(18));
         scenario.end();
+    }
+
+    #[test]
+    fun test_cancel_uninitialized_namespace_releases_label() {
+        let mut scenario = test_scenario::begin(OWNER);
+        let account_id = setup_account(&mut scenario);
+        let first_id = create_namespace(&mut scenario, account_id, string::utf8(b"reusable"));
+        scenario.next_tx(OWNER);
+        {
+            let mut ns_registry = scenario.take_shared<NamespaceRegistry>();
+            let account_registry = scenario.take_shared<AccountRegistry>();
+            let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
+            let mut ns = scenario.take_shared_by_id<MemoryNamespace>(first_id);
+            let clock = clock::create_for_testing(scenario.ctx());
+            namespace::cancel_uninitialized_namespace(
+                &mut ns_registry,
+                &account_registry,
+                &managed,
+                &mut ns,
+                &clock,
+                scenario.ctx(),
+            );
+            assert!(namespace::is_destroyed(&ns));
+            assert!(!namespace::is_key_initialized(&ns));
+            assert!(!namespace::has_namespace(&ns_registry, account_id, &string::utf8(b"reusable")));
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(ns);
+            test_scenario::return_shared(managed);
+            test_scenario::return_shared(account_registry);
+            test_scenario::return_shared(ns_registry);
+        };
+        let reused_id = create_namespace(&mut scenario, account_id, string::utf8(b"reusable"));
+        assert!(reused_id != first_id);
+        initialize_namespace(&mut scenario, account_id, reused_id, wrapped(21));
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = namespace::EKeyAlreadyInitialized)]
+    fun test_cancel_initialized_namespace_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        let (account_id, namespace_id) = setup_namespace(&mut scenario);
+        scenario.next_tx(OWNER);
+        {
+            let mut ns_registry = scenario.take_shared<NamespaceRegistry>();
+            let account_registry = scenario.take_shared<AccountRegistry>();
+            let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
+            let mut ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
+            let clock = clock::create_for_testing(scenario.ctx());
+            namespace::cancel_uninitialized_namespace(
+                &mut ns_registry,
+                &account_registry,
+                &managed,
+                &mut ns,
+                &clock,
+                scenario.ctx(),
+            );
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(ns);
+            test_scenario::return_shared(managed);
+            test_scenario::return_shared(account_registry);
+            test_scenario::return_shared(ns_registry);
+        };
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = namespace::EInvalidCommitment)]
+    fun test_write_fence_rejects_wrong_commitment_length() {
+        let mut scenario = test_scenario::begin(OWNER);
+        let (account_id, namespace_id) = setup_namespace(&mut scenario);
+        scenario.next_tx(OWNER);
+        {
+            let ns_registry = scenario.take_shared<NamespaceRegistry>();
+            let account_registry = scenario.take_shared<AccountRegistry>();
+            let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
+            let ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
+            let clock = clock::create_for_testing(scenario.ctx());
+            namespace::write_fence(
+                namespace::seal_key_id(namespace_id, 0),
+                &ns_registry,
+                &account_registry,
+                &managed,
+                &ns,
+                b"too-short",
+                &clock,
+                scenario.ctx(),
+            );
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(ns);
+            test_scenario::return_shared(managed);
+            test_scenario::return_shared(account_registry);
+            test_scenario::return_shared(ns_registry);
+        };
+        scenario.end();
+    }
+
+    #[test]
+    fun test_seal_id_golden_vectors_are_little_endian_bcs() {
+        // Cross-language golden vectors for `BCS(namespace_id) || BCS(u64)`.
+        // namespace_id = 0x...cafe, versions 1 and 10000.
+        let namespace_id = object::id_from_address(@0xcafe);
+        let v1 = namespace::seal_key_id(namespace_id, 1);
+        assert!(v1.length() == 40);
+        assert!(namespace::test_decode_trailing_u64(&v1) == 1);
+        assert!(v1[32] == 1);
+        let mut i = 33;
+        while (i < 40) {
+            assert!(v1[i] == 0);
+            i = i + 1;
+        };
+
+        let v10000 = namespace::seal_key_id(namespace_id, 10000);
+        assert!(namespace::test_decode_trailing_u64(&v10000) == 10000);
+        assert!(v10000[32] == 0x10);
+        assert!(v10000[33] == 0x27);
+        i = 34;
+        while (i < 40) {
+            assert!(v10000[i] == 0);
+            i = i + 1;
+        };
+
+        let mut prefixed = x"aabb";
+        prefixed.append(v1);
+        assert!(namespace::test_has_suffix(&prefixed, &v1));
+        assert!(namespace::test_decode_trailing_u64(&prefixed) == 1);
     }
 }
