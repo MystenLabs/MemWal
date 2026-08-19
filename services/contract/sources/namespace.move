@@ -208,9 +208,10 @@ module memwal::namespace {
         cancelled_at_ms: u64,
     }
 
-    /// On-chain write receipt for WALM-352 receipts / hash-chain anchoring.
-    /// The contract stores only the digest; the relayer binds it to the Walrus
-    /// blob in the same PTB.
+    /// Caller-supplied 32-byte digest emitted as a write receipt. This is not a
+    /// verified Walrus blob binding and not a hash-chain node: the contract
+    /// checks length only. WALM-352's relayer/indexer binds the digest to the
+    /// blob and builds the chain off chain.
     public struct MemoryWritten has copy, drop {
         namespace_id: ID,
         account_id: ID,
@@ -421,14 +422,14 @@ module memwal::namespace {
     /// `initialize_key`: no DEK exists, so no ciphertext can be rebound. The
     /// registry entry is removed so the label can be reused; the orphaned
     /// object is latched destroyed so it can never be initialized later.
-    entry fun cancel_uninitialized_namespace(
+    public fun cancel_uninitialized_namespace(
         registry: &mut NamespaceRegistry,
         account_registry: &AccountRegistry,
         account: &MemWalAccount,
         namespace: &mut MemoryNamespace,
         clock: &Clock,
         ctx: &TxContext,
-    ) {
+    ): NamespaceCancelled {
         assert_linked(registry, account_registry, account, namespace);
         assert_owner(namespace, ctx.sender());
         assert!(!namespace.destroyed, ENamespaceDestroyed);
@@ -438,13 +439,15 @@ module memwal::namespace {
         registry.namespaces.remove(uniqueness_key);
         namespace.active = false;
         namespace.destroyed = true;
-        event::emit(NamespaceCancelled {
+        let cancelled = NamespaceCancelled {
             namespace_id: object::id(namespace),
             account_id: namespace.account_id,
             owner: namespace.owner,
             label: namespace.label,
             cancelled_at_ms: clock.timestamp_ms(),
-        });
+        };
+        event::emit(cancelled);
+        cancelled
     }
 
     // ============================================================
@@ -597,12 +600,13 @@ module memwal::namespace {
 
     /// Seal policy for a namespace DEK version.
     ///
-    /// Canonical Seal ID:
-    /// `[optional prefix] || BCS(namespace_object_id) || BCS(key_version)`
-    /// where the mandatory suffix is exactly 40 bytes: 32-byte object ID then
-    /// little-endian BCS `u64` version. Seal may prepend a domain-separation
-    /// prefix (typically `BCS(package_id)`). The contract checks suffix equality
-    /// only; SDKs must use the same BCS encoding (see golden vectors in tests).
+    /// Canonical Seal ID suffix (exactly 40 bytes, little-endian BCS):
+    /// `BCS(namespace_object_id) || BCS(key_version)`.
+    /// Example (`namespace_id = 0x...cafe`, `key_version = 1`):
+    /// `0000...00cafe || 0100000000000000`.
+    /// Seal may prepend a domain-separation prefix (typically `BCS(package_id)`).
+    /// The contract checks suffix equality only; SDKs must emit the same 40-byte
+    /// tail (hard-coded golden vectors live in `namespace_tests`).
     entry fun seal_approve(
         id: vector<u8>,
         registry: &NamespaceRegistry,
@@ -619,15 +623,15 @@ module memwal::namespace {
 
     /// Linearization fence to place in the same PTB that persists/transfers a
     /// new Walrus Blob. It rejects a stale version, enforces effective WRITE,
-    /// and emits a `MemoryWritten` receipt binding `(namespace, key_version,
-    /// commitment, writer)` for WALM-352 receipts and hash-chain anchoring.
-    /// `commitment` must be a 32-byte content digest; the contract does not
-    /// interpret the bytes beyond that length bound.
+    /// and emits `MemoryWritten` with the caller-supplied 32-byte digest.
+    /// The digest is not hashed or bound to the Seal ID / blob on chain;
+    /// WALM-352 binds it to the Walrus object and extends the hash chain.
     ///
-    /// The on-chain ACL table is not enumerable. Authorization is authoritative
-    /// here; WALM-352's indexer is the projection/display layer, rebuilt from
-    /// `AccessUpdated` / `AccessRevoked` plus this write receipt stream.
-    entry fun write_fence(
+    /// The ACL `Table` is not enumerable. On-chain authorization is the gate;
+    /// WALM-352's indexer is the display projection. Rebuild that projection
+    /// from genesis or a trusted snapshot — an unchanged grant emits nothing,
+    /// so a mid-stream checkpoint cannot recover the full ACL.
+    public fun write_fence(
         id: vector<u8>,
         registry: &NamespaceRegistry,
         account_registry: &AccountRegistry,
@@ -636,21 +640,23 @@ module memwal::namespace {
         commitment: vector<u8>,
         clock: &Clock,
         ctx: &TxContext,
-    ) {
+    ): MemoryWritten {
         assert_ready(registry, account_registry, account, namespace);
         assert!(commitment.length() == COMMITMENT_LENGTH, EInvalidCommitment);
         let key_version = assert_seal_id(&id, namespace);
         assert!(key_version == namespace.current_key_version, ENotCurrentKeyVersion);
         assert_key_decryptable(namespace, key_version);
         assert!(can_write(namespace, ctx.sender()), ENoWriteAccess);
-        event::emit(MemoryWritten {
+        let written = MemoryWritten {
             namespace_id: object::id(namespace),
             account_id: namespace.account_id,
             key_version,
             commitment,
             writer: ctx.sender(),
             written_at_ms: clock.timestamp_ms(),
-        });
+        };
+        event::emit(written);
+        written
     }
 
     // ============================================================
@@ -674,6 +680,19 @@ module memwal::namespace {
     public fun registry_version(registry: &NamespaceRegistry): u64 { registry.version }
     public fun current_version(): u64 { VERSION }
     public fun commitment_length(): u64 { COMMITMENT_LENGTH }
+
+    public fun memory_written_namespace_id(event: &MemoryWritten): ID { event.namespace_id }
+    public fun memory_written_account_id(event: &MemoryWritten): ID { event.account_id }
+    public fun memory_written_key_version(event: &MemoryWritten): u64 { event.key_version }
+    public fun memory_written_commitment(event: &MemoryWritten): &vector<u8> { &event.commitment }
+    public fun memory_written_writer(event: &MemoryWritten): address { event.writer }
+    public fun memory_written_written_at_ms(event: &MemoryWritten): u64 { event.written_at_ms }
+
+    public fun namespace_cancelled_namespace_id(event: &NamespaceCancelled): ID { event.namespace_id }
+    public fun namespace_cancelled_account_id(event: &NamespaceCancelled): ID { event.account_id }
+    public fun namespace_cancelled_owner(event: &NamespaceCancelled): address { event.owner }
+    public fun namespace_cancelled_label(event: &NamespaceCancelled): &String { &event.label }
+    public fun namespace_cancelled_cancelled_at_ms(event: &NamespaceCancelled): u64 { event.cancelled_at_ms }
 
     public fun has_namespace(
         registry: &NamespaceRegistry,

@@ -223,7 +223,7 @@ module memwal::namespace_tests {
             let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
             let ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
             let clock = clock::create_for_testing(scenario.ctx());
-            namespace::write_fence(
+            let written = namespace::write_fence(
                 namespace::seal_key_id(namespace_id, key_version),
                 &ns_registry,
                 &account_registry,
@@ -233,6 +233,11 @@ module memwal::namespace_tests {
                 &clock,
                 scenario.ctx(),
             );
+            assert!(namespace::memory_written_namespace_id(&written) == namespace_id);
+            assert!(namespace::memory_written_account_id(&written) == account_id);
+            assert!(namespace::memory_written_key_version(&written) == key_version);
+            assert!(namespace::memory_written_commitment(&written) == &wrapped(1));
+            assert!(namespace::memory_written_writer(&written) == caller);
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(ns);
             test_scenario::return_shared(managed);
@@ -2143,7 +2148,7 @@ module memwal::namespace_tests {
             let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
             let mut ns = scenario.take_shared_by_id<MemoryNamespace>(first_id);
             let clock = clock::create_for_testing(scenario.ctx());
-            namespace::cancel_uninitialized_namespace(
+            let cancelled = namespace::cancel_uninitialized_namespace(
                 &mut ns_registry,
                 &account_registry,
                 &managed,
@@ -2154,6 +2159,10 @@ module memwal::namespace_tests {
             assert!(namespace::is_destroyed(&ns));
             assert!(!namespace::is_key_initialized(&ns));
             assert!(!namespace::has_namespace(&ns_registry, account_id, &string::utf8(b"reusable")));
+            assert!(namespace::namespace_cancelled_namespace_id(&cancelled) == first_id);
+            assert!(namespace::namespace_cancelled_account_id(&cancelled) == account_id);
+            assert!(namespace::namespace_cancelled_owner(&cancelled) == OWNER);
+            assert!(namespace::namespace_cancelled_label(&cancelled).as_bytes() == b"reusable");
             clock::destroy_for_testing(clock);
             test_scenario::return_shared(ns);
             test_scenario::return_shared(managed);
@@ -2228,32 +2237,181 @@ module memwal::namespace_tests {
 
     #[test]
     fun test_seal_id_golden_vectors_are_little_endian_bcs() {
-        // Cross-language golden vectors for `BCS(namespace_id) || BCS(u64)`.
-        // namespace_id = 0x...cafe, versions 1 and 10000.
+        // Hard-coded 40-byte tails for other-language SDKs to match.
+        // namespace_id = 0x0000...00cafe; versions 1 and 10000 as BCS little-endian u64.
         let namespace_id = object::id_from_address(@0xcafe);
-        let v1 = namespace::seal_key_id(namespace_id, 1);
-        assert!(v1.length() == 40);
-        assert!(namespace::test_decode_trailing_u64(&v1) == 1);
-        assert!(v1[32] == 1);
-        let mut i = 33;
-        while (i < 40) {
-            assert!(v1[i] == 0);
-            i = i + 1;
-        };
+        let expected_v1 = x"000000000000000000000000000000000000000000000000000000000000cafe0100000000000000";
+        let expected_v10000 = x"000000000000000000000000000000000000000000000000000000000000cafe1027000000000000";
+        assert!(namespace::seal_key_id(namespace_id, 1) == expected_v1);
+        assert!(namespace::seal_key_id(namespace_id, 10000) == expected_v10000);
+        assert!(namespace::test_decode_trailing_u64(&expected_v1) == 1);
+        assert!(namespace::test_decode_trailing_u64(&expected_v10000) == 10000);
 
-        let v10000 = namespace::seal_key_id(namespace_id, 10000);
-        assert!(namespace::test_decode_trailing_u64(&v10000) == 10000);
-        assert!(v10000[32] == 0x10);
-        assert!(v10000[33] == 0x27);
-        i = 34;
-        while (i < 40) {
-            assert!(v10000[i] == 0);
-            i = i + 1;
-        };
-
+        // Seal may prepend a domain-separation prefix; only the 40-byte suffix is canonical.
         let mut prefixed = x"aabb";
-        prefixed.append(v1);
-        assert!(namespace::test_has_suffix(&prefixed, &v1));
+        prefixed.append(expected_v1);
+        assert!(namespace::test_has_suffix(&prefixed, &expected_v1));
         assert!(namespace::test_decode_trailing_u64(&prefixed) == 1);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = namespace::ENotAccountOwner)]
+    fun test_non_owner_cannot_cancel_uninitialized_namespace() {
+        let mut scenario = test_scenario::begin(OWNER);
+        let account_id = setup_account(&mut scenario);
+        let namespace_id = create_namespace(&mut scenario, account_id, string::utf8(b"cancel-auth"));
+        scenario.next_tx(OTHER);
+        {
+            let mut ns_registry = scenario.take_shared<NamespaceRegistry>();
+            let account_registry = scenario.take_shared<AccountRegistry>();
+            let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
+            let mut ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
+            let clock = clock::create_for_testing(scenario.ctx());
+            namespace::cancel_uninitialized_namespace(
+                &mut ns_registry,
+                &account_registry,
+                &managed,
+                &mut ns,
+                &clock,
+                scenario.ctx(),
+            );
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(ns);
+            test_scenario::return_shared(managed);
+            test_scenario::return_shared(account_registry);
+            test_scenario::return_shared(ns_registry);
+        };
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = namespace::ENamespaceDestroyed)]
+    fun test_cancel_uninitialized_namespace_twice_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        let account_id = setup_account(&mut scenario);
+        let namespace_id = create_namespace(&mut scenario, account_id, string::utf8(b"cancel-twice"));
+        scenario.next_tx(OWNER);
+        {
+            let mut ns_registry = scenario.take_shared<NamespaceRegistry>();
+            let account_registry = scenario.take_shared<AccountRegistry>();
+            let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
+            let mut ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
+            let clock = clock::create_for_testing(scenario.ctx());
+            namespace::cancel_uninitialized_namespace(
+                &mut ns_registry,
+                &account_registry,
+                &managed,
+                &mut ns,
+                &clock,
+                scenario.ctx(),
+            );
+            namespace::cancel_uninitialized_namespace(
+                &mut ns_registry,
+                &account_registry,
+                &managed,
+                &mut ns,
+                &clock,
+                scenario.ctx(),
+            );
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(ns);
+            test_scenario::return_shared(managed);
+            test_scenario::return_shared(account_registry);
+            test_scenario::return_shared(ns_registry);
+        };
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = namespace::ENamespaceDestroyed)]
+    fun test_cancel_then_initialize_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        let account_id = setup_account(&mut scenario);
+        let namespace_id = create_namespace(&mut scenario, account_id, string::utf8(b"cancel-then-init"));
+        scenario.next_tx(OWNER);
+        {
+            let mut ns_registry = scenario.take_shared<NamespaceRegistry>();
+            let account_registry = scenario.take_shared<AccountRegistry>();
+            let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
+            let mut ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
+            let clock = clock::create_for_testing(scenario.ctx());
+            namespace::cancel_uninitialized_namespace(
+                &mut ns_registry,
+                &account_registry,
+                &managed,
+                &mut ns,
+                &clock,
+                scenario.ctx(),
+            );
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(ns);
+            test_scenario::return_shared(managed);
+            test_scenario::return_shared(account_registry);
+            test_scenario::return_shared(ns_registry);
+        };
+        initialize_namespace(&mut scenario, account_id, namespace_id, wrapped(22));
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = namespace::ENamespaceDestroyed)]
+    fun test_shred_then_cancel_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        let account_id = setup_account(&mut scenario);
+        let namespace_id = create_namespace(&mut scenario, account_id, string::utf8(b"shred-then-cancel"));
+        scenario.next_tx(OWNER);
+        {
+            let mut ns_registry = scenario.take_shared<NamespaceRegistry>();
+            let account_registry = scenario.take_shared<AccountRegistry>();
+            let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
+            let mut ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
+            let clock = clock::create_for_testing(scenario.ctx());
+            namespace::crypto_shred_namespace(&ns_registry, &account_registry, &managed, &mut ns, &clock, scenario.ctx());
+            namespace::cancel_uninitialized_namespace(
+                &mut ns_registry,
+                &account_registry,
+                &managed,
+                &mut ns,
+                &clock,
+                scenario.ctx(),
+            );
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(ns);
+            test_scenario::return_shared(managed);
+            test_scenario::return_shared(account_registry);
+            test_scenario::return_shared(ns_registry);
+        };
+        scenario.end();
+    }
+
+    #[test]
+    #[expected_failure(abort_code = namespace::ENamespaceDestroyed)]
+    fun test_cancel_then_shred_fails() {
+        let mut scenario = test_scenario::begin(OWNER);
+        let account_id = setup_account(&mut scenario);
+        let namespace_id = create_namespace(&mut scenario, account_id, string::utf8(b"cancel-then-shred"));
+        scenario.next_tx(OWNER);
+        {
+            let mut ns_registry = scenario.take_shared<NamespaceRegistry>();
+            let account_registry = scenario.take_shared<AccountRegistry>();
+            let managed = scenario.take_shared_by_id<MemWalAccount>(account_id);
+            let mut ns = scenario.take_shared_by_id<MemoryNamespace>(namespace_id);
+            let clock = clock::create_for_testing(scenario.ctx());
+            namespace::cancel_uninitialized_namespace(
+                &mut ns_registry,
+                &account_registry,
+                &managed,
+                &mut ns,
+                &clock,
+                scenario.ctx(),
+            );
+            namespace::crypto_shred_namespace(&ns_registry, &account_registry, &managed, &mut ns, &clock, scenario.ctx());
+            clock::destroy_for_testing(clock);
+            test_scenario::return_shared(ns);
+            test_scenario::return_shared(managed);
+            test_scenario::return_shared(account_registry);
+            test_scenario::return_shared(ns_registry);
+        };
+        scenario.end();
     }
 }
