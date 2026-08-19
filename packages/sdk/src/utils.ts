@@ -155,10 +155,11 @@ export function sanitizeServerError(
 ): { message: string; raw: string; serverCode?: string } {
     if (status === 401) {
         return {
+            // GH #696: empty/unauthenticated 401s used to surface as
+            // "Walrus Memory server error (401): <no message>". Point first-time
+            // MCP callers at memwal_login instead of a blank body.
             message:
-                "401 from relayer: typically wrong private key, key not registered on this account, " +
-                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
-                "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
+                "Walrus Memory server error (401): Not authenticated. Run memwal_login to connect your Sui wallet.",
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
         };
