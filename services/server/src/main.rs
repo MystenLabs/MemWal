@@ -479,7 +479,7 @@ async fn init_apalis_pool(
     // Do not `set_config(..., false)` on this pool. Those are session GUCs;
     // through a transaction-mode pooler they leak onto backends later reused
     // by unrelated code (legacy sqlx migrate inherited lock_timeout=15s and
-    // panicked — WALM-378). Boot is still bounded by the tokio timeouts below.
+    // panicked). Boot is still bounded by the tokio timeouts below.
     let pool_future = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(startup_timeout)

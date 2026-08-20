@@ -1,4 +1,4 @@
-//! Postgres URL helpers for WALM-378.
+//! Postgres URL helpers for pooled vs direct endpoints.
 //!
 //! sqlx migrations take a **session-scoped** `pg_advisory_lock`. A
 //! transaction-mode pooler (Neon `-pooler`, PgBouncer) can route `LOCK` and

@@ -7,8 +7,8 @@ use super::postgres_url::{direct_postgres_url, is_transaction_pooler_url, postgr
 use crate::types::AppError;
 
 /// Bound how long a single migrate attempt waits on sqlx's session advisory
-/// lock. Combined with retries so a leaked pooler lock (WALM-378) is a
-/// transient boot delay, not a hard crash.
+/// lock. Combined with retries so a leaked pooler lock is a transient boot
+/// delay, not a hard crash.
 const LEGACY_MIGRATION_LOCK_TIMEOUT: &str = "5s";
 const LEGACY_MIGRATION_MAX_ATTEMPTS: u32 = 6;
 
@@ -61,7 +61,7 @@ async fn apply_legacy_migrations(
         tracing::info!(
             original_host,
             direct_host,
-            "legacy db: running sqlx migrations on the direct Postgres endpoint (WALM-378)"
+            "legacy db: running sqlx migrations on the direct Postgres endpoint"
         );
     }
 
@@ -80,8 +80,8 @@ async fn apply_legacy_migrations(
                     retry_in_ms = delay.as_millis() as u64,
                     error = %error,
                     "legacy migration lock contention; retrying. \
-                     If this persists, an orphaned sqlx advisory lock is held on a pooled backend \
-                     (WALM-378). Release it with pg_terminate_backend on the pg_locks pid."
+                     If this persists, an orphaned sqlx advisory lock is held on a pooled backend. \
+                     Release it with pg_terminate_backend on the pg_locks pid."
                 );
                 tokio::time::sleep(delay).await;
                 last_error = Some(error);
@@ -166,7 +166,7 @@ fn crc32_iso_hdlc(data: &[u8]) -> u32 {
 
 /// Advisory locks are database-wide. A pooled backend that leaked sqlx's
 /// session lock will block even a direct migrator. If that holder is idle
-/// (the WALM-378 shape: pgbouncer backend now serving unrelated traffic),
+/// (idle pgbouncer backend now serving unrelated traffic),
 /// terminate it so the next attempt can proceed. Never kill a non-idle
 /// backend — that could be a live upload holding a different advisory lock.
 async fn release_orphaned_sqlx_migration_lock(conn: &mut PgConnection) {
@@ -207,10 +207,10 @@ async fn release_orphaned_sqlx_migration_lock(conn: &mut PgConnection) {
             application_name = application_name.as_deref().unwrap_or(""),
             state = state.as_deref().unwrap_or(""),
             query = query.as_deref().unwrap_or(""),
-            "legacy migration: sqlx advisory lock is held by another backend (WALM-378)"
+            "legacy migration: sqlx advisory lock is held by another backend"
         );
-        // Live migrators are `active`. The leaked pooler backend in WALM-378
-        // was `idle` (and would be `idle in transaction` if SET left a txn).
+        // Live migrators are `active`. A leaked pooler backend is `idle`
+        // (or `idle in transaction` if SET left a txn).
         if !matches!(state.as_deref(), Some("idle") | Some("idle in transaction")) {
             continue;
         }
@@ -287,8 +287,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sqlx_lock_id_matches_walm378_neondb() {
-        // Values taken from the live incident (WALM-378).
+    fn sqlx_lock_id_matches_known_neondb_dump() {
+        // Values taken from a live Neon/sqlx lock-id dump.
         assert_eq!(crc32_iso_hdlc(b"neondb"), 1_372_559_388);
         assert_eq!(sqlx_migration_lock_id("neondb"), 1_409_249_852_220_689_736);
     }
