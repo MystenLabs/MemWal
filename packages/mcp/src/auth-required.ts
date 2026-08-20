@@ -36,21 +36,25 @@ interface RpcMessage {
     error?: unknown;
 }
 
-/** The static memory-tool definitions served before a live relayer session
- * exists. Exported so the bridge can serve the same list instantly at cold
- * start (refreshed from the real upstream list once connected).
- *
- * MUST mirror the tools the relayer sidecar registers
- * (services/server/scripts/mcp/tools/index.ts) so the cold-start list and the
- * post-connect list advertise the same set — order and names matched to that
- * registration (remember, remember_bulk, recall, analyze, restore, health). */
-export const TOOL_DEFINITIONS = [
+const SIGNED_OUT_REMEMBER =
+    "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.";
+const SIGNED_IN_REMEMBER =
+    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.";
+const SIGNED_OUT_RECALL =
+    "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.";
+const SIGNED_IN_RECALL =
+    "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by relevance.";
+
+/** Build the static memory-tool list. `proactive` is true for the signed-in
+ * cold-start path (bridge: credentials exist, relayer not yet up) and false
+ * for auth-required (no credentials). Same tool names/order as the sidecar. */
+function buildToolDefinitions(proactive: boolean) {
+    return [
     {
         name: "memwal_remember",
         title: "Remember a Fact",
         annotations: { readOnlyHint: false, destructiveHint: false },
-        description:
-            "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
+        description: proactive ? SIGNED_IN_REMEMBER : SIGNED_OUT_REMEMBER,
         inputSchema: {
             type: "object",
             properties: {
@@ -85,9 +89,8 @@ export const TOOL_DEFINITIONS = [
     {
         name: "memwal_recall",
         title: "Recall Memories",
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        description:
-            "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.",
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        description: proactive ? SIGNED_IN_RECALL : SIGNED_OUT_RECALL,
         inputSchema: {
             type: "object",
             properties: {
@@ -155,7 +158,18 @@ export const TOOL_DEFINITIONS = [
             additionalProperties: false,
         },
     },
-];
+    ];
+}
+
+/** Signed-in cold-start list (bridge). Credentials exist; the relayer session
+ * is not up yet. Proactive wording so clients that keep the first tools/list
+ * still save/recall without being asked. */
+export const TOOL_DEFINITIONS = buildToolDefinitions(true);
+
+/** Signed-out list (auth-required). No credentials, so every memory call
+ * fails: keep conservative wording or the model will spam remember and get
+ * a stream of auth errors. */
+export const SIGNED_OUT_TOOL_DEFINITIONS = buildToolDefinitions(false);
 
 /** Maximum time we'll keep the login HTTP listener bound after the user
  * clicks `memwal_login`. The user paces themselves — wallet popups, ledger
@@ -404,7 +418,7 @@ function handleAuthLine(
         writeStdoutMessage({
             jsonrpc: "2.0",
             id,
-            result: { tools: TOOL_DEFINITIONS },
+            result: { tools: SIGNED_OUT_TOOL_DEFINITIONS },
         });
         return null;
     }
