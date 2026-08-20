@@ -5,14 +5,19 @@
  * The agent has the conversation and understands any language or spelling;
  * a regex cannot. This only injects a decision rubric.
  */
-import { readStdin, emitContext } from "./lib/hook-io.mjs";
-import { DECISION_RUBRIC } from "./lib/decision-rubric.mjs";
+import { readStdin, emitContext, firstTime } from "./lib/hook-io.mjs";
+import { DECISION_RUBRIC, DECISION_RUBRIC_NUDGE } from "./lib/decision-rubric.mjs";
 
 const input = readStdin();
 const prompt = (input.prompt || "").toString();
+const sessionId = input.session_id || "default";
 
-// Skip very short prompts (acks, single words) — nothing useful to act on.
-if (prompt.trim().length < 20) process.exit(0);
+// 8 chars lets terse preferences through ("Tui thích pnpm" is 14).
+// Acks like "ok" / "yes" stay quiet. Deliberate: not a keyword gate.
+if (prompt.trim().length < 8) process.exit(0);
 
-emitContext("UserPromptSubmit", DECISION_RUBRIC);
+const text = firstTime("rubric", sessionId)
+    ? DECISION_RUBRIC
+    : DECISION_RUBRIC_NUDGE;
+emitContext("UserPromptSubmit", text);
 process.exit(0);

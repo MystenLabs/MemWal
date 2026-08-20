@@ -48,12 +48,14 @@ user explicitly asks for developer integration.
     Do not treat MCP-only as success. If marketplace add or plugin install
     fails, stop and report that error. Do not silently fall back to
     `claude mcp add`.
-11. On Claude Code, merge the Walrus Memory routing block into
-    `~/.claude/CLAUDE.md` (create the file if needed). Do not replace the
-    whole file. Claude's built-in `MEMORY.md` lives in the system prompt and
-    outranks MCP instructions; without this user-level rule the agent often
-    writes `MEMORY.md` instead of calling `memwal_*`. Tell the user to turn
-    off Claude's built-in / native memory in account settings if it is on.
+11. On Claude Code, show the Walrus Memory routing block and get the user's
+    go-ahead before writing `~/.claude/CLAUDE.md` (a global file outside the
+    project). Create the file if needed. Do not replace the whole file. If
+    `<!-- memwal:start -->` ... `<!-- memwal:end -->` already exists, replace
+    that span only. Claude's built-in `MEMORY.md` lives in the system prompt
+    and outranks MCP instructions; without this user-level rule the agent
+    often writes `MEMORY.md` instead of calling `memwal_*`. Tell the user to
+    turn off Claude's built-in / native memory in account settings if it is on.
 
 ## Requirements
 
@@ -226,11 +228,13 @@ claude mcp add --scope user memwal -- npx -y @mysten-incubation/memwal-mcp
 
 If you use that fallback, tell the user the automatic-memory hooks are missing.
 
-Then merge this block into `~/.claude/CLAUDE.md`. Create the file if it does
-not exist. If a Walrus Memory / `memwal_*` routing section is already there,
-leave it. Never overwrite the rest of the file.
+Show this block, get the user's go-ahead, then merge it into
+`~/.claude/CLAUDE.md`. Create the file if it does not exist. If
+`<!-- memwal:start -->` ... `<!-- memwal:end -->` is already there, replace
+that span only. Never overwrite the rest of the file.
 
 ```markdown
+<!-- memwal:start -->
 ## Walrus Memory
 
 Prefer the memwal_* tools over Claude's built-in memory and MEMORY.md.
@@ -241,6 +245,7 @@ something. Pass the complete statement, never a summary. Skip one-off tasks,
 the current file or bug, and small talk.
 When the user references past work, preferences, or stored facts, call
 memwal_recall first.
+<!-- memwal:end -->
 ```
 
 Tell the user: if Claude's built-in memory is enabled in account settings,

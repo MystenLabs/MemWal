@@ -1,15 +1,17 @@
 /**
- * UserPromptSubmit hook injects the same decision rubric for every
- * substantive prompt. It must not classify remember vs recall from
- * English keywords — Vietnamese, typos, and "I like" nested in a
- * question all get the same text, and the agent chooses the tool.
+ * UserPromptSubmit injects one full decision rubric per session, then a
+ * one-line nudge. It must not classify remember vs recall from English
+ * keywords — every substantive prompt in a fresh session gets the same text.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DECISION_RUBRIC } from "../plugin/scripts/lib/decision-rubric.mjs";
+import {
+    DECISION_RUBRIC,
+    DECISION_RUBRIC_NUDGE,
+} from "../plugin/scripts/lib/decision-rubric.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOOK = resolve(__dirname, "../plugin/scripts/on_user_prompt.mjs");
@@ -35,20 +37,31 @@ const SUBSTANTIVE = [
     "Remeber that I always use pnpm and my canary is cedar-wren-11.",
 ];
 
-test("substantive prompts get the decision rubric, not a classified directive", () => {
-    for (const prompt of SUBSTANTIVE) {
-        const ctx = runHook(prompt);
-        assert.equal(ctx, DECISION_RUBRIC, `should inject rubric: ${prompt}`);
-        assert.match(ctx, /memwal_recall/);
-        assert.match(ctx, /memwal_remember/);
-        assert.match(ctx, /any language or spelling/);
-        assert.match(ctx, /skip one-off tasks/i);
+test("fresh-session substantive prompts produce byte-identical output", () => {
+    const outputs = SUBSTANTIVE.map((prompt) => runHook(prompt));
+    assert.ok(outputs.length > 1);
+    for (const ctx of outputs) {
+        assert.equal(ctx, outputs[0]);
         assert.doesNotMatch(ctx, /The user is referencing earlier work/);
         assert.doesNotMatch(ctx, /The user just stated a durable fact/);
     }
+    assert.equal(outputs[0], DECISION_RUBRIC);
+});
+
+test("later turns in the same session get the one-line nudge", () => {
+    const sessionId = `session-${Math.random().toString(16).slice(2)}`;
+    const first = runHook(SUBSTANTIVE[0], sessionId);
+    const second = runHook(SUBSTANTIVE[1], sessionId);
+    assert.equal(first, DECISION_RUBRIC);
+    assert.equal(second, DECISION_RUBRIC_NUDGE);
+});
+
+test("terse Vietnamese preference is not skipped", () => {
+    const ctx = runHook("Tui thích pnpm");
+    assert.equal(ctx, DECISION_RUBRIC);
 });
 
 test("short prompts stay quiet", () => {
-    assert.equal(runHook("ok thanks"), "");
+    assert.equal(runHook("ok"), "");
     assert.equal(runHook("yes"), "");
 });

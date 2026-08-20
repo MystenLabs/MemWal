@@ -11,3 +11,7 @@ export const DECISION_RUBRIC = [
     "If it asks about past work, stored facts, or preferences, call memwal_recall first with a focused query.",
     'Do not wait for an English keyword such as "remember".',
 ].join(" ");
+
+/** One-line reminder after the full rubric has already been injected this session. */
+export const DECISION_RUBRIC_NUDGE =
+    "Prefer memwal_* over built-in memory. Remember durable facts, recall past work, skip one-off tasks.";
