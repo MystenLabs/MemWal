@@ -7,7 +7,7 @@ import { join } from "node:path";
 test("login requires a matching localhost preflight before browser approval", async () => {
     // Imports the credential writer in-process, so the sandbox has to hold
     // here rather than in a child. MEMWAL_CREDS_DIR avoids mutating HOME, which
-    // os.homedir() ignores on Windows (GH #610).
+    // os.homedir() ignores on Windows.
     const credsDir = mkdtempSync(join(tmpdir(), "memwal-preflight-"));
     const previousCredsDir = process.env.MEMWAL_CREDS_DIR;
     process.env.MEMWAL_CREDS_DIR = credsDir;

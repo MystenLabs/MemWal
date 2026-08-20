@@ -1,9 +1,9 @@
 /**
- * Guards the credential-directory sandbox (GH #610 / WALM-360).
+ * Guards the credential-directory sandbox.
  *
  * A test that writes credentials must be able to keep off the developer's real
  * ~/.memwal. Doing that through HOME alone is silently ineffective on Windows,
- * where os.homedir() reads USERPROFILE.
+ * where os.homedir() reads USERPROFILE and ignores HOME.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";

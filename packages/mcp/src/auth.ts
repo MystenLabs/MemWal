@@ -36,10 +36,11 @@ export interface MemWalCredentials {
     version: 1;
 }
 
-/** Resolved per call, not frozen at module load: a sandbox that has to be in
- * place before the first import is a requirement nothing enforces, and missing
- * it cost a developer their delegate key (GH #610). `MEMWAL_CREDS_DIR` moves
- * the store with no process-global mutation. */
+/** Resolved per call, not frozen at module load. A caller that needs the store
+ * elsewhere would otherwise have to change the environment before this module
+ * is first imported, which nothing enforces; miss it and writes land on the
+ * real credentials file. `MEMWAL_CREDS_DIR` moves the store with no
+ * process-global mutation. */
 function credsDir(): string {
     return process.env.MEMWAL_CREDS_DIR || join(homedir(), ".memwal");
 }
