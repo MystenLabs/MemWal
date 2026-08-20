@@ -39,7 +39,7 @@ pub fn direct_postgres_url(url: &str) -> Cow<'_, str> {
     Cow::Owned(parsed.to_string())
 }
 
-fn postgres_host(url: &str) -> Option<String> {
+pub(crate) fn postgres_host(url: &str) -> Option<String> {
     url::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_owned))
