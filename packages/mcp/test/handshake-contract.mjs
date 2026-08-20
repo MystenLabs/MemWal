@@ -43,7 +43,14 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SERVER = resolve(__dirname, "../dist/bin/memwal-mcp.js");
+// Defaults to this checkout's build. Override with MEMWAL_MCP_SERVER to point
+// at a published package instead, which is how you compare "what dev ships
+// today" against "what this branch would ship":
+//   npm i --prefix /tmp/x @mysten-incubation/memwal-mcp@dev
+//   MEMWAL_MCP_SERVER=/tmp/x/node_modules/@mysten-incubation/memwal-mcp/dist/bin/memwal-mcp.js \
+//     node test/handshake-contract.mjs --dev
+const SERVER =
+    process.env.MEMWAL_MCP_SERVER || resolve(__dirname, "../dist/bin/memwal-mcp.js");
 
 const ENV_FLAG = process.argv.find((a) => /^--(dev|staging|prod|local)$/.test(a)) || "--dev";
 const TIMEOUT_MS = Number(process.env.PROBE_TIMEOUT_MS || 30_000);
