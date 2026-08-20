@@ -24,6 +24,10 @@ import { createSponsorAuthorization } from "@mysten-incubation/memwal";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/shared/components/ui/button";
 import { enokiConfig } from "@/lib/enoki/config";
+import {
+  fetchAccountIdForOwner,
+  findCreatedObjectByType,
+} from "@/lib/sui-client-compat";
 import { useAuth } from "@/feature/auth";
 import { trpc } from "@/shared/lib/trpc/client";
 
@@ -197,30 +201,11 @@ export function EnokiLoginCard() {
         let knownAccountId: string | null = null;
 
         try {
-          const registryObj = await suiClient.getObject({
-            id: enokiConfig.memwalRegistryId,
-            options: { showContent: true },
-          });
-          if (
-            registryObj?.data?.content &&
-            "fields" in registryObj.data.content
-          ) {
-            const fields = registryObj.data.content.fields as any;
-            const tableId = fields?.accounts?.fields?.id?.id;
-            if (tableId) {
-              const dynField = await suiClient.getDynamicFieldObject({
-                parentId: tableId,
-                name: { type: "address", value: address },
-              });
-              if (
-                dynField?.data?.content &&
-                "fields" in dynField.data.content
-              ) {
-                knownAccountId = (dynField.data.content.fields as any)
-                  .value as string;
-              }
-            }
-          }
+          knownAccountId = await fetchAccountIdForOwner(
+            suiClient,
+            enokiConfig.memwalRegistryId,
+            address,
+          );
         } catch {
           // Dynamic field not found → no account yet
         }
@@ -267,19 +252,11 @@ export function EnokiLoginCard() {
           );
           await suiClient.waitForTransaction({ digest: createResult.digest });
 
-          const txDetails = await suiClient.getTransactionBlock({
-            digest: createResult.digest,
-            options: { showObjectChanges: true },
-          });
-          const createdObj = txDetails.objectChanges?.find(
-            (c) =>
-              c.type === "created" &&
-              "objectType" in c &&
-              c.objectType.includes("MemWalAccount"),
+          knownAccountId = await findCreatedObjectByType(
+            suiClient,
+            createResult.digest,
+            "MemWalAccount",
           );
-          if (createdObj && "objectId" in createdObj) {
-            knownAccountId = createdObj.objectId;
-          }
 
           if (!knownAccountId) {
             throw new Error("Account created but object ID not found. Please try again.");
