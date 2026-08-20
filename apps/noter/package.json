@@ -16,7 +16,7 @@
     "verify:memwal": "tsx ../../scripts/verify-memwal-credentials.ts",
     "test:unit": "vitest run",
     "playwright:install": "playwright install --with-deps chromium",
-    "test:e2e": "playwright test",
+    "test:e2e": "PLAYWRIGHT=True playwright test",
     "clean": "rm -rf .next out build"
   },
   "dependencies": {

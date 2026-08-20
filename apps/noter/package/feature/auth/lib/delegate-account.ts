@@ -33,11 +33,19 @@ export async function deriveDelegatePublicKeyHex(
 }
 
 function publicKeyHex(value: unknown): string | null {
+  // Hex first: every 64-char hex string (alphabet 0-9a-f, length divisible
+  // by 4) is also valid base64 of the *wrong* bytes. fromBase64() will not
+  // throw — it just decodes garbage — so a hex-first check is required.
+  // Matches researcher/lib/auth/delegate-account.ts.
+  if (typeof value === "string" && /^[0-9a-f]{64}$/i.test(value)) {
+    return value.toLowerCase();
+  }
   if (typeof value === "string") {
     try {
-      return toHex(fromBase64(value)).toLowerCase();
+      const decoded = fromBase64(value);
+      return decoded.length === 32 ? toHex(decoded).toLowerCase() : null;
     } catch {
-      return /^[0-9a-f]{64}$/i.test(value) ? value.toLowerCase() : null;
+      return null;
     }
   }
   if (

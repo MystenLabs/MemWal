@@ -202,6 +202,7 @@ jobs:
       NEXT_PUBLIC_APP_URL: http://localhost:3002
       PORT: "3002"
       NODE_ENV: test
+      PLAYWRIGHT: "True"
       # NEXT_PUBLIC_* Enoki/Sui vars are inlined at build time — placeholders
       # are fine here since the e2e suite authenticates via delegate key, not
       # the Google/Enoki popup flow (that needs a real OAuth session and stays
@@ -212,11 +213,10 @@ jobs:
       NEXT_PUBLIC_MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
       NEXT_PUBLIC_MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
       NEXT_PUBLIC_MEMWAL_SERVER_URL: https://relayer.dev.memwal.ai
-      # MEMWAL_E2E_PRIVATE_KEY / MEMWAL_E2E_ACCOUNT_ID intentionally unset:
-      # the memory-write specs that need real relayer credentials self-skip
-      # via test.skip() when absent. CI validates auth + note CRUD
-      # deterministically; the real remember round-trip against the relayer
-      # stays a manual check, same caveat #680 documents for researcher.
+      # No live-Walrus canary in this suite: isTestEnvironment flips the
+      # binding check onto the fixture pool, so even a real on-chain key
+      # would fail at login. CI covers auth + note CRUD + the memory API
+      # contract; remember → recall against production stays a manual check.
 
     steps:
       - name: Checkout
@@ -241,10 +241,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: pw-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: pw-${{ runner.os }}-
+          # Separate from chatbot's `pw-` key so the two jobs don't race the
+          # same cache entry. Fall back to the shared prefix on a cold start.
+          key: pw-noter-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pw-noter-${{ runner.os }}-
+            pw-${{ runner.os }}-
 
       - name: Install Playwright (Chromium + OS deps)
+        timeout-minutes: 8
         run: pnpm --filter @memwal/noter playwright:install
 
       - name: Run Playwright E2E

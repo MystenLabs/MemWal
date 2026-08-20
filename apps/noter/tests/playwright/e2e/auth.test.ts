@@ -42,6 +42,7 @@ test.describe("Delegate key authentication", () => {
     await page.reload();
 
     expect(await readSessionId(page)).toBe(before);
+    await expect(page).toHaveURL(/\/note(\/|$)/);
   });
 
   test("does not sign in with a key that is not 64 hex characters", async ({ page }) => {
@@ -54,7 +55,7 @@ test.describe("Delegate key authentication", () => {
     await page.getByRole("button", { name: "Sign In", exact: true }).click();
 
     // Server-side zod guard: /^[0-9a-f]{64}$/i — no session is issued.
-    await page.waitForTimeout(2000);
+    await expect(page.locator("p.text-destructive")).toContainText(/64 hex/i);
     await expect(page).toHaveURL("/");
     expect(await readSessionId(page)).toBeNull();
   });
@@ -95,7 +96,7 @@ test.describe("Delegate key authentication", () => {
     // /note's guard fired router.replace("/") — bouncing an authenticated
     // user back to the landing page. sessionAtom now reads sessionStorage
     // synchronously on first render (getOnInit: true), so no such gap exists.
-    await page.waitForTimeout(3000);
+    await page.waitForURL(/\/note(\/|$)/);
     await expect(page).toHaveURL(/\/note(\/|$)/);
   });
 

@@ -63,4 +63,26 @@ describe("delegate account binding", () => {
       })
     ).resolves.toMatch(/inactive/);
   });
+
+  it("accepts a hex-encoded public_key without treating it as base64", async () => {
+    // 64-char hex is also valid-but-wrong base64. A base64-first parser
+    // silently decodes the wrong bytes and rejects a registered key.
+    await expect(
+      validate({
+        active: true,
+        owner: OWNER,
+        delegate_keys: [{ public_key: KEY }],
+      })
+    ).resolves.toBeNull();
+  });
+
+  it("rejects a different hex-encoded public_key", async () => {
+    await expect(
+      validate({
+        active: true,
+        owner: OWNER,
+        delegate_keys: [{ public_key: "cd".repeat(32) }],
+      })
+    ).resolves.toMatch(/not registered/);
+  });
 });

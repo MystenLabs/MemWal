@@ -1,66 +1,53 @@
 /**
  * Delegate-key auth helpers.
  *
- * `connectDelegateKey` now calls `assertDelegateAccountBinding` (see
- * package/feature/auth/lib/delegate-account.ts), which verifies the derived
- * public key is registered on the claimed account — on real chain data
- * outside tests, and against package/feature/auth/lib/delegate-account.mock.ts's
- * fixture pool when isTestEnvironment is set (playwright.config.ts passes
- * PLAYWRIGHT=True to the webServer). A random, never-registered key/account
- * pair is no longer enough to reach an authenticated session, so this pulls
- * from that same fixture pool instead of generating throwaway credentials.
+ * `connectDelegateKey` calls `assertDelegateAccountBinding`, which verifies
+ * the derived public key is registered on the claimed account — on real
+ * chain data outside tests, and against the shared fixture pool
+ * (`package/feature/auth/lib/delegate-fixtures.ts`) when isTestEnvironment
+ * is set (playwright.config.ts / test:e2e pass PLAYWRIGHT=True).
  *
- * The pool (24 entries) exists because noter's specs authenticate a fresh
- * identity per test — with `workers: 2` and ~15 login call sites, two fixed
- * identities (researcher's pattern) would have tests colliding on each
- * other's notes. Generation must match delegate-account.mock.ts exactly:
- * index N → accountId byte `N` repeated, privateKey byte `N + 0x40`
- * repeated — keep both in sync.
+ * Identities come from that single pool so the mock and this fixture cannot
+ * drift. The allocator throws when the pool is exhausted rather than wrapping
+ * back to fixture 0 (which would collide two tests on the same notes).
  *
  * A fixture key is NOT enough to write to Walrus Memory: isTestEnvironment
- * is unconditionally true for every Playwright run, so the binding check
- * only ever consults the fixture pool — a real, on-chain-registered key
- * would fail at login before reaching the relayer. There's no live-write
- * path in this suite by design; see the note in e2e/memory.test.ts.
+ * is true for every Playwright-started server, so the binding check only
+ * ever consults the fixture pool. There's no live-write path in this suite
+ * by design; see the note in e2e/memory.test.ts.
  */
 import { test, type Page } from "@playwright/test";
+import {
+  DELEGATE_FIXTURE_COUNT,
+  delegateFixtureAt,
+} from "../../../package/feature/auth/lib/delegate-fixtures";
 
 export type DelegateCredentials = {
   privateKey: string;
   accountId: string;
 };
 
-const FIXTURE_COUNT = 24;
-
-function hex2(n: number): string {
-  return n.toString(16).padStart(2, "0");
-}
-
-function fixtureAt(i: number): DelegateCredentials {
-  return {
-    accountId: `0x${hex2(i).repeat(32)}`,
-    privateKey: hex2(i + 0x40).repeat(32),
-  };
-}
-
 // Module-scoped counter, one instance per Playwright worker PROCESS (workers:
 // 2 spawns separate processes, not just separate async contexts — a plain
 // counter alone would restart at 0 in each, so two workers' first calls would
 // both claim fixture 0). Interleave by test.info().parallelIndex so worker 0
-// claims 0, 2, 4, ... and worker 1 claims 1, 3, 5, ... — every call across
-// every worker gets a distinct fixture, with no fixed per-worker range to
-// exhaust. Wraps at FIXTURE_COUNT if a run needs more logins than the pool
-// has — bump FIXTURE_COUNT (and the matching constant in
-// delegate-account.mock.ts) if that ever fires for real.
+// claims 0, 2, 4, ... and worker 1 claims 1, 3, 5, ...
 let localCallCount = 0;
 
-/** A never-yet-used fixture identity from the pool this test run owns exclusively. */
+/** A never-yet-used fixture identity from the pool this worker owns exclusively. */
 export function nextDelegateCredentials(): DelegateCredentials {
   const parallelIndex = test.info().parallelIndex;
-  const workerCount = test.info().config.workers;
-  const i = (localCallCount * workerCount + parallelIndex) % FIXTURE_COUNT;
+  const workerCount = Number(test.info().config.workers);
+  const i = localCallCount * workerCount + parallelIndex;
+  if (i >= DELEGATE_FIXTURE_COUNT) {
+    throw new Error(
+      `Delegate fixture pool exhausted (need index ${i}, have ${DELEGATE_FIXTURE_COUNT}). ` +
+        `Bump DELEGATE_FIXTURE_COUNT in package/feature/auth/lib/delegate-fixtures.ts.`
+    );
+  }
   localCallCount += 1;
-  return fixtureAt(i);
+  const fixture = delegateFixtureAt(i);
+  return { accountId: fixture.accountId, privateKey: fixture.privateKey };
 }
 
 /** Open the collapsed "Sign in with delegate key" form on the landing page. */
