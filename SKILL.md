@@ -548,7 +548,6 @@ Add to `~/.openclaw/openclaw.json`:
 
 Lifecycle hooks run automatically:
 - `before_prompt_build` — injects relevant memories as context
-- `before_reset` — saves session summary
 - `agent_end` — captures last response
 
 ---

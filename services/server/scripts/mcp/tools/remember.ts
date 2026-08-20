@@ -26,6 +26,7 @@ const REMEMBER_INPUT = {
  * Call this PROACTIVELY whenever the user reveals a durable fact about
  * themselves or the project (preference, decision, constraint, correction,
  * identity, recurring workflow) — you do not need to be explicitly asked.
+ * Skip one-off tasks, the current file or bug, and small talk.
  * For several facts at once, prefer `memwal_remember_bulk`.
  */
 export function registerRememberTool(
@@ -37,7 +38,7 @@ export function registerRememberTool(
         {
             ...TOOL_METADATA.memwal_remember,
             description:
-                "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever you learn something worth remembering across sessions — a stated preference, decision, constraint, correction, identity detail, or recurring workflow — even if the user did not explicitly say 'remember this'. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
+                "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
             inputSchema: REMEMBER_INPUT,
         },
         wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {

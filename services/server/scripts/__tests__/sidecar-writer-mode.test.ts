@@ -150,8 +150,11 @@ test("writer mode exposes only durable writer and observability routes", async (
             perWallet: [
                 {
                     address: writerKey.toSuiAddress(),
+                    walletIndex: 0,
                     suiMist: "1230000000",
+                    suiAddressBalanceMist: "1200000000",
                     walFrost: "4560000000",
+                    walAddressBalanceFrost: "4500000000",
                 },
             ],
         });

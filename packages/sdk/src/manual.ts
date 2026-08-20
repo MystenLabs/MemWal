@@ -46,6 +46,7 @@ import {
     u64ToLeHex,
     normalizeServerUrl,
     sanitizeServerError,
+    clockDriftErrorFromResponse,
     scoringWeightsToWire,
 } from "./utils.js";
 import { assertCompatibleRelayer, compatibilityErrorFromStatus } from "./compatibility.js";
@@ -171,7 +172,7 @@ export class MemWalManual {
         this.delegatePrivateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
         // LOW-22: default to HTTPS; warn (do not throw) on plaintext HTTP
         // against non-localhost hosts.
-        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memwal.ai/");
+        this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
         this.walletSigner = config.walletSigner ?? null;
         this.config = config;
         this.namespace = config.namespace ?? "default";
@@ -879,6 +880,11 @@ export class MemWalManual {
             const raw = await res.text();
             const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
             if (compatibilityError) throw compatibilityError;
+
+            // Surface a stale-timestamp rejection (401 + x-auth-error) as an
+            // actionable clock-drift error rather than an opaque server error.
+            const clockDriftError = clockDriftErrorFromResponse(res);
+            if (clockDriftError) throw clockDriftError;
 
             const { message: sanitized, serverCode } = sanitizeServerError(res.status, raw);
             const err = new Error(sanitized) as Error & {

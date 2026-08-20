@@ -386,7 +386,8 @@ export default function Dashboard({
     const relayerLooksMismatched =
         (config.suiNetwork === 'mainnet' && normalizedRelayerUrl.includes('staging')) ||
         (config.suiNetwork !== 'mainnet' &&
-            normalizedRelayerUrl.includes('relayer.memwal.ai') &&
+            (normalizedRelayerUrl.includes('relayer.memory.walrus.xyz') ||
+                normalizedRelayerUrl.includes('relayer.memwal.ai')) &&
             !normalizedRelayerUrl.includes('staging') &&
             !normalizedRelayerUrl.includes('dev'))
     const dashboardSubtitle = delegateKey || previewReady

@@ -14,7 +14,7 @@ export interface MemWalConfig {
     key: string | Uint8Array;
     /** Walrus Memory account object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
     accountId: string;
-    /** Server URL (default: https://relayer.memwal.ai) */
+    /** Server URL (default: https://relayer.memory.walrus.xyz) */
     serverUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
@@ -58,11 +58,49 @@ export interface RecallMemory {
     distance: number;
 }
 
+/**
+ * Token-budget metadata attached to a RecallResult when a `maxTokens` budget was
+ * requested. Lets callers/telemetry assert "this recall cost ≤ N tokens".
+ */
+export interface RecallTokenMeta {
+    /**
+     * Estimated token count of the RETURNED `results` payload (sum of per-hit
+     * estimates, after any truncation). This is the value a caller can assert a
+     * budget against, e.g. `meta.tokenEstimate <= maxTokens`. It is the
+     * post-truncation cost, not the pre-truncation total.
+     */
+    tokenEstimate: number;
+    /** True if any hit was dropped or shortened to fit the `maxTokens` budget. */
+    truncated: boolean;
+}
+
 /** Result from recall() */
 export interface RecallResult {
     results: RecallMemory[];
     total: number;
+    /**
+     * Present only when a `maxTokens` budget was supplied to recall(). Additive
+     * and optional — omitted for budget-less recalls, so existing callers are
+     * unaffected.
+     */
+    meta?: RecallTokenMeta;
 }
+
+/**
+ * How recall trims recalled memories to fit a `maxTokens` budget.
+ *
+ * - `high-relevance-only` (default): keep the lowest-distance hits whole, in
+ *   order, until the next hit would exceed the budget; drop the rest. No hit is
+ *   ever partially shown.
+ * - `per-hit-cap`: cap each hit's text to an equal share of the budget
+ *   (`floor(maxTokens / hitCount)`). Hits whose share rounds to zero (more hits
+ *   than budget tokens) are dropped rather than returned empty.
+ * - `drop-tail`: preserve order and keep whole hits from the front, then
+ *   truncate the single boundary hit that straddles the budget so the payload
+ *   fills to the end of the concatenated budget. The last kept hit may be a
+ *   shortened partial (this is what distinguishes it from `high-relevance-only`).
+ */
+export type TruncationStrategy = "high-relevance-only" | "per-hit-cap" | "drop-tail";
 
 /** Options for recall(). */
 export interface RecallOptions {
@@ -74,6 +112,24 @@ export interface RecallOptions {
     namespace?: string;
     /** Drop memories whose distance is greater than or equal to this value. */
     maxDistance?: number;
+    /**
+     * Client-side token budget for the returned payload. When set, recall trims
+     * the results (per `truncationStrategy`) so their estimated token count fits,
+     * and attaches `meta.tokenEstimate` / `meta.truncated`. Omit for the current
+     * (unbudgeted) behavior. Counting is an estimate — see `countTokens`.
+     */
+    maxTokens?: number;
+    /**
+     * Strategy used when `maxTokens` is set. Default: `high-relevance-only`.
+     * Ignored when `maxTokens` is not set.
+     */
+    truncationStrategy?: TruncationStrategy;
+    /**
+     * Custom exact token counter (e.g. a tiktoken binding). When omitted, a
+     * zero-dependency character-based approximation (~chars/4) is used. Only
+     * consulted when `maxTokens` is set.
+     */
+    countTokens?: (text: string) => number;
 }
 
 /** Recommended object-style recall input — preferred over positional args. */
@@ -339,7 +395,7 @@ export interface SealServerConfig {
 export interface MemWalManualConfig {
     /** Ed25519 delegate private key (hex or Uint8Array) for server auth */
     key: string | Uint8Array;
-    /** Server URL (default: https://relayer.memwal.ai) */
+    /** Server URL (default: https://relayer.memory.walrus.xyz) */
     serverUrl?: string;
     /**
      * Sui private key (bech32 suiprivkey1...) for SEAL + Walrus signing.

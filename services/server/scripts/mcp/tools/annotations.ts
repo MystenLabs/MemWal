@@ -26,8 +26,10 @@ export const TOOL_METADATA = {
     },
     memwal_recall: {
         title: "Recall Memories",
-        // Recall cleans stale index rows when Walrus confirms a blob is absent.
-        annotations: { readOnlyHint: false, destructiveHint: true },
+        // Search. Stale-row cleanup when a Walrus blob is already gone is
+        // incidental; advertising destructiveHint would make clients gate the
+        // proactive recall this tool exists to encourage.
+        annotations: { readOnlyHint: true, destructiveHint: false },
     },
     memwal_health: {
         title: "Check Walrus Memory Health",

@@ -7,7 +7,11 @@ import { createMcpServer } from "../server.js";
 
 test("tools/list publishes safe titles and behavior annotations for every remote tool", async (t) => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const server = createMcpServer({} as MemWalSession);
+    // Full scope so every remote tool is registered — tool registration is
+    // scope-gated, and this test is about the annotations each tool publishes.
+    const server = createMcpServer({
+        oauthScope: "memwal:read memwal:write",
+    } as MemWalSession);
     const client = new Client({ name: "annotations-test", version: "1.0.0" });
 
     t.after(async () => {
@@ -42,7 +46,7 @@ test("tools/list publishes safe titles and behavior annotations for every remote
             },
             memwal_recall: {
                 title: "Recall Memories",
-                annotations: { readOnlyHint: false, destructiveHint: true },
+                annotations: { readOnlyHint: true, destructiveHint: false },
             },
             memwal_health: {
                 title: "Check Walrus Memory Health",

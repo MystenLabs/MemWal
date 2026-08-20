@@ -79,8 +79,8 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
             <thead>
               <tr>
                 <th scope="col">Address</th>
-                <th scope="col" style={{ textAlign: 'right' }}>SUI</th>
-                <th scope="col" style={{ textAlign: 'right' }}>WAL</th>
+                <th scope="col" style={{ textAlign: 'right' }}>SUI (spendable)</th>
+                <th scope="col" style={{ textAlign: 'right' }}>WAL (spendable)</th>
                 <th scope="col">Status</th>
               </tr>
             </thead>
@@ -96,11 +96,25 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
                   <td title={wallet.address} className="admin-table-monospace">
                     {abbreviateAddress(wallet.address)}
                   </td>
-                  <td style={{ textAlign: 'right' }} className="admin-table-monospace" title={`${wallet.suiBalance} mist`}>
+                  <td
+                    style={{ textAlign: 'right' }}
+                    className="admin-table-monospace"
+                    title={`spendable ${wallet.suiBalance} mist / total ${wallet.suiTotal} mist`}
+                  >
                     {formatBalance(wallet.suiBalance, 'SUI')}
+                    {wallet.suiTotal !== wallet.suiBalance ? (
+                      <div className="admin-balance-total">total {formatBalance(wallet.suiTotal, 'SUI')}</div>
+                    ) : null}
                   </td>
-                  <td style={{ textAlign: 'right' }} className="admin-table-monospace" title={`${wallet.walBalance} frost`}>
+                  <td
+                    style={{ textAlign: 'right' }}
+                    className="admin-table-monospace"
+                    title={`spendable ${wallet.walBalance} frost / total ${wallet.walTotal} frost`}
+                  >
                     {formatBalance(wallet.walBalance, 'WAL')}
+                    {wallet.walTotal !== wallet.walBalance ? (
+                      <div className="admin-balance-total">total {formatBalance(wallet.walTotal, 'WAL')}</div>
+                    ) : null}
                   </td>
                   <td>
                     <span className={`admin-status-badge admin-status-badge--${wallet.status}`}>

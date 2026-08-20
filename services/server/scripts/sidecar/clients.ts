@@ -243,7 +243,14 @@ export type WalletBalanceSnapshot = {
     walletWalAddressBalanceFrost: string;
     walletWalCoinBalanceFrost: string;
     walletWalAddressFundedCount: number;
-    perWallet: Array<{ address: string; suiMist: string; walFrost: string }>;
+    perWallet: Array<{
+        address: string;
+        walletIndex: number;
+        suiMist: string;
+        suiAddressBalanceMist: string;
+        walFrost: string;
+        walAddressBalanceFrost: string;
+    }>;
 };
 
 const BALANCE_RPC_TIMEOUT_MS = 1_500;
@@ -300,7 +307,7 @@ async function loadWalletBalanceSnapshot(owners: string[]): Promise<WalletBalanc
     let suiAddressFundedCount = 0;
     let walAddressFundedCount = 0;
     const suiType = normalizeStructTag(SUI_TYPE);
-    const perWallet: Array<{ address: string; suiMist: string; walFrost: string }> = [];
+    const perWallet: WalletBalanceSnapshot["perWallet"] = [];
     balancesByOwner.forEach((balances, index) => {
         let ownerSuiAddressBalance = 0n;
         let ownerWalAddressBalance = 0n;
@@ -332,8 +339,11 @@ async function loadWalletBalanceSnapshot(owners: string[]): Promise<WalletBalanc
         if (ownerWalAddressBalance > 0n) walAddressFundedCount += 1;
         perWallet.push({
             address: owners[index],
+            walletIndex: index,
             suiMist: ownerSuiTotal.toString(),
+            suiAddressBalanceMist: ownerSuiAddressBalance.toString(),
             walFrost: ownerWalTotal.toString(),
+            walAddressBalanceFrost: ownerWalAddressBalance.toString(),
         });
     });
     return {

@@ -106,6 +106,49 @@ pub const DEFAULT_REGISTRY_SCAN_MAX_PAGES: u32 = 20;
 /// `sui_getObject` per candidate account).
 pub const REGISTRY_SCAN_MAX_CONCURRENT: usize = 2;
 
+/// Default accepted clock drift (seconds, each direction) between a client's
+/// signed timestamp and the relayer's clock. A request is fresh when
+/// `|now - timestamp| <= this`.
+pub const DEFAULT_AUTH_CLOCK_DRIFT_SECS: i64 = 300;
+
+/// Hard upper bound on the configurable clock-drift window. A wide window
+/// lengthens the interval in which a captured (signature, nonce) pair could be
+/// replayed if the nonce store were unavailable, so operators may tune the
+/// window down but never past this ceiling. Values above it fall back to the
+/// default.
+pub const MAX_AUTH_CLOCK_DRIFT_SECS: i64 = 900;
+
+/// Safety margin added on top of a request's full freshness lifetime when
+/// computing the replay-nonce TTL. Freshness is symmetric, so a request can be
+/// first accepted as early as `drift` seconds before its timestamp and remains
+/// fresh until `drift` seconds after — a `2 * drift` span. The nonce TTL is
+/// `2 * drift + NONCE_TTL_BUFFER_SECS` (see `auth::nonce_ttl_secs`), so the
+/// record always outlives the window in which the same signature could be
+/// replayed, whatever the window is tuned to.
+pub const NONCE_TTL_BUFFER_SECS: i64 = 300;
+
+/// Accepted timestamp drift window, from `AUTH_MAX_CLOCK_DRIFT_SECS`.
+/// Bounded to `0..=MAX_AUTH_CLOCK_DRIFT_SECS`; 0 requires an exact-second match.
+/// Out-of-range or unparseable values warn and fall back to the default.
+pub(crate) fn configured_auth_clock_drift_secs() -> i64 {
+    match std::env::var("AUTH_MAX_CLOCK_DRIFT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+    {
+        Some(secs) if (0..=MAX_AUTH_CLOCK_DRIFT_SECS).contains(&secs) => secs,
+        Some(secs) => {
+            tracing::warn!(
+                "AUTH_MAX_CLOCK_DRIFT_SECS={} out of range 0..={}; using default {}",
+                secs,
+                MAX_AUTH_CLOCK_DRIFT_SECS,
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS,
+            );
+            DEFAULT_AUTH_CLOCK_DRIFT_SECS
+        }
+        None => DEFAULT_AUTH_CLOCK_DRIFT_SECS,
+    }
+}
+
 // ============================================================
 // App State (shared across routes + middleware)
 // ============================================================
@@ -366,6 +409,7 @@ pub struct Config {
     /// Balance monitoring (proactive alerts)
     pub balance_monitor_interval_secs: u64,
     pub wallet_balance_low_threshold_wal: u64,
+    pub wallet_balance_low_threshold_sui: u64,
     pub sponsor_balance_low_threshold_sui: u64,
     /// MCP OAuth 2.1 support for Claude (and future) native custom
     /// connectors. `None` when required env vars are unset — routes still
@@ -373,6 +417,11 @@ pub struct Config {
     /// always available alongside the legacy delegate-key bearer.
     #[allow(dead_code)]
     pub mcp_oauth: Option<crate::oauth::McpOAuthConfig>,
+    /// Accepted clock drift (seconds, each direction) for signed-request
+    /// timestamps. Signatures older/newer than this are rejected as stale.
+    /// Default 300; tunable via `AUTH_MAX_CLOCK_DRIFT_SECS`, capped at
+    /// `MAX_AUTH_CLOCK_DRIFT_SECS`. Independent of nonce replay protection.
+    pub auth_max_clock_drift_secs: i64,
 }
 
 impl Config {
@@ -533,9 +582,21 @@ impl Config {
                 "BALANCE_MONITOR_INTERVAL_SECS",
                 900,
             )),
-            wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
-            sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
+            // Both WAL and SUI use 9 decimal places (FROST/MIST).
+            wallet_balance_low_threshold_wal: env_number(
+                "WALLET_BALANCE_LOW_THRESHOLD_WAL",
+                50_000_000_000,
+            ),
+            wallet_balance_low_threshold_sui: env_number(
+                "WALLET_BALANCE_LOW_THRESHOLD_SUI",
+                5_000_000_000,
+            ),
+            sponsor_balance_low_threshold_sui: env_number(
+                "SPONSOR_BALANCE_LOW_THRESHOLD_SUI",
+                5_000_000_000,
+            ),
             mcp_oauth: crate::oauth::McpOAuthConfig::from_env(),
+            auth_max_clock_drift_secs: configured_auth_clock_drift_secs(),
         }
     }
 }
@@ -1873,9 +1934,11 @@ mod tests {
             walrus_system_object_id: "0x4".into(),
             restore_requests_per_owner_per_minute: 10,
             balance_monitor_interval_secs: 900,
-            wallet_balance_low_threshold_wal: 1_000_000,
-            sponsor_balance_low_threshold_sui: 100_000_000,
+            wallet_balance_low_threshold_wal: 50_000_000_000,
+            wallet_balance_low_threshold_sui: 5_000_000_000,
+            sponsor_balance_low_threshold_sui: 5_000_000_000,
             mcp_oauth: None,
+            auth_max_clock_drift_secs: DEFAULT_AUTH_CLOCK_DRIFT_SECS,
         }
     }
 
@@ -2386,6 +2449,92 @@ mod tests {
             assert_eq!(configured_walrus_storage_epochs("mainnet"), 3);
             assert_eq!(configured_walrus_storage_epochs("testnet"), 5);
         });
+    }
+
+    // ── configured_auth_clock_drift_secs — bounded, defaulted ────────────
+
+    static AUTH_CLOCK_DRIFT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_auth_clock_drift_env<R>(value: Option<&str>, test: impl FnOnce() -> R) -> R {
+        let _guard = AUTH_CLOCK_DRIFT_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("AUTH_MAX_CLOCK_DRIFT_SECS").ok();
+
+        match value {
+            Some(value) => std::env::set_var("AUTH_MAX_CLOCK_DRIFT_SECS", value),
+            None => std::env::remove_var("AUTH_MAX_CLOCK_DRIFT_SECS"),
+        }
+
+        let result = test();
+
+        match previous {
+            Some(value) => std::env::set_var("AUTH_MAX_CLOCK_DRIFT_SECS", value),
+            None => std::env::remove_var("AUTH_MAX_CLOCK_DRIFT_SECS"),
+        }
+
+        result
+    }
+
+    #[test]
+    fn auth_clock_drift_defaults_to_300_when_unset() {
+        with_auth_clock_drift_env(None, || {
+            assert_eq!(configured_auth_clock_drift_secs(), 300);
+            assert_eq!(DEFAULT_AUTH_CLOCK_DRIFT_SECS, 300);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_honors_valid_env() {
+        with_auth_clock_drift_env(Some("120"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), 120);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_zero_means_exact_match() {
+        with_auth_clock_drift_env(Some("0"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), 0);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_accepts_exact_ceiling() {
+        with_auth_clock_drift_env(Some("900"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), MAX_AUTH_CLOCK_DRIFT_SECS);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_rejects_just_over_ceiling() {
+        // Pin the exact inclusive boundary: 900 accepted, 901 falls back.
+        with_auth_clock_drift_env(Some("901"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_falls_back_when_env_exceeds_cap() {
+        with_auth_clock_drift_env(Some("3600"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_falls_back_on_negative_or_garbage() {
+        with_auth_clock_drift_env(Some("-5"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+        });
+        with_auth_clock_drift_env(Some("not-a-number"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+        });
+    }
+
+    #[test]
+    fn nonce_ttl_buffer_is_positive() {
+        // The replay invariant (nonce record outlives the full 2*drift
+        // freshness lifetime) rests on the buffer being strictly positive; the
+        // `2*drift + buffer` derivation itself is tested against the real
+        // `nonce_ttl_secs` in the auth module.
+        assert!(NONCE_TTL_BUFFER_SECS > 0);
     }
 
     // ── AppError Display implementations ────────────────────────────────

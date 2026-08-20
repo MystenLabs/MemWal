@@ -1,5 +1,11 @@
 # memwal
 
+## Unreleased
+
+### Added
+
+- Added `MemWalClockDriftError`, raised when the relayer rejects a request because the signed timestamp is outside its accepted clock-drift window (`401` + `x-auth-error: ERR_TIMESTAMP_OUT_OF_BOUNDS`). Surfaces an actionable "synchronize the client clock" message instead of an opaque `401`. Subclasses `MemWalError`, so existing `except MemWalError` handlers still catch it.
+
 ## 0.1.7
 
 ### Added

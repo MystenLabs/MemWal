@@ -21,4 +21,6 @@ export interface PluginConfig {
   minRelevance: number;
   /** Number of recent messages to send for auto-capture. */
   captureMaxMessages: number;
+  /** Per-request deadline in ms for every relayer call. */
+  requestTimeoutMs: number;
 }

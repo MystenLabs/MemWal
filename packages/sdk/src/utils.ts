@@ -189,6 +189,33 @@ export function sanitizeServerError(
     return { message, raw: rawBody, serverCode };
 }
 
+/**
+ * Machine-readable reason the relayer sets on the `x-auth-error` header when it
+ * rejects a request because the signed timestamp is outside its accepted
+ * clock-drift window.
+ */
+export const ERR_TIMESTAMP_OUT_OF_BOUNDS = "ERR_TIMESTAMP_OUT_OF_BOUNDS";
+
+/**
+ * When a rejected response carries `x-auth-error: ERR_TIMESTAMP_OUT_OF_BOUNDS`,
+ * build an actionable clock-drift error (with `serverCode` set) so the caller
+ * can fix node time rather than seeing an opaque 401. Returns `null` otherwise.
+ */
+export function clockDriftErrorFromResponse(
+    res: { status: number; headers: Headers },
+): (Error & { status?: number; serverCode?: string }) | null {
+    if (res.status !== 401) return null;
+    if (res.headers.get("x-auth-error") !== ERR_TIMESTAMP_OUT_OF_BOUNDS) return null;
+    const err = new Error(
+        "Request rejected: signed timestamp is outside the relayer's accepted clock-drift window. " +
+            "Synchronize this client's clock (NTP); if the deployment needs a wider tolerance, " +
+            "raise AUTH_MAX_CLOCK_DRIFT_SECS on the relayer.",
+    ) as Error & { status?: number; serverCode?: string };
+    err.status = res.status;
+    err.serverCode = ERR_TIMESTAMP_OUT_OF_BOUNDS;
+    return err;
+}
+
 // ============================================================
 // Delegate Key → Sui Address Derivation
 // ============================================================
