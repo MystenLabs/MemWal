@@ -1,26 +1,50 @@
 /**
- * Cold-start tool descriptions (served before the relayer session is up)
- * must match the sidecar's proactive wording. Claude Code often keeps the
- * first tools/list; "Call ONLY when the user explicitly asks" made the
- * model ignore SessionStart / UserPromptSubmit hooks.
+ * Signed-in cold-start tools/list (bridge) must keep the sidecar's proactive
+ * wording. Signed-out tools/list (auth-required) must stay conservative so
+ * a model without credentials does not spam remember and collect 401s.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TOOL_DEFINITIONS } from "../dist/auth-required.js";
+import {
+    TOOL_DEFINITIONS,
+    SIGNED_OUT_TOOL_DEFINITIONS,
+} from "../dist/auth-required.js";
 
-function desc(name) {
-    const tool = TOOL_DEFINITIONS.find((t) => t.name === name);
+function desc(list, name) {
+    const tool = list.find((t) => t.name === name);
     assert.ok(tool, `missing ${name}`);
     return tool.description;
 }
 
-test("memwal_remember cold-start description is proactive", () => {
-    const d = desc("memwal_remember");
-    assert.match(d, /PROACTIVELY/);
-    assert.doesNotMatch(d, /Call ONLY when the user explicitly asks/);
+function annotations(list, name) {
+    const tool = list.find((t) => t.name === name);
+    assert.ok(tool, `missing ${name}`);
+    return tool.annotations;
+}
+
+test("signed-in cold-start remember/recall descriptions are proactive", () => {
+    const remember = desc(TOOL_DEFINITIONS, "memwal_remember");
+    const recall = desc(TOOL_DEFINITIONS, "memwal_recall");
+    assert.match(remember, /PROACTIVELY/);
+    assert.doesNotMatch(remember, /Call ONLY when the user explicitly asks/);
+    assert.match(recall, /PROACTIVELY/);
 });
 
-test("memwal_recall cold-start description is proactive", () => {
-    const d = desc("memwal_recall");
-    assert.match(d, /PROACTIVELY/);
+test("signed-out tools/list keeps conservative remember wording", () => {
+    const remember = desc(SIGNED_OUT_TOOL_DEFINITIONS, "memwal_remember");
+    const recall = desc(SIGNED_OUT_TOOL_DEFINITIONS, "memwal_recall");
+    assert.match(remember, /Call ONLY when the user explicitly asks/);
+    assert.doesNotMatch(remember, /PROACTIVELY/);
+    assert.doesNotMatch(recall, /PROACTIVELY/);
+});
+
+test("memwal_recall is advertised as a read-only search", () => {
+    assert.deepEqual(annotations(TOOL_DEFINITIONS, "memwal_recall"), {
+        readOnlyHint: true,
+        destructiveHint: false,
+    });
+    assert.deepEqual(annotations(SIGNED_OUT_TOOL_DEFINITIONS, "memwal_recall"), {
+        readOnlyHint: true,
+        destructiveHint: false,
+    });
 });

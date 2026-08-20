@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Keep signed-out `tools/list` conservative so a model without credentials does not spam `memwal_remember`. Signed-in cold start (bridge) still uses the sidecar's proactive wording.
+- Advertise `memwal_recall` as a read-only search (`readOnlyHint: true`, `destructiveHint: false`) so clients that gate on destructive tools do not hold back proactive recall.
 - Align the cold-start `memwal_remember` / `memwal_recall` descriptions with the sidecar's proactive wording. The bridge serves this static list before the relayer session is up, and clients that keep the first `tools/list` were told to call remember only when the user explicitly asked.
 - Stop classifying remember vs recall in the UserPromptSubmit hook. The hook injects a decision rubric and the agent chooses the tool from meaning, so Vietnamese, typos, and phrasing that never says "remember" still work.
 - Keep remember proactive for preferences, decisions, constraints, corrections, and identity, but skip one-off tasks, the current file or bug, and small talk.

@@ -53,7 +53,7 @@ This is why many first-run sessions show `memwal_login` before the other tools a
 
 ### memwal_remember
 
-Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** when the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — not only when they explicitly ask. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize.
+Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** when the user states a preference, decision, constraint, correction, identity detail, or recurring workflow, not only when they explicitly ask. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize.
 
 | **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |

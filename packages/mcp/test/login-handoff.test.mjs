@@ -185,7 +185,7 @@ test("auth-required mode picks up credentials mid-session without a restart", as
         },
         memwal_recall: {
             title: "Recall Memories",
-            annotations: { readOnlyHint: false, destructiveHint: true },
+            annotations: { readOnlyHint: true, destructiveHint: false },
         },
         memwal_analyze: {
             title: "Analyze and Remember",

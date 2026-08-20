@@ -46,7 +46,7 @@ test("tools/list publishes safe titles and behavior annotations for every remote
             },
             memwal_recall: {
                 title: "Recall Memories",
-                annotations: { readOnlyHint: false, destructiveHint: true },
+                annotations: { readOnlyHint: true, destructiveHint: false },
             },
             memwal_health: {
                 title: "Check Walrus Memory Health",
