@@ -126,12 +126,16 @@ async fn apply_legacy_migrations_once(
 
     if let Err(error) = &result {
         if migration_error_is_lock_contention(error) {
+            // lock_timeout aborts the statement; if sqlx had a transaction open
+            // the connection is now unusable until ROLLBACK.
+            let _ = sqlx::query("ROLLBACK").execute(&mut conn).await;
             release_orphaned_sqlx_migration_lock(&mut conn).await;
         }
     }
 
     // Direct connections drop session locks on close. Still unlock explicitly
     // so a cancelled run cannot leave the lock if the backend is reused.
+    let _ = sqlx::query("ROLLBACK").execute(&mut conn).await;
     let _ = sqlx::query("SELECT pg_advisory_unlock_all()")
         .execute(&mut conn)
         .await;
@@ -205,7 +209,9 @@ async fn release_orphaned_sqlx_migration_lock(conn: &mut PgConnection) {
             query = query.as_deref().unwrap_or(""),
             "legacy migration: sqlx advisory lock is held by another backend (WALM-378)"
         );
-        if state.as_deref() != Some("idle") {
+        // Live migrators are `active`. The leaked pooler backend in WALM-378
+        // was `idle` (and would be `idle in transaction` if SET left a txn).
+        if !matches!(state.as_deref(), Some("idle") | Some("idle in transaction")) {
             continue;
         }
         match sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
