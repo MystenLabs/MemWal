@@ -31,10 +31,13 @@ export const PROACTIVE_INSTRUCTIONS = [
     "preferences, or facts you may have stored earlier, call memwal_recall. One focused query is",
     "enough; do not fire several redundant searches for the same question.",
     "",
-    "REMEMBER: when you learn a durable fact about the user or their project (a stated preference,",
-    "decision, constraint, correction, identity detail, or recurring workflow), call memwal_remember",
-    "without waiting to be asked. Pass the complete statement rather than a summary. Use",
-    "memwal_remember_bulk when you learned several distinct facts at once.",
+    "REMEMBER: when the user states a preference, decision, constraint, correction, identity",
+    "detail, recurring workflow, or a configuration value such as a hostname, port, region or",
+    "id, call memwal_remember in that same turn, before you finish replying. Do not ask whether",
+    "to save it and do not wait to be asked: acknowledging the fact in your reply does not store",
+    "it, and it is lost when the conversation ends. Pass the complete statement rather than a",
+    "summary. Skip one-off tasks, the current file or bug, and small talk. Use",
+    "memwal_remember_bulk when several distinct facts arrived at once.",
     "",
     "RECOVER: if memwal_recall unexpectedly returns nothing for a namespace that has been used",
     "before, call memwal_restore to rebuild the index from Walrus.",
@@ -46,8 +49,9 @@ export const PROACTIVE_INSTRUCTIONS = [
 /**
  * Signed-out path (auth-required mode). Deliberately NOT the proactive text:
  * without credentials every memory tool fails, so telling the model to save
- * proactively here would only manufacture errors. The stub tool descriptions
- * are scoped the same way ("Call ONLY when the user explicitly asks").
+ * proactively here would only manufacture errors. Signed-out tools/list uses
+ * conservative remember/recall descriptions. The signed-in cold-start list
+ * (bridge) uses the sidecar's proactive wording.
  */
 export const AUTH_REQUIRED_INSTRUCTIONS = [
     "Walrus Memory is this user's persistent memory system, exposed through the memwal_* tools,",
