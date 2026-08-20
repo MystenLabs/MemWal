@@ -178,6 +178,94 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  noter-e2e:
+    name: Noter / Playwright E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: noter
+          POSTGRES_PASSWORD: noter_secret
+          POSTGRES_DB: noter
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U noter"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://noter:noter_secret@localhost:5432/noter
+      NEXT_PUBLIC_APP_URL: http://localhost:3002
+      PORT: "3002"
+      NODE_ENV: test
+      PLAYWRIGHT: "True"
+      # NEXT_PUBLIC_* Enoki/Sui vars are inlined at build time — placeholders
+      # are fine here since the e2e suite authenticates via delegate key, not
+      # the Google/Enoki popup flow (that needs a real OAuth session and stays
+      # a manual check, same as researcher's live-Walrus canary in #680).
+      NEXT_PUBLIC_ENOKI_API_KEY: ci-placeholder-not-used-tests-use-delegate-key
+      NEXT_PUBLIC_GOOGLE_CLIENT_ID: ci-placeholder-not-used-tests-use-delegate-key
+      NEXT_PUBLIC_SUI_NETWORK: testnet
+      NEXT_PUBLIC_MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
+      NEXT_PUBLIC_MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
+      NEXT_PUBLIC_MEMWAL_SERVER_URL: https://relayer.dev.memwal.ai
+      # No live-Walrus canary in this suite: isTestEnvironment flips the
+      # binding check onto the fixture pool, so even a real on-chain key
+      # would fail at login. CI covers auth + note CRUD + the memory API
+      # contract; remember → recall against production stays a manual check.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SDK (workspace dep of noter)
+        run: pnpm build:sdk
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Separate from chatbot's `pw-` key so the two jobs don't race the
+          # same cache entry. Fall back to the shared prefix on a cold start.
+          key: pw-noter-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pw-noter-${{ runner.os }}-
+            pw-${{ runner.os }}-
+
+      - name: Install Playwright (Chromium + OS deps)
+        timeout-minutes: 8
+        run: pnpm --filter @memwal/noter playwright:install
+
+      - name: Run Playwright E2E
+        run: pnpm --filter @memwal/noter test:e2e
+
+      - name: Upload Playwright report + traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-noter
+          path: |
+            apps/noter/playwright-report
+            apps/noter/test-results
+          retention-days: 14
+          if-no-files-found: ignore
+
   server-e2e:
     name: Server / E2E
     runs-on: ubuntu-latest
@@ -364,9 +452,19 @@ jobs:
         run: pnpm exec next build
 
   noter-checks:
-    name: Noter / Unit tests
+    name: Noter / Unit tests + Build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
+    env:
+      # Dummy DB — next build type-checks route handlers but doesn't connect.
+      DATABASE_URL: postgresql://dummy:dummy@localhost:5432/dummy
+      NEXT_PUBLIC_ENOKI_API_KEY: ci-placeholder-build-only
+      NEXT_PUBLIC_GOOGLE_CLIENT_ID: ci-placeholder-build-only
+      NEXT_PUBLIC_SUI_NETWORK: testnet
+      NEXT_PUBLIC_MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
+      NEXT_PUBLIC_MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
+      NEXT_PUBLIC_MEMWAL_SERVER_URL: https://relayer.dev.memwal.ai
 
     steps:
       - name: Checkout
@@ -392,6 +490,14 @@ jobs:
       # the insert-only delegate-credential guard. Fails the job on a regression.
       - name: Unit tests (vitest)
         run: pnpm --filter @memwal/noter test:unit
+
+      - name: Type-check (tsc --noEmit)
+        working-directory: apps/noter
+        run: pnpm exec tsc --noEmit
+
+      - name: Build (Next.js, type-check inclusive)
+        working-directory: apps/noter
+        run: pnpm exec next build
 
   server-checks:
     name: Server / Clippy + Unit tests
