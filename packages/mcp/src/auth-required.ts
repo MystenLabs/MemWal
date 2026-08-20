@@ -67,7 +67,7 @@ function buildToolDefinitions(proactive: boolean) {
     },
     {
         name: "memwal_remember_bulk",
-        title: "Remember Several Facts",
+        title: "Remember Multiple Facts",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
             "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
@@ -107,7 +107,7 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Analyze and Remember",
         annotations: { readOnlyHint: false, destructiveHint: true },
         description:
-            "Extract memorable facts from a passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory.",
+            "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead.",
         inputSchema: {
             type: "object",
             properties: {
@@ -123,7 +123,7 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Restore Memory Index",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts and truncated status; call again with a higher limit when truncated=true.",
+            "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index \u2014 use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status \u2014 does not return memory texts. If truncated=true, increase limit and call again. Call memwal_recall afterwards to query the rebuilt index.",
         inputSchema: {
             type: "object",
             properties: {
@@ -136,7 +136,7 @@ function buildToolDefinitions(proactive: boolean) {
     },
     {
         name: "memwal_health",
-        title: "Check Relayer Health",
+        title: "Check Walrus Memory Health",
         annotations: { readOnlyHint: true, destructiveHint: false },
         description:
             "Quick connectivity check for Walrus Memory. Calls the relayer's lightweight health endpoint (no search, no decryption) and returns its status and version. Use this to confirm the server is reachable — do NOT use memwal_recall for health checks, which is a full and slow retrieval.",

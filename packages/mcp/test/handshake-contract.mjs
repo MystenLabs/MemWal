@@ -121,14 +121,18 @@ if (signedIn) {
     // other. Anchoring is the property under test, so test for it directly.
     check(
         "RECALL is anchored to a turn event",
-        /RECALL:\s+before answering/i.test(instructions),
+        /RECALL: before answering/i.test(instructions.replace(/\s+/g, " ")),
         "before answering..."
     );
+    // The payload is newline-wrapped for readability, so every phrase match
+    // must tolerate a line break mid-sentence. Matching literal spaces here
+    // silently fails on correct output.
+    const flat = instructions.replace(/\s+/g, " ");
     check(
         "REMEMBER is anchored to a turn event",
-        /REMEMBER:/.test(instructions) &&
-            /before you finish replying/i.test(instructions) &&
-            /Do not ask whether to save it/i.test(instructions),
+        /REMEMBER:/.test(flat) &&
+            /in that same turn, before you finish replying/i.test(flat) &&
+            /Do not ask whether to save it/i.test(flat),
         "in that same turn, before you finish replying"
     );
 }
