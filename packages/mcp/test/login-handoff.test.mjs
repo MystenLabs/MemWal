@@ -180,7 +180,7 @@ test("auth-required mode picks up credentials mid-session without a restart", as
             annotations: { readOnlyHint: false, destructiveHint: false },
         },
         memwal_remember_bulk: {
-            title: "Remember Several Facts",
+            title: "Remember Multiple Facts",
             annotations: { readOnlyHint: false, destructiveHint: false },
         },
         memwal_recall: {
@@ -196,7 +196,7 @@ test("auth-required mode picks up credentials mid-session without a restart", as
             annotations: { readOnlyHint: false, destructiveHint: false },
         },
         memwal_health: {
-            title: "Check Relayer Health",
+            title: "Check Walrus Memory Health",
             annotations: { readOnlyHint: true, destructiveHint: false },
         },
         memwal_login: {

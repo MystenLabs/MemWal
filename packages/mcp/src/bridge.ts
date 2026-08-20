@@ -1160,6 +1160,17 @@ export async function runBridge(
                 // having to remove + re-add the MCP server.
                 if (msg.method === "tools/call" && msg.id != null) {
                     const params = (msg.params ?? {}) as { name?: string };
+                    // Tool NAME only, never `arguments` — memory text is the
+                    // user's private data and must not reach a log file.
+                    // Without this the only trace of a call is the host's own
+                    // `method="tools/call" id=N` line, which cannot say WHICH
+                    // tool ran. Scoring the WALM-368 T1-T3 cases needs exactly
+                    // that: "remember never fired" and "remember fired and
+                    // failed" are different bugs that looked identical.
+                    log.info("bridge.tool_call", {
+                        tool: params.name ?? null,
+                        id: msg.id,
+                    });
                     if (params.name === "memwal_login") {
                         const result = await handleLocalLogin(config, adoptCredentials);
                         writeStdoutMessage({
