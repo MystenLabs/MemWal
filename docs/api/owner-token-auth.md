@@ -101,7 +101,7 @@ cheapest handler-level check) → per-owner rate limit → `MemWalAccount`
 existence → mint. `owner` is canonicalized to lowercase before every
 downstream check and before it's embedded in the token's claims.
 
-Response ; `200 OK`:
+Response (`200 OK`):
 
 ```json
 {
@@ -133,8 +133,8 @@ existing token's lifetime.
 | `400` | `{"error": "owner has no MemWalAccount"}` | `owner` is a well-formed address but has never created a `MemWalAccount`. Use `GET /api/accounts/:owner/exists` first. |
 | `400` | `{"error": "Phase 1 only grants memories.read"}` | Request body included `scope` or `permissions` other than `memories.read`. |
 | `401` | *(bare, no body)* | Missing/wrong `x-service-credential`, or the credential is unconfigured on this deployment |
-| `429` | See "Rate limiting" ; **two different shapes**, do not assume one | Per-owner or per-credential budget exceeded |
-| `503` | See "Availability failures" ; **two different shapes**, do not assume one | `OWNER_TOKEN_SECRET` unconfigured, or the rate limiter's Redis backend is unreachable |
+| `429` | See "Rate limiting": **two different shapes**, do not assume one | Per-owner or per-credential budget exceeded |
+| `503` | See "Availability failures": **two different shapes**, do not assume one | `OWNER_TOKEN_SECRET` unconfigured, or the rate limiter's Redis backend is unreachable |
 
 ## Using a token
 

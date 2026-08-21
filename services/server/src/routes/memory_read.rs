@@ -445,8 +445,9 @@ pub(crate) async fn query_owner_memories(
             UNION ALL
             SELECT id, namespace, blob_id, deleted_at, deleted_at, 0::BIGINT,
                    NULL::TEXT, NULL::TEXT, NULL::INT, NULL::TIMESTAMPTZ, NULL::REAL, TRUE
-            FROM memory_tombstones
+            FROM memory_tombstones t
             WHERE owner = $1
+              AND NOT EXISTS (SELECT 1 FROM vector_entries v WHERE v.id = t.id)
         ) u
     ";
 
@@ -666,6 +667,7 @@ pub async fn list_owner_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::db::VectorDb;
     use sqlx::postgres::PgPoolOptions;
     use std::sync::OnceLock;
 
@@ -887,39 +889,18 @@ mod tests {
         assert_eq!(before.namespaces[0].memory_count, 2);
         let cursor = before.next_cursor.clone().unwrap();
 
-        sqlx::query(
-            "INSERT INTO memory_tombstones (id, owner, namespace, blob_id, deleted_at)
-             SELECT id, owner, namespace, blob_id, NOW()
-             FROM vector_entries WHERE owner = $1 AND id = $2",
-        )
-        .bind(&owner)
-        .bind(format!("{}-gone", owner))
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("DELETE FROM vector_entries WHERE owner = $1 AND id = $2")
-            .bind(&owner)
-            .bind(format!("{}-gone", owner))
-            .execute(&pool)
+        let deleted = VectorDb::from_pool(pool.clone())
+            .delete_by_blob_id(&format!("blob-gone"), &owner, "notes")
             .await
             .unwrap();
-        sqlx::query(
-            "INSERT INTO namespace_watermarks (owner, namespace, last_mutated_at)
-             VALUES ($1, 'notes', $2)
-             ON CONFLICT (owner, namespace) DO UPDATE SET last_mutated_at = EXCLUDED.last_mutated_at",
-        )
-        .bind(&owner)
-        .bind(ts(180))
-        .execute(&pool)
-        .await
-        .unwrap();
+        assert_eq!(deleted, 1);
 
         let after = query_owner_namespaces(&pool, &owner, Some(cursor), 100)
             .await
             .unwrap();
         assert_eq!(after.namespaces.len(), 1, "deleted watermark must still resurface");
         assert_eq!(after.namespaces[0].memory_count, 1);
-        assert_eq!(after.namespaces[0].updated_at, ts(180));
+        assert!(after.namespaces[0].updated_at > ts(120));
 
         let memories = query_owner_memories(&pool, &owner, None, 100)
             .await

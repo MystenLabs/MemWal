@@ -96,15 +96,15 @@ sends the signature in `x-signature`:
 {timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}
 ```
 
-- `timestamp` ; the exact value sent in `x-timestamp`.
-- `method` ; HTTP method, e.g. `GET`.
-- `path_and_query` ; the request's path plus query string exactly as sent,
+- `timestamp`: the exact value sent in `x-timestamp`.
+- `method`: HTTP method, e.g. `GET`.
+- `path_and_query`: the request's path plus query string exactly as sent,
   e.g. `/v1/owners/0xabc.../memories?limit=50`. Mismatched query params
   (including a tampered `updated_after` cursor) invalidate the signature.
-- `body_sha256` ; hex-encoded SHA-256 of the request body. For these
+- `body_sha256`: hex-encoded SHA-256 of the request body. For these
   GET-only, bodyless endpoints this is the hash of an empty byte string.
-- `nonce` ; the `x-nonce` value.
-- `account_id` ; the `x-account-id` value (empty string if omitted, which
+- `nonce`: the `x-nonce` value.
+- `account_id`: the `x-account-id` value (empty string if omitted, which
   will not match a real signed request).
 
 Server-side verification flow (`auth.rs::verify_signature`): validate the
@@ -126,7 +126,7 @@ distinguishing failure reasons):
 - `x-timestamp` outside the ±300s window.
 - Ed25519 signature verification failure (including a tampered path, query
   string, or body).
-- Nonce already seen (replay) ; or the Redis nonce check itself failing
+- Nonce already seen (replay): or the Redis nonce check itself failing
   (fail-closed).
 - Public key not found among the resolved account's on-chain delegate keys,
   or the account is deactivated.
@@ -145,7 +145,7 @@ bare `401`, with no distinction in the response between causes, for:
 
 Once authenticated (either path), the three endpoints below additionally
 return `403` if the `{owner}` path segment does not equal the resolved
-identity, or ; bearer-token path only ; if the token's `permissions` don't
+identity, or, on the bearer-token path, if the token's `permissions` don't
 include `memories.read`.
 
 ## Rate limiting

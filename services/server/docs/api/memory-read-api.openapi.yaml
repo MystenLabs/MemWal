@@ -303,10 +303,11 @@ components:
             no more data remains.
         snapshot_version:
           type: integer
+          description: Wire-format version. Currently 3. Bumps only when fields or cursor encoding change, not when rows are deleted.
 
     MemoryItem:
       type: object
-      required: [memory_id, namespace_id, blob_id, created_at, updated_at, size, agent_id, package_id, status, end_epoch, expires_at]
+      required: [memory_id, namespace_id, blob_id, created_at, updated_at, size, agent_id, package_id, status, end_epoch, expires_at, importance]
       properties:
         memory_id:
           type: string
@@ -339,11 +340,16 @@ components:
           nullable: true
         status:
           type: string
-          enum: [active, expired]
+          enum: [active, expired, deleted]
           description: >-
-            "expired" if `expires_at` is in the past, "active" otherwise —
-            including while `end_epoch`/`expires_at` are still null (not yet
-            synced).
+            deleted for tombstoned rows, expired if expires_at is in the past,
+            active otherwise (including while end_epoch/expires_at are still
+            null).
+        importance:
+          type: number
+          format: float
+          nullable: true
+          description: Extractor importance in 0.0-1.0.
         end_epoch:
           type: integer
           format: int32
