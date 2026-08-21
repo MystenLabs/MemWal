@@ -59,6 +59,7 @@
             "group": "Guides",
             "pages": [
               "guides/agent-runtimes",
+              "guides/multi-agent-coordination",
               "guides/delete-old-memories",
               "guides/delete-memories-programmatically"
             ]
