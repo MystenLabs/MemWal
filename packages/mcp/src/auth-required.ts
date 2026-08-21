@@ -24,6 +24,8 @@
 import { loadCreds, type MemWalCredentials } from "./auth.js";
 import { log } from "./logger.js";
 import { loginFlow } from "./login.js";
+import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
+import { MEMWAL_MCP_VERSION } from "./version.js";
 
 interface RpcMessage {
     jsonrpc: "2.0";
@@ -34,11 +36,25 @@ interface RpcMessage {
     error?: unknown;
 }
 
-const TOOL_DEFINITIONS = [
+const SIGNED_OUT_REMEMBER =
+    "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.";
+const SIGNED_IN_REMEMBER =
+    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.";
+const SIGNED_OUT_RECALL =
+    "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.";
+const SIGNED_IN_RECALL =
+    "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by relevance.";
+
+/** Build the static memory-tool list. `proactive` is true for the signed-in
+ * cold-start path (bridge: credentials exist, relayer not yet up) and false
+ * for auth-required (no credentials). Same tool names/order as the sidecar. */
+function buildToolDefinitions(proactive: boolean) {
+    return [
     {
         name: "memwal_remember",
-        description:
-            "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.",
+        title: "Remember a Fact",
+        annotations: { readOnlyHint: false, destructiveHint: false },
+        description: proactive ? SIGNED_IN_REMEMBER : SIGNED_OUT_REMEMBER,
         inputSchema: {
             type: "object",
             properties: {
@@ -50,9 +66,31 @@ const TOOL_DEFINITIONS = [
         },
     },
     {
-        name: "memwal_recall",
+        name: "memwal_remember_bulk",
+        title: "Remember Multiple Facts",
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.",
+            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                facts: {
+                    type: "array",
+                    items: { type: "string", minLength: 1 },
+                    minItems: 1,
+                    maxItems: 20,
+                },
+                namespace: { type: "string" },
+            },
+            required: ["facts"],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: "memwal_recall",
+        title: "Recall Memories",
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        description: proactive ? SIGNED_IN_RECALL : SIGNED_OUT_RECALL,
         inputSchema: {
             type: "object",
             properties: {
@@ -66,8 +104,10 @@ const TOOL_DEFINITIONS = [
     },
     {
         name: "memwal_analyze",
+        title: "Analyze and Remember",
+        annotations: { readOnlyHint: false, destructiveHint: true },
         description:
-            "Extract memorable facts from a passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory.",
+            "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead.",
         inputSchema: {
             type: "object",
             properties: {
@@ -80,8 +120,10 @@ const TOOL_DEFINITIONS = [
     },
     {
         name: "memwal_restore",
+        title: "Restore Memory Index",
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Re-index a namespace from Walrus blobs back into the relayer's search index. Returns counts and truncated status; call again with a higher limit when truncated=true.",
+            "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index \u2014 use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status \u2014 does not return memory texts. If truncated=true, increase limit and call again. Call memwal_recall afterwards to query the rebuilt index.",
         inputSchema: {
             type: "object",
             properties: {
@@ -93,7 +135,21 @@ const TOOL_DEFINITIONS = [
         },
     },
     {
+        name: "memwal_health",
+        title: "Check Walrus Memory Health",
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        description:
+            "Quick connectivity check for Walrus Memory. Calls the relayer's lightweight health endpoint (no search, no decryption) and returns its status and version. Use this to confirm the server is reachable — do NOT use memwal_recall for health checks, which is a full and slow retrieval.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+        },
+    },
+    {
         name: "memwal_login",
+        title: "Sign In to Walrus Memory",
+        annotations: { readOnlyHint: false, destructiveHint: false },
         description:
             "Sign this MCP client into your Walrus Memory account by opening a browser. Run once when the agent reports Walrus Memory is not signed in. Opens the dashboard in the default browser, waits for wallet approval, then writes credentials to ~/.memwal/credentials.json. Other memwal_* tools become usable on the next call after a successful login.",
         inputSchema: {
@@ -102,7 +158,18 @@ const TOOL_DEFINITIONS = [
             additionalProperties: false,
         },
     },
-];
+    ];
+}
+
+/** Signed-in cold-start list (bridge). Credentials exist; the relayer session
+ * is not up yet. Proactive wording so clients that keep the first tools/list
+ * still save/recall without being asked. */
+export const TOOL_DEFINITIONS = buildToolDefinitions(true);
+
+/** Signed-out list (auth-required). No credentials, so every memory call
+ * fails: keep conservative wording or the model will spam remember and get
+ * a stream of auth errors. */
+export const SIGNED_OUT_TOOL_DEFINITIONS = buildToolDefinitions(false);
 
 /** Maximum time we'll keep the login HTTP listener bound after the user
  * clicks `memwal_login`. The user paces themselves — wallet popups, ledger
@@ -329,8 +396,15 @@ function handleAuthLine(
             id,
             result: {
                 protocolVersion: "2024-11-05",
-                capabilities: { tools: { listChanged: false } },
-                serverInfo: { name: "memwal", version: "0.0.1" },
+                // listChanged:true because the tool set DOES change after a
+                // mid-session login: the hot-handoff to the bridge emits
+                // `notifications/tools/list_changed`, and a client told
+                // `false` here would be entitled to ignore it and never pick up
+                // the real upstream tools (or `memwal_logout`). Advertise the
+                // capability the handoff depends on.
+                capabilities: { tools: { listChanged: true } },
+                serverInfo: { name: "memwal", version: MEMWAL_MCP_VERSION },
+                instructions: AUTH_REQUIRED_INSTRUCTIONS,
             },
         });
         return null;
@@ -344,7 +418,7 @@ function handleAuthLine(
         writeStdoutMessage({
             jsonrpc: "2.0",
             id,
-            result: { tools: TOOL_DEFINITIONS },
+            result: { tools: SIGNED_OUT_TOOL_DEFINITIONS },
         });
         return null;
     }

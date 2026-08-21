@@ -7,10 +7,12 @@ use axum::{
 use percent_encoding::percent_decode_str;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
     client_ip::canonical_client_ip,
+    storage::db::{StorageAdmission, StorageReservationRequest},
     types::{AppError, AppState, AuthInfo},
 };
 
@@ -721,13 +723,42 @@ pub async fn read_api_rate_limit_middleware(
 /// Storage tracking still uses PostgreSQL (it's per-row in vector_entries).
 /// Returns `Ok(())` if within quota, `Err(AppError::QuotaExceeded)` if not.
 ///
-/// Uses PostgreSQL advisory lock per-owner to prevent
-/// TOCTOU race where concurrent requests all pass quota check then
-/// all write, collectively exceeding the limit.
-pub async fn check_storage_quota(
+/// How long an unreleased storage reservation keeps counting against quota.
+///
+/// This is the backstop for a release that never happens: process killed
+/// between admission and insert, task cancelled, job lost. It must be longer
+/// than any window in which the write could still legitimately land, or a slow
+/// upload would have its reservation expire while the row is still coming and
+/// a concurrent burst could slip past the quota.
+///
+/// The longest such window is bounded by `main::STALE_REMEMBER_JOB_AFTER`
+/// (10 minutes), after which the sweeper marks the job failed and releases the
+/// reservation anyway. 15 minutes leaves margin over that without letting a
+/// leak sit around long. Over-counting for at most this long is the intended
+/// failure mode; an account is never permanently stranded.
+pub const STORAGE_RESERVATION_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Atomically admit pending writes against the owner's storage quota.
+///
+/// Replaces the old `check_storage_quota`, which was not atomic: it read usage
+/// under a `pg_advisory_xact_lock`, committed (releasing the lock, because xact
+/// locks are transaction scoped), compared outside any lock, and left the
+/// caller to insert later still. Concurrent requests from one owner all read
+/// the same pre-insert total, all passed, and all inserted (GH #532 /
+/// WALM-359).
+///
+/// Admission now records the intent to write inside the locked transaction, so
+/// a later request in the same burst sees the earlier one's bytes even though
+/// no row exists yet. Callers must release once the row lands or the write is
+/// known to be dead — see `release_storage_quota`.
+///
+/// Admission is all-or-nothing across `reservations`, preserving the existing
+/// behaviour where a bulk request lands whole or is rejected whole, and the
+/// `402` / "Storage quota exceeded" response shape is unchanged.
+pub async fn reserve_storage_quota(
     state: &AppState,
     owner: &str,
-    additional_bytes: i64,
+    reservations: &[StorageReservationRequest],
 ) -> Result<(), AppError> {
     let max_bytes = state.config.rate_limit.max_storage_bytes;
 
@@ -736,33 +767,72 @@ pub async fn check_storage_quota(
         return Ok(());
     }
 
-    // Acquire a per-owner PostgreSQL advisory lock.
-    // This serializes concurrent quota checks for the same owner,
-    // preventing TOCTOU race conditions.
-    // We use a stable hash of the owner string as the lock key.
-    let lock_key = stable_hash_i64(owner);
-
-    // Use the combined method which uses an explicit transaction and pg_advisory_xact_lock
-    let used = state.db.get_storage_used_with_lock(owner, lock_key).await?;
-    let projected = used + additional_bytes;
-
-    if projected > max_bytes {
-        let used_mb = used as f64 / 1_048_576.0;
-        let max_mb = max_bytes as f64 / 1_048_576.0;
-        tracing::warn!(
-            "storage quota exceeded: owner={} used={:.1}MB + {:.1}MB > max={:.1}MB",
-            owner,
-            used_mb,
-            additional_bytes as f64 / 1_048_576.0,
-            max_mb
-        );
-        return Err(AppError::QuotaExceeded(format!(
-            "Storage quota exceeded: {:.1}MB used of {:.1}MB allowed",
-            used_mb, max_mb
-        )));
+    if reservations.is_empty() {
+        return Ok(());
     }
 
-    Ok(())
+    // Stable hash of the owner string as the per-owner advisory lock key.
+    let lock_key = stable_hash_i64(owner);
+    let requested: i64 = reservations.iter().map(|r| r.bytes).sum();
+
+    let admission = state
+        .db
+        .admit_storage_reservations(
+            owner,
+            lock_key,
+            max_bytes,
+            reservations,
+            STORAGE_RESERVATION_TTL,
+        )
+        .await?;
+
+    match admission {
+        StorageAdmission::Admitted => Ok(()),
+        StorageAdmission::Rejected { used } => {
+            let used_mb = used as f64 / 1_048_576.0;
+            let max_mb = max_bytes as f64 / 1_048_576.0;
+            tracing::warn!(
+                "storage quota exceeded: owner={} used={:.1}MB + {:.1}MB > max={:.1}MB",
+                owner,
+                used_mb,
+                requested as f64 / 1_048_576.0,
+                max_mb
+            );
+            Err(AppError::QuotaExceeded(format!(
+                "Storage quota exceeded: {:.1}MB used of {:.1}MB allowed",
+                used_mb, max_mb
+            )))
+        }
+    }
+}
+
+/// Convenience wrapper for the single-write call sites.
+pub async fn reserve_storage_quota_one(
+    state: &AppState,
+    owner: &str,
+    id: String,
+    bytes: i64,
+) -> Result<(), AppError> {
+    reserve_storage_quota(state, owner, &[StorageReservationRequest { id, bytes }]).await
+}
+
+/// Release reservations after the bytes are committed as rows, or after the
+/// write that reserved them is known to be dead.
+///
+/// Deliberately infallible: a failed release is recovered by
+/// `STORAGE_RESERVATION_TTL`, and must never turn a successful write into a
+/// failed request.
+pub async fn release_storage_quota(state: &AppState, ids: &[String]) {
+    if state.config.rate_limit.max_storage_bytes <= 0 {
+        return;
+    }
+    state.db.release_storage_reservations(ids).await;
+}
+
+/// Release a single reservation. See `release_storage_quota`.
+pub async fn release_storage_quota_one(state: &AppState, id: &str) {
+    let ids = [id.to_string()];
+    release_storage_quota(state, &ids).await;
 }
 
 /// Compute a stable i64 hash of a string for use as PG advisory lock key.

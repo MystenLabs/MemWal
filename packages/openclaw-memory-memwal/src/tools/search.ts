@@ -10,7 +10,7 @@
 import type { MemWal } from "@mysten-incubation/memwal";
 import { Type } from "@sinclair/typebox";
 import { looksLikeInjection } from "../capture.js";
-import { escapeForPrompt, toolError } from "../format.js";
+import { escapeForPrompt, toolError, withTimeout } from "../format.js";
 import type { PluginConfig } from "../types.js";
 import { DEFAULT_SEARCH_LIMIT } from "../constants.js";
 
@@ -41,7 +41,11 @@ export function registerSearchTool(api: any, client: MemWal, config: PluginConfi
         const ns = namespace || config.defaultNamespace;
 
         try {
-          const result = await client.recall(query, limit, ns);
+          const result = await withTimeout(
+            () => client.recall(query, limit, ns),
+            config.requestTimeoutMs,
+            "memory_search",
+          );
 
           if (!result.results?.length) {
             return {

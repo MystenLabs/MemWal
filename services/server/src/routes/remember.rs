@@ -149,7 +149,18 @@ fn spawn_prepare_remember_job(
                 let vector = vector_result?;
                 let encrypted = encrypted_result?;
 
-                rate_limit::check_storage_quota(&state, &owner, encrypted.len() as i64).await?;
+                // Reserve against quota, keyed by this job's id. The insert
+                // happens minutes later in jobs.rs (after the Walrus upload),
+                // so a plain check here would let a concurrent burst pass
+                // before any row exists. jobs.rs releases the reservation when
+                // the row lands or the job dies terminally.
+                rate_limit::reserve_storage_quota_one(
+                    &state,
+                    &owner,
+                    job_id.clone(),
+                    encrypted.len() as i64,
+                )
+                .await?;
 
                 let wallet_index = state.key_pool.next_index().ok_or_else(|| {
                     AppError::Internal(
@@ -220,6 +231,10 @@ fn spawn_prepare_remember_job(
             if let Err(e) = result {
                 let msg = e.to_string();
                 tracing::error!("remember preparation failed: job_id={} {}", job_id, msg);
+                // The job never reached the queue, so nothing downstream will
+                // release its reservation. No-op when the failure was the
+                // quota rejection itself (nothing was reserved).
+                rate_limit::release_storage_quota_one(&state, &job_id).await;
                 mark_remember_job_failed(&state, &job_id, prepare_claim_token.as_deref(), &msg)
                     .await;
             }
@@ -312,7 +327,20 @@ fn spawn_prepare_bulk_remember_job(
                     prepared.push((job_id, namespace, vector, encrypted));
                 }
 
-                rate_limit::check_storage_quota(&state, &owner, total_encrypted_bytes).await?;
+                // One reservation per item, each keyed by the job id its
+                // vector row will use, so jobs.rs releases them individually
+                // as items land. Admission is still all-or-nothing across the
+                // batch, so an over-quota bulk request is rejected whole.
+                let reservations: Vec<crate::storage::db::StorageReservationRequest> = prepared
+                    .iter()
+                    .map(|(job_id, _, _, encrypted)| {
+                        crate::storage::db::StorageReservationRequest {
+                            id: job_id.clone(),
+                            bytes: encrypted.len() as i64,
+                        }
+                    })
+                    .collect();
+                rate_limit::reserve_storage_quota(&state, &owner, &reservations).await?;
 
                 let mut bulk_items: Vec<BulkRememberItem> = Vec::with_capacity(prepared.len());
                 for (job_id, namespace, vector, encrypted) in prepared {
@@ -363,6 +391,9 @@ fn spawn_prepare_bulk_remember_job(
             if let Err(e) = result {
                 let msg = e.to_string();
                 tracing::error!("remember_bulk preparation failed: {}", msg);
+                // Same reasoning as the single path: nothing downstream will
+                // release these, because the batch never reached the queue.
+                rate_limit::release_storage_quota(&state, &job_ids).await;
                 mark_remember_jobs_failed(&state, &job_ids, &msg).await;
             }
         };
@@ -1352,14 +1383,28 @@ pub async fn remember_manual(
         .decode(&body.encrypted_data)
         .map_err(|e| AppError::BadRequest(format!("encrypted_data is not valid base64: {}", e)))?;
 
-    // Check storage quota before upload (quota enforcement stays here —
-    // the engine owns persistence, not policy).
-    rate_limit::check_storage_quota(&state, owner, encrypted_bytes.len() as i64).await?;
+    // Reserve quota before upload (quota enforcement stays here — the engine
+    // owns persistence, not policy).
+    //
+    // This path inserts inline, microseconds after admission rather than
+    // minutes, but it still goes through a reservation: a bare check would let
+    // two concurrent manual writes both pass on the same pre-insert total, and
+    // sharing one mechanism with the enqueued paths keeps a single source of
+    // truth for what an owner is currently consuming. The id is local because
+    // no job row exists here; the engine mints the vector id itself.
+    let reservation_id = uuid::Uuid::new_v4().to_string();
+    rate_limit::reserve_storage_quota_one(
+        &state,
+        owner,
+        reservation_id.clone(),
+        encrypted_bytes.len() as i64,
+    )
+    .await?;
 
     // Persist via the storage engine: Walrus upload (pool key pays gas,
     // configured storage epochs, immediate transfer to owner) -> Postgres index row.
     // Same logic as before, now in engine/walrus_seal.rs::store_blob.
-    let mref = state
+    let stored = state
         .engine
         .store_blob(
             owner,
@@ -1374,7 +1419,15 @@ pub async fn remember_manual(
             crate::services::extractor::IMPORTANCE_STANDARD,
             Some(&auth.public_key),
         )
-        .await?;
+        .await;
+
+    // Released on both arms. On success the row now carries the bytes, so
+    // holding the reservation would double count until TTL; on failure nothing
+    // was written and the quota must go back immediately. Releasing after the
+    // row is committed (never before) keeps the overlap on the safe side.
+    rate_limit::release_storage_quota_one(&state, &reservation_id).await;
+
+    let mref = stored?;
     let id = mref.id;
     let blob_id = mref.blob_id;
 
@@ -2003,9 +2056,11 @@ mod tests {
             owner_token_rate_limit: crate::types::OwnerTokenRateLimitConfig::default(),
             restore_requests_per_owner_per_minute: 10,
             balance_monitor_interval_secs: 900,
-            wallet_balance_low_threshold_wal: 1_000_000,
-            sponsor_balance_low_threshold_sui: 100_000_000,
+            wallet_balance_low_threshold_wal: 50_000_000_000,
+            wallet_balance_low_threshold_sui: 5_000_000_000,
+            sponsor_balance_low_threshold_sui: 5_000_000_000,
             mcp_oauth: None,
+            auth_max_clock_drift_secs: crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS,
         }
     }
 

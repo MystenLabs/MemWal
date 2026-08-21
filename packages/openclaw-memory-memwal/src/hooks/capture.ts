@@ -9,7 +9,7 @@
 import type { MemWal } from "@mysten-incubation/memwal";
 import { resolveAgent } from "../config.js";
 import { shouldCapture } from "../capture.js";
-import { extractMessageTexts, withRetry } from "../format.js";
+import { extractMessageTexts, withRetry, withTimeout } from "../format.js";
 import type { PluginConfig } from "../types.js";
 
 /** Register the agent_end hook for auto-capture. */
@@ -66,8 +66,14 @@ export function registerCaptureHook(api: any, client: MemWal, config: PluginConf
       // (The "no silent now() fallback" rule is about the server
       // defaulting for callers that passed nothing; here the caller
       // IS passing, with real-ish knowledge of when the event happened.)
+      // Timeout sits inside the retry so each attempt gets its own deadline,
+      // rather than one deadline spanning the whole retry budget.
       const result = await withRetry(() =>
-        client.analyze(conversation, { namespace, occurredAt: new Date() }),
+        withTimeout(
+          () => client.analyze(conversation, { namespace, occurredAt: new Date() }),
+          config.requestTimeoutMs,
+          "auto-capture",
+        ),
       );
 
       if (result.facts?.length) {

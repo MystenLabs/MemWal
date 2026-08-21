@@ -104,12 +104,20 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         return;
     }
     if (args.logout) {
-        clearCreds();
-        note(`Credentials removed (${credsPath()}).`);
+        const cleared = clearCreds();
+        if (!cleared.removedPath) {
+            note(`No credentials to remove (${credsPath()}).`);
+            return;
+        }
+        note(`Credentials removed (${cleared.removedPath}).`);
+        if (cleared.fallbackPath) {
+            note(
+                `Still signed in elsewhere: ${cleared.fallbackPath} remains and is what ` +
+                    `the next run loads, under a possibly different account. Remove it too ` +
+                    `to sign out everywhere.`,
+            );
+        }
         return;
-    }
-    if (args.forceLogin) {
-        clearCreds();
     }
 
     // Resolve URLs: CLI > env > default.
@@ -131,7 +139,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // applyDefaultNamespace in bridge.ts).
     const namespace = args.namespace ?? process.env.MEMWAL_NAMESPACE;
 
-    let creds = loadCreds();
+    // `login` forces a fresh sign-in by IGNORING what is on disk, not by
+    // deleting it. Deleting up front meant an abandoned or failed login left
+    // the user with no credentials at all and nothing to recover from — and it
+    // also destroyed the file `saveCreds` needs in order to notice that the new
+    // sign-in belongs to a different account (GH #628). The old file is now
+    // replaced only on success, and backed up when the account changes.
+    let creds = args.forceLogin ? null : loadCreds();
     if (creds && args.relayerUrl && creds.relayerUrl !== args.relayerUrl) {
         // Caller wants a different relayer than what's saved. NEVER silently
         // mutate the saved relayerUrl — a malicious config snippet (e.g.

@@ -2,7 +2,7 @@ use axum::{
     extract::{Request, State},
     http::{header, HeaderValue, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use redis::AsyncCommands;
@@ -48,8 +48,56 @@ async fn constant_time_reject() -> StatusCode {
     StatusCode::UNAUTHORIZED
 }
 
+/// Machine-readable reason for a stale/future-dated timestamp, surfaced on the
+/// `x-auth-error` header so a client can distinguish clock drift from a bad
+/// signature. Only emitted for the timestamp check: it depends solely on the
+/// client's own clock, not on whether the account or key exists, so exposing it
+/// leaks nothing about server-side identity state. Signature, nonce, and
+/// account-resolution failures keep the bare uniform 401 (no reason header) so
+/// they remain indistinguishable and cannot be used to enumerate accounts.
+const ERR_TIMESTAMP_OUT_OF_BOUNDS: &str = "ERR_TIMESTAMP_OUT_OF_BOUNDS";
+
+/// 401 carrying `x-auth-error: <code>`, after the same constant delay as
+/// `constant_time_reject` so timing stays uniform across auth-failure paths.
+async fn constant_time_reject_with_reason(code: &'static str) -> Response {
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    (
+        StatusCode::UNAUTHORIZED,
+        [("x-auth-error", code)],
+        String::new(),
+    )
+        .into_response()
+}
+
 fn unsupported_legacy_sdk() -> StatusCode {
     StatusCode::UPGRADE_REQUIRED
+}
+
+/// Whether a request whose signed timestamp is `age` seconds old (negative =
+/// future-dated) is fresh, given the accepted drift window. The window is
+/// inclusive and symmetric: `|age| <= drift`. `drift == 0` requires an exact
+/// second match. This is the sole freshness predicate — the middleware and its
+/// tests both call it, so a boundary regression can't hide behind a duplicated
+/// expression.
+fn is_timestamp_fresh(age: i64, drift: i64) -> bool {
+    (-drift..=drift).contains(&age)
+}
+
+/// Redis TTL (seconds) for a request's replay nonce.
+///
+/// Freshness is symmetric: a request signed for time `T` is accepted for any
+/// `now` in `[T - drift, T + drift]`. Its nonce record is written on first
+/// acceptance, which can happen as early as `now = T - drift` (a future-dated
+/// request), yet the request stays fresh until `now = T + drift`. So the record
+/// must survive the *full* `2 * drift` lifetime, not just one drift — otherwise
+/// a request first seen at `T - drift` has its nonce expire at
+/// `(T - drift) + ttl` while still being fresh, and the same signature replays
+/// in the gap. TTL = `2 * drift + NONCE_TTL_BUFFER_SECS` covers the worst case
+/// with margin for every window value. `drift` is bounded to
+/// `0..=MAX_AUTH_CLOCK_DRIFT_SECS`, so `2 * drift + buffer` (≤ 2100) never
+/// overflows and the `as u64` is lossless.
+fn nonce_ttl_secs(drift: i64) -> u64 {
+    (2 * drift + crate::types::NONCE_TTL_BUFFER_SECS).max(0) as u64
 }
 
 #[tracing::instrument(name = "auth.verify_signature", skip_all)]
@@ -116,8 +164,9 @@ pub async fn verify_signature(
     }
 
     // Extract nonce for replay protection.
-    // Nonce must be a UUID v4, checked against Redis to prevent replay attacks.
-    // TTL = 600s (10 min) > timestamp window (300s) so no replay is possible.
+    // Nonce must be a UUID, checked against Redis to prevent replay attacks.
+    // Its TTL is kept strictly greater than the timestamp window (see the SET
+    // below) so no replay is possible once the fresh window closes.
     let nonce = headers
         .get("x-nonce")
         .and_then(|v| v.to_str().ok())
@@ -139,21 +188,27 @@ pub async fn verify_signature(
         return Err(constant_time_reject().await);
     }
 
-    // Validate timestamp (5 minute window)
+    // Validate timestamp freshness against the configured drift window.
     // Use checked_sub to avoid potential overflow with user-supplied timestamps
     let timestamp: i64 = timestamp_str
         .parse()
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let now = chrono::Utc::now().timestamp();
     let age = now.checked_sub(timestamp).unwrap_or(i64::MAX);
-    if !(-300..=300).contains(&age) {
+    let drift = state.config.auth_max_clock_drift_secs;
+    if !is_timestamp_fresh(age, drift) {
         tracing::warn!(
-            "Request timestamp too old or future: {} (now: {})",
+            "Request timestamp outside ±{}s window: {} (now: {}, age: {})",
+            drift,
             timestamp,
-            now
+            now,
+            age,
         );
-        // Use constant_time_reject to normalize timing on timestamp failures
-        return Err(constant_time_reject().await);
+        // Timestamp failures are timing-normalized like every other auth reject,
+        // but carry a machine-readable reason so a drifted client clock is
+        // distinguishable from a bad signature (safe: the check is independent
+        // of any server-side identity state).
+        return Ok(constant_time_reject_with_reason(ERR_TIMESTAMP_OUT_OF_BOUNDS).await);
     }
 
     // Decode public key
@@ -234,14 +289,20 @@ pub async fn verify_signature(
         let nonce_key = format!("nonce:{}", nonce);
         let mut redis = state.redis.clone();
 
-        // SET nonce_key "1" EX 600 NX — only set if Not eXists
+        // Nonce record must outlive the timestamp window so a signature can't be
+        // replayed after its nonce entry expires while still inside the fresh
+        // window. `nonce_ttl_secs` derives TTL from the window so the invariant
+        // holds no matter how the drift window is tuned.
+        let ttl = nonce_ttl_secs(drift);
+
+        // SET nonce_key "1" EX <ttl> NX — only set if Not eXists
         let set_result: Option<String> = redis
             .set_options(
                 &nonce_key,
                 "1",
                 redis::SetOptions::default()
                     .conditional_set(redis::ExistenceCheck::NX)
-                    .with_expiration(redis::SetExpiry::EX(600)),
+                    .with_expiration(redis::SetExpiry::EX(ttl)),
             )
             .await
             .unwrap_or(None); // A Redis error maps to None here, which is
@@ -682,6 +743,83 @@ mod tests {
         let age_expired = now.checked_sub(timestamp_expired).unwrap_or(i64::MAX);
         assert_eq!(age_expired, 301);
         assert!(age_expired > 300);
+    }
+
+    // ── Configurable drift window (exercises the real predicate) ─
+
+    #[test]
+    fn drift_window_boundaries_are_inclusive_and_symmetric() {
+        let drift = 120;
+        assert!(is_timestamp_fresh(drift, drift)); // exactly +window accepted
+        assert!(is_timestamp_fresh(-drift, drift)); // exactly -window accepted
+        assert!(!is_timestamp_fresh(drift + 1, drift)); // just past → rejected
+        assert!(!is_timestamp_fresh(-(drift + 1), drift)); // just past (future) → rejected
+    }
+
+    #[test]
+    fn drift_window_zero_requires_exact_second() {
+        assert!(is_timestamp_fresh(0, 0));
+        assert!(!is_timestamp_fresh(1, 0));
+        assert!(!is_timestamp_fresh(-1, 0));
+    }
+
+    #[test]
+    fn reported_repro_45s_offset_is_within_default_window() {
+        // The issue's repro used a +45s client offset; it is comfortably inside
+        // the default 300s window and is accepted (i.e. does not reproduce).
+        assert!(is_timestamp_fresh(45, crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS));
+        assert!(is_timestamp_fresh(-45, crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS));
+    }
+
+    #[test]
+    fn nonce_ttl_covers_full_future_dated_freshness_lifetime() {
+        // Exercises the real `nonce_ttl_secs` used at the Redis call site, so a
+        // regression is caught here, not hidden behind a duplicated formula.
+        //
+        // Worst case (the one a naive `drift + buffer` TTL misses): a request
+        // signed for `T` is first accepted as early as `now = T - drift`
+        // (future-dated), and stays fresh until `now = T + drift`. The nonce
+        // record, written at first acceptance, must still exist at the end of
+        // that window, i.e. its TTL must cover the full `2 * drift` span so no
+        // replay slips through after it expires.
+        for drift in [0i64, 45, 300, 600, crate::types::MAX_AUTH_CLOCK_DRIFT_SECS] {
+            let first_seen_at = -drift; // now = T - drift, relative to T
+            let fresh_until = drift; //    now = T + drift, relative to T
+            let nonce_expires_at = first_seen_at + nonce_ttl_secs(drift) as i64;
+            assert!(
+                nonce_expires_at > fresh_until,
+                "drift {drift}: nonce expires at {nonce_expires_at} but request is \
+                 fresh through {fresh_until} — replay gap"
+            );
+        }
+        // Pin the exact derivation at default and ceiling so it cannot regress:
+        //   default: 2*300 + 300 = 900
+        //   ceiling: 2*900 + 300 = 2100
+        assert_eq!(nonce_ttl_secs(crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS), 900);
+        assert_eq!(nonce_ttl_secs(crate::types::MAX_AUTH_CLOCK_DRIFT_SECS), 2100);
+    }
+
+    // ── Timestamp-drift reason header (safe to distinguish) ──────
+
+    #[tokio::test]
+    async fn timestamp_reject_carries_reason_header_and_401() {
+        let resp = constant_time_reject_with_reason(ERR_TIMESTAMP_OUT_OF_BOUNDS).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get("x-auth-error")
+                .and_then(|v| v.to_str().ok()),
+            Some("ERR_TIMESTAMP_OUT_OF_BOUNDS"),
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_reject_carries_no_reason_header() {
+        // Signature/nonce/account failures must stay indistinguishable: the bare
+        // 401 from constant_time_reject exposes no x-auth-error, so it can't be
+        // used to tell "bad signature" from "account not found".
+        let status = constant_time_reject().await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     // ── Query parameters included in signed message ──────────────

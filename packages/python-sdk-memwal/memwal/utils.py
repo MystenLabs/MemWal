@@ -232,6 +232,58 @@ def bech32_encode(hrp: str, data: bytes) -> str:
     return hrp + "1" + "".join(_BECH32_CHARSET[d] for d in combined)
 
 
+def bech32_decode(bech: str) -> Tuple[str, bytes]:
+    """Decode a bech32 string into its human-readable part and 5-bit data."""
+    if bech != bech.lower() and bech != bech.upper():
+        raise ValueError("bech32 string is mixed case")
+    bech = bech.lower()
+    pos = bech.rfind("1")
+    if pos < 1 or pos + 7 > len(bech):
+        raise ValueError("bech32 string has no valid separator")
+
+    hrp = bech[:pos]
+    try:
+        data = bytes(_BECH32_CHARSET.index(c) for c in bech[pos + 1 :])
+    except ValueError as exc:
+        raise ValueError("bech32 string has a character outside the charset") from exc
+
+    if _bech32_polymod(_bech32_hrp_expand(hrp) + data) != 1:
+        raise ValueError("bech32 checksum mismatch")
+    return hrp, data[:-6]
+
+
+def decode_sui_private_key(encoded: str) -> bytes:
+    """Decode a Sui bech32 ``suiprivkey1...`` string to its 32-byte Ed25519 seed.
+
+    Inverse of :func:`encode_sui_private_key`. Mirrors ``decodeSuiPrivateKey``
+    from ``@mysten/sui``, which the TypeScript SDK uses.
+    """
+    hrp, data = bech32_decode(encoded)
+    if hrp != "suiprivkey":
+        raise ValueError(f"expected a suiprivkey string, got prefix {hrp!r}")
+
+    payload = _convertbits(data, 5, 8, pad=False)
+    if not payload or payload[0] != _SUI_ED25519_SCHEME_FLAG:
+        raise ValueError("only Ed25519 private keys are supported")
+
+    seed = payload[1:]
+    if len(seed) != 32:
+        raise ValueError(f"Ed25519 seed must be exactly 32 bytes, got {len(seed)}")
+    return seed
+
+
+def normalize_private_key(key: str) -> str:
+    """Accept either a hex seed or a Sui ``suiprivkey1...`` string, return hex.
+
+    The TypeScript SDK takes both, and the dashboard hands out the bech32 form,
+    so hex-only input would reject a key a user reasonably expects to work.
+    """
+    candidate = key.strip()
+    if candidate.lower().startswith("suiprivkey1"):
+        return bytes_to_hex(decode_sui_private_key(candidate))
+    return candidate[2:] if candidate.startswith("0x") else candidate
+
+
 def encode_sui_private_key(seed_bytes: bytes) -> str:
     """Encode a 32-byte Ed25519 seed to Sui bech32 `suiprivkey...` format."""
     if len(seed_bytes) != 32:

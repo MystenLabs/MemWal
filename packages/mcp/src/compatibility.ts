@@ -1,6 +1,31 @@
 export const MEMWAL_MCP_COMPATIBILITY_VERSION = "0.0.1";
 export const SUPPORTED_RELAYER_API_MAJOR = 1;
 
+/** Default budget for ONE relayer connect attempt — the compatibility check
+ * (`GET /version`, and a `/health` fallback) PLUS the initial SSE `GET` share
+ * this deadline (the caller threads a single `AbortSignal` through both). Kept
+ * well under the MCP client's ~30s connection timeout so a slow-but-alive
+ * relayer still succeeds, while a hung one aborts long before the client would
+ * SIGTERM us. Since `initialize` is now answered locally, exceeding this only
+ * defers when `tools/call` becomes available — it surfaces as a tool-call
+ * error, never a failed handshake. */
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+
+/**
+ * Resolve the per-step relayer connect timeout. Overridable via
+ * `MEMWAL_MCP_CONNECT_TIMEOUT_MS` (same pattern as `MEMWAL_MCP_SSE_IDLE_MS`).
+ * Non-numeric / non-positive values fall back to the default. A value of `0`
+ * is treated as "use the default" rather than "no timeout" — an unbounded
+ * connect is the bug we're fixing, so we never expose a way back to it.
+ */
+export function resolveConnectTimeoutMs(): number {
+    const raw = process.env.MEMWAL_MCP_CONNECT_TIMEOUT_MS;
+    if (!raw) return DEFAULT_CONNECT_TIMEOUT_MS;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return DEFAULT_CONNECT_TIMEOUT_MS;
+    return n;
+}
+
 interface RelayerVersionMetadata {
     relayerVersion?: string;
     apiVersion?: string;
@@ -13,26 +38,45 @@ let compatibilityCache: RelayerVersionMetadata | null = null;
 let compatibilityCacheUrl: string | null = null;
 let compatibilityPromise: Promise<void> | null = null;
 
-export async function ensureCompatibleRelayer(relayerUrl: string): Promise<void> {
+/**
+ * @param signal Optional abort signal bounding the whole check. The caller
+ *   passes ONE signal shared with the subsequent SSE connect so a single
+ *   connect attempt is bounded in total, not per-step. When omitted, each fetch
+ *   gets its own `AbortSignal.timeout(resolveConnectTimeoutMs())`.
+ */
+export async function ensureCompatibleRelayer(
+    relayerUrl: string,
+    signal?: AbortSignal,
+): Promise<void> {
     const base = relayerUrl.replace(/\/+$/, "");
     if (compatibilityCache && compatibilityCacheUrl === base) return;
     if (compatibilityPromise) return compatibilityPromise;
 
-    compatibilityPromise = fetchAndValidate(base).finally(() => {
+    compatibilityPromise = fetchAndValidate(base, signal).finally(() => {
         compatibilityPromise = null;
     });
     return compatibilityPromise;
 }
 
-async function fetchAndValidate(relayerUrl: string): Promise<void> {
+async function fetchAndValidate(relayerUrl: string, signal?: AbortSignal): Promise<void> {
     const base = relayerUrl;
-    const versionResp = await fetch(`${base}/version`, { method: "GET" });
+    // Bound the request(s) so a hung relayer aborts well before the MCP client's
+    // ~30s connection timeout. Prefer the caller's shared signal (so the compat
+    // check + SSE connect share one budget); else fall back to a per-check one.
+    const abort = signal ?? AbortSignal.timeout(resolveConnectTimeoutMs());
+    const versionResp = await fetch(`${base}/version`, {
+        method: "GET",
+        signal: abort,
+    });
     let metadata: RelayerVersionMetadata;
 
     if (versionResp.ok) {
         metadata = (await versionResp.json()) as RelayerVersionMetadata;
     } else if (versionResp.status === 404 || versionResp.status === 405) {
-        const healthResp = await fetch(`${base}/health`, { method: "GET" });
+        const healthResp = await fetch(`${base}/health`, {
+            method: "GET",
+            signal: abort,
+        });
         if (!healthResp.ok) {
             throw new Error(
                 `Walrus Memory MCP compatibility check failed: GET /version returned ` +

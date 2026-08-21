@@ -5,6 +5,21 @@
 //! signature size / base64) and per-sender rate limiting. Upstream error
 //! bodies are never echoed to the client — they're logged server-side and
 //! masked to a generic message (`mask_upstream`).
+//!
+//! Masked upstream responses also carry a stable machine-readable `code` and
+//! the request's `traceId`. Masking has to keep the upstream body out of the
+//! response, but a caller still needs to tell "the sponsor refused this
+//! transaction" apart from "your request was malformed" — the code draws that
+//! line without leaking anything, and the traceId points at the one server log
+//! line that does hold the upstream detail.
+//!
+//! `validate_sponsor_transaction_kind` is the sponsorship allowlist: a
+//! sponsored transaction may only call `account::create_account`,
+//! `account::add_delegate_key`, or `account::remove_delegate_key` on the
+//! configured MemWal package. Batching is allowed for delegate-key **removal**
+//! only, up to `MAX_SPONSORED_DELEGATE_REMOVALS` — the dashboard removes a
+//! multi-key selection in one transaction, so a one-command-only rule would
+//! reject every bulk revoke. Every other shape stays single-command.
 
 use axum::body::Body;
 use axum::extract::State;
@@ -22,6 +37,11 @@ use crate::types::*;
 /// schemes are 65/97 bytes, zkLogin signatures are variable-size payloads.
 /// Upper bound to reject obviously oversized inputs before any work.
 const MAX_SPONSORED_SIGNATURE_BYTES: usize = 2048;
+/// A sponsored transaction may batch this many `account::remove_delegate_key`
+/// calls. An account holds at most 20 delegate keys, so this is exactly enough
+/// to revoke every key at once and no more. It bounds how much sponsored gas a
+/// single rate-limited request can spend.
+const MAX_SPONSORED_DELEGATE_REMOVALS: usize = 20;
 const MAX_WALLET_AUTH_SIGNATURE_BYTES: usize = 8192;
 const SPONSOR_AUTH_WINDOW_SECONDS: i64 = 300;
 const SPONSOR_AUTH_NONCE_TTL_SECONDS: i64 = 600;
@@ -35,29 +55,51 @@ redis.call('DEL', KEYS[1])
 return 1
 "#;
 
-fn mask_upstream(status: u16) -> (axum::http::StatusCode, &'static str) {
+/// Map an upstream sponsor status onto what the client is allowed to see: the
+/// status to return, a stable machine-readable code, and a generic message.
+/// The upstream body itself is never part of the result.
+fn mask_upstream(status: u16) -> (axum::http::StatusCode, &'static str, &'static str) {
     match status {
         429 => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "sponsor_overloaded",
             "Sponsor service temporarily overloaded",
         ),
         401 | 403 => (
             axum::http::StatusCode::BAD_GATEWAY,
+            "sponsor_misconfigured",
             "Sponsor service misconfigured",
         ),
-        500..=599 => (axum::http::StatusCode::BAD_GATEWAY, "Sponsor service error"),
+        500..=599 => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            "sponsor_upstream_error",
+            "Sponsor service error",
+        ),
         _ => (
             axum::http::StatusCode::BAD_REQUEST,
+            "sponsor_rejected",
             "Sponsor request rejected",
         ),
     }
 }
 
-fn json_error_response(status: axum::http::StatusCode, msg: &'static str) -> Response<Body> {
+/// Error body for the sponsor proxies: a generic message, a stable `code`, and
+/// the `traceId` that ties the response to the server log line holding the
+/// upstream detail. Without the traceId a masked failure is undiagnosable from
+/// the browser alone.
+fn json_error_response(
+    status: axum::http::StatusCode,
+    code: &'static str,
+    msg: &'static str,
+) -> Response<Body> {
+    let trace_id =
+        crate::observability::current_request_id().unwrap_or_else(|| Uuid::new_v4().to_string());
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::json!({ "error": msg }).to_string()))
+        .body(Body::from(
+            serde_json::json!({ "error": msg, "code": code, "traceId": trace_id }).to_string(),
+        ))
         .unwrap()
 }
 
@@ -195,25 +237,56 @@ fn validate_sponsor_transaction_kind(
         .parse::<sui_sdk_types::Address>()
         .map_err(|_| AppError::Internal("Invalid configured MemWal package ID".into()))?;
 
-    let permitted = programmable.commands.len() == 1
-        && programmable.commands.iter().all(|command| match command {
-            Command::MoveCall(call) => {
-                call.package == package
+    // Every command must be an allowlisted MemWal account call with no type
+    // arguments. Anything else collapses the whole collect() to None, so one
+    // foreign command rejects the entire transaction.
+    let functions: Option<Vec<&str>> = programmable
+        .commands
+        .iter()
+        .map(|command| match command {
+            Command::MoveCall(call)
+                if call.package == package
                     && call.module.as_str() == "account"
+                    && call.type_arguments.is_empty()
                     && matches!(
                         call.function.as_str(),
                         "create_account" | "add_delegate_key" | "remove_delegate_key"
-                    )
-                    && call.type_arguments.is_empty()
+                    ) =>
+            {
+                Some(call.function.as_str())
             }
-            _ => false,
-        });
-    if !permitted {
+            _ => None,
+        })
+        .collect();
+
+    let Some(functions) = functions else {
         return Err(AppError::BadRequest(
             "Transaction kind is not permitted for sponsorship".into(),
         ));
+    };
+
+    match functions.as_slice() {
+        // An empty programmable transaction has no effects but still burns
+        // sponsored gas — never worth paying for.
+        [] => Err(AppError::BadRequest(
+            "Transaction kind is not permitted for sponsorship".into(),
+        )),
+        // One allowlisted call: create, add, or remove.
+        [_] => Ok(()),
+        // Batching exists for bulk revoke only. Every command has to be a
+        // removal, and the batch stays inside the sponsored-gas bound.
+        calls if calls.iter().all(|function| *function == "remove_delegate_key") => {
+            if calls.len() > MAX_SPONSORED_DELEGATE_REMOVALS {
+                return Err(AppError::BadRequest(format!(
+                    "Too many delegate key removals in one transaction (max {MAX_SPONSORED_DELEGATE_REMOVALS})"
+                )));
+            }
+            Ok(())
+        }
+        _ => Err(AppError::BadRequest(
+            "Transaction kind is not permitted for sponsorship".into(),
+        )),
     }
-    Ok(())
 }
 
 async fn authenticate_sponsor_request(
@@ -387,12 +460,13 @@ async fn forward_sponsor(
     } else {
         crate::observability::record_sidecar_failure("sponsor", "http_error");
         tracing::error!(
+            request_id = %crate::observability::current_request_id().unwrap_or_default(),
             "sponsor upstream error {}: {}",
             upstream_status,
             String::from_utf8_lossy(&resp_body)
         );
-        let (masked_status, masked_msg) = mask_upstream(upstream_status.as_u16());
-        Ok(json_error_response(masked_status, masked_msg))
+        let (masked_status, masked_code, masked_msg) = mask_upstream(upstream_status.as_u16());
+        Ok(json_error_response(masked_status, masked_code, masked_msg))
     }
 }
 
@@ -448,12 +522,13 @@ pub async fn sponsor_execute_proxy(
     } else {
         crate::observability::record_sidecar_failure("sponsor_execute", "http_error");
         tracing::error!(
+            request_id = %crate::observability::current_request_id().unwrap_or_default(),
             "sponsor/execute upstream error {}: {}",
             upstream_status,
             String::from_utf8_lossy(&resp_body)
         );
-        let (masked_status, masked_msg) = mask_upstream(upstream_status.as_u16());
-        Ok(json_error_response(masked_status, masked_msg))
+        let (masked_status, masked_code, masked_msg) = mask_upstream(upstream_status.as_u16());
+        Ok(json_error_response(masked_status, masked_code, masked_msg))
     }
 }
 
@@ -480,6 +555,28 @@ mod more_tests {
         bcs::to_bytes(&kind).unwrap()
     }
 
+    /// Build a programmable transaction kind with one MoveCall per
+    /// `(module, function)` pair, so batches of any shape can be asserted on.
+    fn move_calls_kind(package: &str, calls: &[(&str, &str)]) -> Vec<u8> {
+        let kind =
+            TransactionKind::ProgrammableTransaction(sui_sdk_types::ProgrammableTransaction {
+                inputs: vec![],
+                commands: calls
+                    .iter()
+                    .map(|(module, function)| {
+                        Command::MoveCall(sui_sdk_types::MoveCall {
+                            package: package.parse().unwrap(),
+                            module: module.parse().unwrap(),
+                            function: function.parse().unwrap(),
+                            type_arguments: vec![],
+                            arguments: vec![],
+                        })
+                    })
+                    .collect(),
+            });
+        bcs::to_bytes(&kind).unwrap()
+    }
+
     #[test]
     fn sponsor_authorization_message_matches_sdk_contract() {
         assert_eq!(
@@ -498,7 +595,7 @@ nonce: 00000000-0000-4000-8000-000000000000"
     }
 
     #[test]
-    fn sponsor_allowlist_only_accepts_one_memwal_account_call() {
+    fn sponsor_allowlist_accepts_a_single_memwal_account_call() {
         let package = format!("0x{}", "a".repeat(64));
         for function in ["create_account", "add_delegate_key", "remove_delegate_key"] {
             let bytes = move_call_kind(&package, "account", function);
@@ -514,6 +611,113 @@ nonce: 00000000-0000-4000-8000-000000000000"
 
         let wrong_module = move_call_kind(&package, "coin", "transfer");
         assert!(validate_sponsor_transaction_kind(&wrong_module, &package).is_err());
+    }
+
+    /// Regression: the dashboard removes a multi-key selection in ONE
+    /// transaction, so a one-command-only rule rejected every bulk revoke with
+    /// a 400 while single-key removal and add both worked.
+    #[test]
+    fn sponsor_allowlist_accepts_batched_delegate_key_removals() {
+        let package = format!("0x{}", "a".repeat(64));
+        for count in [2usize, 3, MAX_SPONSORED_DELEGATE_REMOVALS] {
+            let calls = vec![("account", "remove_delegate_key"); count];
+            let bytes = move_calls_kind(&package, &calls);
+            validate_sponsor_transaction_kind(&bytes, &package)
+                .unwrap_or_else(|e| panic!("{count} removals must be permitted, got {e}"));
+        }
+    }
+
+    #[test]
+    fn sponsor_allowlist_rejects_removal_batch_over_the_cap() {
+        let package = format!("0x{}", "a".repeat(64));
+        let calls =
+            vec![("account", "remove_delegate_key"); MAX_SPONSORED_DELEGATE_REMOVALS + 1];
+        let bytes = move_calls_kind(&package, &calls);
+        assert!(validate_sponsor_transaction_kind(&bytes, &package).is_err());
+    }
+
+    /// Batching is a bulk-revoke affordance only — it must not become a general
+    /// "many sponsored calls per transaction" hole.
+    #[test]
+    fn sponsor_allowlist_rejects_batches_that_are_not_pure_removals() {
+        let package = format!("0x{}", "a".repeat(64));
+        for calls in [
+            vec![("account", "add_delegate_key"), ("account", "add_delegate_key")],
+            vec![("account", "remove_delegate_key"), ("account", "add_delegate_key")],
+            vec![("account", "create_account"), ("account", "create_account")],
+            vec![("account", "remove_delegate_key"), ("coin", "transfer")],
+        ] {
+            let bytes = move_calls_kind(&package, &calls);
+            assert!(
+                validate_sponsor_transaction_kind(&bytes, &package).is_err(),
+                "batch {calls:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sponsor_allowlist_rejects_an_empty_command_list() {
+        let package = format!("0x{}", "a".repeat(64));
+        let bytes = move_calls_kind(&package, &[]);
+        assert!(validate_sponsor_transaction_kind(&bytes, &package).is_err());
+    }
+
+    // ---- fixtures from the browser's own encoder ----
+    //
+    // The fixtures above are built with the Rust BCS types, which cannot catch a
+    // shape mismatch between the two encoders. These were produced by
+    // @mysten/sui 2.8.0 — the exact encoder `apps/app` ships — for the
+    // transactions `Dashboard.tsx` builds: object-ref inputs for the account and
+    // registry, a `vector<u8>` pure arg per key, and one MoveCall per selected
+    // key.
+
+    const FE_PACKAGE: &str = "0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6";
+    const FE_REMOVE_1: &str = "AAMBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwEAzuem/Y3lLOZFw4MyveI9SjD9lCa8RoFAlzPdUJWKJMYHYWNjb3VudBNyZW1vdmVfZGVsZWdhdGVfa2V5AAMBAAABAQABAgA=";
+    const FE_REMOVE_2: &str = "AAQBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAhIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAgDO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50E3JlbW92ZV9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAECAADO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50E3JlbW92ZV9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAEDAA==";
+    const FE_REMOVE_3: &str = "AAUBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAhIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHACEgBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcDAM7npv2N5SzmRcODMr3iPUow/ZQmvEaBQJcz3VCViiTGB2FjY291bnQTcmVtb3ZlX2RlbGVnYXRlX2tleQADAQAAAQEAAQIAAM7npv2N5SzmRcODMr3iPUow/ZQmvEaBQJcz3VCViiTGB2FjY291bnQTcmVtb3ZlX2RlbGVnYXRlX2tleQADAQAAAQEAAQMAAM7npv2N5SzmRcODMr3iPUow/ZQmvEaBQJcz3VCViiTGB2FjY291bnQTcmVtb3ZlX2RlbGVnYXRlX2tleQADAQAAAQEAAQQA";
+    const FE_ADD_1: &str = "AAMBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwEAzuem/Y3lLOZFw4MyveI9SjD9lCa8RoFAlzPdUJWKJMYHYWNjb3VudBBhZGRfZGVsZWdhdGVfa2V5AAMBAAABAQABAgA=";
+    const FE_MIXED_REMOVE_ADD: &str = "AAQBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAhIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAgDO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50E3JlbW92ZV9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAECAADO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50EGFkZF9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAEDAA==";
+    const FE_ADD_TWICE: &str = "AAQBAKGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABALKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyAQAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAISAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAhIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAgDO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50EGFkZF9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAECAADO56b9jeUs5kXDgzK94j1KMP2UJrxGgUCXM91QlYokxgdhY2NvdW50EGFkZF9kZWxlZ2F0ZV9rZXkAAwEAAAEBAAEDAA==";
+
+    /// The regression, reproduced from browser-encoded bytes: 2 and 3 keys were
+    /// rejected before this fix, 1 key always passed.
+    #[test]
+    fn validator_accepts_browser_encoded_delegate_key_removals() {
+        for (label, fixture) in [
+            ("1 key", FE_REMOVE_1),
+            ("2 keys", FE_REMOVE_2),
+            ("3 keys", FE_REMOVE_3),
+        ] {
+            let bytes = decode_base64(fixture).expect("fixture must be valid base64");
+            validate_sponsor_transaction_kind(&bytes, FE_PACKAGE)
+                .unwrap_or_else(|e| panic!("{label} from the browser encoder must pass, got {e}"));
+        }
+    }
+
+    #[test]
+    fn validator_accepts_browser_encoded_add_but_rejects_impure_batches() {
+        let add = decode_base64(FE_ADD_1).expect("fixture must be valid base64");
+        validate_sponsor_transaction_kind(&add, FE_PACKAGE).expect("a lone add must pass");
+
+        for (label, fixture) in [
+            ("remove + add", FE_MIXED_REMOVE_ADD),
+            ("add twice", FE_ADD_TWICE),
+        ] {
+            let bytes = decode_base64(fixture).expect("fixture must be valid base64");
+            assert!(
+                validate_sponsor_transaction_kind(&bytes, FE_PACKAGE).is_err(),
+                "{label} must be rejected"
+            );
+        }
+    }
+
+    /// Same real bytes, a different configured package — the package check still
+    /// holds against browser-encoded input.
+    #[test]
+    fn validator_rejects_browser_encoded_removals_for_a_foreign_package() {
+        let bytes = decode_base64(FE_REMOVE_3).expect("fixture must be valid base64");
+        let foreign = format!("0x{}", "c".repeat(64));
+        assert!(validate_sponsor_transaction_kind(&bytes, &foreign).is_err());
     }
 
     // ---- validate_sui_address ----
@@ -692,54 +896,67 @@ nonce: 00000000-0000-4000-8000-000000000000"
 
     #[test]
     fn test_mask_upstream_429_to_503() {
-        let (status, msg) = mask_upstream(429);
+        let (status, code, msg) = mask_upstream(429);
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(code, "sponsor_overloaded");
         assert_eq!(msg, "Sponsor service temporarily overloaded");
     }
 
     #[test]
     fn test_mask_upstream_401_to_502() {
-        let (status, msg) = mask_upstream(401);
+        let (status, code, msg) = mask_upstream(401);
         assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(code, "sponsor_misconfigured");
         assert_eq!(msg, "Sponsor service misconfigured");
     }
 
     #[test]
     fn test_mask_upstream_403_to_502() {
-        let (status, msg) = mask_upstream(403);
+        let (status, code, msg) = mask_upstream(403);
         assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(code, "sponsor_misconfigured");
         assert_eq!(msg, "Sponsor service misconfigured");
     }
 
     #[test]
     fn test_mask_upstream_500_to_502() {
-        let (status, msg) = mask_upstream(500);
+        let (status, code, msg) = mask_upstream(500);
         assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(code, "sponsor_upstream_error");
         assert_eq!(msg, "Sponsor service error");
     }
 
     #[test]
     fn test_mask_upstream_503_to_502() {
-        let (status, msg) = mask_upstream(503);
+        let (status, code, msg) = mask_upstream(503);
         assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(code, "sponsor_upstream_error");
         assert_eq!(msg, "Sponsor service error");
     }
 
     #[test]
     fn test_mask_upstream_404_to_400() {
-        let (status, msg) = mask_upstream(404);
+        let (status, code, msg) = mask_upstream(404);
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(code, "sponsor_rejected");
         assert_eq!(msg, "Sponsor request rejected");
     }
 
     #[test]
     fn test_mask_upstream_returns_static_strings_only() {
-        // Verify no dynamic content leaks through for any common error code
-        for code in [400u16, 401, 403, 404, 422, 429, 500, 502, 503] {
-            let (_, msg) = mask_upstream(code);
+        // Verify no dynamic content leaks through for any common error status
+        for status_code in [400u16, 401, 403, 404, 422, 429, 500, 502, 503] {
+            let (_, code, msg) = mask_upstream(status_code);
             assert!(!msg.is_empty(), "mask must always return a message");
             // Message must not look like it came from serde_json / reqwest
             assert!(!msg.contains("Error"), "raw error strings must not leak");
+            // Codes are the client's only signal, so they must be stable,
+            // lowercase snake_case identifiers rather than free text.
+            assert!(!code.is_empty(), "mask must always return a code");
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "code {code} must be a stable snake_case identifier"
+            );
         }
     }
 }

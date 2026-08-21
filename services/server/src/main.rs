@@ -58,6 +58,40 @@ fn security_delete_cors() -> CorsLayer {
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
 }
 
+/// CORS layer for the main relayer routes, scoped to the configured origins.
+/// `allow_headers` are the request headers a browser may send on a signed
+/// request; `expose_headers` lists the response headers a cross-origin client
+/// may read — Fetch hides everything else, so `x-auth-error` must be exposed
+/// for the browser SDK to read the machine-readable auth-failure reason (e.g.
+/// clock-drift vs. bad signature). Only that header is exposed.
+fn relayer_cors(origins: Vec<HeaderValue>) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            // SDK auth headers (required for Ed25519 signed requests)
+            "x-public-key".parse::<header::HeaderName>().unwrap(),
+            "x-signature".parse::<header::HeaderName>().unwrap(),
+            "x-timestamp".parse::<header::HeaderName>().unwrap(),
+            "x-nonce".parse::<header::HeaderName>().unwrap(),
+            "x-account-id".parse::<header::HeaderName>().unwrap(),
+            "x-delegate-key".parse::<header::HeaderName>().unwrap(),
+            "x-request-id".parse::<header::HeaderName>().unwrap(),
+            "x-correlation-id".parse::<header::HeaderName>().unwrap(),
+            // SessionKey envelope replacing x-delegate-key
+            "x-seal-session".parse::<header::HeaderName>().unwrap(),
+            // MCP headers — caller's Walrus Memory account id + optional default namespace.
+            "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
+            "x-memwal-namespace".parse::<header::HeaderName>().unwrap(),
+            // Admin dashboard auth (browser fetches from a different subdomain,
+            // so this custom header must be preflight-allowed)
+            "x-admin-api-key".parse::<header::HeaderName>().unwrap(),
+        ])
+        .expose_headers(["x-auth-error".parse::<header::HeaderName>().unwrap()])
+}
+
 #[cfg(test)]
 mod cors_tests {
     use super::*;
@@ -136,6 +170,49 @@ mod cors_tests {
             None
         );
     }
+
+    #[tokio::test]
+    async fn relayer_cors_exposes_only_x_auth_error() {
+        // Browsers can only read response headers listed in
+        // Access-Control-Expose-Headers. The clock-drift reason (x-auth-error)
+        // must be exposed so the browser SDK can distinguish drift from a bad
+        // signature; nothing else should cross origins.
+        let origin = "https://app.memwal.test";
+        let app = Router::new()
+            .route("/api/remember", post(|| async {}))
+            .layer(relayer_cors(vec![origin.parse().unwrap()]));
+
+        // Access-Control-Expose-Headers is emitted on the actual cross-origin
+        // response, not on the OPTIONS preflight — so drive a real request.
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/remember")
+            .header(header::ORIGIN, origin)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        let exposed = response
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .expect("relayer CORS must set Access-Control-Expose-Headers")
+            .to_str()
+            .unwrap();
+        let names: Vec<&str> = exposed
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("x-auth-error")),
+            "x-auth-error must be exposed, got: {exposed}"
+        );
+        assert_eq!(
+            names.len(),
+            1,
+            "only x-auth-error should be exposed, got: {exposed}"
+        );
+    }
 }
 
 fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
@@ -201,47 +278,109 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                     );
                                     continue;
                                 };
-                                let Some(wal_balance) = wallet
-                                    .get("walFrost")
+                                let wallet_index = wallet
+                                    .get("walletIndex")
+                                    .and_then(|value| value.as_u64())
+                                    .and_then(|value| usize::try_from(value).ok());
+                                if wallet_index.is_none() {
+                                    tracing::warn!(
+                                        address,
+                                        "balance_monitor: wallet metrics entry has invalid walletIndex"
+                                    );
+                                }
+
+                                // Durable registration withdraws both WAL and
+                                // its relay-tip SUI from address balances. Coin
+                                // object balances cannot prevent those writes
+                                // from failing, so alert on the spendable values.
+                                match wallet
+                                    .get("walAddressBalanceFrost")
                                     .and_then(|value| value.as_str())
                                     .and_then(|value| value.parse::<u64>().ok())
-                                else {
-                                    tracing::warn!(
-                                    address,
-                                    "balance_monitor: wallet metrics entry has invalid walFrost"
-                                );
-                                    continue;
-                                };
-
-                                if wal_balance < state.config.wallet_balance_low_threshold_wal {
-                                    tracing::warn!(
-                                    address,
-                                    balance = wal_balance,
-                                    threshold = state.config.wallet_balance_low_threshold_wal,
-                                    "balance_monitor: uploader wallet WAL balance below threshold"
-                                );
-                                    let alert = alerts::WalletBalanceLowAlert {
-                                        wallet_type: "uploader".to_string(),
-                                        address: address.to_string(),
-                                        balance: wal_balance,
-                                        threshold: state.config.wallet_balance_low_threshold_wal,
-                                        token: "WAL".to_string(),
-                                    };
-                                    if let Err(err) =
-                                        state.alerts.notify_wallet_balance_low(alert).await
+                                {
+                                    Some(wal_balance)
+                                        if wal_balance
+                                            < state.config.wallet_balance_low_threshold_wal =>
                                     {
                                         tracing::warn!(
                                             address,
-                                            "balance_monitor: failed to send uploader alert: {}",
-                                            err
+                                            balance = wal_balance,
+                                            threshold = state.config.wallet_balance_low_threshold_wal,
+                                            "balance_monitor: uploader wallet WAL address balance below threshold"
                                         );
+                                        let alert = alerts::WalletBalanceLowAlert {
+                                            wallet_type: "uploader".to_string(),
+                                            address: address.to_string(),
+                                            balance: wal_balance,
+                                            threshold: state.config.wallet_balance_low_threshold_wal,
+                                            token: "WAL".to_string(),
+                                            sui_network: state.config.sui_network.clone(),
+                                            wallet_index,
+                                        };
+                                        if let Err(err) =
+                                            state.alerts.notify_wallet_balance_low(alert).await
+                                        {
+                                            tracing::warn!(
+                                                address,
+                                                "balance_monitor: failed to send uploader WAL alert: {}",
+                                                err
+                                            );
+                                        }
                                     }
-                                } else {
-                                    tracing::debug!(
+                                    Some(wal_balance) => tracing::debug!(
                                         address,
                                         balance = wal_balance,
-                                        "balance_monitor: uploader wallet WAL balance ok"
-                                    );
+                                        "balance_monitor: uploader wallet WAL address balance ok"
+                                    ),
+                                    None => tracing::warn!(
+                                        address,
+                                        "balance_monitor: wallet metrics entry has invalid walAddressBalanceFrost"
+                                    ),
+                                }
+
+                                match wallet
+                                    .get("suiAddressBalanceMist")
+                                    .and_then(|value| value.as_str())
+                                    .and_then(|value| value.parse::<u64>().ok())
+                                {
+                                    Some(sui_balance)
+                                        if sui_balance
+                                            < state.config.wallet_balance_low_threshold_sui =>
+                                    {
+                                        tracing::warn!(
+                                            address,
+                                            balance = sui_balance,
+                                            threshold = state.config.wallet_balance_low_threshold_sui,
+                                            "balance_monitor: uploader wallet SUI address balance below threshold"
+                                        );
+                                        let alert = alerts::WalletBalanceLowAlert {
+                                            wallet_type: "uploader".to_string(),
+                                            address: address.to_string(),
+                                            balance: sui_balance,
+                                            threshold: state.config.wallet_balance_low_threshold_sui,
+                                            token: "SUI".to_string(),
+                                            sui_network: state.config.sui_network.clone(),
+                                            wallet_index,
+                                        };
+                                        if let Err(err) =
+                                            state.alerts.notify_wallet_balance_low(alert).await
+                                        {
+                                            tracing::warn!(
+                                                address,
+                                                "balance_monitor: failed to send uploader SUI alert: {}",
+                                                err
+                                            );
+                                        }
+                                    }
+                                    Some(sui_balance) => tracing::debug!(
+                                        address,
+                                        balance = sui_balance,
+                                        "balance_monitor: uploader wallet SUI address balance ok"
+                                    ),
+                                    None => tracing::warn!(
+                                        address,
+                                        "balance_monitor: wallet metrics entry has invalid suiAddressBalanceMist"
+                                    ),
                                 }
                             }
                         } else {
@@ -294,6 +433,8 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                         balance: sponsor_balance,
                                         threshold: state.config.sponsor_balance_low_threshold_sui,
                                         token: "SUI".to_string(),
+                                        sui_network: state.config.sui_network.clone(),
+                                        wallet_index: None,
                                     };
                                     if let Err(err) =
                                         state.alerts.notify_wallet_balance_low(alert).await
@@ -1255,6 +1396,28 @@ async fn main() {
             {
                 tracing::error!("Stale remember job sweep failed: {}", e);
             }
+
+            // Storage-quota reservation upkeep, on the same tick.
+            //
+            // Ordered after the stale-job sweep so rows it just marked failed
+            // are reconciled in the same pass instead of waiting a full minute.
+            // The reconcile handles terminal jobs whose release was missed; the
+            // expiry sweep is the last-resort backstop for reservations with no
+            // job row at all (inline paths) or whose job vanished entirely.
+            if let Err(e) = stale_job_state
+                .db
+                .release_reservations_for_terminal_jobs()
+                .await
+            {
+                tracing::error!("Terminal-job reservation reconcile failed: {}", e);
+            }
+            if let Err(e) = stale_job_state
+                .db
+                .sweep_expired_storage_reservations()
+                .await
+            {
+                tracing::error!("Expired reservation sweep failed: {}", e);
+            }
         }
     });
 
@@ -1410,9 +1573,10 @@ async fn main() {
         let balance_monitor_state = state.clone();
         let balance_monitor_interval_secs = config.balance_monitor_interval_secs;
         tracing::info!(
-            "  balance monitor: starting with interval={}s, wallet_threshold_wal={}, sponsor_threshold_sui={}",
+            "  balance monitor: starting with interval={}s, wallet_threshold_wal={}, wallet_threshold_sui={}, sponsor_threshold_sui={}",
             balance_monitor_interval_secs,
             config.wallet_balance_low_threshold_wal,
+            config.wallet_balance_low_threshold_sui,
             config.sponsor_balance_low_threshold_sui,
         );
         tokio::spawn(async move {
@@ -1769,30 +1933,7 @@ async fn main() {
             CorsLayer::new() // deny-all: no Allow-Origin header emitted
         } else {
             tracing::info!("  CORS origins: {}", config.allowed_origins);
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::list(origins))
-                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-                .allow_headers([
-                    header::CONTENT_TYPE,
-                    header::AUTHORIZATION,
-                    // SDK auth headers (required for Ed25519 signed requests)
-                    "x-public-key".parse::<header::HeaderName>().unwrap(),
-                    "x-signature".parse::<header::HeaderName>().unwrap(),
-                    "x-timestamp".parse::<header::HeaderName>().unwrap(),
-                    "x-nonce".parse::<header::HeaderName>().unwrap(),
-                    "x-account-id".parse::<header::HeaderName>().unwrap(),
-                    "x-delegate-key".parse::<header::HeaderName>().unwrap(),
-                    "x-request-id".parse::<header::HeaderName>().unwrap(),
-                    "x-correlation-id".parse::<header::HeaderName>().unwrap(),
-                    // SessionKey envelope replacing x-delegate-key
-                    "x-seal-session".parse::<header::HeaderName>().unwrap(),
-                    // MCP headers — caller's Walrus Memory account id + optional default namespace.
-                    "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
-                    "x-memwal-namespace".parse::<header::HeaderName>().unwrap(),
-                    // Admin dashboard auth (browser fetches from a different subdomain,
-                    // so this custom header must be preflight-allowed)
-                    "x-admin-api-key".parse::<header::HeaderName>().unwrap(),
-                ])
+            relayer_cors(origins)
         }
     };
 

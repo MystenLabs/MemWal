@@ -48,27 +48,72 @@ function isNetworkError(err: unknown): boolean {
     return err instanceof TypeError
 }
 
-class SponsorHttpError extends Error {
+/**
+ * The relayer's error envelope. `code` is present only when the relayer masked
+ * an upstream failure; a rejection the relayer decided itself arrives as a
+ * plain `error` message naming the actual reason.
+ */
+type SponsorErrorBody = { error?: string; code?: string; traceId?: string }
+
+function parseErrorBody(body: string): SponsorErrorBody {
+    try {
+        const parsed: unknown = JSON.parse(body)
+        return typeof parsed === 'object' && parsed !== null ? (parsed as SponsorErrorBody) : {}
+    } catch {
+        return {}
+    }
+}
+
+/** Exported for tests. */
+export class SponsorHttpError extends Error {
     readonly stage: 'sponsor' | 'execute'
     readonly status: number
     readonly body: string
+    /** Stable machine-readable code, when the relayer masked an upstream error. */
+    readonly code?: string
+    /** The relayer's own message. Safe to show — it never carries upstream text. */
+    readonly detail?: string
+    /** Ties this failure to one relayer log line. */
+    readonly traceId?: string
     constructor(stage: 'sponsor' | 'execute', status: number, body: string) {
         super(`Sponsor ${stage} failed (${status})`)
         this.name = 'SponsorHttpError'
         this.stage = stage
         this.status = status
         this.body = body
+        const parsed = parseErrorBody(body)
+        this.code = parsed.code
+        this.detail = parsed.error
+        this.traceId = parsed.traceId
     }
 }
 
-function sponsorFailureMessage(err: unknown): string {
+/** Carry the traceId into the UI so a user report points at the log line. */
+function withTrace(message: string, traceId?: string): string {
+    return traceId ? `${message} (traceId: ${traceId})` : message
+}
+
+/** Exported for tests. */
+export function sponsorFailureMessage(err: unknown): string {
     if (isNetworkError(err)) {
         return 'Network error reaching the sponsor service — please check your connection and try again.'
     }
     if (err instanceof SponsorHttpError) {
         if (err.status === 429) return 'Too many requests — please wait a moment and try again.'
-        if (err.status === 502) return 'The transaction was rejected by the sponsor (it may be invalid or already applied). Please refresh and try again.'
+        if (err.code === 'sponsor_misconfigured') {
+            return withTrace('The sponsor service is misconfigured, so this transaction could not be sponsored. Please report this.', err.traceId)
+        }
+        if (err.status === 502) return withTrace('The transaction was rejected by the sponsor (it may be invalid or already applied). Please refresh and try again.', err.traceId)
         if (err.status >= 500 || err.status === 503) return 'Sponsor service is temporarily unavailable — please try again in a moment.'
+        if (err.code === 'sponsor_rejected') {
+            return withTrace('The sponsor service rejected this transaction. Please report this.', err.traceId)
+        }
+        // No code means the relayer rejected the request itself, and its
+        // message names the reason — an unsupported transaction shape, a
+        // malformed field. Showing it is the whole point: the generic fallback
+        // below is what made an un-sponsorable transaction indistinguishable
+        // from a transient sponsor failure.
+        if (err.detail) return err.detail
         return 'Sponsor request was rejected. Please try again.'
     }
     return err instanceof Error ? err.message : 'Transaction sponsorship failed. Please try again.'

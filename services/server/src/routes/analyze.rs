@@ -58,6 +58,10 @@ const EMBED_TIMEOUT_MS: u64 = 800;
 const SEARCH_TIMEOUT_MS: u64 = 300;
 const FETCH_TIMEOUT_MS: u64 = 500;
 
+/// One fact that has finished embed + SEAL encrypt and is ready to enqueue:
+/// `(plaintext, importance, embedding, ciphertext)`.
+type PreparedFact = (String, f32, Vec<f32>, Vec<u8>);
+
 /// POST /api/analyze
 ///
 /// AI fact extraction flow:
@@ -373,7 +377,17 @@ pub async fn analyze(
         // Quota check on plaintext byte length (benchmark mode has no
         // ciphertext — plaintext is the closest analog).
         let total_plaintext_bytes: i64 = facts.iter().map(|f| f.text.len() as i64).sum();
-        rate_limit::check_storage_quota(&state, owner, total_plaintext_bytes).await?;
+        // Inline path: one reservation covering the whole batch, released once
+        // the rows are committed. Local id because these rows have no
+        // `remember_jobs` row to key on (benchmark mode skips the job queue).
+        let reservation_id = uuid::Uuid::new_v4().to_string();
+        rate_limit::reserve_storage_quota_one(
+            &state,
+            owner,
+            reservation_id.clone(),
+            total_plaintext_bytes,
+        )
+        .await?;
 
         let store_tasks: Vec<_> = facts
             .iter()
@@ -413,6 +427,13 @@ pub async fn analyze(
             .collect();
 
         let store_results = collect_bounded_results(store_tasks, ANALYZE_CONCURRENCY).await;
+
+        // Release before the `?` below so a partial failure cannot strand the
+        // reservation for the full TTL. Any facts that did land are already
+        // counted as rows, and the ones that did not should not keep holding
+        // quota.
+        rate_limit::release_storage_quota_one(&state, &reservation_id).await;
+
         let mut stored_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(store_results.len());
         for r in store_results {
             stored_facts.push(r?);
@@ -485,26 +506,50 @@ pub async fn analyze(
 
     let prep_results = collect_bounded_results(prep_tasks, ANALYZE_CONCURRENCY).await;
 
-    // Quota check on total ciphertext size
-    let mut prepared: Vec<(String, f32, Vec<f32>, Vec<u8>)> =
-        Vec::with_capacity(prep_results.len());
-    let mut total_encrypted_bytes: i64 = 0;
+    // Exact ciphertext size per fact is known here, which is what the
+    // per-fact reservations below are sized from.
+    let mut prepared: Vec<PreparedFact> = Vec::with_capacity(prep_results.len());
     for r in prep_results {
-        let (fact_text, importance, vector, encrypted) = r?;
-        total_encrypted_bytes += encrypted.len() as i64;
-        prepared.push((fact_text, importance, vector, encrypted));
+        prepared.push(r?);
     }
-    rate_limit::check_storage_quota(&state, owner, total_encrypted_bytes).await?;
+    // Job ids are minted here, before admission, rather than inside the loop
+    // below: each one keys the reservation for the fact it will store, so
+    // jobs.rs can release from the job id it already carries once the vector
+    // row lands. The insert happens minutes later (after the Walrus upload),
+    // which is exactly the window a bare check left unprotected.
+    let pending: Vec<(String, PreparedFact)> = prepared
+        .into_iter()
+        .map(|fact| (uuid::Uuid::new_v4().to_string(), fact))
+        .collect();
+
+    // All-or-nothing across the batch, so an over-quota analyze request is
+    // still rejected whole with the same 402 shape.
+    let reservations: Vec<crate::storage::db::StorageReservationRequest> = pending
+        .iter()
+        .map(
+            |(job_id, (_, _, _, encrypted))| crate::storage::db::StorageReservationRequest {
+                id: job_id.clone(),
+                bytes: encrypted.len() as i64,
+            },
+        )
+        .collect();
+    rate_limit::reserve_storage_quota(&state, owner, &reservations).await?;
+
+    // Facts are enqueued in order, so at iteration `idx` the set
+    // `all_ids[idx..]` is exactly what holds a reservation with no queued job
+    // to release it. Those get released explicitly if we bail out mid-loop;
+    // without that they would sit against the owner's quota until the TTL.
+    let all_ids: Vec<String> = pending.iter().map(|(id, _)| id.clone()).collect();
 
     // Step 3: For each prepared fact — insert remember_jobs row + enqueue WalletJob.
     // Round-robin across wallet pool so facts upload in parallel.
-    let mut job_ids: Vec<String> = Vec::with_capacity(prepared.len());
-    let mut accepted_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(prepared.len());
-    for (fact_text, importance, vector, encrypted) in prepared {
-        let job_id = uuid::Uuid::new_v4().to_string();
-
+    let mut job_ids: Vec<String> = Vec::with_capacity(pending.len());
+    let mut accepted_facts: Vec<AnalyzeAcceptedFact> = Vec::with_capacity(pending.len());
+    for (idx, (job_id, (fact_text, importance, vector, encrypted))) in
+        pending.into_iter().enumerate()
+    {
         // Insert status row
-        sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
         )
         .bind(&job_id)
@@ -512,16 +557,22 @@ pub async fn analyze(
         .bind(namespace)
         .execute(state.db.pool())
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to create analyze job row: {}", e)))?;
+        {
+            rate_limit::release_storage_quota(&state, &all_ids[idx..]).await;
+            return Err(AppError::Internal(format!(
+                "Failed to create analyze job row: {}",
+                e
+            )));
+        }
 
         // Pick next wallet slot (round-robin) and enqueue UploadAndTransfer
-        let wallet_index = state
-            .key_pool
-            .next_index()
-            .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
+        let Some(wallet_index) = state.key_pool.next_index() else {
+            rate_limit::release_storage_quota(&state, &all_ids[idx..]).await;
+            return Err(AppError::Internal("No Sui keys configured".into()));
+        };
         let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
 
-        enqueue_wallet_job(
+        if let Err(e) = enqueue_wallet_job(
             &state,
             wallet_index,
             WalletOperation::UploadAndTransfer {
@@ -539,7 +590,15 @@ pub async fn analyze(
             },
         )
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to enqueue analyze job: {}", e)))?;
+        {
+            rate_limit::release_storage_quota(&state, &all_ids[idx..]).await;
+            return Err(AppError::Internal(format!(
+                "Failed to enqueue analyze job: {}",
+                e
+            )));
+        }
+
+        // Queued: jobs.rs owns this reservation from here on.
 
         tracing::info!(
             job_id = %job_id,

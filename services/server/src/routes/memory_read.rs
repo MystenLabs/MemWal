@@ -994,7 +994,7 @@ mod tests {
             .unwrap();
         assert_eq!(deleted, 1);
 
-        let after = query_owner_namespaces(&pool, &owner, Some(cursor), 100)
+        let after = query_owner_namespaces(&pool, &owner, Some(cursor.clone()), 100)
             .await
             .unwrap();
         assert_eq!(after.namespaces.len(), 1, "deleted watermark must still resurface");

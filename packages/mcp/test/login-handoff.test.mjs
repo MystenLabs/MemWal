@@ -167,6 +167,44 @@ test("auth-required mode picks up credentials mid-session without a restart", as
     const init = await waitFor((m) => m.id === 1 && m.result);
     assert.equal(init.result.serverInfo.name, "memwal");
 
+    // Pre-login discovery must expose the same safety metadata clients will
+    // receive after the bridge hands off to the remote relayer.
+    send({ jsonrpc: "2.0", id: 10, method: "tools/list", params: {} });
+    const listed = await waitFor((m) => m.id === 10 && m.result);
+    const metadata = Object.fromEntries(
+        listed.result.tools.map(({ name, title, annotations }) => [name, { title, annotations }]),
+    );
+    assert.deepEqual(metadata, {
+        memwal_remember: {
+            title: "Remember a Fact",
+            annotations: { readOnlyHint: false, destructiveHint: false },
+        },
+        memwal_remember_bulk: {
+            title: "Remember Multiple Facts",
+            annotations: { readOnlyHint: false, destructiveHint: false },
+        },
+        memwal_recall: {
+            title: "Recall Memories",
+            annotations: { readOnlyHint: true, destructiveHint: false },
+        },
+        memwal_analyze: {
+            title: "Analyze and Remember",
+            annotations: { readOnlyHint: false, destructiveHint: true },
+        },
+        memwal_restore: {
+            title: "Restore Memory Index",
+            annotations: { readOnlyHint: false, destructiveHint: false },
+        },
+        memwal_health: {
+            title: "Check Walrus Memory Health",
+            annotations: { readOnlyHint: true, destructiveHint: false },
+        },
+        memwal_login: {
+            title: "Sign In to Walrus Memory",
+            annotations: { readOnlyHint: false, destructiveHint: false },
+        },
+    });
+
     // 2. recall before login → not-signed-in instruction.
     send({
         jsonrpc: "2.0",
