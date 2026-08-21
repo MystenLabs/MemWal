@@ -452,17 +452,23 @@ pub(crate) async fn query_owner_memories(
         None => None,
     };
 
+    // must_resync only when the tombstone cursor itself is older than
+    // retention: those tombstones have been swept. A v1 cursor (no
+    // deleted_at) replays 30 days instead. Do not use live updated_at;
+    // a quiet account's last live row can be months old while the client
+    // polled 5 minutes ago.
     if let Some(c) = decoded.as_ref() {
-        let oldest = c.deleted_at.or(c.snapshot_at).unwrap_or(c.updated_at);
-        if oldest < retention_cut {
-            return Ok(MemoriesResponse {
-                memories: Vec::new(),
-                next_cursor: None,
-                has_more: false,
-                snapshot_version: SNAPSHOT_VERSION,
-                deleted: Vec::new(),
-                must_resync: true,
-            });
+        if let Some(deleted_at) = c.deleted_at {
+            if deleted_at < retention_cut {
+                return Ok(MemoriesResponse {
+                    memories: Vec::new(),
+                    next_cursor: None,
+                    has_more: false,
+                    snapshot_version: SNAPSHOT_VERSION,
+                    deleted: Vec::new(),
+                    must_resync: true,
+                });
+            }
         }
     }
 
@@ -1002,6 +1008,16 @@ mod tests {
             memories.deleted,
         );
         assert!(!memories.must_resync);
+
+        VectorDb::from_pool(pool.clone())
+            .delete_by_blob_id(&format!("blob-keep"), &owner, "notes")
+            .await
+            .unwrap();
+        let empty = query_owner_namespaces(&pool, &owner, Some(cursor), 100)
+            .await
+            .unwrap();
+        assert_eq!(empty.namespaces.len(), 1);
+        assert_eq!(empty.namespaces[0].memory_count, 0);
 
         cleanup(&pool, &owner).await;
     }
