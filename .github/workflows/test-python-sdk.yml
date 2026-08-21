@@ -82,9 +82,11 @@ jobs:
     # *rate limit* separate: the relayer meters per delegate key and per
     # account, so the concurrency group below is what stops the three suites
     # 429ing each other. Group name must stay identical in all three
-    # workflows; dev-only here, so it is the literal dev group.
+    # workflows — byte-identical on purpose, including branches this
+    # dev-only job never runs on, so the three land in one group whatever
+    # the expression resolves to.
     concurrency:
-      group: bench-account-dev
+      group: bench-account-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
       cancel-in-progress: false
 
     environment: benchmark-dev

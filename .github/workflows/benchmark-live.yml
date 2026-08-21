@@ -68,9 +68,11 @@ jobs:
     # test-python-sdk.yml, which sign with this same BENCH_DELEGATE_KEY. The
     # relayer rate-limits per delegate key and per account, so two suites
     # running concurrently 429 each other. Group name must stay identical in
-    # all three workflows.
+    # all three workflows — byte-identical on purpose, including the `main`
+    # branch this workflow never runs on, so the three land in one group
+    # whatever the expression resolves to.
     concurrency:
-      group: bench-account-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'staging' && 'staging' || 'dev') }}
+      group: bench-account-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
       cancel-in-progress: false
 
     env:

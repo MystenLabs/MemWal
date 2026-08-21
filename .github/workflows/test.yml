@@ -212,7 +212,10 @@ jobs:
         run: pnpm --filter @mysten-incubation/memwal test
 
   sdk-e2e:
-    name: SDK / E2E ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }} relayer
+    # Deliberately static. A `${{ ... }}` name renders unevaluated in the
+    # checks UI when the job is skipped, which is most of the time. The target
+    # environment is already visible in `environment:` and the run summary.
+    name: SDK / E2E (live relayer)
     runs-on: ubuntu-latest
     needs: [sdk-checks, sdk-changed]
     timeout-minutes: 30
@@ -237,7 +240,8 @@ jobs:
     # two suites hitting one bench account concurrently 429 each other —
     # exactly what broke this job and the benchmark on 2026-08-21. Namespace
     # isolation does not help: the limiter keys on the credential, not the
-    # namespace. Group name must stay identical in all three workflows.
+    # namespace. The expression is byte-identical in all three workflows on
+    # purpose, so they land in one group whatever it resolves to.
     concurrency:
       group: bench-account-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
       cancel-in-progress: false
