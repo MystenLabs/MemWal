@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal
 
+## 0.1.4
+
+### Fixed
+
+- Empty-body 401s now tell first-time MCP callers to run `memwal_login` instead of showing `<no message>`. Credential 401s still point at the AUTH_REJECTED troubleshooting guide.
+
 ## 0.1.3
 
 ### Added

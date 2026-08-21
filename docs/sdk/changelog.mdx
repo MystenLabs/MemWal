@@ -28,8 +28,14 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.3. It adds client-side token estimation and recall token budgets with configurable truncation strategies, and updates the default relayer URL.
+  The latest TypeScript SDK release is 0.1.4. It points empty-body 401s at `memwal_login` instead of `<no message>`. 0.1.3 added client-side token estimation and recall token budgets, and updated the default relayer URL.
 ---
+
+## 0.1.4
+
+### Fixed
+
+- Empty-body 401s now tell first-time MCP callers to run `memwal_login` instead of showing `<no message>`. Credential 401s still point at the AUTH_REJECTED troubleshooting guide.
 
 ## 0.1.3
 
