@@ -7,6 +7,8 @@ without losing context. Portable, verifiable, and fully controlled by you, it's
 the memory layer that lets agents handle complex workflows and coordinate using
 data they can trust.
 
+If Walrus Memory is useful to you, star the repo ⭐ to help other builders discover it and stay up to date with new releases.
+
 > Walrus Memory is currently in beta and actively evolving. While fully usable today, we continue to refine the developer experience and operational guidance. We welcome feedback from early builders as we continue to improve the product.
 
 ## For AI Agents
