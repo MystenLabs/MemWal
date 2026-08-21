@@ -28,8 +28,14 @@ questions:
   - What changed in the MemWal MCP changelog?
   - When was the automatic memory plugin added to MemWal MCP?
 answer: >-
-  The latest MCP package release is 0.0.10. It closes out orphaned tool calls whose responses never arrive with a retryable error, injects the configured default namespace into memwal_remember_bulk calls that omit one, and sends proactive-usage instructions in the MCP initialize handshake so the model knows when to save and recall without being asked, which lazy tool loading had broken. Version 0.0.9 answered the initialize handshake locally and connected the relayer in the background so a slow cold start no longer trips the client's 30s timeout.
+  The latest MCP package release is 0.0.11. It makes memwal_logout actually cut the running bridge session, so memory tools stop after sign-out instead of keeping the deleted delegate key in memory. Version 0.0.10 closes out orphaned tool calls whose responses never arrive with a retryable error, injects the configured default namespace into memwal_remember_bulk calls that omit one, and sends proactive-usage instructions in the MCP initialize handshake so the model knows when to save and recall without being asked, which lazy tool loading had broken.
 ---
+
+## 0.0.11
+
+### Fixed
+
+- Make `memwal_logout` actually revoke access on the running bridge. Logout previously deleted the credentials file and nothing else; the bridge kept the delegate key in memory and the SSE session open, so later `memwal_recall` / `memwal_remember` still ran under the key the user just removed. Logout now aborts the session, fails in-flight calls, and refuses memory tools until `memwal_login`. (#616)
 
 ## 0.0.10
 
