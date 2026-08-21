@@ -354,6 +354,74 @@ fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
     }
 }
 
+/// Release storage reservations given only a pool handle.
+///
+/// Several wallet-job error paths hold a `&PgPool` rather than an `AppState`
+/// (`update_remember_job_after_wallet_error` and friends), and threading state
+/// through all of them just to release quota would be a much larger change than
+/// this fix warrants. Releasing does not need config: when quota is unlimited
+/// no reservation was ever written, so the delete simply matches nothing.
+///
+/// Infallible for the same reason as the method: a failed release is recovered
+/// by the TTL and the terminal-job reconcile, and must never turn a successful
+/// write into a failed request.
+pub async fn release_storage_reservations_with_pool(pool: &PgPool, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let result = sqlx::query("DELETE FROM storage_reservations WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(pool)
+        .await;
+
+    match result {
+        Ok(_) => {
+            crate::observability::observe_db("quota.release_reservations", "ok", started.elapsed());
+        }
+        Err(e) => {
+            crate::observability::observe_db(
+                "quota.release_reservations",
+                "error",
+                started.elapsed(),
+            );
+            // TTL and the terminal-job reconcile are the backstops. Log
+            // loudly but do not propagate.
+            tracing::warn!(
+                "failed to release {} storage reservation(s), falling back to TTL: {}",
+                ids.len(),
+                e
+            );
+        }
+    }
+}
+
+/// One pending write awaiting admission against an owner's storage quota.
+///
+/// `id` is supplied by the caller rather than generated here, because the
+/// release site must be able to name the reservation without extra plumbing:
+///   * enqueued paths pass the `remember_jobs.id` the vector row will use, so
+///     `jobs.rs` can release from the job id it already carries. Nothing new
+///     has to be threaded through the serialized `WalletOperation` payloads.
+///   * inline paths pass a fresh UUID and release it themselves a few lines
+///     later.
+#[derive(Debug, Clone)]
+pub struct StorageReservationRequest {
+    pub id: String,
+    pub bytes: i64,
+}
+
+/// Outcome of an atomic quota admission.
+///
+/// `Rejected` is a normal outcome, not an error, so the caller owns the
+/// response shape. `used` is the total observed under the lock (committed
+/// rows plus live reservations) and feeds the existing 402 message verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageAdmission {
+    Admitted,
+    Rejected { used: i64 },
+}
+
 impl VectorDb {
     /// Initialize database connection pool and run migrations
     pub async fn new(database_url: &str) -> Result<Self, AppError> {
@@ -457,6 +525,14 @@ impl VectorDb {
             .execute(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 013: {}", e)))?;
+
+        // per-owner storage quota reservations. Makes quota admission atomic
+        // with the eventual insert (GH #532 / WALM-359).
+        let migration_014 = include_str!("../../migrations/014_storage_reservations.sql");
+        sqlx::raw_sql(migration_014)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 014: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
@@ -939,30 +1015,75 @@ impl VectorDb {
     // Storage Quota (still PostgreSQL — tracks per-row blob sizes)
     // ============================================================
 
-    /// Acquire an advisory lock and get storage used within a single transaction.
+    /// Atomically admit a batch of writes against the owner's storage quota.
     ///
-    /// Using `pg_advisory_lock` with a connection pool causes deadlocks
-    /// because it's session-level. We use `pg_advisory_xact_lock` inside an explicit
-    /// transaction so the lock is automatically released on commit/rollback.
-    pub async fn get_storage_used_with_lock(
+    /// This is the whole fix for GH #532 / WALM-359. The previous
+    /// `get_storage_used_with_lock` took a `pg_advisory_xact_lock`, read the
+    /// total, and then committed — which released the lock, because xact locks
+    /// are transaction scoped. The comparison and the caller's INSERT both
+    /// happened outside it, so concurrent requests from one owner all observed
+    /// the same pre-insert total and all passed.
+    ///
+    /// Here the lock, the usage read, the comparison, and the reservation
+    /// INSERT all live in one transaction. Nothing else for this owner can
+    /// interleave, so a burst is serialized and only what actually fits is
+    /// admitted.
+    ///
+    /// Usage counts committed rows plus live reservations:
+    ///   `SUM(vector_entries.blob_size_bytes) + SUM(storage_reservations.bytes)`
+    /// Expired reservations are excluded by predicate and opportunistically
+    /// deleted for this owner, so a missed release self-heals at `ttl`.
+    ///
+    /// Admission is all-or-nothing across `reservations`, which preserves the
+    /// existing behaviour where a bulk request either lands whole or is
+    /// rejected whole.
+    ///
+    /// `pg_advisory_xact_lock` (not the session-level `pg_advisory_lock`) is
+    /// still the right primitive here: with a connection pool the session
+    /// variant leaks locks onto pooled connections and deadlocks. Inside an
+    /// explicit transaction the lock is released on commit or rollback.
+    pub async fn admit_storage_reservations(
         &self,
         owner: &str,
         lock_key: i64,
-    ) -> Result<i64, AppError> {
+        max_bytes: i64,
+        reservations: &[StorageReservationRequest],
+        ttl: std::time::Duration,
+    ) -> Result<StorageAdmission, AppError> {
+        if reservations.is_empty() {
+            return Ok(StorageAdmission::Admitted);
+        }
+
         let started = std::time::Instant::now();
+        let ttl_secs = ttl.as_secs().min(i64::MAX as u64) as i64;
+        let requested: i64 = reservations.iter().map(|r| r.bytes).sum();
+
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| AppError::Internal(format!("Failed to begin tx: {}", e)))?;
 
+        // Serializes every admission for this owner. Held until commit or
+        // rollback below, which is what makes check-then-reserve atomic.
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
             .execute(&mut *tx)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to acquire advisory lock: {}", e)))?;
 
-        let row: (i64,) = sqlx::query_as(
+        // Opportunistic cleanup, scoped to this owner so the write stays
+        // small and cannot contend with other owners' admissions. The global
+        // sweeper handles owners who never come back.
+        sqlx::query("DELETE FROM storage_reservations WHERE owner = $1 AND expires_at <= NOW()")
+            .bind(owner)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to prune expired reservations: {}", e))
+            })?;
+
+        let committed: (i64,) = sqlx::query_as(
             "SELECT COALESCE(SUM(blob_size_bytes)::BIGINT, 0) FROM vector_entries WHERE owner = $1",
         )
         .bind(owner)
@@ -970,12 +1091,132 @@ impl VectorDb {
         .await
         .map_err(|e| AppError::Internal(format!("Failed to get storage used: {}", e)))?;
 
+        let reserved: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(bytes)::BIGINT, 0) FROM storage_reservations
+             WHERE owner = $1 AND expires_at > NOW()",
+        )
+        .bind(owner)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get reserved storage: {}", e)))?;
+
+        let used = committed.0.saturating_add(reserved.0);
+
+        if used.saturating_add(requested) > max_bytes {
+            // Rollback releases the advisory lock and writes nothing.
+            if let Err(e) = tx.rollback().await {
+                tracing::warn!("failed to roll back rejected quota admission: {}", e);
+            }
+            crate::observability::observe_db(
+                "quota.admit_reservations",
+                "rejected",
+                started.elapsed(),
+            );
+            return Ok(StorageAdmission::Rejected { used });
+        }
+
+        // ON CONFLICT makes admission idempotent. A retried enqueued job
+        // re-admitting under the same `remember_jobs.id` refreshes its own
+        // reservation instead of double counting itself.
+        for reservation in reservations {
+            sqlx::query(
+                "INSERT INTO storage_reservations (id, owner, bytes, expires_at)
+                 VALUES ($1, $2, $3, NOW() + ($4 * INTERVAL '1 second'))
+                 ON CONFLICT (id) DO UPDATE SET
+                    owner = EXCLUDED.owner,
+                    bytes = EXCLUDED.bytes,
+                    expires_at = EXCLUDED.expires_at",
+            )
+            .bind(&reservation.id)
+            .bind(owner)
+            .bind(reservation.bytes)
+            .bind(ttl_secs)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to insert reservation: {}", e)))?;
+        }
+
         tx.commit()
             .await
             .map_err(|e| AppError::Internal(format!("Failed to commit tx: {}", e)))?;
 
-        crate::observability::observe_db("quota.storage_used_with_lock", "ok", started.elapsed());
-        Ok(row.0)
+        crate::observability::observe_db("quota.admit_reservations", "ok", started.elapsed());
+        Ok(StorageAdmission::Admitted)
+    }
+
+    /// Release reservations once their bytes are accounted for elsewhere, or
+    /// once the write that reserved them is known to be dead.
+    ///
+    /// Callers release *after* the vector row is committed. That ordering
+    /// briefly double counts the same bytes (row + reservation), which is the
+    /// safe direction: releasing first would open a window where neither
+    /// counts and a concurrent burst could slip through.
+    ///
+    /// Idempotent by construction — deleting an already released id is a
+    /// no-op, so retried jobs and overlapping failure handlers are harmless.
+    /// Never returns an error to the caller: a failed release is recovered by
+    /// the TTL, and must not turn a successful write into a failed one.
+    pub async fn release_storage_reservations(&self, ids: &[String]) {
+        release_storage_reservations_with_pool(&self.pool, ids).await
+    }
+
+    /// Drop reservations whose `remember_jobs` row is already terminal.
+    ///
+    /// The explicit release calls in `jobs.rs` handle the common paths
+    /// promptly, but a terminal row with a live reservation can still arise:
+    /// the stale-job sweeper fails a row directly, a recovery handoff marks a
+    /// job failed from a code path that only has a pool handle, or a future
+    /// terminal path forgets to release. Reconciling against job status turns
+    /// every one of those from a full-TTL overcount into a bounded one, and
+    /// keeps the guarantee from depending on nobody ever missing a call site.
+    ///
+    /// Only reservations keyed by a `remember_jobs.id` are affected. Inline
+    /// reservations use local UUIDs with no job row, so they never match here
+    /// and are covered by their own release plus the TTL.
+    pub async fn release_reservations_for_terminal_jobs(&self) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            "DELETE FROM storage_reservations r
+             USING remember_jobs j
+             WHERE r.id = j.id AND j.status IN ('done', 'failed')",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to reconcile reservations against terminal jobs: {}",
+                e
+            ))
+        })?;
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::info!(
+                "released {} storage reservation(s) held by terminal remember jobs",
+                rows
+            );
+        }
+        Ok(rows)
+    }
+
+    /// Delete reservations whose TTL has passed, across all owners.
+    ///
+    /// The admission path already prunes the owner it touches, so this only
+    /// matters for owners who reserved, leaked, and never returned. Without it
+    /// their rows would sit in the table forever even though the predicate
+    /// already stops counting them.
+    pub async fn sweep_expired_storage_reservations(&self) -> Result<u64, AppError> {
+        let result = sqlx::query("DELETE FROM storage_reservations WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to sweep expired reservations: {}", e))
+            })?;
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::info!("swept {} expired storage reservation(s)", rows);
+        }
+        Ok(rows)
     }
 
     // ============================================================
@@ -1668,5 +1909,441 @@ pub mod oauth_rows {
         pub encrypted_private_key: String,
         pub delegate_public_key: String,
         pub delegate_status: String,
+    }
+}
+
+// ============================================================
+// Storage quota admission — concurrency regression tests
+// ============================================================
+//
+// These pin the fix for GH #532 / WALM-359 against a real PostgreSQL, because
+// the defect only exists in the interleaving of concurrent transactions. An
+// in-process fake would serialize the very thing under test and pass against
+// the broken code.
+//
+// Shape mirrors the reproduction on the issue: seed an owner just under quota
+// so exactly one more write fits, fire a 20-way burst, and assert exactly one
+// admission. Against the old read-then-commit-then-insert code the same
+// harness admitted 13 to 20 of 20.
+//
+// Requires DATABASE_URL (or the local default) to point at a Postgres with
+// pgvector. Marked #[ignore] to match the existing convention for tests with
+// external dependencies — run with `cargo test -- --ignored`.
+#[cfg(test)]
+mod quota_admission_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Matches the real default in `rate_limit::RateLimitConfig` (1 GiB).
+    const MAX_BYTES: i64 = 1_073_741_824;
+    /// Per-request size for the burst. Arbitrary but fixed, so the seed below
+    /// can leave room for exactly one.
+    const ITEM_BYTES: i64 = 1_048_576;
+    const BURST: usize = 20;
+    const TTL: Duration = Duration::from_secs(900);
+
+    fn test_database_url() -> String {
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://memwal:memwal_secret@localhost:5432/memwal".into())
+    }
+
+    async fn test_db() -> VectorDb {
+        VectorDb::new(&test_database_url())
+            .await
+            .expect("test database must be reachable with pgvector installed")
+    }
+
+    /// Unique per test so concurrent runs cannot see each other's rows, and so
+    /// a failed run leaves no state that poisons the next one.
+    fn unique_owner(tag: &str) -> String {
+        format!("0xtest-{}-{}", tag, uuid::Uuid::new_v4())
+    }
+
+    fn lock_key(owner: &str) -> i64 {
+        // Same FNV-1a folding as `rate_limit::stable_hash_i64`. Duplicated
+        // rather than imported so this test pins the DB layer's contract on
+        // its own, independent of the caller.
+        const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+        const FNV_PRIME: u64 = 1_099_511_628_211;
+        let hash = owner
+            .bytes()
+            .fold(FNV_OFFSET, |acc, b| acc.wrapping_mul(FNV_PRIME) ^ b as u64);
+        ((hash >> 32) ^ (hash & 0xFFFF_FFFF)) as i64
+    }
+
+    fn zero_vector() -> Vec<f32> {
+        vec![0.0; 1536]
+    }
+
+    /// Seed committed usage so exactly one `ITEM_BYTES` write still fits.
+    async fn seed_to_one_slot_remaining(db: &VectorDb, owner: &str) {
+        let seeded = MAX_BYTES - ITEM_BYTES;
+        db.insert_vector(
+            &format!("seed-{}", uuid::Uuid::new_v4()),
+            owner,
+            "default",
+            "seed-blob",
+            &zero_vector(),
+            seeded,
+            0.5,
+        )
+        .await
+        .expect("seed insert");
+    }
+
+    async fn committed_bytes(db: &VectorDb, owner: &str) -> i64 {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(blob_size_bytes)::BIGINT, 0) FROM vector_entries WHERE owner = $1",
+        )
+        .bind(owner)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        row.0
+    }
+
+    async fn cleanup(db: &VectorDb, owner: &str) {
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(owner)
+            .execute(db.pool())
+            .await;
+        let _ = sqlx::query("DELETE FROM storage_reservations WHERE owner = $1")
+            .bind(owner)
+            .execute(db.pool())
+            .await;
+    }
+
+    /// Inline path: admission immediately followed by the insert.
+    ///
+    /// This is the cheap case (microseconds between check and write) and it
+    /// still overshot before the fix.
+    #[tokio::test]
+    #[ignore]
+    async fn burst_admits_exactly_one_inline() {
+        let db = Arc::new(test_db().await);
+        let owner = unique_owner("inline");
+        seed_to_one_slot_remaining(&db, &owner).await;
+
+        let mut handles = Vec::with_capacity(BURST);
+        for _ in 0..BURST {
+            let db = Arc::clone(&db);
+            let owner = owner.clone();
+            handles.push(tokio::spawn(async move {
+                let id = uuid::Uuid::new_v4().to_string();
+                let admission = db
+                    .admit_storage_reservations(
+                        &owner,
+                        lock_key(&owner),
+                        MAX_BYTES,
+                        &[StorageReservationRequest {
+                            id: id.clone(),
+                            bytes: ITEM_BYTES,
+                        }],
+                        TTL,
+                    )
+                    .await
+                    .expect("admission must not error");
+
+                if admission != StorageAdmission::Admitted {
+                    return false;
+                }
+
+                db.insert_vector(
+                    &id,
+                    &owner,
+                    "default",
+                    "blob",
+                    &zero_vector(),
+                    ITEM_BYTES,
+                    0.5,
+                )
+                .await
+                .expect("insert");
+                db.release_storage_reservations(&[id]).await;
+                true
+            }));
+        }
+
+        let mut admitted = 0usize;
+        for h in handles {
+            if h.await.unwrap() {
+                admitted += 1;
+            }
+        }
+
+        let total = committed_bytes(&db, &owner).await;
+        cleanup(&db, &owner).await;
+
+        assert_eq!(
+            admitted, 1,
+            "exactly one of {} concurrent requests should be admitted, got {}",
+            BURST, admitted
+        );
+        assert!(
+            total <= MAX_BYTES,
+            "committed bytes {} must never exceed quota {}",
+            total,
+            MAX_BYTES
+        );
+    }
+
+    /// Enqueued path: admission, then a delay standing in for the Walrus
+    /// upload, then the insert.
+    ///
+    /// This is the severe case. The gap is real (documented as up to five
+    /// minutes) and before the fix a 150 ms gap was enough to admit the entire
+    /// burst. The delay here is what makes the test meaningful, so it must not
+    /// be optimised away.
+    #[tokio::test]
+    #[ignore]
+    async fn burst_admits_exactly_one_with_delayed_insert() {
+        let db = Arc::new(test_db().await);
+        let owner = unique_owner("enqueued");
+        seed_to_one_slot_remaining(&db, &owner).await;
+
+        let mut handles = Vec::with_capacity(BURST);
+        for _ in 0..BURST {
+            let db = Arc::clone(&db);
+            let owner = owner.clone();
+            handles.push(tokio::spawn(async move {
+                let id = uuid::Uuid::new_v4().to_string();
+                let admission = db
+                    .admit_storage_reservations(
+                        &owner,
+                        lock_key(&owner),
+                        MAX_BYTES,
+                        &[StorageReservationRequest {
+                            id: id.clone(),
+                            bytes: ITEM_BYTES,
+                        }],
+                        TTL,
+                    )
+                    .await
+                    .expect("admission must not error");
+
+                if admission != StorageAdmission::Admitted {
+                    return false;
+                }
+
+                // Stands in for embed → encrypt → Walrus upload.
+                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                db.insert_vector(
+                    &id,
+                    &owner,
+                    "default",
+                    "blob",
+                    &zero_vector(),
+                    ITEM_BYTES,
+                    0.5,
+                )
+                .await
+                .expect("insert");
+                db.release_storage_reservations(&[id]).await;
+                true
+            }));
+        }
+
+        let mut admitted = 0usize;
+        for h in handles {
+            if h.await.unwrap() {
+                admitted += 1;
+            }
+        }
+
+        let total = committed_bytes(&db, &owner).await;
+        cleanup(&db, &owner).await;
+
+        assert_eq!(
+            admitted, 1,
+            "the upload gap must not let extra requests through: got {} of {}",
+            admitted, BURST
+        );
+        assert!(
+            total <= MAX_BYTES,
+            "committed bytes {} must never exceed quota {}",
+            total,
+            MAX_BYTES
+        );
+    }
+
+    /// A reservation must count against quota before any row exists. This is
+    /// the single assertion that fails against the pre-fix code.
+    #[tokio::test]
+    #[ignore]
+    async fn reservation_counts_before_the_row_lands() {
+        let db = test_db().await;
+        let owner = unique_owner("counts");
+        seed_to_one_slot_remaining(&db, &owner).await;
+
+        let first = db
+            .admit_storage_reservations(
+                &owner,
+                lock_key(&owner),
+                MAX_BYTES,
+                &[StorageReservationRequest {
+                    id: "res-first".into(),
+                    bytes: ITEM_BYTES,
+                }],
+                TTL,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, StorageAdmission::Admitted);
+
+        // No insert yet — the reservation alone must fill the slot.
+        let second = db
+            .admit_storage_reservations(
+                &owner,
+                lock_key(&owner),
+                MAX_BYTES,
+                &[StorageReservationRequest {
+                    id: "res-second".into(),
+                    bytes: ITEM_BYTES,
+                }],
+                TTL,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(second, StorageAdmission::Rejected { .. }),
+            "an outstanding reservation must block the next admission, got {:?}",
+            second
+        );
+
+        cleanup(&db, &owner).await;
+    }
+
+    /// Releasing must hand the quota straight back, so a failed or completed
+    /// write does not cost the owner capacity until TTL.
+    #[tokio::test]
+    #[ignore]
+    async fn release_frees_quota_immediately() {
+        let db = test_db().await;
+        let owner = unique_owner("release");
+        seed_to_one_slot_remaining(&db, &owner).await;
+
+        let req = [StorageReservationRequest {
+            id: "res-release".into(),
+            bytes: ITEM_BYTES,
+        }];
+        assert_eq!(
+            db.admit_storage_reservations(&owner, lock_key(&owner), MAX_BYTES, &req, TTL)
+                .await
+                .unwrap(),
+            StorageAdmission::Admitted
+        );
+
+        db.release_storage_reservations(&["res-release".to_string()])
+            .await;
+
+        assert_eq!(
+            db.admit_storage_reservations(&owner, lock_key(&owner), MAX_BYTES, &req, TTL)
+                .await
+                .unwrap(),
+            StorageAdmission::Admitted,
+            "released bytes must be immediately reusable"
+        );
+
+        cleanup(&db, &owner).await;
+    }
+
+    /// The TTL backstop: a reservation nobody ever released must stop counting,
+    /// so a missed release can never make an account permanently unusable.
+    #[tokio::test]
+    #[ignore]
+    async fn expired_reservation_stops_counting() {
+        let db = test_db().await;
+        let owner = unique_owner("ttl");
+        seed_to_one_slot_remaining(&db, &owner).await;
+
+        // Zero TTL: expired the moment it is written, standing in for a
+        // reservation whose release never came.
+        assert_eq!(
+            db.admit_storage_reservations(
+                &owner,
+                lock_key(&owner),
+                MAX_BYTES,
+                &[StorageReservationRequest {
+                    id: "res-stale".into(),
+                    bytes: ITEM_BYTES,
+                }],
+                Duration::from_secs(0),
+            )
+            .await
+            .unwrap(),
+            StorageAdmission::Admitted
+        );
+
+        assert_eq!(
+            db.admit_storage_reservations(
+                &owner,
+                lock_key(&owner),
+                MAX_BYTES,
+                &[StorageReservationRequest {
+                    id: "res-after-stale".into(),
+                    bytes: ITEM_BYTES,
+                }],
+                TTL,
+            )
+            .await
+            .unwrap(),
+            StorageAdmission::Admitted,
+            "an expired reservation must not hold quota"
+        );
+
+        db.sweep_expired_storage_reservations().await.unwrap();
+
+        cleanup(&db, &owner).await;
+    }
+
+    /// Bulk admission is all-or-nothing, which is what keeps the existing
+    /// "reject the whole request" behaviour and the 402 shape intact.
+    #[tokio::test]
+    #[ignore]
+    async fn batch_admission_is_all_or_nothing() {
+        let db = test_db().await;
+        let owner = unique_owner("batch");
+        seed_to_one_slot_remaining(&db, &owner).await;
+
+        // Two items, only one slot.
+        let outcome = db
+            .admit_storage_reservations(
+                &owner,
+                lock_key(&owner),
+                MAX_BYTES,
+                &[
+                    StorageReservationRequest {
+                        id: "batch-a".into(),
+                        bytes: ITEM_BYTES,
+                    },
+                    StorageReservationRequest {
+                        id: "batch-b".into(),
+                        bytes: ITEM_BYTES,
+                    },
+                ],
+                TTL,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, StorageAdmission::Rejected { .. }),
+            "an over-quota batch must be rejected whole, got {:?}",
+            outcome
+        );
+
+        let leaked: (i64,) =
+            sqlx::query_as("SELECT COUNT(*)::BIGINT FROM storage_reservations WHERE owner = $1")
+                .bind(&owner)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            leaked.0, 0,
+            "a rejected batch must not leave partial reservations behind"
+        );
+
+        cleanup(&db, &owner).await;
     }
 }

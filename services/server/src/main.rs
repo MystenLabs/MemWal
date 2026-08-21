@@ -1310,6 +1310,28 @@ async fn main() {
             {
                 tracing::error!("Stale remember job sweep failed: {}", e);
             }
+
+            // Storage-quota reservation upkeep, on the same tick.
+            //
+            // Ordered after the stale-job sweep so rows it just marked failed
+            // are reconciled in the same pass instead of waiting a full minute.
+            // The reconcile handles terminal jobs whose release was missed; the
+            // expiry sweep is the last-resort backstop for reservations with no
+            // job row at all (inline paths) or whose job vanished entirely.
+            if let Err(e) = stale_job_state
+                .db
+                .release_reservations_for_terminal_jobs()
+                .await
+            {
+                tracing::error!("Terminal-job reservation reconcile failed: {}", e);
+            }
+            if let Err(e) = stale_job_state
+                .db
+                .sweep_expired_storage_reservations()
+                .await
+            {
+                tracing::error!("Expired reservation sweep failed: {}", e);
+            }
         }
     });
 
