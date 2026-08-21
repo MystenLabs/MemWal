@@ -617,12 +617,29 @@ async function handleLocalLogin(
  * on-chain delegate key — that requires a separate dashboard action. */
 function handleLocalLogout(): { text: string; isError: boolean } {
     try {
-        clearCreds();
-        log.info("memwal_logout.bridge.success", { credsPath: credsPath() });
+        const cleared = clearCreds();
+        log.info("memwal_logout.bridge.success", {
+            removedPath: cleared.removedPath ?? null,
+            fallbackPath: cleared.fallbackPath ?? null,
+        });
+        if (!cleared.removedPath) {
+            return {
+                isError: false,
+                text: `✅ Already signed out. No credentials at \`${credsPath()}\`.`,
+            };
+        }
         return {
             isError: false,
             text: [
-                `✅ Signed out. Credentials removed from \`${credsPath()}\`.`,
+                `✅ Signed out. Credentials removed from \`${cleared.removedPath}\`.`,
+                ...(cleared.fallbackPath
+                    ? [
+                          ``,
+                          `**Still signed in elsewhere:** \`${cleared.fallbackPath}\` remains and is ` +
+                              `what the next run loads, under a possibly different account. Remove ` +
+                              `that file too to sign out everywhere.`,
+                      ]
+                    : []),
                 ``,
                 `**Note:** the on-chain delegate key for this client is still registered on your Walrus Memory account. To fully revoke access, visit the Walrus Memory dashboard and remove the matching public key from the "Delegate Keys" section.`,
                 ``,
