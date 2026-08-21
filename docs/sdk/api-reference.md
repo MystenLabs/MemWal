@@ -63,7 +63,7 @@ Submit one memory through the relayer. The method returns after the relayer crea
 
 **Returns:**
 
-<!-- memwal:import packages/sdk/src/types.ts#RememberAcceptedResult -->
+{/* memwal:import packages/sdk/src/types.ts#RememberAcceptedResult */}
 ```ts
 /** Result from remember() / rememberAsync() */
 export interface RememberAcceptedResult {
@@ -71,7 +71,7 @@ export interface RememberAcceptedResult {
     status: string;
 }
 ```
-<!-- /memwal:import -->
+{/* /memwal:import */}
 
 ### `rememberAndWait(text, namespace?, opts?): Promise<RememberResult>`
 
@@ -79,7 +79,7 @@ Submit one memory and poll until the background job completes.
 
 **Returns:**
 
-<!-- memwal:import packages/sdk/src/types.ts#RememberResult -->
+{/* memwal:import packages/sdk/src/types.ts#RememberResult */}
 ```ts
 /** Result from rememberAndWait() / waitForRememberJob() */
 export interface RememberResult {
@@ -92,7 +92,7 @@ export interface RememberResult {
     namespace: string;
 }
 ```
-<!-- /memwal:import -->
+{/* /memwal:import */}
 
 ### `waitForRememberJob(jobId, opts?): Promise<RememberResult>`
 
@@ -104,7 +104,7 @@ Submit up to 20 memories in one request and return the accepted job IDs immediat
 
 **Returns:**
 
-<!-- memwal:import packages/sdk/src/types.ts#RememberBulkAcceptedResult -->
+{/* memwal:import packages/sdk/src/types.ts#RememberBulkAcceptedResult */}
 ```ts
 /** Result from rememberBulk() / rememberBulkAsync() */
 export interface RememberBulkAcceptedResult {
@@ -113,7 +113,7 @@ export interface RememberBulkAcceptedResult {
     status: string;
 }
 ```
-<!-- /memwal:import -->
+{/* /memwal:import */}
 
 ### `rememberBulkAndWait(items, opts?): Promise<RememberBulkResult>`
 

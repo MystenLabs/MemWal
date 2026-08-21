@@ -10,11 +10,14 @@
  *
  * This script closes that gap. A docs page marks a fenced block as imported:
  *
- *     <!-- memwal:import packages/sdk/src/types.ts#RememberResult -->
+ *     {/* memwal:import packages/sdk/src/types.ts#RememberResult *\/}
  *     ```ts
  *     ...body written by this script...
  *     ```
- *     <!-- /memwal:import -->
+ *     {/* /memwal:import *\/}
+ *
+ * (the closing delimiters are escaped as *\/ above only so this block comment
+ * does not end early; drop the backslash in a real docs page)
  *
  * and the body is replaced with the real declaration, doc comments included.
  * The result stays committed, so Mintlify renders it with no build step, it
@@ -305,8 +308,16 @@ function fencedLines(lines) {
     return inside;
 }
 
-const OPEN_RE = /^[ \t]*<!--[ \t]*memwal:import[ \t]+(\S+)(?:[ \t]+lang=(\S+))?[ \t]*-->[ \t]*$/;
-const CLOSE_RE = /^[ \t]*<!--[ \t]*\/memwal:import[ \t]*-->[ \t]*$/;
+// Markers are MDX comments, not HTML comments. Both Mintlify and the Walrus
+// Docusaurus site that republishes these pages parse .md as MDX, where
+// `<!-- -->` is a hard parse error ("Unexpected character `!`"). `{/* */}`
+// compiles to a real comment and renders as nothing in both.
+const OPEN_RE = /^[ \t]*\{\/\*[ \t]*memwal:import[ \t]+(\S+?)(?:[ \t]+lang=(\S+?))?[ \t]*\*\/\}[ \t]*$/;
+const CLOSE_RE = /^[ \t]*\{\/\*[ \t]*\/memwal:import[ \t]*\*\/\}[ \t]*$/;
+
+// The HTML-comment form is invisible in CommonMark, so it looks right until the
+// Docusaurus build fails days later in another repository. Catch it here.
+const HTML_MARKER_RE = /^[ \t]*<!--[ \t]*\/?memwal:import\b/;
 
 /**
  * Rebuilds one docs page with every marked block replaced by its source.
@@ -319,6 +330,14 @@ function rewrite(file, text) {
     const blocks = [];
 
     for (let i = 0; i < lines.length; i += 1) {
+        if (HTML_MARKER_RE.test(lines[i]) && !fenced.has(i + 1)) {
+            throw new Error(
+                `${file}:${i + 1}: import markers must be MDX comments, not HTML comments. ` +
+                    "Use {/* memwal:import path#Symbol */} ... {/* /memwal:import */}. " +
+                    "Mintlify and the Walrus Docusaurus site both parse .md as MDX, where " +
+                    "<!-- --> fails to compile.",
+            );
+        }
         const open = OPEN_RE.exec(lines[i]);
         if (!open || fenced.has(i + 1)) {
             out.push(lines[i]);
