@@ -33,6 +33,8 @@ answer: >-
 
 ## 0.0.11
 
+This release makes `memwal_logout` cut the running bridge session so memory tools stop after sign-out.
+
 ### Fixed
 
 - Make `memwal_logout` actually revoke access on the running bridge. Logout previously deleted the credentials file and nothing else; the bridge kept the delegate key in memory and the SSE session open, so later `memwal_recall` / `memwal_remember` still ran under the key the user just removed. Logout now aborts the session, fails in-flight calls, and refuses memory tools until `memwal_login`. (#616)
