@@ -39,14 +39,11 @@ answer: >-
   shared namespace and the next recalling from it.
 ---
 
-Several agents can work against one Walrus Memory account. Two decisions shape everything else:
-
-1. How many delegate keys you issue.
-2. Which namespaces the agents read and write.
+Several agents can work against one Walrus Memory account. Two things decide how they share memory: how many delegate keys you issue, and which namespaces each agent reads and writes.
 
 ## Give each agent its own delegate key
 
-An account has one owner and any number of delegates. A delegate is a keypair the owner authorizes onchain, and the relayer verifies that authorization against the contract on every request.
+An account has one owner and any number of [delegates](/fundamentals/concepts/ownership-and-access). A delegate is a keypair the owner authorizes onchain, and the relayer verifies that authorization against the contract on every request.
 
 Issue one delegate key per agent rather than sharing a single key. The keys grant identical access, so this is not an access-control boundary, but issuing one per agent gives you two things:
 
@@ -59,7 +56,7 @@ Any delegate the account authorizes can decrypt everything that account owns, ac
 
 ## Decide what the agents share
 
-Namespaces decide what agents see, because recall and restore match a namespace exactly and never cross one.
+[Namespaces](/fundamentals/concepts/memory-space) decide what agents see, because recall and restore match a namespace exactly and never cross one.
 
 | **Pattern** | **Setup** | **Result** |
 | --- | --- | --- |
@@ -117,10 +114,3 @@ Match the boundary to what you actually need to separate:
 - Agents cooperating on one user's work: one account, one delegate key each, namespaces to divide the work.
 - Agents serving different users: one account per user, never one shared account split by namespace, because any delegate reads every namespace on the account.
 - Agents running against different deployments: separate app IDs already isolate them, because the package ID scopes encryption and blob discovery.
-
-## References
-
-- [Ownership and Delegates](/fundamentals/concepts/ownership-and-access)
-- [Memory Space](/fundamentals/concepts/memory-space)
-- [Use Walrus Memory From Any Agent Runtime](/guides/agent-runtimes)
-- [Headless SDK Setup](/sdk/headless-setup)
