@@ -9,6 +9,23 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * On-chain Blob attribute key used to tag a mint with the remember-job id
+ * that requested it, so a crash-recovery reconcile (after a mint lands but
+ * before its journal write) can find and adopt the orphaned blob instead of
+ * minting a second paid one on retry.
+ *
+ * Both the write side (walrus-upload-journal.ts's durable register step,
+ * walrus-upload.ts's legacy register step) and the read side
+ * (walrus-query.ts's scanOwnerForJobBlob) must import this same constant
+ * rather than each hardcoding the string literal — they previously didn't,
+ * and drifted: the durable path wrote `memwal_migration_job` (an unrelated
+ * constant from the V1->V2 migration feature) while the reconcile scan
+ * searched for `memwal_job_id`, so the two could never match and the
+ * durable path's crash-recovery guarantee silently did nothing.
+ */
+export const MEMWAL_JOB_TAG_KEY = "memwal_job_id";
+
+/**
  * Test-only lost-response window after a durable side effect has completed.
  *
  * Marker file format (one shot per process tree):
