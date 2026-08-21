@@ -62,11 +62,11 @@ mechanisms, dispatched by `auth::verify_read_api_auth`
 (`services/server/src/auth.rs`) based on whether the request carries an
 `Authorization` header:
 
-1. **Ed25519 signed headers** ; the same `verify_signature` middleware
+1. **Ed25519 signed headers**, the same `verify_signature` middleware
    `/api/restore` and every other protected route use. This is the
    mechanism direct SDK/dashboard delegate-key callers use; see "Required
    headers" and "Canonical signing string" below.
-2. **Owner-scoped bearer token** (`Authorization: Bearer <token>`) ; the
+2. **Owner-scoped bearer token** (`Authorization: Bearer <token>`), the
    mechanism for Console, which structurally never holds a delegate key and
    so can never produce an Ed25519 signature. See `docs/api/owner-token-auth.md`
    for how Console obtains a token; once obtained, a request here is just
@@ -117,7 +117,7 @@ that account's on-chain `MemWalAccount.delegate_keys` (cached in
 
 ### 401 responses
 
-**Ed25519 path** (no `Authorization` header on the request) ; any of the
+**Ed25519 path** (no `Authorization` header on the request), any of the
 following returns a bare `401 Unauthorized` (no JSON body, constant ~100ms
 delay on signature/timestamp/nonce failures to prevent timing side-channels
 distinguishing failure reasons):
@@ -132,10 +132,10 @@ distinguishing failure reasons):
   or the account is deactivated.
 
 A request missing `x-nonce` entirely gets `426 Upgrade Required` instead of
-`401` ; signaling an unsupported legacy SDK version rather than an auth
+`401`, signaling an unsupported legacy SDK version rather than an auth
 failure.
 
-**Bearer-token path** (`Authorization: Bearer <token>` present) ; also a
+**Bearer-token path** (`Authorization: Bearer <token>` present), also a
 bare `401`, with no distinction in the response between causes, for:
 
 - An expired, tampered, wrongly-signed, or wrong-audience token.
@@ -154,14 +154,14 @@ These three endpoints run on their own router (`read_api_routes` in
 `main.rs`), separate from the write path's `protected_routes`, behind
 `read_api_rate_limit_middleware` (`services/server/src/rate_limit.rs`)
 instead of the write path's `rate_limit_middleware`. They do **not** share
-the write path's budget ; a routine pagination loop over this API can no
+the write path's budget, a routine pagination loop over this API can no
 longer trip, or contend with, the 30/min per-delegate-key budget that
 exists to bound the write path's spend-risk (Walrus upload, LLM calls,
 gas).
 
 There is a single sliding-window layer, keyed by delegate key under its
 own Redis prefix (`rate:read:dk:{public_key}`, distinct from the write
-path's `rate:dk:{public_key}`) ; no separate per-account burst/sustained
+path's `rate:dk:{public_key}`), no separate per-account burst/sustained
 tiers on top. Default limit is **200 weighted-requests/min per delegate
 key** (`ReadApiRateLimitConfig::per_delegate_key_per_minute`), overridable
 via the `READ_API_RATE_LIMIT_PER_MINUTE` env var. Weights for this API:
@@ -186,18 +186,18 @@ Exceeding the limit returns `429 Too Many Requests`:
 with a `Retry-After: 60` header. If the rate limiter itself is
 unavailable (Redis unreachable), requests fail closed with `503 Service
 Unavailable` and a `Retry-After: 30` header rather than being allowed
-through unmetered ; there is no in-memory fallback for this middleware,
+through unmetered, there is no in-memory fallback for this middleware,
 unlike the write path's deliberately-fallback-enabled limiter.
 
 ## `GET /v1/owners/:owner/namespaces`
 
-`updated_after` ; like `memories`' below ; must be the opaque `next_cursor`
+`updated_after`, like `memories`' below, must be the opaque `next_cursor`
 value returned by a previous call, not a raw timestamp or namespace name;
 omit it for the first page. It base64 (URL-safe, unpadded) encodes the
 JSON watermark `{"updated_at": ..., "namespace": ...}`: rows are ordered
 and filtered by the rollup's `(MAX(updated_at), namespace)`, mirroring
 `memories`' `(updated_at, id)` keyset. `limit` defaults to 100, max 500,
-`400` for non-positive/non-integer values ; same convention as `memories`.
+`400` for non-positive/non-integer values, same convention as `memories`.
 
 **Breaking change from an earlier version of this endpoint:** namespaces
 are now returned ordered by recency (`(MAX(updated_at), namespace)`), not
@@ -238,7 +238,7 @@ Response:
 }
 ```
 
-`updated_at` is `MAX(updated_at)` across the namespace's memories ; the same
+`updated_at` is `MAX(updated_at)` across the namespace's memories, the same
 value the cursor is built from.
 
 ## `GET /v1/owners/:owner/memories`
@@ -271,7 +271,7 @@ Response:
 }
 ```
 
-`updated_at` is the row's own last-modified time ; the same value this
+`updated_at` is the row's own last-modified time, the same value this
 page's cursor is built from.
 
 `status` is `"deleted"` for tombstoned rows, `"expired"` if `expires_at`
@@ -279,7 +279,7 @@ is in the past, and `"active"` otherwise (including when `end_epoch` /
 `expires_at` are still null because the expiry sweep has not run yet).
 
 The first time the sweep resolves a row's `end_epoch`/`expires_at` from
-`null` to a real value, that row's `updated_at` advances too ; so a client
+`null` to a real value, that row's `updated_at` advances too, so a client
 that already synced the row while it was still unsynced will see the
 populated values on its next incremental poll, rather than being stuck
 with `null` forever. A later routine re-verification that reconfirms an
@@ -289,29 +289,29 @@ anything changed); only a genuine change does.
 
 ### Cursor semantics (both paginated endpoints)
 
-`next_cursor` is **always** returned for a non-empty page ; including the
+`next_cursor` is **always** returned for a non-empty page, including the
 final page of a traversal and a result that fits entirely in one page. It
 is the watermark of the last row in that page, and it is what you pass as
 `updated_after` on your next poll.
 
 An empty page returns `next_cursor: null` in exactly one case: the very
 first page of a fresh walk (no `updated_after` on the request) that
-matches nothing at all ; there is no prior cursor and no row to build a
-watermark from. Every other empty page ; a continuation page reached with
+matches nothing at all, there is no prior cursor and no row to build a
+watermark from. Every other empty page, a continuation page reached with
 an incoming cursor, which can happen when every remaining row raced past
-the walk's snapshot boundary between pages ; still returns a non-null
+the walk's snapshot boundary between pages, still returns a non-null
 `next_cursor`: the same position as the incoming cursor, but with a fresh
 snapshot boundary. Use that new cursor rather than the one you already
-held; the one you held is now stale ; it's exactly what the reset exists
+held; the one you held is now stale, it's exactly what the reset exists
 to replace.
 
-So `next_cursor: null` does **not** mean "end of data" ; use the separate
+So `next_cursor: null` does **not** mean "end of data", use the separate
 `has_more` boolean for that instead. Keep paginating (pass back the latest
 `next_cursor`) while `has_more` is `true`; stop once you see `has_more:
 false`.
 
 **Do not infer end-of-data from page length.** `limit` is silently clamped
-to each endpoint's max (500) ; a request for `limit=1000` that happens to
+to each endpoint's max (500), a request for `limit=1000` that happens to
 match exactly 500 real rows returns a page exactly as long as the (clamped)
 `limit`, and a request for more than the actual remaining data returns a
 page shorter than `limit` while more data still exists elsewhere for that
@@ -336,13 +336,13 @@ Response:
 ## Errors
 
 All errors from these three endpoints (except the shared auth middleware's
-bare `401`/`426`, and the shared rate limiter's `429`/`503` ; see
+bare `401`/`426`, and the shared rate limiter's `429`/`503`, see
 Authentication and Rate limiting above) use the envelope
 `{ "error": "<message>" }`:
 
 | Status | Cause |
 |---|---|
-| `401` | Auth failed ; either an invalid/expired Ed25519 signature/nonce/timestamp, or (bearer-token path) an invalid/expired/unresolvable owner token (see Authentication) |
+| `401` | Auth failed, either an invalid/expired Ed25519 signature/nonce/timestamp, or (bearer-token path) an invalid/expired/unresolvable owner token (see Authentication) |
 | `403` | `{owner}` path segment does not match the authenticated identity, or (bearer-token path) the token's `permissions` lack `memories.read` |
 | `400` | Invalid/malformed cursor, or non-positive/non-integer `limit` |
 | `429` | Rate limit exceeded (see Rate limiting) |
