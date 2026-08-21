@@ -60,6 +60,7 @@ import {
     sha256hex,
     hexToBytes,
     bytesToHex,
+    normalizePrivateKey,
     normalizeServerUrl,
     sanitizeServerError,
     clockDriftErrorFromResponse,
@@ -200,7 +201,10 @@ export class MemWal {
     private pendingRememberKeys = new Map<string, string>();
 
     private constructor(config: MemWalConfig) {
-        this.privateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
+        this.privateKey =
+            typeof config.key === "string"
+                ? hexToBytes(normalizePrivateKey(config.key))
+                : config.key;
         this.accountId = config.accountId;
         // LOW-22: default to HTTPS for production usage; normalizeServerUrl
         // warns (does not throw) if a user passes plain http:// for a
@@ -212,7 +216,7 @@ export class MemWal {
     /**
      * Create a new Walrus Memory client instance.
      *
-     * @param config.key - Ed25519 private key (hex string) — the delegate key
+     * @param config.key - Ed25519 private key (hex or `suiprivkey1...`) — the delegate key
      * @param config.serverUrl - Server URL (default: https://relayer.memory.walrus.xyz)
      */
     static create(config: MemWalConfig): MemWal {
