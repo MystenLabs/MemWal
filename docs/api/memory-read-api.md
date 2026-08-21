@@ -105,7 +105,7 @@ sends the signature in `x-signature`:
   GET-only, bodyless endpoints this is the hash of an empty byte string.
 - `nonce`: the `x-nonce` value.
 - `account_id`: the `x-account-id` value (empty string if omitted, which
-  will not match a real signed request).
+  does not match a real signed request).
 
 Server-side verification flow (`auth.rs::verify_signature`): validate the
 Ed25519 signature against the canonical string → check the nonce hasn't
@@ -141,7 +141,7 @@ bare `401`, with no distinction in the response between causes, for:
 - An expired, tampered, wrongly-signed, or wrong-audience token.
 - `OWNER_TOKEN_SECRET` unconfigured on this deployment.
 - The token's `owner_address` no longer resolves to a `MemWalAccount`
-  (e.g. deleted between mint and use).
+  (for example, deleted between mint and use).
 
 Once authenticated (either path), the three endpoints below additionally
 return `403` if the `{owner}` path segment does not equal the resolved
@@ -276,13 +276,16 @@ Response:
 `updated_at` is the row's own last-modified time, the same value this
 page's cursor is built from.
 
-`status` is `"deleted"` for tombstoned rows, `"expired"` if `expires_at`
-is in the past, and `"active"` otherwise (including when `end_epoch` /
+`status` is `"expired"` if `expires_at` is in the past and `"active"`
+otherwise (including when `end_epoch` /
 `expires_at` are still null because the expiry sweep has not run yet).
+There is no `"deleted"` status: a deleted memory leaves `memories[]`
+entirely and appears once in `deleted[]`. That array is the only deletion
+signal on this endpoint.
 
 The first time the sweep resolves a row's `end_epoch`/`expires_at` from
 `null` to a real value, that row's `updated_at` advances too, so a client
-that already synced the row while it was still unsynced will see the
+that already synced the row while it was still unsynced sees the
 populated values on its next incremental poll, rather than being stuck
 with `null` forever. A later routine re-verification that reconfirms an
 unchanged value does *not* advance `updated_at` (this would otherwise make

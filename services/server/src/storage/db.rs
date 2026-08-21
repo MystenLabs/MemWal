@@ -737,6 +737,70 @@ mod tests {
             .await;
     }
 
+    /// The mainline write path, which the test above does not reach.
+    ///
+    /// `insert_vector` writes `end_epoch` but never `expires_at`. So when the
+    /// sweep first resolves that row, `end_epoch` is already equal and only
+    /// `expires_at` changes. Guarding the bump on `end_epoch` alone made that
+    /// write invisible to incremental sync: a client that synced the row in
+    /// the up-to-5-minute window before the sweep kept `expires_at: null`
+    /// forever, which is the whole of WALM-296 silently not working.
+    #[tokio::test]
+    async fn set_memory_expiry_bumps_updated_at_when_only_expires_at_appears() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let id = format!("test-expiry-inserted-end-epoch-{}", uuid::Uuid::new_v4());
+
+        // end_epoch supplied at INSERT, exactly as the wallet-job path does.
+        db.insert_vector(
+            &id,
+            "0xtest-owner-expiry-inserted-end-epoch",
+            "test-ns",
+            "blob-1",
+            &[0.1_f32; 1536],
+            42,
+            0.5,
+            None,
+            None,
+            Some(500),
+        )
+        .await
+        .unwrap();
+
+        let fetch_updated_at = |id: String, pool: sqlx::PgPool| async move {
+            sqlx::query_as("SELECT updated_at FROM vector_entries WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .map(|(v,): (chrono::DateTime<chrono::Utc>,)| v)
+                .unwrap()
+        };
+
+        let before = fetch_updated_at(id.clone(), db.pool().clone()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Same end_epoch the row already carries; only expires_at changes.
+        db.set_memory_expiry(&id, 500, chrono::Utc::now())
+            .await
+            .unwrap();
+        let after = fetch_updated_at(id.clone(), db.pool().clone()).await;
+        assert!(
+            after > before,
+            "populating expires_at on a row that already had end_epoch must bump updated_at, \
+             otherwise the row never re-enters incremental sync and the client keeps null \
+             forever; got before={:?} after={:?}",
+            before,
+            after
+        );
+
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE id = $1")
+            .bind(&id)
+            .execute(db.pool())
+            .await;
+    }
+
     // ── find_account_by_owner (backs GET /api/accounts/{owner}/exists) ──
     //
     // `accounts` is populated by the v2-indexer from onchain
@@ -1798,9 +1862,13 @@ impl VectorDb {
 
     /// Write back a resolved end_epoch/expires_at for one row.
     ///
-    /// `updated_at` only advances when `end_epoch` actually changes (via
-    /// `IS DISTINCT FROM`, which is null-safe — the first sync from `NULL`
-    /// to a real value counts as a change). This was originally
+    /// `updated_at` advances when `end_epoch` changes, and also whenever
+    /// `expires_at` is still NULL. The second half matters because
+    /// `insert_vector` writes `end_epoch` but not `expires_at`, so on the
+    /// mainline write path the sweep's first call finds `end_epoch` already
+    /// equal and would otherwise populate `expires_at` invisibly, leaving a
+    /// client that synced the row pre-sweep on `null` forever. This was
+    /// originally
     /// unconditional-never: the sweep that calls this re-verifies every
     /// row on a ~24h cadence even after it already has a value, and an
     /// unconditional `updated_at = NOW()` on every one of those routine
@@ -1837,7 +1905,7 @@ impl VectorDb {
              SET end_epoch = $1,
                  expires_at = $2,
                  updated_at = CASE
-                     WHEN end_epoch IS DISTINCT FROM $1
+                     WHEN end_epoch IS DISTINCT FROM $1 OR expires_at IS NULL
                      THEN NOW()
                      ELSE updated_at
                  END

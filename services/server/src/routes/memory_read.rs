@@ -460,8 +460,13 @@ pub(crate) async fn query_owner_memories(
             Some(t) => t < retention_cut,
             None => true,
         };
-        let stale_tombstone = c.deleted_at.is_some_and(|t| t < retention_cut);
-        if stale_mint || stale_tombstone {
+        // Deliberately NOT keyed off c.deleted_at. minted_at is re-stamped on
+        // every cursor we hand out, but deleted_at freezes at the last
+        // tombstone the client saw, so a healthy 5-minute poller would trip a
+        // full resync 30 days after its last observed deletion. The tombstone
+        // query already floors on deleted_at >= retention_cut, so a cursor
+        // below the floor is subsumed: nothing is skipped or duplicated.
+        if stale_mint {
             return Ok(MemoriesResponse {
                 memories: Vec::new(),
                 next_cursor: None,
@@ -873,6 +878,71 @@ mod tests {
             "fixture sweep never produced a STANDARD-unsafe cursor — test would not \
              have caught the regression this fix addresses"
         );
+    }
+
+    /// A client that polls inside the retention window must never be told to
+    /// resync, no matter how old the last deletion it saw is. minted_at is
+    /// re-stamped on every cursor; deleted_at freezes when nothing new is
+    /// deleted, so keying the check off deleted_at forced a full replay on
+    /// healthy pollers 30 days after their last observed deletion.
+    #[tokio::test]
+    async fn fresh_cursor_with_an_ancient_tombstone_mark_does_not_force_resync() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+        seed_entry(&pool, &owner, "live", "notes", 100, ts(0)).await;
+
+        let now = chrono::Utc::now();
+        let json = serde_json::to_vec(&MemoriesCursor {
+            updated_at: ts(0),
+            id: "memory-live".to_string(),
+            snapshot_at: None,
+            // older than TOMBSTONE_RETENTION, but the client is up to date
+            deleted_at: Some(now - chrono::Duration::days(45)),
+            deleted_id: Some("long-gone".to_string()),
+            minted_at: Some(now),
+        })
+        .expect("cursor serializes");
+        let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json);
+
+        let res = query_owner_memories(&pool, &owner, Some(cursor), 100)
+            .await
+            .unwrap();
+        assert!(
+            !res.must_resync,
+            "a cursor minted just now must not trigger must_resync because the last \
+             tombstone it saw fell out of retention"
+        );
+
+        cleanup(&pool, &owner).await;
+    }
+
+    /// The other half: a client that really has been away past retention must
+    /// still be told to resync, because its tombstones have been swept.
+    #[tokio::test]
+    async fn stale_minted_at_still_forces_resync() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+        seed_entry(&pool, &owner, "live", "notes", 100, ts(0)).await;
+
+        let json = serde_json::to_vec(&MemoriesCursor {
+            updated_at: ts(0),
+            id: "memory-live".to_string(),
+            snapshot_at: None,
+            deleted_at: None,
+            deleted_id: None,
+            minted_at: Some(chrono::Utc::now() - chrono::Duration::days(45)),
+        })
+        .expect("cursor serializes");
+        let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json);
+
+        let res = query_owner_memories(&pool, &owner, Some(cursor), 100)
+            .await
+            .unwrap();
+        assert!(res.must_resync, "a cursor older than retention must force a resync");
+        assert!(res.memories.is_empty());
+        assert!(res.next_cursor.is_none());
+
+        cleanup(&pool, &owner).await;
     }
 
     fn ts(offset_secs: i64) -> chrono::DateTime<chrono::Utc> {
