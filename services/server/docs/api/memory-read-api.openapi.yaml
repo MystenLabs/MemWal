@@ -303,10 +303,11 @@ components:
             no more data remains.
         snapshot_version:
           type: integer
+          description: Wire-format version. Currently 2. Additive keys (deleted, must_resync) do not bump it.
 
     MemoryItem:
       type: object
-      required: [memory_id, namespace_id, blob_id, created_at, updated_at, size, agent_id, package_id, status, end_epoch, expires_at]
+      required: [memory_id, namespace_id, blob_id, created_at, updated_at, size, agent_id, package_id, status, end_epoch, expires_at, importance]
       properties:
         memory_id:
           type: string
@@ -341,9 +342,14 @@ components:
           type: string
           enum: [active, expired]
           description: >-
-            "expired" if `expires_at` is in the past, "active" otherwise —
-            including while `end_epoch`/`expires_at` are still null (not yet
-            synced).
+            expired if expires_at is in the past, active otherwise (including
+            while end_epoch/expires_at are still null). Tombstones are never
+            mixed into memories[]; they are listed in deleted[].
+        importance:
+          type: number
+          format: float
+          nullable: true
+          description: Extractor importance in 0.0-1.0.
         end_epoch:
           type: integer
           format: int32
@@ -362,14 +368,34 @@ components:
             Null until synced, independently of `end_epoch` —
             do not assume the two arrive together.
 
+    DeletedMemory:
+      type: object
+      required: [memory_id, namespace_id, deleted_at]
+      properties:
+        memory_id:
+          type: string
+        namespace_id:
+          type: string
+        deleted_at:
+          type: string
+          format: date-time
+
     MemoriesResponse:
       type: object
-      required: [memories, next_cursor, has_more, snapshot_version]
+      required: [memories, next_cursor, has_more, snapshot_version, deleted, must_resync]
       properties:
         memories:
           type: array
           items:
             $ref: '#/components/schemas/MemoryItem'
+        deleted:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeletedMemory'
+          description: Additive tombstone stream. Old clients ignore this key.
+        must_resync:
+          type: boolean
+          description: True when the cursor is older than the 30-day tombstone retention.
         next_cursor:
           type: string
           nullable: true

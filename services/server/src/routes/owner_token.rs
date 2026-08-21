@@ -106,6 +106,13 @@ pub async fn service_credential_gate(
 #[derive(Debug, Deserialize)]
 pub struct IssueOwnerTokenRequest {
     pub owner: String,
+    /// Optional. Phase 1 only mints `memories.read`. Unknown values are 400
+    /// so a caller cannot think they received a broader grant.
+    #[serde(default)]
+    pub permissions: Option<Vec<String>>,
+    /// Alias some clients send instead of `permissions`.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +143,20 @@ pub async fn issue_token(
         return Err(AppError::BadRequest(
             "owner must be a 0x-prefixed 32-byte Sui address (66 characters)".into(),
         ));
+    }
+    if let Some(ref permissions) = request.permissions {
+        if permissions != &[PERMISSION_MEMORIES_READ.to_string()] {
+            return Err(AppError::BadRequest(
+                "Phase 1 only grants memories.read".into(),
+            ));
+        }
+    }
+    if let Some(ref scope) = request.scope {
+        if scope != PERMISSION_MEMORIES_READ {
+            return Err(AppError::BadRequest(
+                "Phase 1 only grants memories.read".into(),
+            ));
+        }
     }
     // Same case-normalization rationale as `routes::accounts::account_exists`:
     // the indexed `accounts.owner` column is always lowercase hex (populated

@@ -1,4 +1,50 @@
-# Memory Read API
+---
+title: Memory Read API
+description: >-
+  Owner-scoped, cursor-based, read-only listing of namespaces, memories, and
+  agents for Walrus Console. Covers authentication, pagination, expiry fields,
+  and deletion visibility.
+keywords:
+  - Walrus Memory
+  - MemWal
+  - Console
+  - read API
+  - namespaces
+  - memories
+goal:
+  description: List an owner's namespaces, memories, and agents through the owner-scoped read API.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 200
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What endpoints does the Memory Read API expose?
+  - How does incremental sync work on GET /v1/owners/:owner/memories?
+  - How does the read API surface deletions?
+answer: >-
+  GET /v1/owners/:owner/namespaces, /memories, and /agents list metadata only.
+  Pass next_cursor as updated_after for incremental sync. Hard deletes write a
+  tombstone and bump a namespace watermark so the next poll sees the change.
+  snapshot_version bumps only when the wire format changes.
+---
+
+## Overview
+
+Registered routes (colon form used by the docs freshness check):
+
+- `GET /v1/owners/:owner/namespaces`
+- `GET /v1/owners/:owner/memories`
+- `GET /v1/owners/:owner/agents`
+- `GET /v1/owners/:owner/_token_probe`
+
 
 Owner-scoped, cursor-based, read-only. All three endpoints accept either of
 two auth mechanisms (see Authentication below); either way, the `{owner}`
@@ -16,11 +62,11 @@ mechanisms, dispatched by `auth::verify_read_api_auth`
 (`services/server/src/auth.rs`) based on whether the request carries an
 `Authorization` header:
 
-1. **Ed25519 signed headers** — the same `verify_signature` middleware
+1. **Ed25519 signed headers**, the same `verify_signature` middleware
    `/api/restore` and every other protected route use. This is the
    mechanism direct SDK/dashboard delegate-key callers use; see "Required
    headers" and "Canonical signing string" below.
-2. **Owner-scoped bearer token** (`Authorization: Bearer <token>`) — the
+2. **Owner-scoped bearer token** (`Authorization: Bearer <token>`), the
    mechanism for Console, which structurally never holds a delegate key and
    so can never produce an Ed25519 signature. See `docs/api/owner-token-auth.md`
    for how Console obtains a token; once obtained, a request here is just
@@ -39,7 +85,7 @@ absence selects the Ed25519 path. A request cannot use both.
 | `x-signature` | Hex-encoded Ed25519 signature (64 bytes) over the canonical message below |
 | `x-timestamp` | Unix timestamp in seconds. Must be within ±300s (5 minutes) of server time |
 | `x-nonce` | UUID v4, used once for replay protection (tracked in Redis for 10 minutes) |
-| `x-account-id` | Walrus Memory account object ID. Effectively required: it is signed into the canonical message, so omitting it signs an empty string and will not match a real account on testnet |
+| `x-account-id` | Walrus Memory account object ID. Effectively required: it is signed into the canonical message, so omitting it signs an empty string and does not match a real account on Testnet |
 
 ### Canonical signing string
 
@@ -50,15 +96,15 @@ sends the signature in `x-signature`:
 {timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}
 ```
 
-- `timestamp` — the exact value sent in `x-timestamp`.
-- `method` — HTTP method, e.g. `GET`.
-- `path_and_query` — the request's path plus query string exactly as sent,
-  e.g. `/v1/owners/0xabc.../memories?limit=50`. Mismatched query params
+- `timestamp`: the exact value sent in `x-timestamp`.
+- `method`: HTTP method, for example `GET`.
+- `path_and_query`: the request's path plus query string exactly as sent,
+  for example `/v1/owners/0xabc.../memories?limit=50`. Mismatched query params
   (including a tampered `updated_after` cursor) invalidate the signature.
-- `body_sha256` — hex-encoded SHA-256 of the request body. For these
+- `body_sha256`: hex-encoded SHA-256 of the request body. For these
   GET-only, bodyless endpoints this is the hash of an empty byte string.
-- `nonce` — the `x-nonce` value.
-- `account_id` — the `x-account-id` value (empty string if omitted, which
+- `nonce`: the `x-nonce` value.
+- `account_id`: the `x-account-id` value (empty string if omitted, which
   will not match a real signed request).
 
 Server-side verification flow (`auth.rs::verify_signature`): validate the
@@ -71,7 +117,7 @@ that account's on-chain `MemWalAccount.delegate_keys` (cached in
 
 ### 401 responses
 
-**Ed25519 path** (no `Authorization` header on the request) — any of the
+**Ed25519 path** (no `Authorization` header on the request), any of the
 following returns a bare `401 Unauthorized` (no JSON body, constant ~100ms
 delay on signature/timestamp/nonce failures to prevent timing side-channels
 distinguishing failure reasons):
@@ -80,16 +126,16 @@ distinguishing failure reasons):
 - `x-timestamp` outside the ±300s window.
 - Ed25519 signature verification failure (including a tampered path, query
   string, or body).
-- Nonce already seen (replay) — or the Redis nonce check itself failing
+- Nonce already seen (replay): or the Redis nonce check itself failing
   (fail-closed).
 - Public key not found among the resolved account's on-chain delegate keys,
   or the account is deactivated.
 
 A request missing `x-nonce` entirely gets `426 Upgrade Required` instead of
-`401` — signaling an unsupported legacy SDK version rather than an auth
+`401`, signaling an unsupported legacy SDK version rather than an auth
 failure.
 
-**Bearer-token path** (`Authorization: Bearer <token>` present) — also a
+**Bearer-token path** (`Authorization: Bearer <token>` present), also a
 bare `401`, with no distinction in the response between causes, for:
 
 - An expired, tampered, wrongly-signed, or wrong-audience token.
@@ -99,7 +145,7 @@ bare `401`, with no distinction in the response between causes, for:
 
 Once authenticated (either path), the three endpoints below additionally
 return `403` if the `{owner}` path segment does not equal the resolved
-identity, or — bearer-token path only — if the token's `permissions` don't
+identity, or, on the bearer-token path, if the token's `permissions` don't
 include `memories.read`.
 
 ## Rate limiting
@@ -108,14 +154,14 @@ These three endpoints run on their own router (`read_api_routes` in
 `main.rs`), separate from the write path's `protected_routes`, behind
 `read_api_rate_limit_middleware` (`services/server/src/rate_limit.rs`)
 instead of the write path's `rate_limit_middleware`. They do **not** share
-the write path's budget — a routine pagination loop over this API can no
+the write path's budget, a routine pagination loop over this API can no
 longer trip, or contend with, the 30/min per-delegate-key budget that
 exists to bound the write path's spend-risk (Walrus upload, LLM calls,
 gas).
 
 There is a single sliding-window layer, keyed by delegate key under its
 own Redis prefix (`rate:read:dk:{public_key}`, distinct from the write
-path's `rate:dk:{public_key}`) — no separate per-account burst/sustained
+path's `rate:dk:{public_key}`), no separate per-account burst/sustained
 tiers on top. Default limit is **200 weighted-requests/min per delegate
 key** (`ReadApiRateLimitConfig::per_delegate_key_per_minute`), overridable
 via the `READ_API_RATE_LIMIT_PER_MINUTE` env var. Weights for this API:
@@ -140,18 +186,18 @@ Exceeding the limit returns `429 Too Many Requests`:
 with a `Retry-After: 60` header. If the rate limiter itself is
 unavailable (Redis unreachable), requests fail closed with `503 Service
 Unavailable` and a `Retry-After: 30` header rather than being allowed
-through unmetered — there is no in-memory fallback for this middleware,
+through unmetered, there is no in-memory fallback for this middleware,
 unlike the write path's deliberately-fallback-enabled limiter.
 
-## GET /v1/owners/{owner}/namespaces?updated_after=<cursor>&limit=100
+## `GET /v1/owners/:owner/namespaces`
 
-`updated_after` — like `memories`' below — must be the opaque `next_cursor`
+`updated_after`, like `memories`' below, must be the opaque `next_cursor`
 value returned by a previous call, not a raw timestamp or namespace name;
 omit it for the first page. It base64 (URL-safe, unpadded) encodes the
 JSON watermark `{"updated_at": ..., "namespace": ...}`: rows are ordered
 and filtered by the rollup's `(MAX(updated_at), namespace)`, mirroring
 `memories`' `(updated_at, id)` keyset. `limit` defaults to 100, max 500,
-`400` for non-positive/non-integer values — same convention as `memories`.
+`400` for non-positive/non-integer values, same convention as `memories`.
 
 **Breaking change from an earlier version of this endpoint:** namespaces
 are now returned ordered by recency (`(MAX(updated_at), namespace)`), not
@@ -164,14 +210,15 @@ next poll if any of its memories were **created or updated** after that
 watermark, however early its name sorts. Namespaces untouched since the
 watermark are not re-sent.
 
-**Deletions are not currently reflected.** Forgetting a memory (or its
-Walrus blob expiring/being cleaned up) removes its row outright — the
-namespace's rollup shrinks, but that shrink does not advance the
-namespace's `updated_at` watermark the way a create/update does, so a
-namespace whose only change since your last sync was a deletion will not
-be resurfaced. Until this is addressed, clients that need to detect
-deletions should periodically do a full (cursor-less) resync rather than
-relying on `updated_after` alone.
+Hard deletes write a row to `memory_tombstones` and remove the live
+`vector_entries` row in one statement. Incremental `/namespaces` computes the
+watermark as GREATEST(live MAX(updated_at), tombstone MAX(deleted_at)), so a
+namespace whose last memory was deleted still resurfaces with a smaller
+`memory_count`. Incremental `/memories` never puts tombstones in `memories[]`.
+They arrive in the additive `deleted` array (`memory_id`, `namespace_id`,
+`deleted_at`). Old Console clients ignore that key. Tombstones are kept for
+30 days; a cursor older than that returns `must_resync: true`.
+`snapshot_version` stays 2.
 
 Response:
 ```json
@@ -191,10 +238,10 @@ Response:
 }
 ```
 
-`updated_at` is `MAX(updated_at)` across the namespace's memories — the same
+`updated_at` is `MAX(updated_at)` across the namespace's memories, the same
 value the cursor is built from.
 
-## GET /v1/owners/{owner}/memories?updated_after=<cursor>&limit=100
+## `GET /v1/owners/:owner/memories`
 
 `updated_after` must be the opaque `next_cursor` value returned by a
 previous call, not a raw timestamp. `limit` defaults to 100, max 500.
@@ -214,25 +261,27 @@ Response:
       "package_id": "0xpkg",
       "status": "active",
       "end_epoch": 900,
-      "expires_at": "2026-09-15T00:00:00Z"
+      "expires_at": "2026-09-15T00:00:00Z",
+      "importance": 0.5
     }
   ],
+  "deleted": [],
+  "must_resync": false,
   "next_cursor": "eyJ1cGRhdGVkX2F0IjouLi59",
   "has_more": false,
   "snapshot_version": 2
 }
 ```
 
-`updated_at` is the row's own last-modified time — the same value this
+`updated_at` is the row's own last-modified time, the same value this
 page's cursor is built from.
 
-`status` is `"expired"` if `expires_at` is in the past, `"active"`
-otherwise — including when `end_epoch`/`expires_at` are still `null` (not
-yet synced; a background sweep populates them within roughly 5 minutes of
-a memory being written, sooner for the primary upload path).
+`status` is `"deleted"` for tombstoned rows, `"expired"` if `expires_at`
+is in the past, and `"active"` otherwise (including when `end_epoch` /
+`expires_at` are still null because the expiry sweep has not run yet).
 
 The first time the sweep resolves a row's `end_epoch`/`expires_at` from
-`null` to a real value, that row's `updated_at` advances too — so a client
+`null` to a real value, that row's `updated_at` advances too, so a client
 that already synced the row while it was still unsynced will see the
 populated values on its next incremental poll, rather than being stuck
 with `null` forever. A later routine re-verification that reconfirms an
@@ -242,35 +291,35 @@ anything changed); only a genuine change does.
 
 ### Cursor semantics (both paginated endpoints)
 
-`next_cursor` is **always** returned for a non-empty page — including the
+`next_cursor` is **always** returned for a non-empty page, including the
 final page of a traversal and a result that fits entirely in one page. It
 is the watermark of the last row in that page, and it is what you pass as
 `updated_after` on your next poll.
 
 An empty page returns `next_cursor: null` in exactly one case: the very
 first page of a fresh walk (no `updated_after` on the request) that
-matches nothing at all — there is no prior cursor and no row to build a
-watermark from. Every other empty page — a continuation page reached with
+matches nothing at all, there is no prior cursor and no row to build a
+watermark from. Every other empty page, a continuation page reached with
 an incoming cursor, which can happen when every remaining row raced past
-the walk's snapshot boundary between pages — still returns a non-null
+the walk's snapshot boundary between pages, still returns a non-null
 `next_cursor`: the same position as the incoming cursor, but with a fresh
 snapshot boundary. Use that new cursor rather than the one you already
-held; the one you held is now stale — it's exactly what the reset exists
+held; the one you held is now stale, it's exactly what the reset exists
 to replace.
 
-So `next_cursor: null` does **not** mean "end of data" — use the separate
+So `next_cursor: null` does **not** mean "end of data", use the separate
 `has_more` boolean for that instead. Keep paginating (pass back the latest
 `next_cursor`) while `has_more` is `true`; stop once you see `has_more:
 false`.
 
 **Do not infer end-of-data from page length.** `limit` is silently clamped
-to each endpoint's max (500) — a request for `limit=1000` that happens to
+to each endpoint's max (500), a request for `limit=1000` that happens to
 match exactly 500 real rows returns a page exactly as long as the (clamped)
 `limit`, and a request for more than the actual remaining data returns a
 page shorter than `limit` while more data still exists elsewhere for that
 owner. `has_more` is correct in both cases; page-length heuristics are not.
 
-## GET /v1/owners/{owner}/agents
+## `GET /v1/owners/:owner/agents`
 
 Live on-chain read of `MemWalAccount.delegate_keys`, short-TTL cached
 per-account (same 30s window `sui/client.rs::walrus_epoch()` uses) so
@@ -289,13 +338,13 @@ Response:
 ## Errors
 
 All errors from these three endpoints (except the shared auth middleware's
-bare `401`/`426`, and the shared rate limiter's `429`/`503` — see
+bare `401`/`426`, and the shared rate limiter's `429`/`503`, see
 Authentication and Rate limiting above) use the envelope
 `{ "error": "<message>" }`:
 
 | Status | Cause |
 |---|---|
-| `401` | Auth failed — either an invalid/expired Ed25519 signature/nonce/timestamp, or (bearer-token path) an invalid/expired/unresolvable owner token (see Authentication) |
+| `401` | Auth failed, either an invalid/expired Ed25519 signature/nonce/timestamp, or (bearer-token path) an invalid/expired/unresolvable owner token (see Authentication) |
 | `403` | `{owner}` path segment does not match the authenticated identity, or (bearer-token path) the token's `permissions` lack `memories.read` |
 | `400` | Invalid/malformed cursor, or non-positive/non-integer `limit` |
 | `429` | Rate limit exceeded (see Rate limiting) |

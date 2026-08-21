@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::security_delete_auth::same_owner;
+use crate::storage::db::TOMBSTONE_RETENTION;
 use crate::types::*;
 
 #[derive(Debug, Serialize)]
@@ -55,6 +56,16 @@ pub struct MemoryItem {
     pub status: String,
     pub end_epoch: Option<i32>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub importance: Option<f32>,
+}
+
+/// Additive tombstone for Console incremental sync (WALM-363). Ignored by
+/// clients that do not read `deleted`. Never mixed into `memories[]`.
+#[derive(Debug, Serialize)]
+pub struct DeletedMemory {
+    pub memory_id: String,
+    pub namespace_id: String,
+    pub deleted_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,12 +77,13 @@ pub struct MemoriesResponse {
     /// `MAX_MEMORIES_LIMIT`).
     pub has_more: bool,
     pub snapshot_version: u32,
+    pub deleted: Vec<DeletedMemory>,
+    pub must_resync: bool,
 }
 
-/// Bumped 1 -> 2: the `/namespaces` cursor changed wire format (bare
-/// namespace name -> `(updated_at, namespace)` watermark, so a v1 cursor is
-/// not decodable as a v2 one) and both `/namespaces` and `/memories` rows
-/// gained an `updated_at` field.
+/// Additive fields only (`deleted`, `must_resync`). Keep at 2 so the shipped
+/// Console client (COMG-568) ignores the new keys and never treats tombstones
+/// as live memories.
 pub const SNAPSHOT_VERSION: u32 = 2;
 
 const DEFAULT_NAMESPACES_LIMIT: i64 = 100;
@@ -203,17 +215,40 @@ pub(crate) async fn query_owner_namespaces(
     // own, because `limit` is silently clamped to MAX_NAMESPACES_LIMIT: a
     // caller that asked for more than the cap and got exactly the cap back
     // would otherwise wrongly conclude it was done.
+    // Live rollup FULL OUTER JOIN stored watermarks so a namespace whose last
+    // row was deleted still resurfaces (WALM-363). Watermark-only rows have
+    // memory_count 0.
+    const NS_SQL_TAIL: &str = "
+        SELECT COALESCE(l.namespace, w.namespace) AS namespace,
+               COALESCE(l.memory_count, 0) AS memory_count,
+               COALESCE(l.storage_used, 0) AS storage_used,
+               GREATEST(l.last_updated_at, w.last_mutated_at) AS last_updated_at
+        FROM (
+            SELECT namespace,
+                   COUNT(*)::BIGINT AS memory_count,
+                   COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used,
+                   MAX(updated_at) AS last_updated_at
+            FROM vector_entries
+            WHERE owner = $1
+            GROUP BY namespace
+        ) l
+        FULL OUTER JOIN (
+            SELECT namespace, MAX(deleted_at) AS last_mutated_at
+            FROM memory_tombstones
+            WHERE owner = $1
+            GROUP BY namespace
+        ) w ON l.namespace = w.namespace
+    ";
+
     let mut rows: Vec<(String, i64, i64, chrono::DateTime<chrono::Utc>)> =
         if let Some((cursor_updated_at, cursor_namespace)) = after.clone() {
-            sqlx::query_as(
-                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated_at
-                 FROM vector_entries
-                 WHERE owner = $1
-                 GROUP BY namespace
-                 HAVING (MAX(updated_at), namespace) > ($2, $3) AND MAX(updated_at) <= $4
-                 ORDER BY MAX(updated_at), namespace
+            let sql = format!(
+                "SELECT namespace, memory_count, storage_used, last_updated_at FROM ({NS_SQL_TAIL}) s
+                 WHERE (last_updated_at, namespace) > ($2, $3) AND last_updated_at <= $4
+                 ORDER BY last_updated_at, namespace
                  LIMIT $5",
-            )
+            );
+            sqlx::query_as(&sql)
             .bind(owner)
             .bind(cursor_updated_at)
             .bind(cursor_namespace)
@@ -222,15 +257,13 @@ pub(crate) async fn query_owner_namespaces(
             .fetch_all(pool)
             .await
         } else {
-            sqlx::query_as(
-                "SELECT namespace, COUNT(*) AS memory_count, COALESCE(SUM(blob_size_bytes), 0)::BIGINT AS storage_used, MAX(updated_at) AS last_updated_at
-                 FROM vector_entries
-                 WHERE owner = $1
-                 GROUP BY namespace
-                 HAVING MAX(updated_at) <= $2
-                 ORDER BY MAX(updated_at), namespace
+            let sql = format!(
+                "SELECT namespace, memory_count, storage_used, last_updated_at FROM ({NS_SQL_TAIL}) s
+                 WHERE last_updated_at <= $2
+                 ORDER BY last_updated_at, namespace
                  LIMIT $3",
-            )
+            );
+            sqlx::query_as(&sql)
             .bind(owner)
             .bind(snapshot_at)
             .bind(limit + 1)
@@ -347,6 +380,15 @@ struct MemoriesCursor {
     id: String,
     #[serde(default)]
     snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Second keyset for the additive `deleted[]` stream. Absent on v1
+    /// cursors: replay up to 30 days of tombstones once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deleted_id: Option<String>,
+    /// When this cursor was minted. v1 cursors lack it and must_resync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    minted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `snapshot_at: None` resets the walk boundary — see
@@ -360,10 +402,23 @@ fn encode_cursor(
     id: &str,
     snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> String {
+    encode_cursor_ex(updated_at, id, snapshot_at, None, None)
+}
+
+fn encode_cursor_ex(
+    updated_at: chrono::DateTime<chrono::Utc>,
+    id: &str,
+    snapshot_at: Option<chrono::DateTime<chrono::Utc>>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    deleted_id: Option<String>,
+) -> String {
     let json = serde_json::to_vec(&MemoriesCursor {
         updated_at,
         id: id.to_string(),
         snapshot_at,
+        deleted_at,
+        deleted_id,
+        minted_at: Some(chrono::Utc::now()),
     })
     .expect("cursor serializes");
     // URL_SAFE_NO_PAD (not STANDARD): next_cursor is used verbatim in a URL
@@ -389,23 +444,47 @@ pub(crate) async fn query_owner_memories(
     limit: i64,
 ) -> Result<MemoriesResponse, AppError> {
     let limit = limit.clamp(1, MAX_MEMORIES_LIMIT);
+    let now = chrono::Utc::now();
+    let retention_cut = now - TOMBSTONE_RETENTION;
 
-    // See the doc comment on `MemoriesCursor::snapshot_at`: bind this whole
-    // walk to one boundary, captured now on the first page and threaded
-    // forward unchanged from the incoming cursor on every later page.
-    let (after, snapshot_at) = match cursor {
-        Some(raw_cursor) => {
-            let c = decode_cursor(&raw_cursor)?;
-            let snapshot_at = c.snapshot_at.unwrap_or_else(chrono::Utc::now);
-            (Some((c.updated_at, c.id)), snapshot_at)
-        }
-        None => (None, chrono::Utc::now()),
+    let decoded = match cursor.as_deref() {
+        Some(raw) => Some(decode_cursor(raw)?),
+        None => None,
     };
 
-    // Peek one row past `limit` for an explicit has_more signal — see
-    // query_owner_namespaces's identical comment on why page-length alone
-    // (vs. the clamped limit) isn't a reliable end-of-data signal.
-    #[allow(clippy::type_complexity)]
+    // minted_at is the last-sync clock. v1 cursors lack it and must_resync
+    // once. Do not use live updated_at: a quiet account's last live row can
+    // be months old while the client polled 5 minutes ago.
+    if let Some(c) = decoded.as_ref() {
+        let stale_mint = match c.minted_at {
+            Some(t) => t < retention_cut,
+            None => true,
+        };
+        let stale_tombstone = c.deleted_at.is_some_and(|t| t < retention_cut);
+        if stale_mint || stale_tombstone {
+            return Ok(MemoriesResponse {
+                memories: Vec::new(),
+                next_cursor: None,
+                has_more: false,
+                snapshot_version: SNAPSHOT_VERSION,
+                deleted: Vec::new(),
+                must_resync: true,
+            });
+        }
+    }
+
+    let (after, snapshot_at, deleted_after) = match decoded {
+        Some(c) => {
+            let snapshot_at = c.snapshot_at.unwrap_or(now);
+            let deleted_after = match (c.deleted_at, c.deleted_id) {
+                (Some(t), Some(id)) => Some((t, id)),
+                _ => None,
+            };
+            (Some((c.updated_at, c.id)), snapshot_at, deleted_after)
+        }
+        None => (None, now, None),
+    };
+
     let mut rows: Vec<(
         String,
         String,
@@ -417,9 +496,11 @@ pub(crate) async fn query_owner_memories(
         Option<String>,
         Option<i32>,
         Option<chrono::DateTime<chrono::Utc>>,
+        Option<f32>,
     )> = if let Some((cursor_updated_at, cursor_id)) = after.clone() {
         sqlx::query_as(
-            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id, end_epoch, expires_at
+            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes,
+                    agent_id, package_id, end_epoch, expires_at, importance
              FROM vector_entries
              WHERE owner = $1 AND (updated_at, id) > ($2, $3) AND updated_at <= $4
              ORDER BY updated_at, id
@@ -434,7 +515,8 @@ pub(crate) async fn query_owner_memories(
         .await
     } else {
         sqlx::query_as(
-            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes, agent_id, package_id, end_epoch, expires_at
+            "SELECT id, namespace, blob_id, created_at, updated_at, blob_size_bytes,
+                    agent_id, package_id, end_epoch, expires_at, importance
              FROM vector_entries
              WHERE owner = $1 AND updated_at <= $2
              ORDER BY updated_at, id
@@ -448,22 +530,84 @@ pub(crate) async fn query_owner_memories(
     }
     .map_err(|e| AppError::Internal(format!("Failed to query memories: {}", e)))?;
 
-    let has_more = rows.len() as i64 > limit;
+    let live_has_more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
 
-    // Same watermark rule as `query_owner_namespaces`: the cursor always
-    // comes from the last row emitted (never the peeked extra row above), so
-    // the final (or only) page still checkpoints the client for its next
-    // incremental poll.
-    // `Some(snapshot_at)` while the walk continues, `None` on the terminal
-    // page — see `encode_cursor`'s doc comment. An empty continuation page
-    // needs the same reset — see the identical branch and its full
-    // rationale in `query_owner_namespaces`.
-    let next_cursor = match rows.last() {
-        Some(r) => Some(encode_cursor(r.4, &r.0, has_more.then_some(snapshot_at))),
-        None => after.map(|(cursor_updated_at, cursor_id)| {
-            encode_cursor(cursor_updated_at, &cursor_id, None)
-        }),
+    let tombstone_start = deleted_after
+        .as_ref()
+        .map(|(t, _)| *t)
+        .unwrap_or(retention_cut);
+
+    let mut deleted_rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> =
+        if let Some((d_at, d_id)) = deleted_after.clone() {
+            sqlx::query_as(
+                "SELECT memory_id, namespace, deleted_at
+                 FROM memory_tombstones
+                 WHERE owner = $1
+                   AND deleted_at >= $2
+                   AND (deleted_at, memory_id) > ($3, $4)
+                   AND deleted_at <= $5
+                 ORDER BY deleted_at, memory_id
+                 LIMIT $6",
+            )
+            .bind(owner)
+            .bind(retention_cut)
+            .bind(d_at)
+            .bind(d_id)
+            .bind(snapshot_at)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await
+        } else {
+            sqlx::query_as(
+                "SELECT memory_id, namespace, deleted_at
+                 FROM memory_tombstones
+                 WHERE owner = $1
+                   AND deleted_at >= $2
+                   AND deleted_at <= $3
+                 ORDER BY deleted_at, memory_id
+                 LIMIT $4",
+            )
+            .bind(owner)
+            .bind(tombstone_start)
+            .bind(snapshot_at)
+            .bind(limit + 1)
+            .fetch_all(pool)
+            .await
+        }
+        .map_err(|e| AppError::Internal(format!("Failed to query tombstones: {}", e)))?;
+
+    let deleted_has_more = deleted_rows.len() as i64 > limit;
+    deleted_rows.truncate(limit as usize);
+    let has_more = live_has_more || deleted_has_more;
+
+    let next_deleted = deleted_rows
+        .last()
+        .map(|(id, _, t)| (*t, id.clone()))
+        .or(deleted_after.clone());
+
+    // Never pin a missing live watermark to snapshot_at: a tombstone-only
+    // first page would skip in-flight inserts with updated_at < snapshot_at.
+    let live_mark = rows
+        .last()
+        .map(|r| (r.4, r.0.clone()))
+        .or(after.clone());
+    let next_cursor = match live_mark {
+        Some((ts, id)) => Some(encode_cursor_ex(
+            ts,
+            &id,
+            has_more.then_some(snapshot_at),
+            next_deleted.as_ref().map(|(t, _)| *t),
+            next_deleted.as_ref().map(|(_, id)| id.clone()),
+        )),
+        None if deleted_has_more => Some(encode_cursor_ex(
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            "",
+            Some(snapshot_at),
+            next_deleted.as_ref().map(|(t, _)| *t),
+            next_deleted.as_ref().map(|(_, id)| id.clone()),
+        )),
+        None => None,
     };
 
     let memories = rows
@@ -480,25 +624,34 @@ pub(crate) async fn query_owner_memories(
                 package_id,
                 end_epoch,
                 expires_at,
-            )| {
-                MemoryItem {
-                    memory_id: id,
-                    namespace_id: namespace,
-                    blob_id,
-                    created_at,
-                    updated_at,
-                    size,
-                    agent_id,
-                    package_id,
-                    status: match expires_at {
-                        Some(exp) if exp < chrono::Utc::now() => "expired".to_string(),
-                        _ => "active".to_string(), // includes NULL (not yet synced) — optimistic default
-                    },
-                    end_epoch,
-                    expires_at,
-                }
+                importance,
+            )| MemoryItem {
+                memory_id: id,
+                namespace_id: namespace,
+                blob_id,
+                created_at,
+                updated_at,
+                size,
+                agent_id,
+                package_id,
+                status: match expires_at {
+                    Some(exp) if exp < chrono::Utc::now() => "expired".to_string(),
+                    _ => "active".to_string(),
+                },
+                end_epoch,
+                expires_at,
+                importance,
             },
         )
+        .collect();
+
+    let deleted = deleted_rows
+        .into_iter()
+        .map(|(memory_id, namespace_id, deleted_at)| DeletedMemory {
+            memory_id,
+            namespace_id,
+            deleted_at,
+        })
         .collect();
 
     Ok(MemoriesResponse {
@@ -506,6 +659,8 @@ pub(crate) async fn query_owner_memories(
         next_cursor,
         has_more,
         snapshot_version: SNAPSHOT_VERSION,
+        deleted,
+        must_resync: false,
     })
 }
 
@@ -612,6 +767,7 @@ pub async fn list_owner_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::db::VectorDb;
     use sqlx::postgres::PgPoolOptions;
     use std::sync::OnceLock;
 
@@ -651,6 +807,8 @@ mod tests {
             include_str!("../../migrations/016_memory_read_api_index.sql"),
             include_str!("../../migrations/017_memory_expiry_columns.sql"),
             include_str!("../../migrations/018_memory_expiry_synced_at_index.sql"),
+            include_str!("../../migrations/019_memory_read_api_updated_at_set_not_null.sql"),
+            include_str!("../../migrations/020_read_api_followups.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -684,6 +842,9 @@ mod tests {
                 updated_at,
                 id: id.clone(),
                 snapshot_at: Some(snapshot_at),
+                deleted_at: None,
+                deleted_id: None,
+                minted_at: None,
             })
             .expect("cursor serializes");
             let standard_encoded = base64::engine::general_purpose::STANDARD.encode(&json);
@@ -746,6 +907,10 @@ mod tests {
     }
 
     async fn cleanup(pool: &PgPool, owner: &str) {
+        let _ = sqlx::query("DELETE FROM memory_tombstones WHERE owner = $1")
+            .bind(owner)
+            .execute(pool)
+            .await;
         let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
             .bind(owner)
             .execute(pool)
@@ -806,6 +971,62 @@ mod tests {
         let decoded = decode_namespaces_cursor(&cursor).unwrap();
         assert_eq!(decoded.namespace, "work");
         assert_eq!(decoded.updated_at, ts(120));
+
+        cleanup(&pool, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn deleting_the_watermark_row_still_resurfaces_the_namespace() {
+        let pool = test_pool().await;
+        let owner = format!("0xtest-{}", uuid::Uuid::new_v4());
+        seed_entry(&pool, &owner, "keep", "notes", 100, ts(0)).await;
+        seed_entry(&pool, &owner, "gone", "notes", 200, ts(120)).await;
+
+        let before = query_owner_namespaces(&pool, &owner, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(before.namespaces[0].memory_count, 2);
+        let cursor = before.next_cursor.clone().unwrap();
+
+        let deleted = VectorDb::from_pool(pool.clone())
+            .delete_by_blob_id(&format!("blob-gone"), &owner, "notes")
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let after = query_owner_namespaces(&pool, &owner, Some(cursor), 100)
+            .await
+            .unwrap();
+        assert_eq!(after.namespaces.len(), 1, "deleted watermark must still resurface");
+        assert_eq!(after.namespaces[0].memory_count, 1);
+        assert!(after.namespaces[0].updated_at > ts(120));
+
+        let memories = query_owner_memories(&pool, &owner, None, 100)
+            .await
+            .unwrap();
+        assert!(
+            memories.memories.iter().all(|m| !m.memory_id.ends_with("-gone")),
+            "deleted row must not appear in memories[]",
+        );
+        assert!(
+            memories
+                .deleted
+                .iter()
+                .any(|d| d.memory_id.ends_with("-gone")),
+            "deleted[] missing tombstone: {:?}",
+            memories.deleted,
+        );
+        assert!(!memories.must_resync);
+
+        VectorDb::from_pool(pool.clone())
+            .delete_by_blob_id(&format!("blob-keep"), &owner, "notes")
+            .await
+            .unwrap();
+        let empty = query_owner_namespaces(&pool, &owner, Some(cursor), 100)
+            .await
+            .unwrap();
+        assert_eq!(empty.namespaces.len(), 1);
+        assert_eq!(empty.namespaces[0].memory_count, 0);
 
         cleanup(&pool, &owner).await;
     }
