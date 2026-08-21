@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Refill agent_id / package_id on pre-migration vector_entries rows (WALM-364).
 #
-# Safe for large mainnet sets (100k+ rows):
-#   - pages unsynced (owner, blob_id) from Postgres
-#   - asks the sidecar for THAT page only (blobIds), not the whole owner
-#   - stamps metadata_synced_at only on blob_ids requested in this page
-#   - never marks the rest of an owner "done"
-#   - HTTP / parse failures skip the page and leave rows NULL to retry
+# Mainnet-sized (100k+ rows): one sidecar listing per owner, not per page of
+# blob ids. Passing blobIds still makes the sidecar walk every owned Blob
+# object, so paging by blob_id would re-scan the owner on every page.
+#
+# Stamping rules:
+#   - HTTP / parse / sourceCapped: stamp nothing for that owner, retry later
+#   - 200 with a complete listing: UPDATE matching blob_ids, then stamp the
+#     owner's leftover unsynced rows (looked, not on chain)
+#   - never stamps a different owner
 #
 # Usage:
 #   DATABASE_URL=postgres://... \
@@ -14,8 +17,8 @@
 #   SIDECAR_SECRET=... \
 #     bash services/server/scripts/backfill-read-api-metadata.sh
 #
-# Optional: PAGE=100 SLEEP_SEC=0.25
-# Requires: psql, python3, curl.
+# Optional: OWNER_BATCH=10 SLEEP_SEC=1 TIMEOUT_SEC=3600
+# Requires: psql, python3.
 
 set -euo pipefail
 exec python3 - "$@" <<'PY'
@@ -27,9 +30,9 @@ secret = os.environ.get("SIDECAR_SECRET") or ""
 if not db or not sidecar:
     sys.exit("set DATABASE_URL and SIDECAR_URL")
 
-page = int(os.environ.get("PAGE") or "100")
-sleep_sec = float(os.environ.get("SLEEP_SEC") or "0.25")
-page = max(1, min(page, 200))
+owner_batch = max(1, int(os.environ.get("OWNER_BATCH") or "10"))
+sleep_sec = float(os.environ.get("SLEEP_SEC") or "1")
+timeout_sec = int(os.environ.get("TIMEOUT_SEC") or "3600")
 
 def psql(sql: str) -> str:
     r = subprocess.run(
@@ -45,8 +48,8 @@ def lit(value):
         return "NULL"
     return "'" + str(value).replace("'", "''") + "'"
 
-def fetch_blobs(owner, blob_ids):
-    body = json.dumps({"owner": owner, "blobIds": blob_ids}).encode()
+def fetch_blobs(owner):
+    body = json.dumps({"owner": owner}).encode()
     headers = {"content-type": "application/json"}
     if secret:
         headers["authorization"] = f"Bearer {secret}"
@@ -57,7 +60,7 @@ def fetch_blobs(owner, blob_ids):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             raw = resp.read().decode()
             status = resp.status
     except urllib.error.HTTPError as e:
@@ -71,9 +74,9 @@ def fetch_blobs(owner, blob_ids):
     except json.JSONDecodeError as e:
         raise RuntimeError(f"sidecar non-json: {raw[:300]!r}") from e
     if not isinstance(data, dict) or "blobs" not in data:
-        raise RuntimeError(f"sidecar missing blobs: {raw[:300]!r}")
+        raise RuntimeError(f"sidecar missing blobs key: {raw[:300]!r}")
     if data.get("sourceCapped") is True:
-        raise RuntimeError("sidecar sourceCapped=true; not stamping this page")
+        raise RuntimeError("sourceCapped=true; listing incomplete, not stamping leftovers")
     by_id = {}
     for blob in data.get("blobs") or []:
         blob_id = blob.get("blobId") or blob.get("blob_id")
@@ -85,47 +88,12 @@ def fetch_blobs(owner, blob_ids):
         )
     return by_id
 
-updated = 0
-pages = 0
-errors = 0
-last_owner = ""
-last_blob = ""
-
-while True:
-    sql = (
-        "SELECT owner, blob_id FROM vector_entries "
-        "WHERE metadata_synced_at IS NULL "
-        f"AND (owner, blob_id) > ({lit(last_owner)}, {lit(last_blob)}) "
-        "ORDER BY owner, blob_id "
-        f"LIMIT {page}"
-    )
-    # First page: no cursor.
-    if pages == 0 and not last_owner:
-        sql = (
-            "SELECT owner, blob_id FROM vector_entries "
-            "WHERE metadata_synced_at IS NULL "
-            "ORDER BY owner, blob_id "
-            f"LIMIT {page}"
-        )
-    rows = [ln.split("|", 1) for ln in psql(sql).splitlines() if ln]
-    if not rows:
-        break
-    pages += 1
-    by_owner = {}
-    for owner, blob_id in rows:
-        by_owner.setdefault(owner, []).append(blob_id)
-    last_owner, last_blob = rows[-1]
-
-    for owner, blob_ids in by_owner.items():
-        try:
-            found = fetch_blobs(owner, blob_ids)
-        except Exception as e:
-            errors += 1
-            print(f"SKIP owner={owner} n={len(blob_ids)} err={e}", file=sys.stderr)
-            continue
+def apply_owner(owner, found):
+    items = list(found.items())
+    for i in range(0, len(items), 200):
+        chunk = items[i:i+200]
         stmts = ["BEGIN;"]
-        for blob_id in blob_ids:
-            agent, package = found.get(blob_id, (None, None))
+        for blob_id, (agent, package) in chunk:
             stmts.append(
                 "UPDATE vector_entries SET "
                 f"agent_id = COALESCE(agent_id, {lit(agent)}), "
@@ -136,13 +104,46 @@ while True:
             )
         stmts.append("COMMIT;")
         psql("\n".join(stmts))
-        updated += len(blob_ids)
-        print(
-            f"page={pages} owner={owner} requested={len(blob_ids)} "
-            f"sidecar_hits={len(found)} total_stamped={updated}"
-        )
+        print(f"  applied {min(i+200, len(items))}/{len(items)} sidecar blobs", flush=True)
+    # Complete listing only: leftover unsynced rows were looked up and are
+    # not on chain (or have no memwal_* keys).
+    psql(
+        "UPDATE vector_entries SET metadata_synced_at = NOW() "
+        f"WHERE owner = {lit(owner)} AND metadata_synced_at IS NULL;"
+    )
+
+stamped_owners = 0
+errors = 0
+last_owner = ""
+
+while True:
+    sql = (
+        "SELECT DISTINCT owner FROM vector_entries "
+        "WHERE metadata_synced_at IS NULL "
+        + (f"AND owner > {lit(last_owner)} " if last_owner else "")
+        + "ORDER BY owner "
+        + f"LIMIT {owner_batch}"
+    )
+    owners = [ln for ln in psql(sql).splitlines() if ln]
+    if not owners:
+        break
+    last_owner = owners[-1]
+    for owner in owners:
+        leftover = psql(
+            "SELECT COUNT(*) FROM vector_entries "
+            f"WHERE owner = {lit(owner)} AND metadata_synced_at IS NULL"
+        ).strip()
+        print(f"owner={owner} unsynced={leftover}", flush=True)
+        try:
+            found = fetch_blobs(owner)
+            apply_owner(owner, found)
+            stamped_owners += 1
+            print(f"  sidecar_blobs={len(found)} ok", flush=True)
+        except Exception as e:
+            errors += 1
+            print(f"  SKIP {e}", file=sys.stderr, flush=True)
         time.sleep(sleep_sec)
 
-print(f"done pages={pages} stamped={updated} skipped_pages={errors}")
+print(f"done owners={stamped_owners} skipped={errors}")
 sys.exit(1 if errors else 0)
 PY
