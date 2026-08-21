@@ -85,7 +85,7 @@ absence selects the Ed25519 path. A request cannot use both.
 | `x-signature` | Hex-encoded Ed25519 signature (64 bytes) over the canonical message below |
 | `x-timestamp` | Unix timestamp in seconds. Must be within ±300s (5 minutes) of server time |
 | `x-nonce` | UUID v4, used once for replay protection (tracked in Redis for 10 minutes) |
-| `x-account-id` | Walrus Memory account object ID. Effectively required: it is signed into the canonical message, so omitting it signs an empty string and will not match a real account on Testnet |
+| `x-account-id` | Walrus Memory account object ID. Effectively required: it is signed into the canonical message, so omitting it signs an empty string and does not match a real account on Testnet |
 
 ### Canonical signing string
 
@@ -97,9 +97,9 @@ sends the signature in `x-signature`:
 ```
 
 - `timestamp`: the exact value sent in `x-timestamp`.
-- `method`: HTTP method, e.g. `GET`.
+- `method`: HTTP method, for example `GET`.
 - `path_and_query`: the request's path plus query string exactly as sent,
-  e.g. `/v1/owners/0xabc.../memories?limit=50`. Mismatched query params
+  for example `/v1/owners/0xabc.../memories?limit=50`. Mismatched query params
   (including a tampered `updated_after` cursor) invalidate the signature.
 - `body_sha256`: hex-encoded SHA-256 of the request body. For these
   GET-only, bodyless endpoints this is the hash of an empty byte string.

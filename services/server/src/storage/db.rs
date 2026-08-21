@@ -4,6 +4,10 @@ use sqlx::PgPool;
 
 use crate::types::{AppError, SearchHit};
 
+/// Tombstone retention for both the read-API `must_resync` clock and the
+/// background sweep. Keep a single constant so the two cannot drift.
+pub const TOMBSTONE_RETENTION: chrono::Duration = chrono::Duration::days(30);
+
 pub struct VectorDb {
     pool: PgPool,
 }
@@ -1255,6 +1259,11 @@ impl VectorDb {
         let embedding = Vector::from(vector.to_vec());
 
         let started = std::time::Instant::now();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to begin plaintext insert tx: {}", e)))?;
         let result = sqlx::query(
             "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, plaintext, importance)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1276,7 +1285,7 @@ impl VectorDb {
         .bind(blob_size_bytes)
         .bind(plaintext)
         .bind(importance)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to insert plaintext vector: {}", e)));
         crate::observability::observe_db(
@@ -1287,9 +1296,12 @@ impl VectorDb {
         result?;
         sqlx::query("DELETE FROM memory_tombstones WHERE memory_id = $1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to clear tombstone: {}", e)))?;
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to commit plaintext insert tx: {}", e)))?;
 
         tracing::debug!(
             "inserted plaintext vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
@@ -1533,10 +1545,10 @@ impl VectorDb {
         Ok(rows)
     }
 
-    /// Drop tombstones older than `retention`. Batched so a large backlog
-    /// cannot lock the table for one giant delete.
-    pub async fn sweep_expired_tombstones(&self, retention: std::time::Duration) -> Result<u64, AppError> {
-        let secs = retention.as_secs() as i64;
+    /// Drop tombstones older than `TOMBSTONE_RETENTION`. Batched so a large
+    /// backlog cannot lock the table for one giant delete.
+    pub async fn sweep_expired_tombstones(&self) -> Result<u64, AppError> {
+        let secs = TOMBSTONE_RETENTION.num_seconds();
         let mut total = 0u64;
         loop {
             let result = sqlx::query(

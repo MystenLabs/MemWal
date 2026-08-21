@@ -1206,10 +1206,7 @@ async fn main() {
             if let Err(e) = evict_state.db.prune_unconsumed_oauth_clients().await {
                 tracing::error!("MCP OAuth client pruning failed: {}", e);
             }
-            if let Err(e) = evict_state
-                .db
-                .sweep_expired_tombstones(std::time::Duration::from_secs(30 * 24 * 3600))
-                .await
+            if let Err(e) = evict_state.db.sweep_expired_tombstones().await
             {
                 tracing::error!("tombstone retention sweep failed: {}", e);
             }

@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::security_delete_auth::same_owner;
+use crate::storage::db::TOMBSTONE_RETENTION;
 use crate::types::*;
 
 #[derive(Debug, Serialize)]
@@ -84,8 +85,6 @@ pub struct MemoriesResponse {
 /// Console client (COMG-568) ignores the new keys and never treats tombstones
 /// as live memories.
 pub const SNAPSHOT_VERSION: u32 = 2;
-
-const TOMBSTONE_RETENTION: chrono::Duration = chrono::Duration::days(30);
 
 const DEFAULT_NAMESPACES_LIMIT: i64 = 100;
 const MAX_NAMESPACES_LIMIT: i64 = 500;
@@ -223,10 +222,7 @@ pub(crate) async fn query_owner_namespaces(
         SELECT COALESCE(l.namespace, w.namespace) AS namespace,
                COALESCE(l.memory_count, 0) AS memory_count,
                COALESCE(l.storage_used, 0) AS storage_used,
-               GREATEST(
-                   COALESCE(l.last_updated_at, w.last_mutated_at),
-                   COALESCE(w.last_mutated_at, l.last_updated_at)
-               ) AS last_updated_at
+               GREATEST(l.last_updated_at, w.last_mutated_at) AS last_updated_at
         FROM (
             SELECT namespace,
                    COUNT(*)::BIGINT AS memory_count,
@@ -390,6 +386,9 @@ struct MemoriesCursor {
     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deleted_id: Option<String>,
+    /// When this cursor was minted. v1 cursors lack it and must_resync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    minted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `snapshot_at: None` resets the walk boundary — see
@@ -419,6 +418,7 @@ fn encode_cursor_ex(
         snapshot_at,
         deleted_at,
         deleted_id,
+        minted_at: Some(chrono::Utc::now()),
     })
     .expect("cursor serializes");
     // URL_SAFE_NO_PAD (not STANDARD): next_cursor is used verbatim in a URL
@@ -452,23 +452,24 @@ pub(crate) async fn query_owner_memories(
         None => None,
     };
 
-    // must_resync only when the tombstone cursor itself is older than
-    // retention: those tombstones have been swept. A v1 cursor (no
-    // deleted_at) replays 30 days instead. Do not use live updated_at;
-    // a quiet account's last live row can be months old while the client
-    // polled 5 minutes ago.
+    // minted_at is the last-sync clock. v1 cursors lack it and must_resync
+    // once. Do not use live updated_at: a quiet account's last live row can
+    // be months old while the client polled 5 minutes ago.
     if let Some(c) = decoded.as_ref() {
-        if let Some(deleted_at) = c.deleted_at {
-            if deleted_at < retention_cut {
-                return Ok(MemoriesResponse {
-                    memories: Vec::new(),
-                    next_cursor: None,
-                    has_more: false,
-                    snapshot_version: SNAPSHOT_VERSION,
-                    deleted: Vec::new(),
-                    must_resync: true,
-                });
-            }
+        let stale_mint = match c.minted_at {
+            Some(t) => t < retention_cut,
+            None => true,
+        };
+        let stale_tombstone = c.deleted_at.is_some_and(|t| t < retention_cut);
+        if stale_mint || stale_tombstone {
+            return Ok(MemoriesResponse {
+                memories: Vec::new(),
+                next_cursor: None,
+                has_more: false,
+                snapshot_version: SNAPSHOT_VERSION,
+                deleted: Vec::new(),
+                must_resync: true,
+            });
         }
     }
 
@@ -585,21 +586,28 @@ pub(crate) async fn query_owner_memories(
         .map(|(id, _, t)| (*t, id.clone()))
         .or(deleted_after.clone());
 
+    // Never pin a missing live watermark to snapshot_at: a tombstone-only
+    // first page would skip in-flight inserts with updated_at < snapshot_at.
     let live_mark = rows
         .last()
         .map(|r| (r.4, r.0.clone()))
-        .or(after.clone())
-        .unwrap_or((snapshot_at, String::new()));
-    let next_cursor = if rows.is_empty() && deleted_rows.is_empty() && after.is_none() {
-        None
-    } else {
-        Some(encode_cursor_ex(
-            live_mark.0,
-            &live_mark.1,
+        .or(after.clone());
+    let next_cursor = match live_mark {
+        Some((ts, id)) => Some(encode_cursor_ex(
+            ts,
+            &id,
             has_more.then_some(snapshot_at),
             next_deleted.as_ref().map(|(t, _)| *t),
             next_deleted.as_ref().map(|(_, id)| id.clone()),
-        ))
+        )),
+        None if deleted_has_more => Some(encode_cursor_ex(
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            "",
+            Some(snapshot_at),
+            next_deleted.as_ref().map(|(t, _)| *t),
+            next_deleted.as_ref().map(|(_, id)| id.clone()),
+        )),
+        None => None,
     };
 
     let memories = rows
@@ -836,6 +844,7 @@ mod tests {
                 snapshot_at: Some(snapshot_at),
                 deleted_at: None,
                 deleted_id: None,
+                minted_at: None,
             })
             .expect("cursor serializes");
             let standard_encoded = base64::engine::general_purpose::STANDARD.encode(&json);

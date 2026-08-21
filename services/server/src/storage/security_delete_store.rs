@@ -689,15 +689,24 @@ pub async fn finalize_batch_deleted(
             .map_err(|error| storage("finalize lost race", error))?;
         return Ok(None);
     }
+    // Security-delete erases the Walrus blob, so every memory row pointing at
+    // that blob_id is dangling. Identify rows by memory id (not a bare
+    // (owner, blob_id) delete) so each tombstone carries the row's own
+    // namespace. Tracking has no namespace column — PK is (owner, blob_id) —
+    // and a shared blob_id across namespaces is unreadable after the blob is
+    // gone, so every matching row is purged.
     sqlx::query(
         "WITH tracked AS (
-            SELECT owner, blob_id FROM delete_blobs_tracking
-            WHERE batch_id=$1 AND state='deleting'
+            SELECT v.id, v.owner, v.namespace, v.blob_id
+            FROM delete_blobs_tracking t
+            INNER JOIN vector_entries v
+              ON v.owner = t.owner AND v.blob_id = t.blob_id
+            WHERE t.batch_id=$1 AND t.state='deleting'
          ),
          removed AS (
             DELETE FROM vector_entries v
             USING tracked t
-            WHERE v.owner = t.owner AND v.blob_id = t.blob_id
+            WHERE v.id = t.id
             RETURNING v.id, v.owner, v.namespace, v.blob_id
          )
          INSERT INTO memory_tombstones (memory_id, owner, namespace, blob_id)

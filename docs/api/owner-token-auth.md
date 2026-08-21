@@ -28,7 +28,7 @@ questions:
   - Which permission does a Phase 1 owner token grant?
 answer: >-
   Console sends x-service-credential to POST /v1/owner-tokens with an owner
-  address and receives a short-lived bearer token whose only permission is
+  address and gets a short-lived bearer token. The token's only permission is
   memories.read. Unknown scopes return 400. Present the token as
   Authorization Bearer on GET /v1/owners/:owner/memories and related routes.
 ---
