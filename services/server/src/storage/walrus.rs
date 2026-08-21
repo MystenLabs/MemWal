@@ -14,6 +14,8 @@ pub struct UploadResult {
     /// Sui object ID of the Blob object (hex, e.g. "0x...")
     #[allow(dead_code)]
     pub object_id: Option<String>,
+    /// Walrus epoch at which the blob's storage expires
+    pub end_epoch: Option<i32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -65,6 +67,13 @@ pub enum UploadBlobError {
         blob_id: String,
         object_id: String,
         message: String,
+        /// Walrus epoch the storage lease ends at — carried from
+        /// whichever response surfaced the failure (the sidecar includes it
+        /// on both the success shape and the metadata-transfer failure
+        /// shape) so the eventual recovery/finalize path doesn't have to
+        /// insert with `end_epoch = None` for a value that was actually
+        /// known at upload time.
+        end_epoch: Option<i32>,
     },
 }
 
@@ -109,6 +118,9 @@ pub struct OnChainBlob {
     /// Walrus Memory package ID from on-chain metadata
     #[serde(rename = "packageId", default)]
     pub package_id: String,
+    /// Delegate/agent public key from on-chain metadata (memwal_agent_id)
+    #[serde(rename = "agentId", default)]
+    pub agent_id: Option<String>,
 }
 
 /// Response from sidecar query-blobs endpoint
@@ -117,13 +129,58 @@ struct QueryBlobsResponse {
     blobs: Vec<OnChainBlob>,
     total: usize,
     /// True when the sidecar's raw on-chain candidate fetch hit its own
-    /// cap before namespace/package filtering (WALM-319) -- `blobs` may be
+    /// cap before namespace/package filtering -- `blobs` may be
     /// an incomplete view of what's actually on chain even though this
     /// response itself isn't further truncated by `limit`. Defaulted so an
     /// older sidecar (mid rolling-deploy) that doesn't send this field yet
     /// still parses.
     #[serde(rename = "sourceCapped", default)]
     source_capped: bool,
+}
+
+/// A blob's on-chain storage lease, as returned by the sidecar's
+/// `/walrus/query-blobs` endpoint when called with `includeStorageLease:
+/// true` (the periodic expiry sweep). This is a genuinely different response
+/// shape from `OnChainBlob`/`query_blobs_by_owner` — no `namespace`,
+/// `packageId`, or `agentId` — so it gets its own struct rather than
+/// extending `OnChainBlob`.
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+pub struct BlobStorageLease {
+    /// Walrus blob ID
+    #[serde(rename = "blobId")]
+    pub blob_id: String,
+    /// Sui object ID of the Blob object
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    /// Walrus epoch at which this blob's storage lease ends
+    #[serde(rename = "storageEndEpoch")]
+    pub storage_end_epoch: i32,
+}
+
+/// Response from sidecar query-blobs endpoint when `includeStorageLease:
+/// true` is requested.
+#[derive(Debug, serde::Deserialize)]
+struct QueryBlobStorageLeasesResponse {
+    blobs: Vec<BlobStorageLease>,
+    #[allow(dead_code)]
+    total: usize,
+    #[serde(rename = "currentEpoch")]
+    current_epoch: i32,
+    #[allow(dead_code)]
+    #[serde(rename = "nonexistentBlobIds", default)]
+    nonexistent_blob_ids: Vec<String>,
+}
+
+/// Result of a batch storage-lease lookup: each blob's on-chain storage
+/// lease, plus the Walrus epoch the sidecar observed while looking them up
+/// (`QueryBlobStorageLeasesResponse.current_epoch`). The expiry sweep
+/// (`main.rs`) needs both — `current_epoch` anchors its
+/// `expires_at_from_epoch` formula, scoped to the exact same lease-lookup
+/// response `storage_end_epoch` came from.
+pub struct BlobStorageLeases {
+    pub blobs: Vec<BlobStorageLease>,
+    pub current_epoch: i32,
 }
 
 /// Request/response types for sidecar HTTP API
@@ -157,6 +214,8 @@ struct WalrusUploadResponse {
     object_id: Option<String>,
     #[serde(default)]
     transfer_status: Option<String>,
+    #[serde(default)]
+    end_epoch: Option<i32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -167,6 +226,12 @@ struct WalrusUploadErrorResponse {
     object_id: Option<String>,
     #[serde(default)]
     transfer_status: Option<String>,
+    /// The sidecar includes this on the metadata-transfer failure response
+    /// too (not just the success shape) — see `walrus-upload.ts`'s 500
+    /// response for the "failed" transfer_status case. Previously absent
+    /// here, so serde silently dropped it despite the sidecar sending it.
+    #[serde(default)]
+    end_epoch: Option<i32>,
 }
 
 #[derive(serde::Serialize)]
@@ -393,6 +458,7 @@ async fn upload_blob_inner(
                         blob_id,
                         object_id,
                         message: err.error,
+                        end_epoch: err.end_epoch,
                     });
                 }
             }
@@ -425,6 +491,7 @@ async fn upload_blob_inner(
                 blob_id: result.blob_id.clone(),
                 object_id,
                 message: "walrus upload completed but metadata/transfer failed".into(),
+                end_epoch: result.end_epoch,
             });
         }
         return Err(UploadBlobError::App(AppError::Internal(
@@ -449,6 +516,7 @@ async fn upload_blob_inner(
     Ok(UploadResult {
         blob_id: result.blob_id,
         object_id: result.object_id,
+        end_epoch: result.end_epoch,
     })
 }
 
@@ -819,6 +887,100 @@ pub async fn query_blobs_by_owner(
     Ok((result.blobs, result.source_capped))
 }
 
+/// Query on-chain storage-lease end epochs for a specific set of blob IDs
+/// owned by `owner_address`, via the sidecar's `/walrus/query-blobs`
+/// endpoint's `includeStorageLease: true` mode (the periodic expiry
+/// sweep). Unlike `query_blobs_by_owner`, this is scoped to exactly the
+/// blob IDs passed in and returns each one's `storageEndEpoch` rather than
+/// namespace/package/agent metadata.
+pub async fn query_blob_storage_leases(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    owner_address: &str,
+    blob_ids: &[String],
+) -> Result<BlobStorageLeases, AppError> {
+    let url = format!("{}/walrus/query-blobs", sidecar_url);
+
+    // NOTE: `limit` does NOT currently bound this call's cost. The
+    // sidecar's `cap` formula (walrus-query.ts) is
+    // `useRecentTxPath && !requestedBlobIds ? ... : Infinity` — since this
+    // call always sends `blobIds`, `requestedBlobIds` is truthy, so `cap`
+    // is always `Infinity` regardless of `limit`, and the sidecar still
+    // paginates the owner's entire on-chain blob collection. `limit` is
+    // sent anyway (harmless, forward-compatible) in case the sidecar's cap
+    // logic is later changed to respect it for this call shape too. The
+    // real fix is sidecar-side (early-exit `listBlobObjectsGrpc` once all
+    // `requestedBlobIds` are found) and is tracked as a follow-up, not
+    // done here.
+    let body = serde_json::json!({
+        "owner": owner_address,
+        "blobIds": blob_ids,
+        "includeStorageLease": true,
+        "limit": blob_ids.len(),
+    });
+
+    let mut req = client.post(&url).json(&body);
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    let req = crate::observability::apply_request_id_header(req);
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "walrus_query_blob_storage_leases",
+            "transport_error",
+            started.elapsed(),
+        );
+        crate::observability::record_sidecar_failure(
+            "walrus_query_blob_storage_leases",
+            "transport_error",
+        );
+        AppError::Internal(format!(
+            "Sidecar walrus/query-blobs (storage lease) failed: {}",
+            e
+        ))
+    })?;
+    let status_label = resp.status().as_u16().to_string();
+    crate::observability::observe_external(
+        "sidecar",
+        "walrus_query_blob_storage_leases",
+        &status_label,
+        started.elapsed(),
+    );
+
+    if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure(
+            "walrus_query_blob_storage_leases",
+            "http_error",
+        );
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "walrus query-blobs (storage lease) failed: {}",
+            body
+        )));
+    }
+
+    let result: QueryBlobStorageLeasesResponse = resp.json().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to parse query-blobs storage-lease response: {}",
+            e
+        ))
+    })?;
+
+    tracing::info!(
+        "walrus query-blobs (storage lease) ok: {} leases for owner={}",
+        result.blobs.len(),
+        owner_address,
+    );
+
+    Ok(BlobStorageLeases {
+        blobs: result.blobs,
+        current_epoch: result.current_epoch,
+    })
+}
+
 /// Download a blob from one or more Walrus aggregators.
 ///
 /// The first URL is treated as primary. When more URLs are configured, cold
@@ -1079,8 +1241,44 @@ mod tests {
     use super::{
         aggregate_download_errors, is_valid_blob_id, register_transaction_for_resume,
         should_reset_prepared_register, PreparedRegisterTransaction, QueryBlobsResponse,
+        WalrusUploadErrorResponse,
     };
     use crate::types::AppError;
+
+    // The sidecar's metadata-transfer failure response includes `endEpoch`
+    // (see walrus-upload.ts's 500 response for the "failed"
+    // transfer_status case), but `WalrusUploadErrorResponse` didn't
+    // declare the field, so serde silently dropped it despite the
+    // sidecar sending it. This pins the deserialize directly against the
+    // sidecar's real response shape, without needing a live sidecar.
+    #[test]
+    fn walrus_upload_error_response_captures_end_epoch() {
+        let body = r#"{
+            "error": "Blob uploaded but metadata/transfer to owner failed",
+            "jobId": "job-123",
+            "blobId": "blob-abc",
+            "objectId": "0xobject",
+            "transferStatus": "failed",
+            "endEpoch": 500
+        }"#;
+        let parsed: WalrusUploadErrorResponse = serde_json::from_str(body).expect("deserializes");
+        assert_eq!(parsed.end_epoch, Some(500));
+    }
+
+    #[test]
+    fn walrus_upload_error_response_end_epoch_defaults_to_none_when_absent() {
+        // Backward compat: a response shape without endEpoch (or an older
+        // sidecar version) must still deserialize, not fail.
+        let body = r#"{
+            "error": "some other failure",
+            "blobId": null,
+            "objectId": null,
+            "transferStatus": null
+        }"#;
+        let parsed: WalrusUploadErrorResponse =
+            serde_json::from_str(body).expect("deserializes without end_epoch");
+        assert_eq!(parsed.end_epoch, None);
+    }
 
     #[test]
     fn prepared_register_transaction_is_sent_only_with_encoded_resume() {
@@ -1225,6 +1423,50 @@ mod tests {
             aggregate_download_errors("blob", &errors),
             AppError::Internal(_)
         ));
+    }
+
+    #[test]
+    fn walrus_upload_response_deserializes_end_epoch() {
+        let json = serde_json::json!({
+            "blobId": "abc123",
+            "objectId": "0xdead",
+            "transferStatus": "ok",
+            "endEpoch": 457,
+        });
+        let parsed: super::WalrusUploadResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.end_epoch, Some(457));
+    }
+
+    /// Locks the exact JSON shape the sidecar's `/walrus/query-blobs`
+    /// (`includeStorageLease: true`) route returns — see
+    /// `res.json({ blobs, total, currentEpoch, nonexistentBlobIds })` in
+    /// `services/server/scripts/sidecar/routes/walrus-query.ts`, where each
+    /// `blobs[]` entry is `{ blobId, objectId, storageEndEpoch }`.
+    #[test]
+    fn query_blob_storage_leases_response_matches_sidecar_shape() {
+        let json = serde_json::json!({
+            "blobs": [
+                {
+                    "blobId": "M4hsZGQ1oCchKzYnnhDMV-ZKvhWsp2SS1G7xI6PzQxs",
+                    "objectId": "0xdead",
+                    "storageEndEpoch": 457,
+                }
+            ],
+            "total": 1,
+            "currentEpoch": 450,
+            "nonexistentBlobIds": []
+        });
+        let parsed: super::QueryBlobStorageLeasesResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.total, 1);
+        assert_eq!(parsed.current_epoch, 450);
+        assert!(parsed.nonexistent_blob_ids.is_empty());
+        assert_eq!(parsed.blobs.len(), 1);
+        assert_eq!(
+            parsed.blobs[0].blob_id,
+            "M4hsZGQ1oCchKzYnnhDMV-ZKvhWsp2SS1G7xI6PzQxs"
+        );
+        assert_eq!(parsed.blobs[0].object_id, "0xdead");
+        assert_eq!(parsed.blobs[0].storage_end_epoch, 457);
     }
 
     // GH #477 reconcile client. The fail-closed contract is funds-critical: a

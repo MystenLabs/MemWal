@@ -127,7 +127,7 @@ pub async fn stats(
 /// here means only "the server process is up," not "your delegate
 /// key/account ID are valid." A caller preflighting credentials before a
 /// signed call should not treat this as a substitute for that call
-/// succeeding (WALM-318).
+/// succeeding.
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -431,7 +431,7 @@ pub async fn ask(
 /// returns: that sidecar call itself bounds the raw candidates it fetches
 /// (shared across the owner's namespaces, hard-capped regardless of
 /// `limit`), so `truncated == false` here does not guarantee every missing
-/// blob in the namespace was found — see WALM-317's PR discussion.
+/// blob in the namespace was found.
 fn paginate_missing_blobs(all_missing: Vec<String>, limit: usize) -> (Vec<String>, bool) {
     let truncated = all_missing.len() > limit;
     let page = all_missing.into_iter().take(limit).collect();
@@ -512,11 +512,25 @@ pub async fn restore(
     let all_blob_ids: Vec<String> = on_chain_blobs.iter().map(|b| b.blob_id.clone()).collect();
     let total = all_blob_ids.len();
 
+    // Preserve on-chain provenance (agent_id/package_id) so restored rows
+    // keep the same owner-scoped read API metadata as freshly-remembered
+    // ones.
+    let blob_provenance: std::collections::HashMap<String, (Option<String>, String)> =
+        on_chain_blobs
+            .iter()
+            .map(|b| {
+                (
+                    b.blob_id.clone(),
+                    (b.agent_id.clone(), b.package_id.clone()),
+                )
+            })
+            .collect();
+
     if total == 0 {
         // source_capped, not unconditionally false: the raw candidate fetch
         // can hit its cap fulfilling OTHER namespaces before this one is
         // even filtered out, so zero found here doesn't rule out more
-        // existing that were never fetched (WALM-319).
+        // existing that were never fetched.
         return Ok(Json(RestoreResponse {
             restored: 0,
             skipped: 0,
@@ -554,7 +568,7 @@ pub async fn restore(
     // candidates match after namespace/package filtering, restore returns a
     // partial result instead of scanning the whole wallet.
     let (missing_blob_ids, limit_truncated) = paginate_missing_blobs(all_missing, limit);
-    // OR in source_capped (WALM-319): the local limit-slice check alone
+    // OR in source_capped: the local limit-slice check alone
     // can't see truncation that already happened one layer up, in the
     // sidecar's raw candidate fetch.
     let truncated = limit_truncated || source_capped;
@@ -783,6 +797,16 @@ pub async fn restore(
             );
             0
         });
+        let (agent_id, package_id) = blob_provenance
+            .get(blob_id)
+            .cloned()
+            .unwrap_or((None, String::new()));
+        // The sidecar sends "agentId" as a present-but-empty string when no
+        // delegate key was recorded (the common case) — #[serde(default)]
+        // only fires on a MISSING key, so an empty string deserializes to
+        // Some(""), not None. Normalize both provenance fields the same way
+        // so a blob with no known agent gets a real SQL NULL, not "".
+        let agent_id = agent_id.filter(|s| !s.is_empty());
         state
             .db
             .insert_vector(
@@ -798,6 +822,13 @@ pub async fn restore(
                 // neutral "standard" bucket so restored memories rank as
                 // average — neither boosted nor penalized.
                 crate::services::extractor::IMPORTANCE_STANDARD,
+                agent_id.as_deref(),
+                if package_id.is_empty() {
+                    None
+                } else {
+                    Some(package_id.as_str())
+                },
+                None,
             )
             .await?;
     }

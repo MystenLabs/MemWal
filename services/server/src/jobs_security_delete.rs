@@ -3,7 +3,7 @@
 use crate::security_delete_auth::same_owner;
 use crate::storage::security_delete_store as store;
 use crate::sui::input_freshness::{self, StaleInputReason};
-use crate::sui::{ObjectInfo, SuiApi, SuiEpoch, SuiErr, WalrusEpoch};
+use crate::sui::{ObjectInfo, SuiApi, SuiEpoch, SuiErr, WalrusEpoch, WalrusEpochSchedule};
 use crate::types::{AppError, AppState, SecurityDeleteExecutionGate};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -715,6 +715,7 @@ mod tests {
         pages: Mutex<HashMap<Option<String>, VecDeque<OwnedBlobPage>>>,
         epoch: SuiEpoch,
         walrus_epoch: WalrusEpoch,
+        walrus_epoch_schedule: WalrusEpochSchedule,
         balance: u64,
         execute_calls: AtomicUsize,
         list_calls: AtomicUsize,
@@ -736,6 +737,12 @@ mod tests {
                 pages: Default::default(),
                 epoch: SuiEpoch(1159),
                 walrus_epoch: WalrusEpoch(457),
+                // Arbitrary but internally consistent 1-day-epoch schedule; no fixture in
+                // this file asserts a specific `expires_at_from_epoch` result against it.
+                walrus_epoch_schedule: WalrusEpochSchedule {
+                    epoch_duration_ms: 86_400_000,
+                    first_epoch_start_ms: 1_700_000_000_000,
+                },
                 balance: 0,
                 execute_calls: Default::default(),
                 list_calls: Default::default(),
@@ -761,6 +768,9 @@ mod tests {
         }
         async fn walrus_epoch(&self) -> Result<WalrusEpoch, SuiErr> {
             Ok(self.walrus_epoch)
+        }
+        async fn walrus_epoch_schedule(&self) -> Result<WalrusEpochSchedule, SuiErr> {
+            Ok(self.walrus_epoch_schedule)
         }
         async fn reference_gas_price(&self) -> Result<u64, SuiErr> {
             Ok(1)

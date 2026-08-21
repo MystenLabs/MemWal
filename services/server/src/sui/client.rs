@@ -228,6 +228,16 @@ struct Timed<T> {
 /// Gas price, keyed by the SUI epoch it was fetched in (gas price changes per Sui epoch).
 type EpochGasPrice = (SuiEpoch, u64);
 
+/// Walrus epoch schedule — the `epoch_duration_ms`/`first_epoch_start_ms` pair that lets a
+/// Walrus epoch (e.g. `Blob.storage.end_epoch`) be converted into a wall-clock timestamp via
+/// [`expires_at_from_epoch`]. Read from the Walrus staking pool's state object, which is a
+/// SEPARATE on-chain object from the system object `walrus_epoch()` reads.
+#[derive(Clone, Copy, Debug)]
+pub struct WalrusEpochSchedule {
+    pub epoch_duration_ms: u64,
+    pub first_epoch_start_ms: u64,
+}
+
 /// Production gRPC implementation. Cloning it is cheap: `sui_rpc::Client`
 /// clones the underlying channel and all caches/rate state are shared.
 #[derive(Clone)]
@@ -236,10 +246,12 @@ pub struct SuiClient {
     gate: RateGate,
     epoch: Arc<RwLock<Option<Timed<SuiEpoch>>>>,
     walrus_epoch: Arc<RwLock<Option<Timed<WalrusEpoch>>>>,
+    walrus_epoch_schedule: Arc<RwLock<Option<Timed<WalrusEpochSchedule>>>>,
     gas_price: Arc<RwLock<Option<Timed<EpochGasPrice>>>>,
     chain: Arc<RwLock<Option<[u8; 32]>>>,
     walrus_package: Option<String>,
     walrus_system: Option<String>,
+    walrus_staking_pool: Option<String>,
     priority: RequestPriority,
     attempt_timeout: Duration,
 }
@@ -253,10 +265,12 @@ impl SuiClient {
             gate: RateGate::new(requests_per_window, window)?,
             epoch: Arc::new(RwLock::new(None)),
             walrus_epoch: Arc::new(RwLock::new(None)),
+            walrus_epoch_schedule: Arc::new(RwLock::new(None)),
             gas_price: Arc::new(RwLock::new(None)),
             chain: Arc::new(RwLock::new(None)),
             walrus_package: None,
             walrus_system: None,
+            walrus_staking_pool: None,
             priority: RequestPriority::Interactive,
             attempt_timeout: DEFAULT_RPC_ATTEMPT_TIMEOUT,
         })
@@ -277,9 +291,15 @@ impl SuiClient {
         Ok(self)
     }
 
-    pub fn with_walrus_config(mut self, package_id: String, system_object_id: String) -> Self {
+    pub fn with_walrus_config(
+        mut self,
+        package_id: String,
+        system_object_id: String,
+        staking_pool_id: String,
+    ) -> Self {
         self.walrus_package = Some(package_id);
         self.walrus_system = Some(system_object_id);
+        self.walrus_staking_pool = Some(staking_pool_id);
         self
     }
 
@@ -691,6 +711,110 @@ impl SuiApi for SuiClient {
         Ok(epoch)
     }
 
+    /// Walrus epoch schedule — `epoch_duration_ms`/`first_epoch_start_ms`, used to convert a
+    /// Walrus epoch into a wall-clock timestamp via [`expires_at_from_epoch`].
+    ///
+    /// Mirrors `walrus_epoch()`'s structure exactly, but reads a DIFFERENT on-chain object:
+    /// the Walrus staking pool's own versioned state (hung off the staking pool object as a
+    /// dynamic field), not the system object. See `walrus_epoch()`'s doc comment for why the
+    /// state id must be resolved from chain (never pinned in config) and why the HIGHEST
+    /// dynamic-field version must be selected rather than trusting page order.
+    async fn walrus_epoch_schedule(&self) -> Result<WalrusEpochSchedule, SuiErr> {
+        if let Some(cached) = self
+            .walrus_epoch_schedule
+            .read()
+            .await
+            .as_ref()
+            .filter(|c| c.fetched_at.elapsed() < Duration::from_secs(30))
+        {
+            return Ok(cached.value);
+        }
+        let parent = self.walrus_staking_pool.clone().ok_or_else(|| {
+            SuiErr::Rejected("Walrus staking pool object ID is not configured".into())
+        })?;
+        let mut fields = Vec::new();
+        let mut page_token: Option<Vec<u8>> = None;
+        loop {
+            let parent = parent.clone();
+            let token = page_token.clone();
+            let response = self
+                .call(move |mut client| {
+                    let parent = parent.clone();
+                    let token = token.clone();
+                    async move {
+                        let mut request = ListDynamicFieldsRequest::default();
+                        request.parent = Some(parent);
+                        request.page_size = Some(50);
+                        request.page_token = token.map(Into::into);
+                        // `name` carries the BCS-encoded key — the staking pool version — and
+                        // is what makes the selection deterministic. Without it we would be
+                        // guessing.
+                        request.read_mask = Some(FieldMask::from_paths(["field_id", "name"]));
+                        client
+                            .state_client()
+                            .list_dynamic_fields(request)
+                            .await
+                            .map(|r| r.into_inner())
+                    }
+                })
+                .await?;
+            fields.extend(response.dynamic_fields);
+            match response.next_page_token {
+                Some(token) if !token.is_empty() => page_token = Some(token.to_vec()),
+                _ => break,
+            }
+        }
+        // Walrus keys the state field by the pool `version` (a Move u64), so select the
+        // HIGHEST version — the newest state — rather than trusting page order.
+        let state_id = fields
+            .iter()
+            .filter_map(|field| {
+                let id = field.field_id.clone()?;
+                let name = field.name.as_ref()?;
+                let version: u64 = bcs::from_bytes(name.value.as_ref()?).ok()?;
+                Some((version, id))
+            })
+            .max_by_key(|(version, _)| *version)
+            .map(|(_, id)| id)
+            .ok_or_else(|| {
+                SuiErr::Transport(
+                    "Walrus staking pool object exposes no versioned state dynamic field".into(),
+                )
+            })?;
+        let json = self
+            .call(|mut client| {
+                let id = state_id.clone();
+                async move {
+                    let mut request = GetObjectRequest::default();
+                    request.object_id = Some(id);
+                    request.read_mask = Some(FieldMask::from_paths(["json"]));
+                    client
+                        .ledger_client()
+                        .get_object(request)
+                        .await
+                        .map(|r| r.into_inner().object.and_then(|o| o.json))
+                }
+            })
+            .await?
+            .ok_or_else(|| SuiErr::Rejected("Walrus staking pool state object not found".into()))?;
+        let value = prost_json(&json);
+        let schedule = parse_epoch_schedule(&value).ok_or_else(|| {
+            tracing::warn!(
+                state_object = %state_id,
+                json = %serde_json::to_string(&value).unwrap_or_default().chars().take(400).collect::<String>(),
+                "walrus staking pool state: epoch_duration/first_epoch_start not found"
+            );
+            SuiErr::Transport(
+                "Walrus staking pool state JSON omitted epoch_duration/first_epoch_start".into(),
+            )
+        })?;
+        *self.walrus_epoch_schedule.write().await = Some(Timed {
+            value: schedule,
+            fetched_at: Instant::now(),
+        });
+        Ok(schedule)
+    }
+
     async fn reference_gas_price(&self) -> Result<u64, SuiErr> {
         let epoch = self.current_epoch().await?;
         if let Some(cached) = self
@@ -1026,6 +1150,89 @@ fn walrus_committee_epoch(value: &serde_json::Value) -> Option<u64> {
         serde_json::Value::String(text) => text.parse().ok(),
         _ => None,
     }
+}
+
+/// Parse epoch_duration/first_epoch_start from the Walrus staking pool's
+/// state object JSON. Mirrors walrus_committee_epoch()'s exact-path,
+/// unwrap-the-Field-wrapper approach — see that function's doc comment
+/// for why this must not be a recursive/fuzzy key search.
+fn parse_epoch_schedule(value: &serde_json::Value) -> Option<WalrusEpochSchedule> {
+    let root = value.get("value").unwrap_or(value);
+    let parse_u64_field = |key: &str| -> Option<u64> {
+        match root.get(key)? {
+            serde_json::Value::Number(n) => n.as_u64(),
+            serde_json::Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    };
+    Some(WalrusEpochSchedule {
+        epoch_duration_ms: parse_u64_field("epoch_duration")?,
+        first_epoch_start_ms: parse_u64_field("first_epoch_start")?,
+    })
+}
+
+/// Convert a Walrus epoch to its wall-clock expiry timestamp.
+///
+/// Anchored on the CURRENT epoch, not Walrus's genesis:
+///
+/// ```text
+/// expires_at = now + (end_epoch - current_epoch) * epoch_duration
+/// ```
+///
+/// This self-corrects every sweep cycle (the caller re-fetches
+/// `current_epoch`/`now` on every 24h resync), so an `epoch_duration`
+/// change, or drift between actual epoch rollovers and the ideal schedule,
+/// can never silently extrapolate a wrong date over hundreds of epochs —
+/// the error is bounded to at most one epoch's worth of drift since the
+/// last resync. This deliberately does NOT use `schedule.first_epoch_start_ms`
+/// (kept on `WalrusEpochSchedule` only because `parse_epoch_schedule` still
+/// reads it off the same on-chain object; genesis-anchoring was the
+/// previous, riskier formula).
+///
+/// `end_epoch - current_epoch` can legitimately be negative — an
+/// already-expired blob, where `end_epoch < current_epoch` — in which case
+/// `expires_at` correctly lands in the past. That is expected, not an
+/// error. No step of this computation can panic: epoch counts/durations
+/// are always small in practice (Walrus epochs are weeks; counts stay in
+/// the thousands for centuries), but every step — including the initial
+/// `end_epoch - current_epoch` subtraction of two arbitrary `u64`s, which
+/// can itself overflow `i64` before any multiplication happens — is done
+/// in `i128` (wide enough for the full `u64` range on both sides) and only
+/// saturated back down to `i64` at the very end. This must not panic the
+/// caller, which runs inside an unsupervised `tokio::spawn` background
+/// task with no restart wrapper.
+pub fn expires_at_from_epoch(
+    end_epoch: WalrusEpoch,
+    current_epoch: WalrusEpoch,
+    schedule: &WalrusEpochSchedule,
+    now: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
+    // Widen to i128 for the whole computation — end_epoch/current_epoch are
+    // arbitrary u64s (a malformed/adversarial on-chain response is not
+    // ruled out), so a plain `as i64 - as i64` subtraction can itself
+    // overflow i64 (e.g. end_epoch = i64::MAX as u64, current_epoch =
+    // i64::MIN as u64) before the multiplication even runs. i128 can hold
+    // the full u64 range on both sides of the subtraction without
+    // overflowing, but the subsequent multiplication by epoch_duration_ms
+    // can still exceed i128's range (u64::MAX * u64::MAX overflows i128 by
+    // roughly 2x) — that's why it's `saturating_mul`, not a plain `*`; only
+    // the final narrowing back to i64 needs an explicit saturating clamp.
+    //
+    // The narrowing bound is `-i64::MAX..=i64::MAX`, NOT the full i64
+    // range: `chrono::Duration::milliseconds` itself panics on exactly
+    // `i64::MIN` (its `TimeDelta` range is asymmetric — `-i64::MAX` is its
+    // minimum representable value, not `i64::MIN` — see chrono's
+    // `time_delta.rs`), so clamping to `i64::MIN..=i64::MAX` would trade
+    // one panic for another at the most-negative boundary.
+    let epoch_delta: i128 = end_epoch.0 as i128 - current_epoch.0 as i128;
+    let delta_ms: i128 = epoch_delta.saturating_mul(schedule.epoch_duration_ms as i128);
+    let delta_ms: i64 = delta_ms.clamp(-(i64::MAX as i128), i64::MAX as i128) as i64;
+    now.checked_add_signed(chrono::Duration::milliseconds(delta_ms))
+        .unwrap_or(if delta_ms >= 0 {
+            chrono::DateTime::<chrono::Utc>::MAX_UTC
+        } else {
+            chrono::DateTime::<chrono::Utc>::MIN_UTC
+        })
 }
 
 #[cfg(test)]
@@ -1507,5 +1714,105 @@ mod tests {
         };
         let json = prost_json(&root);
         assert_eq!(find_json_u64(&json, "end_epoch"), None);
+    }
+
+    #[test]
+    fn expires_at_from_epoch_same_epoch_boundary_equals_now() {
+        // Current-epoch-anchored: when end_epoch == current_epoch, the
+        // blob expires exactly "now" (zero epoch delta), regardless of
+        // schedule.first_epoch_start_ms — which this formula no longer
+        // reads at all.
+        let schedule = WalrusEpochSchedule {
+            epoch_duration_ms: 86_400_000, // 1 day
+            first_epoch_start_ms: 1_700_000_000_000,
+        };
+        let now = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
+        let expires_at = expires_at_from_epoch(WalrusEpoch(10), WalrusEpoch(10), &schedule, now);
+        assert_eq!(expires_at, now);
+    }
+
+    #[test]
+    fn expires_at_from_epoch_computes_wall_clock_time() {
+        let schedule = WalrusEpochSchedule {
+            epoch_duration_ms: 86_400_000, // 1 day
+            first_epoch_start_ms: 1_700_000_000_000,
+        };
+        let now = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
+        let end_epoch = WalrusEpoch(10);
+        let current_epoch = WalrusEpoch(1);
+        let expires_at = expires_at_from_epoch(end_epoch, current_epoch, &schedule, now);
+        // end_epoch is 9 epochs ahead of current_epoch, so expiry is
+        // `now` plus 9 durations.
+        let expected_ms = 1_800_000_000_000_i64 + 9 * 86_400_000_i64;
+        assert_eq!(expires_at.timestamp_millis(), expected_ms);
+    }
+
+    #[test]
+    fn expires_at_from_epoch_negative_delta_lands_in_the_past() {
+        // end_epoch < current_epoch is a legitimate, expected case (an
+        // already-expired blob the sweep hasn't caught up to yet) — not an
+        // error. expires_at must correctly land before `now`.
+        let schedule = WalrusEpochSchedule {
+            epoch_duration_ms: 86_400_000, // 1 day
+            first_epoch_start_ms: 1_700_000_000_000,
+        };
+        let now = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).unwrap();
+        let end_epoch = WalrusEpoch(1);
+        let current_epoch = WalrusEpoch(10);
+        let expires_at = expires_at_from_epoch(end_epoch, current_epoch, &schedule, now);
+        // current_epoch is 9 epochs ahead of end_epoch, so expiry is `now`
+        // minus 9 durations — squarely in the past.
+        let expected_ms = 1_800_000_000_000_i64 - 9 * 86_400_000_i64;
+        assert_eq!(expires_at.timestamp_millis(), expected_ms);
+        assert!(expires_at < now);
+    }
+
+    #[test]
+    fn expires_at_from_epoch_does_not_panic_on_extreme_inputs() {
+        // Malformed/adversarial epoch values must saturate, not panic —
+        // this runs inside an unsupervised tokio::spawn background task
+        // with no restart wrapper.
+        //
+        // `WalrusEpoch(u64::MAX)`/`WalrusEpoch(0)` are NOT a real stress
+        // test of the `end_epoch.0 as i64 - current_epoch.0 as i64`
+        // subtraction: they bit-cast to `-1`/`0` as i64, nowhere near the
+        // i64 overflow boundary. `i64::MAX as u64` / `i64::MIN as u64` are
+        // both legitimate `u64` values (WalrusEpoch's inner type) that DO
+        // hit that boundary — `i64::MAX - i64::MIN` overflows i64 outright,
+        // which previously panicked under this crate's default
+        // overflow-checks-on debug/test profile even though the
+        // subsequent multiplication was already saturating.
+        let schedule = WalrusEpochSchedule {
+            epoch_duration_ms: u64::MAX,
+            first_epoch_start_ms: 0,
+        };
+        let now = chrono::Utc::now();
+        let max_epoch = WalrusEpoch(i64::MAX as u64);
+        let min_epoch = WalrusEpoch(i64::MIN as u64);
+        let _ = expires_at_from_epoch(max_epoch, min_epoch, &schedule, now);
+        let _ = expires_at_from_epoch(min_epoch, max_epoch, &schedule, now);
+        let _ = expires_at_from_epoch(WalrusEpoch(u64::MAX), WalrusEpoch(0), &schedule, now);
+        let _ = expires_at_from_epoch(WalrusEpoch(0), WalrusEpoch(u64::MAX), &schedule, now);
+    }
+
+    #[test]
+    fn parse_epoch_schedule_extracts_duration_and_start() {
+        // Shape per @mysten/walrus SDK's BCS-decoded StakingInnerV1 type
+        // (dist/client.d.mts): epoch_duration/first_epoch_start are
+        // top-level string (u64-as-string) fields, sibling to `epoch`.
+        // This exact raw-JSON shape (whether wrapped in a `value` field
+        // like the system-state object is) is NOT independently verified
+        // against a live fetch — if a real run shows a different shape,
+        // fix parse_epoch_schedule, not this test's expectation of what
+        // the fix should produce.
+        let raw = serde_json::json!({
+            "n_shards": 1000,
+            "epoch_duration": "86400000",
+            "first_epoch_start": "1700000000000",
+            "epoch": 457,
+        });
+        let schedule = parse_epoch_schedule(&raw).expect("fields present");
+        assert_eq!(schedule.epoch_duration_ms, 86_400_000);
+        assert_eq!(schedule.first_epoch_start_ms, 1_700_000_000_000);
     }
 }
