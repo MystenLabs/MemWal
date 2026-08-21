@@ -689,6 +689,25 @@ pub async fn finalize_batch_deleted(
             .map_err(|error| storage("finalize lost race", error))?;
         return Ok(None);
     }
+    sqlx::query(
+        "WITH tracked AS (
+            SELECT owner, blob_id FROM delete_blobs_tracking
+            WHERE batch_id=$1 AND state='deleting'
+         ),
+         removed AS (
+            DELETE FROM vector_entries v
+            USING tracked t
+            WHERE v.owner = t.owner AND v.blob_id = t.blob_id
+            RETURNING v.id, v.owner, v.namespace, v.blob_id
+         )
+         INSERT INTO memory_tombstones (memory_id, owner, namespace, blob_id)
+         SELECT id, owner, namespace, blob_id FROM removed
+         ON CONFLICT (memory_id) DO UPDATE SET deleted_at = NOW()",
+    )
+    .bind(batch_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| storage("tombstone security-delete rows", error))?;
     let rows = sqlx::query(
         "UPDATE delete_blobs_tracking SET state='deleted', batch_id=NULL, updated_at=NOW()
          WHERE batch_id=$1 AND state='deleting'",

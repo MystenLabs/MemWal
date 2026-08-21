@@ -880,27 +880,6 @@ const PAGINATION_INDEX_NAME: &str = "idx_vector_entries_owner_updated_id";
 /// nullable `updated_at` column) and before migration 015 (which
 /// requires no NULL rows remain before it can validate its NOT NULL
 /// constraint).
-async fn bump_namespace_watermark<'e, E>(
-    exec: E,
-    owner: &str,
-    namespace: &str,
-) -> Result<(), AppError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(
-        "INSERT INTO namespace_watermarks (owner, namespace, last_mutated_at)
-         VALUES ($1, $2, NOW())
-         ON CONFLICT (owner, namespace) DO UPDATE SET last_mutated_at = NOW()",
-    )
-    .bind(owner)
-    .bind(namespace)
-    .execute(exec)
-    .await
-    .map_err(|e| AppError::Internal(format!("Failed to bump namespace watermark: {}", e)))?;
-    Ok(())
-}
-
 async fn backfill_updated_at(pool: &PgPool) -> Result<(), AppError> {
     const BATCH_SIZE: i64 = 5000;
     let mut total_rows: u64 = 0;
@@ -1235,8 +1214,7 @@ impl VectorDb {
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
         crate::observability::observe_db("vector.insert", db_status(&result), started.elapsed());
         result?;
-        bump_namespace_watermark(&mut *tx, owner, namespace).await?;
-        sqlx::query("DELETE FROM memory_tombstones WHERE id = $1")
+        sqlx::query("DELETE FROM memory_tombstones WHERE memory_id = $1")
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -1307,8 +1285,7 @@ impl VectorDb {
             started.elapsed(),
         );
         result?;
-        bump_namespace_watermark(&self.pool, owner, namespace).await?;
-        sqlx::query("DELETE FROM memory_tombstones WHERE id = $1")
+        sqlx::query("DELETE FROM memory_tombstones WHERE memory_id = $1")
             .bind(id)
             .execute(&self.pool)
             .await
@@ -1479,30 +1456,21 @@ impl VectorDb {
     /// `POST /api/forget` — authed, owner-scoped.
     pub async fn delete_by_namespace(&self, owner: &str, namespace: &str) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to begin forget tx: {}", e)))?;
-        sqlx::query(
-            "INSERT INTO memory_tombstones (id, owner, namespace, blob_id, deleted_at)
-             SELECT id, owner, namespace, blob_id, NOW()
-             FROM vector_entries
-             WHERE owner = $1 AND namespace = $2
-             ON CONFLICT (id) DO UPDATE SET deleted_at = NOW()",
+        let result = sqlx::query(
+            "WITH removed AS (
+                DELETE FROM vector_entries
+                WHERE owner = $1 AND namespace = $2
+                RETURNING id, owner, namespace, blob_id
+             )
+             INSERT INTO memory_tombstones (memory_id, owner, namespace, blob_id)
+             SELECT id, owner, namespace, blob_id FROM removed
+             ON CONFLICT (memory_id) DO UPDATE SET deleted_at = NOW()",
         )
         .bind(owner)
         .bind(namespace)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to tombstone namespace: {}", e)))?;
-        bump_namespace_watermark(&mut *tx, owner, namespace).await?;
-        let result = sqlx::query("DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2")
-            .bind(owner)
-            .bind(namespace)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)));
+        .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)));
         crate::observability::observe_db(
             "vector.delete_by_namespace",
             db_status(&result),
@@ -1510,9 +1478,6 @@ impl VectorDb {
         );
         let result = result?;
         let rows = result.rows_affected();
-        tx.commit()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to commit forget tx: {}", e)))?;
         tracing::info!(
             "deleted {} entries for owner={}, ns={}",
             rows,
@@ -1533,35 +1498,20 @@ impl VectorDb {
         namespace: &str,
     ) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to begin blob-delete tx: {}", e)))?;
-        let tombstoned = sqlx::query(
-            "INSERT INTO memory_tombstones (id, owner, namespace, blob_id, deleted_at)
-             SELECT id, owner, namespace, blob_id, NOW()
-             FROM vector_entries
-             WHERE blob_id = $1 AND owner = $2 AND namespace = $3
-             ON CONFLICT (id) DO UPDATE SET deleted_at = NOW()",
-        )
-        .bind(blob_id)
-        .bind(owner)
-        .bind(namespace)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to tombstone blob: {}", e)))?;
-        if tombstoned.rows_affected() > 0 {
-            bump_namespace_watermark(&mut *tx, owner, namespace).await?;
-        }
         let result = sqlx::query(
-            "DELETE FROM vector_entries
-             WHERE blob_id = $1 AND owner = $2 AND namespace = $3",
+            "WITH removed AS (
+                DELETE FROM vector_entries
+                WHERE blob_id = $1 AND owner = $2 AND namespace = $3
+                RETURNING id, owner, namespace, blob_id
+             )
+             INSERT INTO memory_tombstones (memory_id, owner, namespace, blob_id)
+             SELECT id, owner, namespace, blob_id FROM removed
+             ON CONFLICT (memory_id) DO UPDATE SET deleted_at = NOW()",
         )
         .bind(blob_id)
         .bind(owner)
         .bind(namespace)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to delete vector by blob_id: {}", e)));
         crate::observability::observe_db(
@@ -1571,9 +1521,6 @@ impl VectorDb {
         );
         let result = result?;
         let rows = result.rows_affected();
-        tx.commit()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to commit blob-delete tx: {}", e)))?;
         if rows > 0 {
             tracing::info!(
                 "deleted expired blob from DB: blob_id={}, owner={}, namespace={}, rows={}",
@@ -1584,6 +1531,33 @@ impl VectorDb {
             );
         }
         Ok(rows)
+    }
+
+    /// Drop tombstones older than `retention`. Batched so a large backlog
+    /// cannot lock the table for one giant delete.
+    pub async fn sweep_expired_tombstones(&self, retention: std::time::Duration) -> Result<u64, AppError> {
+        let secs = retention.as_secs() as i64;
+        let mut total = 0u64;
+        loop {
+            let result = sqlx::query(
+                "DELETE FROM memory_tombstones
+                 WHERE memory_id IN (
+                    SELECT memory_id FROM memory_tombstones
+                    WHERE deleted_at < NOW() - make_interval(secs => $1)
+                    LIMIT 1000
+                 )",
+            )
+            .bind(secs)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to sweep tombstones: {}", e)))?;
+            let n = result.rows_affected();
+            total += n;
+            if n < 1000 {
+                break;
+            }
+        }
+        Ok(total)
     }
 
     // ============================================================

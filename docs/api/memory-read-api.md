@@ -210,15 +210,15 @@ next poll if any of its memories were **created or updated** after that
 watermark, however early its name sorts. Namespaces untouched since the
 watermark are not re-sent.
 
-Hard deletes now advance a stored per-namespace watermark and write a
-`memory_tombstones` row, so incremental `/namespaces` polling resurfaces the
-namespace (with a smaller `memory_count`) and `/memories` returns
-`status: "deleted"` for the removed id. `snapshot_version` still only bumps
-when the wire format changes, not when data is deleted.
-
-Console should still run a periodic full (cursor-less) reconcile as a
-safety net. Size that interval around a 5 to 6 hour SLA if you only poll
-incrementally; a 5-minute `/namespaces` poll already sees the watermark bump.
+Hard deletes write a row to `memory_tombstones` and remove the live
+`vector_entries` row in one statement. Incremental `/namespaces` computes the
+watermark as GREATEST(live MAX(updated_at), tombstone MAX(deleted_at)), so a
+namespace whose last memory was deleted still resurfaces with a smaller
+`memory_count`. Incremental `/memories` never puts tombstones in `memories[]`.
+They arrive in the additive `deleted` array (`memory_id`, `namespace_id`,
+`deleted_at`). Old Console clients ignore that key. Tombstones are kept for
+30 days; a cursor older than that returns `must_resync: true`.
+`snapshot_version` stays 2.
 
 Response:
 ```json
@@ -234,7 +234,7 @@ Response:
   ],
   "next_cursor": "eyJ1cGRhdGVkX2F0IjouLi4sIm5hbWVzcGFjZSI6IndvcmsifQ",
   "has_more": false,
-  "snapshot_version": 3
+  "snapshot_version": 2
 }
 ```
 
@@ -265,9 +265,11 @@ Response:
       "importance": 0.5
     }
   ],
+  "deleted": [],
+  "must_resync": false,
   "next_cursor": "eyJ1cGRhdGVkX2F0IjouLi59",
   "has_more": false,
-  "snapshot_version": 3
+  "snapshot_version": 2
 }
 ```
 
@@ -329,7 +331,7 @@ Response:
   "agents": [
     { "label": "cli", "sui_address": "0xdelegate1" }
   ],
-  "snapshot_version": 3
+  "snapshot_version": 2
 }
 ```
 
