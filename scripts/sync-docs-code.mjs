@@ -380,7 +380,7 @@ function rewrite(file, text) {
 
 // ── Run ────────────────────────────────────────────────────────────
 
-let docsExists = true;
+let docsExists;
 try {
     docsExists = statSync(DOCS_DIR).isDirectory();
 } catch {
