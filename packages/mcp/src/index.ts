@@ -104,8 +104,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         return;
     }
     if (args.logout) {
-        clearCreds();
-        note(`Credentials removed (${credsPath()}).`);
+        const cleared = clearCreds();
+        if (!cleared.removedPath) {
+            note(`No credentials to remove (${credsPath()}).`);
+            return;
+        }
+        note(`Credentials removed (${cleared.removedPath}).`);
+        if (cleared.fallbackPath) {
+            note(
+                `Still signed in elsewhere: ${cleared.fallbackPath} remains and is what ` +
+                    `the next run loads, under a possibly different account. Remove it too ` +
+                    `to sign out everywhere.`,
+            );
+        }
         return;
     }
 

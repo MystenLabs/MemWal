@@ -225,3 +225,89 @@ test("a first sign-in has nothing to warn about", async (t) => {
 
     assert.equal(auth.formatPendingSignInWarning(), null);
 });
+
+/**
+ * Resolution walks up from the working directory (review on PR #701).
+ *
+ * Checking only `process.cwd()` meant `cd src` — or an MCP host launched with
+ * its cwd below the project root — missed the project file and silently used
+ * the global account, which is GH #628 one directory deeper. The walk is
+ * bounded at the project root so it cannot climb into shared parents.
+ */
+
+/** Move into a directory beneath `root`, creating it first. Restoring cwd is
+ * left to `sandbox`, whose `t.after` runs first and would delete these roots
+ * out from under a second chdir. */
+function chdirBelow(root, ...segments) {
+    const dir = join(root, ...segments);
+    mkdirSync(dir, { recursive: true });
+    process.chdir(dir);
+    return dir;
+}
+
+test("a subdirectory of the project resolves to the project's credentials", async (t) => {
+    const { auth, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+    chdirBelow(cwd, "src", "nested");
+
+    assert.equal(
+        auth.credsPath(),
+        join(cwd, ".memwal", "credentials.json"),
+        "running from a subfolder must still find the project file",
+    );
+    assert.equal(auth.loadCreds()?.accountId, PROJECT_ACCOUNT);
+});
+
+test("the walk stops at the project root and does not climb into shared parents", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+    // `cwd/.memwal` now stands in for a stray file in a shared parent — a home
+    // directory, /tmp, a workspace root holding unrelated checkouts. A repo
+    // below it must not adopt credentials from outside itself.
+    const repo = join(cwd, "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    chdirBelow(repo, "src");
+
+    assert.equal(
+        auth.credsPath(),
+        join(home, ".memwal", "credentials.json"),
+        "a file above the project root is out of scope; fall back to global",
+    );
+    assert.equal(auth.loadCreds()?.accountId, GLOBAL_ACCOUNT);
+});
+
+test("clearCreds reports the file it actually removed", async (t) => {
+    const { auth, home } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+    const path = join(home, ".memwal", "credentials.json");
+
+    const result = auth.clearCreds();
+
+    assert.equal(result.removedPath, path);
+    assert.equal(result.fallbackPath, undefined, "nothing survives a complete sign-out");
+    assert.equal(existsSync(path), false);
+});
+
+test("removing a project file reports the global one that takes over", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+
+    const result = auth.clearCreds();
+
+    // Without this the caller names the global file as "removed" and the user
+    // is silently switched to another account on the next run.
+    assert.equal(result.removedPath, join(cwd, ".memwal", "credentials.json"));
+    assert.equal(result.fallbackPath, join(home, ".memwal", "credentials.json"));
+    assert.equal(auth.loadCreds()?.accountId, GLOBAL_ACCOUNT, "the global file is untouched");
+});
+
+test("clearCreds with nothing to remove reports nothing", async (t) => {
+    const { auth } = await sandbox(t, {});
+
+    assert.deepEqual(auth.clearCreds(), {});
+});

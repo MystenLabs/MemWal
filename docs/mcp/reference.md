@@ -125,10 +125,12 @@ Both session tools (`memwal_login`, `memwal_logout`) are intercepted locally by 
 
 Credentials resolve from two places, in order:
 
-1. `.memwal/credentials.json` in the **current working directory**
+1. `.memwal/credentials.json` in the **working directory or a parent of it**
 2. `~/.memwal/credentials.json` (global, per machine)
 
-The first one that exists wins, the way `.npmrc` and `.git/config` resolve. Whichever file is chosen is the one read, written, and deleted for that run.
+The search starts in the working directory and walks up, the way `.npmrc` and `.git/config` resolve, so a command run from a subfolder still picks up that project's credentials. The first `.memwal/credentials.json` it finds wins.
+
+The walk stops at your project root (the directory holding `.git`), at your home directory, or at the filesystem root, whichever comes first. That bound keeps one project from picking up a credentials file belonging to a parent folder that holds unrelated checkouts. If nothing is found inside it, the global file is used. Whichever file is chosen is the one read, written, and deleted for that run.
 
 ### Working on several accounts
 
@@ -143,7 +145,7 @@ memwal-mcp login          # writes to the global file the first time
 cp ~/.memwal/credentials.json .memwal/credentials.json
 ```
 
-From then on, runs started from that directory use the project's credentials, and runs started anywhere else keep using the global one.
+From then on, runs started from that directory or anywhere beneath it use the project's credentials, and runs started outside it keep using the global one.
 
 <Warning>
 `.memwal/credentials.json` holds a delegate private key. Add `.memwal/` to your `.gitignore`.
@@ -151,7 +153,7 @@ From then on, runs started from that directory use the project's credentials, an
 
 ### Migration
 
-Nothing to do. Creating a project-local file is the opt-in — a machine without one behaves exactly as it did before, and the global file remains the fallback indefinitely.
+Nothing to do. Creating a project-local file is the opt-in, so a machine without one behaves exactly as it did before, and the global file remains the fallback indefinitely.
 
 ### Replacing an account
 
@@ -224,7 +226,7 @@ Example, pin every memory call to a `work` namespace:
 
 ## Credential file
 
-The stdio package stores credentials in whichever file [Credential locations](#credential-locations) resolves to — a project-local `.memwal/credentials.json`, or the global `~/.memwal/credentials.json`.
+The stdio package stores credentials in whichever file [Credential locations](#credential-locations) resolves to: a project-local `.memwal/credentials.json`, or the global `~/.memwal/credentials.json`.
 
 The file includes:
 

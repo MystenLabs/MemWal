@@ -53,27 +53,61 @@ function globalCredsPath(): string {
     return join(homedir(), ".memwal", CREDS_FILE);
 }
 
-/** Working-directory location, checked first. */
-function projectCredsPath(): string {
-    return join(process.cwd(), ".memwal", CREDS_FILE);
+/**
+ * Nearest project-local location: the working directory, then each ancestor.
+ *
+ * Walking up is what makes the `.npmrc` / `.git/config` comparison true, and it
+ * is load-bearing rather than cosmetic. A shell that has `cd src`, or an MCP
+ * host launched with its cwd somewhere below the project root, would otherwise
+ * miss the project file and silently fall back to the global account — the
+ * exact swap GH #628 is about, just one directory deeper.
+ *
+ * The walk is bounded at the project root, the home directory, or the
+ * filesystem root, whichever comes first. Returns null when nothing inside
+ * those bounds carries a credentials file.
+ */
+function projectCredsPath(): string | null {
+    const home = homedir();
+    const global = globalCredsPath();
+    let dir = process.cwd();
+    for (;;) {
+        // The home directory is where the *global* file lives. Matching it here
+        // would relabel it project-local and invert the precedence this whole
+        // function exists to establish.
+        if (dir === home) return null;
+
+        const candidate = join(dir, ".memwal", CREDS_FILE);
+        if (candidate !== global && existsSync(candidate)) return candidate;
+
+        // Stop at the project root. `.git/config` resolution ends here too, and
+        // bounding the walk is what keeps it from climbing out of the project
+        // into shared parents — including the real home directory, which is
+        // reachable from a working directory that is not underneath it (any
+        // test that overrides HOME, for one).
+        if (existsSync(join(dir, ".git"))) return null;
+
+        const parent = dirname(dir);
+        if (parent === dir) return null; // filesystem root
+        dir = parent;
+    }
 }
 
 /**
  * Which credentials file this process should read and write.
  *
- * A project-local `.memwal/credentials.json` wins over the global one, the way
- * `.npmrc` and `.git/config` resolve. Signing in from one project otherwise
- * repoints every other project on the machine at a different account and
- * delegate key, silently — memories then land on the wrong account, on
- * immutable storage, with no delete path (GH #628).
+ * The nearest project-local `.memwal/credentials.json` at or above the working
+ * directory wins over the global one, the way `.npmrc` and `.git/config`
+ * resolve. Signing in from one project otherwise repoints every other project
+ * on the machine at a different account and delegate key, silently — memories
+ * then land on the wrong account, on immutable storage, with no delete path
+ * (GH #628).
  *
  * Presence-based on purpose: creating the local file is the opt-in, so this is
  * purely additive. Resolved per call rather than at module load, because the
  * working directory is not knowable at import time.
  */
 export function credsPath(): string {
-    const project = projectCredsPath();
-    return existsSync(project) ? project : globalCredsPath();
+    return projectCredsPath() ?? globalCredsPath();
 }
 
 /** Load credentials from disk. Returns null if missing or malformed. */
@@ -194,16 +228,40 @@ function backupIfReplacingAnotherAccount(
     }
 }
 
-/** Delete credentials. No-op if the file does not exist. */
-export function clearCreds(): void {
+/** What `clearCreds` did. Reported rather than printed, for the same reason
+ * `saveCreds` reports: persistence should not own user-facing output. */
+export interface ClearCredsResult {
+    /** File actually deleted. Absent when there was nothing to remove, or the
+     * unlink failed. */
+    removedPath?: string;
+    /** Credentials that take over from the next run, because removing the file
+     * above them re-exposed them. Absent when signing out was complete. */
+    fallbackPath?: string;
+}
+
+/**
+ * Delete the credentials this process resolves to. No-op if none exist.
+ *
+ * Resolution happens *before* the unlink on purpose: once the file is gone
+ * `credsPath()` reports the next one down the chain, so a caller that asked
+ * afterwards would name a file it never touched. That same survivor is what
+ * the next run loads, so removing a project file while a global one exists is
+ * not a full sign-out — `fallbackPath` is how the caller can say so instead of
+ * leaving the user to discover a different account later (GH #628).
+ */
+export function clearCreds(): ClearCredsResult {
     const path = credsPath();
-    if (existsSync(path)) {
-        try {
-            unlinkSync(path);
-        } catch {
-            /* swallow */
-        }
+    if (!existsSync(path)) return {};
+    try {
+        unlinkSync(path);
+    } catch {
+        // Nothing was removed; claiming otherwise would be worse than silence.
+        return {};
     }
+    const survivor = credsPath();
+    return existsSync(survivor) && survivor !== path
+        ? { removedPath: path, fallbackPath: survivor }
+        : { removedPath: path };
 }
 
 function isValid(obj: unknown): obj is MemWalCredentials {
