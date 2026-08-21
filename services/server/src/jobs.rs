@@ -196,6 +196,18 @@ async fn update_remember_job_after_wallet_error(
         "running"
     };
 
+    // Terminal means no later attempt will ever insert the row, so the bytes
+    // this job reserved at admission must go back to the owner now rather than
+    // waiting out the TTL. Retryable errors keep the reservation: the next
+    // attempt still intends to write those bytes, and releasing early would let
+    // a concurrent burst overcommit while the retry is in flight.
+    //
+    // Safe to run even when a concurrent attempt already won and released:
+    // release is a delete by id, so a second call is a no-op.
+    if error.aborts_retries() {
+        crate::storage::db::release_storage_reservations_with_pool(pool, &[jid.to_string()]).await;
+    }
+
     // Guard against downgrading a row a concurrent attempt already finished.
     // Every pre-existing caller only runs while holding the per-job upload
     // lock (JobUploadLock), so it was never the current status writer's own
@@ -841,6 +853,12 @@ async fn insert_vector_and_mark_remember_done(
         .bind(jid)
         .execute(state.db.pool())
         .await;
+
+        // Release only now that the vector row is committed. The row carries
+        // the bytes from here on, so holding the reservation would double count
+        // them; releasing before the insert would instead open a window where
+        // neither counts and a concurrent burst could slip past the quota.
+        crate::rate_limit::release_storage_quota_one(state, jid).await;
     }
 
     tracing::info!(
