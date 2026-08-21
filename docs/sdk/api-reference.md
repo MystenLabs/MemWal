@@ -55,7 +55,7 @@ For the full config surface, see [Configuration](/reference/configuration).
 
 ## `MemWal` Methods
 
-These methods are available on any client returned by `MemWal.create()`.
+You can call these methods on any client that `MemWal.create()` returns.
 
 ### `remember(text, namespace?): Promise<RememberAcceptedResult>`
 

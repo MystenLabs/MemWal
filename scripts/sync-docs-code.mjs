@@ -77,7 +77,23 @@ const LANG_BY_EXT = new Map([
 // a non-exported helper can still be imported deliberately.
 const DECL_KEYWORDS = ["interface", "type", "class", "enum", "function", "const", "let", "var"];
 
-const checkOnly = process.argv.slice(2).includes("--check");
+const KNOWN_FLAGS = new Set(["--check"]);
+
+const argv = process.argv.slice(2);
+for (const arg of argv) {
+    if (!KNOWN_FLAGS.has(arg)) {
+        // Ignoring an unknown flag would turn a typo'd `--chekc` into a silent
+        // rewrite of every imported block, which is the opposite of what the
+        // caller asked for.
+        console.error(
+            `Unknown argument '${arg}'. This script takes no positional arguments; ` +
+                `known flags: ${[...KNOWN_FLAGS].join(", ")}.`,
+        );
+        process.exit(2);
+    }
+}
+
+const checkOnly = argv.includes("--check");
 
 // ── Reading source ─────────────────────────────────────────────────
 
