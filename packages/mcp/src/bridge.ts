@@ -154,6 +154,13 @@ const LOCAL_TOOL_NAMES = new Set(LOCAL_TOOL_DEFINITIONS.map((t) => t.name));
 const SIGNED_OUT_TEXT =
     "❌ Signed out of Walrus Memory. Memory tools are unavailable on this connection until you call `memwal_login` again.";
 
+/** `failRequest` options for every signed-out refusal, so a request refused at
+ * logout time and one refused on arrival afterwards read identically. */
+const SIGNED_OUT_FAILURE = {
+    toolText: SIGNED_OUT_TEXT,
+    errorMessage: SIGNED_OUT_TEXT,
+} as const;
+
 /** The `tools/list` we serve LOCALLY at cold start: the memory tools (from the
  * same source as auth-required mode) plus the locally-handled login/logout
  * tools. We strip any locally-served name from the imported list first —
@@ -682,7 +689,7 @@ function handleLocalLogout(): { text: string; isError: boolean } {
  * relayer's response on the way back to the client.
  */
 export async function runBridge(
-    creds: MemWalCredentials,
+    initialCreds: MemWalCredentials,
     config: BridgeConfig,
     /** Requests the auth-required server already read off stdin before it
      * detected fresh credentials and handed control here (e.g. the
@@ -691,11 +698,11 @@ export async function runBridge(
      * mode switch — this is what removes the historical "second restart". */
     pendingLines: string[] = [],
 ): Promise<void> {
-    note(`Connecting to ${creds.relayerUrl}...`);
+    note(`Connecting to ${initialCreds.relayerUrl}...`);
     log.info("bridge.connecting", {
-        relayer: creds.relayerUrl,
-        accountId: creds.accountId,
-        delegate: creds.delegateAddress,
+        relayer: initialCreds.relayerUrl,
+        accountId: initialCreds.accountId,
+        delegate: initialCreds.delegateAddress,
     });
 
     // Live handle to the current SSE stream — replaced whenever we reconnect.
@@ -705,6 +712,13 @@ export async function runBridge(
     // the background; anything that must reach the relayer (`tools/call`) is
     // buffered in `pendingForward` until `sse` is live, then flushed.
     let sse: SseHandshakeResult | null = null;
+
+    /** The delegate key this bridge is currently authorized to act with.
+     * Nulled by `invalidateSession()` so signing out drops the key itself
+     * rather than only setting a flag that every forwarding path has to
+     * remember to check — after logout there is simply nothing left to sign
+     * with. `adoptCredentials` republishes it on the next login. */
+    let creds: MemWalCredentials | null = initialCreds;
 
     let stdinClosed = false;
     /** Set by `memwal_logout`. Unlike `stdinClosed` the process stays up and
@@ -886,6 +900,10 @@ export async function runBridge(
                 while (!stdinClosed && !loggedOut) {
                     const openingGeneration = credentialGeneration;
                     const openingCreds = creds;
+                    // Signed out between the guard above and here: the key is
+                    // gone, so there is nothing to authorize a new session
+                    // with. Belt-and-braces against `loggedOut` alone.
+                    if (!openingCreds) break;
                     const candidate = await openSseStream(
                         openingCreds.relayerUrl,
                         openingCreds,
@@ -932,6 +950,16 @@ export async function runBridge(
                     // and the SSE pump may delete entries concurrently as replies
                     // start arriving on the new session.
                     for (const [id, entry] of Array.from(inFlight.entries())) {
+                        // Replay awaits a POST per entry, so a logout can land
+                        // partway through this loop. The snapshot and
+                        // `openingCreds` both predate it, so without this the
+                        // remaining entries would still go out under the key the
+                        // user just deleted — `invalidateSession` clearing
+                        // `inFlight` cannot stop a snapshot already taken.
+                        if (loggedOut || openingGeneration !== credentialGeneration) {
+                            log.info("bridge.replay_halted_signed_out", { id });
+                            break;
+                        }
                         const msg = entry.msg;
                         try {
                             // A replayed `initialize` produces a fresh upstream
@@ -992,7 +1020,10 @@ export async function runBridge(
     }
 
     async function adoptCredentials(nextCreds: MemWalCredentials): Promise<void> {
-        const previousAccountId = creds.accountId;
+        // `null` after a logout — treated as an account change, which is the
+        // safe direction: it purges rather than replays. (`invalidateSession`
+        // already emptied both queues, so the purge is a no-op there.)
+        const previousAccountId = creds?.accountId ?? null;
         const accountChanged = previousAccountId !== nextCreds.accountId;
 
         // Never replay an operation authorized for account A against account B.
@@ -1098,15 +1129,23 @@ export async function runBridge(
             /* already dead */
         }
         sse = null;
+        // Drop the delegate key itself, not just the flag. Revocation that
+        // rests only on `loggedOut` is one missed check away from forwarding
+        // under the key the user deleted; with `creds` null there is nothing
+        // left to sign with and every forwarding path fails closed instead.
+        creds = null;
+        // Bump the generation so any handshake or replay that captured the old
+        // key before this point discards its work on its next check, exactly as
+        // it would for a mid-flight key rotation.
+        credentialGeneration += 1;
         // Answer everything still outstanding rather than stranding it: these
         // were authorized under the old key and must not be replayed later.
-        const signedOut = { toolText: SIGNED_OUT_TEXT, errorMessage: SIGNED_OUT_TEXT };
         for (const [, entry] of Array.from(inFlight.entries())) {
-            failRequest(entry.msg, "signed out", signedOut);
+            failRequest(entry.msg, "signed out", SIGNED_OUT_FAILURE);
         }
         inFlight.clear();
         for (const msg of pendingForward.splice(0, pendingForward.length)) {
-            failRequest(msg, "signed out", signedOut);
+            failRequest(msg, "signed out", SIGNED_OUT_FAILURE);
         }
         log.info("bridge.session_invalidated", { reason: "logout" });
     }
@@ -1139,8 +1178,10 @@ export async function runBridge(
                     // session is published (or stdin closes).
                     // Cast for the same reason as `stream` above: every
                     // assignment to `logoutPark` happens in a sibling closure,
-                    // so TS narrows it to `null` here.
-                    if (loggedOut && !stdinClosed) {
+                    // so TS narrows it to `null` here. No `!stdinClosed` guard:
+                    // the `while` above already established it and nothing is
+                    // awaited in between, so it cannot have changed.
+                    if (loggedOut) {
                         await (logoutPark as Promise<void> | null);
                         continue;
                     }
@@ -1254,6 +1295,11 @@ export async function runBridge(
                         id: msg.id,
                         result: buildLocalInitializeResult(msg.params),
                     });
+                    // Signed out: the local reply is the whole answer. We will
+                    // not forward upstream, so do not arm a suppression that no
+                    // reply can ever consume — a leaked arm would swallow the
+                    // real reply if the client later reuses this id.
+                    if (loggedOut) return;
                     // Expect exactly one upstream reply to drop for this forward.
                     expectSuppressedReply(msg.id);
                     // Fall through: forward/buffer the initialize upstream too.
@@ -1319,20 +1365,23 @@ export async function runBridge(
                         });
                         return;
                     }
-                    // Signed out: refuse every remaining tool locally. `login`
-                    // and `logout` returned above, so anything reaching here
-                    // needs the delegate key the user deleted.
-                    if (loggedOut) {
-                        writeStdoutMessage({
-                            jsonrpc: "2.0",
-                            id: msg.id,
-                            result: {
-                                content: [{ type: "text", text: SIGNED_OUT_TEXT }],
-                                isError: true,
-                            },
-                        });
-                        return;
-                    }
+                }
+
+                // Signed out: refuse EVERY remaining request locally, not just
+                // memory tool calls. `login`/`logout` returned above, and
+                // `initialize`/`tools/list` are answered locally further up, so
+                // anything still here would need the delegate key the user
+                // deleted. Falling through instead would park it in
+                // `pendingForward` — `sse` is null and `reconnect()` no-ops
+                // while signed out — where it would either hang the client until
+                // a login that may never come, or be flushed afterwards under a
+                // NEW key the client never authorized it against. `failRequest`
+                // picks the right shape per method: tool-result text for
+                // `tools/call`, a JSON-RPC error for `ping` and friends, and
+                // nothing at all for notifications.
+                if (loggedOut) {
+                    failRequest(msg, "signed out", SIGNED_OUT_FAILURE);
+                    return;
                 }
 
                 // Fill in the configured default namespace for memory tool
@@ -1377,6 +1426,12 @@ export async function runBridge(
                 if (activeCredentialGeneration !== credentialGeneration) {
                     await reconnect("post-credential-generation-mismatch", true);
                 }
+                // A logout can land while the two awaits above are parked. The
+                // key is gone by then, so answer locally instead of posting.
+                if (loggedOut || !creds) {
+                    failRequest(msg, "signed out", SIGNED_OUT_FAILURE);
+                    return;
+                }
                 const status = await postMessage(sse.postUrl, msg, creds);
                 if (status === 404) {
                     log.warn("bridge.session_stale", { sessionUrl: sse.postUrl });
@@ -1408,7 +1463,9 @@ export async function runBridge(
                     // into inFlight but not delivered) is closed out below.
                     break;
                 }
-                if (!sse) break; // lost the session; reconnect replays inFlight
+                // `invalidateSession` nulls both; either one means this queue
+                // must not be drained onto the relayer.
+                if (!sse || !creds) break; // lost the session; reconnect replays inFlight
                 const msg = pendingForward.shift()!;
                 try {
                     const status = await postMessage(sse.postUrl, msg, creds);

@@ -539,3 +539,87 @@ test("logging out mid-handshake does not publish the in-flight session", async (
         "the session that completed after logout must be aborted, not published",
     );
 });
+
+/**
+ * Review follow-up (PR #699): the signed-out refusal originally sat INSIDE the
+ * `msg.method === "tools/call"` branch, so it only covered memory tool calls.
+ * Any other id-bearing request arriving after logout fell through to the
+ * forwarding path, where `sse` is null and `reconnect()` no-ops while signed
+ * out — so it landed in `pendingForward` with nothing left to drain it.
+ *
+ * The baseline recall below is load-bearing, not decoration. It forces the
+ * initial `connectInBackground` to succeed and RETURN. Without it that loop is
+ * often still in flight when logout lands, hits its own `loggedOut` break, and
+ * drains `pendingForward` on the way out — which masks the bug behind a
+ * misleading "relayer unavailable: connection not established before shutdown"
+ * reply. Once the connect has returned, nothing drains that queue and the
+ * request is never answered at all.
+ *
+ * `ping` is the cheap case to prove it with: a plain MCP request with an id,
+ * not intercepted locally, that a correct bridge owes an answer.
+ */
+test("a non-tool request after logout is answered locally instead of hanging", async (t) => {
+    const mock = await startMockRelayer();
+    const home = mkdtempSync(join(tmpdir(), "memwal-logout-nontool-"));
+    const credsPath = join(home, ".memwal", "credentials.json");
+    mkdirSync(dirname(credsPath), { recursive: true });
+    writeFileSync(credsPath, JSON.stringify(makeCreds(mock.base)), { mode: 0o600 });
+
+    t.after(() => {
+        mock.server.close();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    const { send, waitFor } = startBridge(t, mock, home);
+
+    send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    await waitFor((m) => m.id === 1 && m.result, 10_000);
+
+    // Drives the initial connect to completion — see the note above.
+    send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "memwal_recall", arguments: { query: "before logout" } },
+    });
+    await waitFor((m) => m.id === 2, 10_000);
+    assert.equal(mock.getRecallCount(), 1, "baseline recall should reach the relayer");
+
+    send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "memwal_logout", arguments: {} },
+    });
+    const logout = await waitFor((m) => m.id === 3, 10_000);
+    assert.notEqual(logout.result?.isError, true, "logout itself should succeed");
+
+    // Short timeout on purpose: the bug is an unanswered request, so a generous
+    // window would only make the failure slow instead of clear.
+    send({ jsonrpc: "2.0", id: 4, method: "ping" });
+    const pong = await waitFor((m) => m.id === 4, 5_000);
+
+    // Shape matters as much as the fact of a reply. `ping` is not a tool call,
+    // so the refusal must be a JSON-RPC error — answering it with a tool-result
+    // envelope would be a protocol violation the client cannot interpret.
+    assert.ok(pong.error, "a non-tool request must be refused with a JSON-RPC error");
+    assert.equal(pong.result, undefined, "must not answer `ping` with a tool result");
+    assert.match(pong.error.message, /Signed out/i);
+
+    // `tools/list` is a separate path: it is answered locally whenever `sse` is
+    // null, which logout makes true — so it must still work, and must still
+    // advertise `memwal_login` as the way back in.
+    send({ jsonrpc: "2.0", id: 5, method: "tools/list", params: {} });
+    const list = await waitFor((m) => m.id === 5, 5_000);
+    assert.ok(list.result?.tools, "tools/list must still be served while signed out");
+    assert.ok(
+        list.result.tools.some((tool) => tool.name === "memwal_login"),
+        "the signed-out tool list must still offer the way back in",
+    );
+
+    assert.equal(
+        mock.getRecallCount(),
+        1,
+        "nothing after logout should have reached the relayer",
+    );
+});
