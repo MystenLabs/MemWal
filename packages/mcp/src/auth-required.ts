@@ -174,7 +174,17 @@ export const SIGNED_OUT_TOOL_DEFINITIONS = buildToolDefinitions(false);
 /** Maximum time we'll keep the login HTTP listener bound after the user
  * clicks `memwal_login`. The user paces themselves — wallet popups, ledger
  * sign, MetaMask review — so we give 5 min before the port closes. */
-const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
+
+/** Override via `MEMWAL_MCP_LOGIN_TIMEOUT_MS`, mostly for tests — waiting the
+ * full 5 min to observe a failed sign-in is not a testable deadline. */
+function resolveLoginTimeoutMs(): number {
+    const raw = process.env.MEMWAL_MCP_LOGIN_TIMEOUT_MS;
+    if (!raw) return DEFAULT_LOGIN_BG_TIMEOUT_MS;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 100) return DEFAULT_LOGIN_BG_TIMEOUT_MS;
+    return n;
+}
 
 /** How long to wait for the local listener to bind + emit its URL before we
  * give up and return an error. Should be near-instant; 5s is paranoia. */
@@ -196,6 +206,27 @@ const LOGIN_INSTRUCTION = [
     "Either path opens a browser tab — click **Connect Sui Wallet** and approve the on-chain",
     "`add_delegate_key` transaction. Credentials land at `~/.memwal/credentials.json`.",
 ].join("\n");
+
+/** Set when a background `memwal_login` ends without credentials. The tool call
+ * already returned the URL by then, so this is the only place left to say so. */
+let lastLoginFailure: string | null = null;
+
+/** Prefix explaining that a sign-in was attempted and did not complete. */
+function loginFailureNotice(): string {
+    if (!lastLoginFailure) return "";
+    return [
+        "⚠️ A sign-in was started but never completed, so there are still no credentials.",
+        "",
+        `Reason: ${lastLoginFailure}`,
+        "",
+        "The delegate key may already be registered on your account — the browser step can",
+        "succeed and still fail to hand the key back. Signing in again is safe, and the",
+        "second attempt usually works. Open the new link promptly; it expires in 5 minutes.",
+        "",
+        "---",
+        "",
+    ].join("\n");
+}
 
 function writeStdoutMessage(msg: RpcMessage): void {
     process.stdout.write(JSON.stringify(msg) + "\n");
@@ -245,7 +276,7 @@ function sendLogMessage(level: "info" | "warning" | "error", text: string): void
  *     reporting to the user, leaving them stuck.
  *   - `notifications/message` is filtered out by some clients.
  *
- * The login HTTP listener stays alive for LOGIN_BG_TIMEOUT_MS in the
+ * The login HTTP listener stays alive for resolveLoginTimeoutMs() in the
  * background. Once the user clicks the link and approves the wallet, the
  * callback writes credentials to ~/.memwal/credentials.json. The user then
  * issues any other memwal_* tool to verify — which now succeeds because
@@ -270,7 +301,7 @@ async function handleLoginToolCall(
             relayerUrl: config.relayerUrl,
             webUrl: config.webUrl,
             label: config.label,
-            timeoutMs: LOGIN_BG_TIMEOUT_MS,
+            timeoutMs: resolveLoginTimeoutMs(),
             openBrowser: false,
             onUrl: (url) => {
                 connectUrl = url;
@@ -281,6 +312,7 @@ async function handleLoginToolCall(
             },
         })
             .then((creds) => {
+                lastLoginFailure = null;
                 log.info("memwal_login.bg.success", {
                     accountId: creds.accountId,
                     delegateAddress: creds.delegateAddress,
@@ -288,7 +320,11 @@ async function handleLoginToolCall(
             })
             .catch((err) => {
                 const msg = err instanceof Error ? err.message : String(err);
+                lastLoginFailure = msg;
                 log.warn("memwal_login.bg.failed", { msg });
+                // Claude Code drops these; Cursor shows them. The next tool
+                // call carries the same news for clients that do not.
+                sendLogMessage("warning", `Walrus Memory sign-in did not complete: ${msg}`);
             });
     });
 
@@ -454,13 +490,18 @@ function handleAuthLine(
         // no client restart (the historical "second reboot"). Otherwise nudge
         // the agent to sign in first.
         const creds = loadCreds();
-        if (creds) return { creds };
+        if (creds) {
+            lastLoginFailure = null;
+            return { creds };
+        }
 
         writeStdoutMessage({
             jsonrpc: "2.0",
             id,
             result: {
-                content: [{ type: "text", text: LOGIN_INSTRUCTION }],
+                content: [
+                    { type: "text", text: `${loginFailureNotice()}${LOGIN_INSTRUCTION}` },
+                ],
                 isError: true,
             },
         });

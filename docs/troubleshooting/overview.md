@@ -76,6 +76,23 @@ This section covers problems that appear before the memory tools work.
 
 **Fix:** Quit the MCP client fully, then start it again. If you registered the server with `claude mcp add`, run `claude mcp list` to confirm `memwal` is registered before you restart.
 
+### Sign-in succeeds but credentials are not saved
+
+**Symptom:** The sign-in page confirms that your delegate key was registered, but says it could not hand the credentials back to your computer. The agent stays logged out and `~/.memwal/credentials.json` is not written.
+
+**Cause:** Signing in has two halves. Your browser registers a delegate key on chain, then sends that key back to a short-lived listener the MCP package runs on `127.0.0.1`. The first half succeeded and does not need repeating; the second is what failed. The usual reasons:
+
+- The sign-in URL sat unopened for more than five minutes, so the listener timed out and stopped.
+- The MCP client restarted, or the login command was cancelled, while the browser tab was still open.
+- A second `memwal_login` was started in the meantime, so the listener now belongs to a different attempt.
+- Local software such as a firewall, a VPN client, or a browser extension blocks requests from a website to `127.0.0.1`.
+
+**Fix:** Call `memwal_login` again and open the new URL promptly. A second attempt usually works, because the most common cause is a listener that had already timed out. Open the URL within five minutes, and do not run more than one sign-in at a time.
+
+The delegate key from the failed attempt stays registered on your account and is unused. It is harmless, but remove it from the Delegate keys panel in the dashboard so the list stays readable.
+
+If it keeps failing, confirm that nothing blocks localhost traffic, then run `npx -y @mysten-incubation/memwal-mcp login --prod` directly in a terminal. A terminal sign-in prints the failure reason instead of leaving it in the MCP client's logs.
+
 ## Saving and timeouts
 
 This section covers slow or timed-out writes.

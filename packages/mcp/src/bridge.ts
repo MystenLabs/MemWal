@@ -564,8 +564,18 @@ async function handleLocalLogin(
                 });
             })
             .catch((err) => {
-                log.warn("memwal_login.bridge.failed", {
-                    msg: err instanceof Error ? err.message : String(err),
+                const msg = err instanceof Error ? err.message : String(err);
+                log.warn("memwal_login.bridge.failed", { msg });
+                // The tool call already returned the URL, so this is the only
+                // channel left. Swallowed by some clients, shown by others.
+                writeStdoutMessage({
+                    jsonrpc: "2.0",
+                    method: "notifications/message",
+                    params: {
+                        level: "warning",
+                        logger: "memwal-mcp",
+                        data: `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are unchanged; call memwal_login again to retry.`,
+                    },
                 });
             });
     });
