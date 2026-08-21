@@ -1,4 +1,4 @@
-name: "[QA] Add automated tests to CI (unit + integration + e2e) for Walrus Memory"
+name: Tests
 
 on:
   pull_request:
@@ -6,6 +6,27 @@ on:
   push:
     branches: [main, staging, dev]
   workflow_dispatch:
+    inputs:
+      target_environment:
+        description: Benchmark environment to run the authenticated SDK e2e suite against
+        required: false
+        type: choice
+        default: dev
+        options:
+          - dev
+          - staging
+          - production
+  schedule:
+    # Catches relayer drift with no code change to trigger it. Only sdk-e2e
+    # runs on this trigger — every other job carries
+    # `if: github.event_name != 'schedule'` so a weekly run does not spin up
+    # Playwright, cargo and the docker services for nothing.
+    #
+    # Offset from benchmark-live.yml (0 9 * * 1) and test-python-sdk.yml
+    # (17 9 * * 1) so the three suites do not write through the shared bench
+    # account at once. The concurrency group below now enforces that too;
+    # the offsets remain as a second line of defence.
+    - cron: '47 9 * * 1'
 
 concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
@@ -17,6 +38,7 @@ permissions:
 jobs:
   compatibility-contract:
     name: Compatibility / Contract metadata
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -34,6 +56,7 @@ jobs:
 
   docs-code-sync:
     name: Docs / Code references match packages
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -57,6 +80,7 @@ jobs:
 
   docs-freshness:
     name: Docs / Freshness
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -74,6 +98,7 @@ jobs:
 
   mcp-tests:
     name: MCP / Integration (login handoff)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -100,8 +125,223 @@ jobs:
       - name: MCP integration tests
         run: pnpm --filter @mysten-incubation/memwal-mcp test
 
+  sdk-changed:
+    name: SDK / Change detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sdk: ${{ steps.filter.outputs.sdk }}
+
+    # test-sdk.yml gated its whole workflow on `paths: packages/sdk/**`. This
+    # workflow cannot: a `paths:` filter here would gate all 13 jobs. Without
+    # some gate the live e2e would fire on every dev merge — roughly 100
+    # weighted requests a run against a 500/hour per-account budget, which is
+    # the very limit the concurrency group exists to stay under. So detect the
+    # change here and let sdk-e2e decide.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the SDK change?
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # schedule and workflow_dispatch have no diff to inspect, and both
+          # are deliberate requests to exercise the relayer. Always run.
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "sdk=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base="${{ github.event.before }}"
+          # A new branch, a force-push, or a pruned commit leaves no usable
+          # base. Run rather than skip: a false positive costs one e2e run, a
+          # false negative ships an untested SDK.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "base commit unavailable — running the suite"
+            echo "sdk=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --name-only "$base" "${{ github.sha }}" \
+               | grep -qE '^(packages/sdk/|\.github/workflows/test\.yml$)'; then
+            echo "sdk=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sdk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  sdk-checks:
+    name: SDK / Unit (Node ${{ matrix.node-version }})
+    # No schedule guard: sdk-e2e needs this job, so skipping it on the weekly
+    # cron would skip the e2e run the cron exists for.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is what the rest of this workflow runs on; 24 is the active LTS.
+        node-version: ["22", "24"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck, build and unit tests
+        run: pnpm --filter @mysten-incubation/memwal test
+
+  sdk-e2e:
+    name: SDK / E2E ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }} relayer
+    runs-on: ubuntu-latest
+    needs: [sdk-checks, sdk-changed]
+    timeout-minutes: 30
+
+    # Each long-lived branch tests the deployment it corresponds to. Pull
+    # requests are excluded because environment secrets are withheld from fork
+    # PRs, and every authenticated run writes real memories. The sdk-changed
+    # clause replaces the `paths:` filter test-sdk.yml carried before this job
+    # moved into a workflow shared with twelve unrelated jobs.
+    if: >-
+      needs.sdk-changed.outputs.sdk == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'schedule' ||
+       (github.event_name == 'push' &&
+        (github.ref_name == 'dev' ||
+         github.ref_name == 'staging' ||
+         github.ref_name == 'main')))
+
+    # Serializes against benchmark-live.yml and test-python-sdk.yml, which
+    # sign with the same BENCH_DELEGATE_KEY. The relayer rate-limits per
+    # delegate key (30 weighted-req/min) and per account (60/min, 500/hr), so
+    # two suites hitting one bench account concurrently 429 each other —
+    # exactly what broke this job and the benchmark on 2026-08-21. Namespace
+    # isolation does not help: the limiter keys on the credential, not the
+    # namespace. Group name must stay identical in all three workflows.
+    concurrency:
+      group: bench-account-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
+      cancel-in-progress: false
+
+    # Reuses the credentials benchmark-live.yml and test-python-sdk.yml already
+    # rely on, so this needs no new secrets. The benchmark writes to the
+    # `benchmark` namespace while these tests use a per-run `sdk-e2e-<random>`.
+    #
+    # main maps to benchmark-production, so a push to main writes real
+    # memories through the live Walrus pipeline on the production benchmark
+    # account. That is intentional, and the per-run namespace is what keeps it
+    # contained — never point this job at an account holding user data, and
+    # never relax the namespace isolation in live.e2e.mjs.
+    environment:
+      name: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
+
+    env:
+      # Which deployment this run targets. Mirrors the `environment:` name
+      # above so error messages and the run summary can name it.
+      ENVIRONMENT_NAME: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
+      # BENCH_DELEGATE_KEY is the delegate private key the SDK signs with,
+      # which test/e2e/live.e2e.mjs reads as MEMWAL_PRIVATE_KEY. Stored in Sui
+      # bech32 (`suiprivkey1...`) form; the SDK normalizes both that and hex.
+      MEMWAL_PRIVATE_KEY: ${{ secrets.BENCH_DELEGATE_KEY }}
+      MEMWAL_ACCOUNT_ID: ${{ secrets.BENCH_ACCOUNT_ID }}
+      # Public URL, set per environment (docs/relayer/benchmark-ci-setup.md).
+      # Deliberately NOT defaulted: with three environments in play, a literal
+      # fallback would silently run the production job against whichever
+      # relayer the default names. A missing variable fails the job instead.
+      MEMWAL_SERVER_URL: ${{ vars.BENCH_SERVER_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build:sdk
+
+      - name: Check credentials
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Without the credentials the suite skips every authenticated test,
+          # and the job would report success having never exercised the
+          # relayer beyond /health. Without the URL there is no safe guess to
+          # fall back on. Fail instead of reporting a green run that proved
+          # nothing, or running the wrong deployment.
+          missing=0
+          for name in MEMWAL_PRIVATE_KEY MEMWAL_ACCOUNT_ID MEMWAL_SERVER_URL; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is empty — set BENCH_DELEGATE_KEY / BENCH_ACCOUNT_ID / BENCH_SERVER_URL on the ${ENVIRONMENT_NAME} environment."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "authenticated=true" >> "$GITHUB_OUTPUT"
+
+      - name: E2E tests
+        id: e2e
+        working-directory: packages/sdk
+        run: |
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=e2e-results.xml \
+            "test/e2e/live.e2e.mjs"
+
+      - name: Write run summary
+        if: always()
+        run: |
+          {
+            echo "## JS SDK e2e"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Environment | \`${ENVIRONMENT_NAME}\` |"
+            echo "| Relayer | \`${MEMWAL_SERVER_URL:-<unset>}\` |"
+            echo "| Authenticated | ${{ steps.config.outputs.authenticated }} |"
+            echo "| Result | ${{ steps.e2e.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload e2e results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: js-sdk-e2e-${{ env.ENVIRONMENT_NAME }}-${{ github.run_id }}
+          path: packages/sdk/e2e-results.xml
+          if-no-files-found: warn
+          retention-days: 14
+
   chatbot-e2e:
     name: Chatbot / Playwright E2E
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -151,8 +391,10 @@ jobs:
       - name: Install deps
         run: pnpm install --frozen-lockfile
 
-      - name: Test and build SDK (workspace dep of chatbot)
-        run: pnpm --filter @mysten-incubation/memwal test
+      # Build only. The SDK's own suite runs in sdk-checks below; running it
+      # here too just made a Playwright job fail for an unrelated reason.
+      - name: Build SDK (workspace dep of chatbot)
+        run: pnpm build:sdk
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
@@ -180,6 +422,7 @@ jobs:
 
   noter-e2e:
     name: Noter / Playwright E2E
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -268,6 +511,7 @@ jobs:
 
   server-e2e:
     name: Server / E2E
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -408,6 +652,7 @@ jobs:
 
   chatbot-checks:
     name: Chatbot / Lint + Build
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -453,6 +698,7 @@ jobs:
 
   noter-checks:
     name: Noter / Unit tests + Build
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -501,6 +747,7 @@ jobs:
 
   server-checks:
     name: Server / Clippy + Unit tests
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -564,6 +811,7 @@ jobs:
 
   move-contract:
     name: Move / Contract tests
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

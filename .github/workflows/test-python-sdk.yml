@@ -76,9 +76,17 @@ jobs:
       (github.event_name == 'push' && github.ref_name == 'dev')
 
     # Reuses the credentials benchmark-live.yml already relies on, so this
-    # needs no new secrets. Safe to share: the benchmark writes to the
-    # `benchmark` namespace while these tests use `sdk-test`, `default` and a
-    # per-run `sdk-e2e-<uuid>`.
+    # needs no new secrets. Namespaces keep the *data* separate — the
+    # benchmark writes to `benchmark` while these tests use `sdk-test`,
+    # `default` and a per-run `sdk-e2e-<uuid>` — but they do not keep the
+    # *rate limit* separate: the relayer meters per delegate key and per
+    # account, so the concurrency group below is what stops the three suites
+    # 429ing each other. Group name must stay identical in all three
+    # workflows; dev-only here, so it is the literal dev group.
+    concurrency:
+      group: bench-account-dev
+      cancel-in-progress: false
+
     environment: benchmark-dev
 
     env:
