@@ -127,6 +127,10 @@ jobs:
 
   sdk-changed:
     name: SDK / Change detection
+    # sdk-e2e never runs on pull requests, so the full-history checkout below
+    # would be pure cost on every PR. Skipping here also skips sdk-e2e, which
+    # is what its own `if` already asks for.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
