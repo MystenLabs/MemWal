@@ -73,6 +73,7 @@ mod tests {
             include_str!("../../migrations/017_memory_expiry_columns.sql"),
             include_str!("../../migrations/018_memory_expiry_synced_at_index.sql"),
             include_str!("../../migrations/019_memory_read_api_updated_at_set_not_null.sql"),
+            include_str!("../../migrations/020_read_api_followups.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -872,6 +873,24 @@ const PAGINATION_INDEX_NAME: &str = "idx_vector_entries_owner_updated_id";
 /// nullable `updated_at` column) and before migration 015 (which
 /// requires no NULL rows remain before it can validate its NOT NULL
 /// constraint).
+async fn bump_namespace_watermark(
+    pool: &PgPool,
+    owner: &str,
+    namespace: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO namespace_watermarks (owner, namespace, last_mutated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (owner, namespace) DO UPDATE SET last_mutated_at = NOW()",
+    )
+    .bind(owner)
+    .bind(namespace)
+    .execute(pool)
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to bump namespace watermark: {}", e)))?;
+    Ok(())
+}
+
 async fn backfill_updated_at(pool: &PgPool) -> Result<(), AppError> {
     const BATCH_SIZE: i64 = 5000;
     let mut total_rows: u64 = 0;
@@ -1129,6 +1148,12 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 019: {}", e)))?;
 
+        let migration_020 = include_str!("../../migrations/020_read_api_followups.sql");
+        sqlx::raw_sql(migration_020)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 020: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -1195,6 +1220,7 @@ impl VectorDb {
         .map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
         crate::observability::observe_db("vector.insert", db_status(&result), started.elapsed());
         result?;
+        bump_namespace_watermark(&self.pool, owner, namespace).await?;
 
         tracing::debug!(
             "inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
@@ -1424,6 +1450,19 @@ impl VectorDb {
     /// `POST /api/forget` — authed, owner-scoped.
     pub async fn delete_by_namespace(&self, owner: &str, namespace: &str) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
+        let _ = sqlx::query(
+            "INSERT INTO memory_tombstones (id, owner, namespace, blob_id, deleted_at)
+             SELECT id, owner, namespace, blob_id, NOW()
+             FROM vector_entries
+             WHERE owner = $1 AND namespace = $2
+             ON CONFLICT (id) DO UPDATE SET deleted_at = NOW()",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to tombstone namespace: {}", e)))?;
+        bump_namespace_watermark(&self.pool, owner, namespace).await?;
         let result = sqlx::query("DELETE FROM vector_entries WHERE owner = $1 AND namespace = $2")
             .bind(owner)
             .bind(namespace)
@@ -1458,6 +1497,20 @@ impl VectorDb {
         namespace: &str,
     ) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
+        let _ = sqlx::query(
+            "INSERT INTO memory_tombstones (id, owner, namespace, blob_id, deleted_at)
+             SELECT id, owner, namespace, blob_id, NOW()
+             FROM vector_entries
+             WHERE blob_id = $1 AND owner = $2 AND namespace = $3
+             ON CONFLICT (id) DO UPDATE SET deleted_at = NOW()",
+        )
+        .bind(blob_id)
+        .bind(owner)
+        .bind(namespace)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to tombstone blob: {}", e)))?;
+        bump_namespace_watermark(&self.pool, owner, namespace).await?;
         let result = sqlx::query(
             "DELETE FROM vector_entries
              WHERE blob_id = $1 AND owner = $2 AND namespace = $3",
