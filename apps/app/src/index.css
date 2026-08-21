@@ -11930,3 +11930,58 @@ h1, h2, h3 {
     padding: 20px;
   }
 }
+
+.dash-page .dash-alert--info {
+  min-height: 0;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 28px !important;
+  padding: 14px 18px;
+  border: 1px solid var(--dash-panel-border);
+  border-radius: var(--radius-md);
+  background: var(--dash-panel);
+  color: var(--dash-subtle);
+}
+
+.dash-page .dash-alert--info .dash-alert-icon {
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  color: var(--dash-yellow);
+}
+
+.dash-page .dash-alert--info p {
+  color: var(--dash-subtle);
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.dash-page .dash-alert-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dash-yellow);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.dash-page .dash-alert-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.dash-page .dashboard-key-current-badge {
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .dash-page .dash-alert--info {
+    padding: 12px 14px;
+  }
+
+  .dash-page .dash-alert--info p {
+    font-size: 14px;
+  }
+}
