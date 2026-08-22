@@ -452,3 +452,74 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
     if (!creds) throw new Error("Login flow completed without credentials");
     return creds;
 }
+
+export interface InflightLogin {
+    url: Promise<string>;
+    result: Promise<MemWalCredentials>;
+}
+
+let inflightLogin: InflightLogin | null = null;
+
+/**
+ * Start a login flow, or join one already in progress in this process.
+ * Concurrent `memwal_login` calls share the same listener and URL so a
+ * second call cannot race the first and leave the bridge on a stale session.
+ */
+export function startOrReuseLoginFlow(
+    opts: LoginOptions = {},
+    onSuccess?: (creds: MemWalCredentials) => Promise<void> | void,
+): InflightLogin {
+    if (inflightLogin) return inflightLogin;
+
+    let resolveUrl!: (url: string) => void;
+    let rejectUrl!: (err: unknown) => void;
+    const url = new Promise<string>((resolve, reject) => {
+        resolveUrl = resolve;
+        rejectUrl = reject;
+    });
+
+    const userOnUrl = opts.onUrl;
+    const result = loginFlow({
+        ...opts,
+        onUrl: (connectUrl) => {
+            resolveUrl(connectUrl);
+            try {
+                userOnUrl?.(connectUrl);
+            } catch {
+                /* caller errors don't break the flow */
+            }
+        },
+    });
+
+    result.catch((err) => {
+        rejectUrl(err);
+    });
+
+    if (onSuccess) {
+        result
+            .then(async (creds) => {
+                await onSuccess(creds);
+            })
+            .catch((err) => {
+                log.warn("login.inflight.failed", {
+                    msg: err instanceof Error ? err.message : String(err),
+                });
+            });
+    }
+
+    const session: InflightLogin = { url, result };
+    inflightLogin = session;
+    void result
+        .finally(() => {
+            if (inflightLogin === session) inflightLogin = null;
+        })
+        .catch(() => {
+            /* the original `result` rejection is observed by callers */
+        });
+    return session;
+}
+
+/** Drop the in-flight handle. Does not abort a listener already bound. */
+export function resetInflightLogin(): void {
+    inflightLogin = null;
+}

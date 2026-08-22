@@ -6,6 +6,8 @@
 
 - Do not abort the SSE handshake socket on HTTP 429, 401, or a bad content-type (that crash path fired on Windows).
 - Report MCP session occupancy caps as concurrent, not a 30-second cooldown.
+- Exit with code 1 when `login` is run without a TTY, instead of booting the auth-required stub and reporting success.
+- Concurrent `memwal_login` calls reuse the in-flight listener and URL instead of starting a second flow that can hang later remember/recall.
 
 ## 0.0.10
 

@@ -19,7 +19,7 @@ import { clearCreds, credsPath } from "./auth.js";
 import { TOOL_DEFINITIONS } from "./auth-required.js";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
 import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
-import { loginFlow } from "./login.js";
+import { startOrReuseLoginFlow } from "./login.js";
 import { log, note } from "./logger.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
@@ -559,28 +559,22 @@ async function handleLocalLogin(
     config: BridgeConfig,
     onCredentials: (creds: MemWalCredentials) => Promise<void>,
 ): Promise<{ text: string; isError: boolean }> {
-    const urlReady = new Promise<string>((resolve) => {
-        loginFlow({
+    const session = startOrReuseLoginFlow(
+        {
             relayerUrl: config.relayerUrl,
             webUrl: config.webUrl,
             label: config.label,
             timeoutMs: LOGIN_BG_TIMEOUT_MS,
             openBrowser: false,
-            onUrl: (url) => resolve(url),
-        })
-            .then(async (creds) => {
-                await onCredentials(creds);
-                log.info("memwal_login.bridge.success", {
-                    accountId: creds.accountId,
-                    delegateAddress: creds.delegateAddress,
-                });
-            })
-            .catch((err) => {
-                log.warn("memwal_login.bridge.failed", {
-                    msg: err instanceof Error ? err.message : String(err),
-                });
+        },
+        async (creds) => {
+            await onCredentials(creds);
+            log.info("memwal_login.bridge.success", {
+                accountId: creds.accountId,
+                delegateAddress: creds.delegateAddress,
             });
-    });
+        },
+    );
 
     const timeoutPromise = new Promise<string>((_, reject) =>
         setTimeout(
@@ -591,7 +585,7 @@ async function handleLocalLogin(
 
     let url: string;
     try {
-        url = await Promise.race([urlReady, timeoutPromise]);
+        url = await Promise.race([session.url, timeoutPromise]);
     } catch (err) {
         return {
             isError: true,
