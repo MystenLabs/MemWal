@@ -107,7 +107,7 @@ export class McpRateLimiter {
      */
     acquire(ip: string): AcquireResult {
         if (this.totalActive >= this.config.maxTotalSessions) {
-            return { ok: false, reason: "global_cap", retryAfterSeconds: 30 };
+            return { ok: false, reason: "global_cap" };
         }
 
         const now = Date.now();
@@ -120,7 +120,8 @@ export class McpRateLimiter {
         }
 
         if (state.active >= this.config.maxSessionsPerIp) {
-            return { ok: false, reason: "ip_active_cap", retryAfterSeconds: 30 };
+            // Concurrent cap, not a time window — a 30s Retry-After is a lie.
+            return { ok: false, reason: "ip_active_cap" };
         }
 
         if (state.opens.length >= this.config.maxNewSessionsPerIpPerMin) {

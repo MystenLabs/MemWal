@@ -1,5 +1,12 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.11
+
+### Fixed
+
+- Do not abort the SSE handshake socket on HTTP 429, 401, or a bad content-type (that crash path fired on Windows).
+- Report MCP session occupancy caps as concurrent, not a 30-second cooldown.
+
 ## 0.0.10
 
 ### Fixed

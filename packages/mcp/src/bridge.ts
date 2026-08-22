@@ -306,7 +306,9 @@ async function openSseStream(
 
     if (resp.status === 401) {
         clearConnectTimer();
-        controller.abort();
+        if (resp.body) {
+            await resp.text().catch(() => "");
+        }
         log.warn("bridge.unauthorized", { url });
         // DO NOT wipe creds here. A 401 from the relayer is *evidence* of
         // a problem but not *proof* the saved seed is the cause. Possible
@@ -324,10 +326,18 @@ async function openSseStream(
                 "Run `memwal-mcp login` if you need to rotate the key."
         );
     }
+    if (resp.status === 429) {
+        clearConnectTimer();
+        const retryAfter = resp.headers.get("retry-after");
+        const body = resp.body ? await resp.text() : "";
+        throw new Error(
+            `Walrus Memory relayer SSE handshake rate-limited (HTTP 429` +
+                `${retryAfter ? `, retry after ${retryAfter}s` : ""}). ${body.slice(0, 200)}`.trim()
+        );
+    }
     if (!resp.ok || !resp.body) {
         clearConnectTimer();
         const body = resp.body ? await resp.text() : "";
-        controller.abort();
         throw new Error(
             `Walrus Memory relayer SSE handshake failed: HTTP ${resp.status} ${body.slice(0, 200)}`
         );
@@ -336,7 +346,9 @@ async function openSseStream(
     const ct = resp.headers.get("content-type") ?? "";
     if (!ct.includes("event-stream")) {
         clearConnectTimer();
-        controller.abort();
+        if (resp.body) {
+            await resp.text().catch(() => "");
+        }
         throw new Error(
             `Walrus Memory relayer returned unexpected content-type "${ct}" for SSE endpoint`
         );
