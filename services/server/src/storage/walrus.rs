@@ -852,7 +852,7 @@ pub async fn query_blobs_by_owner(
             started.elapsed(),
         );
         crate::observability::record_sidecar_failure("walrus_query_blobs", "transport_error");
-        AppError::Internal(format!("Sidecar walrus/query-blobs failed: {}", e))
+        AppError::UpstreamUnavailable(format!("Sidecar walrus/query-blobs failed: {}", e))
     })?;
     let status_label = resp.status().as_u16().to_string();
     crate::observability::observe_external(
@@ -865,7 +865,7 @@ pub async fn query_blobs_by_owner(
     if !resp.status().is_success() {
         crate::observability::record_sidecar_failure("walrus_query_blobs", "http_error");
         let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!(
+        return Err(AppError::UpstreamUnavailable(format!(
             "walrus query-blobs failed: {}",
             body
         )));

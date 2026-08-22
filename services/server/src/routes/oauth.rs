@@ -293,6 +293,8 @@ fn error_page(status: StatusCode, title: &str, detail: &str) -> Response {
 }
 
 pub async fn authorize(
+    ConnectInfo(connect_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<AuthorizeQuery>,
 ) -> Response {
@@ -300,6 +302,34 @@ pub async fn authorize(
         Ok(cfg) => cfg,
         Err(err) => return err.into_response(),
     };
+
+    let ip = crate::client_ip::canonical_client_ip(
+        &headers,
+        connect_addr,
+        state.config.trusted_proxy_hops,
+    );
+    let is_trusted = oauth::ip_is_trusted(ip, &cfg.registration_trusted_cidrs);
+    if !is_trusted {
+        let mut redis = state.redis.clone();
+        let key = format!("mcp_oauth:authorize_rl:{}", ip);
+        let count: i64 = redis::cmd("INCR")
+            .arg(&key)
+            .query_async(&mut redis)
+            .await
+            .unwrap_or(1);
+        let _: Result<(), redis::RedisError> = redis::cmd("EXPIRE")
+            .arg(&key)
+            .arg(3600)
+            .query_async(&mut redis)
+            .await;
+        if count > 60 {
+            return error_page(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests",
+                "Authorization rate limit exceeded, try again later.",
+            );
+        }
+    }
 
     // Client and redirect_uri must both check out before we're willing to
     // redirect anywhere — an invalid client or redirect target is an error

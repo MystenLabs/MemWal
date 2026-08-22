@@ -461,6 +461,24 @@ pub async fn restore(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<RestoreRequest>,
 ) -> Result<Json<RestoreResponse>, AppError> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(55),
+        restore_unbounded(state, auth, body),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(AppError::UpstreamUnavailable(
+            "Restore timed out; retry later or with a smaller namespace".into(),
+        )),
+    }
+}
+
+async fn restore_unbounded(
+    state: Arc<AppState>,
+    auth: AuthInfo,
+    body: RestoreRequest,
+) -> Result<Json<RestoreResponse>, AppError> {
     validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
@@ -780,7 +798,9 @@ pub async fn restore(
         })
         .collect();
 
-    let results: Vec<(String, Vec<f32>)> = futures::future::join_all(embed_tasks)
+    let results: Vec<(String, Vec<f32>)> = stream::iter(embed_tasks)
+        .buffer_unordered(3)
+        .collect::<Vec<_>>()
         .await
         .into_iter()
         .flatten()

@@ -1211,22 +1211,34 @@ impl VectorDb {
 
         // per-owner storage quota reservations. Makes quota admission atomic
         // with the eventual insert (GH #532 / WALM-359).
-        let migration_014_reservations = include_str!("../../migrations/014_storage_reservations.sql");
+        let migration_014_reservations =
+            include_str!("../../migrations/014_storage_reservations.sql");
         sqlx::raw_sql(migration_014_reservations)
             .execute(&pool)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 014 (storage reservations): {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to run migration 014 (storage reservations): {}",
+                    e
+                ))
+            })?;
 
         // owner-scoped read API: updated_at cursor column + agent_id/package_id.
         // Split across 014-019 (see each file's header, and
         // backfill_updated_at's / recover_invalid_pagination_index's doc
         // comments above) to avoid holding ACCESS EXCLUSIVE across the
         // full-table backfill or index build.
-        let migration_014_read_api = include_str!("../../migrations/014_memory_read_api_columns.sql");
+        let migration_014_read_api =
+            include_str!("../../migrations/014_memory_read_api_columns.sql");
         sqlx::raw_sql(migration_014_read_api)
             .execute(&pool)
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 014 (read API columns): {}", e)))?;
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to run migration 014 (read API columns): {}",
+                    e
+                ))
+            })?;
 
         // Backfill runs as batched Rust code, not a migration file, since
         // Postgres can't COMMIT mid-loop inside a plain migration
@@ -1399,11 +1411,9 @@ impl VectorDb {
         let embedding = Vector::from(vector.to_vec());
 
         let started = std::time::Instant::now();
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to begin plaintext insert tx: {}", e)))?;
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            AppError::Internal(format!("Failed to begin plaintext insert tx: {}", e))
+        })?;
         let result = sqlx::query(
             "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, plaintext, importance)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1439,9 +1449,9 @@ impl VectorDb {
             .execute(&mut *tx)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to clear tombstone: {}", e)))?;
-        tx.commit()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to commit plaintext insert tx: {}", e)))?;
+        tx.commit().await.map_err(|e| {
+            AppError::Internal(format!("Failed to commit plaintext insert tx: {}", e))
+        })?;
 
         tracing::debug!(
             "inserted plaintext vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
@@ -2641,8 +2651,34 @@ impl VectorDb {
                 AppError::Internal(format!("Failed to evict expired oauth codes: {}", e))
             })?;
         total += codes.rows_affected();
+        let pending = sqlx::query(
+            "DELETE FROM mcp_oauth_delegates d
+             WHERE d.status = 'pending'
+               AND d.created_at <= NOW() - INTERVAL '1 hour'
+               AND NOT EXISTS (
+                   SELECT 1 FROM mcp_oauth_authorize_sessions s
+                   WHERE s.delegate_ref = d.delegate_ref
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM mcp_oauth_codes c
+                   WHERE c.delegate_ref = d.delegate_ref
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM mcp_oauth_grants g
+                   WHERE g.delegate_ref = d.delegate_ref
+               )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to prune abandoned oauth delegates: {}", e))
+        })?;
+        total += pending.rows_affected();
         if total > 0 {
-            tracing::info!("Evicted {} expired MCP OAuth session/code rows", total);
+            tracing::info!(
+                "Evicted {} expired MCP OAuth session/code/pending-delegate rows",
+                total
+            );
         }
         Ok(total)
     }
