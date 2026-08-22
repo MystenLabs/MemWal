@@ -594,6 +594,23 @@ pub fn redirect_uri_matches(candidate: &str, registered: &str) -> bool {
         && candidate_url.query() == registered_url.query()
 }
 
+/// Redirect URI to persist on the authorize session and code row.
+///
+/// Matching is port-agnostic for RFC 8252 loopback, but RFC 6749 §4.1.3
+/// requires the token request to send the *same* URI used at authorize
+/// time. Store the client-presented candidate (`http://localhost:51234/callback`),
+/// not the registered URI (`http://localhost/callback`), so the code
+/// redirect hits the ephemeral listener and token exchange succeeds.
+pub fn authorize_redirect_uri<'a>(
+    candidate: &'a str,
+    registered_uris: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    registered_uris
+        .into_iter()
+        .any(|registered| redirect_uri_matches(candidate, registered))
+        .then_some(candidate)
+}
+
 /// Decision D4: registration only accepts redirect URIs on a known-safe
 /// host allowlist (Anthropic's own callback domain) or an RFC 8252 loopback
 /// pattern. This is the direct fix for the objection that stalled PR #193
@@ -962,6 +979,30 @@ mod tests {
             "http://127.0.0.1:9999/callback",
             "http://127.0.0.1/callback"
         ));
+    }
+
+    #[test]
+    fn authorize_stores_loopback_candidate_not_registered_uri() {
+        let registered = ["http://localhost/callback"];
+        assert_eq!(
+            authorize_redirect_uri("http://localhost:51234/callback", registered),
+            Some("http://localhost:51234/callback")
+        );
+        assert_eq!(
+            authorize_redirect_uri("http://localhost/callback", registered),
+            Some("http://localhost/callback")
+        );
+        assert_eq!(
+            authorize_redirect_uri("http://localhost:51234/evil", registered),
+            None
+        );
+        assert_eq!(
+            authorize_redirect_uri(
+                "https://claude.ai/api/mcp/auth_callback",
+                ["https://claude.ai/api/mcp/auth_callback"]
+            ),
+            Some("https://claude.ai/api/mcp/auth_callback")
+        );
     }
 
     #[test]
