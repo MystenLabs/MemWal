@@ -774,6 +774,7 @@ class MemWal:
             "POST",
             "/api/embed",
             {"text": text},
+            include_seal_session=False,
         )
         return EmbedResult(vector=list(data.get("vector", [])))
 
@@ -906,11 +907,12 @@ class MemWal:
     async def remember_manual(self, opts: RememberManualOptions) -> RememberManualResult:
         """Remember (manual mode).
 
-        User handles SEAL encrypt, embedding, and Walrus upload externally.
-        Server only stores the vector <-> blobId mapping.
+        User handles SEAL encrypt and embedding. The relayer uploads the
+        encrypted bytes to Walrus and stores the vector mapping.
 
         Args:
-            opts: :class:`RememberManualOptions` with blob_id, vector, and optional namespace.
+            opts: :class:`RememberManualOptions` with encrypted_data (base64),
+                vector, and optional namespace.
 
         Returns:
             :class:`RememberManualResult` with id, blob_id, owner, namespace.
@@ -919,7 +921,7 @@ class MemWal:
             "POST",
             "/api/remember/manual",
             {
-                "blob_id": opts.blob_id,
+                "encrypted_data": opts.encrypted_data,
                 "vector": opts.vector,
                 "namespace": opts.namespace or self._namespace,
             },

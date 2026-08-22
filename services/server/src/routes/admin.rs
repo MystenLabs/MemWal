@@ -1,4 +1,4 @@
-//! Admin / utility handlers: `/api/ask`, `/api/forget`, `/api/stats`,
+//! Admin / utility handlers: `/api/embed`, `/api/ask`, `/api/forget`, `/api/stats`,
 //! `/api/restore`, `GET /health`, `GET /config`.
 //!
 //! `ask` is the AI-with-memory demo (recall → inject memories into the LLM
@@ -203,6 +203,35 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigRespon
         security_delete_execution_grace_secs: state.config.exec_grace_secs,
         security_delete_expiry_margin_epochs: state.config.expiry_margin_epochs,
     })
+}
+
+// ============================================================
+// /api/embed
+// ============================================================
+
+const MAX_EMBED_TEXT_BYTES: usize = 64 * 1024;
+
+/// POST /api/embed
+///
+/// Return an embedding vector for `text` without storing anything.
+/// Same model and width as remember / recall / analyze.
+pub async fn embed(
+    State(state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthInfo>,
+    Json(body): Json<EmbedRequest>,
+) -> Result<Json<EmbedResponse>, AppError> {
+    if body.text.is_empty() {
+        return Err(AppError::BadRequest("text cannot be empty".into()));
+    }
+    if body.text.len() > MAX_EMBED_TEXT_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "text exceeds maximum length of {} bytes",
+            MAX_EMBED_TEXT_BYTES
+        )));
+    }
+
+    let vector = state.embedder.embed(&body.text).await?;
+    Ok(Json(EmbedResponse { vector }))
 }
 
 // ============================================================

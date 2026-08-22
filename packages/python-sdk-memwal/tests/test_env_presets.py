@@ -1,4 +1,4 @@
-"""Tests for the relayer environment presets (prod/staging/local).
+"""Tests for the relayer environment presets (prod/dev/staging/local).
 
 Pure config resolution — no network. Mirrors the precedence rule documented
 in the README: explicit non-default ``server_url`` > ``env`` > default.
@@ -18,6 +18,7 @@ ACCOUNT = "0x" + "ab" * 32
     "env,expected",
     [
         ("prod", "https://relayer.memory.walrus.xyz"),
+        ("dev", "https://relayer.dev.memwal.ai"),
         ("staging", "https://relayer-staging.memory.walrus.xyz"),
         ("local", "http://127.0.0.1:8000"),
     ],

@@ -21,15 +21,33 @@ _SUI_ED25519_SCHEME_FLAG = 0
 def hex_to_bytes(hex_str: str) -> bytes:
     """Convert a hex string to bytes.
 
-    Handles optional ``0x`` prefix.
+    Handles optional ``0x`` / ``0X`` prefix. Rejects empty strings, odd
+    length, ASCII whitespace, and any non-hex character. ``bytes.fromhex``
+    would otherwise strip whitespace and decode a *different* valid key.
 
     Args:
         hex_str: Hex-encoded string, optionally prefixed with ``0x``.
 
     Returns:
         Raw bytes.
+
+    Raises:
+        TypeError: If ``hex_str`` is not a ``str``.
+        ValueError: If the input is empty, odd-length, or contains
+            non-hex characters (including whitespace).
     """
-    clean = hex_str[2:] if hex_str.startswith("0x") else hex_str
+    if not isinstance(hex_str, str):
+        raise TypeError("hex_to_bytes: expected str")
+    clean = hex_str[2:] if hex_str[:2].lower() == "0x" else hex_str
+    if len(clean) == 0:
+        raise ValueError("hex_to_bytes: empty hex string")
+    if len(clean) % 2 != 0:
+        raise ValueError(
+            f"hex_to_bytes: odd-length hex string (length={len(clean)}); "
+            "hex must have an even number of digits"
+        )
+    if any(c not in "0123456789abcdefABCDEF" for c in clean):
+        raise ValueError("hex_to_bytes: input contains non-hex characters")
     return bytes.fromhex(clean)
 
 

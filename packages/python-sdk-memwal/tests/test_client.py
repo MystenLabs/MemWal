@@ -866,18 +866,32 @@ class TestManualAPI:
         )
 
         opts = RememberManualOptions(
-            blob_id="blob-xyz",
+            encrypted_data="dGVzdA==",
             vector=[0.1, 0.2, 0.3],
         )
         result = await memwal_client.remember_manual(opts)
 
         body = json.loads(route.calls[0].request.content)
         headers = route.calls[0].request.headers
-        assert body["blob_id"] == "blob-xyz"
+        assert body["encrypted_data"] == "dGVzdA=="
+        assert "blob_id" not in body
         assert body["vector"] == [0.1, 0.2, 0.3]
         assert "x-seal-session" not in headers
         assert "x-delegate-key" not in headers
         assert result.blob_id == "blob-xyz"
+
+    @respx.mock
+    async def test_embed(self, memwal_client: MemWal) -> None:
+        _mock_version()
+        route = respx.post(f"{_TEST_SERVER}/api/embed").mock(
+            return_value=httpx.Response(200, json={"vector": [0.1, 0.2, 0.3]})
+        )
+
+        result = await memwal_client.embed("hello")
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["text"] == "hello"
+        assert result.vector == [0.1, 0.2, 0.3]
 
     @respx.mock
     async def test_recall_manual(self, memwal_client: MemWal) -> None:

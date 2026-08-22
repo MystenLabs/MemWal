@@ -320,8 +320,8 @@ export interface RelayerVersionMetadata {
 
 /** Options for rememberManual() on MemWal class */
 export interface RememberManualOptions {
-    /** Walrus blob ID (user already uploaded encrypted data) */
-    blobId: string;
+    /** Base64-encoded SEAL-encrypted bytes. The relayer uploads them to Walrus. */
+    encryptedData: string;
     /** Embedding vector (user already generated) */
     vector: number[];
     /** Namespace (default: config namespace or "default") */

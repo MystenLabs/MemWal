@@ -1,5 +1,15 @@
 # @mysten-incubation/memwal
 
+## 0.1.5
+
+### Changed
+
+- `rememberManual` now sends `encryptedData` (base64 SEAL ciphertext) instead of a pre-uploaded `blobId`, matching `POST /api/remember/manual`.
+
+### Fixed
+
+- Manual recall decodes SEAL object ids with `hexToBytes` instead of an unguarded `parseInt` / `.match!` path that could coerce `NaN` to `0` or throw on empty input.
+
 ## 0.1.4
 
 ### Fixed
