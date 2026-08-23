@@ -164,10 +164,8 @@ pub async fn seal_encrypt(
             started.elapsed(),
         );
         crate::observability::record_sidecar_failure("seal_encrypt", "transport_error");
-        AppError::Internal(format!(
-            "Sidecar seal/encrypt request failed: {}. Is the sidecar running?",
-            e
-        ))
+        tracing::error!(error = %e, "sidecar seal/encrypt transport failed");
+        AppError::UpstreamUnavailable("Memory encryption backend is unavailable".into())
     })?;
     let status_label = resp.status().as_u16().to_string();
     crate::observability::observe_external(
@@ -255,10 +253,8 @@ pub async fn seal_decrypt(
             started.elapsed(),
         );
         crate::observability::record_sidecar_failure("seal_decrypt", "transport_error");
-        AppError::Internal(format!(
-            "Sidecar seal/decrypt request failed: {}. Is the sidecar running?",
-            e
-        ))
+        tracing::error!(error = %e, "sidecar seal/decrypt transport failed");
+        AppError::UpstreamUnavailable("Memory encryption backend is unavailable".into())
     })?;
     let status_label = resp.status().as_u16().to_string();
     crate::observability::observe_external(
@@ -404,10 +400,8 @@ pub async fn seal_decrypt_batch(
             started.elapsed(),
         );
         crate::observability::record_sidecar_failure("seal_decrypt_batch", "transport_error");
-        AppError::Internal(format!(
-            "Sidecar seal/decrypt-batch request failed: {}. Is the sidecar running?",
-            e
-        ))
+        tracing::error!(error = %e, "sidecar seal/decrypt-batch transport failed");
+        AppError::UpstreamUnavailable("Memory encryption backend is unavailable".into())
     })?;
     let status_label = resp.status().as_u16().to_string();
     crate::observability::observe_external(

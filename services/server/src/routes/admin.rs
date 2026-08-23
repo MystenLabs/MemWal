@@ -146,8 +146,44 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             extract: crate::services::extractor::FACT_EXTRACTION_PROMPT_VERSION.to_string(),
             ask: ASK_SYSTEM_PROMPT_VERSION.to_string(),
         },
+        write_ready: sidecar_write_ready(&state).await,
     })
 }
+
+async fn sidecar_write_ready(state: &std::sync::Arc<AppState>) -> bool {
+    // Reuse a short TTL so unsigned /health probes do not fan out to the
+    // sidecar on every load-balancer tick.
+    {
+        let cache = WRITE_READY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, ready)) = *cache {
+            if at.elapsed() < std::time::Duration::from_secs(2) {
+                return ready;
+            }
+        }
+    }
+
+    let url = format!("{}/health", state.config.sidecar_url.trim_end_matches('/'));
+    let ready = match state
+        .http_client
+        .get(&url)
+        .timeout(std::time::Duration::from_millis(300))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(err) => {
+            tracing::debug!(error = %err, "sidecar health probe failed");
+            false
+        }
+    };
+    if let Ok(mut cache) = WRITE_READY_CACHE.lock() {
+        *cache = Some((std::time::Instant::now(), ready));
+    }
+    ready
+}
+
+static WRITE_READY_CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+    std::sync::Mutex::new(None);
 
 /// GET /version
 pub async fn version() -> Json<crate::compatibility::VersionResponse> {

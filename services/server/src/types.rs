@@ -1754,6 +1754,10 @@ pub struct HealthResponse {
     /// at from git history. Both fields are always populated — there is
     /// no "version unknown" state for a running server.
     pub prompt_versions: PromptVersions,
+    /// Whether the encryption sidecar process answered its own `/health`.
+    /// This is sidecar liveness, not a guarantee that remember/analyze will
+    /// succeed. `status` stays `"ok"` while the relayer process is up.
+    pub write_ready: bool,
 }
 
 /// prompt version constants surfaced on `/health`. See the
@@ -3010,10 +3014,12 @@ mod tests {
                 extract: "extract.v1".to_string(),
                 ask: "ask.v1".to_string(),
             },
+            write_ready: true,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["prompt_versions"]["extract"], "extract.v1");
         assert_eq!(json["prompt_versions"]["ask"], "ask.v1");
+        assert_eq!(json["write_ready"], true);
         assert_eq!(
             json["apiVersion"],
             crate::compatibility::RELAYER_API_VERSION

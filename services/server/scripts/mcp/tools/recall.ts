@@ -83,12 +83,20 @@ export function registerRecallTool(
         },
         wrapTool<{ query: string; limit: number; namespace?: string }>(async ({ query, limit, namespace }) => {
             const result = await session.memwal.recall(query, limit, namespace);
+            const dropped =
+                typeof (result as { dropped_count?: number }).dropped_count === "number"
+                    ? (result as { dropped_count: number }).dropped_count
+                    : 0;
             if (result.results.length === 0) {
+                const empty =
+                    dropped > 0
+                        ? `No matching memories could be returned (${dropped} matched but failed to download or decrypt). This is not an empty namespace.`
+                        : "No matching memories found.";
                 return {
                     content: [
                         {
                             type: "text",
-                            text: "No matching memories found.",
+                            text: empty,
                         },
                     ],
                 };
@@ -104,6 +112,11 @@ export function registerRecallTool(
             if (collapsed > 0) {
                 lines.push(
                     `\n(${collapsed} duplicate ${collapsed === 1 ? "copy" : "copies"} of the above collapsed; the same fact is stored more than once.)`
+                );
+            }
+            if (dropped > 0) {
+                lines.push(
+                    `\n(${dropped} additional matches could not be decrypted and were omitted.)`,
                 );
             }
             return {
