@@ -34,3 +34,12 @@ test("non-401 empty bodies still use the <no message> placeholder", () => {
     const { message } = sanitizeServerError(500, "");
     assert.equal(message, "Walrus Memory server error (500): <no message>");
 });
+
+test("localhost sidecar URLs are stripped from error text", () => {
+    const { message } = sanitizeServerError(
+        500,
+        "Sidecar seal/encrypt request failed: error sending request for url (http://localhost:9000/seal/encrypt)",
+    );
+    assert.doesNotMatch(message, /localhost:9000/);
+    assert.match(message, /\[internal\]/);
+});

@@ -63,6 +63,7 @@ import {
     normalizePrivateKey,
     normalizeServerUrl,
     sanitizeServerError,
+    redactInternalUrls,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
 } from "./utils.js";
@@ -350,7 +351,9 @@ export class MemWal {
             }
             if (status.status === "failed") {
                 throw Object.assign(
-                    new Error(`remember job failed: ${status.error ?? "unknown error"}`),
+                    new Error(
+                        `remember job failed: ${redactInternalUrls(status.error ?? "unknown error")}`,
+                    ),
                     { status: 500, jobId },
                 );
             }
@@ -529,7 +532,7 @@ export class MemWal {
                         error:
                             status.status === "not_found"
                                 ? "job not found"
-                                : status.error ?? "unknown error",
+                                : redactInternalUrls(status.error ?? "unknown error"),
                     };
                     pending.delete(jobId);
                 }
