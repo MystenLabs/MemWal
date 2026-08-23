@@ -98,7 +98,7 @@ print(result.restored, result.skipped, result.total)
 
 ## Lower-Level Methods
 
-Use these when you already have a vector or SEAL-encrypted bytes — see [Manual methods](/python-sdk/usage/memwal-manual):
+Use these when you already have a vector or SEAL-encrypted bytes. See [Manual methods](/python-sdk/usage/memwal-manual):
 
 - `remember_manual(RememberManualOptions(encrypted_data=..., vector=..., namespace=...))`
 - `recall_manual(RecallManualOptions(vector=..., limit=..., namespace=...))`
