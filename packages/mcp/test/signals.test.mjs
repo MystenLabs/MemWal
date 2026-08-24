@@ -1,63 +1,12 @@
 /**
- * Unit tests for the heuristic signal detectors used by the MemWal lifecycle
- * hooks (../plugin/scripts/lib/signals.mjs). These are pure regex functions —
- * cheap to test, and the place a wording tweak is most likely to silently
- * regress the auto-recall / auto-remember behavior the hooks rely on.
+ * Unit tests for the PostToolUse error detector
+ * (../plugin/scripts/lib/signals.mjs). Remember vs recall is no longer
+ * keyword-gated — see user-prompt-hook.test.mjs.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-    detectRecall,
-    detectRemember,
-    detectError,
-} from "../plugin/scripts/lib/signals.mjs";
-
-test("detectRecall — fires on references to past work / preferences", () => {
-    for (const s of [
-        "Let's pick up where we left off yesterday",
-        "As I mentioned earlier, the API is rate limited",
-        "Last time we decided to use pnpm",
-        "What's my usual setup for this?",
-        "Can you catch me up on the project?",
-    ]) {
-        assert.equal(detectRecall(s), true, `should fire: ${s}`);
-    }
-});
-
-test("detectRecall — stays quiet on fresh, context-free prompts", () => {
-    for (const s of [
-        "Write a function that adds two numbers",
-        "Please refactor this component",
-        "",
-        null,
-    ]) {
-        assert.equal(detectRecall(s), false, `should stay quiet: ${s}`);
-    }
-});
-
-test("detectRemember — fires on durable facts / preferences / identity", () => {
-    for (const s of [
-        "I prefer pnpm and TypeScript strict mode",
-        "Remember that I use tabs, not spaces",
-        "My name is Uy",
-        "From now on, use conventional commits",
-        "We standardize on Rust for services",
-    ]) {
-        assert.equal(detectRemember(s), true, `should fire: ${s}`);
-    }
-});
-
-test("detectRemember — stays quiet on transient requests", () => {
-    for (const s of [
-        "What does this function do?",
-        "Please fix the failing build",
-        "",
-        null,
-    ]) {
-        assert.equal(detectRemember(s), false, `should stay quiet: ${s}`);
-    }
-});
+import { detectError } from "../plugin/scripts/lib/signals.mjs";
 
 test("detectError — fires on strong error markers", () => {
     for (const s of [

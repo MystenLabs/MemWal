@@ -2,13 +2,14 @@ use axum::{
     extract::{Request, State},
     http::{header, HeaderValue, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use redis::AsyncCommands;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+use crate::owner_token_auth;
 use crate::storage::sui::{
     find_account_by_delegate_key, verify_delegate_key_onchain, OnchainVerifyError,
 };
@@ -47,8 +48,56 @@ async fn constant_time_reject() -> StatusCode {
     StatusCode::UNAUTHORIZED
 }
 
+/// Machine-readable reason for a stale/future-dated timestamp, surfaced on the
+/// `x-auth-error` header so a client can distinguish clock drift from a bad
+/// signature. Only emitted for the timestamp check: it depends solely on the
+/// client's own clock, not on whether the account or key exists, so exposing it
+/// leaks nothing about server-side identity state. Signature, nonce, and
+/// account-resolution failures keep the bare uniform 401 (no reason header) so
+/// they remain indistinguishable and cannot be used to enumerate accounts.
+const ERR_TIMESTAMP_OUT_OF_BOUNDS: &str = "ERR_TIMESTAMP_OUT_OF_BOUNDS";
+
+/// 401 carrying `x-auth-error: <code>`, after the same constant delay as
+/// `constant_time_reject` so timing stays uniform across auth-failure paths.
+async fn constant_time_reject_with_reason(code: &'static str) -> Response {
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    (
+        StatusCode::UNAUTHORIZED,
+        [("x-auth-error", code)],
+        String::new(),
+    )
+        .into_response()
+}
+
 fn unsupported_legacy_sdk() -> StatusCode {
     StatusCode::UPGRADE_REQUIRED
+}
+
+/// Whether a request whose signed timestamp is `age` seconds old (negative =
+/// future-dated) is fresh, given the accepted drift window. The window is
+/// inclusive and symmetric: `|age| <= drift`. `drift == 0` requires an exact
+/// second match. This is the sole freshness predicate — the middleware and its
+/// tests both call it, so a boundary regression can't hide behind a duplicated
+/// expression.
+fn is_timestamp_fresh(age: i64, drift: i64) -> bool {
+    (-drift..=drift).contains(&age)
+}
+
+/// Redis TTL (seconds) for a request's replay nonce.
+///
+/// Freshness is symmetric: a request signed for time `T` is accepted for any
+/// `now` in `[T - drift, T + drift]`. Its nonce record is written on first
+/// acceptance, which can happen as early as `now = T - drift` (a future-dated
+/// request), yet the request stays fresh until `now = T + drift`. So the record
+/// must survive the *full* `2 * drift` lifetime, not just one drift — otherwise
+/// a request first seen at `T - drift` has its nonce expire at
+/// `(T - drift) + ttl` while still being fresh, and the same signature replays
+/// in the gap. TTL = `2 * drift + NONCE_TTL_BUFFER_SECS` covers the worst case
+/// with margin for every window value. `drift` is bounded to
+/// `0..=MAX_AUTH_CLOCK_DRIFT_SECS`, so `2 * drift + buffer` (≤ 2100) never
+/// overflows and the `as u64` is lossless.
+fn nonce_ttl_secs(drift: i64) -> u64 {
+    (2 * drift + crate::types::NONCE_TTL_BUFFER_SECS).max(0) as u64
 }
 
 #[tracing::instrument(name = "auth.verify_signature", skip_all)]
@@ -115,8 +164,9 @@ pub async fn verify_signature(
     }
 
     // Extract nonce for replay protection.
-    // Nonce must be a UUID v4, checked against Redis to prevent replay attacks.
-    // TTL = 600s (10 min) > timestamp window (300s) so no replay is possible.
+    // Nonce must be a UUID, checked against Redis to prevent replay attacks.
+    // Its TTL is kept strictly greater than the timestamp window (see the SET
+    // below) so no replay is possible once the fresh window closes.
     let nonce = headers
         .get("x-nonce")
         .and_then(|v| v.to_str().ok())
@@ -138,21 +188,27 @@ pub async fn verify_signature(
         return Err(constant_time_reject().await);
     }
 
-    // Validate timestamp (5 minute window)
+    // Validate timestamp freshness against the configured drift window.
     // Use checked_sub to avoid potential overflow with user-supplied timestamps
     let timestamp: i64 = timestamp_str
         .parse()
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     let now = chrono::Utc::now().timestamp();
     let age = now.checked_sub(timestamp).unwrap_or(i64::MAX);
-    if !(-300..=300).contains(&age) {
+    let drift = state.config.auth_max_clock_drift_secs;
+    if !is_timestamp_fresh(age, drift) {
         tracing::warn!(
-            "Request timestamp too old or future: {} (now: {})",
+            "Request timestamp outside ±{}s window: {} (now: {}, age: {})",
+            drift,
             timestamp,
-            now
+            now,
+            age,
         );
-        // Use constant_time_reject to normalize timing on timestamp failures
-        return Err(constant_time_reject().await);
+        // Timestamp failures are timing-normalized like every other auth reject,
+        // but carry a machine-readable reason so a drifted client clock is
+        // distinguishable from a bad signature (safe: the check is independent
+        // of any server-side identity state).
+        return Ok(constant_time_reject_with_reason(ERR_TIMESTAMP_OUT_OF_BOUNDS).await);
     }
 
     // Decode public key
@@ -160,6 +216,17 @@ pub async fn verify_signature(
     let pk_array: [u8; 32] = pk_bytes.try_into().map_err(|_| StatusCode::UNAUTHORIZED)?;
     let verifying_key =
         VerifyingKey::from_bytes(&pk_array).map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    // Canonicalize to lowercase hex derived from the decoded bytes, not the
+    // caller-supplied header string: `hex::decode` above accepts mixed-case
+    // input, so without this the same delegate key could vary casing across
+    // requests to obtain independent identities for account-resolution
+    // caching and — most importantly — the read-API rate limiter's per-key
+    // Redis bucket (`rate:read:dk:{public_key}` in rate_limit.rs), trivially
+    // defeating that abuse-prevention control. Every downstream use of
+    // `public_key_hex` (cache keys, `AuthInfo.public_key`, logging) must see
+    // this canonical form, not the raw header value.
+    let public_key_hex = hex::encode(pk_array);
 
     // Decode signature
     let sig_bytes = hex::decode(&signature_hex).map_err(|_| StatusCode::UNAUTHORIZED)?;
@@ -190,10 +257,10 @@ pub async fn verify_signature(
     //         empty string so the signature will mismatch and the request
     //         is rejected below.
     //
-    // NOTE (coordinator): this change must land in lockstep with the SDK
-    // signing change in packages/sdk/src/{memwal,manual}.ts. If the Rust
-    // sidecar agent edits this function concurrently, reconcile so the
-    // canonical message below is the single source of truth.
+    // The canonical message below is the single source of truth for this
+    // format: any change to it must land in lockstep with the SDK signing
+    // code in packages/sdk/src/{memwal,manual}.ts, or every signed request
+    // from an unmatched SDK will fail verification.
     //
     // Canonical format:
     //   "{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}"
@@ -222,14 +289,20 @@ pub async fn verify_signature(
         let nonce_key = format!("nonce:{}", nonce);
         let mut redis = state.redis.clone();
 
-        // SET nonce_key "1" EX 600 NX — only set if Not eXists
+        // Nonce record must outlive the timestamp window so a signature can't be
+        // replayed after its nonce entry expires while still inside the fresh
+        // window. `nonce_ttl_secs` derives TTL from the window so the invariant
+        // holds no matter how the drift window is tuned.
+        let ttl = nonce_ttl_secs(drift);
+
+        // SET nonce_key "1" EX <ttl> NX — only set if Not eXists
         let set_result: Option<String> = redis
             .set_options(
                 &nonce_key,
                 "1",
                 redis::SetOptions::default()
                     .conditional_set(redis::ExistenceCheck::NX)
-                    .with_expiration(redis::SetExpiry::EX(600)),
+                    .with_expiration(redis::SetExpiry::EX(ttl)),
             )
             .await
             .unwrap_or(None); // A Redis error maps to None here, which is
@@ -428,6 +501,99 @@ async fn resolve_account(
     Err("no account found: not in cache, exact account id, or registry".to_string())
 }
 
+/// Combined auth dispatcher for `read_api_routes`: tries the owner-scoped
+/// bearer token (Console) when `Authorization: Bearer` is present, otherwise falls
+/// back to the unmodified Ed25519 signed-request scheme (SDK/dashboard delegate-key
+/// callers). The two calling populations are disjoint by construction — Console never
+/// holds a delegate key, the SDK never sends `Authorization` — so presence of that
+/// header alone is a safe, unambiguous dispatch key.
+///
+/// NOTE: if a request ever carried both a full Ed25519 header set AND an
+/// `Authorization: Bearer` header, the bearer branch wins unconditionally; the
+/// Ed25519 headers are never consulted. This is fine while the two populations stay
+/// disjoint — flagging here so a future proxy/gateway that auto-attaches
+/// `Authorization` doesn't silently break signed requests on this router only.
+#[tracing::instrument(name = "auth.verify_read_api_auth", skip_all)]
+pub async fn verify_read_api_auth(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let bearer = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_owned);
+
+    let Some(token) = bearer else {
+        return verify_signature(State(state), request, next).await;
+    };
+
+    if state.config.owner_token_secret.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let claims = owner_token_auth::verify_token(
+        state.config.owner_token_secret.as_bytes(),
+        &token,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    if !owner_token_has_scope(&claims, owner_token_auth::PERMISSION_MEMORIES_READ) {
+        tracing::warn!(owner = %claims.owner_address, "owner token missing memories.read");
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // claims.owner_address is already canonical lowercase (issue_token validated +
+    // lowercased before minting) — do not re-lowercase.
+    let account_id = match state.db.find_account_by_owner(&claims.owner_address).await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            // Valid token, but the backing account no longer resolves (e.g. deleted
+            // between mint and use). Mirrors verify_signature's own "account not
+            // found" resolution failure: bare 401, not 403 — this codebase reserves
+            // 403 (AppError::Forbidden) strictly for "identity resolved but doesn't
+            // own this path", never for "doesn't exist".
+            tracing::warn!(owner = %claims.owner_address, "owner token account no longer resolves");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(e) => {
+            tracing::warn!("owner token account lookup failed: {}", e);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
+
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(owner_token_to_auth_info(claims, account_id));
+    Ok(next.run(request).await)
+}
+
+fn owner_token_has_scope(claims: &owner_token_auth::OwnerTokenClaims, required: &str) -> bool {
+    claims.permissions.iter().any(|p| p == required)
+}
+
+fn owner_token_to_auth_info(
+    claims: owner_token_auth::OwnerTokenClaims,
+    account_id: String,
+) -> AuthInfo {
+    AuthInfo {
+        // Not a real hex Ed25519 key. read_api_rate_limit_middleware keys its Redis
+        // bucket solely on `public_key` (`rate:read:dk:{public_key}`) — an
+        // empty/constant value here would collapse every Console-proxied owner into
+        // one shared bucket. The `ownertoken:` prefix keeps buckets isolated per
+        // owner and can never collide with a real 64-hex-char key (hex has no `:`).
+        public_key: format!("ownertoken:{}", claims.owner_address),
+        owner: claims.owner_address,
+        account_id,
+        delegate_key: None,
+        seal_session: None,
+    }
+}
+
 #[tracing::instrument(name = "auth.verify_admin_key", skip_all)]
 pub async fn verify_admin_key(request: Request, next: Next) -> Result<Response, StatusCode> {
     let headers = request.headers();
@@ -579,6 +745,83 @@ mod tests {
         assert!(age_expired > 300);
     }
 
+    // ── Configurable drift window (exercises the real predicate) ─
+
+    #[test]
+    fn drift_window_boundaries_are_inclusive_and_symmetric() {
+        let drift = 120;
+        assert!(is_timestamp_fresh(drift, drift)); // exactly +window accepted
+        assert!(is_timestamp_fresh(-drift, drift)); // exactly -window accepted
+        assert!(!is_timestamp_fresh(drift + 1, drift)); // just past → rejected
+        assert!(!is_timestamp_fresh(-(drift + 1), drift)); // just past (future) → rejected
+    }
+
+    #[test]
+    fn drift_window_zero_requires_exact_second() {
+        assert!(is_timestamp_fresh(0, 0));
+        assert!(!is_timestamp_fresh(1, 0));
+        assert!(!is_timestamp_fresh(-1, 0));
+    }
+
+    #[test]
+    fn reported_repro_45s_offset_is_within_default_window() {
+        // The issue's repro used a +45s client offset; it is comfortably inside
+        // the default 300s window and is accepted (i.e. does not reproduce).
+        assert!(is_timestamp_fresh(45, crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS));
+        assert!(is_timestamp_fresh(-45, crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS));
+    }
+
+    #[test]
+    fn nonce_ttl_covers_full_future_dated_freshness_lifetime() {
+        // Exercises the real `nonce_ttl_secs` used at the Redis call site, so a
+        // regression is caught here, not hidden behind a duplicated formula.
+        //
+        // Worst case (the one a naive `drift + buffer` TTL misses): a request
+        // signed for `T` is first accepted as early as `now = T - drift`
+        // (future-dated), and stays fresh until `now = T + drift`. The nonce
+        // record, written at first acceptance, must still exist at the end of
+        // that window, i.e. its TTL must cover the full `2 * drift` span so no
+        // replay slips through after it expires.
+        for drift in [0i64, 45, 300, 600, crate::types::MAX_AUTH_CLOCK_DRIFT_SECS] {
+            let first_seen_at = -drift; // now = T - drift, relative to T
+            let fresh_until = drift; //    now = T + drift, relative to T
+            let nonce_expires_at = first_seen_at + nonce_ttl_secs(drift) as i64;
+            assert!(
+                nonce_expires_at > fresh_until,
+                "drift {drift}: nonce expires at {nonce_expires_at} but request is \
+                 fresh through {fresh_until} — replay gap"
+            );
+        }
+        // Pin the exact derivation at default and ceiling so it cannot regress:
+        //   default: 2*300 + 300 = 900
+        //   ceiling: 2*900 + 300 = 2100
+        assert_eq!(nonce_ttl_secs(crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS), 900);
+        assert_eq!(nonce_ttl_secs(crate::types::MAX_AUTH_CLOCK_DRIFT_SECS), 2100);
+    }
+
+    // ── Timestamp-drift reason header (safe to distinguish) ──────
+
+    #[tokio::test]
+    async fn timestamp_reject_carries_reason_header_and_401() {
+        let resp = constant_time_reject_with_reason(ERR_TIMESTAMP_OUT_OF_BOUNDS).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get("x-auth-error")
+                .and_then(|v| v.to_str().ok()),
+            Some("ERR_TIMESTAMP_OUT_OF_BOUNDS"),
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_reject_carries_no_reason_header() {
+        // Signature/nonce/account failures must stay indistinguishable: the bare
+        // 401 from constant_time_reject exposes no x-auth-error, so it can't be
+        // used to tell "bad signature" from "account not found".
+        let status = constant_time_reject().await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
     // ── Query parameters included in signed message ──────────────
 
     #[test]
@@ -689,6 +932,47 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&secret)
     }
 
+    // ── Public-key casing must canonicalize ─────────────────────────────
+    //
+    // `hex::decode` accepts mixed-case input, but `AuthInfo.public_key` (and
+    // everything keyed by it downstream: account-resolution cache lookups,
+    // and — the actual security-relevant one — read_api_rate_limit_middleware's
+    // per-key Redis bucket `rate:read:dk:{public_key}`) must see one
+    // canonical string per key, or the same delegate key could vary casing
+    // to get a fresh rate-limit bucket on every request. The fix re-encodes
+    // from the decoded bytes (`hex::encode(pk_array)`) rather than trusting
+    // the caller-supplied header string — this pins that invariant directly,
+    // independent of the full request pipeline.
+    #[test]
+    fn public_key_hex_canonicalizes_regardless_of_input_casing() {
+        let lower = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(lower.len(), 64, "fixture must be exactly 32 bytes of hex");
+        let upper = lower.to_ascii_uppercase();
+        let mixed = "0123456789ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef";
+
+        let canon_from = |s: &str| {
+            let bytes = hex::decode(s).unwrap();
+            let array: [u8; 32] = bytes.try_into().unwrap();
+            hex::encode(array)
+        };
+
+        let canonical = canon_from(lower);
+        assert_eq!(
+            canonical, lower,
+            "lowercase input should already be canonical"
+        );
+        assert_eq!(
+            canon_from(&upper),
+            canonical,
+            "uppercase input must canonicalize to the same string as lowercase"
+        );
+        assert_eq!(
+            canon_from(mixed),
+            canonical,
+            "mixed-case input must canonicalize to the same string as lowercase"
+        );
+    }
+
     #[test]
     fn ed25519_roundtrip_signature_verification() {
         use ed25519_dalek::Signer;
@@ -772,6 +1056,81 @@ mod tests {
         let debug_str = format!("{:?}", auth);
         assert!(debug_str.contains("None"));
         assert!(!debug_str.contains("<redacted>"));
+    }
+
+    // ── Owner-token → AuthInfo bridge for read_api_routes ────────────────
+
+    fn owner_token_claims(permissions: &[&str]) -> owner_token_auth::OwnerTokenClaims {
+        owner_token_auth::OwnerTokenClaims {
+            subject: "console".to_string(),
+            owner_address: "0xabc".to_string(),
+            audience: owner_token_auth::OWNER_TOKEN_AUDIENCE.to_string(),
+            issued_at: 0,
+            expires_at: i64::MAX,
+            nonce: "00000000-0000-0000-0000-000000000000".to_string(),
+            permissions: permissions.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn owner_token_to_auth_info_sets_ownertoken_prefixed_public_key() {
+        let claims = owner_token_claims(&[owner_token_auth::PERMISSION_MEMORIES_READ]);
+        let auth = owner_token_to_auth_info(claims, "0xaccount".to_string());
+        assert_eq!(auth.public_key, "ownertoken:0xabc");
+    }
+
+    #[test]
+    fn owner_token_to_auth_info_preserves_owner_and_account_id() {
+        let claims = owner_token_claims(&[owner_token_auth::PERMISSION_MEMORIES_READ]);
+        let auth = owner_token_to_auth_info(claims, "0xaccount".to_string());
+        assert_eq!(auth.owner, "0xabc");
+        assert_eq!(auth.account_id, "0xaccount");
+    }
+
+    #[test]
+    fn owner_token_to_auth_info_never_sets_delegate_key_or_seal_session() {
+        let claims = owner_token_claims(&[owner_token_auth::PERMISSION_MEMORIES_READ]);
+        let auth = owner_token_to_auth_info(claims, "0xaccount".to_string());
+        assert!(auth.delegate_key.is_none());
+        assert!(auth.seal_session.is_none());
+    }
+
+    #[test]
+    fn owner_token_has_scope_true_when_present() {
+        let claims = owner_token_claims(&[owner_token_auth::PERMISSION_MEMORIES_READ]);
+        assert!(owner_token_has_scope(
+            &claims,
+            owner_token_auth::PERMISSION_MEMORIES_READ
+        ));
+    }
+
+    #[test]
+    fn owner_token_has_scope_false_when_missing() {
+        let claims = owner_token_claims(&["some.other.scope"]);
+        assert!(!owner_token_has_scope(
+            &claims,
+            owner_token_auth::PERMISSION_MEMORIES_READ
+        ));
+    }
+
+    #[test]
+    fn owner_token_has_scope_false_when_empty() {
+        let claims = owner_token_claims(&[]);
+        assert!(!owner_token_has_scope(
+            &claims,
+            owner_token_auth::PERMISSION_MEMORIES_READ
+        ));
+    }
+
+    #[test]
+    fn ownertoken_prefix_cannot_collide_with_hex_ed25519_pubkey() {
+        // Ed25519 public keys on the wire are 64 lowercase hex chars
+        // (`x-public-key`, decoded via `hex::decode` above) — `[0-9a-f]` only,
+        // no `:`. The synthetic sentinel this module mints always contains a
+        // `:`, so it can never be mistaken for (or collide with) a real key.
+        let synthetic = format!("ownertoken:{}", "0".repeat(64));
+        assert!(synthetic.contains(':'));
+        assert!(!synthetic.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

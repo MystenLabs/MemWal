@@ -18,10 +18,12 @@
 //!     Ed25519 delegate key and the `X-MemWal-Account-Id` header — and the
 //!     SDK signs every downstream relayer API call from inside the MCP tools.
 //!
-//! Trust model: only the relayer can reach the sidecar (loopback). Forwarding
-//! the user's `Authorization` header into the sidecar is safe; the sidecar's
-//! own shared-secret auth middleware does not run on `/mcp/*` (mounted before
-//! it in `scripts/sidecar/app.ts`).
+//! Trust model: the sidecar's blanket shared-secret middleware does not run on
+//! `/mcp/*` (mounted before it in `scripts/sidecar/app.ts`), because
+//! `Authorization` already carries the end user's delegate key. Instead this
+//! module presents the same secret in `x-memwal-internal-sidecar-token`, and
+//! the sidecar refuses to honour any `x-memwal-internal-*` header without it —
+//! so reaching the sidecar directly is not enough to forge one (GH #685).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -39,7 +41,12 @@ use crate::{client_ip::canonical_client_ip, types::AppState};
 /// Header names that we forward verbatim from the inbound client request to
 /// the sidecar. Anything else is dropped — we never proxy cookies, host, or
 /// any infra header that would confuse the sidecar.
+///
+/// Internal headers (starting with `x-memwal-internal-`) are strictly reserved
+/// for trusted relayer-to-sidecar communication and must NEVER be forwarded
+/// from untrusted client requests.
 const FORWARD_HEADER_PREFIXES: &[&str] = &["x-memwal-"];
+const INTERNAL_HEADER_PREFIXES: &[&str] = &["x-memwal-internal-"];
 const FORWARD_HEADER_EXACT: &[&str] = &[
     "authorization",
     "content-type",
@@ -55,6 +62,9 @@ const FORWARD_HEADER_EXACT: &[&str] = &[
 
 fn should_forward(name: &HeaderName) -> bool {
     let s = name.as_str().to_ascii_lowercase();
+    if INTERNAL_HEADER_PREFIXES.iter().any(|p| s.starts_with(p)) {
+        return false;
+    }
     FORWARD_HEADER_EXACT.iter().any(|h| *h == s)
         || FORWARD_HEADER_PREFIXES.iter().any(|p| s.starts_with(p))
 }
@@ -113,11 +123,11 @@ enum McpAuthOutcome {
     /// today, byte for byte (OAuth tokens are never valid here).
     Passthrough,
     Oauth(Box<crate::oauth::ResolvedOAuthIdentity>),
-    /// OAuth is enabled and the bearer is missing/malformed/expired/
-    /// revoked — respond with the RFC 9728 challenge ourselves instead of
-    /// forwarding to the sidecar (which wouldn't know how to build the
-    /// `resource_metadata` pointer anyway).
+    /// Bearer missing/malformed/expired/revoked, or the hex key is not a
+    /// registered delegate. RFC 9728 challenge when OAuth is configured.
     Unauthorized(Option<crate::oauth::OAuthBearerError>),
+    /// On-chain lookup failed transiently; do not 401 a registered key.
+    Unavailable,
 }
 
 fn is_legacy_delegate_bearer(token: &str) -> bool {
@@ -125,26 +135,80 @@ fn is_legacy_delegate_bearer(token: &str) -> bool {
     hex_part.len() == 64 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-async fn classify_and_resolve(state: &AppState, headers: &HeaderMap) -> McpAuthOutcome {
-    if state.config.mcp_oauth.is_none() {
-        return McpAuthOutcome::Passthrough;
-    }
-    let Some(auth_value) = headers
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let auth_value = headers
         .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    else {
-        return McpAuthOutcome::Unauthorized(None);
-    };
-    let Some(token) = auth_value
+        .and_then(|v| v.to_str().ok())?;
+    auth_value
         .strip_prefix("Bearer ")
         .or_else(|| auth_value.strip_prefix("bearer "))
         .map(str::trim)
-    else {
+        .filter(|token| !token.is_empty())
+}
+
+fn account_id_header(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-memwal-account-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+fn public_key_from_delegate_hex(token: &str) -> Option<[u8; 32]> {
+    let hex_part = token.strip_prefix("0x").unwrap_or(token);
+    let secret: [u8; 32] = hex::decode(hex_part).ok()?.try_into().ok()?;
+    Some(
+        ed25519_dalek::SigningKey::from_bytes(&secret)
+            .verifying_key()
+            .to_bytes(),
+    )
+}
+
+async fn legacy_delegate_registered(
+    state: &AppState,
+    headers: &HeaderMap,
+    token: &str,
+) -> McpAuthOutcome {
+    let Some(account_id) = account_id_header(headers) else {
+        return McpAuthOutcome::Unauthorized(None);
+    };
+    let Some(pk) = public_key_from_delegate_hex(token) else {
+        return McpAuthOutcome::Unauthorized(None);
+    };
+    match crate::storage::sui::verify_delegate_key_onchain(
+        &state.http_client,
+        &state.config.sui_rpc_url,
+        state.sui_grpc_client.as_ref(),
+        account_id,
+        &pk,
+        &state.config.package_id,
+    )
+    .await
+    {
+        Ok(_) => McpAuthOutcome::Passthrough,
+        Err(crate::storage::sui::OnchainVerifyError::RpcError(msg))
+        | Err(crate::storage::sui::OnchainVerifyError::ScanCapExceeded(msg)) => {
+            tracing::warn!(error = %msg, "mcp delegate on-chain verify unavailable");
+            McpAuthOutcome::Unavailable
+        }
+        Err(err) => {
+            tracing::debug!("mcp delegate rejected: {err}");
+            McpAuthOutcome::Unauthorized(None)
+        }
+    }
+}
+
+async fn classify_and_resolve(state: &AppState, headers: &HeaderMap) -> McpAuthOutcome {
+    let Some(token) = bearer_token(headers) else {
         return McpAuthOutcome::Unauthorized(None);
     };
 
     if is_legacy_delegate_bearer(token) {
-        return McpAuthOutcome::Passthrough;
+        return legacy_delegate_registered(state, headers, token).await;
+    }
+
+    if state.config.mcp_oauth.is_none() {
+        return McpAuthOutcome::Unauthorized(None);
     }
 
     match crate::oauth::resolve_oauth_bearer(state, token).await {
@@ -157,41 +221,86 @@ async fn classify_and_resolve(state: &AppState, headers: &HeaderMap) -> McpAuthO
     }
 }
 
-/// Overwrite (never merge) `authorization` + `x-memwal-account-id` on the
-/// outbound headers. This MUST be an overwrite: `build_forwarded_headers`
-/// already copies any client-supplied `x-memwal-*` header verbatim (that's
-/// how the legacy explicit-header flow works), so a caller presenting a
-/// valid OAuth token alongside a forged `X-MemWal-Account-Id` must have the
-/// forged value discarded, not merged with the token's real account.
-fn apply_oauth_headers(
+/// Internal headers the relayer states on every forwarded `/mcp/*` request.
+///
+/// Both values are written with `insert` (overwrite, never append), so a
+/// client-supplied `x-memwal-internal-*` copied through by
+/// `build_forwarded_headers` is always replaced and can never survive. GH #665
+/// additionally drops that prefix on the way in; this function does not depend
+/// on it.
+///
+/// - **sidecar token** proves to the sidecar that the request really came from
+///   the relayer. `/mcp/*` is mounted before the sidecar's shared-secret
+///   middleware because `authorization` already carries the end user's
+///   delegate key, so the secret rides in its own header instead.
+/// - **oauth scope** is stated explicitly on BOTH auth paths — the resolved
+///   grant for OAuth callers, and full read+write for legacy delegate-key
+///   callers. The sidecar registers no tools when it is absent, so silence
+///   means "no access" rather than "unrestricted" (GH #685).
+///
+/// For the OAuth path this MUST overwrite `authorization` and
+/// `x-memwal-account-id`: `build_forwarded_headers` copies any client-supplied
+/// `x-memwal-*` header verbatim (that's how the legacy explicit-header flow
+/// works), so a caller presenting a valid OAuth token alongside a forged
+/// `X-MemWal-Account-Id` must have the forged value discarded, not merged.
+///
+/// Returns `Err` rather than skipping a header it cannot build: a partially
+/// applied set would hand the sidecar an authenticated request with no scope,
+/// and the whole point of #685 is that such a request must fail, not proceed.
+fn apply_internal_headers(
     forwarded: &mut reqwest::header::HeaderMap,
-    identity: &crate::oauth::ResolvedOAuthIdentity,
-) {
-    if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!(
-        "Bearer {}",
-        identity.delegate_private_key.as_str()
-    )) {
-        forwarded.insert(reqwest::header::AUTHORIZATION, v);
+    sidecar_secret: Option<&str>,
+    identity: Option<&crate::oauth::ResolvedOAuthIdentity>,
+) -> Result<(), StatusCode> {
+    fn internal_error(what: &str) -> StatusCode {
+        tracing::error!("mcp_proxy: cannot build internal header {what}");
+        StatusCode::INTERNAL_SERVER_ERROR
     }
-    if let (Ok(name), Ok(v)) = (
-        reqwest::header::HeaderName::from_bytes(b"x-memwal-account-id"),
-        reqwest::header::HeaderValue::from_str(&identity.account_id),
-    ) {
-        forwarded.insert(name, v);
+
+    let Some(secret) = sidecar_secret else {
+        return Err(internal_error(
+            "x-memwal-internal-sidecar-token (SIDECAR_AUTH_TOKEN unset)",
+        ));
+    };
+    let token = reqwest::header::HeaderValue::from_str(secret)
+        .map_err(|_| internal_error("x-memwal-internal-sidecar-token"))?;
+
+    let scope = match identity {
+        Some(identity) => identity.scope.clone(),
+        // Legacy delegate-key callers have no OAuth grant, so the relayer says
+        // outright that they hold every tool scope.
+        None => format!("{} {}", crate::oauth::SCOPE_READ, crate::oauth::SCOPE_WRITE),
+    };
+    let scope = reqwest::header::HeaderValue::from_str(&scope)
+        .map_err(|_| internal_error("x-memwal-internal-oauth-scope"))?;
+
+    if let Some(identity) = identity {
+        let auth = reqwest::header::HeaderValue::from_str(&format!(
+            "Bearer {}",
+            identity.delegate_private_key.as_str()
+        ))
+        .map_err(|_| internal_error("authorization"))?;
+        let account = reqwest::header::HeaderValue::from_str(&identity.account_id)
+            .map_err(|_| internal_error("x-memwal-account-id"))?;
+        forwarded.insert(reqwest::header::AUTHORIZATION, auth);
+        forwarded.insert(
+            reqwest::header::HeaderName::from_static("x-memwal-account-id"),
+            account,
+        );
     }
-    // This header is never copied from inbound traffic. Only the relayer can
-    // add it on the loopback request after resolving a valid OAuth token.
-    if let (Ok(name), Ok(v)) = (
-        reqwest::header::HeaderName::from_bytes(b"x-memwal-internal-oauth-scope"),
-        reqwest::header::HeaderValue::from_str(&identity.scope),
-    ) {
-        forwarded.insert(name, v);
-    }
+
+    forwarded.insert(
+        reqwest::header::HeaderName::from_static("x-memwal-internal-sidecar-token"),
+        token,
+    );
+    forwarded.insert(
+        reqwest::header::HeaderName::from_static("x-memwal-internal-oauth-scope"),
+        scope,
+    );
+    Ok(())
 }
 
-/// RFC 9728 401 challenge. `state.config.mcp_oauth` must be `Some` — only
-/// called from `classify_and_resolve`'s `Unauthorized` arm, which only
-/// returns that when OAuth is enabled.
+/// RFC 9728 401 challenge when OAuth is configured; plain 401 otherwise.
 fn oauth_unauthorized_response(
     state: &AppState,
     err: Option<&crate::oauth::OAuthBearerError>,
@@ -238,12 +347,22 @@ pub async fn sse_proxy(
         peer,
         state.config.trusted_proxy_hops,
     );
-    match classify_and_resolve(&state, &headers).await {
-        McpAuthOutcome::Passthrough => {}
-        McpAuthOutcome::Oauth(identity) => apply_oauth_headers(&mut forwarded, &identity),
+    let identity = match classify_and_resolve(&state, &headers).await {
+        McpAuthOutcome::Passthrough => None,
+        McpAuthOutcome::Oauth(identity) => Some(identity),
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
         }
+        McpAuthOutcome::Unavailable => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
+        }
+    };
+    if let Err(code) = apply_internal_headers(
+        &mut forwarded,
+        state.config.sidecar_secret.as_deref(),
+        identity.as_deref(),
+    ) {
+        return (code, "internal error").into_response();
     }
     let req = state
         .http_client
@@ -341,12 +460,22 @@ pub async fn messages_proxy(
         peer,
         state.config.trusted_proxy_hops,
     );
-    match classify_and_resolve(&state, &headers).await {
-        McpAuthOutcome::Passthrough => {}
-        McpAuthOutcome::Oauth(identity) => apply_oauth_headers(&mut forwarded, &identity),
+    let identity = match classify_and_resolve(&state, &headers).await {
+        McpAuthOutcome::Passthrough => None,
+        McpAuthOutcome::Oauth(identity) => Some(identity),
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
         }
+        McpAuthOutcome::Unavailable => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
+        }
+    };
+    if let Err(code) = apply_internal_headers(
+        &mut forwarded,
+        state.config.sidecar_secret.as_deref(),
+        identity.as_deref(),
+    ) {
+        return (code, "internal error").into_response();
     }
     let upstream = state
         .http_client
@@ -451,12 +580,22 @@ pub async fn streamable_proxy(
         peer,
         state.config.trusted_proxy_hops,
     );
-    match classify_and_resolve(&state, &headers).await {
-        McpAuthOutcome::Passthrough => {}
-        McpAuthOutcome::Oauth(identity) => apply_oauth_headers(&mut forwarded, &identity),
+    let identity = match classify_and_resolve(&state, &headers).await {
+        McpAuthOutcome::Passthrough => None,
+        McpAuthOutcome::Oauth(identity) => Some(identity),
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
         }
+        McpAuthOutcome::Unavailable => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
+        }
+    };
+    if let Err(code) = apply_internal_headers(
+        &mut forwarded,
+        state.config.sidecar_secret.as_deref(),
+        identity.as_deref(),
+    ) {
+        return (code, "internal error").into_response();
     }
     req = req.headers(forwarded);
 
@@ -572,6 +711,22 @@ mod tests {
     }
 
     #[test]
+    fn should_forward_blocks_internal_headers() {
+        for h in [
+            "x-memwal-internal-oauth-scope",
+            "x-memwal-internal-auth",
+            "x-memwal-internal-test",
+            "X-MemWal-Internal-Oauth-Scope",
+        ] {
+            let name = AxumHeaderName::from_bytes(h.as_bytes()).unwrap();
+            assert!(
+                !should_forward(&name),
+                "must not forward internal header {h}"
+            );
+        }
+    }
+
+    #[test]
     fn forwarded_client_ip_sets_peer_when_inbound_missing() {
         let mut out = reqwest::header::HeaderMap::new();
         let inbound = axum_headers(&[]);
@@ -621,6 +776,7 @@ mod tests {
             ("authorization", "Bearer abc"),
             ("cookie", "session=evil"),
             ("x-memwal-account-id", "0xdeadbeef"),
+            ("x-memwal-internal-oauth-scope", "memwal:write"),
             ("host", "evil.example"),
         ]);
 
@@ -636,6 +792,10 @@ mod tests {
         );
         assert!(out.get("cookie").is_none(), "cookie must not be forwarded");
         assert!(out.get("host").is_none(), "host must not be forwarded");
+        assert!(
+            out.get("x-memwal-internal-oauth-scope").is_none(),
+            "inbound internal oauth scope header must be dropped"
+        );
     }
 
     // -- MCP OAuth bearer classification ---------------------------------
@@ -656,7 +816,106 @@ mod tests {
     }
 
     #[test]
-    fn apply_oauth_headers_overwrites_forwarded_authorization_and_account_id() {
+    fn bearer_token_requires_authorization_header() {
+        assert!(bearer_token(&axum_headers(&[])).is_none());
+        assert_eq!(
+            bearer_token(&axum_headers(&[("authorization", "Bearer abc")])),
+            Some("abc")
+        );
+        assert!(bearer_token(&axum_headers(&[("authorization", "Basic abc")])).is_none());
+    }
+
+    // -- internal relayer->sidecar headers (GH #685) ----------------------
+
+    fn test_identity(scope: &str) -> crate::oauth::ResolvedOAuthIdentity {
+        let key = [3u8; 32];
+        let envelope = crate::oauth::encrypt_delegate_private_key(&key, &"b".repeat(64)).unwrap();
+        let secret = crate::oauth::decrypt_delegate_private_key(&key, &envelope).unwrap();
+        crate::oauth::ResolvedOAuthIdentity {
+            account_id: "0xrealaccount".to_string(),
+            delegate_private_key: secret,
+            grant_id: "mwg_test".to_string(),
+            scope: scope.to_string(),
+        }
+    }
+
+    #[test]
+    fn internal_headers_grant_full_scope_to_legacy_passthrough() {
+        let mut out = reqwest::header::HeaderMap::new();
+
+        apply_internal_headers(&mut out, Some("shhh"), None).expect("passthrough must succeed");
+
+        assert_eq!(
+            out.get("x-memwal-internal-oauth-scope")
+                .and_then(|v| v.to_str().ok()),
+            Some("memwal:read memwal:write"),
+            "legacy callers must be granted read+write explicitly, not by omission"
+        );
+        assert_eq!(
+            out.get("x-memwal-internal-sidecar-token")
+                .and_then(|v| v.to_str().ok()),
+            Some("shhh")
+        );
+    }
+
+    #[test]
+    fn internal_headers_forward_the_resolved_oauth_scope() {
+        let mut out = reqwest::header::HeaderMap::new();
+        let identity = test_identity("memwal:read");
+
+        apply_internal_headers(&mut out, Some("shhh"), Some(&identity))
+            .expect("oauth must succeed");
+
+        assert_eq!(
+            out.get("x-memwal-internal-oauth-scope")
+                .and_then(|v| v.to_str().ok()),
+            Some("memwal:read"),
+            "the sidecar relies on this header being set; nothing else asserts it"
+        );
+        assert_eq!(
+            out.get("x-memwal-internal-sidecar-token")
+                .and_then(|v| v.to_str().ok()),
+            Some("shhh")
+        );
+    }
+
+    #[test]
+    fn internal_headers_overwrite_client_supplied_values() {
+        let mut out = build_forwarded_headers(&axum_headers(&[
+            ("x-memwal-internal-oauth-scope", "memwal:write"),
+            ("x-memwal-internal-sidecar-token", "guessed"),
+        ]));
+
+        apply_internal_headers(&mut out, Some("shhh"), None).unwrap();
+
+        assert_eq!(
+            out.get("x-memwal-internal-oauth-scope")
+                .and_then(|v| v.to_str().ok()),
+            Some("memwal:read memwal:write")
+        );
+        assert_eq!(
+            out.get("x-memwal-internal-sidecar-token")
+                .and_then(|v| v.to_str().ok()),
+            Some("shhh")
+        );
+    }
+
+    #[test]
+    fn internal_headers_fail_closed_without_a_sidecar_secret() {
+        let mut out = reqwest::header::HeaderMap::new();
+
+        assert!(
+            apply_internal_headers(&mut out, None, None).is_err(),
+            "no shared secret must fail the request, not forward unauthenticated"
+        );
+        assert!(
+            out.get("x-memwal-internal-oauth-scope").is_none(),
+            "must not leave partial headers behind on failure"
+        );
+    }
+
+    #[test]
+    fn apply_internal_headers_overwrites_forwarded_authorization_and_account_id() {
         // Simulates the case build_forwarded_headers already copied a
         // client-supplied (potentially forged) x-memwal-account-id — the
         // OAuth resolution must win, not merge.
@@ -680,7 +939,7 @@ mod tests {
             scope: "memwal:read".to_string(),
         };
 
-        apply_oauth_headers(&mut forwarded, &identity);
+        apply_internal_headers(&mut forwarded, Some("shhh"), Some(&identity)).unwrap();
 
         assert_eq!(
             forwarded.get("authorization").and_then(|v| v.to_str().ok()),

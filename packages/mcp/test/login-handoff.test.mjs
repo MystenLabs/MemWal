@@ -179,9 +179,13 @@ test("auth-required mode picks up credentials mid-session without a restart", as
             title: "Remember a Fact",
             annotations: { readOnlyHint: false, destructiveHint: false },
         },
+        memwal_remember_bulk: {
+            title: "Remember Multiple Facts",
+            annotations: { readOnlyHint: false, destructiveHint: false },
+        },
         memwal_recall: {
             title: "Recall Memories",
-            annotations: { readOnlyHint: false, destructiveHint: true },
+            annotations: { readOnlyHint: true, destructiveHint: false },
         },
         memwal_analyze: {
             title: "Analyze and Remember",
@@ -190,6 +194,10 @@ test("auth-required mode picks up credentials mid-session without a restart", as
         memwal_restore: {
             title: "Restore Memory Index",
             annotations: { readOnlyHint: false, destructiveHint: false },
+        },
+        memwal_health: {
+            title: "Check Walrus Memory Health",
+            annotations: { readOnlyHint: true, destructiveHint: false },
         },
         memwal_login: {
             title: "Sign In to Walrus Memory",

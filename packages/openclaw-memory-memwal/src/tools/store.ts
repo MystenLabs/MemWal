@@ -9,7 +9,7 @@
 import type { MemWal } from "@mysten-incubation/memwal";
 import { Type } from "@sinclair/typebox";
 import { looksLikeInjection } from "../capture.js";
-import { toolError } from "../format.js";
+import { toolError, withTimeout } from "../format.js";
 import type { PluginConfig } from "../types.js";
 import { MIN_STORE_TEXT_LENGTH, MAX_FACT_PREVIEW_COUNT, MAX_TEXT_PREVIEW_LENGTH } from "../constants.js";
 
@@ -82,10 +82,11 @@ export function registerStoreTool(api: any, client: MemWal, config: PluginConfig
         }
 
         try {
-          const result = await client.analyze(text.trim(), {
-            namespace: ns,
-            occurredAt,
-          });
+          const result = await withTimeout(
+            () => client.analyze(text.trim(), { namespace: ns, occurredAt }),
+            config.requestTimeoutMs,
+            "memory_store",
+          );
 
           const factCount = result.facts?.length ?? 0;
           // Show first 3 extracted facts as confirmation, or raw text truncation as fallback

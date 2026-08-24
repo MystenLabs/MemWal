@@ -85,6 +85,33 @@ test("MemWalMock matches production recall overloads and topK precedence", async
     assert.equal(objectStyle.results.length, 2);
 });
 
+test("MemWalMock matches production token-budget behavior", async () => {
+    const mock = MemWalMock.create({
+        initialMemories: [
+            { text: "a".repeat(40) },
+            { text: "a".repeat(40) },
+        ],
+    });
+
+    assert.equal(mock.countTokens("a".repeat(8)), 2);
+
+    const unbudgeted = await mock.recall({ query: "a", limit: 2 });
+    assert.equal(unbudgeted.results.length, 2);
+    assert.equal("meta" in unbudgeted, false);
+
+    const budgeted = await mock.recall({
+        query: "a",
+        limit: 2,
+        maxTokens: 10,
+    });
+    assert.equal(budgeted.results.length, 1);
+    assert.equal(budgeted.total, 1);
+    assert.deepEqual(budgeted.meta, {
+        tokenEstimate: 10,
+        truncated: true,
+    });
+});
+
 test("MemWalMock tokenization does not depend on the host locale", async () => {
     const originalLocaleLowerCase = String.prototype.toLocaleLowerCase;
     String.prototype.toLocaleLowerCase = () => {

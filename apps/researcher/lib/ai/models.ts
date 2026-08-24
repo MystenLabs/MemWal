@@ -61,3 +61,18 @@ export const modelsByProvider = chatModels.reduce(
   },
   {} as Record<string, ChatModel[]>
 );
+
+/**
+ * Coerce a persisted `chat-model` cookie to a model we actually support.
+ *
+ * The cookie outlives the curated list: anyone who had a since-retired model
+ * selected keeps sending that id, and `/api/chat` rejects unknown ids with a
+ * 400. The picker's own fallback is display-only — it renders the default name
+ * while `initialChatModel` still carries the stale id into the request body —
+ * so the coercion has to happen where the cookie is read.
+ */
+export function resolveChatModelId(cookieValue: string | undefined): string {
+  return cookieValue && allowedModelIds.has(cookieValue)
+    ? cookieValue
+    : DEFAULT_CHAT_MODEL;
+}

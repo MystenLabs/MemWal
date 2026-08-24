@@ -1,5 +1,41 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.11
+
+### Fixed
+
+- Do not abort the SSE handshake socket on HTTP 429, 401, or a bad content-type (that crash path fired on Windows).
+- Report MCP session occupancy caps as concurrent, not a 30-second cooldown.
+- Exit with code 1 when `login` is run without a TTY, instead of booting the auth-required stub and reporting success.
+- Concurrent `memwal_login` calls reuse the in-flight listener and URL instead of starting a second flow that can hang later remember/recall.
+- Serialize outbound MCP POSTs and reconnect when the SSE handle is gone, so a burst of `memwal_recall` calls cannot poison the bridge until restart.
+- Login timeout now warns that an on-chain delegate key may already exist if the browser approved after the local listener expired.
+- Make `memwal_logout` actually revoke access on the running bridge. Logout previously deleted the credentials file and nothing else; the bridge kept the delegate key in memory and the SSE session open, so later `memwal_recall` / `memwal_remember` still ran under the key the user just removed. Logout now aborts the session, fails in-flight calls, and refuses memory tools until `memwal_login`. (#616)
+- Drop the delegate key itself on logout rather than only flagging the session as signed out, so a forwarding path that misses the flag fails closed instead of reusing the deleted key. This also closes reconnect's replay loop, which posted against a pre-logout snapshot and could still push queued calls out under that key if a logout landed mid-replay. (#616)
+- Refuse every request that arrives while signed out, not just memory tool calls. `ping` and other id-bearing requests previously fell through to a queue nothing drains while signed out and were never answered, hanging the client until the next `memwal_login`. (#616)
+
+## 0.0.10
+
+### Fixed
+
+- Keep signed-out `tools/list` conservative so a model without credentials does not spam `memwal_remember`. Signed-in cold start (bridge) still uses the sidecar's proactive wording.
+- Advertise `memwal_recall` as a read-only search (`readOnlyHint: true`, `destructiveHint: false`) so clients that gate on destructive tools do not hold back proactive recall.
+- Align the cold-start `memwal_remember` / `memwal_recall` descriptions with the sidecar's proactive wording. The bridge serves this static list before the relayer session is up, and clients that keep the first `tools/list` were told to call remember only when the user explicitly asked.
+- Stop classifying remember vs recall in the UserPromptSubmit hook. The hook injects a decision rubric and the agent chooses the tool from meaning, so Vietnamese, typos, and phrasing that never says "remember" still work.
+- Keep remember proactive for preferences, decisions, constraints, corrections, and identity, but skip one-off tasks, the current file or bug, and small talk.
+- Answer orphaned tool calls whose upstream response never arrives with a retryable error instead of hanging indefinitely. The bridge now tracks in-flight request start times and sweeps expired calls through a per-request deadline (`MEMWAL_MCP_CALL_TIMEOUT_MS`, default 240s), reuses the existing late-reply drop so an expired call cannot get a second response, and enriches reconnect logs with pending request IDs and methods. (#690)
+- Inject the configured default namespace (`--namespace` / `MEMWAL_NAMESPACE`) into `memwal_remember_bulk` calls that omit one, so bulk facts land in the project namespace instead of the relayer fallback `default`. (#667)
+- Send proactive-usage instructions in the MCP `initialize` handshake, so the model knows when to save and recall without being asked. Clients moved to lazy tool loading, which keeps tool descriptions out of the model's context until a tool is explicitly loaded; the guidance lived only in those descriptions, so the model stopped using memory on its own and would offer its built-in memory or deny the tool existed. `instructions` travels with `initialize`, before any `tools/list`, so lazy loading cannot strip it. (#681)
+- Carry those instructions through the bridge's local `initialize`. The bridge answers the handshake itself at cold start and suppresses the relayer's reply, so the relayer's instructions never reached a stdio client. Signed-out sessions instead get guidance pointing at `memwal_login`, since every memory tool fails without credentials.
+- Report the real package version in `serverInfo.version` instead of a hardcoded `0.0.1`, so handshake logs identify which build a user is running.
+
+## 0.0.9
+
+### Fixed
+
+- Answer the MCP `initialize` handshake locally and connect the relayer in the background, so a slow cold start no longer trips the client's 30s connection timeout and leaves the session with no memory tools. Tool discovery is served immediately and refreshed once the relayer is up; a hung relayer now degrades to a tool-call error instead of a failed startup. (#415)
+- Drop buffered tool calls on a same-account login reconnect and keep the `initialize` request id reusable, so a login handoff cannot publish stale cold-start traffic or break the client's handshake.
+
 ## 0.0.8
 
 ### Added

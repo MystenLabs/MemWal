@@ -8,6 +8,7 @@ mod jobs_security_delete;
 mod mcp_proxy;
 mod oauth;
 mod observability;
+mod owner_token_auth;
 mod rate_limit;
 mod routes;
 mod security_delete_auth;
@@ -41,6 +42,7 @@ use jobs::{
 use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
 use storage::legacy_db::LegacyDb;
+use storage::postgres_url::direct_postgres_url;
 use types::{
     AppState, Config, KeyPool, DEFAULT_BLOB_CACHE_MAX_BYTES, DEFAULT_BLOB_CACHE_TTL_SECS,
     DEFAULT_EMBEDDING_CACHE_TTL_SECS,
@@ -55,6 +57,40 @@ fn security_delete_cors() -> CorsLayer {
         .allow_origin(AllowOrigin::any())
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+}
+
+/// CORS layer for the main relayer routes, scoped to the configured origins.
+/// `allow_headers` are the request headers a browser may send on a signed
+/// request; `expose_headers` lists the response headers a cross-origin client
+/// may read — Fetch hides everything else, so `x-auth-error` must be exposed
+/// for the browser SDK to read the machine-readable auth-failure reason (e.g.
+/// clock-drift vs. bad signature). Only that header is exposed.
+fn relayer_cors(origins: Vec<HeaderValue>) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            // SDK auth headers (required for Ed25519 signed requests)
+            "x-public-key".parse::<header::HeaderName>().unwrap(),
+            "x-signature".parse::<header::HeaderName>().unwrap(),
+            "x-timestamp".parse::<header::HeaderName>().unwrap(),
+            "x-nonce".parse::<header::HeaderName>().unwrap(),
+            "x-account-id".parse::<header::HeaderName>().unwrap(),
+            "x-delegate-key".parse::<header::HeaderName>().unwrap(),
+            "x-request-id".parse::<header::HeaderName>().unwrap(),
+            "x-correlation-id".parse::<header::HeaderName>().unwrap(),
+            // SessionKey envelope replacing x-delegate-key
+            "x-seal-session".parse::<header::HeaderName>().unwrap(),
+            // MCP headers — caller's Walrus Memory account id + optional default namespace.
+            "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
+            "x-memwal-namespace".parse::<header::HeaderName>().unwrap(),
+            // Admin dashboard auth (browser fetches from a different subdomain,
+            // so this custom header must be preflight-allowed)
+            "x-admin-api-key".parse::<header::HeaderName>().unwrap(),
+        ])
+        .expose_headers(["x-auth-error".parse::<header::HeaderName>().unwrap()])
 }
 
 #[cfg(test)]
@@ -135,6 +171,49 @@ mod cors_tests {
             None
         );
     }
+
+    #[tokio::test]
+    async fn relayer_cors_exposes_only_x_auth_error() {
+        // Browsers can only read response headers listed in
+        // Access-Control-Expose-Headers. The clock-drift reason (x-auth-error)
+        // must be exposed so the browser SDK can distinguish drift from a bad
+        // signature; nothing else should cross origins.
+        let origin = "https://app.memwal.test";
+        let app = Router::new()
+            .route("/api/remember", post(|| async {}))
+            .layer(relayer_cors(vec![origin.parse().unwrap()]));
+
+        // Access-Control-Expose-Headers is emitted on the actual cross-origin
+        // response, not on the OPTIONS preflight — so drive a real request.
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/remember")
+            .header(header::ORIGIN, origin)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        let exposed = response
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .expect("relayer CORS must set Access-Control-Expose-Headers")
+            .to_str()
+            .unwrap();
+        let names: Vec<&str> = exposed
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("x-auth-error")),
+            "x-auth-error must be exposed, got: {exposed}"
+        );
+        assert_eq!(
+            names.len(),
+            1,
+            "only x-auth-error should be exposed, got: {exposed}"
+        );
+    }
 }
 
 fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
@@ -200,47 +279,109 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                     );
                                     continue;
                                 };
-                                let Some(wal_balance) = wallet
-                                    .get("walFrost")
+                                let wallet_index = wallet
+                                    .get("walletIndex")
+                                    .and_then(|value| value.as_u64())
+                                    .and_then(|value| usize::try_from(value).ok());
+                                if wallet_index.is_none() {
+                                    tracing::warn!(
+                                        address,
+                                        "balance_monitor: wallet metrics entry has invalid walletIndex"
+                                    );
+                                }
+
+                                // Durable registration withdraws both WAL and
+                                // its relay-tip SUI from address balances. Coin
+                                // object balances cannot prevent those writes
+                                // from failing, so alert on the spendable values.
+                                match wallet
+                                    .get("walAddressBalanceFrost")
                                     .and_then(|value| value.as_str())
                                     .and_then(|value| value.parse::<u64>().ok())
-                                else {
-                                    tracing::warn!(
-                                    address,
-                                    "balance_monitor: wallet metrics entry has invalid walFrost"
-                                );
-                                    continue;
-                                };
-
-                                if wal_balance < state.config.wallet_balance_low_threshold_wal {
-                                    tracing::warn!(
-                                    address,
-                                    balance = wal_balance,
-                                    threshold = state.config.wallet_balance_low_threshold_wal,
-                                    "balance_monitor: uploader wallet WAL balance below threshold"
-                                );
-                                    let alert = alerts::WalletBalanceLowAlert {
-                                        wallet_type: "uploader".to_string(),
-                                        address: address.to_string(),
-                                        balance: wal_balance,
-                                        threshold: state.config.wallet_balance_low_threshold_wal,
-                                        token: "WAL".to_string(),
-                                    };
-                                    if let Err(err) =
-                                        state.alerts.notify_wallet_balance_low(alert).await
+                                {
+                                    Some(wal_balance)
+                                        if wal_balance
+                                            < state.config.wallet_balance_low_threshold_wal =>
                                     {
                                         tracing::warn!(
                                             address,
-                                            "balance_monitor: failed to send uploader alert: {}",
-                                            err
+                                            balance = wal_balance,
+                                            threshold = state.config.wallet_balance_low_threshold_wal,
+                                            "balance_monitor: uploader wallet WAL address balance below threshold"
                                         );
+                                        let alert = alerts::WalletBalanceLowAlert {
+                                            wallet_type: "uploader".to_string(),
+                                            address: address.to_string(),
+                                            balance: wal_balance,
+                                            threshold: state.config.wallet_balance_low_threshold_wal,
+                                            token: "WAL".to_string(),
+                                            sui_network: state.config.sui_network.clone(),
+                                            wallet_index,
+                                        };
+                                        if let Err(err) =
+                                            state.alerts.notify_wallet_balance_low(alert).await
+                                        {
+                                            tracing::warn!(
+                                                address,
+                                                "balance_monitor: failed to send uploader WAL alert: {}",
+                                                err
+                                            );
+                                        }
                                     }
-                                } else {
-                                    tracing::debug!(
+                                    Some(wal_balance) => tracing::debug!(
                                         address,
                                         balance = wal_balance,
-                                        "balance_monitor: uploader wallet WAL balance ok"
-                                    );
+                                        "balance_monitor: uploader wallet WAL address balance ok"
+                                    ),
+                                    None => tracing::warn!(
+                                        address,
+                                        "balance_monitor: wallet metrics entry has invalid walAddressBalanceFrost"
+                                    ),
+                                }
+
+                                match wallet
+                                    .get("suiAddressBalanceMist")
+                                    .and_then(|value| value.as_str())
+                                    .and_then(|value| value.parse::<u64>().ok())
+                                {
+                                    Some(sui_balance)
+                                        if sui_balance
+                                            < state.config.wallet_balance_low_threshold_sui =>
+                                    {
+                                        tracing::warn!(
+                                            address,
+                                            balance = sui_balance,
+                                            threshold = state.config.wallet_balance_low_threshold_sui,
+                                            "balance_monitor: uploader wallet SUI address balance below threshold"
+                                        );
+                                        let alert = alerts::WalletBalanceLowAlert {
+                                            wallet_type: "uploader".to_string(),
+                                            address: address.to_string(),
+                                            balance: sui_balance,
+                                            threshold: state.config.wallet_balance_low_threshold_sui,
+                                            token: "SUI".to_string(),
+                                            sui_network: state.config.sui_network.clone(),
+                                            wallet_index,
+                                        };
+                                        if let Err(err) =
+                                            state.alerts.notify_wallet_balance_low(alert).await
+                                        {
+                                            tracing::warn!(
+                                                address,
+                                                "balance_monitor: failed to send uploader SUI alert: {}",
+                                                err
+                                            );
+                                        }
+                                    }
+                                    Some(sui_balance) => tracing::debug!(
+                                        address,
+                                        balance = sui_balance,
+                                        "balance_monitor: uploader wallet SUI address balance ok"
+                                    ),
+                                    None => tracing::warn!(
+                                        address,
+                                        "balance_monitor: wallet metrics entry has invalid suiAddressBalanceMist"
+                                    ),
                                 }
                             }
                         } else {
@@ -293,6 +434,8 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                         balance: sponsor_balance,
                                         threshold: state.config.sponsor_balance_low_threshold_sui,
                                         token: "SUI".to_string(),
+                                        sui_network: state.config.sui_network.clone(),
+                                        wallet_index: None,
                                     };
                                     if let Err(err) =
                                         state.alerts.notify_wallet_balance_low(alert).await
@@ -330,28 +473,37 @@ async fn init_apalis_pool(
     database_url: &str,
     startup_timeout: std::time::Duration,
 ) -> Result<sqlx::PgPool, String> {
-    let statement_timeout = format!("{}ms", startup_timeout.as_millis().min(300_000));
-    let lock_timeout_ms = (startup_timeout.as_millis() / 3).clamp(1_000, 30_000);
-    let lock_timeout = format!("{}ms", lock_timeout_ms);
-
     tracing::info!(
         "  Apalis: connecting to PostgreSQL (startup_timeout={}s)",
         startup_timeout.as_secs()
     );
+    // Runtime query bounds for this pool (job fetch/update, not migrate).
+    //
+    // `set_config(..., true)` (SET LOCAL) in after_connect is a no-op:
+    // after_connect runs under autocommit, so Postgres discards the GUC when
+    // that statement's implicit transaction ends — runtime queries would
+    // then be unbounded. Session-scoped (`false`) is the only after_connect
+    // form that actually sticks.
+    //
+    // `lock_timeout` is intentionally omitted. A leaked session lock_timeout
+    // on a transaction-mode pooler backend is what aborted sqlx migrate
+    // (15s wait → panic). Migrate now uses the direct host, but we still
+    // don't put lock_timeout on pooled backends. statement_timeout and
+    // idle_in_transaction_session_timeout bound queries without aborting
+    // lock waits; if they leak onto another pooler client they are still
+    // a bound, not a migrate-killer.
+    let statement_timeout = format!("{}ms", startup_timeout.as_millis().min(300_000));
     let pool_future = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(startup_timeout)
         .after_connect(move |conn, _meta| {
             let statement_timeout = statement_timeout.clone();
-            let lock_timeout = lock_timeout.clone();
             Box::pin(async move {
                 sqlx::query(
                     "SELECT set_config('statement_timeout', $1, false), \
-                            set_config('lock_timeout', $2, false), \
                             set_config('idle_in_transaction_session_timeout', $1, false)",
                 )
                 .bind(statement_timeout)
-                .bind(lock_timeout)
                 .execute(conn)
                 .await?;
                 Ok(())
@@ -388,7 +540,31 @@ async fn init_apalis_pool(
     }
 
     tracing::info!("  Apalis: running PostgreSQL migrations");
-    match tokio::time::timeout(startup_timeout, PostgresStorage::<()>::setup(&pool)).await {
+    let migrate_url = direct_postgres_url(database_url);
+    let setup_pool_future = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(startup_timeout)
+        .connect(migrate_url.as_ref());
+    let setup_pool = match tokio::time::timeout(startup_timeout, setup_pool_future).await {
+        Ok(Ok(setup_pool)) => setup_pool,
+        Ok(Err(err)) => {
+            return Err(format!(
+                "connect to PostgreSQL for Apalis migrations: {err}"
+            ))
+        }
+        Err(_) => {
+            return Err(format!(
+                "timed out after {}s connecting to PostgreSQL for Apalis migrations",
+                startup_timeout.as_secs()
+            ))
+        }
+    };
+    let setup_result = match tokio::time::timeout(
+        startup_timeout,
+        PostgresStorage::<()>::setup(&setup_pool),
+    )
+    .await
+    {
         Ok(Ok(())) => {
             tracing::info!("  Apalis: PostgreSQL migrations applied");
             Ok(pool)
@@ -398,7 +574,20 @@ async fn init_apalis_pool(
             "timed out after {}s running Apalis PostgreSQL migrations",
             startup_timeout.as_secs()
         )),
+    };
+    // If setup already timed out because the connection is wedged, a graceful
+    // close can block boot indefinitely. Keep the same outer bound as the rest
+    // of this function and surface `setup_result` either way.
+    if tokio::time::timeout(startup_timeout, setup_pool.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_secs = startup_timeout.as_secs(),
+            "  Apalis: timed out closing the migration pool; continuing"
+        );
     }
+    setup_result
 }
 
 async fn apalis_schema_ready(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
@@ -477,6 +666,29 @@ async fn main() {
         config.accounts_rate_limit.global_per_minute,
         config.accounts_rate_limit.global_per_hour,
     );
+    tracing::info!(
+        "  owner-token issuance: {} (ttl={}s); rate limit {}/min, {}/hr per credential; {}/min, {}/hr per owner",
+        if config.owner_token_secret.is_empty() {
+            "DISABLED (OWNER_TOKEN_SECRET unset)"
+        } else {
+            "enabled"
+        },
+        config.owner_token_ttl_secs,
+        config.owner_token_rate_limit.per_minute,
+        config.owner_token_rate_limit.per_hour,
+        config.owner_token_rate_limit.owner_per_minute,
+        config.owner_token_rate_limit.owner_per_hour,
+    );
+    if config.owner_token_secret.is_empty() {
+        tracing::warn!(
+            "  owner-token: OWNER_TOKEN_SECRET is unset — POST /v1/owner-tokens will 503 and the OwnerToken extractor will reject every bearer token until it's set."
+        );
+    }
+    if config.owner_token_service_credential.is_empty() {
+        tracing::warn!(
+            "  owner-token: OWNER_TOKEN_SERVICE_CREDENTIAL is unset — POST /v1/owner-tokens will 401 every caller until it's set."
+        );
+    }
     if config.rate_limit.bench_bypass_enabled {
         // Storage quota is unaffected — this only skips the request-rate
         // buckets. The warning is split across lines so each one is grep-able
@@ -847,6 +1059,7 @@ async fn main() {
         .with_walrus_config(
             config.walrus_package_id.clone(),
             config.walrus_system_object_id.clone(),
+            config.walrus_staking_pool_id.clone(),
         );
         (
             Some(Arc::new(client.clone())),
@@ -882,6 +1095,32 @@ async fn main() {
         config.security_delete_execute_max_in_flight,
     ));
 
+    // General-purpose Sui client for the per-memory expiry sweep.
+    // Deliberately independent of `security_delete_component_enabled` —
+    // unlike `security_delete_sui` above, the expiry sweep must have a
+    // client whenever SUI_GRPC_URL is configured at all, so it works in
+    // deployments that never enable security deletion. This builds a
+    // separate SuiClient/gRPC client instance from `security_delete_sui`'s
+    // even when both end up `Some`; that duplication is intentional, not a
+    // bug — unifying them is out of scope for this change.
+    let walrus_sui_client: Option<Arc<dyn sui::SuiApi>> =
+        config.sui_grpc_url.as_deref().map(|url| {
+            let client = sui::SuiClient::new(
+                url,
+                config.sui_rpc_requests_per_window,
+                config.sui_rpc_window,
+            )
+            .expect("failed to initialize Walrus Sui client")
+            .with_rpc_limits(config.sui_rpc_attempt_timeout, config.sui_rpc_max_in_flight)
+            .expect("invalid Walrus Sui RPC controls")
+            .with_walrus_config(
+                config.walrus_package_id.clone(),
+                config.walrus_system_object_id.clone(),
+                config.walrus_staking_pool_id.clone(),
+            );
+            Arc::new(client) as Arc<dyn sui::SuiApi>
+        });
+
     // Shared application state
     // Dedicated pool for per-job upload advisory locks (see AppState docs). Sized
     // to the wallet-job concurrency (+1 headroom) so every concurrent upload can
@@ -907,10 +1146,12 @@ async fn main() {
         security_delete_wallet_verifier,
         security_delete_sui,
         security_delete_background_sui,
+        walrus_sui_client,
         security_delete_execution_gate,
         config: Arc::clone(&config),
         http_client,
         sui_grpc_client,
+        delegate_keys_cache: crate::storage::sui::new_delegate_keys_cache(),
         key_pool,
         alerts,
         engine,
@@ -1153,6 +1394,39 @@ async fn main() {
             if let Err(e) = evict_state.db.prune_unconsumed_oauth_clients().await {
                 tracing::error!("MCP OAuth client pruning failed: {}", e);
             }
+            if let Err(e) = evict_state.db.sweep_expired_tombstones().await
+            {
+                tracing::error!("tombstone retention sweep failed: {}", e);
+            }
+        }
+    });
+
+    // Spawn background task to bound the in-memory `DelegateKeysCache`
+    // (the `/agents` cache — see `storage/sui.rs`). Unlike the
+    // Postgres-backed eviction above, nothing else ever removes entries from
+    // this HashMap: the 30s TTL only gates whether a hit is trusted, so
+    // without this sweep it grows for the lifetime of the process, one
+    // entry per distinct account_object_id ever looked up. Sweeping is a
+    // cheap in-memory `retain` (no I/O), so a 5-minute cadence against the
+    // 10-minute `DELEGATE_KEYS_CACHE_MAX_AGE` keeps the map bounded to
+    // recently-active accounts with headroom to spare.
+    let delegate_cache_sweep_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            let mut cache = delegate_cache_sweep_state.delegate_keys_cache.write().await;
+            let before = cache.len();
+            cache.retain(|_, v| v.fetched_at.elapsed() < storage::sui::DELEGATE_KEYS_CACHE_MAX_AGE);
+            let evicted = before - cache.len();
+            drop(cache);
+            if evicted > 0 {
+                tracing::debug!(
+                    "delegate_keys_cache sweep: evicted {} stale entries ({} remaining)",
+                    evicted,
+                    before - evicted
+                );
+            }
         }
     });
 
@@ -1169,6 +1443,175 @@ async fn main() {
             {
                 tracing::error!("Stale remember job sweep failed: {}", e);
             }
+
+            // Storage-quota reservation upkeep, on the same tick.
+            //
+            // Ordered after the stale-job sweep so rows it just marked failed
+            // are reconciled in the same pass instead of waiting a full minute.
+            // The reconcile handles terminal jobs whose release was missed; the
+            // expiry sweep is the last-resort backstop for reservations with no
+            // job row at all (inline paths) or whose job vanished entirely.
+            if let Err(e) = stale_job_state
+                .db
+                .release_reservations_for_terminal_jobs()
+                .await
+            {
+                tracing::error!("Terminal-job reservation reconcile failed: {}", e);
+            }
+            if let Err(e) = stale_job_state
+                .db
+                .sweep_expired_storage_reservations()
+                .await
+            {
+                tracing::error!("Expired reservation sweep failed: {}", e);
+            }
+        }
+    });
+
+    // A blob's storage_end_epoch and the current_epoch its lease lookup
+    // was observed at — both scoped to the same sidecar response, both
+    // needed by the current-epoch-anchored `expires_at_from_epoch` formula
+    // (the expiry sweep, below).
+    struct LeaseEpochs {
+        storage_end_epoch: i32,
+        current_epoch: i32,
+    }
+
+    // Spawn background task for per-memory expiry refresh.
+    //
+    // Populates `end_epoch`/`expires_at` on `vector_entries` rows so the
+    // owner-scoped memory listing API never needs a live chain read.
+    // Batches by owner so each owner needs one sidecar query-blobs call
+    // (with `includeStorageLease: true`) rather than one per row. The
+    // epoch schedule (`epoch_duration_ms`) is fetched ONCE per tick,
+    // shared across every owner in that tick's batch.
+    let expiry_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        // Rate-limited external-RPC loop: if a tick overruns 300s, catch up
+        // by spacing subsequent ticks rather than firing several back-to-back
+        // (the default `Burst` behavior).
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+
+            // SUI_GRPC_URL isn't configured in this deployment — a
+            // legitimate degraded-but-non-panicking state. Skip the whole
+            // sweep body (not just the on-chain call) so a client-less
+            // deployment doesn't still select + mark-scheduled rows for
+            // nothing every tick, churning expiry_synced_at across the
+            // table with no benefit.
+            let Some(sui_client) = expiry_state.walrus_sui_client.as_ref() else {
+                tracing::warn!(
+                    "Expiry refresh sweep: no Sui client configured (SUI_GRPC_URL unset), skipping sweep"
+                );
+                continue;
+            };
+
+            // Fetch the epoch schedule ONCE per tick, BEFORE selecting or
+            // marking any row as scheduled. walrus_epoch_schedule() is a
+            // process-global (not owner-specific) on-chain fetch — if it
+            // fails here, nothing has been selected or marked yet, so the
+            // tick naturally retries in 300s. Previously this was fetched
+            // per-owner AFTER rows were already marked scheduled, so a
+            // failure left affected rows with NULL end_epoch/expires_at but
+            // stamped expiry_synced_at, invisible to the sweep for 24h.
+            let schedule = match sui_client.walrus_epoch_schedule().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Expiry refresh sweep: epoch schedule lookup failed: {}", e);
+                    continue;
+                }
+            };
+
+            let rows = match expiry_state.db.rows_needing_expiry_refresh(100).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::error!("Expiry refresh sweep: failed to select rows: {}", e);
+                    continue;
+                }
+            };
+            if rows.is_empty() {
+                continue;
+            }
+
+            let ids: Vec<String> = rows.iter().map(|(_, id, _)| id.clone()).collect();
+            if let Err(e) = expiry_state.db.mark_expiry_scheduled(&ids).await {
+                tracing::error!("Expiry refresh sweep: failed to mark scheduled: {}", e);
+                continue;
+            }
+
+            // Group by owner so each owner needs only one on-chain query
+            // rather than one RPC per row.
+            let mut by_owner: std::collections::HashMap<String, Vec<(String, String)>> =
+                std::collections::HashMap::new();
+            for (owner, id, blob_id) in rows {
+                by_owner.entry(owner).or_default().push((id, blob_id));
+            }
+
+            for (owner, id_blob_pairs) in by_owner {
+                let blob_ids: Vec<String> = id_blob_pairs
+                    .iter()
+                    .map(|(_, blob_id)| blob_id.clone())
+                    .collect();
+                let leases = match crate::storage::walrus::query_blob_storage_leases(
+                    &expiry_state.http_client,
+                    &expiry_state.config.sidecar_url,
+                    expiry_state.config.sidecar_secret.as_deref(),
+                    &owner,
+                    &blob_ids,
+                )
+                .await
+                {
+                    Ok(leases) => leases,
+                    Err(e) => {
+                        tracing::warn!(owner = %owner, "Expiry refresh sweep: on-chain lease lookup failed: {}", e);
+                        continue;
+                    }
+                };
+
+                // Widen the per-blob-id map to carry each blob's
+                // storage_end_epoch AND the current_epoch this owner's
+                // lease lookup observed — the current-epoch-anchored
+                // expires_at_from_epoch formula needs both, and
+                // current_epoch is scoped to this exact lease response
+                // (not the once-per-tick schedule, which only carries
+                // epoch_duration_ms).
+                let current_epoch = leases.current_epoch;
+                let by_blob_id: std::collections::HashMap<String, LeaseEpochs> = leases
+                    .blobs
+                    .into_iter()
+                    .map(|lease| {
+                        (
+                            lease.blob_id,
+                            LeaseEpochs {
+                                storage_end_epoch: lease.storage_end_epoch,
+                                current_epoch,
+                            },
+                        )
+                    })
+                    .collect();
+
+                let now = chrono::Utc::now();
+                for (id, blob_id) in id_blob_pairs {
+                    let Some(lease) = by_blob_id.get(&blob_id) else {
+                        continue;
+                    };
+                    let expires_at = crate::sui::expires_at_from_epoch(
+                        crate::sui::WalrusEpoch(lease.storage_end_epoch as u64),
+                        crate::sui::WalrusEpoch(lease.current_epoch as u64),
+                        &schedule,
+                        now,
+                    );
+                    if let Err(e) = expiry_state
+                        .db
+                        .set_memory_expiry(&id, lease.storage_end_epoch, expires_at)
+                        .await
+                    {
+                        tracing::error!(id = %id, "Expiry refresh sweep: failed to write back: {}", e);
+                    }
+                }
+            }
         }
     });
 
@@ -1177,9 +1620,10 @@ async fn main() {
         let balance_monitor_state = state.clone();
         let balance_monitor_interval_secs = config.balance_monitor_interval_secs;
         tracing::info!(
-            "  balance monitor: starting with interval={}s, wallet_threshold_wal={}, sponsor_threshold_sui={}",
+            "  balance monitor: starting with interval={}s, wallet_threshold_wal={}, wallet_threshold_sui={}, sponsor_threshold_sui={}",
             balance_monitor_interval_secs,
             config.wallet_balance_low_threshold_wal,
+            config.wallet_balance_low_threshold_sui,
             config.sponsor_balance_low_threshold_sui,
         );
         tokio::spawn(async move {
@@ -1229,6 +1673,40 @@ async fn main() {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::verify_signature,
+        ))
+        .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
+
+    // Owner-scoped read API — split out of `protected_routes` so
+    // these 3 GET endpoints stop spending the write path's 30/min
+    // per-delegate-key budget (that budget exists to bound Walrus
+    // upload/LLM/gas spend-risk; plain reads carry none of that risk and a
+    // routine pagination loop could trip it under completely normal use).
+    // Auth is `auth::verify_read_api_auth`: a combined dispatcher that
+    // accepts either the existing Ed25519 signed-request scheme
+    // (SDK/dashboard delegate-key callers, unmodified) or an owner-scoped
+    // bearer token (Console, which structurally can never
+    // produce an Ed25519 signature — see `owner_token_auth`'s module doc).
+    // Both paths populate the same `AuthInfo` extension, so the handlers
+    // themselves don't need to know which scheme authenticated the request.
+    // `read_api_rate_limit_middleware` (not the shared `rate_limit_middleware`)
+    // so this budget can never contend with writes.
+    let read_api_routes = Router::new()
+        .route(
+            "/v1/owners/{owner}/namespaces",
+            get(routes::list_owner_namespaces),
+        )
+        .route(
+            "/v1/owners/{owner}/memories",
+            get(routes::list_owner_memories),
+        )
+        .route("/v1/owners/{owner}/agents", get(routes::list_owner_agents))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::read_api_rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::verify_read_api_auth,
         ))
         .layer(DefaultBodyLimit::max(auth::PROTECTED_BODY_LIMIT_BYTES));
 
@@ -1298,6 +1776,51 @@ async fn main() {
     let security_delete_routes = security_delete_auth_routes
         .merge(security_delete_bearer_routes)
         .layer(security_delete_cors());
+
+    // Owner-scoped bearer token issuance. Its own dedicated
+    // router group (mirrors `security_delete_auth_routes`): it belongs in
+    // neither `protected_routes` (which requires an Ed25519 signed
+    // request — Console structurally can never produce one, since it
+    // never holds a delegate key) nor `public_routes` (this is the
+    // opposite of public — it demands the service credential). Router::layer
+    // runs bottom-to-top (last-added = outermost = runs first), so:
+    //   1. owner_token_ip_rate_limit_middleware (outermost) — throttles by
+    //      source IP regardless of credential validity. This is the layer
+    //      that actually bounds credential-guessing: the credential gate
+    //      rejects a bad guess in-process with no I/O, so the per-credential
+    //      limiter below it is structurally unreachable for a failing guess
+    //      (and even if reached, is keyed by the guessed value itself, so a
+    //      varying guess gets a fresh bucket every time). Without this IP
+    //      layer, guessing the one shared service credential had no
+    //      throttling anywhere (found in adversarial review, fixed here).
+    //   2. service_credential_gate — rejects an uncredentialed caller before
+    //      the per-credential rate limiter spends any Redis budget on it.
+    //   3. owner_token_credential_rate_limit_middleware (innermost) — the
+    //      legitimate-traffic budget for an authenticated Console instance.
+    let owner_token_routes = Router::new()
+        .route(
+            "/v1/owner-tokens",
+            post(routes::issue_token).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::owner_token_credential_rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::owner_token::service_credential_gate,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::owner_token_ip_rate_limit_middleware,
+        ));
+
+    // `GET /v1/owners/{owner}/_token_probe` — no router-level middleware
+    // needed: `OwnerToken` is a pure `FromRequestParts` extractor, so axum
+    // resolves (and rejects) it per-handler before the body ever runs.
+    // See `routes::owner_token` module doc for why this route exists.
+    let owner_token_probe_routes =
+        Router::new().route("/v1/owners/{owner}/_token_probe", get(routes::token_probe));
 
     // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
     // No signed-request auth here: MCP clients ship a single Bearer at SSE
@@ -1457,36 +1980,23 @@ async fn main() {
             CorsLayer::new() // deny-all: no Allow-Origin header emitted
         } else {
             tracing::info!("  CORS origins: {}", config.allowed_origins);
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::list(origins))
-                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-                .allow_headers([
-                    header::CONTENT_TYPE,
-                    header::AUTHORIZATION,
-                    // SDK auth headers (required for Ed25519 signed requests)
-                    "x-public-key".parse::<header::HeaderName>().unwrap(),
-                    "x-signature".parse::<header::HeaderName>().unwrap(),
-                    "x-timestamp".parse::<header::HeaderName>().unwrap(),
-                    "x-nonce".parse::<header::HeaderName>().unwrap(),
-                    "x-account-id".parse::<header::HeaderName>().unwrap(),
-                    "x-delegate-key".parse::<header::HeaderName>().unwrap(),
-                    "x-request-id".parse::<header::HeaderName>().unwrap(),
-                    "x-correlation-id".parse::<header::HeaderName>().unwrap(),
-                    // SessionKey envelope replacing x-delegate-key
-                    "x-seal-session".parse::<header::HeaderName>().unwrap(),
-                    // MCP headers — caller's Walrus Memory account id + optional default namespace.
-                    "x-memwal-account-id".parse::<header::HeaderName>().unwrap(),
-                    "x-memwal-namespace".parse::<header::HeaderName>().unwrap(),
-                    // Admin dashboard auth (browser fetches from a different subdomain,
-                    // so this custom header must be preflight-allowed)
-                    "x-admin-api-key".parse::<header::HeaderName>().unwrap(),
-                ])
+            relayer_cors(origins)
         }
     };
 
     let app = Router::new()
         .merge(protected_routes)
+        .merge(read_api_routes)
         .merge(public_routes)
+        // Owner-token routes use the same deployment-wide ALLOWED_ORIGINS
+        // CORS policy as protected/public routes (deny-all by default),
+        // NOT the security-delete API's blanket allow-any: the service
+        // credential must never reach browser JS (the mint call is
+        // server-to-server, Console backend → WM), and the probe / future
+        // owner-scoped read routes are only meant to be reachable from origins
+        // this deployment explicitly trusts.
+        .merge(owner_token_routes)
+        .merge(owner_token_probe_routes)
         .merge(admin_dashboard_routes)
         .layer(cors)
         // Merge after applying the deployment-wide CORS layer so its

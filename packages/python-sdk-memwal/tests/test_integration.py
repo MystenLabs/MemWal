@@ -58,12 +58,42 @@ SERVER_URL = os.environ.get("MEMWAL_SERVER_URL", "https://relayer-staging.memory
 PRIVATE_KEY_HEX = os.environ.get("MEMWAL_PRIVATE_KEY", "")
 ACCOUNT_ID = os.environ.get("MEMWAL_ACCOUNT_ID", "")
 
+# A live write runs embed -> SEAL encrypt -> Walrus upload -> on-chain metadata.
+# Measured around 44s against the dev relayer, so the SDK's 60s default leaves
+# too little headroom to be reliable in CI. 120s matches what the SDK already
+# uses for bulk pipelines.
+_REMEMBER_TIMEOUT_MS = int(os.environ.get("MEMWAL_REMEMBER_TIMEOUT_MS", "120000"))
+
+# Every authenticated test writes into a namespace unique to this run. The bench
+# account is shared, and `default` in particular is what real users get, so a
+# recurring job must not leave live Walrus blobs there.
+_E2E_NAMESPACE = f"sdk-e2e-{uuid.uuid4().hex[:8]}"
+_E2E_NAMESPACE_ALT = f"{_E2E_NAMESPACE}-alt"
+
 HAS_KEY = bool(PRIVATE_KEY_HEX and ACCOUNT_ID)
 
 requires_key = pytest.mark.skipif(
     not HAS_KEY,
     reason="MEMWAL_PRIVATE_KEY and MEMWAL_ACCOUNT_ID not set",
 )
+
+
+def _sync_client(namespace: str = _E2E_NAMESPACE) -> MemWalSync:
+    return MemWalSync.create(
+        key=PRIVATE_KEY_HEX,
+        account_id=ACCOUNT_ID,
+        server_url=SERVER_URL,
+        namespace=namespace,
+    )
+
+
+def _async_client(namespace: str = _E2E_NAMESPACE) -> MemWal:
+    return MemWal.create(
+        key=PRIVATE_KEY_HEX,
+        account_id=ACCOUNT_ID,
+        server_url=SERVER_URL,
+        namespace=namespace,
+    )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -189,37 +219,42 @@ class TestRemember:
     """remember() / remember_and_wait() against live server."""
 
     def test_remember_returns_job_id_and_status(self) -> None:
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        )
-        result = mw.remember("Integration test: the sky is blue", namespace="sdk-test")
+        mw = _sync_client()
+        result = mw.remember("Integration test: the sky is blue")
         assert result.job_id is not None and isinstance(result.job_id, str)
         assert result.status in ("pending", "running")
         print(f"\n  accepted job={result.job_id[:8]}... status={result.status}")
 
     def test_remember_and_wait_returns_blob_and_owner(self) -> None:
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
+        mw = _sync_client()
+        result = mw.remember_and_wait(
+            "Integration test: the sky is blue", timeout_ms=_REMEMBER_TIMEOUT_MS
         )
-        result = mw.remember_and_wait("Integration test: the sky is blue", namespace="sdk-test")
         assert result.id is not None and isinstance(result.id, str)
         assert result.blob_id is not None and isinstance(result.blob_id, str)
         assert result.owner.startswith("0x")
         print(f"\n  done job={result.id[:8]}... blob={result.blob_id[:8]}...")
 
-    def test_remember_default_namespace(self) -> None:
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
+    def test_remember_uses_the_client_namespace(self) -> None:
+        """Omitting `namespace` falls back to the one the client was built with.
+
+        The literal `"default"` fallback is asserted in the mocked suite; proving
+        it here would mean writing a live blob into the namespace real users get.
+        """
+        mw = _sync_client()
+        result = mw.remember_and_wait(
+            "Integration test: namespace fallback", timeout_ms=_REMEMBER_TIMEOUT_MS
         )
-        result = mw.remember_and_wait("Integration test: namespace default")
-        assert result.namespace == "default"
+        assert result.namespace == _E2E_NAMESPACE
 
     def test_remember_custom_namespace(self) -> None:
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
+        mw = _sync_client()
+        result = mw.remember_and_wait(
+            "Integration test: custom namespace",
+            namespace=_E2E_NAMESPACE_ALT,
+            timeout_ms=_REMEMBER_TIMEOUT_MS,
         )
-        result = mw.remember_and_wait("Integration test: custom namespace", namespace="sdk-test")
-        assert result.namespace == "sdk-test"
+        assert result.namespace == _E2E_NAMESPACE_ALT
 
 
 @requires_key
@@ -227,25 +262,19 @@ class TestRecall:
     """recall() against live server."""
 
     def test_recall_returns_list(self) -> None:
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        )
+        mw = _sync_client()
         result = mw.recall("sky blue", limit=5)
         assert isinstance(result.results, list)
         assert result.total >= 0
         print(f"\n  recall total={result.total}")
 
     def test_recall_respects_limit(self) -> None:
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        )
+        mw = _sync_client()
         result = mw.recall("test", limit=2)
         assert len(result.results) <= 2
 
     def test_recall_result_has_expected_fields(self) -> None:
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        )
+        mw = _sync_client()
         result = mw.recall("test", limit=3)
         for mem in result.results:
             assert isinstance(mem.text, str)
@@ -258,13 +287,8 @@ class TestAnalyze:
     """analyze() against live server."""
 
     def test_analyze_returns_facts(self) -> None:
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        )
-        result = mw.analyze(
-            "I love hiking and my favorite food is pho.",
-            namespace="sdk-test",
-        )
+        mw = _sync_client()
+        result = mw.analyze("I love hiking and my favorite food is pho.")
         assert isinstance(result.facts, list)
         assert result.total >= 0
         assert result.owner.startswith("0x")
@@ -278,9 +302,7 @@ class TestAsk:
     """ask() against live server."""
 
     def test_ask_returns_string_answer(self) -> None:
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        )
+        mw = _sync_client()
         result = mw.ask("What outdoor activities do I enjoy?", limit=3)
         assert isinstance(result.answer, str)
         assert len(result.answer) > 0
@@ -301,12 +323,10 @@ class TestFullFlow:
         text = f"SDK e2e test {unique}: quantum entanglement in photonics"
         ns = f"sdk-e2e-{unique}"
 
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        )
+        mw = _sync_client()
 
         # Store a distinctive memory in an isolated namespace
-        mem = mw.remember_and_wait(text, namespace=ns)
+        mem = mw.remember_and_wait(text, namespace=ns, timeout_ms=_REMEMBER_TIMEOUT_MS)
         assert mem.id is not None
 
         # Recall — should find the stored memory
@@ -320,11 +340,11 @@ class TestFullFlow:
 
     def test_remember_then_ask_uses_memory(self) -> None:
         """remember → ask — answer should reference the stored fact."""
-        mw = MemWalSync.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
+        mw = _sync_client()
+        mw.remember_and_wait(
+            "I am allergic to shellfish", timeout_ms=_REMEMBER_TIMEOUT_MS
         )
-        mw.remember_and_wait("I am allergic to shellfish", namespace="sdk-test")
-        result = mw.ask("What are my food allergies?", limit=3, namespace="sdk-test")
+        result = mw.ask("What are my food allergies?", limit=3)
         assert isinstance(result.answer, str)
         assert len(result.answer) > 0
         print(f"\n  ask answer: {result.answer[:100]}")
@@ -338,38 +358,30 @@ class TestAsync:
     """Async client variants."""
 
     async def test_async_health(self) -> None:
-        async with MemWal.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        ) as mw:
+        async with _async_client() as mw:
             result = await mw.health()
             assert result.status == "ok"
 
     async def test_async_remember(self) -> None:
-        async with MemWal.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        ) as mw:
+        async with _async_client() as mw:
             result = await mw.remember("Async SDK test: Paris is the capital of France")
             assert result.job_id is not None
             assert result.status in ("pending", "running")
 
     async def test_async_recall(self) -> None:
-        async with MemWal.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        ) as mw:
-            await mw.remember_and_wait("Async SDK test: I enjoy reading")
+        async with _async_client() as mw:
+            await mw.remember_and_wait(
+                "Async SDK test: I enjoy reading", timeout_ms=_REMEMBER_TIMEOUT_MS
+            )
             result = await mw.recall("reading books", limit=3)
             assert isinstance(result.results, list)
 
     async def test_async_analyze(self) -> None:
-        async with MemWal.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        ) as mw:
-            result = await mw.analyze("I drink tea every morning.", namespace="sdk-test")
+        async with _async_client() as mw:
+            result = await mw.analyze("I drink tea every morning.")
             assert isinstance(result.facts, list)
 
     async def test_async_ask(self) -> None:
-        async with MemWal.create(
-            key=PRIVATE_KEY_HEX, account_id=ACCOUNT_ID, server_url=SERVER_URL
-        ) as mw:
+        async with _async_client() as mw:
             result = await mw.ask("What do I drink?", limit=3)
             assert isinstance(result.answer, str)

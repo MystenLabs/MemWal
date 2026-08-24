@@ -100,6 +100,150 @@ export function scoringWeightsToWire(weights?: ScoringWeights): object | undefin
 }
 
 // ============================================================
+// Sui Private Key Formats
+// ============================================================
+
+// Bech32 (BIP-173) charset, and the Sui scheme flag for Ed25519.
+const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const SUI_ED25519_SCHEME_FLAG = 0;
+
+/**
+ * Hand-rolled rather than pulling in `decodeSuiPrivateKey` from `@mysten/sui`:
+ * this package keeps `@mysten/*` as peer dependencies so the core client works
+ * without them, and `MemWal`'s constructor is synchronous so it cannot await a
+ * dynamic import. The Python SDK hand-rolls it in `memwal/utils.py` for the
+ * same reason.
+ */
+function bech32Polymod(values: number[]): number {
+    const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+    let chk = 1;
+    for (const value of values) {
+        const top = chk >> 25;
+        chk = ((chk & 0x1ffffff) << 5) ^ value;
+        for (let i = 0; i < 5; i++) {
+            if ((top >> i) & 1) {
+                chk ^= generators[i]!;
+            }
+        }
+    }
+    return chk;
+}
+
+function bech32HrpExpand(hrp: string): number[] {
+    const high: number[] = [];
+    const low: number[] = [];
+    for (const char of hrp) {
+        const code = char.charCodeAt(0);
+        high.push(code >> 5);
+        low.push(code & 31);
+    }
+    return [...high, 0, ...low];
+}
+
+/**
+ * Regroup `data` from `frombits`-wide values to `tobits`-wide ones. Bech32
+ * carries 5-bit values; a private key is bytes, so decoding is 5 -> 8.
+ */
+function convertBits(data: number[], frombits: number, tobits: number, pad: boolean): number[] {
+    let acc = 0;
+    let bits = 0;
+    const ret: number[] = [];
+    const maxv = (1 << tobits) - 1;
+    const maxAcc = (1 << (frombits + tobits - 1)) - 1;
+    for (const value of data) {
+        if (value < 0 || value >> frombits) {
+            throw new Error("convertBits: value out of range");
+        }
+        acc = ((acc << frombits) | value) & maxAcc;
+        bits += frombits;
+        while (bits >= tobits) {
+            bits -= tobits;
+            ret.push((acc >> bits) & maxv);
+        }
+    }
+    if (pad) {
+        if (bits) {
+            ret.push((acc << (tobits - bits)) & maxv);
+        }
+    } else if (bits >= frombits || ((acc << (tobits - bits)) & maxv)) {
+        throw new Error("convertBits: invalid incomplete group");
+    }
+    return ret;
+}
+
+/** Decode a bech32 string into its human-readable part and 5-bit data. */
+function bech32Decode(bech: string): { hrp: string; data: number[] } {
+    if (bech !== bech.toLowerCase() && bech !== bech.toUpperCase()) {
+        throw new Error("bech32 string is mixed case");
+    }
+    const lower = bech.toLowerCase();
+    const pos = lower.lastIndexOf("1");
+    if (pos < 1 || pos + 7 > lower.length) {
+        throw new Error("bech32 string has no valid separator");
+    }
+
+    const hrp = lower.slice(0, pos);
+    const data: number[] = [];
+    for (const char of lower.slice(pos + 1)) {
+        const index = BECH32_CHARSET.indexOf(char);
+        if (index === -1) {
+            throw new Error("bech32 string has a character outside the charset");
+        }
+        data.push(index);
+    }
+
+    if (bech32Polymod([...bech32HrpExpand(hrp), ...data]) !== 1) {
+        throw new Error("bech32 checksum mismatch");
+    }
+    return { hrp, data: data.slice(0, -6) };
+}
+
+/**
+ * Decode a Sui bech32 `suiprivkey1...` string to its 32-byte Ed25519 seed.
+ *
+ * Mirrors `decodeSuiPrivateKey` from `@mysten/sui`.
+ */
+export function decodeSuiPrivateKey(encoded: string): Uint8Array {
+    const { hrp, data } = bech32Decode(encoded);
+    if (hrp !== "suiprivkey") {
+        throw new Error(`expected a suiprivkey string, got prefix '${hrp}'`);
+    }
+
+    const payload = convertBits(data, 5, 8, false);
+    if (payload.length === 0 || payload[0] !== SUI_ED25519_SCHEME_FLAG) {
+        throw new Error("only Ed25519 private keys are supported");
+    }
+
+    const seed = payload.slice(1);
+    if (seed.length !== 32) {
+        throw new Error(`Ed25519 seed must be exactly 32 bytes, got ${seed.length}`);
+    }
+    return Uint8Array.from(seed);
+}
+
+/**
+ * Accept either a hex seed or a Sui `suiprivkey1...` string, return hex.
+ *
+ * Both forms are in circulation — `sui keytool` and wallets hand out bech32,
+ * while `generateDelegateKey()` returns hex — so hex-only input would reject a
+ * key a user reasonably expects to work, and the "non-hex characters" error it
+ * raised named nothing they could act on. Matches the Python SDK's
+ * `normalize_private_key`.
+ */
+export function normalizePrivateKey(key: string): string {
+    if (typeof key !== "string") {
+        throw new TypeError("normalizePrivateKey: expected string input");
+    }
+    const candidate = key.trim();
+    if (candidate.toLowerCase().startsWith("suiprivkey1")) {
+        return bytesToHex(decodeSuiPrivateKey(candidate));
+    }
+    return candidate.startsWith("0x") || candidate.startsWith("0X")
+        ? candidate.slice(2)
+        : candidate;
+}
+
+// ============================================================
 // Transport Security Helpers
 // ============================================================
 
@@ -153,12 +297,17 @@ export function sanitizeServerError(
     status: number,
     rawBody: string,
 ): { message: string; raw: string; serverCode?: string } {
-    if (status === 401) {
+    // Number() so a string "401" (some MCP / HTTP paths) still hits this branch.
+    if (Number(status) === 401) {
+        // Empty body = no-session / bare relayer 401. Non-empty keeps
+        // the AUTH_REJECTED triage (wrong key / account / network).
+        const empty = !String(rawBody ?? "").trim();
         return {
-            message:
-                "401 from relayer: typically wrong private key, key not registered on this account, " +
-                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
-                "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
+            message: empty
+                ? "Walrus Memory isn't signed in. Call the memwal_login tool, then retry."
+                : "401 from relayer: typically wrong private key, key not registered on this account, " +
+                  "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+                  "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
         };
@@ -189,6 +338,33 @@ export function sanitizeServerError(
     return { message, raw: rawBody, serverCode };
 }
 
+/**
+ * Machine-readable reason the relayer sets on the `x-auth-error` header when it
+ * rejects a request because the signed timestamp is outside its accepted
+ * clock-drift window.
+ */
+export const ERR_TIMESTAMP_OUT_OF_BOUNDS = "ERR_TIMESTAMP_OUT_OF_BOUNDS";
+
+/**
+ * When a rejected response carries `x-auth-error: ERR_TIMESTAMP_OUT_OF_BOUNDS`,
+ * build an actionable clock-drift error (with `serverCode` set) so the caller
+ * can fix node time rather than seeing an opaque 401. Returns `null` otherwise.
+ */
+export function clockDriftErrorFromResponse(
+    res: { status: number; headers: Headers },
+): (Error & { status?: number; serverCode?: string }) | null {
+    if (res.status !== 401) return null;
+    if (res.headers.get("x-auth-error") !== ERR_TIMESTAMP_OUT_OF_BOUNDS) return null;
+    const err = new Error(
+        "Request rejected: signed timestamp is outside the relayer's accepted clock-drift window. " +
+            "Synchronize this client's clock (NTP); if the deployment needs a wider tolerance, " +
+            "raise AUTH_MAX_CLOCK_DRIFT_SECS on the relayer.",
+    ) as Error & { status?: number; serverCode?: string };
+    err.status = res.status;
+    err.serverCode = ERR_TIMESTAMP_OUT_OF_BOUNDS;
+    return err;
+}
+
 // ============================================================
 // Delegate Key → Sui Address Derivation
 // ============================================================
@@ -202,7 +378,7 @@ export function sanitizeServerError(
  * This allows a delegate key to be used as a Sui keypair for signing transactions
  * (e.g. calling seal_approve for SEAL decryption).
  *
- * @param privateKeyHex - Ed25519 private key as hex string
+ * @param privateKeyHex - Ed25519 private key, hex or `suiprivkey1...`
  * @returns Sui address as 0x-prefixed hex string
  *
  * @example
@@ -215,7 +391,7 @@ export async function delegateKeyToSuiAddress(privateKeyHex: string): Promise<st
     const ed = await import("@noble/ed25519");
     const { blake2b } = await import("@noble/hashes/blake2.js");
 
-    const privateKey = hexToBytes(privateKeyHex);
+    const privateKey = hexToBytes(normalizePrivateKey(privateKeyHex));
     const publicKey = await ed.getPublicKeyAsync(privateKey);
 
     // Sui Ed25519 address = blake2b256(0x00 || public_key)
@@ -228,12 +404,12 @@ export async function delegateKeyToSuiAddress(privateKeyHex: string): Promise<st
 }
 
 /**
- * Get the Ed25519 public key bytes from a delegate key private key hex.
+ * Get the Ed25519 public key bytes from a delegate private key.
  *
- * @param privateKeyHex - Ed25519 private key as hex string
+ * @param privateKeyHex - Ed25519 private key, hex or `suiprivkey1...`
  * @returns 32-byte public key as Uint8Array
  */
 export async function delegateKeyToPublicKey(privateKeyHex: string): Promise<Uint8Array> {
     const ed = await import("@noble/ed25519");
-    return ed.getPublicKeyAsync(hexToBytes(privateKeyHex));
+    return ed.getPublicKeyAsync(hexToBytes(normalizePrivateKey(privateKeyHex)));
 }

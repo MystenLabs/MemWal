@@ -64,6 +64,17 @@ jobs:
       name: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'staging' && 'staging' || 'dev') }}
     timeout-minutes: 30
 
+    # Serializes against the sdk-e2e job in test.yml and the e2e job in
+    # test-python-sdk.yml, which sign with this same BENCH_DELEGATE_KEY. The
+    # relayer rate-limits per delegate key and per account, so two suites
+    # running concurrently 429 each other. Group name must stay identical in
+    # all three workflows — byte-identical on purpose, including the `main`
+    # branch this workflow never runs on, so the three land in one group
+    # whatever the expression resolves to.
+    concurrency:
+      group: bench-account-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
+      cancel-in-progress: false
+
     env:
       SERVER_URL: ${{ github.event.inputs.server_url || vars.BENCH_SERVER_URL }}
       NAMESPACE: ${{ github.event.inputs.namespace || 'benchmark' }}

@@ -37,6 +37,14 @@ const MIN_BALANCE_MONITOR_INTERVAL_SECS: u64 = 30;
 
 /// Upper bound for explicit Walrus storage purchases.
 pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
+/// Hard ceiling for `OWNER_TOKEN_TTL_SECS` — 24 hours. Without a
+/// bound, `env_positive_u64` accepts any positive u64, and a very large TTL
+/// both defeats the "short-lived" security property the token scheme's
+/// whole threat model rests on (see docs/api/owner-token-auth.md's
+/// trust-boundary note) and can push `now + ttl` outside chrono's
+/// representable range in `routes::owner_token::issue_token`'s `expires_at`
+/// computation.
+pub const MAX_OWNER_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
 pub const DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS: u32 = 5;
 
 pub(crate) fn default_walrus_storage_epochs_for_network(network: &str) -> u32 {
@@ -106,6 +114,49 @@ pub const DEFAULT_REGISTRY_SCAN_MAX_PAGES: u32 = 20;
 /// `sui_getObject` per candidate account).
 pub const REGISTRY_SCAN_MAX_CONCURRENT: usize = 2;
 
+/// Default accepted clock drift (seconds, each direction) between a client's
+/// signed timestamp and the relayer's clock. A request is fresh when
+/// `|now - timestamp| <= this`.
+pub const DEFAULT_AUTH_CLOCK_DRIFT_SECS: i64 = 300;
+
+/// Hard upper bound on the configurable clock-drift window. A wide window
+/// lengthens the interval in which a captured (signature, nonce) pair could be
+/// replayed if the nonce store were unavailable, so operators may tune the
+/// window down but never past this ceiling. Values above it fall back to the
+/// default.
+pub const MAX_AUTH_CLOCK_DRIFT_SECS: i64 = 900;
+
+/// Safety margin added on top of a request's full freshness lifetime when
+/// computing the replay-nonce TTL. Freshness is symmetric, so a request can be
+/// first accepted as early as `drift` seconds before its timestamp and remains
+/// fresh until `drift` seconds after — a `2 * drift` span. The nonce TTL is
+/// `2 * drift + NONCE_TTL_BUFFER_SECS` (see `auth::nonce_ttl_secs`), so the
+/// record always outlives the window in which the same signature could be
+/// replayed, whatever the window is tuned to.
+pub const NONCE_TTL_BUFFER_SECS: i64 = 300;
+
+/// Accepted timestamp drift window, from `AUTH_MAX_CLOCK_DRIFT_SECS`.
+/// Bounded to `0..=MAX_AUTH_CLOCK_DRIFT_SECS`; 0 requires an exact-second match.
+/// Out-of-range or unparseable values warn and fall back to the default.
+pub(crate) fn configured_auth_clock_drift_secs() -> i64 {
+    match std::env::var("AUTH_MAX_CLOCK_DRIFT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+    {
+        Some(secs) if (0..=MAX_AUTH_CLOCK_DRIFT_SECS).contains(&secs) => secs,
+        Some(secs) => {
+            tracing::warn!(
+                "AUTH_MAX_CLOCK_DRIFT_SECS={} out of range 0..={}; using default {}",
+                secs,
+                MAX_AUTH_CLOCK_DRIFT_SECS,
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS,
+            );
+            DEFAULT_AUTH_CLOCK_DRIFT_SECS
+        }
+        None => DEFAULT_AUTH_CLOCK_DRIFT_SECS,
+    }
+}
+
 // ============================================================
 // App State (shared across routes + middleware)
 // ============================================================
@@ -132,6 +183,16 @@ pub struct AppState {
     /// background so resolver/reconciler traffic cannot consume reservations
     /// held for auth, prepare, and submit.
     pub security_delete_background_sui: Option<Arc<dyn crate::sui::SuiApi>>,
+    /// General-purpose Sui client for on-chain reads unrelated to security
+    /// deletion (currently: the per-memory expiry sweep's
+    /// `walrus_epoch_schedule()` lookup). Unlike
+    /// `security_delete_sui`, this is populated whenever `SUI_GRPC_URL` is
+    /// configured, regardless of whether the security-delete component is
+    /// enabled — the expiry sweep must work in deployments that don't run
+    /// security deletion at all. `None` only when `SUI_GRPC_URL` itself is
+    /// unset, in which case dependent background tasks log and skip rather
+    /// than panic.
+    pub walrus_sui_client: Option<Arc<dyn crate::sui::SuiApi>>,
     /// Shared only by security-delete API execution and reconciler replay.
     pub security_delete_execution_gate: Arc<SecurityDeleteExecutionGate>,
     /// `Arc` so the engine + handlers share one immutable config.
@@ -141,6 +202,12 @@ pub struct AppState {
     /// once at startup. This client is intentionally independent of security
     /// deletion's quota gate.
     pub sui_grpc_client: Option<sui_rpc::Client>,
+    /// Short-TTL (`storage::sui::DELEGATE_KEYS_CACHE_TTL`, mirrors
+    /// `sui/client.rs`'s `Timed<WalrusEpoch>` window) in-memory cache of
+    /// each account's on-chain delegate-key list, keyed by account object
+    /// id. Backs `GET /v1/owners/{owner}/agents` so repeated calls within
+    /// the TTL window don't re-hit the chain.
+    pub delegate_keys_cache: crate::storage::sui::DelegateKeysCache,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
     pub alerts: Arc<AlertManager>,
@@ -311,6 +378,10 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     /// Sponsor-specific rate limiting and concurrency config
     pub sponsor_rate_limit: SponsorRateLimitConfig,
+    /// Dedicated rate-limit budget for the owner-scoped read API
+    /// (`/v1/owners/{owner}/{namespaces,memories,agents}`), separate from
+    /// the write path's `rate_limit` budget.
+    pub read_api_rate_limit: ReadApiRateLimitConfig,
     /// Rate limiting for the public, unauthenticated `GET
     /// /api/accounts/{owner}/exists` endpoint
     pub accounts_rate_limit: AccountsRateLimitConfig,
@@ -357,6 +428,42 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// Walrus staking pool object id — a SEPARATE shared object from
+    /// walrus_system_object_id. The system state object (read by
+    /// sui::client::walrus_epoch()) carries committee.epoch; this object's
+    /// state carries epoch_duration/first_epoch_start, needed to convert a
+    /// Walrus epoch into a wall-clock timestamp. Do not
+    /// conflate the two ids.
+    pub walrus_staking_pool_id: String,
+    /// HMAC signing secret for owner-scoped bearer tokens
+    /// (`OWNER_TOKEN_SECRET`). Typed `String` rather than `Option<String>`
+    /// (unlike `deletion_token_secret`, whose env-loading idiom this
+    /// otherwise mirrors — `nonempty_env`, trimmed): owner-token issuance
+    /// isn't behind a separate feature flag the way security-delete is, so
+    /// there's no natural "component disabled" state to model with `None`.
+    /// An empty string means "not configured" — both `POST
+    /// /v1/owner-tokens` and the `OwnerToken` extractor treat that as an
+    /// unconditional rejection rather than letting an empty HMAC key
+    /// validate (see `owner_token_auth::OwnerToken`'s doc comment).
+    pub owner_token_secret: String,
+    /// The **service credential**: one static
+    /// shared secret WM generates and hands to Console, which Console
+    /// includes on every `POST /v1/owner-tokens` call
+    /// (`OWNER_TOKEN_SERVICE_CREDENTIAL`, header
+    /// `routes::owner_token::SERVICE_CREDENTIAL_HEADER`). Distinct from
+    /// `owner_token_secret`, which only signs the minted tokens: this one
+    /// authenticates the *client* calling the mint endpoint, and there is
+    /// nothing else for that check to compare against. Same
+    /// empty-string-means-unconfigured contract as `owner_token_secret`
+    /// above.
+    pub owner_token_service_credential: String,
+    /// TTL for owner-scoped bearer tokens
+    /// (`OWNER_TOKEN_TTL_SECS`). Default 900s (15 min): short enough to keep
+    /// the "short-lived" security property, long enough that Console doesn't
+    /// need to re-mint on every single read during one user session.
+    pub owner_token_ttl_secs: u64,
+    /// Rate limiting for `POST /v1/owner-tokens`.
+    pub owner_token_rate_limit: OwnerTokenRateLimitConfig,
     /// Max `/api/restore` calls per owner per minute (GH #501 / WALM-299).
     /// Dedicated on top of the generic weighted account rate limiter —
     /// bounds how often an attacker can force a fresh first-time-discovery
@@ -366,6 +473,7 @@ pub struct Config {
     /// Balance monitoring (proactive alerts)
     pub balance_monitor_interval_secs: u64,
     pub wallet_balance_low_threshold_wal: u64,
+    pub wallet_balance_low_threshold_sui: u64,
     pub sponsor_balance_low_threshold_sui: u64,
     /// MCP OAuth 2.1 support for Claude (and future) native custom
     /// connectors. `None` when required env vars are unset — routes still
@@ -373,6 +481,11 @@ pub struct Config {
     /// always available alongside the legacy delegate-key bearer.
     #[allow(dead_code)]
     pub mcp_oauth: Option<crate::oauth::McpOAuthConfig>,
+    /// Accepted clock drift (seconds, each direction) for signed-request
+    /// timestamps. Signatures older/newer than this are rejected as stale.
+    /// Default 300; tunable via `AUTH_MAX_CLOCK_DRIFT_SECS`, capped at
+    /// `MAX_AUTH_CLOCK_DRIFT_SECS`. Independent of nonce replay protection.
+    pub auth_max_clock_drift_secs: i64,
 }
 
 impl Config {
@@ -386,6 +499,7 @@ impl Config {
             "devnet" => "https://fullnode.devnet.sui.io:443",
             _ => "https://fullnode.mainnet.sui.io:443",
         };
+        let default_walrus_staking_pool_id = default_walrus_staking_pool_id(&network);
         let walrus_publisher_url = std::env::var("WALRUS_PUBLISHER_URL")
             .unwrap_or_else(|_| "https://publisher.walrus-mainnet.walrus.space".to_string());
         let walrus_aggregator_url = std::env::var("WALRUS_AGGREGATOR_URL")
@@ -471,6 +585,7 @@ impl Config {
             seal_expected_committee_identity,
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
+            read_api_rate_limit: ReadApiRateLimitConfig::from_env(),
             accounts_rate_limit: AccountsRateLimitConfig::from_env(),
             trusted_proxy_hops: std::env::var("TRUSTED_PROXY_HOPS")
                 .ok()
@@ -521,6 +636,14 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            walrus_staking_pool_id: nonempty_env("WALRUS_STAKING_POOL_ID")
+                .unwrap_or_else(|| default_walrus_staking_pool_id.to_string()),
+            owner_token_secret: nonempty_env("OWNER_TOKEN_SECRET").unwrap_or_default(),
+            owner_token_service_credential: nonempty_env("OWNER_TOKEN_SERVICE_CREDENTIAL")
+                .unwrap_or_default(),
+            owner_token_ttl_secs: env_positive_u64("OWNER_TOKEN_TTL_SECS", 900)
+                .min(MAX_OWNER_TOKEN_TTL_SECS),
+            owner_token_rate_limit: OwnerTokenRateLimitConfig::from_env(),
             // `env_number`, not `env_positive_u64`: `0` is a meaningful,
             // documented value here (disables `check_restore_call_rate_limit`
             // entirely) — `env_positive_u64` would silently coerce it back
@@ -533,10 +656,38 @@ impl Config {
                 "BALANCE_MONITOR_INTERVAL_SECS",
                 900,
             )),
-            wallet_balance_low_threshold_wal: env_number("WALLET_BALANCE_LOW_THRESHOLD_WAL", 1_000_000),
-            sponsor_balance_low_threshold_sui: env_number("SPONSOR_BALANCE_LOW_THRESHOLD_SUI", 100_000_000),
+            // Both WAL and SUI use 9 decimal places (FROST/MIST).
+            wallet_balance_low_threshold_wal: env_number(
+                "WALLET_BALANCE_LOW_THRESHOLD_WAL",
+                50_000_000_000,
+            ),
+            wallet_balance_low_threshold_sui: env_number(
+                "WALLET_BALANCE_LOW_THRESHOLD_SUI",
+                5_000_000_000,
+            ),
+            sponsor_balance_low_threshold_sui: env_number(
+                "SPONSOR_BALANCE_LOW_THRESHOLD_SUI",
+                5_000_000_000,
+            ),
             mcp_oauth: crate::oauth::McpOAuthConfig::from_env(),
+            auth_max_clock_drift_secs: configured_auth_clock_drift_secs(),
         }
+    }
+}
+
+/// Per-network default for the Walrus staking pool shared object id (see
+/// `Config::walrus_staking_pool_id`'s doc comment). Matches @mysten/walrus's
+/// constants.mjs per-network defaults (see also scripts/sidecar/config.ts's
+/// WALRUS_PACKAGE_ID handling, which follows the same pattern for the TS
+/// sidecar). Only `testnet` has a distinct default — every other network
+/// value, including `devnet`/`localnet`, silently falls back to the
+/// MAINNET object id. Callers on a non-testnet, non-mainnet network should
+/// set `WALRUS_STAKING_POOL_ID` explicitly rather than relying on this.
+/// Expects `network` already trimmed/lowercased (see `Config::from_env`).
+pub fn default_walrus_staking_pool_id(network: &str) -> &'static str {
+    match network {
+        "testnet" => "0xbe46180321c30aab2f8b3501e24048377287fa708018a5b7c2792b35fe339ee3",
+        _ => "0x10b9d30c28448939ce6c4d6c6e0ffce4a7f8a4ada8248bdad09ef8b70e4a3904",
     }
 }
 
@@ -816,6 +967,37 @@ impl SponsorRateLimitConfig {
 }
 
 // ============================================================
+// Read API Rate Limit Config
+// ============================================================
+//
+// The 3 owner-scoped read endpoints (`namespaces`,
+// `memories`, `agents`) originally shared the write path's 30/min
+// per-delegate-key budget (`RateLimitConfig::max_requests_per_delegate_key`).
+// That budget exists to bound spend-risk on endpoints that write, upload to
+// Walrus, or call an LLM; a 31-request pagination loop over
+// `GET /v1/owners/{owner}/memories` — completely ordinary client behavior —
+// could trip it. Reads carry no equivalent spend risk, so they get their own,
+// more generous, single-layer budget instead of being folded into the
+// account-level burst/sustained layers that exist specifically to protect
+// the write path's spend surface.
+#[derive(Debug, Clone)]
+pub struct ReadApiRateLimitConfig {
+    /// Max weighted read-API requests per minute per delegate key.
+    /// Default 200: headroom for paginating a ~10k-memory account at
+    /// `limit=100` (100+ requests per full sync) plus margin for retries
+    /// and concurrent `namespaces`/`agents` calls in the same window.
+    pub per_delegate_key_per_minute: i64,
+}
+
+impl Default for ReadApiRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_delegate_key_per_minute: 200,
+        }
+    }
+}
+
+// ============================================================
 // Accounts Rate Limit Config
 // ============================================================
 
@@ -857,6 +1039,18 @@ impl Default for AccountsRateLimitConfig {
     }
 }
 
+impl ReadApiRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("READ_API_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_delegate_key_per_minute = n;
+            }
+        }
+        c
+    }
+}
+
 impl AccountsRateLimitConfig {
     pub fn from_env() -> Self {
         let mut c = Self::default();
@@ -878,6 +1072,95 @@ impl AccountsRateLimitConfig {
         if let Ok(v) = std::env::var("ACCOUNTS_GLOBAL_RATE_LIMIT_PER_HOUR") {
             if let Ok(n) = v.parse() {
                 c.global_per_hour = n;
+            }
+        }
+        c
+    }
+}
+
+// ============================================================
+// Owner Token Rate Limit Config
+// ============================================================
+
+/// Rate limits for `POST /v1/owner-tokens`.
+///
+/// Two independent layers, both enforced (see
+/// `rate_limit::owner_token_credential_rate_limit_middleware` and
+/// `rate_limit::check_owner_token_owner_rate_limit`):
+///
+/// - `per_minute` / `per_hour` — keyed by the caller's service credential.
+///   Phase 1 has exactly one shared credential (Console's), so in practice
+///   this is one deployment-wide budget, same idea as
+///   `SponsorRateLimitConfig::global_per_minute`. Defaults (120/min,
+///   3000/hr) are generous relative to a 15-minute token TTL — Console
+///   minting a token per active user session, even across many concurrent
+///   sessions, stays well under this.
+/// - `owner_per_minute` / `owner_per_hour` — keyed by the (canonical)
+///   owner address, independent of which credential presented it. A
+///   compromised or buggy Console instance that still holds a valid
+///   service credential must not be able to mint unbounded tokens for one
+///   owner. Defaults (5/min, 30/hr) are tight: with a 900s default TTL, a
+///   legitimate caller has no reason to re-mint for the same owner more
+///   than a handful of times per minute.
+#[derive(Debug, Clone)]
+pub struct OwnerTokenRateLimitConfig {
+    pub per_minute: i64,
+    pub per_hour: i64,
+    pub owner_per_minute: i64,
+    pub owner_per_hour: i64,
+    /// Per-source-IP budget, independent of `x-service-credential` validity
+    /// (see `rate_limit::owner_token_ip_rate_limit_middleware`'s doc
+    /// comment — this is what actually throttles someone guessing the
+    /// shared credential, since the per-credential budget below is keyed
+    /// by the guessed value itself and never sees repeated failed guesses).
+    pub ip_per_minute: i64,
+    pub ip_per_hour: i64,
+}
+
+impl Default for OwnerTokenRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 120,
+            per_hour: 3000,
+            owner_per_minute: 5,
+            owner_per_hour: 30,
+            ip_per_minute: 30,
+            ip_per_hour: 300,
+        }
+    }
+}
+
+impl OwnerTokenRateLimitConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_OWNER_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.owner_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_OWNER_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.owner_per_hour = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_IP_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                c.ip_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("OWNER_TOKEN_RATE_LIMIT_IP_PER_HOUR") {
+            if let Ok(n) = v.parse() {
+                c.ip_per_hour = n;
             }
         }
         c
@@ -1403,7 +1686,7 @@ pub struct RestoreResponse {
     /// restore, or the sidecar's raw on-chain candidate fetch (bounded
     /// per owner, shared across all of the owner's namespaces, hard-capped
     /// independent of `limit`) hit its own cap before this namespace's
-    /// blobs were even filtered out of that set (WALM-319) — the second
+    /// blobs were even filtered out of that set — the second
     /// case can be `true` even when `total == 0` for this namespace,
     /// since a cap hit elsewhere can starve this namespace's fetch
     /// entirely. Raising `limit` only helps with the first case; past the
@@ -1428,7 +1711,7 @@ pub struct ForgetResponse {
 }
 
 /// GET /api/accounts/:owner/exists — does `owner` have a registered
-/// MemWalAccount? Backs Console's WALM-298 existence-check primitive.
+/// MemWalAccount? Backs Console's existence-check primitive.
 /// Intentionally minimal: no `account_id`, since Console doesn't need the
 /// internal identifier and returning it would needlessly widen the API's
 /// surface for future churn.
@@ -1575,6 +1858,12 @@ pub struct SponsorExecuteRequest {
 /// Headers required for authenticated requests
 #[derive(Clone)]
 pub struct AuthInfo {
+    /// Hex-encoded Ed25519 public key for a signed-request caller. For an
+    /// owner-token-authenticated read-API request (no delegate key
+    /// involved), `auth::verify_read_api_auth` populates this instead with
+    /// the synthetic sentinel `"ownertoken:{owner_address}"` — never a real
+    /// key — solely so `read_api_rate_limit_middleware`'s per-key budget
+    /// stays isolated per owner. Do not assume this is always valid hex.
     #[allow(dead_code)]
     pub public_key: String,
     /// Owner address from the onchain MemWalAccount (set after onchain verification)
@@ -1625,6 +1914,9 @@ pub enum AppError {
     Internal(String),
     /// Walrus blob not found (expired or deleted) — triggers cleanup
     BlobNotFound(String),
+    /// Caller authenticated successfully but the path's {owner} does not
+    /// match the authenticated identity (HTTP 403).
+    Forbidden(String),
     /// Rate limit exceeded (HTTP 429)
     #[allow(dead_code)]
     RateLimited(String),
@@ -1650,6 +1942,7 @@ impl std::fmt::Display for AppError {
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
             AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
+            AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
             AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
             AppError::QuotaExceeded(msg) => write!(f, "Quota Exceeded: {}", msg),
@@ -1681,6 +1974,7 @@ impl axum::response::IntoResponse for AppError {
                 )
             }
             AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
+            AppError::Forbidden(msg) => (axum::http::StatusCode::FORBIDDEN, msg.clone()),
             AppError::Conflict(msg) => (axum::http::StatusCode::CONFLICT, msg.clone()),
             AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
@@ -1716,6 +2010,7 @@ impl AppError {
             AppError::Unauthorized(_) => "unauthorized",
             AppError::Internal(_) => "internal",
             AppError::BlobNotFound(_) => "blob_not_found",
+            AppError::Forbidden(_) => "forbidden",
             AppError::Conflict(_) => "conflict",
             AppError::RateLimited(_) => "rate_limited",
             AppError::QuotaExceeded(_) => "quota_exceeded",
@@ -1843,6 +2138,7 @@ mod tests {
             seal_expected_committee_identity: None,
             rate_limit: RateLimitConfig::default(),
             sponsor_rate_limit: SponsorRateLimitConfig::default(),
+            read_api_rate_limit: ReadApiRateLimitConfig::default(),
             accounts_rate_limit: AccountsRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
@@ -1871,11 +2167,18 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            walrus_staking_pool_id: "0x5".into(),
+            owner_token_secret: "owner-token-test-secret".into(),
+            owner_token_service_credential: "owner-token-test-credential".into(),
+            owner_token_ttl_secs: 900,
+            owner_token_rate_limit: OwnerTokenRateLimitConfig::default(),
             restore_requests_per_owner_per_minute: 10,
             balance_monitor_interval_secs: 900,
-            wallet_balance_low_threshold_wal: 1_000_000,
-            sponsor_balance_low_threshold_sui: 100_000_000,
+            wallet_balance_low_threshold_wal: 50_000_000_000,
+            wallet_balance_low_threshold_sui: 5_000_000_000,
+            sponsor_balance_low_threshold_sui: 5_000_000_000,
             mcp_oauth: None,
+            auth_max_clock_drift_secs: DEFAULT_AUTH_CLOCK_DRIFT_SECS,
         }
     }
 
@@ -2294,6 +2597,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn forbidden_maps_to_403() {
+        // `IntoResponse` isn't otherwise imported in this module (other
+        // status-mapping tests call it via the fully-qualified
+        // `axum::response::IntoResponse::into_response(err)` form instead),
+        // so bring it into scope locally for the method-call syntax below.
+        use axum::response::IntoResponse;
+        let err = AppError::Forbidden("owner mismatch".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn forbidden_display_format() {
+        let err = AppError::Forbidden("owner mismatch".to_string());
+        assert_eq!(err.to_string(), "Forbidden: owner mismatch");
+    }
+
+    #[test]
+    fn forbidden_kind() {
+        let err = AppError::Forbidden("owner mismatch".to_string());
+        assert_eq!(err.kind(), "forbidden");
+    }
+
     // ── KeyPool: round-robin selection ─────────────────────────────────
 
     #[test]
@@ -2341,6 +2668,25 @@ mod tests {
         assert_eq!(config.global_per_hour, 1000);
     }
 
+    // ── ReadApiRateLimitConfig defaults ─────────────────────────────────
+
+    #[test]
+    fn read_api_rate_limit_default_values() {
+        let config = ReadApiRateLimitConfig::default();
+        assert_eq!(config.per_delegate_key_per_minute, 200);
+    }
+
+    #[test]
+    fn read_api_rate_limit_from_env_override() {
+        // No other test touches READ_API_RATE_LIMIT_PER_MINUTE, so unlike
+        // WALRUS_STORAGE_EPOCHS above this doesn't need a shared lock to be
+        // race-free under `cargo test`'s parallel test threads.
+        std::env::set_var("READ_API_RATE_LIMIT_PER_MINUTE", "500");
+        let config = ReadApiRateLimitConfig::from_env();
+        std::env::remove_var("READ_API_RATE_LIMIT_PER_MINUTE");
+        assert_eq!(config.per_delegate_key_per_minute, 500);
+    }
+
     // ── AccountsRateLimitConfig defaults ────────────────────────────────
 
     #[test]
@@ -2386,6 +2732,92 @@ mod tests {
             assert_eq!(configured_walrus_storage_epochs("mainnet"), 3);
             assert_eq!(configured_walrus_storage_epochs("testnet"), 5);
         });
+    }
+
+    // ── configured_auth_clock_drift_secs — bounded, defaulted ────────────
+
+    static AUTH_CLOCK_DRIFT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_auth_clock_drift_env<R>(value: Option<&str>, test: impl FnOnce() -> R) -> R {
+        let _guard = AUTH_CLOCK_DRIFT_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("AUTH_MAX_CLOCK_DRIFT_SECS").ok();
+
+        match value {
+            Some(value) => std::env::set_var("AUTH_MAX_CLOCK_DRIFT_SECS", value),
+            None => std::env::remove_var("AUTH_MAX_CLOCK_DRIFT_SECS"),
+        }
+
+        let result = test();
+
+        match previous {
+            Some(value) => std::env::set_var("AUTH_MAX_CLOCK_DRIFT_SECS", value),
+            None => std::env::remove_var("AUTH_MAX_CLOCK_DRIFT_SECS"),
+        }
+
+        result
+    }
+
+    #[test]
+    fn auth_clock_drift_defaults_to_300_when_unset() {
+        with_auth_clock_drift_env(None, || {
+            assert_eq!(configured_auth_clock_drift_secs(), 300);
+            assert_eq!(DEFAULT_AUTH_CLOCK_DRIFT_SECS, 300);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_honors_valid_env() {
+        with_auth_clock_drift_env(Some("120"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), 120);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_zero_means_exact_match() {
+        with_auth_clock_drift_env(Some("0"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), 0);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_accepts_exact_ceiling() {
+        with_auth_clock_drift_env(Some("900"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), MAX_AUTH_CLOCK_DRIFT_SECS);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_rejects_just_over_ceiling() {
+        // Pin the exact inclusive boundary: 900 accepted, 901 falls back.
+        with_auth_clock_drift_env(Some("901"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_falls_back_when_env_exceeds_cap() {
+        with_auth_clock_drift_env(Some("3600"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+        });
+    }
+
+    #[test]
+    fn auth_clock_drift_falls_back_on_negative_or_garbage() {
+        with_auth_clock_drift_env(Some("-5"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+        });
+        with_auth_clock_drift_env(Some("not-a-number"), || {
+            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+        });
+    }
+
+    #[test]
+    fn nonce_ttl_buffer_is_positive() {
+        // The replay invariant (nonce record outlives the full 2*drift
+        // freshness lifetime) rests on the buffer being strictly positive; the
+        // `2*drift + buffer` derivation itself is tested against the real
+        // `nonce_ttl_secs` in the auth module.
+        assert!(NONCE_TTL_BUFFER_SECS > 0);
     }
 
     // ── AppError Display implementations ────────────────────────────────

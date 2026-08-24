@@ -3,6 +3,12 @@
   "kind": "memory",
   "name": "Walrus Memory",
   "description": "Encrypted, decentralized long-term memory via Walrus Memory",
+  "contracts": {
+    "tools": [
+      "memory_search",
+      "memory_store"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -48,9 +54,14 @@
         "minimum": 1,
         "maximum": 50,
         "description": "Recent messages window for auto-capture"
+      },
+      "requestTimeoutMs": {
+        "type": "number",
+        "minimum": 1000,
+        "maximum": 60000,
+        "description": "Per-request deadline for relayer calls (default: 10000)"
       }
-    },
-    "required": ["privateKey", "accountId", "serverUrl"]
+    }
   },
   "uiHints": {
     "privateKey": {
@@ -66,7 +77,7 @@
     },
     "serverUrl": {
       "label": "Walrus Memory Server URL",
-      "placeholder": "https://relayer.dev.memwal.ai"
+      "placeholder": "https://relayer-staging.memory.walrus.xyz"
     },
     "defaultNamespace": {
       "label": "Default Namespace",

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chatModels, DEFAULT_CHAT_MODEL, TITLE_MODEL } from "./models";
+import {
+  chatModels,
+  DEFAULT_CHAT_MODEL,
+  resolveChatModelId,
+  TITLE_MODEL,
+} from "./models";
 
 // Regression guard for the 2026-08 incident: getTitleModel() hardcoded
 // "google/gemini-2.0-flash-001", which OpenRouter retired. Every chat's title
@@ -53,4 +58,36 @@ test("chatModels entries are unique and well formed", () => {
     assert.ok(m.id.includes("/"), `model id "${m.id}" is not provider-qualified`);
     assert.ok(m.name.length > 0, `model "${m.id}" has no display name`);
   }
+});
+
+// A `chat-model` cookie outlives the curated list. Anyone who had one of the
+// retired ids selected kept sending it, and /api/chat 400s unknown ids — the
+// picker's fallback is display-only, so the coercion belongs where the cookie
+// is read (both chat pages).
+
+test("resolveChatModelId keeps a supported cookie value", () => {
+  for (const m of chatModels) {
+    assert.equal(resolveChatModelId(m.id), m.id);
+  }
+});
+
+test("resolveChatModelId falls back for retired or unknown ids", () => {
+  const rejected = [
+    "google/gemini-2.0-flash-001",
+    "anthropic/claude-3.5-haiku",
+    "anthropic/claude-3.5-sonnet",
+    "not-a-model",
+    "",
+  ];
+  for (const value of rejected) {
+    assert.equal(
+      resolveChatModelId(value),
+      DEFAULT_CHAT_MODEL,
+      `"${value}" should have been coerced to the default`
+    );
+  }
+});
+
+test("resolveChatModelId falls back when the cookie is absent", () => {
+  assert.equal(resolveChatModelId(undefined), DEFAULT_CHAT_MODEL);
 });

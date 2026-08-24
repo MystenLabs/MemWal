@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 // Minimal env for booting the default-mode sidecar app. The find-blob-by-job
 // validation path returns 400 before touching the chain, so no client mocking
@@ -14,6 +17,7 @@ process.env.WALRUS_PACKAGE_ID = `0x${"a".repeat(64)}`;
 
 const { createSidecarApp } = await import("../sidecar/app.js");
 const { sanitizeRequestId } = await import("../sidecar/log.js");
+const { MEMWAL_JOB_TAG_KEY } = await import("../sidecar/util.js");
 
 // The reconcile correctness hinges on the register-side tag value
 // (sanitizeRequestId(jobId)) equaling the query-side value (also
@@ -28,6 +32,46 @@ test("a remember-job UUID survives sanitizeRequestId unchanged (tag == query)", 
     // And a non-conforming id sanitizes to null on BOTH sides (no silent mismatch).
     assert.equal(sanitizeRequestId("has spaces"), null);
     assert.equal(sanitizeRequestId("x".repeat(129)), null);
+});
+
+// Regression: the durable upload path (walrus-upload-journal.ts) once wrote
+// the crash-recovery job tag under a different key (`memwal_migration_job`,
+// an unrelated dead-code constant from the V1->V2 migration feature) than
+// the one scanOwnerForJobBlob() actually searches for (`memwal_job_id`) — so
+// the tag written by every real /api/remember call could never be found by
+// reconcile, and a crash right after mint-but-before-journal would mint a
+// second paid blob on retry, silently. Both the write sites (durable +
+// legacy) and the read site now import the same MEMWAL_JOB_TAG_KEY constant
+// from util.ts instead of each hardcoding the string, so this can't drift
+// again without deliberately un-importing the shared constant. This test
+// pins the constant's value and confirms no file in sidecar/ hardcodes a
+// competing literal for job-tag purposes.
+test("register (write) and reconcile (read) use the identical job-tag key — no hardcoded drift", () => {
+    assert.equal(MEMWAL_JOB_TAG_KEY, "memwal_job_id");
+
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const sidecarDir = path.join(here, "..", "sidecar");
+    const filesToCheck = [
+        path.join(sidecarDir, "routes", "walrus-upload-journal.ts"),
+        path.join(sidecarDir, "routes", "walrus-upload.ts"),
+        path.join(sidecarDir, "routes", "walrus-query.ts"),
+    ];
+
+    for (const file of filesToCheck) {
+        const src = readFileSync(file, "utf8");
+        assert.ok(
+            src.includes("MEMWAL_JOB_TAG_KEY"),
+            `${path.basename(file)} must reference the shared MEMWAL_JOB_TAG_KEY constant, not a hardcoded literal`
+        );
+        // The only other job-shaped tag key in this codebase is the distinct,
+        // separately-purposed `memwal_migration_job` (findOwnedBlobObjects in
+        // walrus-query.ts) — a hardcoded `"memwal_job_id"` string literal
+        // anywhere in these files would mean someone reintroduced the drift.
+        assert.ok(
+            !src.includes('"memwal_job_id"') && !src.includes("'memwal_job_id'"),
+            `${path.basename(file)} must not hardcode the "memwal_job_id" string literal — import MEMWAL_JOB_TAG_KEY instead`
+        );
+    }
 });
 
 async function listen(): Promise<{ server: Server; baseUrl: string }> {
