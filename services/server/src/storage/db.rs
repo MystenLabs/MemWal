@@ -900,6 +900,196 @@ mod tests {
             .await
             .unwrap();
     }
+
+    async fn remember_jobs_test_db() -> Option<VectorDb> {
+        let db = test_db().await?;
+        for migration in [
+            include_str!("../../migrations/005_remember_jobs.sql"),
+            include_str!("../../migrations/012_remember_write_idempotency.sql"),
+            include_str!("../../migrations/013_remember_write_idempotency_index.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(db.pool()).await.unwrap();
+        }
+        Some(db)
+    }
+
+    #[tokio::test]
+    async fn update_vector_importance_is_owner_and_namespace_scoped() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0ximp-owner-{suffix}");
+        let other_owner = format!("0ximp-other-{suffix}");
+        let id = format!("imp-row-{suffix}");
+        let other_id = format!("imp-other-{suffix}");
+
+        db.insert_vector(
+            &id,
+            &owner,
+            "notes",
+            "blob-imp",
+            &[0.1_f32; 1536],
+            1,
+            0.2,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &other_id,
+            &other_owner,
+            "notes",
+            "blob-imp-other",
+            &[0.1_f32; 1536],
+            1,
+            0.2,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(db
+            .update_vector_importance(&id, &owner, "notes", 0.9)
+            .await
+            .unwrap());
+        assert!(
+            !db.update_vector_importance(&id, &other_owner, "notes", 0.5)
+                .await
+                .unwrap(),
+            "must not update another owner's row"
+        );
+        assert!(
+            !db.update_vector_importance(&id, &owner, "other-ns", 0.5)
+                .await
+                .unwrap(),
+            "must not update another namespace"
+        );
+
+        let scores: Vec<(String, f32)> = sqlx::query_as(
+            "SELECT id, importance FROM vector_entries WHERE id = ANY($1) ORDER BY id",
+        )
+        .bind(vec![id.clone(), other_id.clone()])
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+
+        sqlx::query("DELETE FROM vector_entries WHERE id = ANY($1)")
+            .bind(vec![id.clone(), other_id.clone()])
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(scores, vec![(other_id, 0.2), (id, 0.9)]);
+    }
+
+    #[tokio::test]
+    async fn forget_clears_idempotency_keys_so_the_same_text_can_be_rewritten() {
+        let Some(db) = remember_jobs_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xforget-idem-{suffix}");
+        let other_ns_owner_job = format!("other-ns-job-{suffix}");
+        let job_id = format!("forget-job-{suffix}");
+        let vector_id = job_id.clone();
+        let key = format!("analyze:{suffix}");
+
+        db.insert_vector(
+            &vector_id,
+            &owner,
+            "notes",
+            "blob-forget",
+            &[0.1_f32; 1536],
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, blob_id)
+             VALUES ($1, $2, 'notes', 'done', $3, 'blob-forget')",
+        )
+        .bind(&job_id)
+        .bind(&owner)
+        .bind(&key)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key)
+             VALUES ($1, $2, 'keep', 'done', $3)",
+        )
+        .bind(&other_ns_owner_job)
+        .bind(&owner)
+        .bind(format!("analyze-keep:{suffix}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        assert_eq!(db.delete_by_namespace(&owner, "notes").await.unwrap(), 1);
+
+        let remaining_key: Option<String> =
+            sqlx::query_scalar("SELECT idempotency_key FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(remaining_key, None);
+
+        let kept_key: Option<String> =
+            sqlx::query_scalar("SELECT idempotency_key FROM remember_jobs WHERE id = $1")
+                .bind(&other_ns_owner_job)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            kept_key.as_deref(),
+            Some(format!("analyze-keep:{suffix}").as_str())
+        );
+
+        let rewritten = sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key)
+             VALUES ($1, $2, 'notes', 'pending', $3)
+             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+        )
+        .bind(format!("rewrite-job-{suffix}"))
+        .bind(&owner)
+        .bind(&key)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            rewritten.rows_affected(),
+            1,
+            "the same analyze key must insert after forget"
+        );
+
+        sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM memory_tombstones WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
 }
 
 fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
@@ -1616,8 +1806,18 @@ impl VectorDb {
     /// removes the local `vector_entries` rows, so the memories stop being
     /// retrievable and stop counting toward storage quota.) Reachable via
     /// `POST /api/forget` — authed, owner-scoped.
+    ///
+    /// Also NULLs `remember_jobs.idempotency_key` for the same owner +
+    /// namespace. Analyze (and client-keyed remember) collapse retries on
+    /// that unique key; leaving it set after forget makes a later write of
+    /// the same text return success without storing anything.
     pub async fn delete_by_namespace(&self, owner: &str, namespace: &str) -> Result<u64, AppError> {
         let started = std::time::Instant::now();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to begin forget tx: {}", e)))?;
         let result = sqlx::query(
             "WITH removed AS (
                 DELETE FROM vector_entries
@@ -1630,15 +1830,52 @@ impl VectorDb {
         )
         .bind(owner)
         .bind(namespace)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to delete by namespace: {}", e)));
-        crate::observability::observe_db(
-            "vector.delete_by_namespace",
-            db_status(&result),
-            started.elapsed(),
-        );
-        let result = result?;
+        let result = match result {
+            Ok(result) => result,
+            Err(e) => {
+                crate::observability::observe_db(
+                    "vector.delete_by_namespace",
+                    "error",
+                    started.elapsed(),
+                );
+                return Err(e);
+            }
+        };
+        let clear = sqlx::query(
+            "UPDATE remember_jobs
+             SET idempotency_key = NULL, updated_at = NOW()
+             WHERE owner = $1 AND namespace = $2 AND idempotency_key IS NOT NULL",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to clear remember idempotency keys: {}", e))
+        });
+        if let Err(e) = clear {
+            crate::observability::observe_db(
+                "vector.delete_by_namespace",
+                "error",
+                started.elapsed(),
+            );
+            return Err(e);
+        }
+        if let Err(e) = tx.commit().await {
+            crate::observability::observe_db(
+                "vector.delete_by_namespace",
+                "error",
+                started.elapsed(),
+            );
+            return Err(AppError::Internal(format!(
+                "Failed to commit forget tx: {}",
+                e
+            )));
+        }
+        crate::observability::observe_db("vector.delete_by_namespace", "ok", started.elapsed());
         let rows = result.rows_affected();
         tracing::info!(
             "deleted {} entries for owner={}, ns={}",
@@ -1647,6 +1884,36 @@ impl VectorDb {
             namespace
         );
         Ok(rows)
+    }
+
+    /// Change importance on one live memory without rewriting the blob.
+    /// Returns whether a matching owner-scoped row existed.
+    pub async fn update_vector_importance(
+        &self,
+        id: &str,
+        owner: &str,
+        namespace: &str,
+        importance: f32,
+    ) -> Result<bool, AppError> {
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "UPDATE vector_entries
+             SET importance = $4, updated_at = NOW()
+             WHERE id = $1 AND owner = $2 AND namespace = $3",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(namespace)
+        .bind(importance)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to update vector importance: {}", e)));
+        crate::observability::observe_db(
+            "vector.update_importance",
+            db_status(&result),
+            started.elapsed(),
+        );
+        Ok(result?.rows_affected() > 0)
     }
 
     /// Delete vector entries for one expired blob within an owner + namespace.

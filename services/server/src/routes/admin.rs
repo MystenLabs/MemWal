@@ -52,9 +52,11 @@ fn encode_untrusted_memory_context(memories: &[RecallResult]) -> Result<String, 
 /// Delete the vector index rows for every memory in `owner`'s
 /// `namespace` (a hard `DELETE` on `vector_entries` — the underlying
 /// Walrus blobs persist, since Walrus has no delete; the memories just
-/// stop being retrievable and stop counting toward storage quota). Used
-/// by the benchmark harness for inter-run cleanup; also a general admin
-/// op. Mode-blind — works the same in production and benchmark mode (in
+/// stop being retrievable and stop counting toward storage quota) and
+/// release `remember_jobs.idempotency_key` for that namespace so a later
+/// analyze/remember of the same text is a new write. Used by the
+/// benchmark harness for inter-run cleanup; also a general admin op.
+/// Mode-blind — works the same in production and benchmark mode (in
 /// benchmark mode this also removes the plaintext rows). Owner-scoped:
 /// only the caller's own rows are deleted.
 pub async fn forget(
