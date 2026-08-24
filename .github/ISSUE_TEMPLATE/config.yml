@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Docs and troubleshooting
+    url: https://docs.wal.app/walrus-memory/troubleshooting/overview
+    about: 401s, login, empty recall, and MCP setup. Check here before filing a bug.
+  - name: Search existing issues
+    url: https://github.com/MystenLabs/MemWal/issues?q=is%3Aissue
+    about: Many requests (list, forget, timestamps, pagination) already have an issue.
+  - name: Walrus Discord
+    url: https://discord.gg/walrusprotocol
+    about: Questions and builder support that are not a bug or a feature request.
+  - name: Report a security vulnerability
+    url: https://github.com/MystenLabs/MemWal/security/advisories/new
+    about: Private advisory. Do not file a public issue for security findings.
