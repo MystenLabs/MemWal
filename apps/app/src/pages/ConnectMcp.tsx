@@ -558,7 +558,13 @@ function SuccessCard({
     return (
         <div className="setup-classic-intro">
             <h2 className="setup-classic-title">
-                <span style={{ color: '#22c55e' }}>✓</span> MCP client connected
+                {callbackDelivered === false ? (
+                    <>On-chain key added; local login did not finish</>
+                ) : (
+                    <>
+                        <span style={{ color: '#22c55e' }}>✓</span> MCP client connected
+                    </>
+                )}
             </h2>
             {callbackDelivered === true && (
                 <p className="setup-classic-description">
@@ -568,7 +574,9 @@ function SuccessCard({
             {callbackDelivered === false && (
                 <p className="setup-classic-description" style={errorTextStyle}>
                     The on-chain registration succeeded, but the local MCP login listener at{' '}
-                    <code style={codeStyle}>http://127.0.0.1:{port}/callback</code> did not accept the callback. Restart the MCP login command and try again so credentials can be saved locally.
+                    <code style={codeStyle}>http://127.0.0.1:{port}/callback</code> did not accept the callback.
+                    A delegate key was still added on-chain. If you are not using it, remove it from the dashboard,
+                    then restart <code style={codeStyle}>memwal-mcp login</code> so credentials can be saved locally.
                 </p>
             )}
             <div className="card setup-classic-feature-card">
