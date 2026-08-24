@@ -41,7 +41,7 @@ Lets Console call WM's owner-scoped read API without ever holding
 a delegate key. Console proves control of a WM owner address `Y` entirely on
 its own side (its own identity-link flow, Enoki Connect or a wallet-signature
 challenge; WM is never involved in that proof). It then calls `POST /v1/owner-tokens`,
-authenticating itself as a legitimate client via a single static **service
+authenticating itself as a legitimate client through a single static **service
 credential** WM issues to Console out of band, to mint a short-lived bearer
 token scoped to `Y`. Console presents that token as `Authorization: Bearer
 <token>` on subsequent read calls.
@@ -72,10 +72,10 @@ Missing header, wrong value, or the secret being unconfigured on WM's side
 (`OWNER_TOKEN_SERVICE_CREDENTIAL` unset) all collapse to a bare `401` with no
 body, no detail is leaked about which of these it was.
 
-**Trust boundary, stated explicitly:** this credential is the *only* thing
-gating who can request a token, and a request's `owner` is taken as a plain
-request parameter, trusted because the caller already proved it holds the
-credential. If the credential leaks, whoever holds it can mint a
+**Trust boundary, stated explicitly:** this credential is the **only** thing
+gating who can request a token, and the server treats a request's `owner` as a
+plain request parameter and trusts it because the caller already proved it
+holds the credential. If the credential leaks, whoever holds it can mint a
 `memories.read` token for **any** owner address, there is no secondary check
 tying a specific token request back to a specific proven identity-link event.
 This is an accepted Phase-1 trade-off, a deliberate choice of a shared
@@ -98,7 +98,7 @@ Validation order: per-IP rate limit (outer middleware, throttles credential
 guessing regardless of validity) → service credential (middleware) →
 per-credential rate limit (middleware) → Sui address format (handler,
 cheapest handler-level check) → per-owner rate limit → `MemWalAccount`
-existence → mint. `owner` is canonicalized to lowercase before every
+existence → mint. The handler canonicalizes `owner` to lowercase before every
 downstream check and before it's embedded in the token's claims.
 
 Response (`200 OK`):
@@ -119,7 +119,7 @@ lowercase), `audience` (constant `"memwal"`), `issued_at`/`expires_at` (Unix
 seconds), `nonce` (a UUID identifying this specific token, see "Replay and
 revocation" below), `permissions` (`["memories.read"]` in Phase 1).
 
-TTL defaults to 900s (15 minutes), configurable via `OWNER_TOKEN_TTL_SECS`.
+TTL defaults to 900s (15 minutes), configurable through `OWNER_TOKEN_TTL_SECS`.
 **Refresh path:** there is no separate refresh/rotate endpoint in Phase 1, 
 when a token is at or near expiry, call `POST /v1/owner-tokens` again with
 the same `owner` to mint a fresh one. There is no reuse or extension of an
@@ -144,7 +144,7 @@ Authorization: Bearer <token>
 ```
 
 `GET /v1/owners/{owner}/namespaces`, `.../memories`, and `.../agents`
-all accept this same bearer token via `auth::verify_read_api_auth`
+all accept this same bearer token through `auth::verify_read_api_auth`
 (`services/server/src/auth.rs`), which dispatches between it and the
 existing Ed25519 signed-request scheme based on whether the request carries
 an `Authorization` header, see `docs/api/memory-read-api.md`'s
@@ -155,11 +155,12 @@ the real handlers existed; it is redundant now and a candidate for removal
 in a follow-up, not something Console should call.
 
 `{owner}` in the path must exactly equal the token's `owner_address` claim
-(canonical-address comparison, not raw string equality) or the request is
-rejected `403`. The token's `permissions` must include the scope the route
-requires (`memories.read` for all three read routes) or the request is
-rejected `403`. An expired, tampered, wrongly-signed, or wrong-audience token
-is rejected `401`, with no distinction in the response between those causes.
+(canonical-address comparison, not raw string equality) or the server rejects
+the request with `403`. The token's `permissions` must include the scope the
+route requires (`memories.read` for all three read routes) or the server
+rejects the request with `403`. For an expired, tampered, wrongly-signed, or
+wrong-audience token, the server rejects it with `401`, with no distinction in
+the response between those causes.
 
 ## Rate limiting
 
@@ -275,7 +276,7 @@ Each token's `nonce` claim is a unique UUID generated at mint time. It is
 scheme's `x-nonce` is, a bearer token is meant to be reused across many read
 requests during its TTL window, so per-request single-use tracking would
 break normal usage. Its purpose in Phase 1 is forward-compatibility
-(identifying a specific issued token, in case a revocation list is added
+(identifying a specific issued token, in case you add a revocation list
 later) and observability (logging which token served a given request). A
 stolen, unexpired token is fully usable for its entire remaining TTL, the
 short default TTL (15 minutes) is the primary mitigation, not the nonce.
