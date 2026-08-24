@@ -83,10 +83,8 @@ export function registerRecallTool(
         },
         wrapTool<{ query: string; limit: number; namespace?: string }>(async ({ query, limit, namespace }) => {
             const result = await session.memwal.recall(query, limit, namespace);
-            const dropped =
-                typeof (result as { dropped_count?: number }).dropped_count === "number"
-                    ? (result as { dropped_count: number }).dropped_count
-                    : 0;
+            const droppedRaw = (result as { dropped_count?: unknown }).dropped_count;
+            const dropped = typeof droppedRaw === "number" ? droppedRaw : 0;
             if (result.results.length === 0) {
                 const empty =
                     dropped > 0
