@@ -1,41 +1,49 @@
 ---
 title: Codex
-description: Add portable Walrus Memory to OpenAI Codex as a plain MCP server (recommended), or as a full plugin with automatic-memory hooks.
-keywords: [MCP, Codex, Walrus Memory, MemWal, plugin, automatic memory]
+description: Add portable Walrus Memory to OpenAI Codex as a full plugin with automatic-memory hooks via the plugin marketplace, or as a plain MCP server.
+keywords: [MCP, Codex, Walrus Memory, MemWal, plugin, automatic memory, marketplace]
+goal:
+  description: Add MemWal to Codex as an automatic memory plugin via the marketplace or MCP-only server, authenticate with your account credentials, and confirm persistent memory is working across sessions.
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I add Walrus Memory to Codex?
+  - How do I install the MemWal plugin on Codex?
+  - Does Codex have a plugin marketplace for MemWal?
+answer: >-
+  To add Walrus Memory to Codex, install the MemWal plugin through the marketplace (codex plugin marketplace add MystenLabs/MemWal, then codex plugin add memwal@memwal-plugins), or add it as MCP-only by editing ~/.codex/config.toml directly. The plugin includes lifecycle hooks that reinforce automatic recall and save behavior on top of the MCP tools.
 ---
 
-Add MemWal to Codex so it recalls context and saves durable facts as you work. Install it as **MCP-only** (recommended; just the tools, one config block, no repo to clone) or as a full **plugin** (adds automatic-memory hooks, but currently requires cloning the repo).
+Add MemWal to Codex so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended; adds automatic-memory hooks) or as **MCP-only** (just the tools).
 
 ## Prerequisites
 
 - Node.js 20+
+- A Codex CLI build with `codex plugin` support (shipped since ~April 2026; check with `codex plugin --help`) if you want the plugin install. MCP-only works on any version.
 - A Walrus Memory account. The first memory tool call opens a browser sign-in (`memwal_login`).
 
 ## Installation
 
 <Tabs>
-  <Tab title="MCP-only (recommended)">
-    Add to `~/.codex/config.toml`:
-    ```toml
-    [mcp_servers.memwal]
-    command = "npx"
-    args = ["-y", "@mysten-incubation/memwal-mcp"]
-    ```
-    Restart Codex, then ask the agent to run `memwal_login` on first use. The
-    memory tools are proactive, so this is enough for automatic save and recall.
-  </Tab>
-  <Tab title="Plugin (automatic-memory hooks)">
-    The plugin adds lifecycle hooks on top of the MCP server. There is no Codex
-    marketplace install yet, so it currently requires a cloned repo. If you just
-    want memory in Codex, use the MCP-only tab instead.
-
+  <Tab title="Plugin (recommended)">
     <Steps>
-      <Step title="Install the hooks + MCP server">
-        From a cloned repo:
+      <Step title="Add the marketplace and install">
         ```bash
-        node packages/mcp/plugin/scripts/install_codex_hooks.mjs
+        codex plugin marketplace add MystenLabs/MemWal
+        codex plugin add memwal@memwal-plugins
+        codex plugin list
         ```
-        This merges the MemWal hooks into `~/.codex/hooks.json` and registers `[mcp_servers.memwal]` in `~/.codex/config.toml`. Re-running is safe (idempotent); add `--uninstall` to remove the hooks.
+        This registers the MemWal plugin, which bundles the MCP server and the lifecycle hooks together.
       </Step>
       <Step title="Enable the hooks feature flag">
         Add to `~/.codex/config.toml`:
@@ -48,11 +56,29 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
         Restart Codex. On first use the agent runs `memwal_login` to connect your wallet.
       </Step>
     </Steps>
+
+    <Note>
+    Older Codex CLI builds without `codex plugin` support can still get the hooks from a cloned repo:
+    ```bash
+    node packages/mcp/plugin/scripts/install_codex_hooks.mjs
+    ```
+    This merges the MemWal hooks into `~/.codex/hooks.json` and registers `[mcp_servers.memwal]` in `~/.codex/config.toml`. Re-running is safe (idempotent); add `--uninstall` to remove the hooks.
+    </Note>
+  </Tab>
+  <Tab title="MCP-only">
+    Add to `~/.codex/config.toml`:
+    ```toml
+    [mcp_servers.memwal]
+    command = "npx"
+    args = ["-y", "@mysten-incubation/memwal-mcp"]
+    ```
+    Restart Codex, then ask the agent to run `memwal_login` on first use. The
+    memory tools are proactive, so this is enough for automatic save and recall.
   </Tab>
 </Tabs>
 
 <Warning>
-Do not combine both options: the plugin installer already registers `[mcp_servers.memwal]`. Adding it again creates a duplicate server.
+Do not combine both options: the plugin already registers `[mcp_servers.memwal]`. Adding it again creates a duplicate server.
 </Warning>
 
 ## What the plugin includes
