@@ -80,7 +80,7 @@ These routes require no authentication.
 
 ### `GET /health`
 
-Service health check.
+Service liveness check. `status` is `"ok"` when the relayer process is up. `write_ready` is `true` when the encryption sidecar process answered its own `/health` (cached a few seconds). A write outage can still return HTTP 200 with `write_ready: false`. `write_ready: true` is sidecar liveness, not a guarantee that remember or analyze succeed.
 
 **Response:**
 
@@ -106,7 +106,8 @@ Service health check.
   "prompt_versions": {
     "extract": "extract.v1",
     "ask": "ask.v1"
-  }
+  },
+  "write_ready": true
 }
 ```
 
