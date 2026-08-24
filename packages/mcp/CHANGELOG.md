@@ -8,6 +8,8 @@
 - Report MCP session occupancy caps as concurrent, not a 30-second cooldown.
 - Exit with code 1 when `login` is run without a TTY, instead of booting the auth-required stub and reporting success.
 - Concurrent `memwal_login` calls reuse the in-flight listener and URL instead of starting a second flow that can hang later remember/recall.
+- Serialize outbound MCP POSTs and reconnect when the SSE handle is gone, so a burst of `memwal_recall` calls cannot poison the bridge until restart.
+- Login timeout now warns that an on-chain delegate key may already exist if the browser approved after the local listener expired.
 
 ## 0.0.10
 
