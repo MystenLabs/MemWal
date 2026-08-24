@@ -10,7 +10,10 @@
 // ============================================================
 
 export interface MemWalConfig {
-    /** Ed25519 private key (hex string or Uint8Array). This is the Walrus Memory delegate key. */
+    /**
+     * Ed25519 private key — the Walrus Memory delegate key. Accepts hex (with
+     * or without `0x`), a Sui `suiprivkey1...` bech32 string, or raw bytes.
+     */
     key: string | Uint8Array;
     /** Walrus Memory account object ID on Sui (ensures correct account when delegate key exists in multiple accounts) */
     accountId: string;
@@ -393,7 +396,7 @@ export interface SealServerConfig {
 
 /** Config for MemWalManual (full client-side: SEAL + Walrus + embedding) */
 export interface MemWalManualConfig {
-    /** Ed25519 delegate private key (hex or Uint8Array) for server auth */
+    /** Ed25519 delegate private key (hex, `suiprivkey1...`, or Uint8Array) for server auth */
     key: string | Uint8Array;
     /** Server URL (default: https://relayer.memory.walrus.xyz) */
     serverUrl?: string;

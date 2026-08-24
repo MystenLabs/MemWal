@@ -45,7 +45,7 @@ import {
     NoSideEffectError,
     withRpcRetry,
 } from "../retry/rpc.js";
-import { delayInjectedResponseOnce, errorMessage, parseWalrusKeySlot } from "../util.js";
+import { MEMWAL_JOB_TAG_KEY, delayInjectedResponseOnce, errorMessage, parseWalrusKeySlot } from "../util.js";
 import {
     DURABLE_WALLET_FALLBACK_POLICY,
     assertFinalizedTransactionSuccess,
@@ -743,7 +743,7 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                                 ...(namespace ? { memwal_namespace: namespace } : {}),
                                 ...(targetOwner ? { memwal_owner: targetOwner } : {}),
                                 ...(packageId ? { memwal_package_id: packageId } : {}),
-                                memwal_migration_job: jobId,
+                                [MEMWAL_JOB_TAG_KEY]: jobId,
                             },
                         });
                         enforceAddressBalanceCoinIntents(registerTx);

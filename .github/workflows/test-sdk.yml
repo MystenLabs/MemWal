@@ -1,0 +1,187 @@
+name: Test JS SDK
+
+on:
+  pull_request:
+    paths:
+      - 'packages/sdk/**'
+      - '.github/workflows/test-sdk.yml'
+  push:
+    branches:
+      - main
+      - staging
+      - dev
+    paths:
+      - 'packages/sdk/**'
+      - '.github/workflows/test-sdk.yml'
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: Benchmark environment to run the authenticated e2e suite against
+        required: true
+        type: choice
+        default: dev
+        options:
+          - dev
+          - staging
+          - production
+  schedule:
+    # Catches relayer drift with no code change to trigger it. Offset 30
+    # minutes from test-python-sdk.yml (17 9 * * 1) so the two weekly suites
+    # don't write through the shared bench account at the same time.
+    - cron: '47 9 * * 1'
+
+concurrency:
+  group: test-sdk-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit / Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is what the rest of CI runs on; 24 is the active LTS.
+        node-version: ['22', '24']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck, build and unit tests
+        run: pnpm --filter @mysten-incubation/memwal test
+
+  e2e:
+    name: E2E / ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }} relayer
+    runs-on: ubuntu-latest
+    needs: unit
+    timeout-minutes: 30
+
+    # Each long-lived branch tests the deployment it corresponds to. Pull
+    # requests are excluded because environment secrets are withheld from fork
+    # PRs, and every authenticated run writes real memories.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' &&
+       (github.ref_name == 'dev' ||
+        github.ref_name == 'staging' ||
+        github.ref_name == 'main'))
+
+    # Reuses the credentials benchmark-live.yml and test-python-sdk.yml already
+    # rely on, so this needs no new secrets. Safe to share: the benchmark
+    # writes to the `benchmark` namespace while these tests use a per-run
+    # `sdk-e2e-<random>`.
+    #
+    # main maps to benchmark-production, so a push to main writes real
+    # memories through the live Walrus pipeline on the production benchmark
+    # account. That is intentional, and the per-run namespace is what keeps it
+    # contained — never point this job at an account holding user data, and
+    # never relax the namespace isolation in live.e2e.mjs.
+    environment:
+      name: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
+
+    env:
+      # Which deployment this run targets. Mirrors the `environment:` name
+      # above so error messages and the run summary can name it.
+      ENVIRONMENT_NAME: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
+      # BENCH_DELEGATE_KEY is the delegate private key the SDK signs with,
+      # which test/e2e/live.e2e.mjs reads as MEMWAL_PRIVATE_KEY.
+      MEMWAL_PRIVATE_KEY: ${{ secrets.BENCH_DELEGATE_KEY }}
+      MEMWAL_ACCOUNT_ID: ${{ secrets.BENCH_ACCOUNT_ID }}
+      # Public URL, set per environment (docs/relayer/benchmark-ci-setup.md).
+      # Deliberately NOT defaulted: with three environments in play, a literal
+      # fallback would silently run the production job against whichever
+      # relayer the default names. A missing variable fails the job instead.
+      MEMWAL_SERVER_URL: ${{ vars.BENCH_SERVER_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm --filter @mysten-incubation/memwal build
+
+      - name: Check credentials
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Without the credentials the suite skips every authenticated test,
+          # and the job would report success having never exercised the
+          # relayer beyond /health. Without the URL there is no safe guess to
+          # fall back on. Fail instead of reporting a green run that proved
+          # nothing, or running the wrong deployment.
+          missing=0
+          for name in MEMWAL_PRIVATE_KEY MEMWAL_ACCOUNT_ID MEMWAL_SERVER_URL; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is empty — set BENCH_DELEGATE_KEY / BENCH_ACCOUNT_ID / BENCH_SERVER_URL on the ${ENVIRONMENT_NAME} environment."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "authenticated=true" >> "$GITHUB_OUTPUT"
+
+      - name: E2E tests
+        id: e2e
+        working-directory: packages/sdk
+        run: |
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=e2e-results.xml \
+            "test/e2e/live.e2e.mjs"
+
+      - name: Write run summary
+        if: always()
+        run: |
+          {
+            echo "## JS SDK e2e"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Environment | \`${ENVIRONMENT_NAME}\` |"
+            echo "| Relayer | \`${MEMWAL_SERVER_URL:-<unset>}\` |"
+            echo "| Authenticated | ${{ steps.config.outputs.authenticated }} |"
+            echo "| Result | ${{ steps.e2e.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload e2e results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: js-sdk-e2e-${{ env.ENVIRONMENT_NAME }}-${{ github.run_id }}
+          path: packages/sdk/e2e-results.xml
+          if-no-files-found: warn
+          retention-days: 14

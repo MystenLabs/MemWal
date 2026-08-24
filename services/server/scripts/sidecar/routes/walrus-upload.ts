@@ -35,7 +35,7 @@ import {
 import { acquireWalrusUploadSlots, walrusUploadLimitSnapshot, WalrusUploadLimitError } from "../concurrency.js";
 import { requestIdFor, sanitizeRequestId, sidecarLog } from "../log.js";
 import { sidecarStartedAtMs, sidecarStateSnapshot } from "../state.js";
-import { dedupeAddresses, errorMessage, parseWalrusKeySlot, shortAddress, sleep, truncateForLog } from "../util.js";
+import { MEMWAL_JOB_TAG_KEY, dedupeAddresses, errorMessage, parseWalrusKeySlot, shortAddress, sleep, truncateForLog } from "../util.js";
 import { isMoveAbortBalanceSplit, isMoveAbortWalDestroyZero } from "../enoki.js";
 import {
     ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
@@ -240,7 +240,7 @@ export function registerWalrusUploadRoute(app: Express): void {
                     // Correlate the minted blob back to its remember job so a
                     // crashed write (mint landed, response/DB-record lost) can be
                     // reconciled — found and adopted — instead of re-minting.
-                    ...(jobIdForLog ? { memwal_job_id: jobIdForLog } : {}),
+                    ...(jobIdForLog ? { [MEMWAL_JOB_TAG_KEY]: jobIdForLog } : {}),
                 },
             });
 
@@ -372,6 +372,7 @@ export function registerWalrusUploadRoute(app: Express): void {
                         blobId: blob.blobId,
                         objectId: blobObjectId,
                         transferStatus: "failed",
+                        endEpoch: blob.blobObject.storage.end_epoch,
                     });
                 }
             }
@@ -391,6 +392,7 @@ export function registerWalrusUploadRoute(app: Express): void {
                 blobId: blob.blobId,
                 objectId: blobObjectId,
                 transferStatus: deferTransfer ? "deferred" : "ok",
+                endEpoch: blob.blobObject.storage.end_epoch,
             });
         } catch (err: any) {
             const message = err?.message || String(err);

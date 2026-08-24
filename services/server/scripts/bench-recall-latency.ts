@@ -32,6 +32,11 @@
 import { createHash, randomUUID } from "crypto";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import {
+  isRetryableLiveBenchFailure,
+  LIVE_BENCH_MAX_ATTEMPTS,
+  liveBenchRetryDelayMs,
+} from "./live-bench-retry.js";
 
 // ============================================================
 // CLI
@@ -264,6 +269,7 @@ interface ApiRunResult {
   memoryId?: string;
   blobId?: string;
   statusCode?: number;
+  contentType?: string | null;
   error?: string;
 }
 
@@ -279,23 +285,42 @@ async function rememberOnce(args: Args): Promise<ApiRunResult> {
     });
 
     const latencyMs = performance.now() - start;
+    const contentType = resp.headers.get("content-type");
 
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
-      return { ok: false, latencyMs, statusCode: resp.status, error: body.slice(0, 300) };
+      return {
+        ok: false,
+        latencyMs,
+        statusCode: resp.status,
+        contentType,
+        error: body.slice(0, 300),
+      };
     }
 
-    const json = (await resp.json()) as { id?: string; blob_id?: string };
+    const json = (await resp.json().catch((err: unknown) => {
+      throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
+        statusCode: resp.status,
+        contentType,
+      });
+    })) as { id?: string; blob_id?: string };
     return {
       ok: true,
       latencyMs,
       statusCode: resp.status,
+      contentType,
       memoryId: json.id,
       blobId: json.blob_id,
     };
   } catch (err: any) {
     const latencyMs = performance.now() - start;
-    return { ok: false, latencyMs, error: err?.message ?? String(err) };
+    return {
+      ok: false,
+      latencyMs,
+      statusCode: err?.statusCode,
+      contentType: err?.contentType,
+      error: err?.message ?? String(err),
+    };
   }
 }
 
@@ -311,23 +336,42 @@ async function recallOnce(args: Args): Promise<ApiRunResult> {
     });
 
     const latencyMs = performance.now() - start;
+    const contentType = resp.headers.get("content-type");
 
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
-      return { ok: false, latencyMs, statusCode: resp.status, error: body.slice(0, 300) };
+      return {
+        ok: false,
+        latencyMs,
+        statusCode: resp.status,
+        contentType,
+        error: body.slice(0, 300),
+      };
     }
 
-    const json = (await resp.json()) as { results?: unknown[]; total?: number; dropped_count?: number };
+    const json = (await resp.json().catch((err: unknown) => {
+      throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
+        statusCode: resp.status,
+        contentType,
+      });
+    })) as { results?: unknown[]; total?: number; dropped_count?: number };
     return {
       ok: true,
       latencyMs,
       statusCode: resp.status,
+      contentType,
       resultCount: json.total ?? json.results?.length ?? 0,
       droppedCount: json.dropped_count ?? 0,
     };
   } catch (err: any) {
     const latencyMs = performance.now() - start;
-    return { ok: false, latencyMs, error: err?.message ?? String(err) };
+    return {
+      ok: false,
+      latencyMs,
+      statusCode: err?.statusCode,
+      contentType: err?.contentType,
+      error: err?.message ?? String(err),
+    };
   }
 }
 
@@ -357,14 +401,26 @@ async function runBatch(
 
   for (let i = 0; i < runs; i++) {
     process.stdout.write(`  [${label}] run ${i + 1}/${runs}... `);
-    const result = await callOnce();
-    if (result.ok) {
-      rawMs.push(result.latencyMs);
+    let result: ApiRunResult | undefined;
+    for (let attempt = 1; attempt <= LIVE_BENCH_MAX_ATTEMPTS; attempt++) {
+      result = await callOnce();
+      if (
+        result.ok ||
+        !isRetryableLiveBenchFailure(result) ||
+        attempt === LIVE_BENCH_MAX_ATTEMPTS
+      ) {
+        break;
+      }
+      process.stdout.write(`retry ${attempt}/${LIVE_BENCH_MAX_ATTEMPTS - 1}... `);
+      await sleep(liveBenchRetryDelayMs(attempt));
+    }
+    if (result!.ok) {
+      rawMs.push(result!.latencyMs);
       successCount++;
-      console.log(`ok ${ms(result.latencyMs)} ${formatOk(result)}`);
+      console.log(`ok ${ms(result!.latencyMs)} ${formatOk(result!)}`);
     } else {
       failCount++;
-      const errMsg = result.error ?? `HTTP ${result.statusCode}`;
+      const errMsg = result!.error ?? `HTTP ${result!.statusCode}`;
       errors.push(errMsg);
       console.log(`FAILED: ${errMsg.slice(0, 120)}`);
     }

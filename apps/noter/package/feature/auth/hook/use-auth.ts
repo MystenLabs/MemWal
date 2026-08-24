@@ -71,11 +71,9 @@ export function useAuth() {
       accountId?: string;
     }) => {
       try {
-        setLoading(true);
         const result = await connectEnokiMutation.mutateAsync(params);
 
         if ("needsSetup" in result && result.needsSetup) {
-          setLoading(false);
           return result;
         }
 
@@ -94,19 +92,17 @@ export function useAuth() {
 
         return result;
       } catch (error) {
-        setLoading(false);
         console.error("Enoki connection failed:", error);
         throw error;
       }
     },
-    [connectEnokiMutation, setSession, setAuthenticated, setLoading]
+    [connectEnokiMutation, setSession, setAuthenticated]
   );
 
   /** Connect with delegate key (manual key + account ID). */
   const connectDelegateKey = useCallback(
     async (params: { privateKey: string; accountId: string }) => {
       try {
-        setLoading(true);
         const result = await connectDelegateKeyMutation.mutateAsync(params);
 
         setSession(result.sessionData);
@@ -120,12 +116,11 @@ export function useAuth() {
 
         return result;
       } catch (error) {
-        setLoading(false);
         console.error("Delegate key connection failed:", error);
         throw error;
       }
     },
-    [connectDelegateKeyMutation, setSession, setAuthenticated, setLoading]
+    [connectDelegateKeyMutation, setSession, setAuthenticated]
   );
 
   /** Logout — clear session, auth state, and disconnect wallet (prevents autoConnect). */

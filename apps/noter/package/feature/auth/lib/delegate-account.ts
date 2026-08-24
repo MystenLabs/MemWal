@@ -2,6 +2,7 @@ import "server-only";
 
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { fromBase64, normalizeSuiAddress, toHex } from "@mysten/sui/utils";
+import { isTestEnvironment } from "@/lib/constants";
 import { enokiConfig } from "@/lib/enoki/config";
 
 export class DelegateAccountBindingError extends Error {
@@ -32,11 +33,19 @@ export async function deriveDelegatePublicKeyHex(
 }
 
 function publicKeyHex(value: unknown): string | null {
+  // Hex first: every 64-char hex string (alphabet 0-9a-f, length divisible
+  // by 4) is also valid base64 of the *wrong* bytes. fromBase64() will not
+  // throw — it just decodes garbage — so a hex-first check is required.
+  // Matches researcher/lib/auth/delegate-account.ts.
+  if (typeof value === "string" && /^[0-9a-f]{64}$/i.test(value)) {
+    return value.toLowerCase();
+  }
   if (typeof value === "string") {
     try {
-      return toHex(fromBase64(value)).toLowerCase();
+      const decoded = fromBase64(value);
+      return decoded.length === 32 ? toHex(decoded).toLowerCase() : null;
     } catch {
-      return /^[0-9a-f]{64}$/i.test(value) ? value.toLowerCase() : null;
+      return null;
     }
   }
   if (
@@ -109,6 +118,28 @@ export async function assertDelegateAccountBinding(input: {
     throw new DelegateAccountBindingError(
       "Walrus Memory package is not configured"
     );
+  }
+
+  if (isTestEnvironment) {
+    // Playwright runs have no chain to read. Serve a fixture object instead
+    // of the gRPC fetch so the real validation below still executes — an
+    // unknown account or unregistered key fails the same way it would live.
+    const { mockDelegateAccountObject } = await import(
+      "./delegate-account.mock"
+    );
+    const mocked = mockDelegateAccountObject(input.accountId);
+    if (!mocked) {
+      throw new DelegateAccountBindingError(
+        "Unable to verify Walrus Memory account"
+      );
+    }
+    const mockError = delegateAccountBindingError(mocked.type, mocked.json, {
+      owner: input.owner,
+      publicKeyHex: input.publicKeyHex,
+      packageId: enokiConfig.memwalPackageId,
+    });
+    if (mockError) throw new DelegateAccountBindingError(mockError);
+    return;
   }
 
   const network = enokiConfig.suiNetwork;

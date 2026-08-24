@@ -6,5 +6,7 @@ main().catch((err) => {
     if (err?.stack && process.env.MEMWAL_MCP_DEBUG) {
         process.stderr.write(err.stack + "\n");
     }
-    process.exit(1);
+    // Let the event loop drain so undici/libuv can close the handshake
+    // socket. process.exit(1) here asserts on Windows (UV_HANDLE_CLOSING).
+    process.exitCode = 1;
 });

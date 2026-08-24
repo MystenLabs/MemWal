@@ -43,6 +43,7 @@ import {
     sha256hex,
     hexToBytes,
     bytesToHex,
+    normalizePrivateKey,
     u64ToLeHex,
     normalizeServerUrl,
     sanitizeServerError,
@@ -169,7 +170,10 @@ export class MemWalManual {
         if (config.suiPrivateKey && config.walletSigner) {
             throw new Error("MemWalManual: provide suiPrivateKey OR walletSigner, not both");
         }
-        this.delegatePrivateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
+        this.delegatePrivateKey =
+            typeof config.key === "string"
+                ? hexToBytes(normalizePrivateKey(config.key))
+                : config.key;
         // LOW-22: default to HTTPS; warn (do not throw) on plaintext HTTP
         // against non-localhost hosts.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
