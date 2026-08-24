@@ -110,9 +110,9 @@ sends the signature in `x-signature`:
 Server-side verification flow (`auth.rs::verify_signature`): validate the
 Ed25519 signature against the canonical string → check the nonce hasn't
 been seen before (Redis, fail-closed on Redis outage) → resolve the account
-(cache, then the `x-account-id` hint, then a bounded on-chain registry scan
+(cache, then the `x-account-id` hint, then a bounded onchain registry scan
 as a last resort) → verify the public key is a registered delegate key on
-that account's on-chain `MemWalAccount.delegate_keys` (cached in
+that account's onchain `MemWalAccount.delegate_keys` (cached in
 `delegate_key_cache`, revoked entries evicted).
 
 ### 401 responses
@@ -128,7 +128,7 @@ distinguishing failure reasons):
   string, or body).
 - Nonce already seen (replay): or the Redis nonce check itself failing
   (fail-closed).
-- Public key not found among the resolved account's on-chain delegate keys,
+- Public key not found among the resolved account's onchain delegate keys,
   or the account is deactivated.
 
 A request missing `x-nonce` entirely gets `426 Upgrade Required` instead of
@@ -164,13 +164,13 @@ own Redis prefix (`rate:read:dk:{public_key}`, distinct from the write
 path's `rate:dk:{public_key}`), no separate per-account burst/sustained
 tiers on top. Default limit is **200 weighted-requests/min per delegate
 key** (`ReadApiRateLimitConfig::per_delegate_key_per_minute`), overridable
-via the `READ_API_RATE_LIMIT_PER_MINUTE` env var. Weights for this API:
+through the `READ_API_RATE_LIMIT_PER_MINUTE` env var. Weights for this API:
 
 | Endpoint | Weight | Why |
 |---|---|---|
 | `GET /v1/owners/{owner}/namespaces` | 1 | DB read only |
 | `GET /v1/owners/{owner}/memories` | 1 | DB read only |
-| `GET /v1/owners/{owner}/agents` | 2 | Makes a live on-chain `sui_getObject` RPC call (short-TTL cached, but uncached on a cold/expired cache entry) |
+| `GET /v1/owners/{owner}/agents` | 2 | Makes a live onchain `sui_getObject` RPC call (short-TTL cached, but uncached on a cold/expired cache entry) |
 
 Exceeding the limit returns `429 Too Many Requests`:
 
@@ -324,7 +324,7 @@ owner. `has_more` is correct in both cases; page-length heuristics are not.
 
 ## `GET /v1/owners/:owner/agents`
 
-Live on-chain read of `MemWalAccount.delegate_keys`, short-TTL cached
+Live onchain read of `MemWalAccount.delegate_keys`, short-TTL cached
 per-account (same 30s window `sui/client.rs::walrus_epoch()` uses) so
 repeated calls within the TTL window don't re-hit the chain.
 
@@ -351,7 +351,7 @@ Authentication and Rate limiting above) use the envelope
 | `403` | `{owner}` path segment does not match the authenticated identity, or (bearer-token path) the token's `permissions` lack `memories.read` |
 | `400` | Invalid/malformed cursor, or non-positive/non-integer `limit` |
 | `429` | Rate limit exceeded (see Rate limiting) |
-| `500` | Internal error, including an on-chain RPC failure on `/agents` |
+| `500` | Internal error, including an onchain RPC failure on `/agents` |
 
 An empty list (owner with no memories/namespaces, or no delegate keys) is
 a valid `200`, not a `404`.
