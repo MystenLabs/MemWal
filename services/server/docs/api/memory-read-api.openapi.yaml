@@ -1,0 +1,440 @@
+openapi: 3.0.3
+info:
+  title: Walrus Memory — Memory Read API
+  description: >-
+    Owner-scoped, cursor-paginated read endpoints for Console to sync a
+    user's namespaces, memories, and delegate agents. See
+    docs/api/memory-read-api.md for the full narrative contract this spec
+    formalizes; that document remains the source of truth for auth mechanics
+    and error semantics — this file exists to unblock machine-generated
+    clients (e.g. Console's typed API client).
+  version: "1.0.0"
+servers:
+  - url: https://relayer.memory.walrus.xyz
+    description: production
+  - url: https://relayer.dev.memwal.ai
+    description: dev
+
+security:
+  - signedRequest: []
+
+paths:
+  /v1/owners/{owner}/namespaces:
+    get:
+      operationId: listOwnerNamespaces
+      summary: List an owner's namespaces with per-namespace rollup counts
+      parameters:
+        - $ref: '#/components/parameters/owner'
+        - $ref: '#/components/parameters/updatedAfter'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: OK — an empty list is valid (owner has no memories yet)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NamespacesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '426':
+          $ref: '#/components/responses/UpgradeRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RateLimiterUnavailable'
+
+  /v1/owners/{owner}/memories:
+    get:
+      operationId: listOwnerMemories
+      summary: List an owner's memories, keyset-paginated on (updated_at, id)
+      parameters:
+        - $ref: '#/components/parameters/owner'
+        - $ref: '#/components/parameters/updatedAfter'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: OK — an empty list is valid (owner has no memories yet)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoriesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '426':
+          $ref: '#/components/responses/UpgradeRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RateLimiterUnavailable'
+
+  /v1/owners/{owner}/agents:
+    get:
+      operationId: listOwnerAgents
+      summary: >-
+        Live on-chain read of the account's registered delegate keys
+        (30s per-account cache).
+      parameters:
+        - $ref: '#/components/parameters/owner'
+      responses:
+        '200':
+          description: OK — an empty list is valid (no delegate keys registered)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '426':
+          $ref: '#/components/responses/UpgradeRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          description: >-
+            Internal error, including an on-chain RPC failure while resolving
+            delegate keys.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/RateLimiterUnavailable'
+
+components:
+  securitySchemes:
+    signedRequest:
+      type: apiKey
+      in: header
+      name: x-signature
+      description: >-
+        Not a bearer token — this models the composite Ed25519-signed-request
+        scheme documented in docs/api/memory-read-api.md. A real request also
+        requires x-public-key, x-timestamp, x-nonce, and x-account-id headers,
+        which OpenAPI's securitySchemes cannot express as a single scheme;
+        see the `signedRequestHeaders` parameter group below and the prose
+        doc for the canonical signing string and verification flow.
+
+  parameters:
+    owner:
+      name: owner
+      in: path
+      required: true
+      description: >-
+        Sui address, 0x + 64 hex chars. Must equal the authenticated
+        identity's resolved owner or the request is rejected with 403.
+      schema:
+        type: string
+        pattern: '^0x[0-9a-fA-F]{64}$'
+      example: "0xffebf969cf2f9ec94089be20387633b3ffaf8a3c8e6caade6c47e8814852c4e7"
+    updatedAfter:
+      name: updated_after
+      in: query
+      required: false
+      description: >-
+        Opaque pagination continuation token — must be a `next_cursor` value
+        returned by a previous call on this same endpoint, never a raw
+        timestamp or hand-constructed value. Omit for the first page. This is
+        a pure continuation token, not an independent "changed since"
+        filter — see docs/api/memory-read-api.md.
+      schema:
+        type: string
+    limit:
+      name: limit
+      in: query
+      required: false
+      description: >-
+        Page size. Defaults to 100. Values above 500 are silently clamped to
+        500; non-positive or non-integer values return 400.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+        maximum: 500
+        default: 100
+
+  headers:
+    RetryAfter:
+      description: Seconds to wait before retrying (429 and 503 responses).
+      schema:
+        type: integer
+
+  responses:
+    BadRequest:
+      description: Invalid/malformed cursor, or non-positive/non-integer limit.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: >-
+        Auth failed (missing/malformed signing headers, expired timestamp,
+        bad signature, replayed nonce, or the key is not a registered
+        delegate on the resolved account). No response body.
+    Forbidden:
+      description: The {owner} path segment does not match the authenticated identity.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UpgradeRequired:
+      description: >-
+        x-nonce header missing entirely — signals an unsupported legacy SDK
+        version rather than an auth failure. No response body.
+    RateLimited:
+      description: Rate limit exceeded (per-delegate-key, per-account burst, or per-account sustained layer).
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RateLimitErrorResponse'
+    RateLimiterUnavailable:
+      description: Rate limiter backend (Redis) unreachable — fails closed rather than allowing unmetered traffic.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Internal server error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+      example:
+        error: "invalid cursor"
+
+    RateLimitErrorResponse:
+      type: object
+      required: [error, layer, limit, retry_after_seconds]
+      properties:
+        error:
+          type: string
+        layer:
+          type: string
+          description: >-
+            Which sliding-window budget was exceeded. Real values emitted by
+            the server (services/server/src/rate_limit.rs): delegate_key,
+            account_burst, account_sustained.
+          enum: [delegate_key, account_burst, account_sustained]
+        limit:
+          type: string
+        retry_after_seconds:
+          type: integer
+      example:
+        error: "Rate limit exceeded"
+        layer: "account_burst"
+        limit: "60 weighted-requests/min"
+        retry_after_seconds: 12
+
+    NamespaceSummary:
+      type: object
+      required: [id, name, memory_count, storage_used, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        memory_count:
+          type: integer
+          format: int64
+        storage_used:
+          type: integer
+          format: int64
+          description: Sum of blob_size_bytes across the namespace's memories.
+        updated_at:
+          type: string
+          format: date-time
+          description: >-
+            MAX(updated_at) across the namespace's memories — the same value
+            this page's cursor is built from.
+
+    NamespacesResponse:
+      type: object
+      required: [namespaces, next_cursor, has_more, snapshot_version]
+      properties:
+        namespaces:
+          type: array
+          items:
+            $ref: '#/components/schemas/NamespaceSummary'
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Always returned for a non-empty page — including the final page
+            of a traversal. Null in exactly one case: the very first page of
+            a fresh walk (no `updated_after` on the request) that matches
+            nothing at all. Every other empty page — a continuation page
+            reached with an incoming cursor, which can happen when every
+            remaining row raced past the walk's snapshot boundary between
+            pages — still returns a non-null cursor: the same position as
+            the incoming cursor, with a fresh snapshot boundary. Do not
+            treat null as "end of data"; use `has_more` for that instead.
+        has_more:
+          type: boolean
+          description: >-
+            The only correct end-of-data signal — keep paginating while
+            true. `limit` is silently clamped to this endpoint's max, so a
+            page shorter than the requested `limit` does not reliably mean
+            no more data remains.
+        snapshot_version:
+          type: integer
+          description: Wire-format version. Currently 2. Additive keys (deleted, must_resync) do not bump it.
+
+    MemoryItem:
+      type: object
+      required: [memory_id, namespace_id, blob_id, created_at, updated_at, size, agent_id, package_id, status, end_epoch, expires_at, importance]
+      properties:
+        memory_id:
+          type: string
+        namespace_id:
+          type: string
+        blob_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          description: >-
+            The row's own last-modified time — the same value this page's
+            cursor is built from.
+        size:
+          type: integer
+          format: int64
+        agent_id:
+          type: string
+          nullable: true
+          description: >-
+            Delegate Ed25519 public key (hex) that wrote this memory. Not
+            directly comparable to `agents[].sui_address` from the /agents
+            endpoint — derive the Sui address from this public key
+            (blake2b256-based, one-hop) to correlate the two.
+        package_id:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [active, expired]
+          description: >-
+            expired if expires_at is in the past, active otherwise (including
+            while end_epoch/expires_at are still null). Tombstones are never
+            mixed into memories[]; they are listed in deleted[].
+        importance:
+          type: number
+          format: float
+          nullable: true
+          description: Extractor importance in 0.0-1.0.
+        end_epoch:
+          type: integer
+          format: int32
+          nullable: true
+          description: >-
+            On-chain Walrus storage lease end epoch. Null until a
+            background sweep syncs it, typically within ~5 minutes of the
+            memory being written. Nullable independently of `expires_at` —
+            the two are not guaranteed to become non-null in the same pass.
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Computed absolute expiry timestamp derived from `end_epoch`.
+            Null until synced, independently of `end_epoch` —
+            do not assume the two arrive together.
+
+    DeletedMemory:
+      type: object
+      required: [memory_id, namespace_id, deleted_at]
+      properties:
+        memory_id:
+          type: string
+        namespace_id:
+          type: string
+        deleted_at:
+          type: string
+          format: date-time
+
+    MemoriesResponse:
+      type: object
+      required: [memories, next_cursor, has_more, snapshot_version, deleted, must_resync]
+      properties:
+        memories:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryItem'
+        deleted:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeletedMemory'
+          description: Additive tombstone stream. Old clients ignore this key.
+        must_resync:
+          type: boolean
+          description: True when the cursor is older than the 30-day tombstone retention.
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Always returned for a non-empty page — including the final page
+            of a traversal. Null in exactly one case: the very first page of
+            a fresh walk (no `updated_after` on the request) that matches
+            nothing at all. Every other empty page — a continuation page
+            reached with an incoming cursor, which can happen when every
+            remaining row raced past the walk's snapshot boundary between
+            pages — still returns a non-null cursor: the same position as
+            the incoming cursor, with a fresh snapshot boundary. Do not
+            treat null as "end of data"; use `has_more` for that instead.
+        has_more:
+          type: boolean
+          description: >-
+            The only correct end-of-data signal — keep paginating while
+            true. `limit` is silently clamped to this endpoint's max, so a
+            page shorter than the requested `limit` does not reliably mean
+            no more data remains.
+        snapshot_version:
+          type: integer
+
+    DelegateKeyResponse:
+      type: object
+      required: [label, sui_address]
+      properties:
+        label:
+          type: string
+        sui_address:
+          type: string
+
+    AgentsResponse:
+      type: object
+      required: [agents, snapshot_version]
+      properties:
+        agents:
+          type: array
+          items:
+            $ref: '#/components/schemas/DelegateKeyResponse'
+        snapshot_version:
+          type: integer

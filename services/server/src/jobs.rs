@@ -113,6 +113,13 @@ pub enum WalletOperation {
         account_id: Option<String>,
         #[serde(default)]
         policy_package_id: Option<String>,
+        /// Walrus epoch the storage lease ends at, carried from
+        /// the `UploadBlobError::MetadataTransferFailed` that triggered this
+        /// recovery job. `#[serde(default)]` so in-flight jobs enqueued
+        /// before this field existed deserialize as `None` (the prior
+        /// behavior) rather than failing.
+        #[serde(default)]
+        end_epoch: Option<i32>,
     },
     /// Finish a partially recovered upload after metadata+transfer has already
     /// succeeded. This keeps DB/vector retries from repeating an on-chain
@@ -131,6 +138,21 @@ pub enum WalletOperation {
         /// recovery jobs enqueued before this field existed.
         #[serde(default = "default_importance")]
         importance: f32,
+        /// Carried from the originating SetMetadataAndTransfer job so the
+        /// eventual insert_vector call can persist them.
+        /// `#[serde(default)]` so in-flight jobs enqueued before this field
+        /// existed deserialize as None rather than failing.
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default)]
+        package_id: Option<String>,
+        /// Carried from the originating SetMetadataAndTransfer job so the
+        /// eventual insert_vector call can persist it, the same
+        /// way agent_id/package_id already are. `#[serde(default)]` so
+        /// in-flight jobs enqueued before this field existed deserialize as
+        /// `None` rather than failing.
+        #[serde(default)]
+        end_epoch: Option<i32>,
     },
 }
 
@@ -566,6 +588,7 @@ pub(crate) async fn execute_wallet_job(
             encrypted_b64,
             account_id,
             policy_package_id,
+            end_epoch,
         } => {
             let result = execute_set_metadata_and_transfer(
                 state,
@@ -594,6 +617,9 @@ pub(crate) async fn execute_wallet_job(
                             blob_size_bytes,
                             importance,
                             enqueued_wallet_index,
+                            agent_id.as_deref(),
+                            package_id.as_deref(),
+                            end_epoch,
                         )
                         .await
                         {
@@ -608,6 +634,9 @@ pub(crate) async fn execute_wallet_job(
                                 vector,
                                 blob_size_bytes,
                                 importance,
+                                agent_id.clone(),
+                                package_id.clone(),
+                                end_epoch,
                             )
                             .await
                             {
@@ -683,6 +712,9 @@ pub(crate) async fn execute_wallet_job(
             vector,
             blob_size_bytes,
             importance,
+            agent_id,
+            package_id,
+            end_epoch,
         } => {
             insert_vector_and_mark_remember_done(
                 state,
@@ -694,6 +726,9 @@ pub(crate) async fn execute_wallet_job(
                 blob_size_bytes,
                 importance,
                 enqueued_wallet_index,
+                agent_id.as_deref(),
+                package_id.as_deref(),
+                end_epoch,
             )
             .await
         }
@@ -813,6 +848,9 @@ async fn insert_vector_and_mark_remember_done(
     blob_size_bytes: i64,
     importance: f32,
     wallet_index: usize,
+    agent_id: Option<&str>,
+    package_id: Option<&str>,
+    end_epoch: Option<i32>,
 ) -> Result<(), WalletJobError> {
     let vector_id = remember_job_id
         .map(str::to_owned)
@@ -828,6 +866,9 @@ async fn insert_vector_and_mark_remember_done(
             vector,
             blob_size_bytes,
             importance,
+            agent_id,
+            package_id,
+            end_epoch,
         )
         .await
     {
@@ -883,6 +924,9 @@ async fn enqueue_finalize_uploaded_blob(
     vector: Vec<f32>,
     blob_size_bytes: i64,
     importance: f32,
+    agent_id: Option<String>,
+    package_id: Option<String>,
+    end_epoch: Option<i32>,
 ) -> Result<(), WalletJobError> {
     let mut storage = state.wallet_storage.clone();
     storage
@@ -897,6 +941,9 @@ async fn enqueue_finalize_uploaded_blob(
                 vector,
                 blob_size_bytes,
                 importance,
+                agent_id,
+                package_id,
+                end_epoch,
             },
         }))
         .await
@@ -1215,6 +1262,11 @@ fn build_resume_transfer_job(
             encrypted_b64: Some(encrypted_b64.to_string()),
             account_id: Some(account_id.to_string()),
             policy_package_id: Some(seal_policy_package_id.to_string()),
+            // Resuming after a restart from persisted `remember_jobs` state,
+            // which doesn't carry end_epoch — the periodic expiry
+            // re-verification sweep backfills it on its next pass, same as
+            // any other row that starts out with an unknown expiry.
+            end_epoch: None,
         },
     }
 }
@@ -1602,6 +1654,14 @@ async fn execute_upload_and_transfer_locked(
                     blob_size_bytes,
                     importance,
                     wallet_index,
+                    agent_public_key.as_deref(),
+                    Some(&package_id),
+                    // Resuming after a restart from persisted `remember_jobs`
+                    // state, which doesn't carry end_epoch — the periodic
+                    // expiry re-verification sweep backfills it on its next
+                    // pass, same as any other row that starts out with an
+                    // unknown expiry.
+                    None,
                 )
                 .await;
             }
@@ -1731,6 +1791,7 @@ async fn execute_upload_and_transfer_locked(
             blob_id,
             object_id,
             message,
+            end_epoch,
         }) => {
             tracing::warn!(
                 "[wallet-job:upload] job_id={} upload succeeded but metadata/transfer failed: {}",
@@ -1768,6 +1829,7 @@ async fn execute_upload_and_transfer_locked(
                         encrypted_b64: Some(encrypted_b64.clone()),
                         account_id: Some(account_id.clone()),
                         policy_package_id: Some(state.config.seal_policy_package_id.clone()),
+                        end_epoch,
                     },
                 }))
                 .await
@@ -1973,6 +2035,9 @@ async fn execute_upload_and_transfer_locked(
         encrypted.len() as i64,
         importance,
         wallet_index,
+        agent_public_key.as_deref(),
+        Some(&package_id),
+        upload.end_epoch,
     )
     .await
 }
@@ -2415,9 +2480,15 @@ impl WalletJobError {
     /// `GasPoolExhausted` is gated on pool-level confirmation by the caller.
     pub fn is_gas_pool_budget_error(msg: &str) -> bool {
         let lower = msg.to_ascii_lowercase();
-        (lower.contains("moveabort") || lower.contains("move abort"))
+        let move_split = (lower.contains("moveabort") || lower.contains("move abort"))
             && lower.contains("balance")
-            && lower.contains("split")
+            && lower.contains("split");
+        let gas_selection = lower.contains("gas selection") && lower.contains("insufficient");
+        let sui_balance = lower.contains("insufficient")
+            && lower.contains("sui")
+            && lower.contains("balance")
+            && !lower.contains("::wal::wal");
+        move_split || gas_selection || sui_balance
     }
 
     /// True if `msg` is the Walrus register PTB's `0x2::coin::destroy_zero`
@@ -2979,6 +3050,9 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 vector: vec![0.1],
                 blob_size_bytes: 1,
                 importance: 0.5,
+                agent_id: None,
+                package_id: None,
+                end_epoch: None,
             },
         };
         let mut value = serde_json::to_value(&job).expect("serialize");
@@ -3166,6 +3240,17 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             assert!(!classified.aborts_retries(), "must retry: {}", msg);
             assert!(WalletJobError::is_gas_pool_budget_error(msg));
         }
+    }
+
+    #[test]
+    fn gas_selection_insufficient_sui_is_pool_budget_error() {
+        let msg = "Internal Error: durable Walrus upload failed (503 Service Unavailable): Unable to perform gas selection due to insufficient SUI balance";
+        assert!(WalletJobError::is_gas_pool_budget_error(msg));
+        let classified = WalletJobError::classify_sidecar_error(msg);
+        assert!(matches!(classified, WalletJobError::Transient(_)));
+        assert!(!WalletJobError::is_gas_pool_budget_error(
+            LOW_WAL_BALANCE_ERR
+        ));
     }
 
     #[test]
@@ -3384,6 +3469,9 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 vector: vec![],
                 blob_size_bytes: 0,
                 importance: crate::services::extractor::IMPORTANCE_STANDARD,
+                agent_id: None,
+                package_id: None,
+                end_epoch: None,
             },
         });
 

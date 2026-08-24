@@ -17,6 +17,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::jobs::WalletOperation;
@@ -27,6 +28,53 @@ use crate::types::*;
 use super::{collect_bounded_results, enqueue_wallet_job};
 
 const ANALYZE_CONCURRENCY: usize = 5;
+
+/// Stable per-fact key so an HTTP retry of `/api/analyze` collapses onto the
+/// in-flight or completed upload instead of minting a second Walrus blob.
+///
+/// Importance is intentionally not hashed in. The extractor assigns a
+/// vital/standard/trivial bucket per fact; a later call that extracts the
+/// same text with a different bucket updates the live `vector_entries` row
+/// rather than paying for a duplicate write. `forget` NULLs this key so a
+/// re-analyze after delete is a new write, not a silent no-op.
+fn analyze_fact_idempotency_key(owner: &str, namespace: &str, fact_text: &str) -> String {
+    let digest = Sha256::digest(format!("{owner}\n{namespace}\n{fact_text}").as_bytes());
+    format!("analyze:{}", hex::encode(digest))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AnalyzeJobReuse {
+    /// In-flight, or already stored with the same importance: return the existing job.
+    Collapse,
+    /// Failed before a blob was paid for: reset and re-enqueue on the same id.
+    RetryUnpaidFailure,
+    /// Live memory exists, but the extractor now scores it differently.
+    UpdateImportance,
+    /// Job completed and the vector is gone (forget / expiry): free the key and write again.
+    RewriteForgotten,
+}
+
+fn importance_changed(existing: f32, incoming: f32) -> bool {
+    (existing - incoming).abs() > 1e-6
+}
+
+fn classify_analyze_job_reuse(
+    status: &str,
+    blob_id: Option<&str>,
+    live_importance: Option<f32>,
+    incoming_importance: f32,
+) -> AnalyzeJobReuse {
+    if status == "failed" && blob_id.is_none() {
+        return AnalyzeJobReuse::RetryUnpaidFailure;
+    }
+    match live_importance {
+        None if blob_id.is_some() && status == "done" => AnalyzeJobReuse::RewriteForgotten,
+        Some(existing) if importance_changed(existing, incoming_importance) => {
+            AnalyzeJobReuse::UpdateImportance
+        }
+        _ => AnalyzeJobReuse::Collapse,
+    }
+}
 
 // /api/analyze does not benefit from larger inputs — it sends the
 // full text to gpt-4o-mini for fact extraction in a single LLM call (no
@@ -548,21 +596,240 @@ pub async fn analyze(
     for (idx, (job_id, (fact_text, importance, vector, encrypted))) in
         pending.into_iter().enumerate()
     {
-        // Insert status row
-        if let Err(e) = sqlx::query(
-            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
+        let idem_key = analyze_fact_idempotency_key(owner, namespace, &fact_text);
+        let inserted = match sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint)
+             VALUES ($1, $2, $3, 'pending', $4, $4)
+             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
         )
         .bind(&job_id)
         .bind(owner)
         .bind(namespace)
+        .bind(&idem_key)
         .execute(state.db.pool())
         .await
         {
-            rate_limit::release_storage_quota(&state, &all_ids[idx..]).await;
-            return Err(AppError::Internal(format!(
-                "Failed to create analyze job row: {}",
-                e
-            )));
+            Ok(result) => result,
+            Err(e) => {
+                rate_limit::release_storage_quota(&state, &all_ids[idx..]).await;
+                return Err(AppError::Internal(format!(
+                    "Failed to create analyze job row: {}",
+                    e
+                )));
+            }
+        };
+        let mut upload_job_id = job_id.clone();
+        if inserted.rows_affected() == 0 {
+            rate_limit::release_storage_quota(&state, std::slice::from_ref(&job_id)).await;
+            let existing = sqlx::query_as::<_, (String, String, Option<String>)>(
+                "SELECT id, status, blob_id FROM remember_jobs WHERE owner = $1 AND idempotency_key = $2",
+            )
+            .bind(owner)
+            .bind(&idem_key)
+            .fetch_optional(state.db.pool())
+            .await;
+            match existing {
+                Err(e) => {
+                    rate_limit::release_storage_quota(&state, &all_ids[idx + 1..]).await;
+                    return Err(AppError::Internal(format!(
+                        "Failed to look up analyze job: {}",
+                        e
+                    )));
+                }
+                Ok(None) => {
+                    rate_limit::release_storage_quota(&state, &all_ids[idx + 1..]).await;
+                    return Err(AppError::Internal(
+                        "Failed to create analyze job row: insert affected no rows".into(),
+                    ));
+                }
+                Ok(Some((existing_id, status, blob_id))) => {
+                    let live_importance = match sqlx::query_scalar::<_, f32>(
+                        "SELECT importance FROM vector_entries
+                         WHERE id = $1 AND owner = $2 AND namespace = $3",
+                    )
+                    .bind(&existing_id)
+                    .bind(owner)
+                    .bind(namespace)
+                    .fetch_optional(state.db.pool())
+                    .await
+                    {
+                        Ok(value) => value,
+                        Err(e) => {
+                            rate_limit::release_storage_quota(&state, &all_ids[idx + 1..]).await;
+                            return Err(AppError::Internal(format!(
+                                "Failed to look up analyze memory: {}",
+                                e
+                            )));
+                        }
+                    };
+                    let reuse = classify_analyze_job_reuse(
+                        &status,
+                        blob_id.as_deref(),
+                        live_importance,
+                        importance,
+                    );
+                    let rewrite = match reuse {
+                        AnalyzeJobReuse::Collapse => {
+                            accepted_facts.push(AnalyzeAcceptedFact {
+                                text: fact_text,
+                                id: existing_id.clone(),
+                                job_id: existing_id.clone(),
+                            });
+                            job_ids.push(existing_id);
+                            continue;
+                        }
+                        AnalyzeJobReuse::UpdateImportance => {
+                            match state
+                                .db
+                                .update_vector_importance(
+                                    &existing_id,
+                                    owner,
+                                    namespace,
+                                    importance,
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    accepted_facts.push(AnalyzeAcceptedFact {
+                                        text: fact_text,
+                                        id: existing_id.clone(),
+                                        job_id: existing_id.clone(),
+                                    });
+                                    job_ids.push(existing_id);
+                                    continue;
+                                }
+                                Ok(false) => true,
+                                Err(e) => {
+                                    rate_limit::release_storage_quota(&state, &all_ids[idx + 1..])
+                                        .await;
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        AnalyzeJobReuse::RewriteForgotten => true,
+                        AnalyzeJobReuse::RetryUnpaidFailure => false,
+                    };
+                    if rewrite {
+                        if let Err(e) = sqlx::query(
+                            "UPDATE remember_jobs
+                             SET idempotency_key = NULL, updated_at = NOW()
+                             WHERE id = $1 AND owner = $2",
+                        )
+                        .bind(&existing_id)
+                        .bind(owner)
+                        .execute(state.db.pool())
+                        .await
+                        {
+                            rate_limit::release_storage_quota(&state, &all_ids[idx + 1..]).await;
+                            return Err(AppError::Internal(format!(
+                                "Failed to release analyze idempotency key: {}",
+                                e
+                            )));
+                        }
+                        let rewritten = match sqlx::query(
+                            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint)
+                             VALUES ($1, $2, $3, 'pending', $4, $4)
+                             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+                        )
+                        .bind(&job_id)
+                        .bind(owner)
+                        .bind(namespace)
+                        .bind(&idem_key)
+                        .execute(state.db.pool())
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(e) => {
+                                rate_limit::release_storage_quota(&state, &all_ids[idx + 1..])
+                                    .await;
+                                return Err(AppError::Internal(format!(
+                                    "Failed to recreate analyze job row: {}",
+                                    e
+                                )));
+                            }
+                        };
+                        if rewritten.rows_affected() == 0 {
+                            // Another retry won the key after we released it.
+                            let winner = sqlx::query_scalar::<_, String>(
+                                "SELECT id FROM remember_jobs WHERE owner = $1 AND idempotency_key = $2",
+                            )
+                            .bind(owner)
+                            .bind(&idem_key)
+                            .fetch_optional(state.db.pool())
+                            .await;
+                            match winner {
+                                Ok(Some(winner_id)) => {
+                                    accepted_facts.push(AnalyzeAcceptedFact {
+                                        text: fact_text,
+                                        id: winner_id.clone(),
+                                        job_id: winner_id.clone(),
+                                    });
+                                    job_ids.push(winner_id);
+                                    continue;
+                                }
+                                Ok(None) => {
+                                    rate_limit::release_storage_quota(&state, &all_ids[idx + 1..])
+                                        .await;
+                                    return Err(AppError::Internal(
+                                        "Failed to recreate analyze job row: insert affected no rows"
+                                            .into(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    rate_limit::release_storage_quota(&state, &all_ids[idx + 1..])
+                                        .await;
+                                    return Err(AppError::Internal(format!(
+                                        "Failed to look up analyze job: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        }
+                        if let Err(e) = rate_limit::reserve_storage_quota(
+                            &state,
+                            owner,
+                            &[crate::storage::db::StorageReservationRequest {
+                                id: job_id.clone(),
+                                bytes: encrypted.len() as i64,
+                            }],
+                        )
+                        .await
+                        {
+                            rate_limit::release_storage_quota(&state, &all_ids[idx + 1..]).await;
+                            return Err(e);
+                        }
+                    } else {
+                        if let Err(e) = sqlx::query(
+                            "UPDATE remember_jobs SET status = 'pending', error_msg = NULL, updated_at = NOW()
+                             WHERE id = $1 AND status = 'failed' AND blob_id IS NULL",
+                        )
+                        .bind(&existing_id)
+                        .execute(state.db.pool())
+                        .await
+                        {
+                            rate_limit::release_storage_quota(&state, &all_ids[idx + 1..]).await;
+                            return Err(AppError::Internal(format!(
+                                "Failed to reset analyze job: {}",
+                                e
+                            )));
+                        }
+                        if let Err(e) = rate_limit::reserve_storage_quota(
+                            &state,
+                            owner,
+                            &[crate::storage::db::StorageReservationRequest {
+                                id: existing_id.clone(),
+                                bytes: encrypted.len() as i64,
+                            }],
+                        )
+                        .await
+                        {
+                            rate_limit::release_storage_quota(&state, &all_ids[idx + 1..]).await;
+                            return Err(e);
+                        }
+                        upload_job_id = existing_id;
+                    }
+                }
+            }
         }
 
         // Pick next wallet slot (round-robin) and enqueue UploadAndTransfer
@@ -584,14 +851,23 @@ pub async fn analyze(
                 package_id: state.config.package_id.clone(),
                 account_id: account_id.clone(),
                 agent_public_key: Some(auth_pubkey_base.clone()),
-                remember_job_id: Some(job_id.clone()),
+                remember_job_id: Some(upload_job_id.clone()),
                 prepare_claim_token: None,
                 epochs: state.config.walrus_storage_epochs,
             },
         )
         .await
         {
-            rate_limit::release_storage_quota(&state, &all_ids[idx..]).await;
+            let _ = sqlx::query(
+                "UPDATE remember_jobs SET status = 'failed', error_msg = $2, updated_at = NOW()
+                 WHERE id = $1 AND blob_id IS NULL",
+            )
+            .bind(&upload_job_id)
+            .bind(e.to_string())
+            .execute(state.db.pool())
+            .await;
+            rate_limit::release_storage_quota(&state, std::slice::from_ref(&upload_job_id)).await;
+            rate_limit::release_storage_quota(&state, &all_ids[idx + 1..]).await;
             return Err(AppError::Internal(format!(
                 "Failed to enqueue analyze job: {}",
                 e
@@ -601,17 +877,17 @@ pub async fn analyze(
         // Queued: jobs.rs owns this reservation from here on.
 
         tracing::info!(
-            job_id = %job_id,
+            job_id = %upload_job_id,
             wallet_index,
             fact_len = fact_text.len(),
             "analyze fact enqueued"
         );
         accepted_facts.push(AnalyzeAcceptedFact {
             text: fact_text,
-            id: job_id.clone(),
-            job_id: job_id.clone(),
+            id: upload_job_id.clone(),
+            job_id: upload_job_id.clone(),
         });
-        job_ids.push(job_id);
+        job_ids.push(upload_job_id);
     }
 
     let fact_count = job_ids.len();
@@ -636,7 +912,10 @@ pub async fn analyze(
 
 #[cfg(test)]
 mod tests {
-    use super::{ANALYZE_CONCURRENCY, MAX_ANALYZE_TEXT_BYTES};
+    use super::{
+        analyze_fact_idempotency_key, classify_analyze_job_reuse, AnalyzeJobReuse,
+        ANALYZE_CONCURRENCY, MAX_ANALYZE_TEXT_BYTES,
+    };
     use crate::routes::remember::MAX_REMEMBER_TEXT_BYTES;
     use crate::services::extractor::MAX_ANALYZE_FACTS;
 
@@ -659,6 +938,65 @@ mod tests {
     #[test]
     fn analyze_concurrency_constant_is_5() {
         assert_eq!(ANALYZE_CONCURRENCY, 5);
+    }
+
+    #[test]
+    fn analyze_fact_idempotency_key_is_stable_and_namespaced() {
+        let a = analyze_fact_idempotency_key("0xowner", "work", "likes rust");
+        let b = analyze_fact_idempotency_key("0xowner", "work", "likes rust");
+        let c = analyze_fact_idempotency_key("0xowner", "work", "likes go");
+        let other_owner = analyze_fact_idempotency_key("0xother", "work", "likes rust");
+        let other_ns = analyze_fact_idempotency_key("0xowner", "home", "likes rust");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, other_owner);
+        assert_ne!(a, other_ns);
+        assert!(a.starts_with("analyze:"));
+    }
+
+    #[test]
+    fn classify_collapses_inflight_and_matching_live_row() {
+        assert_eq!(
+            classify_analyze_job_reuse("pending", None, None, 0.5),
+            AnalyzeJobReuse::Collapse
+        );
+        assert_eq!(
+            classify_analyze_job_reuse("uploaded", Some("blob"), None, 0.5),
+            AnalyzeJobReuse::Collapse
+        );
+        assert_eq!(
+            classify_analyze_job_reuse("done", Some("blob"), Some(0.5), 0.5),
+            AnalyzeJobReuse::Collapse
+        );
+        // Paid-but-not-indexed: do not mint a second blob.
+        assert_eq!(
+            classify_analyze_job_reuse("failed", Some("blob"), None, 0.5),
+            AnalyzeJobReuse::Collapse
+        );
+    }
+
+    #[test]
+    fn classify_retries_unpaid_failure() {
+        assert_eq!(
+            classify_analyze_job_reuse("failed", None, None, 0.5),
+            AnalyzeJobReuse::RetryUnpaidFailure
+        );
+    }
+
+    #[test]
+    fn classify_updates_importance_on_live_row() {
+        assert_eq!(
+            classify_analyze_job_reuse("done", Some("blob"), Some(0.2), 0.9),
+            AnalyzeJobReuse::UpdateImportance
+        );
+    }
+
+    #[test]
+    fn classify_rewrites_when_done_job_has_no_live_memory() {
+        assert_eq!(
+            classify_analyze_job_reuse("done", Some("blob"), None, 0.5),
+            AnalyzeJobReuse::RewriteForgotten
+        );
     }
 
     #[test]

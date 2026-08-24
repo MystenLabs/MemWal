@@ -1,0 +1,63 @@
+name: Feature request
+description: Ask for a new capability. Search existing issues first. Duplicates are closed.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests without a concrete problem are closed.
+
+        Search existing issues first. Requests for namespace listing, forget/delete, timestamps, and recall pagination already have threads. Comment there instead of opening a new issue.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - TypeScript SDK (@mysten-incubation/memwal)
+        - Python SDK (memwal)
+        - MCP (@mysten-incubation/memwal-mcp)
+        - Relayer / hosted API
+        - Dashboard / Console (memory.walrus.xyz)
+        - Developer Playground
+        - OpenClaw plugin
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can you not do today? A real workload beats a wishlist.
+      placeholder: After an agent reset, stale memories keep winning recall. There is no way to stop a fact from being recalled.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like?
+      description: The smallest change that would unblock you.
+      placeholder: An owner-scoped forget(memory_id) that stops the fact from appearing in recall.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround today
+      description: What you do instead, if anything. Optional.
+      placeholder: Rotate the namespace prefix and abandon the old one.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true

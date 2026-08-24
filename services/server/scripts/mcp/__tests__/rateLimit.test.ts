@@ -45,7 +45,7 @@ test("per-IP active cap denies once exceeded", () => {
     const denied = rl.acquire("1.1.1.1");
     assert.equal(denied.ok, false);
     assert.equal(denied.reason, "ip_active_cap");
-    assert.ok((denied.retryAfterSeconds ?? 0) > 0);
+    assert.equal(denied.retryAfterSeconds, undefined);
 });
 
 test("global total cap denies once exceeded", () => {

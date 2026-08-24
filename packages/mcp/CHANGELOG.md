@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Do not abort the SSE handshake socket on HTTP 429, 401, or a bad content-type (that crash path fired on Windows).
+- Report MCP session occupancy caps as concurrent, not a 30-second cooldown.
+- Exit with code 1 when `login` is run without a TTY, instead of booting the auth-required stub and reporting success.
+- Concurrent `memwal_login` calls reuse the in-flight listener and URL instead of starting a second flow that can hang later remember/recall.
+- Serialize outbound MCP POSTs and reconnect when the SSE handle is gone, so a burst of `memwal_recall` calls cannot poison the bridge until restart.
+- Login timeout now warns that an on-chain delegate key may already exist if the browser approved after the local listener expired.
 - Make `memwal_logout` actually revoke access on the running bridge. Logout previously deleted the credentials file and nothing else; the bridge kept the delegate key in memory and the SSE session open, so later `memwal_recall` / `memwal_remember` still ran under the key the user just removed. Logout now aborts the session, fails in-flight calls, and refuses memory tools until `memwal_login`. (#616)
 - Drop the delegate key itself on logout rather than only flagging the session as signed out, so a forwarding path that misses the flag fails closed instead of reusing the deleted key. This also closes reconnect's replay loop, which posted against a pre-logout snapshot and could still push queued calls out under that key if a logout landed mid-replay. (#616)
 - Refuse every request that arrives while signed out, not just memory tool calls. `ping` and other id-bearing requests previously fell through to a queue nothing drains while signed out and were never answered, hanging the client until the next `memwal_login`. (#616)

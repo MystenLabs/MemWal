@@ -19,7 +19,7 @@ import { clearCreds, credsPath } from "./auth.js";
 import { TOOL_DEFINITIONS } from "./auth-required.js";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
 import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
-import { loginFlow } from "./login.js";
+import { startOrReuseLoginFlow } from "./login.js";
 import { log, note } from "./logger.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
@@ -319,7 +319,9 @@ async function openSseStream(
 
     if (resp.status === 401) {
         clearConnectTimer();
-        controller.abort();
+        if (resp.body) {
+            await resp.text().catch(() => "");
+        }
         log.warn("bridge.unauthorized", { url });
         // DO NOT wipe creds here. A 401 from the relayer is *evidence* of
         // a problem but not *proof* the saved seed is the cause. Possible
@@ -337,10 +339,18 @@ async function openSseStream(
                 "Run `memwal-mcp login` if you need to rotate the key."
         );
     }
+    if (resp.status === 429) {
+        clearConnectTimer();
+        const retryAfter = resp.headers.get("retry-after");
+        const body = resp.body ? await resp.text() : "";
+        throw new Error(
+            `Walrus Memory relayer SSE handshake rate-limited (HTTP 429` +
+                `${retryAfter ? `, retry after ${retryAfter}s` : ""}). ${body.slice(0, 200)}`.trim()
+        );
+    }
     if (!resp.ok || !resp.body) {
         clearConnectTimer();
         const body = resp.body ? await resp.text() : "";
-        controller.abort();
         throw new Error(
             `Walrus Memory relayer SSE handshake failed: HTTP ${resp.status} ${body.slice(0, 200)}`
         );
@@ -349,7 +359,9 @@ async function openSseStream(
     const ct = resp.headers.get("content-type") ?? "";
     if (!ct.includes("event-stream")) {
         clearConnectTimer();
-        controller.abort();
+        if (resp.body) {
+            await resp.text().catch(() => "");
+        }
         throw new Error(
             `Walrus Memory relayer returned unexpected content-type "${ct}" for SSE endpoint`
         );
@@ -560,28 +572,22 @@ async function handleLocalLogin(
     config: BridgeConfig,
     onCredentials: (creds: MemWalCredentials) => Promise<void>,
 ): Promise<{ text: string; isError: boolean }> {
-    const urlReady = new Promise<string>((resolve) => {
-        loginFlow({
+    const session = startOrReuseLoginFlow(
+        {
             relayerUrl: config.relayerUrl,
             webUrl: config.webUrl,
             label: config.label,
             timeoutMs: LOGIN_BG_TIMEOUT_MS,
             openBrowser: false,
-            onUrl: (url) => resolve(url),
-        })
-            .then(async (creds) => {
-                await onCredentials(creds);
-                log.info("memwal_login.bridge.success", {
-                    accountId: creds.accountId,
-                    delegateAddress: creds.delegateAddress,
-                });
-            })
-            .catch((err) => {
-                log.warn("memwal_login.bridge.failed", {
-                    msg: err instanceof Error ? err.message : String(err),
-                });
+        },
+        async (creds) => {
+            await onCredentials(creds);
+            log.info("memwal_login.bridge.success", {
+                accountId: creds.accountId,
+                delegateAddress: creds.delegateAddress,
             });
-    });
+        },
+    );
 
     const timeoutPromise = new Promise<string>((_, reject) =>
         setTimeout(
@@ -592,7 +598,7 @@ async function handleLocalLogin(
 
     let url: string;
     try {
-        url = await Promise.race([urlReady, timeoutPromise]);
+        url = await Promise.race([session.url, timeoutPromise]);
     } catch (err) {
         return {
             isError: true,
@@ -736,6 +742,29 @@ export async function runBridge(
     let releaseLogoutPark: (() => void) | null = null;
     let reconnectAttempt = 0;
     let reconnectPromise: Promise<void> | null = null;
+    let firstConnectDone = false;
+    /** Bumped when the live SSE session is aborted or replaced so queued
+     * POSTs captured against a stale URL are skipped (reconnect replays). */
+    let sessionEpoch = 0;
+    /** One in-flight POST per SSE session — overlapping POSTs drop the stream. */
+    let postChain: Promise<unknown> = Promise.resolve();
+    function enqueuePost<T>(fn: () => Promise<T>): Promise<T> {
+        const run = postChain.then(fn, fn);
+        postChain = run.then(
+            () => undefined,
+            () => undefined,
+        );
+        return run;
+    }
+    function postIfCurrent(
+        epoch: number,
+        postUrl: string,
+        msg: RpcMessage,
+        postCreds: MemWalCredentials,
+    ): Promise<number> {
+        if (epoch !== sessionEpoch) return Promise.resolve(0);
+        return postMessage(postUrl, msg, postCreds);
+    }
     let credentialGeneration = 0;
     let activeCredentialGeneration = 0;
 
@@ -866,6 +895,7 @@ export async function runBridge(
         if (reconnectPromise) return reconnectPromise;
 
         reconnectPromise = (async () => {
+            sessionEpoch += 1;
             try {
                 sse?.abort();
             } catch {
@@ -931,7 +961,9 @@ export async function runBridge(
                         continue;
                     }
 
+                    sessionEpoch += 1;
                     sse = candidate;
+                    firstConnectDone = true;
                     activeCredentialGeneration = openingGeneration;
                     reconnectAttempt = 0;
                     log.info("bridge.reconnected", {
@@ -975,7 +1007,11 @@ export async function runBridge(
                                 suppressUpstreamReplies.delete(msg.id);
                                 expectSuppressedReply(msg.id);
                             }
-                            const status = await postMessage(sse.postUrl, msg, openingCreds);
+                            const epoch = sessionEpoch;
+                            const postUrl = sse.postUrl;
+                            const status = await enqueuePost(() =>
+                                postIfCurrent(epoch, postUrl, msg, openingCreds),
+                            );
                             log.info("bridge.replayed", { id, status });
                         } catch (err) {
                             log.error("bridge.replay_failed", {
@@ -1410,12 +1446,18 @@ export async function runBridge(
                 // arrived before it (posting directly here would let it overtake
                 // a still-queued buffered item). The flush (or the next connect)
                 // forwards it in order. Dropping it would strand the request.
-                if (sse === null || flushing) {
+                if (flushing || (sse === null && !firstConnectDone)) {
                     pendingForward.push(msg);
                     log.info("bridge.buffered_pre_connect", {
                         method: msg.method,
                         id: msg.id ?? null,
                     });
+                    return;
+                }
+                // After the first connect, do not buffer: nothing flushes
+                // pendingForward once connectInBackground has returned.
+                if (sse === null) {
+                    await reconnect("sse-missing");
                     return;
                 }
 
@@ -1432,7 +1474,16 @@ export async function runBridge(
                     failRequest(msg, "signed out", SIGNED_OUT_FAILURE);
                     return;
                 }
-                const status = await postMessage(sse.postUrl, msg, creds);
+                if (!sse) {
+                    await reconnect("sse-missing");
+                    return;
+                }
+                const epoch = sessionEpoch;
+                const postUrl = sse.postUrl;
+                const postCreds = creds;
+                const status = await enqueuePost(() =>
+                    postIfCurrent(epoch, postUrl, msg, postCreds),
+                );
                 if (status === 404) {
                     log.warn("bridge.session_stale", { sessionUrl: sse.postUrl });
                     // reconnect() itself replays in-flight against the fresh
@@ -1468,7 +1519,12 @@ export async function runBridge(
                 if (!sse || !creds) break; // lost the session; reconnect replays inFlight
                 const msg = pendingForward.shift()!;
                 try {
-                    const status = await postMessage(sse.postUrl, msg, creds);
+                    const epoch = sessionEpoch;
+                    const postUrl = sse.postUrl;
+                    const postCreds = creds;
+                    const status = await enqueuePost(() =>
+                        postIfCurrent(epoch, postUrl, msg, postCreds),
+                    );
                     if (status === 404) {
                         // Stale session right after connect. EVERY id-bearing
                         // request is in `inFlight`, and ANY reconnect — this
@@ -1678,7 +1734,9 @@ export async function runBridge(
                     candidate.abort();
                     continue;
                 }
+                sessionEpoch += 1;
                 sse = candidate;
+                firstConnectDone = true;
                 note(`Connected. Bridging stdio MCP ↔ ${creds.relayerUrl}`);
                 log.info("bridge.connected", { relayer: creds.relayerUrl });
                 signalFirstConnect();
