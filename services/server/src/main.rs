@@ -476,13 +476,38 @@ async fn init_apalis_pool(
         "  Apalis: connecting to PostgreSQL (startup_timeout={}s)",
         startup_timeout.as_secs()
     );
-    // Do not `set_config(..., false)` on this pool. Those are session GUCs;
-    // through a transaction-mode pooler they leak onto backends later reused
-    // by unrelated code (legacy sqlx migrate inherited lock_timeout=15s and
-    // panicked). Boot is still bounded by the tokio timeouts below.
+    // Runtime query bounds for this pool (job fetch/update, not migrate).
+    //
+    // `set_config(..., true)` (SET LOCAL) in after_connect is a no-op:
+    // after_connect runs under autocommit, so Postgres discards the GUC when
+    // that statement's implicit transaction ends — runtime queries would
+    // then be unbounded. Session-scoped (`false`) is the only after_connect
+    // form that actually sticks.
+    //
+    // `lock_timeout` is intentionally omitted. A leaked session lock_timeout
+    // on a transaction-mode pooler backend is what aborted sqlx migrate
+    // (15s wait → panic). Migrate now uses the direct host, but we still
+    // don't put lock_timeout on pooled backends. statement_timeout and
+    // idle_in_transaction_session_timeout bound queries without aborting
+    // lock waits; if they leak onto another pooler client they are still
+    // a bound, not a migrate-killer.
+    let statement_timeout = format!("{}ms", startup_timeout.as_millis().min(300_000));
     let pool_future = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(startup_timeout)
+        .after_connect(move |conn, _meta| {
+            let statement_timeout = statement_timeout.clone();
+            Box::pin(async move {
+                sqlx::query(
+                    "SELECT set_config('statement_timeout', $1, false), \
+                            set_config('idle_in_transaction_session_timeout', $1, false)",
+                )
+                .bind(statement_timeout)
+                .execute(conn)
+                .await?;
+                Ok(())
+            })
+        })
         .connect(database_url);
 
     let pool = match tokio::time::timeout(startup_timeout, pool_future).await {
@@ -549,7 +574,18 @@ async fn init_apalis_pool(
             startup_timeout.as_secs()
         )),
     };
-    setup_pool.close().await;
+    // If setup already timed out because the connection is wedged, a graceful
+    // close can block boot indefinitely. Keep the same outer bound as the rest
+    // of this function and surface `setup_result` either way.
+    if tokio::time::timeout(startup_timeout, setup_pool.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_secs = startup_timeout.as_secs(),
+            "  Apalis: timed out closing the migration pool; continuing"
+        );
+    }
     setup_result
 }
 

@@ -69,24 +69,21 @@ async fn apply_legacy_migrations(
     for attempt in 1..=LEGACY_MIGRATION_MAX_ATTEMPTS {
         match apply_legacy_migrations_once(migrate_url.as_ref(), search_path).await {
             Ok(()) => return Ok(()),
-            Err(error)
-                if migration_error_is_lock_contention(&error)
-                    && attempt < LEGACY_MIGRATION_MAX_ATTEMPTS =>
-            {
+            Err(failure) if failure.lock_contention && attempt < LEGACY_MIGRATION_MAX_ATTEMPTS => {
                 let delay = Duration::from_millis(500 * (1u64 << (attempt - 1).min(4)));
                 tracing::warn!(
                     attempt,
                     max_attempts = LEGACY_MIGRATION_MAX_ATTEMPTS,
                     retry_in_ms = delay.as_millis() as u64,
-                    error = %error,
+                    error = %failure.error,
                     "legacy migration lock contention; retrying. \
                      If this persists, an orphaned sqlx advisory lock is held on a pooled backend. \
                      Release it with pg_terminate_backend on the pg_locks pid."
                 );
                 tokio::time::sleep(delay).await;
-                last_error = Some(error);
+                last_error = Some(failure.error);
             }
-            Err(error) => return Err(error),
+            Err(failure) => return Err(failure.error),
         }
     }
     Err(last_error.unwrap_or_else(|| {
@@ -94,10 +91,24 @@ async fn apply_legacy_migrations(
     }))
 }
 
+struct LegacyMigrationAttemptError {
+    error: AppError,
+    lock_contention: bool,
+}
+
+impl From<AppError> for LegacyMigrationAttemptError {
+    fn from(error: AppError) -> Self {
+        Self {
+            error,
+            lock_contention: false,
+        }
+    }
+}
+
 async fn apply_legacy_migrations_once(
     migrate_url: &str,
     search_path: Option<&str>,
-) -> Result<(), AppError> {
+) -> Result<(), LegacyMigrationAttemptError> {
     let mut options = PgConnectOptions::from_str(migrate_url)
         .map_err(|error| AppError::Internal(format!("legacy db URL invalid: {error}")))?;
     let mut gucs: Vec<(&str, &str)> = vec![("lock_timeout", LEGACY_MIGRATION_LOCK_TIMEOUT)];
@@ -119,19 +130,22 @@ async fn apply_legacy_migrations_once(
     // The old V1 database already contains migration history from Apalis.
     // Only validate and apply migrations owned by the security-delete subsystem.
     migrator.set_ignore_missing(true);
-    let result = migrator
-        .run(&mut conn)
-        .await
-        .map_err(|error| AppError::Internal(format!("legacy migration failed: {error}")));
-
-    if let Err(error) = &result {
-        if migration_error_is_lock_contention(error) {
-            // lock_timeout aborts the statement; if sqlx had a transaction open
-            // the connection is now unusable until ROLLBACK.
-            let _ = sqlx::query("ROLLBACK").execute(&mut conn).await;
-            release_orphaned_sqlx_migration_lock(&mut conn).await;
+    let result = match migrator.run(&mut conn).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let lock_contention = migrate_error_is_lock_contention(&error);
+            if lock_contention {
+                // lock_timeout aborts the statement; if sqlx had a transaction
+                // open the connection is now unusable until ROLLBACK.
+                let _ = sqlx::query("ROLLBACK").execute(&mut conn).await;
+                release_orphaned_sqlx_migration_lock(&mut conn).await;
+            }
+            Err(LegacyMigrationAttemptError {
+                error: AppError::Internal(format!("legacy migration failed: {error}")),
+                lock_contention,
+            })
         }
-    }
+    };
 
     // Direct connections drop session locks on close. Still unlock explicitly
     // so a cancelled run cannot leave the lock if the backend is reused.
@@ -233,12 +247,39 @@ async fn release_orphaned_sqlx_migration_lock(conn: &mut PgConnection) {
     }
 }
 
-fn migration_error_is_lock_contention(error: &AppError) -> bool {
-    let msg = error.to_string().to_ascii_lowercase();
-    msg.contains("lock timeout")
-        || msg.contains("deadlock detected")
-        || msg.contains("55p03")
-        || msg.contains("40p01")
+/// Postgres SQLSTATE for lock-wait failures.
+///
+/// `55P03` = lock_not_available (`canceling statement due to lock timeout`)
+/// `40P01` = deadlock_detected
+fn sqlstate_is_lock_contention(code: &str) -> bool {
+    code.eq_ignore_ascii_case("55P03") || code.eq_ignore_ascii_case("40P01")
+}
+
+fn sqlx_error_is_lock_contention(error: &sqlx::Error) -> bool {
+    let Some(db) = error.as_database_error() else {
+        return false;
+    };
+    match db.code() {
+        Some(code) => sqlstate_is_lock_contention(code.as_ref()),
+        // Driver dropped SQLSTATE: don't let a Display reword disable retries,
+        // but don't treat generic statement-timeout text as lock contention.
+        None => {
+            let msg = db.message().to_ascii_lowercase();
+            msg.contains("lock timeout") || msg.contains("deadlock detected")
+        }
+    }
+}
+
+fn migrate_error_sqlx_source(error: &sqlx::migrate::MigrateError) -> Option<&sqlx::Error> {
+    match error {
+        sqlx::migrate::MigrateError::Execute(source)
+        | sqlx::migrate::MigrateError::ExecuteMigration(source, _) => Some(source),
+        _ => None,
+    }
+}
+
+fn migrate_error_is_lock_contention(error: &sqlx::migrate::MigrateError) -> bool {
+    migrate_error_sqlx_source(error).is_some_and(sqlx_error_is_lock_contention)
 }
 
 #[cfg(test)]
@@ -294,18 +335,85 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn lock_timeout_errors_are_retryable() {
-        assert!(migration_error_is_lock_contention(&AppError::Internal(
-            "legacy migration failed: while executing migrations: \
-             error returned from database: canceling statement due to lock timeout"
-                .into()
-        )));
-        assert!(migration_error_is_lock_contention(&AppError::Internal(
-            "deadlock detected".into()
-        )));
-        assert!(!migration_error_is_lock_contention(&AppError::Internal(
-            "relation \"vector_entries\" does not exist".into()
-        )));
+    fn lock_timeout_sqlstates_are_retryable() {
+        assert!(sqlstate_is_lock_contention("55P03"));
+        assert!(sqlstate_is_lock_contention("40P01"));
+        assert!(sqlstate_is_lock_contention("55p03"));
+        assert!(!sqlstate_is_lock_contention("57014")); // statement_timeout
+        assert!(!sqlstate_is_lock_contention("42P01")); // undefined_table
+    }
+
+    #[test]
+    fn migrate_errors_classify_on_sqlstate_not_display_text() {
+        let lock_timeout = sqlx::Error::Database(Box::new(FakeDbError {
+            message: "the wording changed in a future postgres",
+            code: Some("55P03"),
+        }));
+        assert!(sqlx_error_is_lock_contention(&lock_timeout));
+        assert!(migrate_error_is_lock_contention(
+            &sqlx::migrate::MigrateError::Execute(lock_timeout)
+        ));
+
+        let statement_timeout = sqlx::Error::Database(Box::new(FakeDbError {
+            message: "canceling statement due to lock timeout",
+            code: Some("57014"),
+        }));
+        assert!(!sqlx_error_is_lock_contention(&statement_timeout));
+        assert!(!migrate_error_is_lock_contention(
+            &sqlx::migrate::MigrateError::Execute(statement_timeout)
+        ));
+
+        let missing_code_lock = sqlx::Error::Database(Box::new(FakeDbError {
+            message: "canceling statement due to lock timeout",
+            code: None,
+        }));
+        assert!(sqlx_error_is_lock_contention(&missing_code_lock));
+
+        let missing_code_other = sqlx::Error::Database(Box::new(FakeDbError {
+            message: "relation \"vector_entries\" does not exist",
+            code: None,
+        }));
+        assert!(!sqlx_error_is_lock_contention(&missing_code_other));
+    }
+
+    #[derive(Debug)]
+    struct FakeDbError {
+        message: &'static str,
+        code: Option<&'static str>,
+    }
+
+    impl std::fmt::Display for FakeDbError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for FakeDbError {}
+
+    impl sqlx::error::DatabaseError for FakeDbError {
+        fn message(&self) -> &str {
+            self.message
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            self.code.map(std::borrow::Cow::Borrowed)
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
     }
 
     #[tokio::test]
