@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 const releases = [
     {
         name: "TypeScript SDK",
-        version: "0.1.3",
+        version: "0.1.4",
         manifests: [["packages/sdk/package.json", "version"]],
         changelogs: ["packages/sdk/CHANGELOG.md", "docs/sdk/changelog.mdx"],
     },

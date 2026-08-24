@@ -15,6 +15,8 @@
     "db:purge-legacy-sessions": "tsx scripts/purge-legacy-zklogin-sessions.ts",
     "verify:memwal": "tsx ../../scripts/verify-memwal-credentials.ts",
     "test:unit": "vitest run",
+    "playwright:install": "playwright install --with-deps chromium",
+    "test:e2e": "PLAYWRIGHT=True playwright test",
     "clean": "rm -rf .next out build"
   },
   "dependencies": {
@@ -81,6 +83,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.50.1",
     "@tailwindcss/postcss": "^4",
     "@types/jwt-decode": "^3.1.0",
     "@types/node": "^20",
