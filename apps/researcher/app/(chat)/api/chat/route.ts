@@ -307,9 +307,23 @@ export async function POST(request: Request) {
         );
 
         if (titlePromise) {
-          const title = await titlePromise;
-          dataStream.write({ type: "data-chat-title", data: title });
-          updateChatTitleById({ chatId: id, title });
+          try {
+            const title = await titlePromise;
+            dataStream.write({ type: "data-chat-title", data: title });
+            updateChatTitleById({ chatId: id, title });
+          } catch (error) {
+            // Title generation is a non-fatal side effect of the response
+            // already streaming above it (dataStream.merge). Left unguarded,
+            // the rejection reached createUIMessageStream's onError, which
+            // injected an "error" part into the stream — so the client
+            // surfaced a fatal chat error even though the real answer had
+            // streamed successfully underneath it. Verified locally A/B
+            // against the retired title model: without this catch the stream
+            // carries {"type":"error"}; with it, the answer arrives clean and
+            // the chat simply has no auto-generated title.
+            // Same fix as apps/chatbot (334cf915); researcher was missed then.
+            console.error("[chat] title generation failed:", error);
+          }
         }
       },
       generateId: generateUUID,

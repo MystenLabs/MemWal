@@ -5,6 +5,7 @@ import {
   wrapLanguageModel,
 } from "ai";
 import { isTestEnvironment } from "../constants";
+import { TITLE_MODEL } from "./models";
 
 const THINKING_SUFFIX_REGEX = /-thinking$/;
 
@@ -56,7 +57,7 @@ export function getTitleModel() {
   if (isTestEnvironment && myProvider) {
     return myProvider.languageModel("title-model");
   }
-  return openrouter.chat("google/gemini-2.0-flash-001");
+  return openrouter.chat(TITLE_MODEL);
 }
 
 /** OpenRouter embedding model for source chunk embeddings */
