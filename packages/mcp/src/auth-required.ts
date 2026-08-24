@@ -23,7 +23,7 @@
  */
 import { loadCreds, type MemWalCredentials } from "./auth.js";
 import { log } from "./logger.js";
-import { loginFlow } from "./login.js";
+import { startOrReuseLoginFlow } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
@@ -255,42 +255,33 @@ async function handleLoginToolCall(
     config: AuthRequiredConfig,
     _progressToken: unknown,
 ): Promise<{ text: string; isError: boolean }> {
-    let connectUrl: string | null = null;
-
-    // Promise that resolves with the URL as soon as the listener is bound.
-    const urlReady = new Promise<string>((resolve) => {
-        // Fire loginFlow but DO NOT await — it runs in the background.
-        // openBrowser: false because (a) child-process spawning a browser is
-        // unreliable across MCP clients, and (b) macOS `open <url>` often
-        // foregrounds an existing memory.walrus.xyz tab instead of navigating to
-        // the full /connect/mcp?... URL — so user lands on the homepage,
-        // not the consent screen. The agent surfaces the clickable URL
-        // from the tool result instead.
-        loginFlow({
+    // Fire login but DO NOT await the wallet callback — it runs in the
+    // background. openBrowser: false because (a) child-process spawning a
+    // browser is unreliable across MCP clients, and (b) macOS `open <url>`
+    // often foregrounds an existing memory.walrus.xyz tab instead of
+    // navigating to the full /connect/mcp?... URL. The agent surfaces the
+    // clickable URL from the tool result instead.
+    //
+    // Concurrent memwal_login calls join this in-flight flow instead of
+    // opening a second listener (that race hung later recall/remember).
+    const session = startOrReuseLoginFlow(
+        {
             relayerUrl: config.relayerUrl,
             webUrl: config.webUrl,
             label: config.label,
             timeoutMs: LOGIN_BG_TIMEOUT_MS,
             openBrowser: false,
             onUrl: (url) => {
-                connectUrl = url;
-                resolve(url);
-                // Also push to log notification — clients that surface these
-                // (Cursor) get a second visible copy of the URL.
                 sendLogMessage("info", `Walrus Memory MCP login URL: ${url}`);
             },
-        })
-            .then((creds) => {
-                log.info("memwal_login.bg.success", {
-                    accountId: creds.accountId,
-                    delegateAddress: creds.delegateAddress,
-                });
-            })
-            .catch((err) => {
-                const msg = err instanceof Error ? err.message : String(err);
-                log.warn("memwal_login.bg.failed", { msg });
+        },
+        (creds) => {
+            log.info("memwal_login.bg.success", {
+                accountId: creds.accountId,
+                delegateAddress: creds.delegateAddress,
             });
-    });
+        },
+    );
 
     // Race the URL-ready against a short timeout. The listener bind is
     // synchronous-ish (single port allocation); 5s is a hard cap for a
@@ -304,7 +295,7 @@ async function handleLoginToolCall(
 
     let url: string;
     try {
-        url = await Promise.race([urlReady, timeoutPromise]);
+        url = await Promise.race([session.url, timeoutPromise]);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error("memwal_login.tool.url_not_ready", { msg });

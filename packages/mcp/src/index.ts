@@ -139,6 +139,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // applyDefaultNamespace in bridge.ts).
     const namespace = args.namespace ?? process.env.MEMWAL_NAMESPACE;
 
+    // Explicit `login` is a human command. When stdin is not a TTY the
+    // process was spawned by a script or MCP client — booting the
+    // auth-required stub here would exit 0 without ever opening a browser.
+    if (args.forceLogin && !process.stdin.isTTY) {
+        log.error("login.requires_tty", { credsPath: credsPath() });
+        note("error: `login` requires an interactive terminal (stdin is not a TTY).");
+        note("       Run it in a terminal, or call `memwal_login` from an MCP client.");
+        process.exitCode = 1;
+        return;
+    }
+
     // `login` forces a fresh sign-in by IGNORING what is on disk, not by
     // deleting it. Deleting up front meant an abandoned or failed login left
     // the user with no credentials at all and nothing to recover from — and it
