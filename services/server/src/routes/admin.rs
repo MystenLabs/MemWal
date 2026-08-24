@@ -52,9 +52,11 @@ fn encode_untrusted_memory_context(memories: &[RecallResult]) -> Result<String, 
 /// Delete the vector index rows for every memory in `owner`'s
 /// `namespace` (a hard `DELETE` on `vector_entries` — the underlying
 /// Walrus blobs persist, since Walrus has no delete; the memories just
-/// stop being retrievable and stop counting toward storage quota). Used
-/// by the benchmark harness for inter-run cleanup; also a general admin
-/// op. Mode-blind — works the same in production and benchmark mode (in
+/// stop being retrievable and stop counting toward storage quota) and
+/// release `remember_jobs.idempotency_key` for that namespace so a later
+/// analyze/remember of the same text is a new write. Used by the
+/// benchmark harness for inter-run cleanup; also a general admin op.
+/// Mode-blind — works the same in production and benchmark mode (in
 /// benchmark mode this also removes the plaintext rows). Owner-scoped:
 /// only the caller's own rows are deleted.
 pub async fn forget(
@@ -461,6 +463,24 @@ pub async fn restore(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<RestoreRequest>,
 ) -> Result<Json<RestoreResponse>, AppError> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(55),
+        restore_unbounded(state, auth, body),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(AppError::UpstreamUnavailable(
+            "Restore timed out; retry later or with a smaller namespace".into(),
+        )),
+    }
+}
+
+async fn restore_unbounded(
+    state: Arc<AppState>,
+    auth: AuthInfo,
+    body: RestoreRequest,
+) -> Result<Json<RestoreResponse>, AppError> {
     validate_namespace(&body.namespace)?;
 
     let owner = &auth.owner;
@@ -780,7 +800,9 @@ pub async fn restore(
         })
         .collect();
 
-    let results: Vec<(String, Vec<f32>)> = futures::future::join_all(embed_tasks)
+    let results: Vec<(String, Vec<f32>)> = stream::iter(embed_tasks)
+        .buffer_unordered(3)
+        .collect::<Vec<_>>()
         .await
         .into_iter()
         .flatten()

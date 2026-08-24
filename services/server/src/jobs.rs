@@ -2480,9 +2480,15 @@ impl WalletJobError {
     /// `GasPoolExhausted` is gated on pool-level confirmation by the caller.
     pub fn is_gas_pool_budget_error(msg: &str) -> bool {
         let lower = msg.to_ascii_lowercase();
-        (lower.contains("moveabort") || lower.contains("move abort"))
+        let move_split = (lower.contains("moveabort") || lower.contains("move abort"))
             && lower.contains("balance")
-            && lower.contains("split")
+            && lower.contains("split");
+        let gas_selection = lower.contains("gas selection") && lower.contains("insufficient");
+        let sui_balance = lower.contains("insufficient")
+            && lower.contains("sui")
+            && lower.contains("balance")
+            && !lower.contains("::wal::wal");
+        move_split || gas_selection || sui_balance
     }
 
     /// True if `msg` is the Walrus register PTB's `0x2::coin::destroy_zero`
@@ -3234,6 +3240,17 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             assert!(!classified.aborts_retries(), "must retry: {}", msg);
             assert!(WalletJobError::is_gas_pool_budget_error(msg));
         }
+    }
+
+    #[test]
+    fn gas_selection_insufficient_sui_is_pool_budget_error() {
+        let msg = "Internal Error: durable Walrus upload failed (503 Service Unavailable): Unable to perform gas selection due to insufficient SUI balance";
+        assert!(WalletJobError::is_gas_pool_budget_error(msg));
+        let classified = WalletJobError::classify_sidecar_error(msg);
+        assert!(matches!(classified, WalletJobError::Transient(_)));
+        assert!(!WalletJobError::is_gas_pool_budget_error(
+            LOW_WAL_BALANCE_ERR
+        ));
     }
 
     #[test]
