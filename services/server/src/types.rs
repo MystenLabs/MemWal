@@ -1608,6 +1608,18 @@ pub struct RememberManualResponse {
     pub namespace: String,
 }
 
+/// POST /api/embed
+/// Embed text into a vector without storing anything.
+#[derive(Debug, Deserialize)]
+pub struct EmbedRequest {
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbedResponse {
+    pub vector: Vec<f32>,
+}
+
 /// POST /api/recall/manual
 /// User provides pre-computed query vector.
 /// Server returns matching blobIds + distances (no download/decrypt).

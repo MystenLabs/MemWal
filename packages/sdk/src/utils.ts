@@ -285,6 +285,14 @@ export function normalizeServerUrl(url: string): string {
 // Error Sanitization (LOW-26)
 // ============================================================
 
+/** Replace loopback URLs that leak sidecar topology into client-facing errors. */
+export function redactInternalUrls(text: string): string {
+    return text.replace(
+        /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?[^ \t)\]>'"]*/gi,
+        "[internal]",
+    );
+}
+
 /**
  * LOW-26: Sanitize a raw server error body before surfacing it to callers.
  *
@@ -331,7 +339,9 @@ export function sanitizeServerError(
 
     // Strip ASCII control chars (0x00-0x1F, 0x7F) that could corrupt logs.
     // eslint-disable-next-line no-control-regex
-    const stripped = text.replace(/[\u0000-\u001F\u007F]/g, " ").trim();
+    const stripped = redactInternalUrls(
+        text.replace(/[\u0000-\u001F\u007F]/g, " "),
+    ).trim();
     const truncated =
         stripped.length > MAX ? `${stripped.slice(0, MAX)}...` : stripped;
     const message = `Walrus Memory server error (${status}): ${truncated || "<no message>"}`;

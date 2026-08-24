@@ -1,7 +1,7 @@
 ---
 title: API Reference
 description: >-
-  Complete HTTP API reference for the Walrus Memory relayer, including authentication headers, public routes, the protected endpoints for remember, recall, analyze, ask, restore, forget, and stats, and the MCP transport endpoints.
+  Complete HTTP API reference for the Walrus Memory relayer, including authentication headers, public routes, the protected endpoints for remember, recall, analyze, embed, ask, restore, forget, and stats, and the MCP transport endpoints.
 keywords:
   - Walrus Memory
   - MemWal
@@ -28,7 +28,7 @@ questions:
   - "How do I authenticate requests to the MemWal relayer?"
   - "What is the request and response format for the remember and recall APIs?"
 answer: >-
-  The Walrus Memory relayer exposes public routes (health, version, config, metrics, sponsor) and protected routes (remember, recall, analyze, ask, restore, forget, stats) that require Ed25519 signed headers, plus MCP transport endpoints that use bearer authentication. Signed authentication uses x-public-key, x-signature, x-timestamp, and x-nonce headers, with the signature covering the timestamp, method, path, body hash, nonce, and account ID.
+  The Walrus Memory relayer exposes public routes (health, version, config, metrics, sponsor) and protected routes (remember, recall, analyze, embed, ask, restore, forget, stats) that require Ed25519 signed headers, plus MCP transport endpoints that use bearer authentication. Signed authentication uses x-public-key, x-signature, x-timestamp, and x-nonce headers, with the signature covering the timestamp, method, path, body hash, nonce, and account ID.
 ---
 
 The Rust relayer exposes these routes. The route table lives in `services/server/src/main.rs`.
@@ -378,6 +378,28 @@ Extract facts from text using an LLM, then enqueue each fact as a separate memor
   "fact_count": 2,
   "status": "pending",
   "owner": "0x..."
+}
+```
+
+### `POST /api/embed`
+
+Return an embedding vector for `text` without storing a memory. Uses the same model and width as remember, recall, and analyze. Requires signed-header auth.
+
+**Request:**
+
+```json
+{
+  "text": "hello world"
+}
+```
+
+`text` must be non-empty and at most 64 KiB.
+
+**Response:**
+
+```json
+{
+  "vector": [0.01, -0.02]
 }
 ```
 

@@ -149,6 +149,7 @@ fn endpoint_weight(path: &str) -> i64 {
         "/api/remember/manual" => 3, // Walrus upload only (client did embed/encrypt)
         "/api/restore" => 3,         // download + decrypt + re-embed
         "/api/ask" => 2,             // recall + LLM
+        "/api/embed" => 2,           // embedding API only
         // Owner-scoped read API — {owner} is a variable path segment, so
         // match by prefix/suffix like the observability route_label()
         // normalization does for the same three routes.
@@ -1807,6 +1808,7 @@ mod tests {
         assert_eq!(endpoint_weight("/api/remember/manual"), 3);
         assert_eq!(endpoint_weight("/api/restore"), 3);
         assert_eq!(endpoint_weight("/api/ask"), 2);
+        assert_eq!(endpoint_weight("/api/embed"), 2);
 
         // With trailing slash — must return SAME weight.
         assert_eq!(

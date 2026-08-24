@@ -133,6 +133,7 @@ memwal = MemWal.create(
 | `env` | Relayer URL |
 |-------|-------------|
 | `prod` | `https://relayer.memory.walrus.xyz` |
+| `dev` | `https://relayer.dev.memwal.ai` |
 | `staging` | `https://relayer-staging.memory.walrus.xyz` |
 
 Precedence: an explicit non-default **`server_url` wins over `env`**, which wins
@@ -206,7 +207,7 @@ Create a new async client.
 | `await ask(question, limit?, namespace?)` | Ask a question answered using memories |
 | `await restore(namespace, limit?)` | Restore a namespace |
 | `await health()` | Check server health |
-| `await remember_manual(opts)` | Store with pre-computed vector |
+| `await remember_manual(opts)` | Store encrypted payload + pre-computed vector |
 | `await recall_manual(opts)` | Search with pre-computed vector |
 | `await get_public_key_hex()` | Get Ed25519 public key |
 

@@ -1658,6 +1658,7 @@ async fn main() {
             post(routes::remember_bulk).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         .route("/api/analyze", post(routes::analyze))
+        .route("/api/embed", post(routes::embed))
         .route("/api/ask", post(routes::ask))
         .route("/api/restore", post(routes::restore))
         // admin/harness endpoints — namespace delete + stats.
