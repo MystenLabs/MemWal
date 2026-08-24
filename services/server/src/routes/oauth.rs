@@ -322,12 +322,15 @@ pub async fn authorize(
             )
         }
     };
-    let Some(redirect_uri) = client
-        .redirect_uris
-        .iter()
-        .find(|registered| oauth::redirect_uri_matches(&query.redirect_uri, registered))
-        .cloned()
-    else {
+    // Match against the registered list (port-agnostic for loopback), but
+    // persist the client-presented URI. Cloning the registered URI here
+    // sent Claude Code's auth code to port 80 and made token exchange
+    // reject the real `http://localhost:<ephemeral>/callback` (#619).
+    let Some(redirect_uri) = oauth::authorize_redirect_uri(
+        &query.redirect_uri,
+        client.redirect_uris.iter().map(String::as_str),
+    )
+    .map(str::to_owned) else {
         return error_page(
             StatusCode::BAD_REQUEST,
             "Redirect not recognized",
