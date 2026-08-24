@@ -114,6 +114,9 @@ class RecallResult:
 
     results: List[RecallMemory]
     total: int
+    # Matches omitted because download or decrypt failed. 0 also means the
+    # relayer omitted the field (older servers).
+    dropped_count: int = 0
 
 
 @dataclass
@@ -191,6 +194,7 @@ class HealthResult:
     deprecations: Optional[List[Dict[str, Any]]] = None
     build: Optional[Dict[str, Any]] = None
     mode: Optional[str] = None
+    write_ready: Optional[bool] = None
 
 
 @dataclass
