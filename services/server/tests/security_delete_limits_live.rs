@@ -20,8 +20,26 @@
 //! Read-only: run this BEFORE the n900 cohort's `execute` phase consumes
 //! its owned-object set.
 
+use memwal_server::default_walrus_staking_pool_id;
 use memwal_server::sui::{SuiApi, SuiClient};
 use std::time::{Duration, Instant};
+
+/// Mirrors `Config::from_env`'s `WALRUS_STAKING_POOL_ID` resolution
+/// (`services/server/src/types.rs`): explicit env var if set, else the
+/// per-network default (only testnet/mainnet have real distinct defaults —
+/// see `default_walrus_staking_pool_id`'s doc comment).
+fn resolve_walrus_staking_pool_id() -> String {
+    std::env::var("WALRUS_STAKING_POOL_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| {
+            let network = std::env::var("SUI_NETWORK")
+                .unwrap_or_else(|_| "mainnet".to_string())
+                .trim()
+                .to_ascii_lowercase();
+            default_walrus_staking_pool_id(&network).to_string()
+        })
+}
 
 #[tokio::test]
 #[ignore]
@@ -30,11 +48,12 @@ async fn batch_get_objects_cap_probe() {
     let walrus_package = std::env::var("WALRUS_PACKAGE_ID").expect("WALRUS_PACKAGE_ID must be set");
     let walrus_system =
         std::env::var("WALRUS_SYSTEM_OBJECT_ID").expect("WALRUS_SYSTEM_OBJECT_ID must be set");
+    let walrus_staking_pool = resolve_walrus_staking_pool_id();
     let owner = std::env::var("TEST_BLOB_OWNER")
         .expect("TEST_BLOB_OWNER must be set to an address owning ~1000 real Walrus Blob objects");
     let client = SuiClient::new(&url, 3_000, Duration::from_secs(10))
         .unwrap()
-        .with_walrus_config(walrus_package, walrus_system);
+        .with_walrus_config(walrus_package, walrus_system, walrus_staking_pool);
 
     // Collect the full owned set across pages, recording each page's size —
     // the observed page cap is itself a Task 6 measurement (spec §8 assumed

@@ -1,5 +1,4 @@
 import { cookies } from "next/headers";
-import Script from "next/script";
 import { Suspense } from "react";
 import { AppSidebar } from "@/components/sidebar/app-sidebar";
 import { DataStreamProvider } from "@/components/data/data-stream-provider";
@@ -8,12 +7,13 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { getSession } from "@/lib/auth/session";
 
 export default function Layout({ children }: { children: React.ReactNode }) {
+  // No pyodide <Script> here anymore: it was template leftover (Vercel
+  // ai-chatbot's Python code-runner) that nothing in this app calls — no
+  // loadPyodide/runPython usage exists. It cost a multi-MB CDN download on
+  // every chat page and, as of Next 16, beforeInteractive in a nested layout
+  // throws "Encountered a script tag while rendering React component".
   return (
     <>
-      <Script
-        src="https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js"
-        strategy="beforeInteractive"
-      />
       <DataStreamProvider>
         <SourceProcessingProvider>
           <Suspense fallback={<div className="flex h-dvh" />}>

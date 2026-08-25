@@ -54,11 +54,15 @@ function rateLimitDeny(
     if (retryAfterSeconds && retryAfterSeconds > 0) {
         res.setHeader("retry-after", String(retryAfterSeconds));
     }
+    const message =
+        reason === "ip_active_cap" || reason === "global_cap"
+            ? `MCP rate limit: ${reason}. Close another MCP session, then retry.`
+            : `MCP rate limit: ${reason}. Try again in ${retryAfterSeconds ?? 30}s.`;
     res.status(429).json({
         jsonrpc: "2.0",
         error: {
             code: -32000,
-            message: `MCP rate limit: ${reason}. Try again in ${retryAfterSeconds ?? 30}s.`,
+            message,
         },
         id: null,
     });
@@ -85,8 +89,25 @@ interface StreamableConnection {
     sessionKey: string;
     transport: StreamableHTTPServerTransport;
     cleanup: () => void;
+    lastActiveMs: number;
 }
 const streamableSessions = new Map<string, StreamableConnection>();
+
+/** Abandoned streamable sessions pin per-IP slots until DELETE. Reap idle ones. */
+const STREAMABLE_IDLE_MS = 15 * 60_000;
+const idleReaper = setInterval(() => {
+    const now = Date.now();
+    for (const [id, conn] of streamableSessions) {
+        if (now - conn.lastActiveMs <= STREAMABLE_IDLE_MS) continue;
+        log.info("session.idle_closed", {
+            transport: "streamable",
+            transportId: id,
+        });
+        void Promise.resolve(conn.transport.close()).catch(() => conn.cleanup());
+        conn.cleanup();
+    }
+}, 60_000);
+idleReaper.unref?.();
 
 function rpcError(res: Response, status: number, message: string): void {
     res.status(status).json({
@@ -330,6 +351,7 @@ async function handleStreamableHttp(
                 "mcp-session-id does not match authenticated caller"
             );
         }
+        conn.lastActiveMs = Date.now();
         await conn.transport.handleRequest(req, res);
         return;
     }
@@ -385,6 +407,7 @@ async function handleStreamableHttp(
                 sessionKey: auth.sessionKey,
                 transport,
                 cleanup,
+                lastActiveMs: Date.now(),
             });
             log.info("session.opened", {
                 transport: "streamable",

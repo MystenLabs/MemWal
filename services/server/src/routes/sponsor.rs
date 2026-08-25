@@ -275,7 +275,11 @@ fn validate_sponsor_transaction_kind(
         [_] => Ok(()),
         // Batching exists for bulk revoke only. Every command has to be a
         // removal, and the batch stays inside the sponsored-gas bound.
-        calls if calls.iter().all(|function| *function == "remove_delegate_key") => {
+        calls
+            if calls
+                .iter()
+                .all(|function| *function == "remove_delegate_key") =>
+        {
             if calls.len() > MAX_SPONSORED_DELEGATE_REMOVALS {
                 return Err(AppError::BadRequest(format!(
                     "Too many delegate key removals in one transaction (max {MAX_SPONSORED_DELEGATE_REMOVALS})"
@@ -510,8 +514,25 @@ pub async fn sponsor_execute_proxy(
 
     consume_pending_sponsor(&state, &req.digest, sender).await?;
 
-    let (upstream_status, resp_body) =
-        call_sidecar_sponsor_execute(&state, &req.digest, &req.signature, false).await?;
+    let execute_result =
+        call_sidecar_sponsor_execute(&state, &req.digest, &req.signature, false).await;
+
+    let (upstream_status, resp_body) = match execute_result {
+        Ok(pair) => pair,
+        Err(err) => {
+            // Transport / parse failure: the sidecar never confirmed
+            // execution. Put the binding back so the client can retry
+            // without re-running /sponsor (GH #617).
+            if let Err(restore_err) = record_pending_sponsor(&state, &req.digest, sender).await {
+                tracing::error!(
+                    digest = %req.digest,
+                    error = %restore_err,
+                    "failed to restore sponsor pending record after sidecar transport error"
+                );
+            }
+            return Err(err);
+        }
+    };
 
     if upstream_status.is_success() {
         Ok(Response::builder()
@@ -520,6 +541,16 @@ pub async fn sponsor_execute_proxy(
             .body(Body::from(resp_body))
             .unwrap())
     } else {
+        if should_restore_pending_sponsor(upstream_status) {
+            if let Err(restore_err) = record_pending_sponsor(&state, &req.digest, sender).await {
+                tracing::error!(
+                    digest = %req.digest,
+                    status = %upstream_status,
+                    error = %restore_err,
+                    "failed to restore sponsor pending record after sidecar error"
+                );
+            }
+        }
         crate::observability::record_sidecar_failure("sponsor_execute", "http_error");
         tracing::error!(
             request_id = %crate::observability::current_request_id().unwrap_or_default(),
@@ -532,6 +563,13 @@ pub async fn sponsor_execute_proxy(
     }
 }
 
+/// Restore the pending binding after a sidecar failure that did not
+/// confirm execution. 4xx means the signed tx was rejected; leave it
+/// consumed so the client must re-sponsor. 5xx / 429 are transient.
+fn should_restore_pending_sponsor(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
 // ============================================================
 // Unit Tests
 // ============================================================
@@ -539,6 +577,29 @@ pub async fn sponsor_execute_proxy(
 #[cfg(test)]
 mod more_tests {
     use super::*;
+
+    #[test]
+    fn restore_pending_on_transient_sidecar_status() {
+        assert!(should_restore_pending_sponsor(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(should_restore_pending_sponsor(
+            reqwest::StatusCode::BAD_GATEWAY
+        ));
+        assert!(should_restore_pending_sponsor(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(should_restore_pending_sponsor(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(!should_restore_pending_sponsor(
+            reqwest::StatusCode::BAD_REQUEST
+        ));
+        assert!(!should_restore_pending_sponsor(
+            reqwest::StatusCode::UNAUTHORIZED
+        ));
+        assert!(!should_restore_pending_sponsor(reqwest::StatusCode::OK));
+    }
 
     fn move_call_kind(package: &str, module: &str, function: &str) -> Vec<u8> {
         let kind =
@@ -630,8 +691,7 @@ nonce: 00000000-0000-4000-8000-000000000000"
     #[test]
     fn sponsor_allowlist_rejects_removal_batch_over_the_cap() {
         let package = format!("0x{}", "a".repeat(64));
-        let calls =
-            vec![("account", "remove_delegate_key"); MAX_SPONSORED_DELEGATE_REMOVALS + 1];
+        let calls = vec![("account", "remove_delegate_key"); MAX_SPONSORED_DELEGATE_REMOVALS + 1];
         let bytes = move_calls_kind(&package, &calls);
         assert!(validate_sponsor_transaction_kind(&bytes, &package).is_err());
     }
@@ -642,8 +702,14 @@ nonce: 00000000-0000-4000-8000-000000000000"
     fn sponsor_allowlist_rejects_batches_that_are_not_pure_removals() {
         let package = format!("0x{}", "a".repeat(64));
         for calls in [
-            vec![("account", "add_delegate_key"), ("account", "add_delegate_key")],
-            vec![("account", "remove_delegate_key"), ("account", "add_delegate_key")],
+            vec![
+                ("account", "add_delegate_key"),
+                ("account", "add_delegate_key"),
+            ],
+            vec![
+                ("account", "remove_delegate_key"),
+                ("account", "add_delegate_key"),
+            ],
             vec![("account", "create_account"), ("account", "create_account")],
             vec![("account", "remove_delegate_key"), ("coin", "transfer")],
         ] {

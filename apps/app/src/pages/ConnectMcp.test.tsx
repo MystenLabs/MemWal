@@ -102,6 +102,8 @@ describe('MCP sign-in hand-off', () => {
         stubListener(async () => new Response('nope', { status: 409 }))
         await signIn()
 
+        expect(await screen.findByText(/Almost there/i)).toBeInTheDocument()
+        expect(screen.queryByText(/MCP client connected/i)).not.toBeInTheDocument()
         expect(await screen.findByText(/turned down the hand-off/i)).toBeInTheDocument()
         expect(screen.queryByText(/Nothing answered on your computer/i)).not.toBeInTheDocument()
     })
@@ -112,7 +114,7 @@ describe('MCP sign-in hand-off', () => {
         })
         await signIn()
 
-        expect(await screen.findByText(/you do not need to repeat it/i)).toBeInTheDocument()
+        expect(await screen.findByText(/first half of sign-in succeeded/i)).toBeInTheDocument()
         expect(screen.getByRole('link', { name: /troubleshooting/i })).toHaveAttribute(
             'href',
             'https://docs.test/troubleshooting/overview#sign-in-succeeds-but-credentials-are-not-saved',

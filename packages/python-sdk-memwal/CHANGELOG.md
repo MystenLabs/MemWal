@@ -1,10 +1,19 @@
 # memwal
 
-## Unreleased
+## 0.1.8
 
 ### Added
 
+- `recall()` results include `dropped_count` when the relayer omitted matches that failed to download or decrypt.
+- `health()` surfaces optional `write_ready` when the relayer reports write-path sidecar liveness.
 - Added `MemWalClockDriftError`, raised when the relayer rejects a request because the signed timestamp is outside its accepted clock-drift window (`401` + `x-auth-error: ERR_TIMESTAMP_OUT_OF_BOUNDS`). Surfaces an actionable "synchronize the client clock" message instead of an opaque `401`. Subclasses `MemWalError`, so existing `except MemWalError` handlers still catch it.
+- Added the `dev` relayer preset (`https://relayer.dev.memwal.ai`) to `ENV_PRESETS`.
+
+### Fixed
+
+- `hex_to_bytes` now rejects empty, odd-length, whitespace, and non-hex input instead of silently decoding a different key.
+- `remember_manual` sends `encrypted_data` (base64 SEAL ciphertext) instead of a pre-uploaded `blob_id`, matching `POST /api/remember/manual`.
+- HTTP error messages and remember-job error strings no longer forward `localhost` / `127.0.0.1` URLs to callers.
 
 ## 0.1.7
 

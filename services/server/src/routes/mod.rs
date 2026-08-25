@@ -5,11 +5,19 @@
 //!   (+ the async prep tasks and the summarize-for-embedding helpers)
 //! - `recall` — `/api/recall`, `/api/recall/manual` (+ the recall-embedding cache)
 //! - `analyze` — `/api/analyze` (fact extraction → store; sync bypass in benchmark mode)
-//! - `admin` — `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`,
+//! - `admin` — `/api/embed`, `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`,
 //!   `/health`, `/version`, `/config`
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
 //! - `accounts` — `/api/accounts/{owner}/exists` (public MemWalAccount
 //!   existence check)
+//! - `memory_read` — `GET /v1/owners/{owner}/{namespaces,memories,agents}`
+//!   (owner-scoped, cursor-paginated reads; accepts either the Ed25519
+//!   signed-request scheme or an owner-scoped bearer token — see
+//!   `auth::verify_read_api_auth`)
+//! - `owner_token` — `POST /v1/owner-tokens` (owner-scoped bearer
+//!   token issuance) + `GET /v1/owners/{owner}/_token_probe` (the original
+//!   dev-only smoke-test route this mechanism was proven against before
+//!   `memory_read`'s real handlers existed; now redundant with them)
 //!
 //! Shared route-level helpers (`enqueue_wallet_job`, `truncate_str`,
 //! `collect_bounded_results`, `cleanup_expired_blob`) live here in `mod.rs`.
@@ -20,7 +28,9 @@ mod accounts;
 mod admin;
 pub mod admin_dashboard;
 mod analyze;
+mod memory_read;
 pub mod oauth;
+pub mod owner_token;
 mod recall;
 mod remember;
 pub mod security_delete;
@@ -29,8 +39,10 @@ mod sponsor;
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
 // without having to know which submodule each handler lives in.
 pub use accounts::account_exists;
-pub use admin::{ask, forget, get_config, health, restore, stats, version};
+pub use admin::{ask, embed, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
+pub use memory_read::{list_owner_agents, list_owner_memories, list_owner_namespaces};
+pub use owner_token::{issue_token, token_probe};
 pub use recall::{recall, recall_manual};
 pub use remember::{
     remember, remember_bulk, remember_bulk_status, remember_manual, remember_status,
@@ -173,7 +185,7 @@ pub(super) async fn cleanup_expired_blob(
 /// Same pattern is used by both `/api/recall` and `/api/ask` — extracting
 /// it here keeps the two call sites in sync.
 ///
-/// Renamed from `zip_created_at_onto_hydrated` in once importance
+/// Renamed from `zip_created_at_onto_hydrated` once importance
 /// joined the zip. Single function (rather than two separate ones) because
 /// both fields come from the same `SearchHit` and we don't want to walk
 /// the hits vector twice for what's a hot path.

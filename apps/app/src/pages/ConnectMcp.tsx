@@ -583,15 +583,19 @@ function SuccessCard({
             {!delivered && callbackOutcome !== null && (
                 <>
                     <p className="setup-classic-description">
-                        Your key was created and registered to your account, so that part is done
-                        and you do not need to repeat it. What did not work is the last step: this
-                        page could not pass the key back to the Walrus Memory app running on your
-                        computer, so your MCP client cannot use it yet.
+                        The first half of sign-in succeeded: your key was created and registered
+                        to your account. What did not work is the last step: this page could not
+                        pass the key back to the Walrus Memory app running on your computer, so
+                        your MCP client cannot use it yet.
                     </p>
                     <p className="setup-classic-description">
                         {callbackOutcome === 'unreachable'
                             ? 'Nothing answered on your computer. Sign-in links stop working after five minutes, so most often the link was simply opened too late.'
                             : 'The app on your computer turned down the hand-off. That usually means a newer sign-in was started while this tab was still open.'}
+                    </p>
+                    <p className="setup-classic-description">
+                        The unused key from this attempt is already on your account. Remove it
+                        from the dashboard if you are not using it.
                     </p>
                     <p className="setup-classic-description">
                         <strong>Sign in again and open the new link straight away.</strong> The

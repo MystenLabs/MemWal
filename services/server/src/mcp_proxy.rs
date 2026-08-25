@@ -123,11 +123,11 @@ enum McpAuthOutcome {
     /// today, byte for byte (OAuth tokens are never valid here).
     Passthrough,
     Oauth(Box<crate::oauth::ResolvedOAuthIdentity>),
-    /// OAuth is enabled and the bearer is missing/malformed/expired/
-    /// revoked — respond with the RFC 9728 challenge ourselves instead of
-    /// forwarding to the sidecar (which wouldn't know how to build the
-    /// `resource_metadata` pointer anyway).
+    /// Bearer missing/malformed/expired/revoked, or the hex key is not a
+    /// registered delegate. RFC 9728 challenge when OAuth is configured.
     Unauthorized(Option<crate::oauth::OAuthBearerError>),
+    /// On-chain lookup failed transiently; do not 401 a registered key.
+    Unavailable,
 }
 
 fn is_legacy_delegate_bearer(token: &str) -> bool {
@@ -135,26 +135,80 @@ fn is_legacy_delegate_bearer(token: &str) -> bool {
     hex_part.len() == 64 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-async fn classify_and_resolve(state: &AppState, headers: &HeaderMap) -> McpAuthOutcome {
-    if state.config.mcp_oauth.is_none() {
-        return McpAuthOutcome::Passthrough;
-    }
-    let Some(auth_value) = headers
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let auth_value = headers
         .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    else {
-        return McpAuthOutcome::Unauthorized(None);
-    };
-    let Some(token) = auth_value
+        .and_then(|v| v.to_str().ok())?;
+    auth_value
         .strip_prefix("Bearer ")
         .or_else(|| auth_value.strip_prefix("bearer "))
         .map(str::trim)
-    else {
+        .filter(|token| !token.is_empty())
+}
+
+fn account_id_header(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-memwal-account-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+fn public_key_from_delegate_hex(token: &str) -> Option<[u8; 32]> {
+    let hex_part = token.strip_prefix("0x").unwrap_or(token);
+    let secret: [u8; 32] = hex::decode(hex_part).ok()?.try_into().ok()?;
+    Some(
+        ed25519_dalek::SigningKey::from_bytes(&secret)
+            .verifying_key()
+            .to_bytes(),
+    )
+}
+
+async fn legacy_delegate_registered(
+    state: &AppState,
+    headers: &HeaderMap,
+    token: &str,
+) -> McpAuthOutcome {
+    let Some(account_id) = account_id_header(headers) else {
+        return McpAuthOutcome::Unauthorized(None);
+    };
+    let Some(pk) = public_key_from_delegate_hex(token) else {
+        return McpAuthOutcome::Unauthorized(None);
+    };
+    match crate::storage::sui::verify_delegate_key_onchain(
+        &state.http_client,
+        &state.config.sui_rpc_url,
+        state.sui_grpc_client.as_ref(),
+        account_id,
+        &pk,
+        &state.config.package_id,
+    )
+    .await
+    {
+        Ok(_) => McpAuthOutcome::Passthrough,
+        Err(crate::storage::sui::OnchainVerifyError::RpcError(msg))
+        | Err(crate::storage::sui::OnchainVerifyError::ScanCapExceeded(msg)) => {
+            tracing::warn!(error = %msg, "mcp delegate on-chain verify unavailable");
+            McpAuthOutcome::Unavailable
+        }
+        Err(err) => {
+            tracing::debug!("mcp delegate rejected: {err}");
+            McpAuthOutcome::Unauthorized(None)
+        }
+    }
+}
+
+async fn classify_and_resolve(state: &AppState, headers: &HeaderMap) -> McpAuthOutcome {
+    let Some(token) = bearer_token(headers) else {
         return McpAuthOutcome::Unauthorized(None);
     };
 
     if is_legacy_delegate_bearer(token) {
-        return McpAuthOutcome::Passthrough;
+        return legacy_delegate_registered(state, headers, token).await;
+    }
+
+    if state.config.mcp_oauth.is_none() {
+        return McpAuthOutcome::Unauthorized(None);
     }
 
     match crate::oauth::resolve_oauth_bearer(state, token).await {
@@ -246,9 +300,7 @@ fn apply_internal_headers(
     Ok(())
 }
 
-/// RFC 9728 401 challenge. `state.config.mcp_oauth` must be `Some` — only
-/// called from `classify_and_resolve`'s `Unauthorized` arm, which only
-/// returns that when OAuth is enabled.
+/// RFC 9728 401 challenge when OAuth is configured; plain 401 otherwise.
 fn oauth_unauthorized_response(
     state: &AppState,
     err: Option<&crate::oauth::OAuthBearerError>,
@@ -300,6 +352,9 @@ pub async fn sse_proxy(
         McpAuthOutcome::Oauth(identity) => Some(identity),
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
+        }
+        McpAuthOutcome::Unavailable => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
         }
     };
     if let Err(code) = apply_internal_headers(
@@ -410,6 +465,9 @@ pub async fn messages_proxy(
         McpAuthOutcome::Oauth(identity) => Some(identity),
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
+        }
+        McpAuthOutcome::Unavailable => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
         }
     };
     if let Err(code) = apply_internal_headers(
@@ -527,6 +585,9 @@ pub async fn streamable_proxy(
         McpAuthOutcome::Oauth(identity) => Some(identity),
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
+        }
+        McpAuthOutcome::Unavailable => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
         }
     };
     if let Err(code) = apply_internal_headers(
@@ -658,7 +719,10 @@ mod tests {
             "X-MemWal-Internal-Oauth-Scope",
         ] {
             let name = AxumHeaderName::from_bytes(h.as_bytes()).unwrap();
-            assert!(!should_forward(&name), "must not forward internal header {h}");
+            assert!(
+                !should_forward(&name),
+                "must not forward internal header {h}"
+            );
         }
     }
 
@@ -749,6 +813,16 @@ mod tests {
         assert!(!is_legacy_delegate_bearer("not-hex-at-all"));
         assert!(!is_legacy_delegate_bearer(&"a".repeat(63))); // one short
         assert!(!is_legacy_delegate_bearer(&"a".repeat(65))); // one long
+    }
+
+    #[test]
+    fn bearer_token_requires_authorization_header() {
+        assert!(bearer_token(&axum_headers(&[])).is_none());
+        assert_eq!(
+            bearer_token(&axum_headers(&[("authorization", "Bearer abc")])),
+            Some("abc")
+        );
+        assert!(bearer_token(&axum_headers(&[("authorization", "Basic abc")])).is_none());
     }
 
     // -- internal relayer->sidecar headers (GH #685) ----------------------

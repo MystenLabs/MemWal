@@ -1,0 +1,109 @@
+name: Bug report
+description: Something is broken. We need a repro, environment, and versions.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Incomplete issues (no repro, no environment) are closed.
+
+        Do not paste delegate private keys, mnemonics, or other secrets.
+
+        If this is a security finding, use a [private advisory](https://github.com/MystenLabs/MemWal/security/advisories/new) instead of this form.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Where did you hit this?
+      options:
+        - TypeScript SDK (@mysten-incubation/memwal)
+        - Python SDK (memwal)
+        - MCP (@mysten-incubation/memwal-mcp)
+        - Relayer / hosted API
+        - Dashboard / Console (memory.walrus.xyz)
+        - Developer Playground
+        - OpenClaw plugin
+        - Example app (chatbot, noter, researcher)
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: network
+    attributes:
+      label: Network
+      options:
+        - Mainnet (relayer.memory.walrus.xyz)
+        - Staging (relayer-staging.memory.walrus.xyz)
+        - Local / self-hosted
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      description: The package or binary version you actually ran, not "latest".
+      placeholder: "@mysten-incubation/memwal@0.0.x or memwal-mcp@0.0.x"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: One or two sentences. What did you do, and what broke?
+      placeholder: memwal_analyze reported 3 blob_ids but restore shows 6 blobs in a fresh namespace.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Commands, tool calls, or UI clicks another person can follow.
+      placeholder: |
+        1. Create a fresh namespace.
+        2. Call memwal_analyze with text X.
+        3. Call memwal_restore / memwal_recall on that namespace.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      placeholder: Analyze writes N blobs and reports N blob_ids. Recall returns each fact once.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      placeholder: Tool reports 3 blob_ids. restore total=6. recall returns each fact twice.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error text
+      description: Paste the error or tool response. Redact keys. Leave blank if none.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: This report contains no private keys, mnemonics, or other secrets.
+          required: true

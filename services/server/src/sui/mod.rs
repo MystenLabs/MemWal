@@ -9,7 +9,7 @@ pub mod input_freshness;
 pub mod tx_build;
 pub mod verifier;
 
-pub use client::{RequestPriority, SuiClient};
+pub use client::{expires_at_from_epoch, RequestPriority, SuiClient, WalrusEpochSchedule};
 
 use async_trait::async_trait;
 use sui_sdk_types::ExecutionStatus;
@@ -161,6 +161,11 @@ pub trait SuiApi: Send + Sync {
     async fn current_epoch(&self) -> Result<SuiEpoch, SuiErr>;
     /// Walrus epoch — the only clock `Blob.storage.end_epoch` is measured in.
     async fn walrus_epoch(&self) -> Result<WalrusEpoch, SuiErr>;
+    /// Walrus epoch schedule (`epoch_duration_ms`/`first_epoch_start_ms`) — converts a Walrus
+    /// epoch into a wall-clock timestamp via [`expires_at_from_epoch`]. Read from the Walrus
+    /// staking pool's state object, a SEPARATE on-chain object from the one `walrus_epoch()`
+    /// reads.
+    async fn walrus_epoch_schedule(&self) -> Result<WalrusEpochSchedule, SuiErr>;
     async fn reference_gas_price(&self) -> Result<u64, SuiErr>;
     async fn execute_tx(
         &self,
@@ -192,6 +197,7 @@ pub mod mock {
         pub objects: Mutex<HashMap<String, ObjectInfo>>,
         pub epoch: SuiEpoch,
         pub walrus_epoch: WalrusEpoch,
+        pub walrus_epoch_schedule: WalrusEpochSchedule,
         pub gas_price: u64,
         pub chain: [u8; 32],
         pub system: Option<SharedObjectInfo>,
@@ -204,6 +210,13 @@ pub mod mock {
                 // Observed on testnet 2026-07-13. Keep them far apart.
                 epoch: SuiEpoch(1159),
                 walrus_epoch: WalrusEpoch(457),
+                // Arbitrary but internally consistent 1-day-epoch schedule. No fixture
+                // asserts a specific `expires_at_from_epoch` result against this default;
+                // tests that care construct their own `WalrusEpochSchedule`.
+                walrus_epoch_schedule: WalrusEpochSchedule {
+                    epoch_duration_ms: 86_400_000,
+                    first_epoch_start_ms: 1_700_000_000_000,
+                },
                 gas_price: 0,
                 chain: [0; 32],
                 system: None,
@@ -225,6 +238,9 @@ pub mod mock {
         }
         async fn walrus_epoch(&self) -> Result<WalrusEpoch, SuiErr> {
             Ok(self.walrus_epoch)
+        }
+        async fn walrus_epoch_schedule(&self) -> Result<WalrusEpochSchedule, SuiErr> {
+            Ok(self.walrus_epoch_schedule)
         }
         async fn reference_gas_price(&self) -> Result<u64, SuiErr> {
             Ok(self.gas_price)
