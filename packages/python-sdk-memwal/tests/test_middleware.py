@@ -99,6 +99,12 @@ def _mock_seal_session_prereqs() -> None:
             },
         )
     )
+    respx.post("https://graphql.testnet.sui.io/graphql").mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": {"object": {"version": 1}}},
+        )
+    )
     respx.post(_SUI_RPC_URL).mock(
         return_value=httpx.Response(
             200,
