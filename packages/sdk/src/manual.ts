@@ -386,7 +386,7 @@ export class MemWalManual {
         limitOrOptions: number | MemWalManualRecallOptions = 10,
         namespace?: string
     ): Promise<RecallManualResult> {
-        if (!query) throw new Error("Query cannot be empty");
+        if (!query.trim()) throw new Error("Query cannot be empty");
 
         const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions, namespace } : limitOrOptions;
         const limit = options.limit ?? 10;
