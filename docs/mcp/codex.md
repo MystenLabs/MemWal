@@ -43,10 +43,10 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
         codex plugin add memwal@memwal-plugins
         codex plugin list
         ```
-        This registers the MemWal plugin, which bundles the MCP server and the lifecycle hooks together as plugin-scoped resources — it does not write a `[mcp_servers.memwal]` block to `~/.codex/config.toml`.
+        This registers the MemWal plugin, which bundles the MCP server and the lifecycle hooks together as plugin-scoped resources. It does not write a `[mcp_servers.memwal]` block to `~/.codex/config.toml`.
       </Step>
       <Step title="Trust the plugin hooks">
-        Codex loads plugin-bundled hooks but will not run them until you trust the definition. Run `/hooks` (or follow the startup review prompt) and trust the MemWal hook commands.
+        Codex loads plugin-bundled hooks but does not run them until you trust the definition. Run `/hooks` (or follow the startup review prompt) and trust the MemWal hook commands.
       </Step>
       <Step title="Restart and sign in">
         Restart Codex. On first use the agent runs `memwal_login` to connect your wallet.
@@ -74,7 +74,7 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
 </Tabs>
 
 <Warning>
-Do not combine options: the plugin bundles the memwal MCP server on its own. Do not also add a manual `[mcp_servers.memwal]` block — that duplicates the server. (The cloned-repo fallback installer does write `[mcp_servers.memwal]` directly, so that one warning doesn't apply if you used it instead.)
+Do not combine options: the plugin bundles the memwal MCP server on its own. Do not also add a manual `[mcp_servers.memwal]` block, which duplicates the server. (The cloned-repo fallback installer does write `[mcp_servers.memwal]` directly, so that one warning doesn't apply if you used it instead.)
 </Warning>
 
 ## What the plugin includes
@@ -115,7 +115,7 @@ Ask the agent what MCP tools it has available. You should see the `memwal_*` too
 ## Troubleshooting
 
 - **Tools missing**: restart Codex.
-- **Duplicate `memwal` errors**: the plugin already bundles the MCP server; you likely also have a manual `[mcp_servers.memwal]` block — remove it.
+- **Duplicate `memwal` errors**: the plugin already bundles the MCP server; you likely also have a manual `[mcp_servers.memwal]` block. Remove it.
 - **Hooks not firing (plugin install)**: run `/hooks` and confirm the MemWal hooks are trusted, not just installed.
 - **Hooks not firing (cloned-repo fallback)**: confirm `codex_hooks = true` under `[features]` in `~/.codex/config.toml`, and that you restarted Codex.
 - **`memwal_recall` returns nothing although you saved before**: run `memwal_restore <namespace>` to rebuild the index from Walrus.
