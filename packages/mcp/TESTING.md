@@ -121,21 +121,20 @@ Notes:
 
 > Requires a Codex CLI build with `codex plugin` support (`codex plugin --help`).
 > Older builds: use the hooks installer instead — `node packages/mcp/plugin/scripts/install_codex_hooks.mjs`.
+>
+> Plugin MCP servers are plugin-scoped (`plugins.<id>.mcp_servers.*`), not a
+> `[mcp_servers.memwal]` block — plugin policy can enable/disable tools but
+> cannot override the command/args, so you cannot redirect the bundled server
+> at a local binary by editing config.toml. For local testnet, same as 2A:
+> point the registered (prod `npx`) server at your local relayer via
+> `MEMWAL_SERVER_URL`.
 
 - [ ] In Codex: `codex plugin marketplace add /Users/uydev/code/MemWal`
 - [ ] In Codex: `codex plugin add memwal@memwal-plugins`
-- [ ] Enable the flag in `~/.codex/config.toml`:
-  ```toml
-  [features]
-  codex_hooks = true
-  ```
-- [ ] **For local testnet**, point the registered server at local — edit `[mcp_servers.memwal]` in `~/.codex/config.toml` to:
-  ```toml
-  [mcp_servers.memwal]
-  command = "node"
-  args = ["/Users/uydev/code/MemWal/packages/mcp/dist/bin/memwal-mcp.js", "--local"]
-  ```
-- [ ] Restart Codex → `codex plugin list` shows `memwal`; run Section 1 prompts; confirm hooks fire
+- [ ] **For local testnet**, launch Codex with `MEMWAL_SERVER_URL=http://127.0.0.1:8000` exported (or point saved creds at local)
+- [ ] Restart Codex → `codex plugin list` shows `memwal`
+- [ ] Run `/hooks` (or follow the startup review prompt) and trust the MemWal hooks
+- [ ] Run Section 1 prompts; confirm hooks fire
 - [ ] *(Unverified by me — report what you see.)*
 
 ### 2E. Codex — MCP-only
@@ -257,9 +256,9 @@ codex plugin marketplace add MystenLabs/MemWal
 codex plugin add memwal@memwal-plugins
 ```
 
-Enable `codex_hooks = true`, restart Codex, repeat the Step 2 prompts.
+Restart Codex, run `/hooks` (or follow the startup review prompt) to trust the MemWal hooks, repeat the Step 2 prompts.
 
-- [ ] `codex plugin list` shows `memwal`, `[mcp_servers.memwal]` registered in `~/.codex/config.toml`, no duplicates on re-run
+- [ ] `codex plugin list` shows `memwal` (plugin MCP servers are plugin-scoped — no `[mcp_servers.memwal]` block in `config.toml`, and none should be added manually)
 - [ ] Auto-save / auto-recall behave as in Step 2
 
 Older Codex CLI builds without `codex plugin` support (pre-April 2026) fall back to the hooks installer:

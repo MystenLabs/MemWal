@@ -43,14 +43,10 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
         codex plugin add memwal@memwal-plugins
         codex plugin list
         ```
-        This registers the MemWal plugin, which bundles the MCP server and the lifecycle hooks together.
+        This registers the MemWal plugin, which bundles the MCP server and the lifecycle hooks together as plugin-scoped resources — it does not write a `[mcp_servers.memwal]` block to `~/.codex/config.toml`.
       </Step>
-      <Step title="Enable the hooks feature flag">
-        Add to `~/.codex/config.toml`:
-        ```toml
-        [features]
-        codex_hooks = true
-        ```
+      <Step title="Trust the plugin hooks">
+        Codex loads plugin-bundled hooks but will not run them until you trust the definition. Run `/hooks` (or follow the startup review prompt) and trust the MemWal hook commands.
       </Step>
       <Step title="Restart and sign in">
         Restart Codex. On first use the agent runs `memwal_login` to connect your wallet.
@@ -62,7 +58,7 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
     ```bash
     node packages/mcp/plugin/scripts/install_codex_hooks.mjs
     ```
-    This merges the MemWal hooks into `~/.codex/hooks.json` and registers `[mcp_servers.memwal]` in `~/.codex/config.toml`. Re-running is safe (idempotent); add `--uninstall` to remove the hooks.
+    This merges the MemWal hooks into `~/.codex/hooks.json` and registers `[mcp_servers.memwal]` in `~/.codex/config.toml`. Re-running is safe (idempotent); add `--uninstall` to remove the hooks. This path writes the hooks file directly, so it needs `[features] codex_hooks = true` (or the modern equivalent `[features] hooks = true`, already the default) rather than the plugin trust flow above.
     </Note>
   </Tab>
   <Tab title="MCP-only">
@@ -78,7 +74,7 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
 </Tabs>
 
 <Warning>
-Do not combine both options: the plugin already registers `[mcp_servers.memwal]`. Adding it again creates a duplicate server.
+Do not combine options: the plugin bundles the memwal MCP server on its own. Do not also add a manual `[mcp_servers.memwal]` block — that duplicates the server. (The cloned-repo fallback installer does write `[mcp_servers.memwal]` directly, so that one warning doesn't apply if you used it instead.)
 </Warning>
 
 ## What the plugin includes
@@ -119,6 +115,7 @@ Ask the agent what MCP tools it has available. You should see the `memwal_*` too
 ## Troubleshooting
 
 - **Tools missing**: restart Codex.
-- **Duplicate `memwal` errors**: you have both the plugin and a manual `[mcp_servers.memwal]`; remove the manual entry.
-- **Hooks not firing**: confirm `codex_hooks = true` under `[features]` in `~/.codex/config.toml`, and that you restarted Codex.
+- **Duplicate `memwal` errors**: the plugin already bundles the MCP server; you likely also have a manual `[mcp_servers.memwal]` block — remove it.
+- **Hooks not firing (plugin install)**: run `/hooks` and confirm the MemWal hooks are trusted, not just installed.
+- **Hooks not firing (cloned-repo fallback)**: confirm `codex_hooks = true` under `[features]` in `~/.codex/config.toml`, and that you restarted Codex.
 - **`memwal_recall` returns nothing although you saved before**: run `memwal_restore <namespace>` to rebuild the index from Walrus.
