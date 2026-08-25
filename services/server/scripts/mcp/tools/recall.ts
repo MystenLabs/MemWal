@@ -8,6 +8,7 @@ const RECALL_INPUT = {
     query: z
         .string()
         .min(1)
+        .refine((v) => v.trim().length > 0, "Query cannot be empty.")
         .describe("Natural-language search query to match against stored memories."),
     limit: z
         .number()
