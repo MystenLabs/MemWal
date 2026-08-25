@@ -80,6 +80,10 @@ export default defineConfig({
     command: "pnpm dev",
     url: `${baseURL}/ping`,
     timeout: 120_000,
+    // Locally this drives whatever `pnpm dev` is already up, which without
+    // PLAYWRIGHT in its env runs no mocks at all. Reuse stays on for the fast
+    // iteration loop against a `PLAYWRIGHT=True pnpm dev`; global-setup.ts
+    // reads the seam header from /ping and refuses any other server.
     reuseExistingServer: !isCI,
     stdout: "pipe",
     stderr: "pipe",

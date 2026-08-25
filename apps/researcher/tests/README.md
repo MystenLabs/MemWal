@@ -40,8 +40,28 @@ supplies safe defaults for `AUTH_SECRET`, `NEXT_PUBLIC_MEMWAL_PACKAGE_ID`, and
 `REDIS_URL` when the environment doesn't set them.
 
 `global-setup.ts` applies Drizzle migrations (idempotent), clears the auth
-rate-limit keys from Redis, and warms `/login` and `/` so the first
-navigations don't race Turbopack's cold compile.
+rate-limit keys from Redis, checks the server is running the mock seams, and
+warms `/login` and `/` so the first navigations don't race Turbopack's cold
+compile.
+
+### Running with a dev server already up
+
+Playwright reuses an existing server on the port locally
+(`reuseExistingServer: !isCI`). A plain `pnpm dev` has no `PLAYWRIGHT` in its
+environment, so none of the seams below are active in it — model calls would
+reach OpenRouter, the binding check Sui, and sprint saves the real Walrus
+relayer. `/ping` reports the seam as `x-researcher-test-mode: 1` (`proxy.ts`),
+and global setup fails the run with an explanation if it doesn't.
+
+So either stop that server and let Playwright start its own, or start it in
+test mode and keep the fast loop:
+
+```bash
+PLAYWRIGHT=True pnpm dev     # then: pnpm --filter researcher test:e2e --ui
+```
+
+CI never reuses (`reuseExistingServer` is false there); the check still runs,
+asserting the `webServer` env reached the Next.js process.
 
 The rate-limit reset matters: the auth limiter allows 10 verify attempts per
 IP per minute and a run spends about five, so without it a second run inside
@@ -61,7 +81,7 @@ webServer, so the Next.js process takes the mock path too.
 | LLMs | `lib/ai/providers.ts` → `lib/ai/models.mock.ts` | Deterministic streamed text; picker model ids map onto the three mock models. |
 | Title model failure | `lib/ai/models.mock.ts` | A user message containing `FAIL_TITLE_GENERATION` makes the title model reject — reproduces the retired-model production P0. |
 | Delegate-account binding | `lib/auth/delegate-account.ts` → `.mock.ts` | Fabricates the `MemWalAccount` object for two fixture accounts. The real validation still runs, so wrong-key and unknown-account logins fail exactly as they would on-chain. |
-| Walrus Memory | `lib/sprint/memwal.ts` | `MemWalMock` from the SDK, one instance per server process, so remember → recall round-trips in memory and CI can never write to the real relayer. |
+| Walrus Memory | `lib/sprint/memwal.ts` | `MemWalMock` from the SDK, one instance per account id, so remember → recall round-trips in memory, stays isolated between identities, and CI can never write to the real relayer. |
 
 Fixture identities live in `tests/playwright/fixtures/test-accounts.ts` and are
 mirrored in `lib/auth/delegate-account.mock.ts` — change one, change both.

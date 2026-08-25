@@ -5,7 +5,8 @@
  *   1. Applying Drizzle migrations so chat/user tables exist.
  *   2. Failing fast with a clear error if POSTGRES_URL is missing in CI.
  *   3. Clearing the auth rate-limit counters left by a previous run.
- *   4. Warming `/login` and `/` so the suite's first navigations don't race
+ *   4. Refusing a reused dev server that isn't running the mock seams.
+ *   5. Warming `/login` and `/` so the suite's first navigations don't race
  *      Turbopack's lazy cold compile against the navigationTimeout on CI.
  */
 import { spawnSync } from "node:child_process";
@@ -44,6 +45,53 @@ async function clearAuthRateLimits(): Promise<void> {
   }
 }
 
+/**
+ * `reuseExistingServer` is on locally, so a `pnpm dev` a developer already has
+ * running is what the suite drives. Started without PLAYWRIGHT, that process
+ * has every mock seam off: model calls go to OpenRouter, the delegate-account
+ * binding check to Sui, and sprint saves to the real Walrus relayer in
+ * MEMWAL_SERVER_URL. `/ping` reports the seam (proxy.ts) so the run can stop
+ * before any of that instead of failing later as a pile of auth errors.
+ *
+ * Runs in CI too, where it asserts the webServer env actually reached Next.
+ */
+async function assertServerRunsMockSeams(baseUrl: string): Promise<void> {
+  const target = `${baseUrl}/ping`;
+  let mode: string | null = null;
+  let lastError: unknown;
+
+  // The webServer has already polled /ping to a 200 before global setup runs;
+  // the retries only cover a server that is momentarily busy recompiling.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(target, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(10_000),
+      });
+      mode = res.headers.get("x-researcher-test-mode");
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (mode === "1") return;
+
+  const reason =
+    mode === null
+      ? `could not be reached (${lastError instanceof Error ? lastError.message : "no x-researcher-test-mode header"})`
+      : `reported x-researcher-test-mode: ${mode}`;
+
+  throw new Error(
+    `[playwright] The server at ${baseUrl} is not running the mock seams — ${target} ${reason}.\n\n` +
+      "Playwright reuses an already-running dev server locally, and a plain `pnpm dev` has none of\n" +
+      "the mocks: model calls would hit OpenRouter, the binding check Sui, and sprint saves the real\n" +
+      "Walrus relayer.\n\n" +
+      "Stop that server and re-run `pnpm test:e2e` so Playwright starts its own, or restart it in\n" +
+      "test mode: `PLAYWRIGHT=True pnpm dev`."
+  );
+}
+
 export default async function globalSetup(): Promise<void> {
   const url = process.env.POSTGRES_URL;
 
@@ -72,13 +120,17 @@ export default async function globalSetup(): Promise<void> {
 
   await clearAuthRateLimits();
 
+  const port = process.env.PORT ?? "3000";
+  const baseUrl = `http://localhost:${port}`;
+
+  await assertServerRunsMockSeams(baseUrl);
+
   // Prime Next.js/Turbopack's per-route compile cache. On a cold CI runner
   // the first navigation to a lazily-compiled route can take 15-30s, which
   // flakes tests until retries kick in. Fetching here moves the cost to
   // setup time so the first real navigations hit a warm cache.
-  const port = process.env.PORT ?? "3000";
   for (const route of ["/login", "/"]) {
-    const target = `http://localhost:${port}${route}`;
+    const target = `${baseUrl}${route}`;
     console.log(`[playwright] Warming ${target} ...`);
     try {
       const started = Date.now();

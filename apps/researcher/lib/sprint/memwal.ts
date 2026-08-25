@@ -5,15 +5,20 @@ import type { RememberResult } from "@mysten-incubation/memwal";
 import { isTestEnvironment } from "@/lib/constants";
 import type { Citation, SourceMeta } from "./types";
 
-// Shared across requests so a sprint remembered in one Playwright request is
-// recallable in the next — and so test runs can never write to the real
-// relayer configured in MEMWAL_SERVER_URL.
-let testMemWalClient: MemWalMock | null = null;
+// One mock per account, mirroring the real client's per-(key, accountId)
+// construction: a sprint remembered by one identity must not be recallable by
+// another. Held across requests so remember → recall round-trips within a run,
+// and so test runs can never write to the real relayer in MEMWAL_SERVER_URL.
+const testMemWalClients = new Map<string, MemWalMock>();
 
 function getMemWalClient(key: string, accountId: string): MemWal | MemWalMock {
   if (isTestEnvironment) {
-    testMemWalClient ??= MemWalMock.create({ owner: "playwright" });
-    return testMemWalClient;
+    const existing = testMemWalClients.get(accountId);
+    if (existing) return existing;
+
+    const created = MemWalMock.create({ owner: accountId });
+    testMemWalClients.set(accountId, created);
+    return created;
   }
   return MemWal.create({
     key,
