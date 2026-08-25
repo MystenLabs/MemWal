@@ -322,13 +322,13 @@ test("rememberBulkAndWait stores a batch", { skip: requiresKey }, async () => {
     }
 });
 
-// `embed()` and the lightweight manual mode (`rememberManual` / `recallManual`)
-// are deliberately NOT covered here: both SDK methods target contracts this
-// relayer does not serve. `/api/embed` is absent from the protected route table
-// (services/server/src/main.rs), and `RememberManualRequest`
-// (services/server/src/types.rs) requires `encrypted_data` where the SDK sends
-// `blob_id`, so the call 422s before reaching the handler. Tests for them would
-// be guaranteed red on the first authenticated run. Tracked in WALM-371.
+test("embed returns a vector", { skip: requiresKey }, async () => {
+    const mw = client();
+    const result = await mw.embed("hello world");
+    assert.ok(Array.isArray(result.vector));
+    assert.ok(result.vector.length > 0);
+    assert.equal(typeof result.vector[0], "number");
+});
 
 test("restore reports counts for the run namespace", { skip: requiresKey }, async () => {
     // Everything this run stored is already indexed on the relayer, so restore

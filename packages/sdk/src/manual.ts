@@ -386,7 +386,7 @@ export class MemWalManual {
         limitOrOptions: number | MemWalManualRecallOptions = 10,
         namespace?: string
     ): Promise<RecallManualResult> {
-        if (!query) throw new Error("Query cannot be empty");
+        if (!query.trim()) throw new Error("Query cannot be empty");
 
         const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions, namespace } : limitOrOptions;
         const limit = options.limit ?? 10;
@@ -498,10 +498,9 @@ export class MemWalManual {
             try {
                 const fullId = blob.parsed.id;
 
-                // Build seal_approve PTB
-                const idBytes = Array.from(
-                    Uint8Array.from(fullId.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)))
-                );
+                // Build seal_approve PTB. hexToBytes rejects empty, odd-length,
+                // and non-hex ids instead of coercing NaN to 0.
+                const idBytes = Array.from(hexToBytes(fullId));
                 const tx = new Transaction();
                 tx.moveCall({
                     target: `${this.config.sealPolicyPackageId ?? this.config.packageId}::account::seal_approve`,

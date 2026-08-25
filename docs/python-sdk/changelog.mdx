@@ -29,12 +29,29 @@ questions:
   - What changes were made in memwal 0.1.4?
   - Where can I find the release history for the Walrus Memory Python SDK?
 answer: >-
-  The latest Python SDK release is 0.1.7. It adds deterministic async and sync mock clients and idempotency keys that make remember retries reuse the accepted paid job.
+  The latest Python SDK release is 0.1.8. It adds `dropped_count` on recall results, `write_ready` on health, `MemWalClockDriftError` for clock-drift 401s, and the `dev` relayer preset, and hardens hex decoding and error redaction. 0.1.7 added deterministic mock clients and idempotency keys.
 ---
 
 Track what's new, changed, and fixed in `memwal` (Python).
 
 For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
+
+## 0.1.8
+
+This release surfaces partial recall results and write-path health, adds a clock-drift error, and aligns manual remember with the relayer contract.
+
+### Added
+
+- `recall()` results include `dropped_count` when the relayer omitted matches that failed to download or decrypt.
+- `health()` surfaces optional `write_ready` when the relayer reports write-path sidecar liveness.
+- Added `MemWalClockDriftError`, raised when the relayer rejects a request because the signed timestamp is outside its accepted clock-drift window (`401` + `x-auth-error: ERR_TIMESTAMP_OUT_OF_BOUNDS`). Surfaces an actionable "synchronize the client clock" message instead of an opaque `401`. Subclasses `MemWalError`, so existing `except MemWalError` handlers still catch it.
+- Added the `dev` relayer preset (`https://relayer.dev.memwal.ai`) to `ENV_PRESETS`.
+
+### Fixed
+
+- `hex_to_bytes` now rejects empty, odd-length, whitespace, and non-hex input instead of silently decoding a different key.
+- `remember_manual` sends `encrypted_data` (base64 SEAL ciphertext) instead of a pre-uploaded `blob_id`, matching `POST /api/remember/manual`.
+- HTTP error messages and remember-job error strings no longer forward `localhost` / `127.0.0.1` URLs to callers.
 
 ## 0.1.7
 

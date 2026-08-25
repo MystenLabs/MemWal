@@ -86,6 +86,12 @@ def mock_seal_session_prereqs() -> None:
             },
         )
     )
+    respx.post("https://graphql.testnet.sui.io/graphql").mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": {"object": {"version": 1}}},
+        )
+    )
     respx.post(_TEST_SUI_RPC).mock(
         return_value=httpx.Response(
             200,
@@ -370,9 +376,23 @@ class TestRecall:
 
         assert len(result.results) == 2
         assert result.total == 2
+        assert result.dropped_count == 0
         assert result.results[0].text == "I love coffee"
         assert result.results[0].distance == 0.1
         assert result.results[1].blob_id == "b2"
+
+    @respx.mock
+    async def test_recall_surfaces_dropped_count(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                200,
+                json={"results": [], "total": 0, "dropped_count": 3},
+            )
+        )
+        result = await memwal_client.recall("coffee")
+        assert result.results == []
+        assert result.dropped_count == 3
 
     @respx.mock
     async def test_accepts_recall_params_object(
@@ -573,6 +593,20 @@ class TestErrorHandling:
 
         with pytest.raises(MemWalError, match="500"):
             await memwal_client.recall("test")
+
+    @respx.mock
+    async def test_500_strips_localhost_sidecar_urls(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                500,
+                text="Sidecar seal/encrypt request failed: error sending request for url (http://localhost:9000/seal/encrypt)",
+            )
+        )
+        with pytest.raises(MemWalError) as exc:
+            await memwal_client.recall("test")
+        assert "localhost:9000" not in str(exc.value)
+        assert "[internal]" in str(exc.value)
 
     @respx.mock
     async def test_health_non_200_raises(self, memwal_client: MemWal) -> None:
@@ -866,18 +900,32 @@ class TestManualAPI:
         )
 
         opts = RememberManualOptions(
-            blob_id="blob-xyz",
+            encrypted_data="dGVzdA==",
             vector=[0.1, 0.2, 0.3],
         )
         result = await memwal_client.remember_manual(opts)
 
         body = json.loads(route.calls[0].request.content)
         headers = route.calls[0].request.headers
-        assert body["blob_id"] == "blob-xyz"
+        assert body["encrypted_data"] == "dGVzdA=="
+        assert "blob_id" not in body
         assert body["vector"] == [0.1, 0.2, 0.3]
         assert "x-seal-session" not in headers
         assert "x-delegate-key" not in headers
         assert result.blob_id == "blob-xyz"
+
+    @respx.mock
+    async def test_embed(self, memwal_client: MemWal) -> None:
+        _mock_version()
+        route = respx.post(f"{_TEST_SERVER}/api/embed").mock(
+            return_value=httpx.Response(200, json={"vector": [0.1, 0.2, 0.3]})
+        )
+
+        result = await memwal_client.embed("hello")
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["text"] == "hello"
+        assert result.vector == [0.1, 0.2, 0.3]
 
     @respx.mock
     async def test_recall_manual(self, memwal_client: MemWal) -> None:

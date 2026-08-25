@@ -2,7 +2,7 @@
 title: "Manual Methods"
 description: >-
   Lower-level remember_manual, recall_manual, and embed methods for callers that manage
-  their own vectors or have pre-uploaded Walrus blobs in the Python SDK.
+  their own vectors or already have SEAL-encrypted payloads in the Python SDK.
 keywords:
   - Walrus Memory
   - MemWal
@@ -12,7 +12,7 @@ keywords:
   - remember_manual
   - recall_manual
 goal:
-  description: Call the manual Python SDK methods to register a pre-uploaded blob, search with a pre-computed embedding vector, and compute embeddings independently from storage.
+  description: Call the manual Python SDK methods to register SEAL-encrypted bytes with a pre-computed embedding vector, search with a pre-computed vector, and compute embeddings independently from storage.
   requires:
     - has_frontmatter:
         - title
@@ -31,13 +31,14 @@ questions:
   - When should I use manual methods vs standard remember/recall in MemWal?
 answer: >-
   The Python SDK provides lower-level manual methods on the same MemWal/MemWalSync client:
-  `embed` computes a vector without storing anything, `remember_manual` registers a
-  pre-uploaded blob with a pre-computed vector, and `recall_manual` searches with a
-  pre-computed query vector returning raw blob IDs and distances.
+  `embed` computes a vector without storing anything, `remember_manual` sends
+  base64 SEAL-encrypted bytes plus a pre-computed vector (the relayer uploads to
+  Walrus), and `recall_manual` searches with a pre-computed query vector returning
+  raw blob IDs and distances.
 ---
 
 <Note>
-Unlike the TypeScript SDK there is **no separate `MemWalManual` class** in Python. The Python SDK is relayer-backed: the relayer always handles embedding, SEAL encryption, and Walrus storage. The "manual" methods are lower-level entry points on the same `MemWal` / `MemWalSync` client for callers that already have a vector or a pre-uploaded blob.
+Unlike the TypeScript SDK there is **no separate `MemWalManual` class** in Python. The Python SDK is relayer-backed for the standard `remember` / `recall` flow. The "manual" methods are lower-level entry points on the same `MemWal` / `MemWalSync` client for callers that already have a vector and SEAL-encrypted bytes.
 </Note>
 
 Use these when you want to control indexing or do your own vector math. For the standard flow, prefer [`remember` / `recall`](/python-sdk/usage/memwal).
@@ -57,14 +58,14 @@ print(len(vec.vector))
 
 ## `remember_manual`
 
-Register a pre-uploaded Walrus blob with a pre-computed vector. The relayer stores the `{blob_id, vector, owner, namespace}` mapping; it does not upload for you here.
+Send base64 SEAL-encrypted bytes plus a pre-computed vector. The relayer uploads the ciphertext to Walrus and stores the `{blob_id, vector, owner, namespace}` mapping.
 
 ```python
 from memwal import RememberManualOptions
 
 result = await memwal.remember_manual(
     RememberManualOptions(
-        blob_id="<walrus-blob-id>",
+        encrypted_data="<base64-seal-ciphertext>",
         vector=vec.vector,
         namespace="chatbot-prod",   # optional; falls back to client default
     )
@@ -93,7 +94,7 @@ for hit in hits.results:
 | --- | --- |
 | Plain text, want it stored | `remember` / `remember_and_wait` |
 | Plain text, want only the vector | `embed` |
-| A vector + an already-uploaded blob | `remember_manual` |
+| A vector + SEAL-encrypted bytes | `remember_manual` |
 | A query vector, want raw hits | `recall_manual` |
 | Plain query text, want decrypted matches | `recall` |
 

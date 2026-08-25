@@ -163,7 +163,7 @@ const stored = await memwal.waitForRememberJob(accepted.job_id, {
 
 | Method | Description |
 |---|---|
-| `rememberManual({ blobId, vector, namespace? })` | Register pre-uploaded blob with pre-computed vector |
+| `rememberManual({ encryptedData, vector, namespace? })` | Send SEAL-encrypted bytes + pre-computed vector; relayer uploads |
 | `recallManual({ vector, limit?, namespace? })` | Search with pre-computed vector (returns blob IDs only) |
 | `embed(text)` | Generate embedding vector (no storage) |
 
