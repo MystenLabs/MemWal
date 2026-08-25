@@ -33,6 +33,10 @@ npx -y @mysten-incubation/memwal-mcp login
 
 The command opens your browser, asks you to connect your Sui wallet, and saves credentials locally.
 
+`login` needs an interactive terminal. When the process is spawned by an MCP client (no TTY) the command exits with an error instead of stalling; ask the agent to call the `memwal_login` tool in that case.
+
+Existing credentials are never deleted up front. `login` ignores the saved file and overwrites it only after the new sign-in succeeds, so an aborted or failed login leaves you signed in as before. Use `--logout` when you actually want the file removed.
+
 ## Commands
 
 ```sh
