@@ -14,7 +14,7 @@ import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useNavigate } from 'react-router-dom'
-import { TriangleAlert, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle } from 'lucide-react'
+import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
@@ -27,6 +27,7 @@ import SecurityDeleteSection from '../components/SecurityDeleteSection'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import { apiGet } from '../utils/api'
 import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
 
 function DelegateKeyCtaIcon(props: SVGProps<SVGSVGElement>) {
@@ -118,6 +119,7 @@ interface OnChainDelegateKey {
 
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_MESSAGE = 'This wallet already has 20 delegate keys. Remove an old key before creating a new delegate key.'
+const DELEGATE_KEYS_SECTION_ID = 'delegate-keys'
 const PRIVATE_KEY_ENV = 'MEMWAL_PRIVATE_KEY'
 const ACCOUNT_ID_ENV = 'MEMWAL_ACCOUNT_ID'
 const SERVER_URL_ENV = 'MEMWAL_SERVER_URL'
@@ -249,6 +251,10 @@ export default function Dashboard({
 
     // Delegate key management state
     const [onChainKeys, setOnChainKeys] = useState<OnChainDelegateKey[]>([])
+    const [namespaces, setNamespaces] = useState<{ name: string; memory_count: number }[]>([])
+    const [namespacesLoading, setNamespacesLoading] = useState(false)
+    const [namespacesError, setNamespacesError] = useState('')
+    const [namespacesTruncated, setNamespacesTruncated] = useState(false)
     const [loadingKeys, setLoadingKeys] = useState(false)
     const [addingKey, setAddingKey] = useState(false)
     const [removingKey, setRemovingKey] = useState<string | null>(null)
@@ -368,7 +374,6 @@ export default function Dashboard({
 
     const hasResolvedAccount = Boolean(effectiveAccountObjectId)
     const accountLookupPending = loadingAccount || (shouldResolveAccount && (!accountLookupComplete || accountLookupAddress !== address))
-    const isRecoveringExistingAccount = !delegateKey && hasResolvedAccount && !previewReady
     const activeEnvironmentLabel = config.suiNetwork === 'mainnet'
         ? 'production / mainnet'
         : 'staging / testnet'
@@ -401,11 +406,20 @@ export default function Dashboard({
     const hasMaxDelegateKeys = onChainKeys.length >= MAX_DELEGATE_KEYS
     const isKeyListLoading = accountLookupPending || (loadingKeys && onChainKeys.length === 0)
     const isKeyListRefreshing = loadingKeys && onChainKeys.length > 0
+    const onChainKeyCount = onChainKeys.length
+    const browserHasNoKey = !delegateKey && hasResolvedAccount && !previewReady
+    const showNoBrowserKeyNotice = browserHasNoKey && !isKeyListLoading
     const selectableKeyPublicKeys = useMemo(() => onChainKeys.map((key) => key.publicKey), [onChainKeys])
     const selectedKeySet = useMemo(() => new Set(selectedKeyPublicKeys), [selectedKeyPublicKeys])
     const selectedKeyCount = selectedKeyPublicKeys.length
     const keyRemovalBusy = removingSelectedKeys || Boolean(removingKey)
     const showKeySelectionControls = Boolean(effectiveAccountObjectId) && selectedKeyCount > 0 && !accountLookupPending
+
+    const scrollToDelegateKeys = useCallback(() => {
+        document
+            .getElementById(DELEGATE_KEYS_SECTION_ID)
+            ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, [])
 
     useEffect(() => {
         setSelectedKeyPublicKeys((prev) => {
@@ -446,6 +460,63 @@ export default function Dashboard({
         setOnChainKeys([])
         fetchOnChainKeys()
     }, [fetchOnChainKeys])
+
+    const namespacesFetchGen = useRef(0)
+    const fetchNamespaces = useCallback(async () => {
+        if (!delegateKey || !effectiveAccountObjectId || !address) return
+        const gen = ++namespacesFetchGen.current
+        setNamespacesLoading(true)
+        setNamespacesError('')
+        setNamespacesTruncated(false)
+        try {
+            const owner = address.toLowerCase()
+            const collected: { name: string; memory_count: number }[] = []
+            let cursor: string | undefined
+            let truncated = false
+            for (let page = 0; page < 20; page++) {
+                const qs = new URLSearchParams({ limit: '100' })
+                if (cursor) qs.set('updated_after', cursor)
+                const path = `/v1/owners/${owner}/namespaces?${qs.toString()}`
+                const data = await apiGet(
+                    delegateKey,
+                    config.memwalServerUrl.replace(/\/+$/, ''),
+                    path,
+                    effectiveAccountObjectId,
+                ) as {
+                    namespaces?: { name?: string; memory_count?: number }[]
+                    next_cursor?: string | null
+                    has_more?: boolean
+                }
+                if (gen !== namespacesFetchGen.current) return
+                for (const ns of data.namespaces ?? []) {
+                    if (typeof ns.name === 'string') {
+                        collected.push({
+                            name: ns.name,
+                            memory_count: Number(ns.memory_count ?? 0),
+                        })
+                    }
+                }
+                if (!data.has_more) break
+                if (!data.next_cursor) break
+                cursor = data.next_cursor
+                if (page === 19) truncated = true
+            }
+            if (gen !== namespacesFetchGen.current) return
+            setNamespaces(collected)
+            setNamespacesTruncated(truncated)
+        } catch (err) {
+            if (gen !== namespacesFetchGen.current) return
+            console.error('Failed to list namespaces:', err)
+            setNamespacesError('Could not load namespace counts from the relayer.')
+        } finally {
+            if (gen === namespacesFetchGen.current) setNamespacesLoading(false)
+        }
+    }, [delegateKey, effectiveAccountObjectId, address])
+
+    useEffect(() => {
+        setNamespaces([])
+        void fetchNamespaces()
+    }, [fetchNamespaces])
 
     // ============================================================
     // Generate + add a new delegate key (via SDK)
@@ -775,12 +846,30 @@ const result = await generateText({
                     {showDashboardSubtitle && <p>{dashboardSubtitle}</p>}
                 </div>
 
-                {isRecoveringExistingAccount && (
-                    <div className="dash-alert" style={{ marginBottom: 24 }}>
-                        <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
-                        <p>
-                            Your Walrus Memory account is active, but this browser has no saved delegate key. Create a new key to continue, or revoke an old one below.
-                        </p>
+                {showNoBrowserKeyNotice && (
+                    <div className="dash-alert dash-alert--info">
+                        <Info className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
+                        {onChainKeyCount > 0 ? (
+                            <p>
+                                This browser doesn't have a key bound to it yet. Your account has{' '}
+                                {onChainKeyCount} delegate {onChainKeyCount === 1 ? 'key' : 'keys'} for
+                                other clients (
+                                <button
+                                    type="button"
+                                    className="dash-alert-link"
+                                    onClick={scrollToDelegateKeys}
+                                >
+                                    see below
+                                </button>
+                                ). Create a browser key to manage your account from here, or use the
+                                dashboard from a client that has one.
+                            </p>
+                        ) : (
+                            <p>
+                                Your Walrus Memory account is active but has no delegate keys yet.
+                                Create one to connect this browser and the SDK to your account.
+                            </p>
+                        )}
                     </div>
                 )}
 
@@ -1020,11 +1109,74 @@ const result = await generateText({
                     </Card>
                 )}
 
+                {delegateKey && (
+                    <Card
+                        id="namespaces"
+                        className="dashboard-keys-card"
+                        title="Namespaces"
+                        subtitle={
+                            namespacesLoading
+                                ? 'Loading memory counts from the relayer'
+                                : namespacesError
+                                    ? namespacesError
+                                    : namespaces.length === 0
+                                        ? 'No indexed namespaces yet (or none the relayer can see for this account)'
+                                        : `${namespaces.reduce((n, ns) => n + ns.memory_count, 0)} memories across ${namespaces.length} ${namespaces.length === 1 ? 'namespace' : 'namespaces'}${namespacesTruncated ? ' (list truncated)' : ''}`
+                        }
+                        action={
+                            <button
+                                className="btn btn-secondary btn-sm dashboard-keys-refresh"
+                                onClick={() => void fetchNamespaces()}
+                                disabled={namespacesLoading}
+                                aria-busy={namespacesLoading}
+                            >
+                                <RefreshCw size={12} /> Refresh
+                            </button>
+                        }
+                    >
+                        {namespacesError && (
+                            <p style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>{namespacesError}</p>
+                        )}
+                        {!namespacesLoading && namespaces.length > 0 && (
+                            <div className="dashboard-key-table-wrap">
+                                <table className="dashboard-key-table">
+                                    <thead>
+                                        <tr>
+                                            <th scope="col">Namespace</th>
+                                            <th scope="col">Memories</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {namespaces.map((ns) => (
+                                            <tr key={ns.name}>
+                                                <td data-label="Namespace">
+                                                    <Link
+                                                        to={`/playground?namespace=${encodeURIComponent(ns.name)}`}
+                                                        title="Open this namespace in the playground"
+                                                    >
+                                                        <code>{ns.name}</code>
+                                                    </Link>
+                                                </td>
+                                                <td data-label="Memories">{ns.memory_count}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </Card>
+                )}
+
                 {/* On-Chain Delegate Keys Management */}
                 <Card
+                    id={DELEGATE_KEYS_SECTION_ID}
                     className={`dashboard-keys-card${isKeyListRefreshing ? ' dashboard-keys-card--refreshing' : ''}`}
                     title="Delegate keys"
-                    subtitle="All keys registered to your Walrus Memory account"
+                    subtitle={
+                        isKeyListLoading || onChainKeyCount === 0
+                            ? 'All keys registered to your account, across every browser and client'
+                            : `${onChainKeyCount} ${onChainKeyCount === 1 ? 'key' : 'keys'} registered to your account, across every browser and client`
+                    }
                     action={
                         <div className="card-header-actions">
                             <button
@@ -1224,7 +1376,14 @@ const result = await generateText({
                                                 <td data-label="Key name">
                                                     <div className="dashboard-key-name">
                                                         <span>{k.label || 'Untitled'}</span>
-                                                        {isCurrentKey && <span className="dashboard-key-current-badge">current</span>}
+                                                        {isCurrentKey && (
+                                                            <span
+                                                                className="dashboard-key-current-badge"
+                                                                title="This is the delegate key saved in this browser"
+                                                            >
+                                                                This browser
+                                                            </span>
+                                                        )}
                                                     </div>
                                                 </td>
                                                 <td data-label="Public key">

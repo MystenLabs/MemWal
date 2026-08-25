@@ -8,11 +8,18 @@ type SprintGreetingData = {
   isLoading: boolean;
 };
 
-const DEFAULT_SUGGESTIONS = [
+/**
+ * Fallback prompts shown when the chat has no sprints to generate from.
+ *
+ * Exported because SuggestedActions previously kept its own byte-identical
+ * copy, and only this one was ever reachable — editing the other silently did
+ * nothing. Kept to a similar, short length so each pill sits on one line.
+ */
+export const DEFAULT_SUGGESTIONS = [
   "What sources do I have?",
-  "Help me research the latest advances in decentralized storage",
-  "Compare SEAL encryption with traditional approaches",
-  "Summarize my research on blockchain scalability",
+  "Research advances in decentralized storage",
+  "Compare SEAL with traditional encryption",
+  "Summarize my blockchain scalability research",
 ];
 
 export function useSprintGreeting(sprintIds?: string[]): SprintGreetingData {

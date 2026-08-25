@@ -46,6 +46,35 @@ function client() {
 
 const chars = (n) => "a".repeat(n);
 
+test("recall surfaces dropped_count when the relayer omitted matches", async () => {
+    globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/version") {
+            return Response.json({
+                apiVersion: "1.0.0",
+                relayerVersion: "1.0.0",
+                minSupportedSdk: { typescript: "0.0.4" },
+            });
+        }
+        if (path === "/api/config") {
+            return Response.json({ packageId: "0x1", network: "testnet" });
+        }
+        if (path === "/api/recall" && init.method === "POST") {
+            return Response.json({ results: [], total: 0, dropped_count: 3 });
+        }
+        throw new Error(`unexpected request ${path}`);
+    };
+    const result = await client().recall({ query: "x", namespace: "default" });
+    assert.equal(result.dropped_count, 3);
+    assert.equal(result.results.length, 0);
+});
+
+test("recall omits dropped_count when the relayer does", async () => {
+    stubRecall([]);
+    const result = await client().recall({ query: "x", namespace: "default" });
+    assert.equal("dropped_count" in result, false);
+});
+
 test("recall without maxTokens: response unchanged, NO meta (backward compatible)", async () => {
     const hits = [
         { blob_id: "b1", text: chars(40), distance: 0.1 },

@@ -21,7 +21,8 @@ was never exposed as a tool.
    so it benefits every MCP client (Claude Code, Codex, Cursor).
 2. **Decision hooks** — `packages/mcp/plugin/` (this package). Lifecycle hooks
    (SessionStart / UserPromptSubmit / PostToolUse) that *remind* the agent to
-   recall/remember. Pure heuristic → injected directive; **no fetch, no network,
+   use memory. UserPromptSubmit injects a decision rubric; the agent classifies
+   remember vs recall from meaning. **No keyword gate, no fetch, no network,
    no creds**. The agent makes the actual tool call.
 3. **Docs** — `docs/mcp/` hub (`overview.md`) + per-client pages (`claude-code.md`, `codex.md`, `cursor.md`, `claude-desktop.md`, `antigravity.md`) + `reference.md`.
 
@@ -52,7 +53,10 @@ was never exposed as a tool.
 
 - **Append-only** — no `forget`/`update` tools (relayer dedups embeddings).
 - **Global `default` namespace** — `MEMWAL_NAMESPACE` overrides for per-project scope.
-- **Heuristic → agent directive** — no `ask`-style LLM judge, no hook-side fetch.
+- **Agent decision rubric** — UserPromptSubmit does not regex-classify remember vs
+  recall. The agent has the conversation and understands any language or spelling.
+  Remember is proactive for durable facts; skip one-off tasks and small talk.
+  No `ask`-style LLM judge, no hook-side fetch.
 - **Out of scope** — prefetch/warm-load, a `/api/recent` endpoint, `ask`-style judge,
   background auto-capture. The agentic tools + hooks already deliver auto-memory.
 

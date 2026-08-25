@@ -694,6 +694,7 @@ fn route_label(path: &str) -> String {
         "/api/recall/manual" => "/api/recall/manual".to_string(),
         "/api/analyze" => "/api/analyze".to_string(),
         "/api/ask" => "/api/ask".to_string(),
+        "/api/embed" => "/api/embed".to_string(),
         "/api/restore" => "/api/restore".to_string(),
         "/api/forget" => "/api/forget".to_string(),
         "/api/stats" => "/api/stats".to_string(),
@@ -701,6 +702,18 @@ fn route_label(path: &str) -> String {
         "/api/mcp/messages" => "/api/mcp/messages".to_string(),
         "/api/mcp" => "/api/mcp".to_string(),
         _ if path.starts_with("/api/remember/") => "/api/remember/{job_id}".to_string(),
+        // Owner-scoped read API — {owner} is a variable Sui address path
+        // segment, so these three fall back to prefix/suffix matching the
+        // same way /api/remember/{job_id} does above.
+        _ if path.starts_with("/v1/owners/") && path.ends_with("/namespaces") => {
+            "/v1/owners/{owner}/namespaces".to_string()
+        }
+        _ if path.starts_with("/v1/owners/") && path.ends_with("/memories") => {
+            "/v1/owners/{owner}/memories".to_string()
+        }
+        _ if path.starts_with("/v1/owners/") && path.ends_with("/agents") => {
+            "/v1/owners/{owner}/agents".to_string()
+        }
         _ => "unknown".to_string(),
     }
 }
@@ -722,6 +735,25 @@ mod tests {
         assert_eq!(route_label("/api/remember/abc"), "/api/remember/{job_id}");
         assert_eq!(route_label("/api/recall"), "/api/recall");
         assert_eq!(route_label("/unexpected"), "unknown");
+    }
+
+    #[test]
+    fn route_label_normalizes_owner_scoped_read_api_routes() {
+        assert_eq!(
+            route_label("/v1/owners/0xabc123/namespaces"),
+            "/v1/owners/{owner}/namespaces"
+        );
+        assert_eq!(
+            route_label("/v1/owners/0xabc123/memories"),
+            "/v1/owners/{owner}/memories"
+        );
+        assert_eq!(
+            route_label("/v1/owners/0xabc123/agents"),
+            "/v1/owners/{owner}/agents"
+        );
+        // Previously these three fell through to "unknown", making the new
+        // routes invisible in metrics — this test is the regression guard.
+        assert_ne!(route_label("/v1/owners/0xabc123/namespaces"), "unknown");
     }
 
     #[test]

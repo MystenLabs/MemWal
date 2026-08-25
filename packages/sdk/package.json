@@ -1,6 +1,6 @@
 {
     "name": "@mysten-incubation/memwal",
-    "version": "0.1.3",
+    "version": "0.1.5",
     "description": "Walrus Memory — Privacy-first AI memory SDK with Ed25519 delegate key auth",
     "type": "module",
     "main": "./dist/index.js",
@@ -27,7 +27,8 @@
         "build": "tsc",
         "dev": "tsc --watch",
         "typecheck": "tsc --noEmit",
-        "test": "tsc && node --test \"test/**/*.test.mjs\""
+        "test": "tsc && node --test \"test/**/*.test.mjs\"",
+        "test:e2e": "tsc && node --test \"test/e2e/*.e2e.mjs\""
     },
     "dependencies": {
         "@noble/ed25519": "^2.3.0",

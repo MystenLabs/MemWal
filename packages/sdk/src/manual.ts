@@ -43,6 +43,7 @@ import {
     sha256hex,
     hexToBytes,
     bytesToHex,
+    normalizePrivateKey,
     u64ToLeHex,
     normalizeServerUrl,
     sanitizeServerError,
@@ -169,7 +170,10 @@ export class MemWalManual {
         if (config.suiPrivateKey && config.walletSigner) {
             throw new Error("MemWalManual: provide suiPrivateKey OR walletSigner, not both");
         }
-        this.delegatePrivateKey = typeof config.key === "string" ? hexToBytes(config.key) : config.key;
+        this.delegatePrivateKey =
+            typeof config.key === "string"
+                ? hexToBytes(normalizePrivateKey(config.key))
+                : config.key;
         // LOW-22: default to HTTPS; warn (do not throw) on plaintext HTTP
         // against non-localhost hosts.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
@@ -494,10 +498,9 @@ export class MemWalManual {
             try {
                 const fullId = blob.parsed.id;
 
-                // Build seal_approve PTB
-                const idBytes = Array.from(
-                    Uint8Array.from(fullId.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)))
-                );
+                // Build seal_approve PTB. hexToBytes rejects empty, odd-length,
+                // and non-hex ids instead of coercing NaN to 0.
+                const idBytes = Array.from(hexToBytes(fullId));
                 const tx = new Transaction();
                 tx.moveCall({
                     target: `${this.config.sealPolicyPackageId ?? this.config.packageId}::account::seal_approve`,

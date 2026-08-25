@@ -46,18 +46,34 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
 <Tabs>
   <Tab title="Plugin (recommended)">
     <Steps>
-      <Step title="Add the marketplace">
+      <Step title="Add the marketplace and install">
+        Agents with a terminal should run the CLI, then verify the plugin is enabled. Slash commands are only for a human inside Claude Code.
+
+        ```bash
+        claude plugin marketplace add MystenLabs/MemWal
+        claude plugin install memwal@memwal-plugins -s user
+        claude plugin list
+        ```
+
         ```
         /plugin marketplace add MystenLabs/MemWal
-        ```
-      </Step>
-      <Step title="Install the plugin">
-        ```
         /plugin install memwal@memwal-plugins
         ```
       </Step>
       <Step title="Restart and sign in">
-        Restart Claude Code, then ask the agent to run `memwal_login` and open the URL it returns to connect your wallet.
+        Restart Claude Code, then ask the agent to run `memwal_login` and open the URL it returns to connect your wallet. MCP-only is not a complete Claude Code setup: without the plugin, the agent often writes Claude's built-in `MEMORY.md` instead of calling `memwal_remember`.
+
+        Claude's system prompt still prefers `MEMORY.md` over MCP instructions. Show this block, get the user's go-ahead, then merge it into `~/.claude/CLAUDE.md` (do not replace the file). If `<!-- memwal:start -->` ... `<!-- memwal:end -->` is already there, replace that span only. Turn off Claude's built-in / native memory in account settings if it is on:
+
+        ```markdown
+        <!-- memwal:start -->
+        ## Walrus Memory
+
+        Prefer the memwal_* tools over Claude's built-in memory and MEMORY.md.
+        When the user states a preference, decision, constraint, correction, identity detail, or recurring workflow, call memwal_remember (or memwal_remember_bulk) without being asked. Also call it when they explicitly ask to remember something. Pass the complete statement, never a summary. Skip one-off tasks, the current file or bug, and small talk.
+        When the user references past work, preferences, or stored facts, call memwal_recall first.
+        <!-- memwal:end -->
+        ```
       </Step>
     </Steps>
   </Tab>
@@ -102,7 +118,7 @@ See [Reference](/mcp/reference) for full parameters.
 | **Hook** | **Event** | **What it does** |
 |------|-------|--------------|
 | Session start | `SessionStart` | Announces that memory is active and reminds the agent to use the `memwal_*` tools (preferring them over any built-in memory). |
-| User prompt | `UserPromptSubmit` | Detects when your message references past work or states a durable fact, and reminds the agent to recall or save. |
+| User prompt | `UserPromptSubmit` | Injects a decision rubric so the agent chooses recall vs save from meaning (any language or spelling). |
 | Post-tool | `PostToolUse` (Bash) | When a command's output looks like an error, reminds the agent to recall prior fixes and save the resolution. |
 
 ## Example workflow
@@ -173,6 +189,9 @@ Every recall runs inside one account and namespace. If you set `MEMWAL_NAMESPACE
 
 **Hooks are not firing.**
 The lifecycle hooks ship only with the **plugin** install; MCP-only provides the tools without hooks. Confirm the plugin appears in `/plugin` and restart after installing.
+
+**The agent writes `MEMORY.md` instead of calling `memwal_remember`.**
+Claude Code's built-in memory is in the system prompt and outranks MCP instructions. Confirm the plugin is enabled, merge the Walrus Memory block into `~/.claude/CLAUDE.md`, and turn off Claude's built-in / native memory in account settings.
 
 **Tool calls fail with an authentication error after working before.**
 The stored credential can lapse if you revoked its delegate key from the dashboard. Run `memwal_logout` then `memwal_login` to mint a fresh delegate key.

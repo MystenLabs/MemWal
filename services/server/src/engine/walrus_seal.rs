@@ -286,7 +286,16 @@ impl MemoryEngine for WalrusSealEngine {
         let blob_size = bytes.len() as i64;
         self.db
             .insert_vector(
-                &id, owner, namespace, &blob_id, vector, blob_size, importance,
+                &id,
+                owner,
+                namespace,
+                &blob_id,
+                vector,
+                blob_size,
+                importance,
+                agent_public_key,
+                Some(&self.config.package_id),
+                upload.end_epoch,
             )
             .await?;
 

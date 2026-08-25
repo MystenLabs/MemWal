@@ -1,5 +1,27 @@
 # @mysten-incubation/memwal
 
+## 0.1.5
+
+### Added
+
+- `recall()` results include `dropped_count` when the relayer omitted matches that failed to download or decrypt.
+- `health()` surfaces optional `write_ready` when the relayer reports write-path sidecar liveness.
+
+### Changed
+
+- `rememberManual` now sends `encryptedData` (base64 SEAL ciphertext) instead of a pre-uploaded `blobId`, matching `POST /api/remember/manual`.
+
+### Fixed
+
+- Manual recall decodes SEAL object ids with `hexToBytes` instead of an unguarded `parseInt` / `.match!` path that could coerce `NaN` to `0` or throw on empty input.
+- HTTP error messages and remember-job error strings no longer forward `localhost` / `127.0.0.1` URLs to callers.
+
+## 0.1.4
+
+### Fixed
+
+- Empty-body 401s now tell first-time MCP callers to run `memwal_login` instead of showing `<no message>`. Credential 401s still point at the AUTH_REJECTED troubleshooting guide.
+
 ## 0.1.3
 
 ### Added

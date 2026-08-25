@@ -17,7 +17,7 @@ import {
 import { getWalrusClient, refreshWalrusClientIfStale, suiClient, suiGraphqlClient } from "../clients.js";
 import { requestIdFor, sanitizeRequestId, sidecarLog } from "../log.js";
 import { withRpcRetry } from "../retry/rpc.js";
-import { errorMessage, mapConcurrent } from "../util.js";
+import { MEMWAL_JOB_TAG_KEY, errorMessage, mapConcurrent } from "../util.js";
 
 /**
  * blob_id from chain is a big integer (U256); convert to base64url
@@ -455,7 +455,7 @@ async function scanOwnerForJobBlob(
     const blobs = await listBlobObjectsGrpc(normalizeSuiAddress(scanOwner), blobType, Infinity);
     for (const blob of blobs) {
         const entries = await fetchBlobMetadataEntries(blob.objectId);
-        const jobMatches = entries.some(({ key, value }) => key === "memwal_job_id" && value === jobId);
+        const jobMatches = entries.some(({ key, value }) => key === MEMWAL_JOB_TAG_KEY && value === jobId);
         // Normalize the tagged owner before comparing — the register stores the
         // raw `owner` the relayer sent, which may be mixed-case / unpadded hex.
         const ownerMatches = entries.some(

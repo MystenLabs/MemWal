@@ -83,7 +83,7 @@ See [Reference](/mcp/reference) for full parameters.
 | Hook | Event | What it does |
 |------|-------|--------------|
 | Session start | `SessionStart` | Announces that memory is active and reminds the agent to use the `memwal_*` tools. |
-| User prompt | `UserPromptSubmit` | Detects when your message references past work or states a durable fact, and reminds the agent to recall or save. |
+| User prompt | `UserPromptSubmit` | Injects a decision rubric so the agent chooses recall vs save from meaning (any language or spelling). |
 | Post-tool | `PostToolUse` (Bash) | When a command errors, reminds the agent to recall prior fixes and save the resolution. |
 
 ## Verify

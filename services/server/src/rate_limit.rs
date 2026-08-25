@@ -5,11 +5,14 @@ use axum::{
     response::Response,
 };
 use percent_encoding::percent_decode_str;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
     client_ip::canonical_client_ip,
+    storage::db::{StorageAdmission, StorageReservationRequest},
     types::{AppError, AppState, AuthInfo},
 };
 
@@ -115,6 +118,13 @@ impl RateLimitConfig {
     }
 }
 
+/// Sliding-window lower bounds shared by the live limiter and post-hoc
+/// `charge_explicit_weight`. Passing `now` as `window_start` would prune
+/// every in-window Redis member before inserting the extra charge.
+fn sliding_window_starts(now: f64) -> (f64, f64, f64) {
+    (now - 60_000.0, now - 60_000.0, now - 3_600_000.0)
+}
+
 // ============================================================
 // Cost Weights — per endpoint
 // ============================================================
@@ -146,7 +156,14 @@ fn endpoint_weight(path: &str) -> i64 {
         "/api/remember/manual" => 3, // Walrus upload only (client did embed/encrypt)
         "/api/restore" => 3,         // download + decrypt + re-embed
         "/api/ask" => 2,             // recall + LLM
-        _ => 1,                      // recall, recall/manual, etc.
+        "/api/embed" => 2,           // embedding API only
+        // Owner-scoped read API — {owner} is a variable path segment, so
+        // match by prefix/suffix like the observability route_label()
+        // normalization does for the same three routes.
+        _ if path.starts_with("/v1/owners/") && path.ends_with("/agents") => 2, // live sui_getObject RPC call, weighted like /api/ask's recall+LLM call
+        _ if path.starts_with("/v1/owners/") && path.ends_with("/namespaces") => 1, // DB read only
+        _ if path.starts_with("/v1/owners/") && path.ends_with("/memories") => 1, // DB read only
+        _ => 1, // recall, recall/manual, etc.
     }
 }
 
@@ -379,7 +396,14 @@ fn rate_limiter_unavailable_response() -> Response {
 // Rate Limit Middleware
 // ============================================================
 
-/// Multi-layer rate limiting middleware for authenticated routes.
+/// Multi-layer rate limiting middleware for the write-path authenticated
+/// routes (`/api/*`, mounted on `protected_routes` in `main.rs`).
+///
+/// The owner-scoped read API (`/v1/owners/{owner}/{namespaces,memories,agents}`)
+/// does NOT run through this middleware — it has its own
+/// dedicated single-layer budget (`read_api_rate_limit_middleware`, below)
+/// so routine read pagination can never spend the write path's budget or
+/// vice versa.
 ///
 /// Checks 3 layers (all must pass):
 /// 1. Per-delegate-key: 30 weighted-req/min (prevents compromised key abuse)
@@ -431,9 +455,7 @@ pub async fn rate_limit_middleware(
     let burst_key = format!("rate:{}", auth.owner);
     let hourly_key = format!("rate:hr:{}", auth.owner);
 
-    let dk_window_start = now - 60_000.0; // 1-min window (ms)
-    let burst_window_start = now - 60_000.0; // 1-min window (ms)
-    let hourly_window_start = now - 3_600_000.0; // 1-hr  window (ms)
+    let (dk_window_start, burst_window_start, hourly_window_start) = sliding_window_starts(now);
 
     // --- Atomic check-and-record via Lua script for all 3 layers ---
     // Each layer is checked+recorded atomically. If Redis is unavailable,
@@ -610,6 +632,95 @@ pub async fn rate_limit_middleware(
 }
 
 // ============================================================
+// Read API Rate Limit Middleware
+// ============================================================
+
+/// Rate limiting middleware for the owner-scoped read API
+/// (`GET /v1/owners/{owner}/{namespaces,memories,agents}`).
+///
+/// These routes used to sit in the same `protected_routes` router as every
+/// write endpoint, behind `rate_limit_middleware`, so they
+/// spent the same 30/min per-delegate-key budget that exists to bound the
+/// write path's spend-risk (Walrus upload, LLM calls, gas). A single
+/// dedicated budget is enough here — reads don't carry that risk, so there's
+/// no need for the write path's extra account-level burst/sustained layers.
+///
+/// Checks ONE dedicated sliding-window layer, keyed by delegate key under
+/// its own Redis prefix (`rate:read:dk:{public_key}`) so it cannot share or
+/// contend with the write path's `rate:dk:{public_key}` bucket. Endpoint
+/// weight is looked up via the same `endpoint_weight()` table the write path
+/// uses (namespaces=1, memories=1, agents=2).
+///
+/// Returns 429 with the same JSON shape as `rate_limit_middleware`
+/// (`layer: "read_delegate_key"`) on exceed, and fails closed to 503 if
+/// Redis is unreachable — no in-memory fallback, matching every other
+/// rate limiter in this file except the deliberately-fallback-enabled
+/// authenticated write path.
+pub async fn read_api_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // RATE_LIMIT_DISABLED=1 — see RateLimitConfig::bench_bypass_enabled.
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    let auth_info = request
+        .extensions()
+        .get::<crate::types::AuthInfo>()
+        .cloned();
+
+    let auth = match auth_info {
+        Some(a) => a,
+        None => {
+            // No auth info = auth middleware didn't run ahead of this one;
+            // nothing to key the bucket on, so skip rather than 500.
+            return next.run(request).await;
+        }
+    };
+
+    let config = &state.config.read_api_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let weight = endpoint_weight(request.uri().path());
+    let dk_key = format!("rate:read:dk:{}", auth.public_key);
+    let window_start = now - 60_000.0; // 1-min window (ms)
+
+    match check_and_record_window(
+        &mut redis,
+        &dk_key,
+        window_start,
+        now,
+        config.per_delegate_key_per_minute,
+        weight,
+        120, // TTL 2 min
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "rate limit [read-delegate-key]: key={}... denied (limit={})",
+                &auth.public_key[..16.min(auth.public_key.len())],
+                config.per_delegate_key_per_minute
+            );
+            rate_limit_response(
+                "read_delegate_key",
+                config.per_delegate_key_per_minute,
+                "min",
+                60,
+            )
+        }
+        Err(e) => {
+            tracing::warn!("rate limit [read-delegate-key] Redis error: {}", e);
+            rate_limiter_unavailable_response()
+        }
+        Ok(WindowCheckResult::Allowed) => next.run(request).await,
+    }
+}
+
+// ============================================================
 // Storage Quota Check (called from routes, not middleware)
 // ============================================================
 
@@ -618,13 +729,42 @@ pub async fn rate_limit_middleware(
 /// Storage tracking still uses PostgreSQL (it's per-row in vector_entries).
 /// Returns `Ok(())` if within quota, `Err(AppError::QuotaExceeded)` if not.
 ///
-/// Uses PostgreSQL advisory lock per-owner to prevent
-/// TOCTOU race where concurrent requests all pass quota check then
-/// all write, collectively exceeding the limit.
-pub async fn check_storage_quota(
+/// How long an unreleased storage reservation keeps counting against quota.
+///
+/// This is the backstop for a release that never happens: process killed
+/// between admission and insert, task cancelled, job lost. It must be longer
+/// than any window in which the write could still legitimately land, or a slow
+/// upload would have its reservation expire while the row is still coming and
+/// a concurrent burst could slip past the quota.
+///
+/// The longest such window is bounded by `main::STALE_REMEMBER_JOB_AFTER`
+/// (10 minutes), after which the sweeper marks the job failed and releases the
+/// reservation anyway. 15 minutes leaves margin over that without letting a
+/// leak sit around long. Over-counting for at most this long is the intended
+/// failure mode; an account is never permanently stranded.
+pub const STORAGE_RESERVATION_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Atomically admit pending writes against the owner's storage quota.
+///
+/// Replaces the old `check_storage_quota`, which was not atomic: it read usage
+/// under a `pg_advisory_xact_lock`, committed (releasing the lock, because xact
+/// locks are transaction scoped), compared outside any lock, and left the
+/// caller to insert later still. Concurrent requests from one owner all read
+/// the same pre-insert total, all passed, and all inserted (GH #532 /
+/// WALM-359).
+///
+/// Admission now records the intent to write inside the locked transaction, so
+/// a later request in the same burst sees the earlier one's bytes even though
+/// no row exists yet. Callers must release once the row lands or the write is
+/// known to be dead — see `release_storage_quota`.
+///
+/// Admission is all-or-nothing across `reservations`, preserving the existing
+/// behaviour where a bulk request lands whole or is rejected whole, and the
+/// `402` / "Storage quota exceeded" response shape is unchanged.
+pub async fn reserve_storage_quota(
     state: &AppState,
     owner: &str,
-    additional_bytes: i64,
+    reservations: &[StorageReservationRequest],
 ) -> Result<(), AppError> {
     let max_bytes = state.config.rate_limit.max_storage_bytes;
 
@@ -633,33 +773,72 @@ pub async fn check_storage_quota(
         return Ok(());
     }
 
-    // Acquire a per-owner PostgreSQL advisory lock.
-    // This serializes concurrent quota checks for the same owner,
-    // preventing TOCTOU race conditions.
-    // We use a stable hash of the owner string as the lock key.
-    let lock_key = stable_hash_i64(owner);
-
-    // Use the combined method which uses an explicit transaction and pg_advisory_xact_lock
-    let used = state.db.get_storage_used_with_lock(owner, lock_key).await?;
-    let projected = used + additional_bytes;
-
-    if projected > max_bytes {
-        let used_mb = used as f64 / 1_048_576.0;
-        let max_mb = max_bytes as f64 / 1_048_576.0;
-        tracing::warn!(
-            "storage quota exceeded: owner={} used={:.1}MB + {:.1}MB > max={:.1}MB",
-            owner,
-            used_mb,
-            additional_bytes as f64 / 1_048_576.0,
-            max_mb
-        );
-        return Err(AppError::QuotaExceeded(format!(
-            "Storage quota exceeded: {:.1}MB used of {:.1}MB allowed",
-            used_mb, max_mb
-        )));
+    if reservations.is_empty() {
+        return Ok(());
     }
 
-    Ok(())
+    // Stable hash of the owner string as the per-owner advisory lock key.
+    let lock_key = stable_hash_i64(owner);
+    let requested: i64 = reservations.iter().map(|r| r.bytes).sum();
+
+    let admission = state
+        .db
+        .admit_storage_reservations(
+            owner,
+            lock_key,
+            max_bytes,
+            reservations,
+            STORAGE_RESERVATION_TTL,
+        )
+        .await?;
+
+    match admission {
+        StorageAdmission::Admitted => Ok(()),
+        StorageAdmission::Rejected { used } => {
+            let used_mb = used as f64 / 1_048_576.0;
+            let max_mb = max_bytes as f64 / 1_048_576.0;
+            tracing::warn!(
+                "storage quota exceeded: owner={} used={:.1}MB + {:.1}MB > max={:.1}MB",
+                owner,
+                used_mb,
+                requested as f64 / 1_048_576.0,
+                max_mb
+            );
+            Err(AppError::QuotaExceeded(format!(
+                "Storage quota exceeded: {:.1}MB used of {:.1}MB allowed",
+                used_mb, max_mb
+            )))
+        }
+    }
+}
+
+/// Convenience wrapper for the single-write call sites.
+pub async fn reserve_storage_quota_one(
+    state: &AppState,
+    owner: &str,
+    id: String,
+    bytes: i64,
+) -> Result<(), AppError> {
+    reserve_storage_quota(state, owner, &[StorageReservationRequest { id, bytes }]).await
+}
+
+/// Release reservations after the bytes are committed as rows, or after the
+/// write that reserved them is known to be dead.
+///
+/// Deliberately infallible: a failed release is recovered by
+/// `STORAGE_RESERVATION_TTL`, and must never turn a successful write into a
+/// failed request.
+pub async fn release_storage_quota(state: &AppState, ids: &[String]) {
+    if state.config.rate_limit.max_storage_bytes <= 0 {
+        return;
+    }
+    state.db.release_storage_reservations(ids).await;
+}
+
+/// Release a single reservation. See `release_storage_quota`.
+pub async fn release_storage_quota_one(state: &AppState, id: &str) {
+    let ids = [id.to_string()];
+    release_storage_quota(state, &ids).await;
 }
 
 /// Compute a stable i64 hash of a string for use as PG advisory lock key.
@@ -904,28 +1083,45 @@ pub async fn charge_explicit_weight(
 
     let mut redis = state.redis.clone();
     let now = chrono::Utc::now().timestamp_millis() as f64;
+    let (dk_window_start, burst_window_start, hourly_window_start) = sliding_window_starts(now);
 
     let dk_key = format!("rate:dk:{}", auth.public_key);
     let burst_key = format!("rate:{}", auth.owner);
     let hr_key = format!("rate:hr:{}", auth.owner);
 
-    // Use the same atomic Lua script for explicit weight charges
-    // (called from /api/analyze after fact count is known).
-    // Ignore WindowCheckResult here — this is a post-hoc charge after
-    // the expensive work is done; we prefer not to block the response.
-    let _ = check_and_record_window(&mut redis, &dk_key, now, now, i64::MAX, weight, 120).await;
+    // Same sliding windows as the live limiter so this post-hoc charge
+    // cannot prune in-window history. Limit is i64::MAX — we never deny
+    // after the work is already done.
     let _ = check_and_record_window(
         &mut redis,
-        &burst_key,
+        &dk_key,
+        dk_window_start,
         now,
-        now + 0.1,
         i64::MAX,
         weight,
         120,
     )
     .await;
-    let _ =
-        check_and_record_window(&mut redis, &hr_key, now, now + 0.2, i64::MAX, weight, 3700).await;
+    let _ = check_and_record_window(
+        &mut redis,
+        &burst_key,
+        burst_window_start,
+        now,
+        i64::MAX,
+        weight,
+        120,
+    )
+    .await;
+    let _ = check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hourly_window_start,
+        now,
+        i64::MAX,
+        weight,
+        3700,
+    )
+    .await;
 
     Ok(())
 }
@@ -1288,6 +1484,335 @@ pub async fn accounts_rate_limit_middleware(
 }
 
 // ============================================================
+// Owner Token — issuance rate limiting
+// ============================================================
+
+/// Pre-handler rate limiting for `POST /v1/owner-tokens`, keyed by a
+/// SHA-256 hash of the caller's `x-service-credential` header value (the
+/// raw credential itself is never used as a Redis key or logged).
+///
+/// Phase 1 has exactly one shared service credential (see
+/// `routes::owner_token` module doc), so today this is effectively one
+/// deployment-wide bucket — same mechanism as
+/// `check_global_sponsor_rate_limit`'s fixed-key global cap — but hashing
+/// the credential rather than hardcoding one key means a future
+/// multi-credential Console rollout (e.g. per-integration credentials)
+/// gets independent buckets for free, with no changes needed here.
+///
+/// This is the "per-service-credential" layer only. The additional
+/// per-owner cap (`check_owner_token_owner_rate_limit`) is applied inside
+/// the `issue_token` handler itself, after the owner address has been
+/// canonicalized — not here — because this middleware runs before the
+/// request body is parsed by the handler's `Json` extractor, and
+/// buffering + re-parsing the body a second time here (mirroring
+/// `auth::verify_signature`'s body-consumption pattern) would duplicate
+/// validation the handler already has to do, for no benefit: an
+/// unauthenticated or malformed-body request is rejected by the
+/// credential gate or the handler's own `Json` extractor either way.
+///
+/// Per-IP budget on `POST /v1/owner-tokens`, independent of whether the
+/// supplied `x-service-credential` is valid. Wired as the TRUE outermost
+/// layer on this route (outside `service_credential_gate` itself) — see
+/// `main.rs`'s `owner_token_routes` wiring for why this is load-bearing:
+/// `service_credential_gate` rejects a bad credential in-process with no
+/// I/O, so `owner_token_credential_rate_limit_middleware` below (keyed by
+/// the *value* of the supplied credential, hashed) is structurally never
+/// reached by a failing-credential request, and an attacker who varies
+/// their guess every request gets a fresh Redis bucket key each time and
+/// is never throttled by it either. Without a limiter keyed by something
+/// an attacker can't freely vary (their source IP), guessing the single
+/// shared service credential has no throttling at all — this closes that
+/// gap the same way `accounts_rate_limit_middleware`/
+/// `sponsor_rate_limit_middleware` already do for their own routes (IP
+/// budget applied unconditionally, before any auth/validity check).
+/// Fails closed to 503 on Redis error, matching every other limiter here.
+pub async fn owner_token_ip_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    let ip = match request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
+    {
+        Some(ip) => ip.to_string(),
+        None => {
+            tracing::warn!(
+                "owner_token_ip_rate_limit_middleware: cannot determine client IP, denying"
+            );
+            return rate_limiter_unavailable_response();
+        }
+    };
+
+    let config = &state.config.owner_token_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:ownertoken:ip:min:{}", ip);
+    let hr_key = format!("rate:ownertoken:ip:hr:{}", ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.ip_per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                config.ip_per_minute
+            );
+            return rate_limit_response("owner_token_ip_burst", config.ip_per_minute, "min", 60);
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_ip_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.ip_per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                config.ip_per_hour
+            );
+            return rate_limit_response(
+                "owner_token_ip_sustained",
+                config.ip_per_hour,
+                "hour",
+                300,
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_ip_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    next.run(request).await
+}
+
+pub async fn owner_token_credential_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // RATE_LIMIT_DISABLED=1 — see RateLimitConfig::bench_bypass_enabled.
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    // Header name duplicated from `routes::owner_token::SERVICE_CREDENTIAL_HEADER`
+    // rather than imported: `rate_limit.rs` is compiled into BOTH the
+    // `main.rs` binary crate tree and the separate `lib.rs` library crate
+    // tree (see that file's module doc — it deliberately does not declare
+    // `mod routes`, only what `sui`'s dependency closure needs), so a
+    // `crate::routes::...` reference here would fail to resolve under
+    // `cargo test --lib`. Keep this literal in sync with
+    // `SERVICE_CREDENTIAL_HEADER` if that constant's value ever changes.
+    const SERVICE_CREDENTIAL_HEADER: &str = "x-service-credential";
+    let credential = request
+        .headers()
+        .get(SERVICE_CREDENTIAL_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let credential_hash = hex::encode(Sha256::digest(credential.as_bytes()));
+
+    let config = &state.config.owner_token_rate_limit;
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+
+    let min_key = format!("rate:ownertoken:cred:min:{credential_hash}");
+    let hr_key = format!("rate:ownertoken:cred:hr:{credential_hash}");
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [credential/min]: denied (limit={})",
+                config.per_minute
+            );
+            return rate_limit_response(
+                "owner_token_credential_burst",
+                config.per_minute,
+                "min",
+                60,
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_credential_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "owner-token rate limit [credential/hr]: denied (limit={})",
+                config.per_hour
+            );
+            return rate_limit_response(
+                "owner_token_credential_sustained",
+                config.per_hour,
+                "hour",
+                300,
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "owner_token_credential_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    next.run(request).await
+}
+
+/// Per-owner cap on `POST /v1/owner-tokens` issuance. Keyed by
+/// the canonical (lowercased) owner address, independent of the
+/// per-service-credential budget enforced by
+/// `owner_token_credential_rate_limit_middleware` — a compromised or buggy
+/// Console instance that still holds a valid service credential must not
+/// be able to mint unbounded tokens for one owner. Called directly from
+/// the `issue_token` handler (see that function's doc comment for why this
+/// isn't middleware).
+///
+/// Reuses `SponsorRlResult` (`Allowed` / `MinuteLimitExceeded` /
+/// `HourLimitExceeded`) rather than defining a fourth near-identical
+/// two-tier rate-limit result enum — this crate already has
+/// `check_global_sponsor_rate_limit` and `check_global_accounts_rate_limit`
+/// returning the same shape for the same reason.
+///
+/// Returns `Err(())` on Redis failure so the caller can fail closed —
+/// consistent with every other limiter in this module.
+pub async fn check_owner_token_owner_rate_limit(
+    state: &crate::types::AppState,
+    owner: &str,
+    per_minute: i64,
+    per_hour: i64,
+) -> Result<SponsorRlResult, ()> {
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let mut redis = state.redis.clone();
+
+    let min_key = format!("rate:ownertoken:owner:min:{owner}");
+    let hr_key = format!("rate:ownertoken:owner:hr:{owner}");
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("owner_token_owner_burst");
+            return Ok(SponsorRlResult::MinuteLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_owner_token_owner_rate_limit: Redis error (minute): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            crate::observability::record_rate_limit_denial("owner_token_owner_sustained");
+            return Ok(SponsorRlResult::HourLimitExceeded);
+        }
+        Err(e) => {
+            tracing::error!(
+                "check_owner_token_owner_rate_limit: Redis error (hour): {}",
+                e
+            );
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    Ok(SponsorRlResult::Allowed)
+}
+
+// ============================================================
 // Unit Tests
 // ============================================================
 
@@ -1305,6 +1830,7 @@ mod tests {
         assert_eq!(endpoint_weight("/api/remember/manual"), 3);
         assert_eq!(endpoint_weight("/api/restore"), 3);
         assert_eq!(endpoint_weight("/api/ask"), 2);
+        assert_eq!(endpoint_weight("/api/embed"), 2);
 
         // With trailing slash — must return SAME weight.
         assert_eq!(
@@ -1329,6 +1855,32 @@ mod tests {
     fn test_endpoint_weight_no_regression() {
         // Double trailing slash should also normalize
         assert_eq!(endpoint_weight("/api/analyze//"), 5);
+    }
+
+    #[test]
+    fn charge_windows_match_live_limiter_not_now() {
+        let now = 1_700_000_000_000.0;
+        let (dk, burst, hourly) = sliding_window_starts(now);
+        assert_eq!(dk, now - 60_000.0);
+        assert_eq!(burst, now - 60_000.0);
+        assert_eq!(hourly, now - 3_600_000.0);
+        assert!(dk < now && burst < now && hourly < now);
+    }
+
+    #[test]
+    fn test_endpoint_weight_owner_scoped_read_api_routes() {
+        // Previously these three fell through to the default `1`
+        // implicitly (no explicit entry) — now explicit, and /agents is
+        // weighted higher since it makes a live on-chain RPC call per request.
+        assert_eq!(endpoint_weight("/v1/owners/0xabc123/namespaces"), 1);
+        assert_eq!(endpoint_weight("/v1/owners/0xabc123/memories"), 1);
+        assert_eq!(
+            endpoint_weight("/v1/owners/0xabc123/agents"),
+            2,
+            "agents does a live on-chain RPC call and must outweigh plain DB reads"
+        );
+        // Trailing slash must not bypass the explicit weight.
+        assert_eq!(endpoint_weight("/v1/owners/0xabc123/agents/"), 2);
     }
 
     // ---- stable_hash_i64 ----
@@ -1363,6 +1915,29 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         // Verify Retry-After header is present
         assert!(resp.headers().contains_key("retry-after"));
+    }
+
+    // ---- Read API rate limit config + response shape ----
+
+    #[test]
+    fn test_read_api_rate_limit_config_defaults() {
+        let config = crate::types::ReadApiRateLimitConfig::default();
+        assert_eq!(config.per_delegate_key_per_minute, 200);
+    }
+
+    #[test]
+    fn test_read_api_rate_limit_response_uses_dedicated_layer_name() {
+        // Guards against re-drifting into the shared "delegate_key" /
+        // "account_burst" layer names the write path uses — the whole point
+        // of this budget is that it is a *separate* bucket clients (and
+        // dashboards keying off `layer`) can distinguish from write-path 429s.
+        let resp = rate_limit_response("read_delegate_key", 200, "min", 60);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers().get("retry-after").unwrap(),
+            "60",
+            "Retry-After header must be present with the same value as retry_after_seconds"
+        );
     }
 
     #[test]
