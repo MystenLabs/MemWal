@@ -66,4 +66,5 @@ was never exposed as a tool.
 - `services/server/scripts/mcp/tools/remember-bulk.ts` + `index.ts` — new bulk tool
 - `packages/mcp/plugin/` — plugin manifest, `.mcp.json`, hooks, Node scripts, Codex installer
 - `.claude-plugin/marketplace.json` (repo root) — Claude Code marketplace entry (local source `./packages/mcp/plugin`)
+- `.agents/plugins/marketplace.json` (repo root) — Codex marketplace entry (local source `./packages/mcp/plugin`); path is fixed by the Codex CLI, not configurable
 - `docs/mcp/{overview,claude-code,codex,cursor,claude-desktop,antigravity,reference}.md` — public docs (no mem0); per-client, MCP-vs-Plugin framing
