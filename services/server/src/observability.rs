@@ -694,6 +694,7 @@ fn route_label(path: &str) -> String {
         "/api/recall/manual" => "/api/recall/manual".to_string(),
         "/api/analyze" => "/api/analyze".to_string(),
         "/api/ask" => "/api/ask".to_string(),
+        "/api/embed" => "/api/embed".to_string(),
         "/api/restore" => "/api/restore".to_string(),
         "/api/forget" => "/api/forget".to_string(),
         "/api/stats" => "/api/stats".to_string(),

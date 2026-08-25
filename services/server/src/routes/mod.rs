@@ -5,7 +5,7 @@
 //!   (+ the async prep tasks and the summarize-for-embedding helpers)
 //! - `recall` — `/api/recall`, `/api/recall/manual` (+ the recall-embedding cache)
 //! - `analyze` — `/api/analyze` (fact extraction → store; sync bypass in benchmark mode)
-//! - `admin` — `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`,
+//! - `admin` — `/api/embed`, `/api/ask`, `/api/forget`, `/api/stats`, `/api/restore`,
 //!   `/health`, `/version`, `/config`
 //! - `sponsor` — `/sponsor`, `/sponsor/execute` (Enoki proxy)
 //! - `accounts` — `/api/accounts/{owner}/exists` (public MemWalAccount
@@ -39,7 +39,7 @@ mod sponsor;
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
 // without having to know which submodule each handler lives in.
 pub use accounts::account_exists;
-pub use admin::{ask, forget, get_config, health, restore, stats, version};
+pub use admin::{ask, embed, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
 pub use memory_read::{list_owner_agents, list_owner_memories, list_owner_namespaces};
 pub use owner_token::{issue_token, token_probe};

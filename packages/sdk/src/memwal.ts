@@ -63,6 +63,7 @@ import {
     normalizePrivateKey,
     normalizeServerUrl,
     sanitizeServerError,
+    redactInternalUrls,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
 } from "./utils.js";
@@ -350,7 +351,9 @@ export class MemWal {
             }
             if (status.status === "failed") {
                 throw Object.assign(
-                    new Error(`remember job failed: ${status.error ?? "unknown error"}`),
+                    new Error(
+                        `remember job failed: ${redactInternalUrls(status.error ?? "unknown error")}`,
+                    ),
                     { status: 500, jobId },
                 );
             }
@@ -529,7 +532,7 @@ export class MemWal {
                         error:
                             status.status === "not_found"
                                 ? "job not found"
-                                : status.error ?? "unknown error",
+                                : redactInternalUrls(status.error ?? "unknown error"),
                     };
                     pending.delete(jobId);
                 }
@@ -707,25 +710,23 @@ export class MemWal {
     // ============================================================
 
     /**
-     * Remember (manual mode) — user handles SEAL encrypt, embedding,
-     * and Walrus upload externally. Server only stores the vector ↔ blobId mapping.
+     * Remember (manual mode) — user handles SEAL encrypt and embedding.
+     * The relayer uploads the encrypted bytes to Walrus and stores the
+     * vector ↔ blobId mapping.
      *
      * Trust boundary (ENG-1696): the delegate private key is NOT transmitted on
      * this request. Manual-mode handlers on the server never invoke SEAL
      * decrypt, so the key stays client-side as the name implies.
      *
-     * @param opts.blobId - Walrus blob ID (user already uploaded encrypted data)
+     * @param opts.encryptedData - Base64-encoded SEAL-encrypted bytes
      * @param opts.vector - Embedding vector (user already generated, e.g. 1536-dim)
      * @returns RememberManualResult with id, blob_id, owner
      *
      * @example
      * ```typescript
-     * // 1. User encrypts + uploads + embeds on their own
-     * const blobId = await myWalrusUpload(sealEncryptedData)
+     * const encryptedData = Buffer.from(sealEncryptedBytes).toString("base64")
      * const vector = await myEmbeddingModel.embed(text)
-     *
-     * // 2. Register vector mapping with server
-     * const result = await memwal.rememberManual({ blobId, vector })
+     * const result = await memwal.rememberManual({ encryptedData, vector })
      * ```
      */
     async rememberManual(opts: RememberManualOptions): Promise<RememberManualResult> {
@@ -733,7 +734,7 @@ export class MemWal {
             "POST",
             "/api/remember/manual",
             {
-                blob_id: opts.blobId,
+                encrypted_data: opts.encryptedData,
                 vector: opts.vector,
                 namespace: opts.namespace ?? this.namespace,
             },
@@ -792,7 +793,12 @@ export class MemWal {
      * @returns EmbedResult with vector
      */
     async embed(text: string): Promise<EmbedResult> {
-        return this.signedRequest<EmbedResult>("POST", "/api/embed", { text });
+        return this.signedRequest<EmbedResult>(
+            "POST",
+            "/api/embed",
+            { text },
+            { includeDelegateKey: false },
+        );
     }
 
     /**

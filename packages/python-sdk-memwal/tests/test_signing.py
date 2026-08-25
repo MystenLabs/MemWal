@@ -40,6 +40,31 @@ class TestHexConversion:
     def test_hex_to_bytes_no_prefix(self) -> None:
         assert hex_to_bytes("deadbeef") == bytes.fromhex("deadbeef")
 
+    def test_hex_to_bytes_strips_0X_prefix(self) -> None:
+        assert hex_to_bytes("0Xdeadbeef") == bytes.fromhex("deadbeef")
+
+    def test_hex_to_bytes_rejects_empty(self) -> None:
+        with pytest.raises(ValueError, match="empty hex string"):
+            hex_to_bytes("")
+        with pytest.raises(ValueError, match="empty hex string"):
+            hex_to_bytes("0x")
+
+    def test_hex_to_bytes_rejects_odd_length(self) -> None:
+        with pytest.raises(ValueError, match="odd-length"):
+            hex_to_bytes("abc")
+
+    def test_hex_to_bytes_rejects_whitespace_and_non_hex(self) -> None:
+        with pytest.raises(ValueError, match="non-hex"):
+            hex_to_bytes("ab  cd")
+        with pytest.raises(ValueError, match="non-hex"):
+            hex_to_bytes("ab\t\tcd")
+        with pytest.raises(ValueError, match="non-hex"):
+            hex_to_bytes("zz")
+
+    def test_hex_to_bytes_rejects_non_str(self) -> None:
+        with pytest.raises(TypeError, match="expected str"):
+            hex_to_bytes(b"deadbeef")  # type: ignore[arg-type]
+
     def test_bytes_to_hex_lowercase(self) -> None:
         assert bytes_to_hex(b"\xDE\xAD") == "dead"
 

@@ -18,6 +18,7 @@
 
 pub mod db;
 pub mod legacy_db;
+pub mod postgres_url;
 pub mod seal;
 pub mod security_delete_store;
 pub mod sui;

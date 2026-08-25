@@ -30,6 +30,7 @@ import base64
 import json
 import logging
 import random
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -652,10 +653,21 @@ class MemWal:
             )
             for m in data.get("results", [])
         ]
+        raw_dropped = data.get("dropped_count") or 0
+        try:
+            dropped = int(raw_dropped)
+        except (TypeError, ValueError):
+            dropped = 0
         if max_distance is not None:
             memories = [m for m in memories if m.distance < max_distance]
-            return RecallResult(results=memories, total=len(memories))
-        return RecallResult(results=memories, total=data.get("total", len(memories)))
+            return RecallResult(
+                results=memories, total=len(memories), dropped_count=dropped
+            )
+        return RecallResult(
+            results=memories,
+            total=data.get("total", len(memories)),
+            dropped_count=dropped,
+        )
 
     async def analyze(
         self,
@@ -774,6 +786,7 @@ class MemWal:
             "POST",
             "/api/embed",
             {"text": text},
+            include_seal_session=False,
         )
         return EmbedResult(vector=list(data.get("vector", [])))
 
@@ -892,6 +905,7 @@ class MemWal:
             deprecations=data.get("deprecations"),
             build=data.get("build"),
             mode=data.get("mode"),
+            write_ready=data.get("write_ready"),
         )
 
     async def compatibility(self) -> Dict[str, Any]:
@@ -906,11 +920,12 @@ class MemWal:
     async def remember_manual(self, opts: RememberManualOptions) -> RememberManualResult:
         """Remember (manual mode).
 
-        User handles SEAL encrypt, embedding, and Walrus upload externally.
-        Server only stores the vector <-> blobId mapping.
+        User handles SEAL encrypt and embedding. The relayer uploads the
+        encrypted bytes to Walrus and stores the vector mapping.
 
         Args:
-            opts: :class:`RememberManualOptions` with blob_id, vector, and optional namespace.
+            opts: :class:`RememberManualOptions` with encrypted_data (base64),
+                vector, and optional namespace.
 
         Returns:
             :class:`RememberManualResult` with id, blob_id, owner, namespace.
@@ -919,7 +934,7 @@ class MemWal:
             "POST",
             "/api/remember/manual",
             {
-                "blob_id": opts.blob_id,
+                "encrypted_data": opts.encrypted_data,
                 "vector": opts.vector,
                 "namespace": opts.namespace or self._namespace,
             },
@@ -1233,6 +1248,15 @@ class MemWalClockDriftError(MemWalError):
     pass
 
 
+def _redact_internal_urls(text: str) -> str:
+    return re.sub(
+        r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s)\]>'\"]*",
+        "[internal]",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
 class _HttpStatusError(MemWalError):
     """Internal: raised when an HTTP response status is not in ``accepted_statuses``.
 
@@ -1245,7 +1269,9 @@ class _HttpStatusError(MemWalError):
         if status == 401:
             super().__init__(AUTH_REJECTED_MESSAGE)
         else:
-            super().__init__(f"Walrus Memory API error ({status}): {body}")
+            super().__init__(
+                f"Walrus Memory API error ({status}): {_redact_internal_urls(body)}"
+            )
         self.status = status
         self.body = body
 
@@ -1263,7 +1289,7 @@ class MemWalRememberJobFailed(MemWalError):
     """The async remember job reached terminal status=failed."""
 
     def __init__(self, job_id: str, error: str) -> None:
-        super().__init__(f"remember job failed: {error}")
+        super().__init__(f"remember job failed: {_redact_internal_urls(error)}")
         self.status = 500
         self.job_id = job_id
         self.error = error

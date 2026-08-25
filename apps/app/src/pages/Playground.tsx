@@ -5,7 +5,7 @@
  * that executes the call against a live server using the real SDK.
  */
 
-import { useState, useCallback, useMemo, type ReactNode } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { LayoutDashboard, LogOut } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -188,7 +188,46 @@ export default function Playground() {
     // SDK Instance — created from delegate key
     // ============================================================
 
-    const [namespace, setNamespace] = useState('default')
+    const initialQueryNamespace = useMemo(() => {
+        if (typeof window === 'undefined') return null
+        const value = new URLSearchParams(window.location.search).get('namespace')?.trim()
+        return value || null
+    }, [])
+    const consumedQueryNamespace = useRef(false)
+    const [hydratedAccountId, setHydratedAccountId] = useState<string | null>(null)
+    const [namespace, setNamespace] = useState(() => {
+        if (initialQueryNamespace) return initialQueryNamespace
+        if (typeof window === 'undefined' || !accountObjectId) return 'default'
+        return window.localStorage.getItem(`memwal.playground.namespace.${accountObjectId}`) || 'default'
+    })
+
+    const persistNamespace = useCallback((accountId: string, value: string) => {
+        window.localStorage.setItem(`memwal.playground.namespace.${accountId}`, value)
+    }, [])
+
+    useEffect(() => {
+        if (!accountObjectId) {
+            setHydratedAccountId(null)
+            return
+        }
+        if (initialQueryNamespace && !consumedQueryNamespace.current) {
+            consumedQueryNamespace.current = true
+            setNamespace(initialQueryNamespace)
+            persistNamespace(accountObjectId, initialQueryNamespace)
+            const url = new URL(window.location.href)
+            url.searchParams.delete('namespace')
+            window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
+        } else {
+            const saved = window.localStorage.getItem(`memwal.playground.namespace.${accountObjectId}`)
+            setNamespace(saved || 'default')
+        }
+        setHydratedAccountId(accountObjectId)
+    }, [accountObjectId, initialQueryNamespace, persistNamespace])
+
+    useEffect(() => {
+        if (!accountObjectId || hydratedAccountId !== accountObjectId) return
+        persistNamespace(accountObjectId, namespace)
+    }, [accountObjectId, hydratedAccountId, namespace, persistNamespace])
 
     const memwal = useMemo(() => {
         if (!delegateKey || !accountObjectId) return null

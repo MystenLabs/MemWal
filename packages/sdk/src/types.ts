@@ -87,6 +87,8 @@ export interface RecallResult {
      * unaffected.
      */
     meta?: RecallTokenMeta;
+    /** Matches omitted because blob download or decrypt failed. Omitted when 0. */
+    dropped_count?: number;
 }
 
 /**
@@ -277,6 +279,8 @@ export interface HealthResult extends Partial<RelayerVersionMetadata> {
     version: string;
     /** "production" or "benchmark" when returned by modern relayers. */
     mode?: string;
+    /** False when writes are not ready; omit means the relayer did not report it. */
+    write_ready?: boolean;
     prompt_versions?: {
         extract: string;
         ask: string;
@@ -320,8 +324,8 @@ export interface RelayerVersionMetadata {
 
 /** Options for rememberManual() on MemWal class */
 export interface RememberManualOptions {
-    /** Walrus blob ID (user already uploaded encrypted data) */
-    blobId: string;
+    /** Base64-encoded SEAL-encrypted bytes. The relayer uploads them to Walrus. */
+    encryptedData: string;
     /** Embedding vector (user already generated) */
     vector: number[];
     /** Namespace (default: config namespace or "default") */

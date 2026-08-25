@@ -23,11 +23,18 @@ export function registerHealthTool(
         },
         wrapTool<Record<string, never>>(async () => {
             const result = await session.memwal.health();
+            const extra = result as { write_ready?: boolean };
+            const writeNote =
+                extra.write_ready === false
+                    ? " write_ready=false (relayer is up; encryption sidecar did not answer health)"
+                    : extra.write_ready === true
+                      ? " write_ready=true"
+                      : "";
             return {
                 content: [
                     {
                         type: "text",
-                        text: `Walrus Memory is reachable. status=${result.status} version=${result.version}`,
+                        text: `Walrus Memory is reachable. status=${result.status} version=${result.version}${writeNote}`,
                     },
                 ],
             };
