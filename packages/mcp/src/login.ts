@@ -22,7 +22,13 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import open from "open";
 
 import type { MemWalCredentials } from "./auth.js";
-import { saveCreds, formatReplacementNotice, formatPendingSignInWarning } from "./auth.js";
+import {
+    saveCreds,
+    formatReplacementNotice,
+    formatPendingSignInWarning,
+    savePendingLogin,
+    clearPendingLogin,
+} from "./auth.js";
 import { generateKeypair } from "./crypto.js";
 import { log, note } from "./logger.js";
 
@@ -194,6 +200,21 @@ function readBody(req: IncomingMessage, maxBytes = 16 * 1024): Promise<string> {
 export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredentials> {
     const cfg = { ...DEFAULTS, ...opts };
     const keypair = await generateKeypair();
+    // Write-ahead (WALM-332). From the moment anything can hand this public key
+    // to a browser, the private half has to survive losing this process — the
+    // browser's on-chain `add_delegate_key` costs gas and cannot be undone, and
+    // it happens strictly before the callback that would otherwise be our only
+    // chance to save the key. Persisting here, ahead of the URL, is what makes
+    // an interrupted flow recoverable instead of an orphaned paid registration.
+    savePendingLogin({
+        delegatePrivateKey: keypair.privateKeyHex,
+        delegatePublicKeyHex: keypair.publicKeyHex,
+        delegateAddress: keypair.suiAddress,
+        relayerUrl: cfg.relayerUrl,
+        label: cfg.label,
+        createdAt: new Date().toISOString(),
+        version: 1,
+    });
     // Cryptographic single-use state token. Round-trip through the browser:
     // we put it in `connectUrl`, the page echoes it back in the callback
     // payload, and we constant-time-compare on receipt. Defeats cross-origin
@@ -414,6 +435,9 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
                     version: 1,
                 };
                 const saved = saveCreds(creds);
+                // The key is durable in credentials.json now, so the
+                // write-ahead record has done its job.
+                clearPendingLogin();
                 const replacement = formatReplacementNotice(saved, creds.accountId);
                 if (replacement) note(replacement);
                 log.info("login.success", {
@@ -470,6 +494,10 @@ let inflightLogin: InflightLogin | null = null;
 export function startOrReuseLoginFlow(
     opts: LoginOptions = {},
     onSuccess?: (creds: MemWalCredentials) => Promise<void> | void,
+    /** Called when the flow fails after the caller has already been handed the
+     * URL and returned. Without this the failure is unobservable — see the
+     * catch below. */
+    onFailure?: (err: Error) => void,
 ): InflightLogin {
     if (inflightLogin) return inflightLogin;
 
@@ -497,15 +525,29 @@ export function startOrReuseLoginFlow(
         rejectUrl(err);
     });
 
-    if (onSuccess) {
+    if (onSuccess || onFailure) {
         result
             .then(async (creds) => {
-                await onSuccess(creds);
+                await onSuccess?.(creds);
             })
             .catch((err) => {
-                log.warn("login.inflight.failed", {
-                    msg: err instanceof Error ? err.message : String(err),
-                });
+                const msg = err instanceof Error ? err.message : String(err);
+                // This used to be a `warn` and nothing else, which made a
+                // background login failure invisible: `handleLocalLogin` has
+                // already returned the URL and told the client it succeeded,
+                // so without a signal here the agent waits forever on a flow
+                // that is already dead (WALM-332). Error level so it surfaces
+                // in client log views, `note` so it reaches stderr, and
+                // `onFailure` so the caller can put it in front of the agent
+                // in-band. The pending write-ahead record is deliberately left
+                // in place — the next start reports the stranded key.
+                log.error("login.inflight.failed", { msg });
+                note(`Walrus Memory sign-in failed: ${msg}`);
+                try {
+                    onFailure?.(err instanceof Error ? err : new Error(msg));
+                } catch {
+                    /* a reporting failure must not mask the original one */
+                }
             });
     }
 

@@ -587,6 +587,26 @@ async function handleLocalLogin(
                 delegateAddress: creds.delegateAddress,
             });
         },
+        // This tool call has already returned "here is your URL, go sign in",
+        // so a later failure has no response left to ride home on. Without an
+        // out-of-band notification the agent sits waiting on a flow that is
+        // already dead (WALM-332). MCP logging notifications are fire-and-
+        // forget and safe to emit at any point in the session.
+        (err) => {
+            writeStdoutMessage({
+                jsonrpc: "2.0",
+                method: "notifications/message",
+                params: {
+                    level: "error",
+                    logger: "memwal",
+                    data:
+                        `Walrus Memory sign-in did not complete: ${err.message}. ` +
+                        `Call \`memwal_login\` again to retry. If a delegate key was ` +
+                        `already registered on-chain, it will be reclaimed automatically ` +
+                        `on the next start, or can be revoked from the dashboard.`,
+                },
+            });
+        },
     );
 
     const timeoutPromise = new Promise<string>((_, reject) =>
