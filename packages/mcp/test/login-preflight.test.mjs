@@ -15,7 +15,13 @@ test("login requires a matching localhost preflight before browser approval", as
     const webUrl = "https://memory.example";
     const relayerUrl = "https://relayer.example";
     const { loginFlow } = await import(`../dist/login.js?test=${Date.now()}`);
-    const { credsPath } = await import(`../dist/auth.js?test=${Date.now()}`);
+    // No cache-busting query here: login.js's own internal `./auth.js` import
+    // always resolves to the plain, query-less specifier regardless of what
+    // query loginFlow itself was imported with. Importing auth.js with a
+    // different query would observe a separate module instance than the one
+    // saveCreds() actually runs in — the assertions below would then be
+    // watching the wrong module.
+    const { credsPath } = await import("../dist/auth.js");
     // Fail before the flow can write anywhere, not after the real file is gone.
     assert.equal(credsPath(), join(credsDir, "credentials.json"));
     let publishUrl;

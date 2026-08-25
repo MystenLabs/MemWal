@@ -106,12 +106,8 @@ function projectCredsPath(): string | null {
  * purely additive. Resolved per call rather than at module load, because the
  * working directory is not knowable at import time.
  *
- * `MEMWAL_CREDS_DIR` overrides both when set, taking priority over project and
- * global resolution alike. A test sandbox that has to be in place before the
- * first import is a requirement nothing enforces, and missing it cost a
- * developer their delegate key when `os.homedir()` read `USERPROFILE` on
- * Windows and ignored a `HOME`-only override. Resolved per call, same as the
- * rest of this function, so an already-imported module still follows it.
+ * `MEMWAL_CREDS_DIR` overrides both project and global resolution when set,
+ * and is re-read on every call.
  */
 export function credsPath(): string {
     const override = process.env.MEMWAL_CREDS_DIR;

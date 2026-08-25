@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,10 +17,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 test("MEMWAL_CREDS_DIR decides the path, whatever HOME and USERPROFILE say", async (t) => {
     const first = mkdtempSync(join(tmpdir(), "memwal-creds-a-"));
     const second = mkdtempSync(join(tmpdir(), "memwal-creds-b-"));
+    // Once the override is gone, credsPath() falls back to
+    // projectCredsPath() ?? globalCredsPath() (WALM-361), so the no-override
+    // assertion below needs a cwd with no .memwal/credentials.json above it —
+    // a .git sentinel stops the project walk here even if the OS temp dir
+    // happens to sit inside the real checkout.
+    const cwdSandbox = mkdtempSync(join(tmpdir(), "memwal-creds-cwd-"));
+    mkdirSync(join(cwdSandbox, ".git"));
     const previous = {
         creds: process.env.MEMWAL_CREDS_DIR,
         home: process.env.HOME,
         userProfile: process.env.USERPROFILE,
+        cwd: process.cwd(),
     };
     t.after(() => {
         for (const [key, value] of [
@@ -31,8 +39,10 @@ test("MEMWAL_CREDS_DIR decides the path, whatever HOME and USERPROFILE say", asy
             if (value === undefined) delete process.env[key];
             else process.env[key] = value;
         }
+        process.chdir(previous.cwd);
         rmSync(first, { recursive: true, force: true });
         rmSync(second, { recursive: true, force: true });
+        rmSync(cwdSandbox, { recursive: true, force: true });
     });
 
     const { credsPath } = await import("../dist/auth.js");
@@ -51,6 +61,7 @@ test("MEMWAL_CREDS_DIR decides the path, whatever HOME and USERPROFILE say", asy
     assert.equal(credsPath(), join(second, "credentials.json"));
 
     delete process.env.MEMWAL_CREDS_DIR;
+    process.chdir(cwdSandbox);
     assert.equal(credsPath(), join(homedir(), ".memwal", "credentials.json"));
 });
 
