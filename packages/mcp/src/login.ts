@@ -55,6 +55,19 @@ const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl">> & { label: strin
     openBrowser: true,
 };
 
+/** How long the background login listener stays bound, shared by every
+ * caller (auth-required mode and the bridge) so one env var controls the
+ * same deadline everywhere instead of each call site hard-coding its own.
+ * Override via `MEMWAL_MCP_LOGIN_TIMEOUT_MS`, mostly for tests — waiting the
+ * full 5 min to observe a failed sign-in is not a testable deadline. */
+export function resolveLoginTimeoutMs(): number {
+    const raw = process.env.MEMWAL_MCP_LOGIN_TIMEOUT_MS;
+    if (!raw) return DEFAULTS.timeoutMs;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 100) return DEFAULTS.timeoutMs;
+    return n;
+}
+
 interface CallbackPayload {
     accountId: string;
     walletAddress: string;

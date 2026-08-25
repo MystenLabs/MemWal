@@ -19,7 +19,7 @@ import { clearCreds, credsPath } from "./auth.js";
 import { TOOL_DEFINITIONS } from "./auth-required.js";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
 import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
-import { startOrReuseLoginFlow } from "./login.js";
+import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { log, note } from "./logger.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
@@ -179,7 +179,6 @@ const LOCAL_TOOLS_LIST = {
     ],
 };
 
-const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
 const URL_READY_TIMEOUT_MS = 5_000;
 
 /** Maximum silence we tolerate on the SSE stream before assuming the
@@ -577,7 +576,7 @@ async function handleLocalLogin(
             relayerUrl: config.relayerUrl,
             webUrl: config.webUrl,
             label: config.label,
-            timeoutMs: LOGIN_BG_TIMEOUT_MS,
+            timeoutMs: resolveLoginTimeoutMs(),
             openBrowser: false,
         },
         async (creds) => {

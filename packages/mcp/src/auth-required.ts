@@ -23,7 +23,7 @@
  */
 import { loadCreds, type MemWalCredentials } from "./auth.js";
 import { log } from "./logger.js";
-import { startOrReuseLoginFlow } from "./login.js";
+import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
@@ -170,21 +170,6 @@ export const TOOL_DEFINITIONS = buildToolDefinitions(true);
  * fails: keep conservative wording or the model will spam remember and get
  * a stream of auth errors. */
 export const SIGNED_OUT_TOOL_DEFINITIONS = buildToolDefinitions(false);
-
-/** Maximum time we'll keep the login HTTP listener bound after the user
- * clicks `memwal_login`. The user paces themselves — wallet popups, ledger
- * sign, MetaMask review — so we give 5 min before the port closes. */
-const DEFAULT_LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
-
-/** Override via `MEMWAL_MCP_LOGIN_TIMEOUT_MS`, mostly for tests — waiting the
- * full 5 min to observe a failed sign-in is not a testable deadline. */
-function resolveLoginTimeoutMs(): number {
-    const raw = process.env.MEMWAL_MCP_LOGIN_TIMEOUT_MS;
-    if (!raw) return DEFAULT_LOGIN_BG_TIMEOUT_MS;
-    const n = Number(raw);
-    if (!Number.isFinite(n) || n < 100) return DEFAULT_LOGIN_BG_TIMEOUT_MS;
-    return n;
-}
 
 /** How long to wait for the local listener to bind + emit its URL before we
  * give up and return an error. Should be near-instant; 5s is paranoia. */
