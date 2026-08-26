@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal-mcp
 
+## Unreleased
+
+### Fixed
+
+- Resolve the credential directory on every access instead of freezing it at module load, and let `MEMWAL_CREDS_DIR` override it. The login test sandboxed the home directory with `HOME` alone, which `os.homedir()` ignores on Windows, so running the package's test suite there wrote fixture credentials over the developer's real `~/.memwal/credentials.json` and destroyed the delegate key stored in it. (#705)
+
 ## 0.0.11
 
 ### Fixed

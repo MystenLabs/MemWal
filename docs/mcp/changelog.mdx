@@ -28,8 +28,16 @@ questions:
   - What changed in the MemWal MCP changelog?
   - When was the automatic memory plugin added to MemWal MCP?
 answer: >-
-  The latest MCP package release is 0.0.11. It makes memwal_logout actually cut the running bridge session, so memory tools stop after sign-out instead of keeping the deleted delegate key in memory. Version 0.0.10 closes out orphaned tool calls whose responses never arrive with a retryable error, injects the configured default namespace into memwal_remember_bulk calls that omit one, and sends proactive-usage instructions in the MCP initialize handshake so the model knows when to save and recall without being asked, which lazy tool loading had broken.
+  The latest MCP package release is 0.0.11. It makes memwal_logout actually cut the running bridge session, so memory tools stop after sign-out instead of keeping the deleted delegate key in memory. Version 0.0.10 closes out orphaned tool calls whose responses never arrive with a retryable error, injects the configured default namespace into memwal_remember_bulk calls that omit one, and sends proactive-usage instructions in the MCP initialize handshake so the model knows when to save and recall without being asked, which lazy tool loading had broken. An unreleased fix resolves the credential directory on every access and lets MEMWAL_CREDS_DIR override it.
 ---
+
+## Unreleased
+
+This unreleased change resolves the credential directory on every access and lets `MEMWAL_CREDS_DIR` override it.
+
+### Fixed
+
+- Resolve the credential directory on every access instead of freezing it at module load, and let `MEMWAL_CREDS_DIR` override it. The login test sandboxed the home directory with `HOME` alone, which `os.homedir()` ignores on Windows, so running the package's test suite there wrote fixture credentials over the developer's real `~/.memwal/credentials.json` and destroyed the delegate key stored in it. (#705)
 
 ## 0.0.11
 
