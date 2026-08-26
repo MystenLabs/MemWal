@@ -154,7 +154,7 @@ pub async fn recall(
     Extension(auth): Extension<AuthInfo>,
     Json(body): Json<RecallRequest>,
 ) -> Result<Json<RecallResponse>, AppError> {
-    if body.query.is_empty() {
+    if body.query.trim().is_empty() {
         return Err(AppError::BadRequest("Query cannot be empty".into()));
     }
 

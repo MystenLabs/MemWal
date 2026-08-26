@@ -2,17 +2,32 @@
 
 import {
   ArrowLeftIcon,
-  BookmarkIcon,
   CalendarIcon,
+  CopyIcon,
+  DownloadIcon,
   ExternalLinkIcon,
   FileTextIcon,
   HashIcon,
   LinkIcon,
   BrainIcon,
+  Maximize2Icon,
 } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useCallback, useState } from "react";
 import { Response } from "@/components/elements/response";
+import { toast } from "@/components/toast";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { SprintListItem } from "@/hooks/use-sprints";
+import { buildSprintMarkdown, sprintFileName } from "@/lib/sprint/markdown";
 import { cn } from "@/lib/utils";
 
 function formatDate(dateStr: string): string {
@@ -25,44 +40,89 @@ function formatDate(dateStr: string): string {
   });
 }
 
-function PureSprintDetail({
-  sprint,
-  onBack,
+function dedupeSources(sprint: SprintListItem) {
+  // Deduplicate sources by title (same source may have different IDs across sessions)
+  const rawSources = sprint.sources ?? [];
+  return rawSources.filter((s, i, arr) =>
+    arr.findIndex((o) => (o.title ?? o.sourceId) === (s.title ?? s.sourceId)) === i
+  );
+}
+
+function SprintActionButton({
+  label,
+  onClick,
+  children,
 }: {
-  sprint: SprintListItem;
-  onBack: () => void;
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
 }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={label}
+          onClick={onClick}
+          className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Copy / Download actions shared by the panel header and the expanded dialog. */
+function SprintExportActions({ sprint }: { sprint: SprintListItem }) {
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(buildSprintMarkdown(sprint));
+      toast({ type: "success", description: "Report copied as markdown" });
+    } catch {
+      toast({ type: "error", description: "Couldn't access the clipboard" });
+    }
+  }, [sprint]);
+
+  const handleDownload = useCallback(() => {
+    const blob = new Blob([buildSprintMarkdown(sprint)], {
+      type: "text/markdown",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = sprintFileName(sprint.title);
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, [sprint]);
+
+  return (
+    <>
+      <SprintActionButton label="Copy report as markdown" onClick={handleCopy}>
+        <CopyIcon className="size-4" />
+      </SprintActionButton>
+      <SprintActionButton label="Download .md" onClick={handleDownload}>
+        <DownloadIcon className="size-4" />
+      </SprintActionButton>
+    </>
+  );
+}
+
+/**
+ * The summary card + Report/Citations/Sources tabs. Extracted so the narrow
+ * side panel and the expanded dialog render the identical body.
+ */
+function SprintBody({ sprint }: { sprint: SprintListItem }) {
   const [activeSection, setActiveSection] = useState<
     "report" | "citations" | "sources"
   >("report");
 
   const citations = sprint.citations ?? [];
-
-  // Deduplicate sources by title (same source may have different IDs across sessions)
-  const rawSources = sprint.sources ?? [];
-  const sources = rawSources.filter((s, i, arr) =>
-    arr.findIndex((o) => (o.title ?? o.sourceId) === (s.title ?? s.sourceId)) === i
-  );
+  const sources = dedupeSources(sprint);
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Header with back button */}
-      <div className="flex items-center gap-2 border-b px-4 py-3">
-        <button
-          type="button"
-          onClick={onBack}
-          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        >
-          <ArrowLeftIcon className="size-4" />
-        </button>
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate text-sm font-semibold">{sprint.title}</h2>
-          <p className="text-xs text-muted-foreground">
-            {formatDate(sprint.createdAt)}
-          </p>
-        </div>
-      </div>
-
+    <>
       {/* Summary card */}
       <div className="border-b px-4 py-3">
         {sprint.summary && (
@@ -228,6 +288,74 @@ function PureSprintDetail({
           </div>
         )}
       </div>
+    </>
+  );
+}
+
+function PureSprintDetail({
+  sprint,
+  onBack,
+}: {
+  sprint: SprintListItem;
+  onBack: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Header with back button and actions */}
+      <div className="flex items-center gap-2 border-b px-4 py-3">
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <ArrowLeftIcon className="size-4" />
+        </button>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-sm font-semibold">{sprint.title}</h2>
+          <p className="text-xs text-muted-foreground">
+            {formatDate(sprint.createdAt)}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <SprintExportActions sprint={sprint} />
+          <SprintActionButton
+            label="Expand"
+            onClick={() => setExpanded(true)}
+          >
+            <Maximize2Icon className="size-4" />
+          </SprintActionButton>
+        </div>
+      </div>
+
+      <SprintBody sprint={sprint} />
+
+      {/* Expanded reading view */}
+      <Dialog open={expanded} onOpenChange={setExpanded}>
+        <DialogContent
+          className="flex h-[85dvh] max-w-3xl flex-col gap-0 p-0"
+          // Radix focuses the first focusable element on open — the Copy
+          // button — which pops its tooltip over the dialog title.
+          onOpenAutoFocus={(e) => e.preventDefault()}
+        >
+          <DialogHeader className="border-b px-4 py-3 text-left">
+            <DialogTitle className="pr-8 text-base">
+              {sprint.title}
+            </DialogTitle>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1">
+                <CalendarIcon className="size-3" />
+                {formatDate(sprint.createdAt)}
+              </span>
+              <span className="flex items-center gap-0.5">
+                <SprintExportActions sprint={sprint} />
+              </span>
+            </div>
+          </DialogHeader>
+          <SprintBody sprint={sprint} />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 /**
- * Install MemWal lifecycle hooks into ~/.codex/hooks.json and register the
+ * Fallback installer for Codex CLI builds without `codex plugin` support
+ * (pre-April 2026). Current builds should use the plugin marketplace instead:
+ * `codex plugin marketplace add MystenLabs/MemWal` + `codex plugin add
+ * memwal@memwal-plugins` (see docs/mcp/codex.md).
+ *
+ * Installs MemWal lifecycle hooks into ~/.codex/hooks.json and registers the
  * MemWal MCP server in ~/.codex/config.toml.
  *
- * Codex discovers hooks only at ~/.codex/hooks.json (or <repo>/.codex/hooks.json)
- * and has no plugin host that auto-wires hooks. This installer reads the
- * template at hooks/codex-hooks.json, rewrites the ${PLUGIN_ROOT} placeholder
- * to this plugin's absolute path, and merges the entries into ~/.codex/hooks.json.
+ * This installer reads the template at hooks/codex-hooks.json, rewrites the
+ * ${PLUGIN_ROOT} placeholder to this plugin's absolute path, and merges the
+ * entries into ~/.codex/hooks.json.
  *
  * Re-running is idempotent: entries this installer owns (identified by our
  * hook script filenames) are removed before fresh entries are added.

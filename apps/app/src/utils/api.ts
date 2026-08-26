@@ -100,3 +100,45 @@ export async function apiCall(
 
     return resp.json()
 }
+
+/**
+ * Signed GET for the owner-scoped read API. Body is empty; the signature
+ * still covers path+query, timestamp, nonce, and account id.
+ */
+export async function apiGet(
+    privateKeyHex: string,
+    serverUrl: string,
+    path: string,
+    accountId?: string,
+) {
+    const { timestamp, nonce, publicKey, signature } = await signRequest(
+        privateKeyHex,
+        'GET',
+        path,
+        '',
+        accountId ?? '',
+    )
+
+    const headers: Record<string, string> = {
+        'x-public-key': publicKey,
+        'x-signature': signature,
+        'x-timestamp': timestamp,
+        'x-nonce': nonce,
+    }
+    if (accountId) {
+        headers['x-account-id'] = accountId
+    }
+
+    const resp = await fetch(`${serverUrl}${path}`, {
+        method: 'GET',
+        headers,
+        cache: 'no-store',
+    })
+
+    if (!resp.ok) {
+        const err = await resp.text()
+        throw new Error(`API error (${resp.status}): ${err}`)
+    }
+
+    return resp.json()
+}

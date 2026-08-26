@@ -5,7 +5,7 @@ import { Suspense } from "react";
 import { getSession } from "@/lib/auth/session";
 import { Chat } from "@/components/chat/chat";
 import { DataStreamHandler } from "@/components/data/data-stream-handler";
-import { DEFAULT_CHAT_MODEL } from "@/lib/ai/models";
+import { resolveChatModelId } from "@/lib/ai/models";
 import { getChatById, getMessagesByChatId, getSprintsByIds } from "@/lib/db/queries";
 import { convertToUIMessages } from "@/lib/utils";
 
@@ -48,9 +48,7 @@ async function ChatPage({ params }: { params: Promise<{ id: string }> }) {
   const uiMessages = convertToUIMessages(messagesFromDb);
 
   const cookieStore = await cookies();
-  const chatModelFromCookie = cookieStore.get("chat-model");
-
-  const chatModel = chatModelFromCookie?.value ?? DEFAULT_CHAT_MODEL;
+  const chatModel = resolveChatModelId(cookieStore.get("chat-model")?.value);
 
   // Fetch sprint data if chat has associated sprints
   const sprintIds = chat.sprintIds ?? [];
@@ -71,7 +69,13 @@ async function ChatPage({ params }: { params: Promise<{ id: string }> }) {
   return (
     <>
       <Chat
-        autoResume={true}
+        // Resumable streaming is not implemented — api/chat/[id]/stream is a
+        // stub that always returns 204. With autoResume on, reopening a chat
+        // whose last message is from the user fired resumeStream() against
+        // that stub; overlapping attempts (easy under dev double-effects) race
+        // inside AI SDK 6.0.37 and throw "Cannot read properties of undefined
+        // (reading 'state')". Re-enable only once the stream route is real.
+        autoResume={false}
         id={chat.id}
         initialChatModel={chatModel}
         initialMessages={uiMessages}

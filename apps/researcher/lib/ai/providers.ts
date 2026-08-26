@@ -5,6 +5,7 @@ import {
   wrapLanguageModel,
 } from "ai";
 import { isTestEnvironment } from "../constants";
+import { TITLE_MODEL } from "./models";
 
 const THINKING_SUFFIX_REGEX = /-thinking$/;
 
@@ -31,14 +32,33 @@ export const myProvider = isTestEnvironment
   })()
   : null;
 
+function isReasoningModelId(modelId: string) {
+  return (
+    modelId.endsWith("-thinking") ||
+    (modelId.includes("reasoning") && !modelId.includes("non-reasoning"))
+  );
+}
+
+const MOCK_MODEL_IDS = new Set([
+  "chat-model",
+  "chat-model-reasoning",
+  "title-model",
+]);
+
 export function getLanguageModel(modelId: string) {
   if (isTestEnvironment && myProvider) {
-    return myProvider.languageModel(modelId);
+    // The picker sends real OpenRouter ids; the mock provider only registers
+    // its own three, so anything else must map onto them or languageModel()
+    // throws NoSuchModelError on the first test message.
+    if (MOCK_MODEL_IDS.has(modelId)) {
+      return myProvider.languageModel(modelId);
+    }
+    return myProvider.languageModel(
+      isReasoningModelId(modelId) ? "chat-model-reasoning" : "chat-model"
+    );
   }
 
-  const isReasoningModel =
-    modelId.endsWith("-thinking") ||
-    (modelId.includes("reasoning") && !modelId.includes("non-reasoning"));
+  const isReasoningModel = isReasoningModelId(modelId);
 
   if (isReasoningModel) {
     const gatewayModelId = modelId.replace(THINKING_SUFFIX_REGEX, "");
@@ -56,7 +76,7 @@ export function getTitleModel() {
   if (isTestEnvironment && myProvider) {
     return myProvider.languageModel("title-model");
   }
-  return openrouter.chat("google/gemini-2.0-flash-001");
+  return openrouter.chat(TITLE_MODEL);
 }
 
 /** OpenRouter embedding model for source chunk embeddings */
