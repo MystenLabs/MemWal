@@ -78,6 +78,13 @@ jobs:
       - name: Check docs code references against the packages
         run: node scripts/check-docs-code-sync.mjs
 
+      # Snippets marked <!-- memwal:import path#Symbol --> are extracted from
+      # the workspace rather than copied. This re-extracts them and fails if
+      # the committed block no longer matches its source, so a rename or a
+      # changed field cannot leave a docs page quietly wrong.
+      - name: Check imported docs snippets match their source
+        run: node scripts/sync-docs-code.mjs --check
+
   docs-freshness:
     name: Docs / Freshness
     if: github.event_name != 'schedule'

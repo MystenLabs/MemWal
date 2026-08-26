@@ -1,5 +1,5 @@
 ---
-title: "API Reference"
+title: API Reference
 description: >-
   Complete API reference for the Walrus Memory SDK, including method signatures, config fields, and return types for MemWal, MemWalManual, withMemWal, account management, and utility functions.
 keywords:
@@ -44,10 +44,10 @@ MemWal.create(config: MemWalConfig): MemWal
 
 Config:
 
-| Property | Type | Required | Default | Notes |
+| **Property** | **Type** | **Required** | **Default** | **Notes** |
 | --- | --- | --- | --- | --- |
-| `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
-| `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
+| `key` | `string` | Yes | none | Ed25519 delegate private key in hex |
+| `accountId` | `string` | Yes | none | MemWalAccount object ID on Sui |
 | `serverUrl` | `string` | No | `https://relayer.memory.walrus.xyz` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
 
@@ -55,18 +55,23 @@ For the full config surface, see [Configuration](/reference/configuration).
 
 ## `MemWal` Methods
 
+You can call these methods on any client that `MemWal.create()` returns.
+
 ### `remember(text, namespace?): Promise<RememberAcceptedResult>`
 
-Submit one memory through the relayer. The method returns after the relayer creates a background job; embedding, SEAL encryption, Walrus upload, and vector indexing continue asynchronously.
+Submit one memory through the relayer. The method returns after the relayer creates a background job; embedding, Seal encryption, Walrus upload, and vector indexing continue asynchronously.
 
 **Returns:**
 
+{/* memwal:import packages/sdk/src/types.ts#RememberAcceptedResult */}
 ```ts
-{
-  job_id: string; // Polling id
-  status: string; // Usually "running"
+/** Result from remember() / rememberAsync() */
+export interface RememberAcceptedResult {
+    job_id: string;
+    status: string;
 }
 ```
+{/* /memwal:import */}
 
 ### `rememberAndWait(text, namespace?, opts?): Promise<RememberResult>`
 
@@ -74,15 +79,20 @@ Submit one memory and poll until the background job completes.
 
 **Returns:**
 
+{/* memwal:import packages/sdk/src/types.ts#RememberResult */}
 ```ts
-{
-  id: string;        // Stable job id/vector row id
-  job_id: string;    // Polling id
-  blob_id: string;   // Walrus blob ID
-  owner: string;     // Owner Sui address
-  namespace: string; // Namespace used
+/** Result from rememberAndWait() / waitForRememberJob() */
+export interface RememberResult {
+    /** Stable server job_id used as the vector row id. */
+    id: string;
+    /** Async job id returned by remember(). */
+    job_id?: string;
+    blob_id: string;
+    owner: string;
+    namespace: string;
 }
 ```
+{/* /memwal:import */}
 
 ### `waitForRememberJob(jobId, opts?): Promise<RememberResult>`
 
@@ -94,13 +104,16 @@ Submit up to 20 memories in one request and return the accepted job IDs immediat
 
 **Returns:**
 
+{/* memwal:import packages/sdk/src/types.ts#RememberBulkAcceptedResult */}
 ```ts
-{
-  job_ids: string[];
-  total: number;
-  status: string; // Usually "running"
+/** Result from rememberBulk() / rememberBulkAsync() */
+export interface RememberBulkAcceptedResult {
+    job_ids: string[];
+    total: number;
+    status: string;
 }
 ```
+{/* /memwal:import */}
 
 ### `rememberBulkAndWait(items, opts?): Promise<RememberBulkResult>`
 
@@ -128,7 +141,7 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 }
 ```
 
-`distance` is cosine distance — lower is more similar.
+`distance` is cosine distance, so lower values mean a closer match.
 
 ### `analyze(text, namespace?): Promise<AnalyzeResult>`
 
@@ -154,7 +167,7 @@ Use `analyzeAndWait(text, namespace?, opts?)` to wait for every extracted fact j
 
 ### `restore(namespace, limit?): Promise<RestoreResult>`
 
-Rebuild missing indexed entries for one namespace from Walrus. Incremental — only re-indexes blobs that aren't already in the local database.
+Rebuild missing indexed entries for one namespace from Walrus. This runs incrementally: it re-indexes only the blobs your local database does not already hold.
 
 - `limit` defaults to `10`
 
@@ -172,7 +185,7 @@ Rebuild missing indexed entries for one namespace from Walrus. Incremental — o
 
 ### `health(): Promise<HealthResult>`
 
-Check relayer health. Does not require authentication — a successful response confirms the relayer is reachable, not that your `key`/`accountId` are valid. A signed call (e.g. `remember()`, `recall()`) can still fail with `401` immediately after a passing `health()`.
+Check relayer health. You do not need authentication, so a successful response confirms only that the relayer answers, not that your `key` and `accountId` work. A signed call such as `remember()` or `recall()` can still fail with `401` immediately after a passing `health()`.
 
 **Returns:** `{ status: string, version: string, relayerVersion?: string, apiVersion?: string, minSupportedSdk?: ... }`
 
@@ -188,7 +201,7 @@ Return the hex-encoded public key for the current delegate key.
 
 These exist on the `MemWal` class for advanced use cases:
 
-| Method | Description |
+| **Method** | **Description** |
 |--------|-------------|
 | `rememberManual({ encryptedData, vector, namespace? })` | Send SEAL-encrypted bytes + a pre-computed vector; the relayer uploads to Walrus |
 | `recallManual({ vector, limit?, namespace? })` | Search with a pre-computed query vector (returns blob IDs, no decryption) |
@@ -204,26 +217,26 @@ See [MemWalManual usage](/sdk/usage/memwal-manual) for the full setup and flow d
 
 ### `rememberManual(text, namespace?): Promise<RememberManualResult>`
 
-Embed locally, SEAL encrypt locally, send encrypted payload + vector to relayer for Walrus upload and vector registration.
+Embed locally, Seal encrypt locally, then send the encrypted payload and vector to the relayer for Walrus upload and vector registration.
 
 ### `recallManual(query, limit?, namespace?): Promise<RecallManualResult>`
 
-Embed locally, search via relayer, download from Walrus, SEAL decrypt locally. Returns decrypted text results.
+Embed locally, search through the relayer, download from Walrus, then Seal decrypt locally. Returns decrypted text results.
 
 ### `restore(namespace, limit?): Promise<RestoreResult>`
 
-Same as `MemWal.restore()` — delegates to the relayer.
+Same as `MemWal.restore()`, which delegates to the relayer.
 
 ### `isWalletMode: boolean`
 
-Whether this client uses a connected wallet signer (vs. raw keypair).
+Whether this client uses a connected wallet signer rather than a raw keypair.
 
 ### Config notes
 
 - `suiNetwork` defaults to `mainnet`
-- `sealServerConfigs` lets the client configure independent or committee SEAL servers; committee entries require `aggregatorUrl`
+- `sealServerConfigs` lets the client configure independent or committee Seal servers; committee entries require `aggregatorUrl`
 - `sealKeyServers` remains supported as a legacy independent key server object ID override
-- All `@mysten/*` peer dependencies are loaded dynamically — only needed if you use `MemWalManual`
+- All `@mysten/*` peer dependencies load dynamically, so you need them only when you use `MemWalManual`
 
 ## `withMemWal`
 
@@ -245,7 +258,7 @@ Wraps a Vercel AI SDK model with automatic memory recall and save.
 
 **Options** (extends `MemWalConfig`):
 
-| Option | Default | Description |
+| **Option** | **Default** | **Description** |
 |--------|---------|-------------|
 | `maxMemories` | `5` | Max memories to inject per request |
 | `autoSave` | `true` | Auto-save new facts from conversation |
@@ -265,10 +278,10 @@ import {
 } from "@mysten-incubation/memwal/account";
 ```
 
-| Function | Description |
+| **Function** | **Description** |
 |----------|-------------|
 | `generateDelegateKey()` | Generate a new Ed25519 keypair (returns `privateKey`, `publicKey`, `suiAddress`) |
-| `createAccount(opts)` | Create a new MemWalAccount on-chain (one per Sui address) |
+| `createAccount(opts)` | Create a new MemWalAccount onchain (one per Sui address) |
 | `addDelegateKey(opts)` | Add a delegate key to an account (owner only) |
 | `removeDelegateKey(opts)` | Remove a delegate key from an account (owner only) |
 
@@ -280,7 +293,7 @@ import {
 import { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "@mysten-incubation/memwal";
 ```
 
-| Function | Description |
+| **Function** | **Description** |
 |----------|-------------|
 | `delegateKeyToSuiAddress(privateKeyHex)` | Derive the Sui address from a delegate private key |
 | `delegateKeyToPublicKey(privateKeyHex)` | Get the 32-byte public key from a delegate private key |
