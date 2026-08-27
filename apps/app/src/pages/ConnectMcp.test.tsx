@@ -95,7 +95,30 @@ describe('MCP sign-in hand-off', () => {
         expect(await screen.findByText(/Almost there/i)).toBeInTheDocument()
         expect(screen.queryByText(/MCP client connected/i)).not.toBeInTheDocument()
         expect(screen.getByText(/Nothing answered on your computer/i)).toBeInTheDocument()
+        expect(screen.getByText(/stopped waiting after this tab was already open/i)).toBeInTheDocument()
+        expect(screen.queryByText(/opened too late/i)).not.toBeInTheDocument()
         expect(screen.getByText(/second attempt usually works/i)).toBeInTheDocument()
+    })
+
+    it('explains an expired link when preflight cannot reach the listener', async () => {
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL) => {
+                const url = String(input)
+                if (url.endsWith('/preflight')) throw new TypeError('Failed to fetch')
+                throw new Error(`unexpected fetch: ${url}`)
+            }),
+        )
+        const query = `?port=${PORT}&publicKey=${PUBLIC_KEY}&relayer=${encodeURIComponent(RELAYER)}&connectState=${STATE}`
+        render(
+            <MemoryRouter initialEntries={[`/connect/mcp${query}`]}>
+                <ConnectMcp />
+            </MemoryRouter>,
+        )
+
+        expect(await screen.findByText(/opened too late/i)).toBeInTheDocument()
+        expect(screen.getByText(/Something went wrong/i)).toBeInTheDocument()
+        expect(screen.queryByText(/Almost there/i)).not.toBeInTheDocument()
     })
 
     it('tells a refused hand-off apart from an absent one', async () => {

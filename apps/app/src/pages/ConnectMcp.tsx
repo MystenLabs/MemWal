@@ -201,10 +201,13 @@ export default function ConnectMcp() {
             } catch (error) {
                 if (controller.signal.aborted) return
                 setVerifiedBridge(null)
+                const openedTooLate = error instanceof TypeError
                 setErrorMsg(
-                    error instanceof Error
-                        ? error.message
-                        : 'Could not verify the local MCP bridge.',
+                    openedTooLate
+                        ? 'Nothing answered on your computer. Sign-in links stop working after five minutes, so most often the link was simply opened too late.'
+                        : error instanceof Error
+                          ? error.message
+                          : 'Could not verify the local MCP bridge.',
                 )
                 setStep('error')
                 trackEvent('mcp_connect_failed', { error_type: 'bridge_preflight_failed' })
@@ -590,7 +593,7 @@ function SuccessCard({
                     </p>
                     <p className="setup-classic-description">
                         {callbackOutcome === 'unreachable'
-                            ? 'Nothing answered on your computer. Sign-in links stop working after five minutes, so most often the link was simply opened too late.'
+                            ? 'Nothing answered on your computer. The app stopped waiting after this tab was already open, which usually means the wallet prompt sat through the deadline, the MCP client restarted, or the login command was cancelled.'
                             : 'The app on your computer turned down the hand-off. That usually means a newer sign-in was started while this tab was still open.'}
                     </p>
                     <p className="setup-classic-description">

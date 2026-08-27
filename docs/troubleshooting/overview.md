@@ -82,7 +82,6 @@ This section covers problems that appear before the memory tools work.
 
 **Cause:** Signing in has two halves. Your browser registers a delegate key onchain, then sends that key back to a short-lived listener the MCP package runs on `127.0.0.1`. The first half succeeded and does not need repeating; the second is what failed. The usual reasons:
 
-- The sign-in URL sat unopened for more than five minutes, so the listener timed out and stopped.
 - The MCP client restarted, or the login command was cancelled, while the browser tab was still open.
 - A second `memwal_login` was started in the meantime, so the listener now belongs to a different attempt.
 - Local software such as a firewall, a VPN client, or a browser extension blocks requests from a website to `127.0.0.1`.
