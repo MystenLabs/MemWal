@@ -7,6 +7,10 @@
 - `recall()` results include optional `created_at` (RFC3339 write-time of the stored fact).
 - `RecallOptions` accepts `sort: "relevance" | "recent"` and `scoringWeights`. `sort: "recent"` over-fetches semantic candidates (5x `limit`, capped at 50), orders them by write-time descending, then truncates to `limit`.
 
+### Fixed
+
+- HTTP 503 from the relayer is reported as a retryable upstream outage, not a sign-in failure. Empty-body 401s still point at `memwal_login`.
+
 ## 0.1.5
 
 ### Added

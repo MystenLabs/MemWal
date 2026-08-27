@@ -97,6 +97,10 @@ AUTH_REJECTED_MESSAGE = (
     "and dashboard credentials. Full troubleshooting: "
     "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
+UPSTREAM_UNAVAILABLE_MESSAGE = (
+    "Walrus Memory temporarily cannot verify credentials (upstream unavailable). "
+    "Retry; this is not a sign-in failure."
+)
 
 
 logger = logging.getLogger("memwal")
@@ -1331,6 +1335,8 @@ class _HttpStatusError(MemWalError):
     def __init__(self, status: int, body: str) -> None:
         if status == 401:
             super().__init__(AUTH_REJECTED_MESSAGE)
+        elif status == 503:
+            super().__init__(UPSTREAM_UNAVAILABLE_MESSAGE)
         else:
             super().__init__(
                 f"Walrus Memory API error ({status}): {_redact_internal_urls(body)}"

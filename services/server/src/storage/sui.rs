@@ -998,6 +998,19 @@ impl std::fmt::Display for OnchainVerifyError {
 
 impl std::error::Error for OnchainVerifyError {}
 
+impl OnchainVerifyError {
+    /// True when the chain could not be consulted, as opposed to a definitive
+    /// "this key is not registered / this account is dead" answer.
+    ///
+    /// HTTP signed auth and the MCP proxy must not treat these as a revoke:
+    /// a Sui gRPC 429 is `RpcError`, and logging it as "revoked on-chain"
+    /// produced intermittent empty 401s that the SDK mapped to memwal_login
+    /// (WALM-429).
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::RpcError(_) | Self::ScanCapExceeded(_))
+    }
+}
+
 /// Reject any object whose Move type is not
 /// `{type-origin-package}::account::MemWalAccount`. Sui preserves the original
 /// publish/type-origin id across package upgrades, so this must never be the
@@ -1316,6 +1329,11 @@ mod tests {
             OnchainVerifyError::AccountDeactivated(_)
         ));
         assert!(matches!(not_found, OnchainVerifyError::KeyNotFound(_)));
+        assert!(!deactivated.is_unavailable());
+        assert!(!not_found.is_unavailable());
+        assert!(OnchainVerifyError::RpcError("429".into()).is_unavailable());
+        assert!(OnchainVerifyError::ScanCapExceeded("cap".into()).is_unavailable());
+        assert!(!OnchainVerifyError::WrongObjectType("type".into()).is_unavailable());
     }
 
     // ── Deactivated account field parsing ────────────────────────

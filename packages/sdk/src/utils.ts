@@ -321,6 +321,18 @@ export function sanitizeServerError(
         };
     }
 
+    // Relayer 503 = Sui RPC/gRPC could not be consulted (WALM-429). This is
+    // retryable and is not a sign-in failure — do not send callers to
+    // memwal_login.
+    if (Number(status) === 503) {
+        return {
+            message:
+                "Walrus Memory temporarily cannot verify credentials (upstream unavailable). Retry; this is not a sign-in failure.",
+            raw: rawBody,
+            serverCode: "UPSTREAM_UNAVAILABLE",
+        };
+    }
+
     const MAX = 200;
     let serverCode: string | undefined;
     let text = rawBody;

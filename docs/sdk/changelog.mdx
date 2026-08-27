@@ -28,17 +28,21 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.6. It adds optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`. 0.1.5 added `dropped_count` on recall results and `write_ready` on health, switched `rememberManual` to sending `encryptedData`, and hardened hex decoding and error redaction.
+  The latest TypeScript SDK release is 0.1.6. It adds optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`. HTTP 503 from the relayer is reported as a retryable upstream outage instead of a sign-in failure. 0.1.5 added `dropped_count` on recall results and `write_ready` on health, switched `rememberManual` to sending `encryptedData`, and hardened hex decoding and error redaction.
 ---
 
 ## 0.1.6
 
-This release adds write-time on recall results and lets callers sort by recency or pass scoring weights.
+This release adds write-time on recall results, lets callers sort by recency or pass scoring weights, and stops mapping relayer 503s to a sign-in failure.
 
 ### Added
 
 - `recall()` results include optional `created_at` (RFC3339 write-time of the stored fact).
 - `RecallOptions` accepts `sort: "relevance" | "recent"` and `scoringWeights`. `sort: "recent"` over-fetches semantic candidates (5x `limit`, capped at 50), orders them by write-time descending, then truncates to `limit`.
+
+### Fixed
+
+- HTTP 503 from the relayer is reported as a retryable upstream outage, not a sign-in failure. Empty-body 401s still point at `memwal_login`.
 
 ## 0.1.5
 

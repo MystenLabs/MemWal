@@ -35,6 +35,20 @@ test("non-401 empty bodies still use the <no message> placeholder", () => {
     assert.equal(message, "Walrus Memory server error (500): <no message>");
 });
 
+test("503 is retryable upstream unavailability, not a login hint", () => {
+    const { message, serverCode } = sanitizeServerError(503, "upstream unavailable");
+    assert.equal(serverCode, "UPSTREAM_UNAVAILABLE");
+    assert.match(message, /not a sign-in failure/);
+    assert.doesNotMatch(message, /memwal_login/);
+});
+
+test("empty-body 503 still avoids the memwal_login copy", () => {
+    const { message, serverCode } = sanitizeServerError(503, "");
+    assert.equal(serverCode, "UPSTREAM_UNAVAILABLE");
+    assert.doesNotMatch(message, /memwal_login/);
+    assert.doesNotMatch(message, /isn't signed in/);
+});
+
 test("localhost sidecar URLs are stripped from error text", () => {
     const { message } = sanitizeServerError(
         500,

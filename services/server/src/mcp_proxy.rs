@@ -186,9 +186,8 @@ async fn legacy_delegate_registered(
     .await
     {
         Ok(_) => McpAuthOutcome::Passthrough,
-        Err(crate::storage::sui::OnchainVerifyError::RpcError(msg))
-        | Err(crate::storage::sui::OnchainVerifyError::ScanCapExceeded(msg)) => {
-            tracing::warn!(error = %msg, "mcp delegate on-chain verify unavailable");
+        Err(err) if err.is_unavailable() => {
+            tracing::warn!(error = %err, "mcp delegate on-chain verify unavailable");
             McpAuthOutcome::Unavailable
         }
         Err(err) => {
