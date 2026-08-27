@@ -346,8 +346,26 @@ export default function Playground() {
             // after the walrus write certifies, then 'done' once the
             // meta-transfer + blob_id is committed.
             const TIMEOUT_MS = 90_000
-            const POLL_MS = 1500
+            const POLL_BASE_MS = 1500
             const deadline = Date.now() + TIMEOUT_MS
+
+            // Back off the way the SDK's waitForRememberJob does
+            // (pollingDelayMs in packages/sdk/src/memwal.ts). A flat 1.5s
+            // interval is 40 polls per minute, and GET /api/remember/{job_id}
+            // costs 1 weighted request against a 30/min delegate-key budget
+            // that the accepting POST already spent 5 of. A remember slow
+            // enough to need ~40s of polling therefore 429s on its own poll
+            // loop, with no retry and nothing wrong with the job. The loop
+            // stays hand-rolled so every intermediate status still reaches
+            // the UI; only the cadence changes.
+            const pollDelayMs = (attempt: number) => {
+                const capped = Math.min(
+                    10_000,
+                    POLL_BASE_MS * 1.5 ** Math.min(attempt, 6)
+                )
+                const jitter = 0.75 + Math.random() * 0.5
+                return Math.floor(capped * jitter)
+            }
 
             let lastStatus = accepted.status
             const transitions: Array<{ status: string; tSec: string }> = [
@@ -364,7 +382,8 @@ export default function Playground() {
                 setRememberResult(
                     `${acceptedBlock}\n\n` +
                         `// 2. polling /api/remember/${accepted.job_id} ` +
-                        `every ${POLL_MS}ms (max ${TIMEOUT_MS / 1000}s)\n` +
+                        `every ${POLL_BASE_MS}ms, backing off to 10s ` +
+                        `(max ${TIMEOUT_MS / 1000}s)\n` +
                         `${ladder}\n\n` +
                         `// current (T+${elapsed()}s)\n${tail}`
                 )
@@ -375,8 +394,11 @@ export default function Playground() {
             // serial requests so we don't pile up retries when the server
             // is briefly slow.
             let terminal: RememberJobStatus | null = null
+            let pollAttempt = 0
             while (Date.now() < deadline && !terminal) {
-                await new Promise((r) => setTimeout(r, POLL_MS))
+                await new Promise((r) =>
+                    setTimeout(r, pollDelayMs(pollAttempt++))
+                )
                 const current = await memwal.getRememberStatus(
                     accepted.job_id
                 )
@@ -764,15 +786,18 @@ const accepted = await memwal.rememberAsync(
 )
 // namespace: "${namespace || 'default'}"
 
-// 2. poll signed GET /api/remember/{job_id} every 1.5s.
+// 2. poll signed GET /api/remember/{job_id}, backing off.
 // Each call surfaces the current state (pending →
-// running → uploaded → done). Use waitForRememberJob
-// instead if you only need the terminal result.
-while (true) {
+// running → uploaded → done). Each poll costs 1 of the
+// 30 weighted-req/min delegate-key budget, so poll at a
+// flat interval and a slow job 429s on its own loop.
+// Use waitForRememberJob (it backs off for you) if you
+// only need the terminal result.
+for (let attempt = 0; ; attempt++) {
   const s = await memwal.getRememberStatus(accepted.job_id)
   if (s.status === "done")   { return s }
   if (s.status === "failed") { throw new Error(s.error) }
-  await sleep(1500)
+  await sleep(Math.min(10_000, 1500 * 1.5 ** Math.min(attempt, 6)))
 }`}
                     onRun={runRemember}
                     result={rememberResult}
