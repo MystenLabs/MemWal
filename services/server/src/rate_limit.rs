@@ -118,6 +118,13 @@ impl RateLimitConfig {
     }
 }
 
+/// Sliding-window lower bounds shared by the live limiter and post-hoc
+/// `charge_explicit_weight`. Passing `now` as `window_start` would prune
+/// every in-window Redis member before inserting the extra charge.
+fn sliding_window_starts(now: f64) -> (f64, f64, f64) {
+    (now - 60_000.0, now - 60_000.0, now - 3_600_000.0)
+}
+
 // ============================================================
 // Cost Weights — per endpoint
 // ============================================================
@@ -448,9 +455,7 @@ pub async fn rate_limit_middleware(
     let burst_key = format!("rate:{}", auth.owner);
     let hourly_key = format!("rate:hr:{}", auth.owner);
 
-    let dk_window_start = now - 60_000.0; // 1-min window (ms)
-    let burst_window_start = now - 60_000.0; // 1-min window (ms)
-    let hourly_window_start = now - 3_600_000.0; // 1-hr  window (ms)
+    let (dk_window_start, burst_window_start, hourly_window_start) = sliding_window_starts(now);
 
     // --- Atomic check-and-record via Lua script for all 3 layers ---
     // Each layer is checked+recorded atomically. If Redis is unavailable,
@@ -1078,28 +1083,45 @@ pub async fn charge_explicit_weight(
 
     let mut redis = state.redis.clone();
     let now = chrono::Utc::now().timestamp_millis() as f64;
+    let (dk_window_start, burst_window_start, hourly_window_start) = sliding_window_starts(now);
 
     let dk_key = format!("rate:dk:{}", auth.public_key);
     let burst_key = format!("rate:{}", auth.owner);
     let hr_key = format!("rate:hr:{}", auth.owner);
 
-    // Use the same atomic Lua script for explicit weight charges
-    // (called from /api/analyze after fact count is known).
-    // Ignore WindowCheckResult here — this is a post-hoc charge after
-    // the expensive work is done; we prefer not to block the response.
-    let _ = check_and_record_window(&mut redis, &dk_key, now, now, i64::MAX, weight, 120).await;
+    // Same sliding windows as the live limiter so this post-hoc charge
+    // cannot prune in-window history. Limit is i64::MAX — we never deny
+    // after the work is already done.
     let _ = check_and_record_window(
         &mut redis,
-        &burst_key,
+        &dk_key,
+        dk_window_start,
         now,
-        now + 0.1,
         i64::MAX,
         weight,
         120,
     )
     .await;
-    let _ =
-        check_and_record_window(&mut redis, &hr_key, now, now + 0.2, i64::MAX, weight, 3700).await;
+    let _ = check_and_record_window(
+        &mut redis,
+        &burst_key,
+        burst_window_start,
+        now,
+        i64::MAX,
+        weight,
+        120,
+    )
+    .await;
+    let _ = check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hourly_window_start,
+        now,
+        i64::MAX,
+        weight,
+        3700,
+    )
+    .await;
 
     Ok(())
 }
@@ -1833,6 +1855,16 @@ mod tests {
     fn test_endpoint_weight_no_regression() {
         // Double trailing slash should also normalize
         assert_eq!(endpoint_weight("/api/analyze//"), 5);
+    }
+
+    #[test]
+    fn charge_windows_match_live_limiter_not_now() {
+        let now = 1_700_000_000_000.0;
+        let (dk, burst, hourly) = sliding_window_starts(now);
+        assert_eq!(dk, now - 60_000.0);
+        assert_eq!(burst, now - 60_000.0);
+        assert_eq!(hourly, now - 3_600_000.0);
+        assert!(dk < now && burst < now && hourly < now);
     }
 
     #[test]

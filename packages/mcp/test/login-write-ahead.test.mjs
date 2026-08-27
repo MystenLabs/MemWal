@@ -20,7 +20,14 @@ const RELAYER = "https://relayer.example";
 
 function freshHome() {
     const home = mkdtempSync(join(tmpdir(), "memwal-writeahead-"));
+    // HOME alone is not a sandbox. os.homedir() reads USERPROFILE on Windows
+    // and ignores HOME, and credsPath() checks for a project-local .memwal
+    // above the working directory before it ever consults the home directory —
+    // which here is the real checkout. MEMWAL_CREDS_DIR overrides both, and
+    // pointing it at the sandbox's .memwal keeps the paths below unchanged.
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.env.MEMWAL_CREDS_DIR = join(home, ".memwal");
     return home;
 }
 

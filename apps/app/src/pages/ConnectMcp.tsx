@@ -26,8 +26,8 @@
  *   - Wallet not connected → wallet picker.
  *   - User has no Walrus Memory account yet → link to /setup.
  *   - Wallet rejects tx → retry button.
- *   - localhost callback unreachable → keep success on-chain anyway, ask user
- *     to manually copy creds (rare — only if the MCP listener died).
+ *   - localhost callback unreachable or refused → on-chain key stands but never
+ *     reaches the client; send the user back through sign-in.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -54,6 +54,9 @@ type Step =
     | 'success'
     | 'no-account'
     | 'error'
+
+/** Hand-off result; the two failures have different causes, so not one boolean. */
+type CallbackOutcome = 'delivered' | 'unreachable' | 'rejected'
 
 function hexToBytes(hex: string): number[] {
     const clean = hex.startsWith('0x') ? hex.slice(2) : hex
@@ -138,7 +141,7 @@ export default function ConnectMcp() {
     const [errorMsg, setErrorMsg] = useState('')
     const [walletPickerOpen, setWalletPickerOpen] = useState(false)
     const [callbackPayload, setCallbackPayload] = useState<McpCallbackPayload | null>(null)
-    const [callbackDelivered, setCallbackDelivered] = useState<boolean | null>(null)
+    const [callbackOutcome, setCallbackOutcome] = useState<CallbackOutcome | null>(null)
     const [verifiedBridge, setVerifiedBridge] = useState<VerifiedBridge | null>(null)
     const [preflightAttempt, setPreflightAttempt] = useState(0)
     const invalidRequestTrackedRef = useRef(false)
@@ -198,10 +201,13 @@ export default function ConnectMcp() {
             } catch (error) {
                 if (controller.signal.aborted) return
                 setVerifiedBridge(null)
+                const openedTooLate = error instanceof TypeError
                 setErrorMsg(
-                    error instanceof Error
-                        ? error.message
-                        : 'Could not verify the local MCP bridge.',
+                    openedTooLate
+                        ? 'Nothing answered on your computer. Sign-in links stop working after five minutes, so most often the link was simply opened too late.'
+                        : error instanceof Error
+                          ? error.message
+                          : 'Could not verify the local MCP bridge.',
                 )
                 setStep('error')
                 trackEvent('mcp_connect_failed', { error_type: 'bridge_preflight_failed' })
@@ -219,10 +225,10 @@ export default function ConnectMcp() {
                     headers: { 'content-type': 'application/json' },
                     body: JSON.stringify(payload),
                 })
-                setCallbackDelivered(res.ok)
+                setCallbackOutcome(res.ok ? 'delivered' : 'rejected')
                 return res.ok
             } catch {
-                setCallbackDelivered(false)
+                setCallbackOutcome('unreachable')
                 return false
             }
         },
@@ -423,7 +429,7 @@ export default function ConnectMcp() {
                     {paramsValid && step === 'success' && callbackPayload && (
                         <SuccessCard
                             payload={callbackPayload}
-                            callbackDelivered={callbackDelivered}
+                            callbackOutcome={callbackOutcome}
                             port={port}
                         />
                     )}
@@ -548,34 +554,82 @@ function ConsentCard({
 
 function SuccessCard({
     payload,
-    callbackDelivered,
+    callbackOutcome,
     port,
 }: {
     payload: McpCallbackPayload
-    callbackDelivered: boolean | null
+    callbackOutcome: CallbackOutcome | null
     port: string
 }) {
+    const delivered = callbackOutcome === 'delivered'
     return (
         <div className="setup-classic-intro">
             <h2 className="setup-classic-title">
-                <span style={{ color: '#22c55e' }}>✓</span> MCP client connected
+                {delivered ? (
+                    <>
+                        <span style={{ color: '#22c55e' }}>✓</span> MCP client connected
+                    </>
+                ) : (
+                    <>
+                        <span style={{ color: '#e8ff75' }}>!</span> Almost there — one step
+                        left
+                    </>
+                )}
             </h2>
-            {callbackDelivered === true && (
+            {delivered && (
                 <p className="setup-classic-description">
                     Credentials were handed off to your MCP client. You can close this tab safely.
                 </p>
             )}
-            {callbackDelivered === false && (
-                <p className="setup-classic-description" style={errorTextStyle}>
-                    The on-chain registration succeeded, but the local MCP login listener at{' '}
-                    <code style={codeStyle}>http://127.0.0.1:{port}/callback</code> did not accept the callback. Restart the MCP login command and try again so credentials can be saved locally.
-                </p>
+            {!delivered && callbackOutcome !== null && (
+                <>
+                    <p className="setup-classic-description">
+                        The first half of sign-in succeeded: your key was created and registered
+                        to your account. What did not work is the last step: this page could not
+                        pass the key back to the Walrus Memory app running on your computer, so
+                        your MCP client cannot use it yet.
+                    </p>
+                    <p className="setup-classic-description">
+                        {callbackOutcome === 'unreachable'
+                            ? 'Nothing answered on your computer. The app stopped waiting after this tab was already open, which usually means the wallet prompt sat through the deadline, the MCP client restarted, or the login command was cancelled.'
+                            : 'The app on your computer rejected this hand-off. That usually means this tab is leftover from a sign-in that already finished, or the request did not match what the app expected.'}
+                    </p>
+                    <p className="setup-classic-description">
+                        <strong>Sign in again and open the new link straight away.</strong> A
+                        retry only helps once the MCP client is left running through the wallet
+                        prompt. The unused key from this attempt is already on your account.
+                        Remove it from the dashboard if you are not using it.{' '}
+                        {config.docsUrl && (
+                            <a
+                                href={`${config.docsUrl}/troubleshooting/overview#sign-in-succeeds-but-credentials-are-not-saved`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={() =>
+                                    trackEvent('outbound_link_click', {
+                                        link: 'docs',
+                                        location: 'connect_mcp_callback_failed',
+                                    })
+                                }
+                            >
+                                If it keeps failing, see troubleshooting.
+                            </a>
+                        )}
+                    </p>
+                </>
             )}
             <div className="card setup-classic-feature-card">
                 <div style={detailRowStyle}>
                     <span style={detailLabelStyle}>Account</span>
                     <span style={detailValueStyle}>{payload.accountId}</span>
                 </div>
+                {!delivered && callbackOutcome !== null && (
+                    <div style={detailRowStyle}>
+                        <span style={detailLabelStyle}>Hand-off address</span>
+                        <span style={{ ...detailValueStyle, ...codeStyle }}>
+                            http://127.0.0.1:{port}/callback
+                        </span>
+                    </div>
+                )}
             </div>
             <div className="setup-classic-actions">
                 <Link

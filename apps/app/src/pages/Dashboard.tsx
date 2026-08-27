@@ -27,6 +27,7 @@ import SecurityDeleteSection from '../components/SecurityDeleteSection'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import { apiGet } from '../utils/api'
 import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
 
 function DelegateKeyCtaIcon(props: SVGProps<SVGSVGElement>) {
@@ -250,6 +251,10 @@ export default function Dashboard({
 
     // Delegate key management state
     const [onChainKeys, setOnChainKeys] = useState<OnChainDelegateKey[]>([])
+    const [namespaces, setNamespaces] = useState<{ name: string; memory_count: number }[]>([])
+    const [namespacesLoading, setNamespacesLoading] = useState(false)
+    const [namespacesError, setNamespacesError] = useState('')
+    const [namespacesTruncated, setNamespacesTruncated] = useState(false)
     const [loadingKeys, setLoadingKeys] = useState(false)
     const [addingKey, setAddingKey] = useState(false)
     const [removingKey, setRemovingKey] = useState<string | null>(null)
@@ -455,6 +460,63 @@ export default function Dashboard({
         setOnChainKeys([])
         fetchOnChainKeys()
     }, [fetchOnChainKeys])
+
+    const namespacesFetchGen = useRef(0)
+    const fetchNamespaces = useCallback(async () => {
+        if (!delegateKey || !effectiveAccountObjectId || !address) return
+        const gen = ++namespacesFetchGen.current
+        setNamespacesLoading(true)
+        setNamespacesError('')
+        setNamespacesTruncated(false)
+        try {
+            const owner = address.toLowerCase()
+            const collected: { name: string; memory_count: number }[] = []
+            let cursor: string | undefined
+            let truncated = false
+            for (let page = 0; page < 20; page++) {
+                const qs = new URLSearchParams({ limit: '100' })
+                if (cursor) qs.set('updated_after', cursor)
+                const path = `/v1/owners/${owner}/namespaces?${qs.toString()}`
+                const data = await apiGet(
+                    delegateKey,
+                    config.memwalServerUrl.replace(/\/+$/, ''),
+                    path,
+                    effectiveAccountObjectId,
+                ) as {
+                    namespaces?: { name?: string; memory_count?: number }[]
+                    next_cursor?: string | null
+                    has_more?: boolean
+                }
+                if (gen !== namespacesFetchGen.current) return
+                for (const ns of data.namespaces ?? []) {
+                    if (typeof ns.name === 'string') {
+                        collected.push({
+                            name: ns.name,
+                            memory_count: Number(ns.memory_count ?? 0),
+                        })
+                    }
+                }
+                if (!data.has_more) break
+                if (!data.next_cursor) break
+                cursor = data.next_cursor
+                if (page === 19) truncated = true
+            }
+            if (gen !== namespacesFetchGen.current) return
+            setNamespaces(collected)
+            setNamespacesTruncated(truncated)
+        } catch (err) {
+            if (gen !== namespacesFetchGen.current) return
+            console.error('Failed to list namespaces:', err)
+            setNamespacesError('Could not load namespace counts from the relayer.')
+        } finally {
+            if (gen === namespacesFetchGen.current) setNamespacesLoading(false)
+        }
+    }, [delegateKey, effectiveAccountObjectId, address])
+
+    useEffect(() => {
+        setNamespaces([])
+        void fetchNamespaces()
+    }, [fetchNamespaces])
 
     // ============================================================
     // Generate + add a new delegate key (via SDK)
@@ -1044,6 +1106,64 @@ const result = await generateText({
                             </div>
                         </div>
                     </div>
+                    </Card>
+                )}
+
+                {delegateKey && (
+                    <Card
+                        id="namespaces"
+                        className="dashboard-keys-card"
+                        title="Namespaces"
+                        subtitle={
+                            namespacesLoading
+                                ? 'Loading memory counts from the relayer'
+                                : namespacesError
+                                    ? namespacesError
+                                    : namespaces.length === 0
+                                        ? 'No indexed namespaces yet (or none the relayer can see for this account)'
+                                        : `${namespaces.reduce((n, ns) => n + ns.memory_count, 0)} memories across ${namespaces.length} ${namespaces.length === 1 ? 'namespace' : 'namespaces'}${namespacesTruncated ? ' (list truncated)' : ''}`
+                        }
+                        action={
+                            <button
+                                className="btn btn-secondary btn-sm dashboard-keys-refresh"
+                                onClick={() => void fetchNamespaces()}
+                                disabled={namespacesLoading}
+                                aria-busy={namespacesLoading}
+                            >
+                                <RefreshCw size={12} /> Refresh
+                            </button>
+                        }
+                    >
+                        {namespacesError && (
+                            <p style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>{namespacesError}</p>
+                        )}
+                        {!namespacesLoading && namespaces.length > 0 && (
+                            <div className="dashboard-key-table-wrap">
+                                <table className="dashboard-key-table">
+                                    <thead>
+                                        <tr>
+                                            <th scope="col">Namespace</th>
+                                            <th scope="col">Memories</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {namespaces.map((ns) => (
+                                            <tr key={ns.name}>
+                                                <td data-label="Namespace">
+                                                    <Link
+                                                        to={`/playground?namespace=${encodeURIComponent(ns.name)}`}
+                                                        title="Open this namespace in the playground"
+                                                    >
+                                                        <code>{ns.name}</code>
+                                                    </Link>
+                                                </td>
+                                                <td data-label="Memories">{ns.memory_count}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
                     </Card>
                 )}
 

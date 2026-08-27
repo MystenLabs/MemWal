@@ -83,6 +83,13 @@ from .utils import (
 
 T = TypeVar("T")
 SEAL_SESSION_TTL_MIN = 5
+
+# Networks with a public Sui GraphQL read endpoint (https://graphql.<network>.sui.io).
+PUBLIC_SUI_GRAPHQL_NETWORKS = ("mainnet", "testnet", "devnet")
+
+# Fail the package-version preflight fast instead of hanging client init when a
+# Sui read endpoint is unresponsive.
+PACKAGE_VERSION_CHECK_TIMEOUT_S = 10.0
 SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
 AUTH_REJECTED_MESSAGE = (
     "401 from relayer: typically wrong private key, key not registered on this "
@@ -1039,17 +1046,46 @@ class MemWal:
         package_id = data.get("packageId")
         network = data.get("network")
         sui_rpc_url = data.get("suiRpcUrl")
-        if not package_id or not network or not sui_rpc_url:
-            raise MemWalError("GET /config response missing packageId / network / suiRpcUrl")
+        if not package_id or not network:
+            raise MemWalError("GET /config response missing packageId / network")
 
         self._server_config = {
             "packageId": package_id,
             "network": network,
-            "suiRpcUrl": sui_rpc_url,
+            "suiRpcUrl": sui_rpc_url or "",
         }
         return self._server_config
 
-    async def _assert_first_package_version(self, sui_rpc_url: str, package_id: str) -> None:
+    async def _fetch_package_version_graphql(self, network: str, package_id: str):
+        """Read the package object version via Sui GraphQL RPC.
+
+        JSON-RPC on public fullnodes is sunset (see
+        https://docs.sui.io/develop/accessing-data/json-rpc-migration), and the
+        third-party JSON-RPC mirror the relayer used to advertise has gone
+        unresponsive, hanging every client init. GraphQL is the plain-HTTPS
+        read layer that survives the sunset without pulling gRPC deps into
+        this SDK.
+        """
+        graphql_url = f"https://graphql.{network}.sui.io/graphql"
+        response = await self._http.post(
+            graphql_url,
+            json={
+                "query": "query($a:SuiAddress!){object(address:$a){version}}",
+                "variables": {"a": package_id},
+            },
+            timeout=PACKAGE_VERSION_CHECK_TIMEOUT_S,
+        )
+        if response.status_code != 200:
+            raise MemWalError(f"Sui GraphQL returned {response.status_code}")
+        body = response.json()
+        obj = (body.get("data") or {}).get("object")
+        if not isinstance(obj, dict) or obj.get("version") is None:
+            raise MemWalError(f"Sui GraphQL could not resolve package {package_id}")
+        return obj["version"]
+
+    async def _fetch_package_version_jsonrpc(self, sui_rpc_url: str, package_id: str):
+        """Legacy JSON-RPC fallback for custom / local networks that have no
+        public GraphQL endpoint and still serve `sui_getObject`."""
         response = await self._http.post(
             sui_rpc_url,
             json={
@@ -1058,6 +1094,7 @@ class MemWal:
                 "method": "sui_getObject",
                 "params": [package_id, {"showBcs": False, "showContent": False, "showType": False}],
             },
+            timeout=PACKAGE_VERSION_CHECK_TIMEOUT_S,
         )
         if response.status_code != 200:
             raise MemWalError(f"sui_getObject returned {response.status_code}")
@@ -1073,6 +1110,20 @@ class MemWal:
                 obj = result.get("object")
                 if isinstance(obj, dict):
                     version = obj.get("version")
+        return version
+
+    async def _assert_first_package_version(
+        self, network: str, sui_rpc_url: str, package_id: str
+    ) -> None:
+        if network in PUBLIC_SUI_GRAPHQL_NETWORKS:
+            version = await self._fetch_package_version_graphql(network, package_id)
+        elif sui_rpc_url:
+            version = await self._fetch_package_version_jsonrpc(sui_rpc_url, package_id)
+        else:
+            raise MemWalError(
+                f"No Sui read endpoint available for network {network!r}: "
+                "no public GraphQL endpoint and GET /config carried no suiRpcUrl"
+            )
         if str(version) != "1":
             raise MemWalError(
                 f"SEAL package {package_id} must be at version 1 to build "
@@ -1081,7 +1132,9 @@ class MemWal:
 
     async def _build_seal_session_inner(self) -> str:
         cfg = await self._fetch_server_config()
-        await self._assert_first_package_version(cfg["suiRpcUrl"], cfg["packageId"])
+        await self._assert_first_package_version(
+            cfg["network"], cfg["suiRpcUrl"], cfg["packageId"]
+        )
 
         session_signing_key = nacl.signing.SigningKey.generate()
         session_public_key = bytes(session_signing_key.verify_key)

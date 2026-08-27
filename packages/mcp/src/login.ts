@@ -61,6 +61,19 @@ const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl">> & { label: strin
     openBrowser: true,
 };
 
+/** How long the background login listener stays bound, shared by every
+ * caller (auth-required mode and the bridge) so one env var controls the
+ * same deadline everywhere instead of each call site hard-coding its own.
+ * Override via `MEMWAL_MCP_LOGIN_TIMEOUT_MS`, mostly for tests — waiting the
+ * full 5 min to observe a failed sign-in is not a testable deadline. */
+export function resolveLoginTimeoutMs(): number {
+    const raw = process.env.MEMWAL_MCP_LOGIN_TIMEOUT_MS;
+    if (!raw) return DEFAULTS.timeoutMs;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 100) return DEFAULTS.timeoutMs;
+    return n;
+}
+
 interface CallbackPayload {
     accountId: string;
     walletAddress: string;
@@ -198,7 +211,11 @@ function readBody(req: IncomingMessage, maxBytes = 16 * 1024): Promise<string> {
  * to call this only when no valid credentials exist on disk.
  */
 export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredentials> {
-    const cfg = { ...DEFAULTS, ...opts };
+    const cfg = {
+        ...DEFAULTS,
+        ...opts,
+        timeoutMs: opts.timeoutMs ?? resolveLoginTimeoutMs(),
+    };
     const keypair = await generateKeypair();
     // Write-ahead (WALM-332). From the moment anything can hand this public key
     // to a browser, the private half has to survive losing this process — the
@@ -490,6 +507,8 @@ let inflightLogin: InflightLogin | null = null;
  * Start a login flow, or join one already in progress in this process.
  * Concurrent `memwal_login` calls share the same listener and URL so a
  * second call cannot race the first and leave the bridge on a stale session.
+ * `onSuccess` and `onFailure` are attached only when this call starts the
+ * flow, so a join cannot emit a second timeout warning.
  */
 export function startOrReuseLoginFlow(
     opts: LoginOptions = {},
@@ -497,7 +516,7 @@ export function startOrReuseLoginFlow(
     /** Called when the flow fails after the caller has already been handed the
      * URL and returned. Without this the failure is unobservable — see the
      * catch below. */
-    onFailure?: (err: Error) => void,
+    onFailure?: (err: unknown) => void,
 ): InflightLogin {
     if (inflightLogin) return inflightLogin;
 
@@ -521,33 +540,45 @@ export function startOrReuseLoginFlow(
         },
     });
 
+    // The one place a failed flow is reported. It has to be this catch rather
+    // than the `onSuccess` chain below: a caller that only passes `onFailure`
+    // still needs to hear about it, and reporting from both would emit the
+    // failure twice for one flow.
     result.catch((err) => {
         rejectUrl(err);
+        const msg = err instanceof Error ? err.message : String(err);
+        // This used to be a `warn` and nothing else, which made a background
+        // login failure invisible: `handleLocalLogin` has already returned the
+        // URL and told the client it succeeded, so without a signal here the
+        // agent waits forever on a flow that is already dead (WALM-332). Error
+        // level so it surfaces in client log views, `note` so it reads as a
+        // sentence on stderr, and `onFailure` so the caller can put it in
+        // front of the agent in-band. The pending write-ahead record is
+        // deliberately left in place — the next start reports the stranded key.
+        log.error("login.inflight.failed", { msg });
+        note(`Walrus Memory sign-in failed: ${msg}`);
+        try {
+            onFailure?.(err);
+        } catch {
+            /* a reporting failure must not mask the original one */
+        }
     });
 
-    if (onSuccess || onFailure) {
-        result
+    if (onSuccess) {
+        void result
             .then(async (creds) => {
-                await onSuccess?.(creds);
-            })
-            .catch((err) => {
-                const msg = err instanceof Error ? err.message : String(err);
-                // This used to be a `warn` and nothing else, which made a
-                // background login failure invisible: `handleLocalLogin` has
-                // already returned the URL and told the client it succeeded,
-                // so without a signal here the agent waits forever on a flow
-                // that is already dead (WALM-332). Error level so it surfaces
-                // in client log views, `note` so it reaches stderr, and
-                // `onFailure` so the caller can put it in front of the agent
-                // in-band. The pending write-ahead record is deliberately left
-                // in place — the next start reports the stranded key.
-                log.error("login.inflight.failed", { msg });
-                note(`Walrus Memory sign-in failed: ${msg}`);
                 try {
-                    onFailure?.(err instanceof Error ? err : new Error(msg));
-                } catch {
-                    /* a reporting failure must not mask the original one */
+                    await onSuccess(creds);
+                } catch (err) {
+                    // A credential handoff that throws is its own failure, and
+                    // distinct from the flow failing — the sign-in did work.
+                    log.error("login.on_success_failed", {
+                        msg: err instanceof Error ? err.message : String(err),
+                    });
                 }
+            })
+            .catch(() => {
+                /* the flow's own rejection is reported in the catch above */
             });
     }
 

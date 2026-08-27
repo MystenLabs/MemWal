@@ -19,7 +19,7 @@ import { clearCreds, credsPath } from "./auth.js";
 import { TOOL_DEFINITIONS } from "./auth-required.js";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
 import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
-import { startOrReuseLoginFlow } from "./login.js";
+import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { log, note } from "./logger.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
@@ -179,7 +179,6 @@ const LOCAL_TOOLS_LIST = {
     ],
 };
 
-const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
 const URL_READY_TIMEOUT_MS = 5_000;
 
 /** Maximum silence we tolerate on the SSE stream before assuming the
@@ -577,7 +576,7 @@ async function handleLocalLogin(
             relayerUrl: config.relayerUrl,
             webUrl: config.webUrl,
             label: config.label,
-            timeoutMs: LOGIN_BG_TIMEOUT_MS,
+            timeoutMs: resolveLoginTimeoutMs(),
             openBrowser: false,
         },
         async (creds) => {
@@ -590,20 +589,24 @@ async function handleLocalLogin(
         // This tool call has already returned "here is your URL, go sign in",
         // so a later failure has no response left to ride home on. Without an
         // out-of-band notification the agent sits waiting on a flow that is
-        // already dead (WALM-332). MCP logging notifications are fire-and-
-        // forget and safe to emit at any point in the session.
+        // already dead. MCP logging notifications are fire-and-forget and safe
+        // to emit at any point in the session.
         (err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn("memwal_login.bridge.failed", { msg });
             writeStdoutMessage({
                 jsonrpc: "2.0",
                 method: "notifications/message",
                 params: {
-                    level: "error",
-                    logger: "memwal",
+                    level: "warning",
+                    logger: "memwal-mcp",
+                    // The last clause is only true because of the write-ahead
+                    // record (WALM-332): a key the browser already paid to
+                    // register is no longer lost with the process.
                     data:
-                        `Walrus Memory sign-in did not complete: ${err.message}. ` +
-                        `Call \`memwal_login\` again to retry. If a delegate key was ` +
-                        `already registered on-chain, it will be reclaimed automatically ` +
-                        `on the next start, or can be revoked from the dashboard.`,
+                        `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are ` +
+                        `unchanged; call memwal_login again to retry. If a delegate key was already ` +
+                        `registered on-chain, the next start reclaims it.`,
                 },
             });
         },

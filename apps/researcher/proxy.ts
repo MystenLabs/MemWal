@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { jwtVerify } from "jose";
+import { isTestEnvironment } from "@/lib/constants";
 
 const secret = new TextEncoder().encode(process.env.AUTH_SECRET);
 
@@ -7,7 +8,13 @@ export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (pathname.startsWith("/ping")) {
-    return new Response("pong", { status: 200 });
+    // Advertises whether this process runs the mock seams. Playwright reuses an
+    // already-running dev server locally, so its global setup reads this header
+    // to refuse one that would reach OpenRouter, Sui or the Walrus relayer.
+    return new Response("pong", {
+      status: 200,
+      headers: { "x-researcher-test-mode": isTestEnvironment ? "1" : "0" },
+    });
   }
 
   if (pathname.startsWith("/api/auth")) {

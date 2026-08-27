@@ -17,7 +17,14 @@ const PACKAGE = `0x${"c".repeat(64)}`;
 
 function freshHome() {
     const home = mkdtempSync(join(tmpdir(), "memwal-recovery-"));
+    // HOME alone is not a sandbox. os.homedir() reads USERPROFILE on Windows
+    // and ignores HOME, and credsPath() checks for a project-local .memwal
+    // above the working directory before it ever consults the home directory —
+    // which here is the real checkout. MEMWAL_CREDS_DIR overrides both, and
+    // pointing it at the sandbox's .memwal keeps the paths below unchanged.
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.env.MEMWAL_CREDS_DIR = join(home, ".memwal");
     mkdirSync(join(home, ".memwal"), { recursive: true });
     return home;
 }
