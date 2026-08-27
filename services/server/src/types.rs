@@ -1363,6 +1363,21 @@ pub struct RecallResult {
     /// shape byte-identical to today for default-weights requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
+    /// Write-time of the memory, from `vector_entries.created_at` — threaded
+    /// `SearchHit` → `HydratedMemory` → here by the recall handler's
+    /// `zip_search_hit_fields_onto_hydrated`.
+    ///
+    /// Present so a caller can implement "newest wins" deterministically
+    /// rather than re-ranking on a date it has to parse back out of the
+    /// memory text (WALM-383). Note this is the *write* time, not any
+    /// event time the text itself may describe.
+    ///
+    /// `None` only when the hydrated record had no matching `SearchHit`,
+    /// which shouldn't happen on the recall path. `skip_serializing_if`
+    /// then omits the field rather than sending a fabricated date — for a
+    /// newest-wins caller a wrong timestamp is worse than a missing one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

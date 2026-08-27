@@ -666,6 +666,11 @@ export class MemWal {
                 query,
                 limit,
                 namespace: resolvedNamespace,
+                // `undefined` when no weights were supplied, which
+                // JSON.stringify drops — so a default-weighted recall stays
+                // byte-identical on the wire and the relayer keeps
+                // short-circuiting to the plain pgvector cosine order.
+                scoring_weights: scoringWeightsToWire(options.scoringWeights),
             }, { signal: ac.signal });
 
             let processed = result;

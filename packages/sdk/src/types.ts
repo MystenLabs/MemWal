@@ -59,6 +59,18 @@ export interface RecallMemory {
     blob_id: string;
     text: string;
     distance: number;
+    /**
+     * RFC3339 write-time of the memory, as recorded by the relayer when the
+     * fact was stored. Lets a caller implement "newest wins" deterministically
+     * instead of re-ranking on a date parsed back out of `text` (WALM-383).
+     *
+     * This is the *write* time, not any event time the text itself describes.
+     *
+     * Optional because relayers older than this field omit it — and because
+     * results are ranked by relevance, not recency, unless you ask for a
+     * recency weight via `RecallOptions.scoringWeights`.
+     */
+    created_at?: string;
 }
 
 /**
@@ -135,6 +147,21 @@ export interface RecallOptions {
      * consulted when `maxTokens` is set.
      */
     countTokens?: (text: string) => number;
+    /**
+     * Composite-scoring weights applied by the relayer's ranker before results
+     * are returned.
+     *
+     * Omit for the default behaviour: pure semantic ranking by cosine
+     * distance, with no recency guarantee. Supply `recency` to blend
+     * write-time into the score — this is the fix for the newest-record
+     * falling outside the `limit` window because an older record happened to
+     * match the query string more literally.
+     *
+     * Ranking happens server-side, so it applies BEFORE `limit` truncates the
+     * result set. Sorting by `created_at` on the client cannot recover a
+     * record that never made the window.
+     */
+    scoringWeights?: ScoringWeights;
 }
 
 /** Recommended object-style recall input — preferred over positional args. */

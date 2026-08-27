@@ -208,6 +208,31 @@ pub(super) fn zip_search_hit_fields_onto_hydrated(
     }
 }
 
+/// Project the ranker's output onto the `/api/recall` and `/api/ask` wire
+/// shape, preserving ranked order.
+///
+/// Shared by both handlers so the set of fields that reach a client is
+/// decided in one place — they previously carried identical inline `map`
+/// closures, and `created_at` (WALM-383) would otherwise have had to be
+/// added to each by hand.
+pub(super) fn recall_results_from_ranked(
+    ranked: Vec<crate::services::ranker::RankedHit>,
+) -> Vec<crate::types::RecallResult> {
+    ranked
+        .into_iter()
+        .map(|r| crate::types::RecallResult {
+            blob_id: r.memory.blob_id,
+            text: r.memory.text,
+            distance: r.memory.distance,
+            // `score` is `Some` only when the ranker ran (recency > 0); the
+            // `#[serde(skip_serializing_if = "Option::is_none")]` on the
+            // type omits the field from the wire when default-weighted.
+            score: r.score,
+            created_at: r.memory.created_at,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{collect_bounded_results, truncate_str};
@@ -271,5 +296,66 @@ mod tests {
         let s = "🦀hello";
         let t = truncate_str(s, 2);
         assert_eq!(t, ""); // can't include partial emoji
+    }
+}
+
+#[cfg(test)]
+mod recall_result_mapping_tests {
+    use crate::engine::HydratedMemory;
+    use crate::services::ranker::RankedHit;
+
+    fn ts(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn hit(blob_id: &str, created_at: Option<chrono::DateTime<chrono::Utc>>) -> RankedHit {
+        RankedHit {
+            memory: HydratedMemory {
+                blob_id: blob_id.to_string(),
+                text: format!("text for {blob_id}"),
+                distance: 0.25,
+                created_at,
+                importance: Some(0.5),
+            },
+            score: None,
+        }
+    }
+
+    /// Ask #1 of WALM-383: a caller implementing "newest wins" must be able to
+    /// order results by write-time without parsing it back out of the memory
+    /// text.
+    #[test]
+    fn mapping_carries_the_hydrated_created_at_onto_the_result() {
+        let written_at = ts("2026-07-06T12:00:00Z");
+
+        let results = super::recall_results_from_ranked(vec![hit("blob-1", Some(written_at))]);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].created_at, Some(written_at));
+    }
+
+    /// `zip_search_hit_fields_onto_hydrated` leaves `created_at` as `None` for
+    /// a hydrated record with no matching SearchHit. That must stay absent
+    /// rather than become a fabricated timestamp — for a newest-wins caller a
+    /// wrong date is worse than a missing one.
+    #[test]
+    fn mapping_preserves_a_missing_created_at_as_none() {
+        let results = super::recall_results_from_ranked(vec![hit("blob-1", None)]);
+
+        assert_eq!(results[0].created_at, None);
+    }
+
+    /// Order is the ranker's output order; the mapping must not re-sort.
+    #[test]
+    fn mapping_preserves_ranked_order() {
+        let results = super::recall_results_from_ranked(vec![
+            hit("blob-1", Some(ts("2026-07-01T00:00:00Z"))),
+            hit("blob-2", Some(ts("2026-07-06T00:00:00Z"))),
+        ]);
+
+        let ids: Vec<&str> = results.iter().map(|r| r.blob_id.as_str()).collect();
+        assert_eq!(ids, vec!["blob-1", "blob-2"]);
     }
 }

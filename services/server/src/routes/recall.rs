@@ -250,18 +250,7 @@ pub async fn recall(
     // `recency_zero_is_short_circuit_no_reorder` tests in services::ranker.
     let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
 
-    let results: Vec<RecallResult> = ranked
-        .into_iter()
-        .map(|r| RecallResult {
-            blob_id: r.memory.blob_id,
-            text: r.memory.text,
-            distance: r.memory.distance,
-            // `score` is `Some` only when the ranker ran (recency > 0); the
-            // `#[serde(skip_serializing_if = "Option::is_none")]` on the
-            // type omits the field from the wire when default-weighted.
-            score: r.score,
-        })
-        .collect();
+    let results: Vec<RecallResult> = super::recall_results_from_ranked(ranked);
     let total = results.len();
 
     // Surface the count of silently-dropped entries (download /

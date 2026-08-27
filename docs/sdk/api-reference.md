@@ -110,25 +110,69 @@ Submit a bulk remember request and wait until every job reaches a terminal state
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance? })`
+- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance?, scoringWeights? })`
 - `limit` defaults to `10`; `topK` is an alias and wins when both are set
 - Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
+- `scoringWeights` blends recency and importance into the ranking — see [Ordering](#ordering) below
 
 **Returns:**
 
 ```ts
 {
   results: Array<{
-    blob_id: string;   // Walrus blob ID
-    text: string;      // Decrypted plaintext
-    distance: number;  // Cosine distance (lower = more similar)
+    blob_id: string;     // Walrus blob ID
+    text: string;        // Decrypted plaintext
+    distance: number;    // Cosine distance (lower = more similar)
+    created_at?: string; // RFC3339 write-time; absent on older relayers
   }>;
   total: number;
 }
 ```
 
 `distance` is cosine distance — lower is more similar.
+
+`created_at` is when the fact was **written**, not any date its text describes.
+
+#### Ordering
+
+**By default, results are ranked by semantic relevance only. There is no
+recency guarantee — not within the returned set, and not in which records make
+the set at all.**
+
+That second part is the one that bites. Ranking happens server-side, before
+`limit` truncates, so a newest-wins protocol written like this is broken:
+
+```ts
+// WRONG: the newest record may never have been in `results`.
+const { results } = await memwal.recall({ query: "current task", limit: 3 });
+const newest = results.sort(byCreatedAtDesc)[0];
+```
+
+If an older record echoes the query's wording more literally than the newest
+one does, the older record outranks it and the newest falls outside the window
+entirely. Sorting client-side cannot recover a record that was never returned.
+
+Ask the ranker for recency instead:
+
+```ts
+const { results } = await memwal.recall({
+  query: "current task",
+  limit: 3,
+  scoringWeights: { semantic: 0.3, recency: 0.7, recencyHalfLifeDays: 30 },
+});
+```
+
+| Weight | Default | Effect |
+| --- | --- | --- |
+| `semantic` | `1` | Weight on similarity (`1 - distance`) |
+| `recency` | `0` | Weight on write-time decay |
+| `recencyHalfLifeDays` | `30` | Days for the recency term to halve |
+| `importance` | `0` | Weight on the per-fact importance set at extraction time |
+
+Omitting `scoringWeights` leaves the request byte-identical to a plain cosine
+sort, so existing callers are unaffected. Use `created_at` to *verify* or
+display an order — use `scoringWeights` to *get* one.
 
 ### `analyze(text, namespace?): Promise<AnalyzeResult>`
 
