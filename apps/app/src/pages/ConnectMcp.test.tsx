@@ -85,6 +85,26 @@ describe('MCP sign-in hand-off', () => {
         expect(screen.getByText(/handed off to your MCP client/i)).toBeInTheDocument()
     })
 
+    it('offers the starter system prompt once the client is connected', async () => {
+        stubListener(async () => new Response('{}', { status: 200 }))
+        await signIn()
+
+        expect(await screen.findByText(/MCP client connected/i)).toBeInTheDocument()
+        expect(screen.getByText(/most agents only write when told to/i)).toBeInTheDocument()
+        expect(screen.getByText(/call memwal_remember in that same turn/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /copy prompt/i })).toBeInTheDocument()
+    })
+
+    it('withholds the starter prompt when the hand-off never landed', async () => {
+        stubListener(async () => {
+            throw new TypeError('Failed to fetch')
+        })
+        await signIn()
+
+        expect(await screen.findByText(/Almost there/i)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /copy prompt/i })).not.toBeInTheDocument()
+    })
+
     it('does not claim success when nothing answers on localhost', async () => {
         stubListener(async () => {
             throw new TypeError('Failed to fetch')

@@ -46,6 +46,30 @@ import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 // Walrus Memory wordmark (public asset, same one the dashboard nav uses).
 const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
 
+/**
+ * Starter system prompt handed to the user on the success screen (WALM-199).
+ * Connecting the MCP server only exposes the tools; without a standing
+ * instruction most agents write memories only when explicitly told to. This is
+ * the shortest prompt that flips that, kept in sync with the "Universal
+ * starter" template on the docs page linked beside it.
+ */
+const STARTER_SYSTEM_PROMPT = `You have persistent memory through the Walrus Memory tools (memwal_*).
+
+RECALL: at the start of any task that touches past work, prior decisions, or the
+user's preferences, call memwal_recall once with a focused query. Do not fire
+several redundant searches for the same question.
+
+REMEMBER: when the user states a preference, decision, constraint, correction,
+identity detail, or recurring workflow, call memwal_remember in that same turn,
+before you finish replying. Do not ask permission and do not wait to be asked.
+Acknowledging a fact in your reply does not store it. Pass the complete
+statement, not a summary. Use memwal_remember_bulk when several distinct facts
+arrive at once.
+
+SKIP: one-off tasks, the file or bug currently open, and small talk.
+
+Use the namespace "personal" unless told otherwise.`
+
 type Step =
     | 'verifying'
     | 'consent'
@@ -631,6 +655,8 @@ function SuccessCard({
                     </div>
                 )}
             </div>
+            {delivered && <StarterPromptCard />}
+
             <div className="setup-classic-actions">
                 <Link
                     to="/dashboard"
@@ -639,6 +665,61 @@ function SuccessCard({
                 >
                     Go to dashboard
                 </Link>
+            </div>
+        </div>
+    )
+}
+
+/**
+ * "Now make your agent use it" step on the success screen. Shows the starter
+ * system prompt with a copy button and points at the full template library.
+ */
+function StarterPromptCard() {
+    const [copied, setCopied] = useState(false)
+
+    const handleCopy = useCallback(() => {
+        void navigator.clipboard
+            .writeText(STARTER_SYSTEM_PROMPT)
+            .then(() => {
+                setCopied(true)
+                trackEvent('cta_click', {
+                    cta: 'mcp_success_copy_prompt',
+                    location: 'connect_mcp',
+                })
+                window.setTimeout(() => setCopied(false), 2000)
+            })
+            .catch(() => undefined)
+    }, [])
+
+    return (
+        <div className="card setup-classic-feature-card">
+            <p style={cardLabelStyle}>Next: make your agent use it</p>
+            <p style={promptIntroStyle}>
+                The tools are connected, but most agents only write when told to. Paste this
+                into your agent's system prompt or rules file so it saves and recalls on its
+                own.
+            </p>
+            <pre style={promptBlockStyle}>{STARTER_SYSTEM_PROMPT}</pre>
+            <div style={promptActionsStyle}>
+                <button type="button" onClick={handleCopy} style={copyButtonStyle}>
+                    {copied ? 'Copied' : 'Copy prompt'}
+                </button>
+                {config.docsUrl && (
+                    <a
+                        href={`${config.docsUrl}/guides/system-prompt-templates`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={promptLinkStyle}
+                        onClick={() =>
+                            trackEvent('outbound_link_click', {
+                                link: 'docs',
+                                location: 'connect_mcp_prompt_templates',
+                            })
+                        }
+                    >
+                        More templates (coding, research, support)
+                    </a>
+                )}
             </div>
         </div>
     )
@@ -705,4 +786,52 @@ const detailValueStyle: React.CSSProperties = {
 
 const errorTextStyle: React.CSSProperties = {
     color: '#ff6b6b',
+}
+
+
+const promptIntroStyle: React.CSSProperties = {
+    margin: '0 0 12px',
+    fontSize: '0.85rem',
+    lineHeight: 1.6,
+    color: '#c9cbcd',
+}
+
+const promptBlockStyle: React.CSSProperties = {
+    margin: 0,
+    padding: '12px 14px',
+    background: '#131415',
+    border: '1px solid #2a2c2e',
+    borderRadius: 8,
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.72rem',
+    lineHeight: 1.6,
+    color: '#faf8f5',
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'anywhere',
+    maxHeight: 220,
+    overflowY: 'auto',
+}
+
+const promptActionsStyle: React.CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 16,
+    marginTop: 12,
+    flexWrap: 'wrap',
+}
+
+const copyButtonStyle: React.CSSProperties = {
+    padding: '6px 14px',
+    background: 'transparent',
+    border: '1px solid #3a3c3e',
+    borderRadius: 6,
+    color: '#e8ff75',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.75rem',
+    cursor: 'pointer',
+}
+
+const promptLinkStyle: React.CSSProperties = {
+    fontSize: '0.78rem',
+    color: '#8f9294',
 }
