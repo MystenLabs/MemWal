@@ -97,6 +97,7 @@ AUTH_REJECTED_MESSAGE = (
     "and dashboard credentials. Full troubleshooting: "
     "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
+AUTH_UPSTREAM_UNAVAILABLE = "AUTH_UPSTREAM_UNAVAILABLE"
 UPSTREAM_UNAVAILABLE_MESSAGE = (
     "Walrus Memory temporarily cannot verify credentials (upstream unavailable). "
     "Retry; this is not a sign-in failure."
@@ -1289,6 +1290,8 @@ class MemWal:
             raise _HttpStatusError(
                 status=response.status_code,
                 body=err_text,
+                auth_error=response.headers.get("x-auth-error"),
+                retry_after=response.headers.get("retry-after"),
             )
 
         return response.json()
@@ -1332,10 +1335,16 @@ class _HttpStatusError(MemWalError):
     explicitly accepted).
     """
 
-    def __init__(self, status: int, body: str) -> None:
+    def __init__(
+        self,
+        status: int,
+        body: str,
+        auth_error: str | None = None,
+        retry_after: str | None = None,
+    ) -> None:
         if status == 401:
             super().__init__(AUTH_REJECTED_MESSAGE)
-        elif status == 503:
+        elif status == 503 and auth_error == AUTH_UPSTREAM_UNAVAILABLE:
             super().__init__(UPSTREAM_UNAVAILABLE_MESSAGE)
         else:
             super().__init__(
@@ -1343,6 +1352,8 @@ class _HttpStatusError(MemWalError):
             )
         self.status = status
         self.body = body
+        self.auth_error = auth_error
+        self.retry_after = retry_after
 
 
 class MemWalRememberJobNotFound(MemWalError):

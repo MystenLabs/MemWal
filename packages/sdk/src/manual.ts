@@ -889,14 +889,23 @@ export class MemWalManual {
             const clockDriftError = clockDriftErrorFromResponse(res);
             if (clockDriftError) throw clockDriftError;
 
-            const { message: sanitized, serverCode } = sanitizeServerError(res.status, raw);
+            const { message: sanitized, serverCode } = sanitizeServerError(
+                res.status,
+                raw,
+                res.headers.get("x-auth-error"),
+            );
             const err = new Error(sanitized) as Error & {
                 status?: number;
                 serverCode?: string;
+                retryAfterSeconds?: number;
                 cause?: string;
             };
             err.status = res.status;
             if (serverCode) err.serverCode = serverCode;
+            const retryAfter = Number(res.headers.get("retry-after"));
+            if (Number.isFinite(retryAfter) && retryAfter > 0) {
+                err.retryAfterSeconds = retryAfter;
+            }
             err.cause = raw;
             throw err;
         }

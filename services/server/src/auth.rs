@@ -50,11 +50,10 @@ async fn constant_time_reject() -> StatusCode {
 
 /// Machine-readable reason for a stale/future-dated timestamp, surfaced on the
 /// `x-auth-error` header so a client can distinguish clock drift from a bad
-/// signature. Only emitted for the timestamp check: it depends solely on the
-/// client's own clock, not on whether the account or key exists, so exposing it
-/// leaks nothing about server-side identity state. Signature, nonce, and
-/// account-resolution failures keep the bare uniform 401 (no reason header) so
-/// they remain indistinguishable and cannot be used to enumerate accounts.
+/// signature. Identity 401s (signature, nonce, account-resolution) keep the
+/// bare uniform 401 so they cannot be used to enumerate accounts. 503 auth
+/// unavailability uses the same header with `AUTH_UPSTREAM_UNAVAILABLE` — that
+/// path does not leak whether the key exists.
 const ERR_TIMESTAMP_OUT_OF_BOUNDS: &str = "ERR_TIMESTAMP_OUT_OF_BOUNDS";
 
 /// 401 carrying `x-auth-error: <code>`, after the same constant delay as
@@ -73,10 +72,55 @@ fn unsupported_legacy_sdk() -> StatusCode {
     StatusCode::UPGRADE_REQUIRED
 }
 
+/// Machine-readable 503 from signed HTTP auth / MCP when Sui cannot be
+/// consulted. Distinct from other relayer 503s (Redis, rate limiter, LLM)
+/// so SDKs only print the credential-verification copy when this header is
+/// present (WALM-429 review).
+pub(crate) const AUTH_UPSTREAM_UNAVAILABLE: &str = "AUTH_UPSTREAM_UNAVAILABLE";
+
+/// Short Retry-After for auth 503. Callers must backoff rather than
+/// immediately re-hitting a 429ing Sui fullnode. Not a substitute for the
+/// 100 ms 401 timing pad — that path stays 401-only.
+pub(crate) const AUTH_UPSTREAM_RETRY_AFTER_SECS: u64 = 5;
+
 /// Matches the MCP proxy: Sui could not be consulted, so this is not a login
 /// failure. Empty 401 here is what made the SDK print memwal_login (WALM-429).
-fn upstream_unavailable() -> Response {
-    (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
+///
+/// Fail-closed: do not authenticate from a cached mapping while the chain
+/// is unreachable. Keep the cache row (do not evict), return 503 with
+/// `x-auth-error: AUTH_UPSTREAM_UNAVAILABLE` and `Retry-After`.
+pub(crate) fn upstream_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            ("retry-after", "5"),
+            ("x-auth-error", AUTH_UPSTREAM_UNAVAILABLE),
+        ],
+        "upstream unavailable",
+    )
+        .into_response()
+}
+
+/// What Strategy 1 does with a cache row after on-chain re-verify.
+/// WALM-429: an RPC failure must not evict the row *and* must not
+/// authenticate from it.
+#[derive(Debug)]
+enum CacheReverifyAction {
+    Authenticate { owner: String },
+    UnavailableKeepCache { reason: String },
+    Evict { reason: String },
+}
+
+fn cache_reverify_action(result: Result<String, OnchainVerifyError>) -> CacheReverifyAction {
+    match result {
+        Ok(owner) => CacheReverifyAction::Authenticate { owner },
+        Err(e) if e.is_unavailable() => CacheReverifyAction::UnavailableKeepCache {
+            reason: e.to_string(),
+        },
+        Err(e) => CacheReverifyAction::Evict {
+            reason: e.to_string(),
+        },
+    }
 }
 
 /// Outcome of resolving a signed delegate key to a MemWal account.
@@ -395,44 +439,46 @@ async fn resolve_account(
     account_id_hint: Option<String>,
 ) -> Result<(String, String), AccountResolveError> {
     // Strategy 1: Check PostgreSQL cache
-    if let Ok(Some((cached_account_id, cached_owner))) =
+    if let Ok(Some((cached_account_id, _cached_owner))) =
         state.db.get_cached_account(public_key_hex).await
     {
-        // Re-verify the cached mapping is still valid onchain when Sui is
-        // reachable. A transient RPC failure is *not* a revoke: keep the row
-        // and serve it so a Sui 429 does not 401 a still-registered key.
-        match verify_delegate_key_onchain(
-            &state.http_client,
-            &state.config.sui_rpc_url,
-            state.sui_grpc_client.as_ref(),
-            &cached_account_id,
-            pk_bytes,
-            &state.config.package_id,
-        )
-        .await
-        {
-            Ok(owner) => {
+        // Re-verify the cached mapping on-chain when Sui is reachable.
+        // A transient RPC failure is *not* a revoke: keep the row, but
+        // fail closed with 503 so a revoked key cannot ride a 24h cache
+        // through a Sui outage. Definitive misses evict.
+        match cache_reverify_action(
+            verify_delegate_key_onchain(
+                &state.http_client,
+                &state.config.sui_rpc_url,
+                state.sui_grpc_client.as_ref(),
+                &cached_account_id,
+                pk_bytes,
+                &state.config.package_id,
+            )
+            .await,
+        ) {
+            CacheReverifyAction::Authenticate { owner } => {
                 tracing::debug!("account resolved from cache: {}", cached_account_id);
                 return Ok((cached_account_id, owner));
             }
-            Err(e) if e.is_unavailable() => {
+            CacheReverifyAction::UnavailableKeepCache { reason } => {
                 tracing::warn!(
-                    "on-chain re-verify unavailable for key {} on account {} ({}); serving cached mapping",
+                    "on-chain re-verify unavailable for key {} on account {} ({}); keeping cached mapping, not authenticating from it",
                     public_key_hex,
                     cached_account_id,
-                    e
+                    reason
                 );
-                return Ok((cached_account_id, cached_owner));
+                return Err(AccountResolveError::Unavailable(format!(
+                    "on-chain re-verify unavailable for cached account {}: {}",
+                    cached_account_id, reason
+                )));
             }
-            Err(e) => {
-                // Definitive miss: key gone, account deactivated, or the
-                // cached object is not a MemWalAccount. Evict so later
-                // requests don't loop cache-hit → RPC → fall-through.
+            CacheReverifyAction::Evict { reason } => {
                 tracing::warn!(
                     "cached delegate key {} is stale for account {} ({}); evicting from cache",
                     public_key_hex,
                     cached_account_id,
-                    e
+                    reason
                 );
                 let _ = state.db.delete_cached_key(public_key_hex).await;
             }
@@ -923,25 +969,49 @@ mod tests {
     async fn upstream_unavailable_is_503_not_401() {
         let resp = upstream_unavailable();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(
-            resp.headers().get("x-auth-error").is_none(),
-            "503 must not look like an identity reject"
+        assert_eq!(
+            resp.headers()
+                .get("x-auth-error")
+                .and_then(|v| v.to_str().ok()),
+            Some(AUTH_UPSTREAM_UNAVAILABLE),
         );
+        assert_eq!(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("5"),
+        );
+        assert_eq!(AUTH_UPSTREAM_RETRY_AFTER_SECS, 5);
         let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
         assert_eq!(&body[..], b"upstream unavailable");
     }
 
     #[test]
-    fn rpc_errors_are_unavailable_not_stale_cache() {
+    fn resolve_account_cache_hit_rpc_error_keeps_row_without_authenticating() {
         // WALM-429: a Sui 429 used to evict the cache and 401 a live key.
-        assert!(OnchainVerifyError::RpcError(
-            "gRPC GetObject failed: 429 Too Many Requests".into()
-        )
-        .is_unavailable());
-        assert!(OnchainVerifyError::ScanCapExceeded("cap".into()).is_unavailable());
-        assert!(!OnchainVerifyError::KeyNotFound("gone".into()).is_unavailable());
-        assert!(!OnchainVerifyError::AccountDeactivated("off".into()).is_unavailable());
-        assert!(!OnchainVerifyError::WrongObjectType("type".into()).is_unavailable());
+        // Keep the row (so a later verify can succeed) but do not treat the
+        // cached mapping as authorization while the chain is unreachable.
+        let action = cache_reverify_action(Err(OnchainVerifyError::RpcError(
+            "gRPC GetObject failed: 429 Too Many Requests".into(),
+        )));
+        assert!(matches!(
+            action,
+            CacheReverifyAction::UnavailableKeepCache { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_account_cache_hit_key_not_found_evicts() {
+        let action = cache_reverify_action(Err(OnchainVerifyError::KeyNotFound("gone".into())));
+        assert!(matches!(action, CacheReverifyAction::Evict { .. }));
+    }
+
+    #[test]
+    fn resolve_account_cache_hit_ok_authenticates() {
+        match cache_reverify_action(Ok("0xowner".into())) {
+            CacheReverifyAction::Authenticate { owner } => assert_eq!(owner, "0xowner"),
+            other => panic!("expected authenticate, got {other:?}"),
+        }
     }
 
     #[test]

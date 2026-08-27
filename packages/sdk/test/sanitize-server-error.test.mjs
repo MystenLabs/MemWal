@@ -35,16 +35,32 @@ test("non-401 empty bodies still use the <no message> placeholder", () => {
     assert.equal(message, "Walrus Memory server error (500): <no message>");
 });
 
-test("503 is retryable upstream unavailability, not a login hint", () => {
-    const { message, serverCode } = sanitizeServerError(503, "upstream unavailable");
-    assert.equal(serverCode, "UPSTREAM_UNAVAILABLE");
+test("auth 503 is retryable credential-verification unavailability, not a login hint", () => {
+    const { message, serverCode } = sanitizeServerError(
+        503,
+        "upstream unavailable",
+        "AUTH_UPSTREAM_UNAVAILABLE",
+    );
+    assert.equal(serverCode, "AUTH_UPSTREAM_UNAVAILABLE");
     assert.match(message, /not a sign-in failure/);
     assert.doesNotMatch(message, /memwal_login/);
 });
 
-test("empty-body 503 still avoids the memwal_login copy", () => {
+test("non-auth 503 keeps a generic retryable body, not credential copy", () => {
+    const { message, serverCode } = sanitizeServerError(
+        503,
+        "Rate limiter temporarily unavailable",
+    );
+    assert.equal(serverCode, undefined);
+    assert.match(message, /Rate limiter temporarily unavailable/);
+    assert.doesNotMatch(message, /cannot verify credentials/);
+    assert.doesNotMatch(message, /memwal_login/);
+});
+
+test("empty-body 503 without the auth header is generic", () => {
     const { message, serverCode } = sanitizeServerError(503, "");
-    assert.equal(serverCode, "UPSTREAM_UNAVAILABLE");
+    assert.equal(serverCode, undefined);
+    assert.equal(message, "Walrus Memory server error (503): <no message>");
     assert.doesNotMatch(message, /memwal_login/);
     assert.doesNotMatch(message, /isn't signed in/);
 });

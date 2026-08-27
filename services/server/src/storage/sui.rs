@@ -1007,7 +1007,10 @@ impl OnchainVerifyError {
     /// produced intermittent empty 401s that the SDK mapped to memwal_login
     /// (WALM-429).
     pub fn is_unavailable(&self) -> bool {
-        matches!(self, Self::RpcError(_) | Self::ScanCapExceeded(_))
+        match self {
+            Self::RpcError(_) | Self::ScanCapExceeded(_) => true,
+            Self::KeyNotFound(_) | Self::AccountDeactivated(_) | Self::WrongObjectType(_) => false,
+        }
     }
 }
 

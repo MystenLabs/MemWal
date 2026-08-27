@@ -304,6 +304,7 @@ export function redactInternalUrls(text: string): string {
 export function sanitizeServerError(
     status: number,
     rawBody: string,
+    authError?: string | null,
 ): { message: string; raw: string; serverCode?: string } {
     // Number() so a string "401" (some MCP / HTTP paths) still hits this branch.
     if (Number(status) === 401) {
@@ -321,15 +322,15 @@ export function sanitizeServerError(
         };
     }
 
-    // Relayer 503 = Sui RPC/gRPC could not be consulted (WALM-429). This is
-    // retryable and is not a sign-in failure — do not send callers to
-    // memwal_login.
-    if (Number(status) === 503) {
+    // Auth-path 503 only: Sui could not be consulted (WALM-429). Other
+    // relayer 503s (Redis, rate limiter, LLM) keep the generic sanitizer
+    // so they are not mislabeled as a credential-verification failure.
+    if (Number(status) === 503 && authError === "AUTH_UPSTREAM_UNAVAILABLE") {
         return {
             message:
                 "Walrus Memory temporarily cannot verify credentials (upstream unavailable). Retry; this is not a sign-in failure.",
             raw: rawBody,
-            serverCode: "UPSTREAM_UNAVAILABLE",
+            serverCode: "AUTH_UPSTREAM_UNAVAILABLE",
         };
     }
 

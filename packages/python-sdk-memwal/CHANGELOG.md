@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- HTTP 503 from the relayer is reported as a retryable upstream outage, not a credential failure.
+- HTTP 503 with `x-auth-error: AUTH_UPSTREAM_UNAVAILABLE` is reported as a retryable credential-verification outage, not a sign-in failure. Other 503s keep the generic sanitized body.
 - `remember_bulk_async` rejects an empty `items` list before the request and raises when the relayer returns a `job_ids` length that does not match the batch.
 - restore `truncated` docs now match WALM-431 retryable semantics.
 
