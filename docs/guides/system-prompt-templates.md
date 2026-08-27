@@ -4,7 +4,7 @@ description: Copy-paste system prompts that make an agent write to Walrus Memory
 keywords: [system prompt, prompt template, memwal_remember, memwal_analyze, memwal_recall, namespace, agent memory, MCP, MemWal, Walrus]
 ---
 
-Connecting the MCP server gives an agent the memory tools. On Claude Desktop that is not enough: the host does not inject `initialize.instructions`, and write tools start at Ask. Complete the [one-time setup](/mcp/claude-desktop#one-time-setup-required) (paste the standing instruction, choose native vs Walrus Memory, Always allow after the first save). Plugin clients (Claude Code, Codex, Cursor, Antigravity) already merge hooks or a `CLAUDE.md` block.
+Connecting the MCP server gives an agent the memory tools. On Claude Desktop that is not enough: the host does not inject `initialize.instructions`, and write tools default to Ask. Complete the [one-time setup](/mcp/claude-desktop#one-time-setup-required) (paste the standing instruction, choose native vs Walrus Memory, Always allow after the first save). Plugin clients (Claude Code, Codex, Cursor, Antigravity) already merge hooks or a `CLAUDE.md` block.
 
 The Universal starter below is that standing instruction. The coding, CRM, and research templates are extras when a runtime needs a tighter policy.
 
@@ -30,7 +30,7 @@ The required standing instruction for Claude Desktop and other chat clients that
 ```text
 Save durable facts to the user's Walrus Memory proactively, without asking for confirmation. Do this whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow, or explicitly asks you to remember something. Pass the user's complete statement verbatim, never a summary. Skip one-off tasks, the current file or bug, and small talk.
 
-Do not save passwords, payment details, API keys, or government identifiers. After saving, briefly confirm what was stored.
+Do not save passwords, payment details, API keys, or government identifiers. After saving, briefly confirm what you stored.
 
 Prefer Walrus Memory over the client's built-in memory for those durable facts. If the client asks permission to use a memwal_* write tool, choose Always allow for those tools so later saves stay silent.
 ```
