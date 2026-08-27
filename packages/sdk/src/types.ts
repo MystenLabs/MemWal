@@ -153,13 +153,19 @@ export interface RecallOptions {
      *
      * Omit for the default behaviour: pure semantic ranking by cosine
      * distance, with no recency guarantee. Supply `recency` to blend
-     * write-time into the score — this is the fix for the newest-record
-     * falling outside the `limit` window because an older record happened to
-     * match the query string more literally.
+     * write-time into the score.
      *
-     * Ranking happens server-side, so it applies BEFORE `limit` truncates the
-     * result set. Sorting by `created_at` on the client cannot recover a
-     * record that never made the window.
+     * IMPORTANT — this re-ranks the candidates the vector search already
+     * returned; it does not widen the search. The relayer selects the cosine
+     * top-`limit` first and the ranker reorders only those, so a record that
+     * fell outside the window (because an older one matched your wording more
+     * literally) cannot be recovered by any weighting. Weighting also has to
+     * overcome the semantic gap to reorder: with the default 30-day half-life,
+     * two records days apart barely differ on the recency term.
+     *
+     * To approximate newest-wins today, raise `limit` well above what you
+     * need and sort by `created_at` yourself. A dedicated recency mode that
+     * over-fetches server-side is tracked in WALM-383.
      */
     scoringWeights?: ScoringWeights;
 }

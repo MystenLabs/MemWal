@@ -153,15 +153,18 @@ If an older record echoes the query's wording more literally than the newest
 one does, the older record outranks it and the newest falls outside the window
 entirely. Sorting client-side cannot recover a record that was never returned.
 
-Ask the ranker for recency instead:
+Until a dedicated recency mode lands (WALM-383), the reliable workaround is to
+over-fetch and narrow it yourself:
 
 ```ts
-const { results } = await memwal.recall({
-  query: "current task",
-  limit: 3,
-  scoringWeights: { semantic: 0.3, recency: 0.7, recencyHalfLifeDays: 30 },
-});
+// Widen the window first, THEN pick the newest.
+const { results } = await memwal.recall({ query: "current task", limit: 50 });
+const newest = results.sort(byCreatedAtDesc)[0];
 ```
+
+#### `scoringWeights`
+
+`scoringWeights` blends recency and importance into the relayer's ranking:
 
 | Weight | Default | Effect |
 | --- | --- | --- |
@@ -170,9 +173,20 @@ const { results } = await memwal.recall({
 | `recencyHalfLifeDays` | `30` | Days for the recency term to halve |
 | `importance` | `0` | Weight on the per-fact importance set at extraction time |
 
+**It re-ranks the candidates the vector search already returned — it does not
+widen the search.** The relayer selects the cosine top-`limit` first and the
+ranker reorders only those, so weighting alone does not solve the problem
+above. It also has to overcome the semantic gap to reorder anything: at the
+default 30-day half-life, two records a few days apart barely differ on the
+recency term, so a closer-worded older record still wins. Shorten
+`recencyHalfLifeDays` to make the recency term bite.
+
 Omitting `scoringWeights` leaves the request byte-identical to a plain cosine
-sort, so existing callers are unaffected. Use `created_at` to *verify* or
-display an order — use `scoringWeights` to *get* one.
+sort, so existing callers are unaffected.
+
+Use `created_at` to *verify* or display an order. Use `scoringWeights` to
+bias one — but raise `limit` if the record you need might not be in the
+window at all.
 
 ### `analyze(text, namespace?): Promise<AnalyzeResult>`
 

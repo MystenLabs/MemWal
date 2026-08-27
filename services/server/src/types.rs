@@ -1367,10 +1367,15 @@ pub struct RecallResult {
     /// `SearchHit` → `HydratedMemory` → here by the recall handler's
     /// `zip_search_hit_fields_onto_hydrated`.
     ///
-    /// Present so a caller can implement "newest wins" deterministically
-    /// rather than re-ranking on a date it has to parse back out of the
-    /// memory text (WALM-383). Note this is the *write* time, not any
+    /// Present so a caller can order and verify the returned set by
+    /// write-time rather than re-ranking on a date it has to parse back out
+    /// of the memory text (WALM-383). Note this is the *write* time, not any
     /// event time the text itself may describe.
+    ///
+    /// This alone does not make "newest wins" correct: the candidate set is
+    /// the cosine top-`limit` from `search_similar`, so the newest row can be
+    /// missing from `results` entirely and no client-side sort recovers it.
+    /// The server-side recency mode that over-fetches is still open.
     ///
     /// `None` only when the hydrated record had no matching `SearchHit`,
     /// which shouldn't happen on the recall path. `skip_serializing_if`
