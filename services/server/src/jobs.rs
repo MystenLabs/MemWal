@@ -2518,6 +2518,19 @@ impl WalletJobError {
         lower.contains("timed out waiting for") && lower.contains("upload slot")
     }
 
+    /// True if `msg` describes a failure of the hosted relayer's own
+    /// infrastructure rather than anything the caller controls: pool-wallet SUI
+    /// gas exhaustion, pool-wallet WAL balance depletion, or upload-slot
+    /// congestion. None of these are actionable by the caller, and their raw
+    /// text names relayer-owned addresses and balances — surfacing it verbatim
+    /// on a job status has led users to send SUI to an address that was never
+    /// theirs to fund. `sanitize_job_error_for_client` gates on this.
+    pub fn is_infrastructure_funding_error(msg: &str) -> bool {
+        Self::is_gas_pool_budget_error(msg)
+            || Self::is_upload_slot_congestion_error(msg)
+            || parse_wal_balance_alert_info(msg).is_some()
+    }
+
     pub fn classify_sidecar_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
         // PostgreSQL B-tree tuple-size failures are deterministic for the
