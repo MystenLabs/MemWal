@@ -8,6 +8,9 @@
 
 ### Fixed
 
+- Keep reading stdin after an in-session `memwal_login`. The auth-required stub hands off to the bridge by pausing stdin, and a stream paused that way does not resume when a new `data` listener attaches — so the bridge served only the request replayed from the hand-off and then went deaf. Signing in appeared to work, the retry succeeded, and every call after it hung until the client timed it out. (#633)
+- Confirm a completed sign-in instead of only writing it to the log file. The failure path already reported itself twice — a notification and a notice on the next tool call — while success reported nothing, so a user who approved in the browser could not tell whether credentials had landed, the bridge had adopted them, or a retry was worth trying. Success now sends the matching notification and prefixes a one-shot banner naming the account, the delegate, and the resolved credentials path onto the next tool result. (#633)
+- Serve one `memwal_login` prompt in both modes. The signed-out stub and the signed-in bridge had drifted into different assistant instructions, step wording, and closing lines, and both claimed credentials land at `~/.memwal/credentials.json` even when the resolved path was project-local. (#633, #628)
 - Resolve the credential directory on every access instead of freezing it at module load, and let `MEMWAL_CREDS_DIR` override it. The login test sandboxed the home directory with `HOME` alone, which `os.homedir()` ignores on Windows, so running the package's test suite there wrote fixture credentials over the developer's real `~/.memwal/credentials.json` and destroyed the delegate key stored in it. (#705)
 
 ## 0.0.11
