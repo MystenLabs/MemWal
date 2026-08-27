@@ -59,7 +59,11 @@ runs:
         last_error = "no successful /health response"
         while time.monotonic() < deadline:
             try:
-                with urllib.request.urlopen(url, timeout=10) as response:
+                request = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "MemWal-ci-wait-for-relayer"},
+                )
+                with urllib.request.urlopen(request, timeout=10) as response:
                     data = json.load(response)
                 status = str(data.get("status") or "")
                 ready = data.get("write_ready") is True
