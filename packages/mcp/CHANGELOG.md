@@ -1,6 +1,6 @@
 # @mysten-incubation/memwal-mcp
 
-## Unreleased
+## 0.0.12
 
 ### Added
 
