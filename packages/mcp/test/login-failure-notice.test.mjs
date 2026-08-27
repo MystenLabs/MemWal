@@ -206,8 +206,8 @@ test("a sign-in that never completes is reported on the next tool call", async (
 
     assert.equal(after.result.isError, true);
     assert.match(text, /never completed/);
-    assert.match(text, /second attempt usually works/);
-    // The wasted on-chain key is the part users cannot discover on their own.
+    assert.match(text, /left running through the/);
+    assert.doesNotMatch(text, /usually works/);
     assert.match(text, /already be registered on your account/);
     // Still tells them how to sign in, rather than replacing the instruction.
     assert.match(text, /memwal_login/);

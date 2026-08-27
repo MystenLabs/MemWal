@@ -86,7 +86,7 @@ This section covers problems that appear before the memory tools work.
 - This tab is leftover from a sign-in that already finished, or the hand-off did not match what the app expected.
 - Local software such as a firewall, a VPN client, or a browser extension blocks requests from a website to `127.0.0.1`.
 
-**Fix:** Call `memwal_login` again and complete the wallet step. A second attempt usually works. Remove the unused key from the Delegate keys panel in the dashboard so the list stays readable.
+**Fix:** Call `memwal_login` again and open the new URL promptly. A retry only helps once the MCP client is left running through the wallet prompt. Remove the unused key from the Delegate keys panel in the dashboard; it is already on your account.
 
 If it keeps failing, confirm that nothing blocks localhost traffic, then run `npx -y @mysten-incubation/memwal-mcp login --prod` directly in a terminal. A terminal sign-in prints the failure reason instead of leaving it in the MCP client's logs.
 

@@ -96,7 +96,10 @@ describe('MCP sign-in hand-off', () => {
         expect(screen.getByText(/Nothing answered on your computer/i)).toBeInTheDocument()
         expect(screen.getByText(/stopped waiting after this tab was already open/i)).toBeInTheDocument()
         expect(screen.queryByText(/opened too late/i)).not.toBeInTheDocument()
-        expect(screen.getByText(/second attempt usually works/i)).toBeInTheDocument()
+        expect(screen.getByText(/Sign in again and open the new link straight away/i)).toBeInTheDocument()
+        expect(screen.getByText(/left running through the wallet prompt/i)).toBeInTheDocument()
+        expect(screen.getByText(/unused key from this attempt is already on your account/i)).toBeInTheDocument()
+        expect(screen.queryByText(/usually works/i)).not.toBeInTheDocument()
     })
 
     it('explains an expired link when preflight cannot reach the listener', async () => {

@@ -596,12 +596,10 @@ function SuccessCard({
                             : 'The app on your computer rejected this hand-off. That usually means this tab is leftover from a sign-in that already finished, or the request did not match what the app expected.'}
                     </p>
                     <p className="setup-classic-description">
-                        The unused key from this attempt is already on your account. Remove it
-                        from the dashboard if you are not using it.
-                    </p>
-                    <p className="setup-classic-description">
-                        <strong>Sign in again and open the new link straight away.</strong> The
-                        second attempt usually works.{' '}
+                        <strong>Sign in again and open the new link straight away.</strong> A
+                        retry only helps once the MCP client is left running through the wallet
+                        prompt. The unused key from this attempt is already on your account.
+                        Remove it from the dashboard if you are not using it.{' '}
                         {config.docsUrl && (
                             <a
                                 href={`${config.docsUrl}/troubleshooting/overview#sign-in-succeeds-but-credentials-are-not-saved`}
