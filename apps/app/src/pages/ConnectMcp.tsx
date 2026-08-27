@@ -684,13 +684,17 @@ function ConsentSetupCard() {
             <p style={cardLabelStyle}>Required: one-time setup</p>
             <ol style={setupListStyle}>
                 <li>
-                    Native memory: for portable memory across apps, turn off Claude or ChatGPT
-                    native memory (Settings → Memory). If you keep it on, Walrus Memory is
-                    explicit-only: name memwal when you want a save.
+                    Native memory: for portable memory across apps, turn off the client's
+                    built-in memory. That is reversible and does not delete existing native
+                    memories. If you keep it on, Walrus Memory is explicit-only: name memwal
+                    when you want a save.
                 </li>
                 <li>
-                    Paste this into Claude: Settings → Profile (or General) → Instructions for
-                    Claude / Personal Preferences. Start a new chat.
+                    Paste this standing instruction, then start a new chat. Claude: Settings →
+                    Profile (or General) → Instructions for Claude / Personal Preferences.
+                    Claude Code: <code style={codeStyle}>~/.claude/CLAUDE.md</code>. Codex:{' '}
+                    <code style={codeStyle}>AGENTS.md</code>. Cursor: a rule file under{' '}
+                    <code style={codeStyle}>.cursor/rules</code>.
                 </li>
             </ol>
             <pre style={promptBlockStyle}>{CONSENT_INSTRUCTION}</pre>
@@ -715,6 +719,10 @@ function ConsentSetupCard() {
                     </a>
                 )}
             </div>
+            <p style={{ ...setupListStyle, paddingLeft: 0, marginTop: 8 }}>
+                The Desktop guide is the long walkthrough. Other clients use the same three
+                steps with the paste paths above.
+            </p>
             <ol start={3} style={{ ...setupListStyle, marginTop: 16 }}>
                 <li>
                     After you save the first fact, choose Always allow for{' '}

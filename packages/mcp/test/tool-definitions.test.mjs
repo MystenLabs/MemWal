@@ -45,9 +45,13 @@ test("signed-in cold-start remember/recall descriptions are proactive", () => {
 
 test("signed-out tools/list keeps conservative remember wording", () => {
     const remember = desc(SIGNED_OUT_TOOL_DEFINITIONS, "memwal_remember");
+    const bulk = desc(SIGNED_OUT_TOOL_DEFINITIONS, "memwal_remember_bulk");
     const recall = desc(SIGNED_OUT_TOOL_DEFINITIONS, "memwal_recall");
     assert.match(remember, /Call ONLY when the user explicitly asks/);
     assert.doesNotMatch(remember, /PROACTIVELY/);
+    assert.match(bulk, /Call ONLY when the user explicitly asks/);
+    assert.doesNotMatch(bulk, /PROACTIVELY/);
+    assert.doesNotMatch(bulk, /never ask permission/i);
     assert.doesNotMatch(recall, /PROACTIVELY/);
 });
 

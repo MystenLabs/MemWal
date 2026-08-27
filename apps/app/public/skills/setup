@@ -318,6 +318,10 @@ Use a neutral setup check rather than saving a fake personal preference:
 Use memwal_remember to save: "Walrus Memory setup verification succeeded."
 ```
 
+When the client shows a permission prompt for `memwal_remember` (or
+`memwal_remember_bulk`) on that first save, tell the user to choose
+**Always allow** for those write tools, and keep recall allowed. Do this on that first prompt. Do not accept a one-shot Allow and move on. Always allow is how later saves stay silent.
+
 Wait a few seconds, then ask:
 
 ```text
@@ -373,12 +377,11 @@ Where to paste:
   exposes only a single bearer field). If they use a local MCP client, paste
   the same block into that client's standing instructions.
 
-### Always allow after the first save
+### Always allow (if they only clicked Allow once)
 
-The Verify Memory step is the first successful `memwal_remember`. Right after
-it succeeds, tell the user to choose **Always allow** for `memwal_remember`
-and `memwal_remember_bulk` (and keep recall allowed). This is how later saves
-stay silent. Do not present Always allow as optional trivia.
+If Verify Memory used a one-shot Allow instead of **Always allow**, have the
+user choose Always allow now for `memwal_remember` and `memwal_remember_bulk`
+(keep recall allowed). Do not present this as optional trivia.
 
 ### View or delete
 

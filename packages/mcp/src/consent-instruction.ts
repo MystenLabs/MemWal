@@ -16,6 +16,8 @@ Prefer Walrus Memory over the client's built-in memory for those durable facts. 
 
 export const ENABLE_PROACTIVE_PROMPT_NAME = "memwal_enable_proactive";
 
+export const ENABLE_PROACTIVE_PROMPT_TITLE = "Enable proactive Walrus Memory";
+
 export const ENABLE_PROACTIVE_PROMPT_DESCRIPTION =
     "One-time standing instruction so this client saves and recalls durable facts through Walrus Memory without asking every turn.";
 
@@ -23,6 +25,7 @@ export const ENABLE_PROACTIVE_PROMPT_LIST = {
     prompts: [
         {
             name: ENABLE_PROACTIVE_PROMPT_NAME,
+            title: ENABLE_PROACTIVE_PROMPT_TITLE,
             description: ENABLE_PROACTIVE_PROMPT_DESCRIPTION,
         },
     ],

@@ -100,6 +100,8 @@ Tool descriptions and handshake instructions are not enough on Desktop. After th
   </Step>
 </Steps>
 
+The MCP prompt `memwal_enable_proactive` is a one-shot `/` fallback that returns the same standing instruction. It does not persist like Profile instructions. Paste the block above and choose Always allow. The prompt does not replace those steps.
+
 ## Available tools
 
 | Tool | Description |

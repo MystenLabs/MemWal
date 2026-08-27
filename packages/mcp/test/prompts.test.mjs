@@ -4,6 +4,7 @@ import {
     CONSENT_INSTRUCTION,
     ENABLE_PROACTIVE_PROMPT_DESCRIPTION,
     ENABLE_PROACTIVE_PROMPT_NAME,
+    ENABLE_PROACTIVE_PROMPT_TITLE,
     localPromptReply,
 } from "../dist/consent-instruction.js";
 
@@ -17,6 +18,7 @@ test("canonical consent instruction excludes secrets and names Always allow", ()
 test("prompts/list advertises memwal_enable_proactive", () => {
     const reply = localPromptReply("prompts/list", {});
     assert.equal(reply?.result?.prompts?.[0]?.name, ENABLE_PROACTIVE_PROMPT_NAME);
+    assert.equal(reply?.result?.prompts?.[0]?.title, ENABLE_PROACTIVE_PROMPT_TITLE);
     assert.equal(reply?.result?.prompts?.[0]?.description, ENABLE_PROACTIVE_PROMPT_DESCRIPTION);
 });
 

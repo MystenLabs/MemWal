@@ -7,6 +7,7 @@ import {
     CONSENT_INSTRUCTION,
     ENABLE_PROACTIVE_PROMPT_DESCRIPTION,
     ENABLE_PROACTIVE_PROMPT_NAME,
+    ENABLE_PROACTIVE_PROMPT_TITLE,
 } from "../consent-instruction.js";
 import { createMcpServer } from "../server.js";
 
@@ -28,6 +29,7 @@ test("prompts/list includes memwal_enable_proactive with the consent instruction
     const { prompts } = await client.listPrompts();
     const prompt = prompts.find((p) => p.name === ENABLE_PROACTIVE_PROMPT_NAME);
     assert.ok(prompt, "memwal_enable_proactive must be listed");
+    assert.equal(prompt.title, ENABLE_PROACTIVE_PROMPT_TITLE);
     assert.equal(prompt.description, ENABLE_PROACTIVE_PROMPT_DESCRIPTION);
 
     const got = await client.getPrompt({ name: ENABLE_PROACTIVE_PROMPT_NAME });

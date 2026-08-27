@@ -2,7 +2,7 @@
 title: OpenCode
 description: >-
   Add portable Walrus Memory to OpenCode through the MemWal MCP server.
-  OpenCode supports MCP-only installation with proactive memory tools.
+  OpenCode supports MCP-only installation. Silent saves need a standing instruction and Always allow after the first save.
 keywords:
   - MCP
   - OpenCode
@@ -28,7 +28,7 @@ questions:
   - How do I configure the MemWal MCP server for OpenCode?
   - Does OpenCode support the MemWal plugin?
 answer: >-
-  To add Walrus Memory to OpenCode, configure the MemWal MCP server in ~/.config/opencode/opencode.json as a local stdio server using npx -y @mysten-incubation/memwal-mcp. OpenCode supports MCP-only (not the plugin with lifecycle hooks). The tool descriptions make the agent save and recall proactively. Pin a default namespace by adding a MEMWAL_NAMESPACE environment variable to the server entry.
+  To add Walrus Memory to OpenCode, configure the MemWal MCP server in ~/.config/opencode/opencode.json as a local stdio server using npx -y @mysten-incubation/memwal-mcp. OpenCode supports MCP-only (not the plugin with lifecycle hooks). MCP-only exposes the tools. A standing instruction and Always allow after the first save are what make later saves silent. Tool descriptions are not enough on hosts that do not inject initialize.instructions and that Ask on writes. Pin a default namespace by adding a MEMWAL_NAMESPACE environment variable to the server entry.
 ---
 
 Add MemWal to OpenCode so the agent can save and recall durable facts. OpenCode uses the **MCP server** (the memory tools); the automatic-memory plugin hooks are available on [Claude Code](/mcp/claude-code), [Codex](/mcp/codex), [Cursor](/mcp/cursor), and [Antigravity](/mcp/antigravity).
@@ -68,7 +68,7 @@ To pin a default namespace, add `"environment": { "MEMWAL_NAMESPACE": "<name>" }
 | `memwal_health` | Fast connectivity check. |
 | `memwal_login` / `memwal_logout` | Connect or disconnect this client. |
 
-The tool descriptions tell the agent to save and recall proactively. See [Reference](/mcp/reference) for full parameters.
+See [Reference](/mcp/reference) for full parameters. MCP-only exposes the tools. A standing instruction and Always allow after the first save are what make later saves silent. Tool descriptions are not enough on hosts that do not inject `initialize.instructions` and that Ask on writes. See [Claude Desktop](/mcp/claude-desktop#one-time-setup-required).
 
 ## Verify
 

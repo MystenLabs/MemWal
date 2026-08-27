@@ -29,7 +29,7 @@ questions:
   - How do I configure the MemWal MCP server for Cursor?
   - Does Cursor support MemWal lifecycle hooks?
 answer: >-
-  To add Walrus Memory to Cursor, configure the MemWal MCP server in ~/.cursor/mcp.json using npx -y @mysten-incubation/memwal-mcp as the command. Cursor also supports optional lifecycle hooks via its plugin system for session start, before prompt, and post-tool events. The MCP-only setup already provides proactive save and recall through tool descriptions, so the hooks are optional reinforcement.
+  To add Walrus Memory to Cursor, configure the MemWal MCP server in ~/.cursor/mcp.json using npx -y @mysten-incubation/memwal-mcp as the command. Cursor also supports optional lifecycle hooks via its plugin system for session start, before prompt, and post-tool events. MCP-only exposes the tools. Plugin hooks, a standing instruction, and Always allow after the first save are what make later saves silent. Tool descriptions are not enough on hosts that do not inject initialize.instructions and that Ask on writes.
 ---
 
 Add MemWal to Cursor so the agent can save and recall durable facts. The **MCP server** (memory tools, below) works on every Cursor version; Cursor's plugin system can also add **lifecycle hooks** for extra reinforcement (see [Lifecycle hooks](#lifecycle-hooks-plugin)).
@@ -68,7 +68,7 @@ To pin a default namespace, pass `"--namespace", "<name>"` in `args` (or set `ME
 | `memwal_health` | Fast connectivity check. |
 | `memwal_login` / `memwal_logout` | Connect or disconnect this client. |
 
-The tool descriptions tell the agent to save and recall proactively. See [Reference](/mcp/reference) for full parameters.
+See [Reference](/mcp/reference) for full parameters. MCP-only exposes the tools. Plugin hooks, a standing instruction, and Always allow after the first save are what make later saves silent. Tool descriptions are not enough on hosts that do not inject `initialize.instructions` and that Ask on writes. See [Claude Desktop](/mcp/claude-desktop#one-time-setup-required).
 
 ## Lifecycle hooks (plugin)
 
@@ -80,7 +80,7 @@ Beyond the MCP tools, Cursor's plugin system can run **lifecycle hooks** that re
 | Before prompt | `beforeSubmitPrompt` | Detects recall/remember intent and reminds the agent. |
 | Post-tool | `postToolUse` (Bash) | On command errors, reminds the agent to recall prior fixes. |
 
-The hook scripts ship inside the plugin bundle (`packages/mcp/plugin/`); hook support depends on your Cursor version. The MCP-only setup above already gives proactive save/recall, so the hooks are an optional reinforcement.
+The hook scripts ship inside the plugin bundle (`packages/mcp/plugin/`); hook support depends on your Cursor version. Hooks reinforce save and recall. They are not a substitute for the standing instruction and Always allow on hosts that Ask on writes.
 
 ## Verify
 

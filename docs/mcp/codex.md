@@ -21,7 +21,7 @@ questions:
   - How do I install the MemWal plugin on Codex?
   - Does Codex have a plugin marketplace for MemWal?
 answer: >-
-  To add Walrus Memory to Codex, install the MemWal plugin through the marketplace (codex plugin marketplace add MystenLabs/MemWal, then codex plugin add memwal@memwal-plugins), or add it as MCP-only by editing ~/.codex/config.toml directly. The plugin includes lifecycle hooks that reinforce automatic recall and save behavior on top of the MCP tools.
+  To add Walrus Memory to Codex, install the MemWal plugin through the marketplace (codex plugin marketplace add MystenLabs/MemWal, then codex plugin add memwal@memwal-plugins), or add it as MCP-only by editing ~/.codex/config.toml directly. MCP-only exposes the tools. Plugin hooks, a standing instruction, and Always allow after the first save are what make later saves silent. Tool descriptions are not enough on hosts that do not inject initialize.instructions and that Ask on writes.
 ---
 
 Add MemWal to Codex so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended; adds automatic-memory hooks) or as **MCP-only** (just the tools).
@@ -68,8 +68,10 @@ Add MemWal to Codex so it recalls context and saves durable facts as you work. I
     command = "npx"
     args = ["-y", "@mysten-incubation/memwal-mcp"]
     ```
-    Restart Codex, then ask the agent to run `memwal_login` on first use. The
-    memory tools are proactive, so this is enough for automatic save and recall.
+    Restart Codex, then ask the agent to run `memwal_login` on first use. MCP-only
+    exposes the tools. Plugin hooks, a standing instruction, and Always allow after
+    the first save are what make later saves silent. See [Claude Desktop](/mcp/claude-desktop#one-time-setup-required)
+    if this host Asks on writes.
   </Tab>
 </Tabs>
 
@@ -84,7 +86,7 @@ Do not combine options: the plugin bundles the memwal MCP server on its own. Do 
 | MemWal MCP (memory tools) | ✓ | ✓ |
 | Lifecycle hooks (automatic recall/save) | ✓ | ✗ |
 
-MCP-only still saves and recalls on its own because the tools are proactive. The plugin adds hooks that reinforce the behavior and make the agent prefer Walrus Memory over any built-in memory.
+MCP-only exposes the memory tools. The plugin adds lifecycle hooks that reinforce save and recall. Tool descriptions are not enough on hosts that do not inject `initialize.instructions` and that Ask on writes. Those hosts need the standing instruction and Always allow. See [Claude Desktop](/mcp/claude-desktop#one-time-setup-required).
 
 ## Available tools
 

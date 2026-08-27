@@ -93,7 +93,7 @@ Add MemWal to Antigravity so the agent recalls context and saves durable facts. 
 | `memwal_health` | Fast connectivity check. |
 | `memwal_login` / `memwal_logout` | Connect or disconnect this client. |
 
-The tool descriptions tell the agent to save and recall proactively. See [Reference](/mcp/reference) for full parameters.
+See [Reference](/mcp/reference) for full parameters. MCP-only exposes the tools. Plugin hooks, a standing instruction, and Always allow after the first save are what make later saves silent. Tool descriptions are not enough on hosts that do not inject `initialize.instructions` and that Ask on writes. See [Claude Desktop](/mcp/claude-desktop#one-time-setup-required).
 
 ## Verify
 
