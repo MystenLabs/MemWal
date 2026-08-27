@@ -29,10 +29,10 @@ questions:
   - What is the difference between the MemWal plugin and MCP-only installation?
   - Which MCP clients support the MemWal automatic memory plugin?
 answer: >-
-  The MemWal MCP server exposes portable Walrus Memory as Model Context Protocol tools so AI agents can save and recall memories on their own. It can be installed as a plugin (with lifecycle hooks for automatic memory) on Claude Code, Codex, Cursor, and Antigravity, or as an MCP-only server on any MCP-aware client. Available tools include memwal_remember, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, and memwal_logout.
+  The MemWal MCP server exposes portable Walrus Memory as Model Context Protocol tools so AI agents can save and recall memories. It can be installed as a plugin (with lifecycle hooks for automatic memory) on Claude Code, Codex, Cursor, and Antigravity, or as an MCP-only server on any MCP-aware client. Claude Desktop needs a one-time standing instruction and Always allow after the first save. ChatGPT remote MCP is not supported today. Available tools include memwal_remember, memwal_recall, memwal_analyze, memwal_restore, memwal_health, memwal_login, and memwal_logout.
 ---
 
-The **MemWal MCP server** exposes your portable Walrus Memory as Model Context Protocol tools, so an AI agent can decide when to save and recall memories on its own. It works with any MCP-aware client, and on **Claude Code**, **Codex**, **Cursor**, and **Antigravity** it can be installed as a **plugin** that adds automatic memory through lifecycle hooks.
+The **MemWal MCP server** exposes your portable Walrus Memory as Model Context Protocol tools. It works with any MCP-aware client. On **Claude Code**, **Codex**, **Cursor**, and **Antigravity** it can be installed as a **plugin** that adds automatic memory through lifecycle hooks. **Claude Desktop** needs the [one-time setup](/mcp/claude-desktop#one-time-setup-required) after connect.
 
 ## MCP vs Plugin
 
@@ -43,11 +43,11 @@ There are two ways to use MemWal. The difference is whether you also get the **l
 | MemWal MCP: memory tools (`memwal_remember`, `memwal_recall`, …) | ✓ | ✓ |
 | Lifecycle hooks: automatic recall/save reminders | ✓ | ✗ |
 
-- **MCP-only** gives the agent the memory tools. Because the tool descriptions encourage proactive use, the agent already saves and recalls on its own; you just do not get the hooks. Available on **every** MCP client.
-- **Plugin** bundles the MCP server **and** lifecycle hooks that reinforce the behavior (for example, preferring Walrus Memory over a client's built-in memory). Available on **Claude Code**, **Codex**, **Antigravity**, and **Cursor**.
+- **MCP-only** gives the agent the memory tools. Available on **every** MCP client. That is not already fully proactive on every host: Claude Desktop (and ChatGPT-style chat clients) do not inject MCP `initialize.instructions`, and write tools start at Ask. Those clients need the [one-time setup](/mcp/claude-desktop#one-time-setup-required). ChatGPT remote MCP is not supported today (the connector UI exposes only a single bearer field).
+- **Plugin** bundles the MCP server **and** lifecycle hooks that reinforce save and recall (for example, preferring Walrus Memory over a client's built-in memory). Available on **Claude Code**, **Codex**, **Antigravity**, and **Cursor**.
 
 <Note>
-The proactive behavior comes from the tool layer, so it works on both installation paths. The plugin hooks add reinforcement on the clients that support them.
+Plugin hooks exist on Claude Code, Codex, Cursor, and Antigravity. Claude Desktop needs the one-time standing instruction and Always allow after the first save. Do not treat MCP-only as already fully proactive on every client.
 </Note>
 
 ## Available tools

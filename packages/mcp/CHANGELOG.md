@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal-mcp
 
+## Unreleased
+
+### Changed
+
+- Productize one-time proactive-memory setup for Claude Desktop: standing consent instruction, `memwal_enable_proactive` MCP prompt, and storage/view-delete wording on remember/recall tools (WALM-430).
+
 ## 0.0.12
 
 ### Added

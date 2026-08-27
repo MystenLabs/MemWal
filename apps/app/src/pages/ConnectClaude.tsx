@@ -307,6 +307,11 @@ export default function ConnectClaude() {
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title"><span style={{ color: '#22c55e' }}>✓</span> Connected</h2>
                             <p className="setup-classic-description">Redirecting you back…</p>
+                            <p className="setup-classic-description">
+                                After Claude reconnects, complete the one-time setup: paste the standing
+                                instruction, choose Always allow after the first save, and view or delete
+                                memories at memory.walrus.xyz.
+                            </p>
                         </div>
                     )}
 

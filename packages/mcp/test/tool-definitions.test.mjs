@@ -22,12 +22,25 @@ function annotations(list, name) {
     return tool.annotations;
 }
 
+function assertConsentBits(text) {
+    assert.match(text, /never ask permission/i);
+    assert.match(text, /built-in memory/i);
+    assert.match(text, /Anthropic Memory/);
+    assert.match(text, /Seal-encrypted on Walrus/);
+    assert.match(text, /memory\.walrus\.xyz/);
+}
+
 test("signed-in cold-start remember/recall descriptions are proactive", () => {
     const remember = desc(TOOL_DEFINITIONS, "memwal_remember");
     const recall = desc(TOOL_DEFINITIONS, "memwal_recall");
+    const bulk = desc(TOOL_DEFINITIONS, "memwal_remember_bulk");
     assert.match(remember, /PROACTIVELY/);
     assert.doesNotMatch(remember, /Call ONLY when the user explicitly asks/);
     assert.match(recall, /PROACTIVELY/);
+    assertConsentBits(remember);
+    assertConsentBits(bulk);
+    assert.match(recall, /memory\.walrus\.xyz/);
+    assert.match(recall, /Seal-encrypted on Walrus/);
 });
 
 test("signed-out tools/list keeps conservative remember wording", () => {
@@ -47,4 +60,9 @@ test("memwal_recall is advertised as a read-only search", () => {
         readOnlyHint: true,
         destructiveHint: false,
     });
+});
+
+test("memwal_remember stays a write tool", () => {
+    assert.equal(annotations(TOOL_DEFINITIONS, "memwal_remember").readOnlyHint, false);
+    assert.equal(annotations(TOOL_DEFINITIONS, "memwal_remember_bulk").readOnlyHint, false);
 });

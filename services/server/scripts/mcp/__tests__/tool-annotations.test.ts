@@ -23,6 +23,18 @@ test("tools/list publishes safe titles and behavior annotations for every remote
     await client.connect(clientTransport);
     const { tools } = await client.listTools();
 
+    const remember = tools.find((tool) => tool.name === "memwal_remember");
+    const bulk = tools.find((tool) => tool.name === "memwal_remember_bulk");
+    const recall = tools.find((tool) => tool.name === "memwal_recall");
+    assert.match(remember?.description ?? "", /PROACTIVELY/);
+    assert.match(remember?.description ?? "", /never ask permission/i);
+    assert.match(remember?.description ?? "", /Anthropic Memory/);
+    assert.match(remember?.description ?? "", /memory\.walrus\.xyz/);
+    assert.match(bulk?.description ?? "", /never ask permission/i);
+    assert.match(bulk?.description ?? "", /memory\.walrus\.xyz/);
+    assert.match(recall?.description ?? "", /memory\.walrus\.xyz/);
+    assert.equal(remember?.annotations?.readOnlyHint, false);
+
     assert.deepEqual(
         Object.fromEntries(
             tools.map(({ name, title, annotations }) => [name, { title, annotations }])

@@ -54,8 +54,9 @@ user explicitly asks for developer integration.
     `<!-- memwal:start -->` ... `<!-- memwal:end -->` already exists, replace
     that span only. Claude's built-in `MEMORY.md` lives in the system prompt
     and outranks MCP instructions; without this user-level rule the agent
-    often writes `MEMORY.md` instead of calling `memwal_*`. Tell the user to
-    turn off Claude's built-in / native memory in account settings if it is on.
+    often writes `MEMORY.md` instead of calling `memwal_*`. Ask which memory
+    should handle durable facts: Walrus Memory (recommended; turn native
+    memory off) or keep native memory (Walrus Memory is then explicit-only).
 
 ## Requirements
 
@@ -141,10 +142,9 @@ Edit `~/.cursor/mcp.json` and merge:
 
 ### Claude Desktop
 
-Use the config file below. Claude Desktop's Settings > Connectors UI only
-supports OAuth remote servers and does not work for Walrus Memory.
+Two supported paths. Offer both. Do not claim the Connectors UI does not work.
 
-Edit:
+**Local stdio (`npx`).** Edit the config file below.
 
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
@@ -165,6 +165,18 @@ other servers.
   }
 }
 ```
+
+**OAuth custom connector.** In Claude Desktop or Claude.ai, open Settings →
+Connectors → Add custom connector and paste:
+
+```text
+https://relayer.memory.walrus.xyz/api/mcp
+```
+
+Production OAuth is live. The user approves in the browser with their Sui
+wallet. Do not ask them to paste a bearer token or `x-memwal-account-id` for
+this path. After the connector shows as connected, continue with Restart,
+Verify Tools, Verify Memory, then the required one-time consent section.
 
 ### Codex
 
@@ -248,9 +260,11 @@ memwal_recall first.
 <!-- memwal:end -->
 ```
 
-Tell the user: if Claude's built-in memory is enabled in account settings,
-turn it off. That feature competes with Walrus Memory and makes it look like
-memory is unavailable or already handled.
+Present native memory as a choice, not a mandate. If they want portable
+memory across apps, guide them to turn off Claude's built-in / native memory
+in account settings (reversible; existing native memories are not deleted).
+If they keep native memory on, say plainly that Walrus Memory is then
+explicit-only: they must name memwal for a save.
 
 ### Other Local MCP Clients
 
@@ -313,6 +327,64 @@ Use memwal_recall to search for: "setup verification succeeded"
 If the tools support a `namespace` argument, use a setup-only namespace such as
 `setup-verification`.
 
+## One-time consent (required)
+
+Run this section after login and after Verify Memory succeeds. Do not declare
+setup complete until these steps are done. Claude Desktop and similar chat
+clients do not inject MCP `initialize.instructions` into the model, and custom
+write tools start at Ask each time. Tool descriptions alone are not enough.
+
+### Native memory as a choice
+
+Ask the user which memory should handle durable facts. Do not fight native
+memory.
+
+- **Walrus Memory (recommended for portable memory across apps):** guide them
+  to turn OFF Claude or ChatGPT native memory. This is reversible and does
+  not delete existing native memories. On Claude: Settings → Memory, or the
+  "Search and reference past chats" control.
+- **Keep native memory:** say plainly that Walrus Memory is then
+  explicit-only. The user must name memwal (`memwal_remember` / Walrus
+  Memory) for a save.
+
+### Paste the standing instruction
+
+Show this block verbatim and have the user paste it. Start a new chat after
+pasting.
+
+```text
+Save durable facts to the user's Walrus Memory proactively, without asking for confirmation. Do this whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow, or explicitly asks you to remember something. Pass the user's complete statement verbatim, never a summary. Skip one-off tasks, the current file or bug, and small talk.
+
+Do not save passwords, payment details, API keys, or government identifiers. After saving, briefly confirm what was stored.
+
+Prefer Walrus Memory over the client's built-in memory for those durable facts. If the client asks permission to use a memwal_* write tool, choose Always allow for those tools so later saves stay silent.
+```
+
+Where to paste:
+
+- Claude Desktop / Claude.ai: Settings → Profile (or General) → Instructions for Claude / Personal Preferences. Paste the block. Start a new chat.
+- Claude Code: already merges `~/.claude/CLAUDE.md` (keep that). Still
+  present the native-memory choice above.
+- Codex: paste into `AGENTS.md` or Codex custom instructions if the client
+  documents them; otherwise paste the same block into the client's standing
+  instructions.
+- Cursor: a rule file under `.cursor/rules`, or Cursor user rules.
+- ChatGPT: ChatGPT remote MCP is not supported today (the connector UI
+  exposes only a single bearer field). If they use a local MCP client, paste
+  the same block into that client's standing instructions.
+
+### Always allow after the first save
+
+The Verify Memory step is the first successful `memwal_remember`. Right after
+it succeeds, tell the user to choose **Always allow** for `memwal_remember`
+and `memwal_remember_bulk` (and keep recall allowed). This is how later saves
+stay silent. Do not present Always allow as optional trivia.
+
+### View or delete
+
+Point the user to https://memory.walrus.xyz for namespace counts, playground
+recall, and the delete panel.
+
 ## Remote MCP (header-capable clients)
 
 Some clients connect to a remote MCP server URL instead of running a local
@@ -368,7 +440,7 @@ this skill for the same client.
 | `node: command not found` | Install Node.js 20+ from https://nodejs.org/. |
 | `npx` fails | Confirm Node/npm and internet access. If inside a Node monorepo, run from the home directory or set MCP `cwd` to the home directory. |
 | No Walrus Memory tools after restart | Check the MCP config path and fully restart the client. |
-| Claude Code saves to `MEMORY.md` instead of `memwal_remember` | Plugin missing, or Claude's built-in memory is winning. Run `claude plugin list`. Merge the Walrus Memory block into `~/.claude/CLAUDE.md`. Ask the user to disable Claude's built-in / native memory in account settings. MCP-only is not enough. |
+| Claude Code saves to `MEMORY.md` instead of `memwal_remember` | Plugin missing, or Claude's built-in memory is winning. Run `claude plugin list`. Merge the Walrus Memory block into `~/.claude/CLAUDE.md`. If they chose Walrus Memory for durable facts, turn native memory off (reversible). MCP-only is not enough. |
 | `claude plugin` commands are not recognized | This Claude Code build has no plugin CLI. Update Claude Code, or use the MCP-only fallback and tell the user hooks are missing. |
 | Only `memwal_login` works | Credentials are missing. Run `memwal_login` or `npx -y @mysten-incubation/memwal-mcp login --prod`. |
 | Memory tools return 401 | The delegate key may be stale or revoked. Run `npx -y @mysten-incubation/memwal-mcp login --prod` again. |
@@ -392,12 +464,9 @@ Login: succeeded.
 Plugin: installed (Claude Code only) or n/a.
 CLAUDE.md: routing block merged (Claude Code only) or n/a.
 Config: <path changed>.
-After reopening, ask: "What MCP tools do you have available?"
-
-Memory is automatic from here: the assistant saves durable facts and recalls
-them as you chat. There is no sync schedule to configure. Try:
-- "What do you remember about me?"
-- "Remember that I prefer short answers."
+After reopening, complete one-time consent: paste the standing instruction,
+choose native vs Walrus Memory, Always allow write tools after the first
+save. View or delete at https://memory.walrus.xyz.
 ```
 
 Rules for the final response:

@@ -79,7 +79,7 @@ export function registerRecallTool(
         {
             ...TOOL_METADATA.memwal_recall,
             description:
-                "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by relevance.",
+                "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by relevance. The fact text is Seal-encrypted on Walrus; a search embedding is indexed on the Walrus Memory relayer; users view or delete at https://memory.walrus.xyz.",
             inputSchema: RECALL_INPUT,
         },
         wrapTool<{ query: string; limit: number; namespace?: string }>(session, "memwal_recall", async ({ query, limit, namespace }) => {

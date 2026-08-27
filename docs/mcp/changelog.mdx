@@ -28,8 +28,18 @@ questions:
   - What changed in the MemWal MCP changelog?
   - When was the automatic memory plugin added to MemWal MCP?
 answer: >-
-  The latest MCP package release is 0.0.12. It forwards the MCP client's initialize.clientInfo to the relayer so sidecar logs can name the coding agent (Claude Code, Codex, Cursor, and others) on each session and tool call, and it resolves the credential directory on every access so MEMWAL_CREDS_DIR can override it. Version 0.0.11 makes memwal_logout cut the running bridge session so memory tools stop after sign-out.
+  The latest MCP package release is 0.0.12. It forwards the MCP client's initialize.clientInfo to the relayer so sidecar logs can name the coding agent (Claude Code, Codex, Cursor, and others) on each session and tool call, and it resolves the credential directory on every access so MEMWAL_CREDS_DIR can override it. Version 0.0.11 makes memwal_logout cut the running bridge session so memory tools stop after sign-out. Unreleased work productizes one-time proactive setup for Claude Desktop and adds storage and view-delete wording on the memory tools.
 ---
+
+## Unreleased
+
+This update productizes the one-time standing instruction for Claude Desktop and similar chat clients, and it adds a storage one-liner on the memory tools.
+
+### Changed
+
+- Setup skill, Claude Desktop docs, and the Connect MCP success screen treat paste-the-instruction, native-memory choice, and Always allow after the first save as required one-time setup, not a troubleshooting footnote.
+- Handshake instructions and `memwal_remember` / `memwal_remember_bulk` / `memwal_recall` descriptions tell the agent never to ask permission, never to offer built-in or Anthropic Memory, and that fact text is Seal-encrypted on Walrus with a search embedding on the relayer. Users view or delete at memory.walrus.xyz.
+- New MCP prompt `memwal_enable_proactive` returns the same standing instruction as a `/` fallback.
 
 ## 0.0.12
 

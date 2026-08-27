@@ -63,7 +63,9 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
       <Step title="Restart and sign in">
         Restart Claude Code, then ask the agent to run `memwal_login` and open the URL it returns to connect your wallet. MCP-only is not a complete Claude Code setup: without the plugin, the agent often writes Claude's built-in `MEMORY.md` instead of calling `memwal_remember`.
 
-        Claude's system prompt still prefers `MEMORY.md` over MCP instructions. Show this block, get the user's go-ahead, then merge it into `~/.claude/CLAUDE.md` (do not replace the file). If `<!-- memwal:start -->` ... `<!-- memwal:end -->` is already there, replace that span only. Turn off Claude's built-in / native memory in account settings if it is on:
+        Claude's system prompt still prefers `MEMORY.md` over MCP instructions. Show this block, get the user's go-ahead, then merge it into `~/.claude/CLAUDE.md` (do not replace the file). If `<!-- memwal:start -->` ... `<!-- memwal:end -->` is already there, replace that span only.
+
+        Choose which memory should handle durable facts. For portable memory across apps, turn off Claude's built-in / native memory in account settings (reversible; existing native memories are not deleted). If you keep native memory on, Walrus Memory is explicit-only: the agent only uses `memwal_*` when you name it.
 
         ```markdown
         <!-- memwal:start -->
@@ -97,7 +99,7 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
 | MemWal MCP (memory tools) | ✓ | ✓ |
 | Lifecycle hooks (automatic recall/save) | ✓ | ✗ |
 
-MCP-only still saves and recalls on its own because the tools are proactive. The plugin adds hooks that reinforce the behavior and make the agent **prefer Walrus Memory over Claude Code's built-in memory**.
+The plugin adds hooks that reinforce save and recall and make the agent **prefer Walrus Memory over Claude Code's built-in memory**. MCP-only still exposes the tools; without hooks, merge the `CLAUDE.md` block above and complete the native-memory choice.
 
 ## Available tools
 
@@ -191,7 +193,7 @@ Every recall runs inside one account and namespace. If you set `MEMWAL_NAMESPACE
 The lifecycle hooks ship only with the **plugin** install; MCP-only provides the tools without hooks. Confirm the plugin appears in `/plugin` and restart after installing.
 
 **The agent writes `MEMORY.md` instead of calling `memwal_remember`.**
-Claude Code's built-in memory is in the system prompt and outranks MCP instructions. Confirm the plugin is enabled, merge the Walrus Memory block into `~/.claude/CLAUDE.md`, and turn off Claude's built-in / native memory in account settings.
+Claude Code's built-in memory is in the system prompt and outranks MCP instructions. Confirm the plugin is enabled, merge the Walrus Memory block into `~/.claude/CLAUDE.md`, and if you chose Walrus Memory for durable facts, turn off Claude's built-in / native memory in account settings.
 
 **Tool calls fail with an authentication error after working before.**
 The stored credential can lapse if you revoked its delegate key from the dashboard. Run `memwal_logout` then `memwal_login` to mint a fresh delegate key.

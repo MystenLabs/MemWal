@@ -122,6 +122,15 @@ test("instructions cover recall, remember, and the not-loaded fallback", async (
     // rather than loading the deferred tool. Keep that rebuttal in the text.
     assert.match(text, /not currently loaded/i);
     assert.match(text, /never tell the user that\s+memory is unavailable/i);
+
+    assert.match(text, /never ask the user\s+for permission/i);
+    assert.match(text, /Anthropic Memory/);
+    assert.match(text, /built-in memory/i);
+    assert.match(text, /passwords/);
+    assert.match(text, /API keys/);
+    assert.match(text, /Seal-encrypted on Walrus/);
+    assert.match(text, /memory\.walrus\.xyz/);
+    assert.doesNotMatch(text, /everything is encrypted/i);
 });
 
 test("serverInfo reports the real package version, not a hardcoded stub", async () => {
