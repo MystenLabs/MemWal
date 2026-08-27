@@ -85,7 +85,6 @@ describe('MCP sign-in hand-off', () => {
         expect(screen.getByText(/handed off to your MCP client/i)).toBeInTheDocument()
     })
 
-    // The bug: the card claimed "MCP client connected" even here.
     it('does not claim success when nothing answers on localhost', async () => {
         stubListener(async () => {
             throw new TypeError('Failed to fetch')

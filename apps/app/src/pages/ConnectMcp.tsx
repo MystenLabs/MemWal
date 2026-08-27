@@ -565,7 +565,6 @@ function SuccessCard({
     const delivered = callbackOutcome === 'delivered'
     return (
         <div className="setup-classic-intro">
-            {/* Heading follows the outcome; it used to say "connected" even on failure. */}
             <h2 className="setup-classic-title">
                 {delivered ? (
                     <>
@@ -626,7 +625,6 @@ function SuccessCard({
                     <span style={detailLabelStyle}>Account</span>
                     <span style={detailValueStyle}>{payload.accountId}</span>
                 </div>
-                {/* Demoted out of the prose, kept for debugging the listener. */}
                 {!delivered && callbackOutcome !== null && (
                     <div style={detailRowStyle}>
                         <span style={detailLabelStyle}>Hand-off address</span>
