@@ -16,7 +16,7 @@
  *   X-MemWal-Namespace: <optional namespace default>
  * =============================================================================
  */
-import type { Express, Request, Response } from "express";
+import type { Request, Response, Router } from "express";
 import { randomUUID } from "node:crypto";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -461,7 +461,11 @@ export interface MountMcpOptions {
  *                              bound to the session opener)
  */
 export function mountMcpRoutes(
-    app: Express,
+    // `Router`, not `Express`: this only ever calls `.get` / `.post` /
+    // `.delete`, all of which `Router` provides, and `Express` extends
+    // `Router` so existing app-level callers are unaffected. Typing it as
+    // `Express` rejected the `express.Router()` the integration test mounts.
+    app: Router,
     options: MountMcpOptions = {}
 ): void {
     const relayerUrl = options.relayerUrl ?? "http://localhost:3001";
