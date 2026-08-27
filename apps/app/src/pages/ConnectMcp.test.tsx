@@ -127,7 +127,7 @@ describe('MCP sign-in hand-off', () => {
 
         expect(await screen.findByText(/Almost there/i)).toBeInTheDocument()
         expect(screen.queryByText(/MCP client connected/i)).not.toBeInTheDocument()
-        expect(await screen.findByText(/turned down the hand-off/i)).toBeInTheDocument()
+        expect(await screen.findByText(/rejected this hand-off/i)).toBeInTheDocument()
         expect(screen.queryByText(/Nothing answered on your computer/i)).not.toBeInTheDocument()
     })
 

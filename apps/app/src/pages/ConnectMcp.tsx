@@ -594,7 +594,7 @@ function SuccessCard({
                     <p className="setup-classic-description">
                         {callbackOutcome === 'unreachable'
                             ? 'Nothing answered on your computer. The app stopped waiting after this tab was already open, which usually means the wallet prompt sat through the deadline, the MCP client restarted, or the login command was cancelled.'
-                            : 'The app on your computer turned down the hand-off. That usually means a newer sign-in was started while this tab was still open.'}
+                            : 'The app on your computer rejected this hand-off. That usually means this tab is leftover from a sign-in that already finished, or the request did not match what the app expected.'}
                     </p>
                     <p className="setup-classic-description">
                         The unused key from this attempt is already on your account. Remove it

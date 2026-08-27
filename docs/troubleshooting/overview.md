@@ -83,7 +83,7 @@ This section covers problems that appear before the memory tools work.
 **Cause:** Signing in has two halves. Your browser registers a delegate key onchain, then sends that key back to a short-lived listener the MCP package runs on `127.0.0.1`. The unused key from this attempt is already on your account and should be revoked. Signing in again is a full new attempt, including the wallet step. The usual reasons:
 
 - The MCP client restarted, or the login command was cancelled, while the browser tab was still open.
-- A second `memwal_login` was started in the meantime, so the listener now belongs to a different attempt.
+- This tab is leftover from a sign-in that already finished, or the hand-off did not match what the app expected.
 - Local software such as a firewall, a VPN client, or a browser extension blocks requests from a website to `127.0.0.1`.
 
 **Fix:** Call `memwal_login` again and complete the wallet step. A second attempt usually works. Remove the unused key from the Delegate keys panel in the dashboard so the list stays readable.
