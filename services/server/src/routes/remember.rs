@@ -67,25 +67,24 @@ struct PendingBulkRememberItem {
 // Client-facing job-error sanitization
 // ============================================================
 
-/// Replacement text for any relayer-infrastructure failure surfaced on a job
-/// status. The raw sidecar text ("Unable to perform gas selection due to
-/// insufficient SUI balance", low-WAL alerts) names relayer-owned pool wallets
-/// and reads like a funding instruction, so callers have tried to fund an
-/// address that was never theirs. Say plainly that it is our side, that the
-/// job is retriable, and that no funding action is expected of them.
+/// Client-facing stand-in for a pool-wallet / upload-congestion failure on a
+/// job that has stopped retrying.
 const INFRA_JOB_ERROR_MESSAGE: &str = "The hosted relayer could not complete the durable Walrus upload: temporary capacity limit on Walrus Memory infrastructure. This is not caused by your account, wallet, or delegate key, and there is nothing for you to fund — do not send SUI or WAL to any address in response to this error. The memory was not stored. Retry in a few minutes, or contact support if it persists.";
 
-/// Redact 0x-prefixed hex blobs (Sui addresses, object IDs, package IDs) from a
-/// job error before it reaches the caller. Even on non-infrastructure errors,
-/// a bare address in a failure message reads as "send funds here". Keeps a
-/// short prefix so the message stays diagnosable when a user reports it.
+/// Same, for a job still in flight. Retryable infrastructure errors are
+/// recorded on rows that stay `running` (see `update_remember_job_after_wallet_error`),
+/// so this must not read as terminal: telling a caller to retry while the
+/// original attempt is live is what produces the resubmit-then-429 loop.
+const INFRA_JOB_RETRYING_MESSAGE: &str = "Temporary capacity limit on Walrus Memory infrastructure; the hosted relayer is still retrying this upload. This is not caused by your account, wallet, or delegate key, and there is nothing for you to fund — do not send SUI or WAL to any address in response to this error. Keep polling; do not resubmit unless the job reaches status `failed`.";
+
+/// Redact `0x` runs of 32+ hex digits (Sui addresses, object ids), keeping a
+/// short prefix. The length floor is what leaves `0x2::coin` and Move abort
+/// codes readable.
 fn redact_hex_addresses(msg: &str) -> String {
     let bytes = msg.as_bytes();
     let mut out = String::with_capacity(msg.len());
     let mut i = 0;
     while i < bytes.len() {
-        // Only 0x-prefixed runs long enough to be an address/object id, so
-        // short hex like an abort code or "0x2::coin" module path is kept.
         let is_start = bytes[i] == b'0'
             && i + 1 < bytes.len()
             && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')
@@ -101,7 +100,6 @@ fn redact_hex_addresses(msg: &str) -> String {
         while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
             end += 1;
         }
-        // 32+ hex digits: a Sui address or object id, never an abort code.
         if end - (i + 2) >= 32 {
             out.push_str(&msg[i..i + 2 + 8]);
             out.push_str("…[redacted]");
@@ -113,14 +111,18 @@ fn redact_hex_addresses(msg: &str) -> String {
     out
 }
 
-/// Map a stored `error_msg` to what the caller should see. Infrastructure
-/// funding/congestion failures collapse to a single actionable message;
-/// everything else keeps its text with addresses redacted. The DB row is left
-/// untouched, so the admin dashboard and ops alerts still see the raw error.
-fn sanitize_job_error_for_client(error_msg: Option<String>) -> Option<String> {
+/// Map a stored `error_msg` to what the caller should see, given the job's
+/// current `status`. Infrastructure failures collapse to fixed copy, chosen by
+/// whether the job has stopped retrying. Everything else keeps its text with
+/// addresses redacted. The DB row is untouched.
+fn sanitize_job_error_for_client(status: &str, error_msg: Option<String>) -> Option<String> {
     let msg = error_msg?;
     if crate::jobs::WalletJobError::is_infrastructure_funding_error(&msg) {
-        return Some(INFRA_JOB_ERROR_MESSAGE.to_string());
+        return Some(if status == "failed" {
+            INFRA_JOB_ERROR_MESSAGE.to_string()
+        } else {
+            INFRA_JOB_RETRYING_MESSAGE.to_string()
+        });
     }
     Some(redact_hex_addresses(&msg))
 }
@@ -1221,13 +1223,15 @@ pub async fn remember_status(
     };
     let _ = owner_db; // already validated equal to auth.owner
 
+    let error = sanitize_job_error_for_client(&status, error_msg);
+
     Ok(Json(RememberJobStatusResponse {
         job_id: id,
         status,
         owner: auth.owner.clone(),
         namespace,
         blob_id,
-        error: sanitize_job_error_for_client(error_msg),
+        error,
     }))
 }
 
@@ -1346,9 +1350,9 @@ fn build_bulk_status_results(
             id.clone(),
             RememberBulkStatusItem {
                 job_id: id,
+                error: sanitize_job_error_for_client(&status, error_msg),
                 status,
                 blob_id,
-                error: sanitize_job_error_for_client(error_msg),
             },
         );
     }
@@ -1515,8 +1519,8 @@ mod tests {
         find_remember_job_by_key, paid_recovery_operation, redact_hex_addresses,
         request_fingerprint, sanitize_job_error_for_client, should_spawn_after_reset,
         split_text_chunks, summarize_for_embedding, validate_idempotency_key,
-        INFRA_JOB_ERROR_MESSAGE, MAX_IDEMPOTENCY_KEY_BYTES, MAX_REMEMBER_TEXT_BYTES,
-        SUMMARIZE_BATCH_INPUT_BYTES, SUMMARIZE_CHUNK_BYTES,
+        INFRA_JOB_ERROR_MESSAGE, INFRA_JOB_RETRYING_MESSAGE, MAX_IDEMPOTENCY_KEY_BYTES,
+        MAX_REMEMBER_TEXT_BYTES, SUMMARIZE_BATCH_INPUT_BYTES, SUMMARIZE_CHUNK_BYTES,
     };
     use crate::jobs::WalletOperation;
     use crate::types::AppError;
@@ -2181,7 +2185,7 @@ mod tests {
 
     #[test]
     fn infra_gas_failure_is_replaced_with_actionable_message() {
-        let out = sanitize_job_error_for_client(Some(GAS_SELECTION_ERR.to_string()))
+        let out = sanitize_job_error_for_client("failed", Some(GAS_SELECTION_ERR.to_string()))
             .expect("failed job keeps an error");
         assert_eq!(out, INFRA_JOB_ERROR_MESSAGE);
         // The raw text is what sent users chasing a funding action.
@@ -2191,7 +2195,7 @@ mod tests {
 
     #[test]
     fn infra_wal_balance_failure_hides_relayer_wallet_address() {
-        let out = sanitize_job_error_for_client(Some(LOW_WAL_ERR.to_string()))
+        let out = sanitize_job_error_for_client("failed", Some(LOW_WAL_ERR.to_string()))
             .expect("failed job keeps an error");
         assert_eq!(out, INFRA_JOB_ERROR_MESSAGE);
         assert!(!out.contains("0x8d3c1f0a"));
@@ -2201,7 +2205,7 @@ mod tests {
     #[test]
     fn non_infra_failure_keeps_its_text_but_redacts_addresses() {
         let raw = "MoveAbort at object 0x8d3c1f0a9b2e4d6c7a5f8e1b0d4c9a2f3e6b7d8c1a0f9e2b3c4d5a6f7e8b9c0d in 0x2::coin, code 7";
-        let out = sanitize_job_error_for_client(Some(raw.to_string())).expect("kept");
+        let out = sanitize_job_error_for_client("failed", Some(raw.to_string())).expect("kept");
         assert!(out.contains("MoveAbort"), "diagnosis preserved: {}", out);
         assert!(out.contains("0x2::coin"), "short hex untouched: {}", out);
         assert!(out.contains("code 7"), "abort code untouched: {}", out);
@@ -2219,7 +2223,7 @@ mod tests {
 
     #[test]
     fn successful_job_has_no_error_to_sanitize() {
-        assert_eq!(sanitize_job_error_for_client(None), None);
+        assert_eq!(sanitize_job_error_for_client("done", None), None);
     }
 
     #[test]
@@ -2228,5 +2232,57 @@ mod tests {
         // shorter than an address are left alone.
         let raw = "upload failed — retry 0xdeadbeef at 0x2::balance::split";
         assert_eq!(redact_hex_addresses(raw), raw);
+    }
+
+    #[test]
+    fn wal_shortfall_is_infra_regardless_of_the_ops_alert_threshold() {
+        // parse_wal_balance_alert_info only fires under 2 WAL available and
+        // needs a parseable `Available:` — that gate decides paging, not
+        // whether the text is a pool-wallet funding instruction. A large-blob
+        // shortfall holding far more than 2 WAL is still infrastructure.
+        let above_threshold = "walrus upload failed: Insufficient balance of 0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL for owner 0x8d3c1f0a9b2e4d6c7a5f8e1b0d4c9a2f3e6b7d8c1a0f9e2b3c4d5a6f7e8b9c0d. Required: 900000000000, Available: 40000000000";
+        let no_available = "walrus upload failed: Insufficient balance of 0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL for owner 0x8d3c1f0a9b2e4d6c7a5f8e1b0d4c9a2f3e6b7d8c1a0f9e2b3c4d5a6f7e8b9c0d";
+        for raw in [above_threshold, no_available] {
+            let out = sanitize_job_error_for_client("failed", Some(raw.to_string()))
+                .expect("failed job keeps an error");
+            assert_eq!(out, INFRA_JOB_ERROR_MESSAGE, "leaked for: {}", raw);
+            assert!(!out.contains("Insufficient balance"));
+            assert!(!out.contains("::wal::WAL"));
+        }
+    }
+
+    #[test]
+    fn upload_slot_congestion_is_infra_and_hides_the_wallet_index() {
+        for raw in [
+            "walrus upload failed: Internal Error: walrus upload failed: timed out waiting for wallet 3 upload slot",
+            "walrus upload failed: Internal Error: timed out waiting for global upload slot",
+        ] {
+            let out = sanitize_job_error_for_client("failed", Some(raw.to_string()))
+                .expect("failed job keeps an error");
+            assert_eq!(out, INFRA_JOB_ERROR_MESSAGE, "leaked for: {}", raw);
+            assert!(!out.contains("wallet 3"));
+            assert!(!out.contains("upload slot"));
+        }
+    }
+
+    #[test]
+    fn retryable_infra_error_on_a_running_job_does_not_read_as_terminal() {
+        // Gas rotation, WAL shortfall and congestion all record error_msg on
+        // rows that stay `running`. Terminal copy there invites a resubmit
+        // while the first attempt is still live — the #655 retry-then-429 loop.
+        for status in ["running", "pending", "uploaded"] {
+            let out = sanitize_job_error_for_client(status, Some(GAS_SELECTION_ERR.to_string()))
+                .expect("in-flight job keeps an error");
+            assert_eq!(out, INFRA_JOB_RETRYING_MESSAGE, "status={}", status);
+            assert!(!out.contains("was not stored"), "status={}", status);
+            assert!(out.contains("do not resubmit"), "status={}", status);
+            // The funding guidance must survive in both variants.
+            assert!(out.contains("nothing for you to fund"), "status={}", status);
+        }
+        // Only a job that stopped retrying gets the terminal wording.
+        assert_eq!(
+            sanitize_job_error_for_client("failed", Some(GAS_SELECTION_ERR.to_string())).unwrap(),
+            INFRA_JOB_ERROR_MESSAGE
+        );
     }
 }
