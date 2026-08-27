@@ -64,7 +64,7 @@ jobs:
       name: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'staging' && 'staging' || 'dev') }}
     timeout-minutes: 30
 
-    # Serializes against the sdk-e2e job in test.yml and the e2e job in
+    # Serializes against the sdk-e2e job in test-sdk.yml and the e2e job in
     # test-python-sdk.yml, which sign with this same BENCH_DELEGATE_KEY. The
     # relayer rate-limits per delegate key and per account, so two suites
     # running concurrently 429 each other. Group name must stay identical in
@@ -102,6 +102,13 @@ jobs:
       - name: Install sidecar script dependencies
         working-directory: services/server/scripts
         run: npm ci
+
+      - name: Wait for Railway deploy
+        uses: ./.github/actions/wait-for-relayer
+        with:
+          server-url: ${{ env.SERVER_URL }}
+          expected-commit: ${{ github.event_name == 'push' && github.sha || '' }}
+          since-commit: ${{ github.event_name == 'push' && github.event.before || '' }}
 
       - name: Run memory API latency benchmark
         shell: bash

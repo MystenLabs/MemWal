@@ -1,0 +1,24 @@
+name: Setup JS
+description: pnpm, Node, and a frozen-lockfile install
+
+inputs:
+  node-version:
+    description: Node version
+    required: false
+    default: "22"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: pnpm
+
+    - name: Install deps
+      shell: bash
+      run: pnpm install --frozen-lockfile

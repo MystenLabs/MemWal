@@ -1,0 +1,138 @@
+name: Test JS SDK
+
+# Live JS SDK e2e against the bench relayer.
+# Unit tests stay in test.yml so they run on every PR; this job also runs
+# them before live writes so a typecheck-only green cannot mint memories.
+#
+# push that touched services/server/**: wait until /health.build.commit == github.sha
+#   (Railway takes ~2m to serve the new replica). Other pushes are SKIPPED by
+#   Railway watchPatterns, so wait-for-relayer drops the SHA and waits on
+#   write_ready only.
+# workflow_dispatch / schedule: wait until /health is ok — Railway does not
+#   deploy a feature-branch SHA, so this is a preview against the live replica.
+
+on:
+  push:
+    branches: [main, staging, dev]
+    paths:
+      - "packages/sdk/**"
+      - ".github/workflows/test-sdk.yml"
+      - ".github/actions/setup-js/**"
+      - ".github/actions/wait-for-relayer/**"
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: Benchmark environment to run the authenticated SDK e2e suite against
+        required: false
+        type: choice
+        default: dev
+        options:
+          - dev
+          - staging
+          - production
+  schedule:
+    # Offset from benchmark-live.yml (0 9 * * 1) and test-python-sdk.yml
+    # (17 9 * * 1) so the three suites do not write through the shared bench
+    # account at once. The concurrency group below enforces that too.
+    - cron: "47 9 * * 1"
+
+concurrency:
+  group: test-js-sdk-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sdk-e2e:
+    name: SDK / E2E (live relayer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Byte-identical to benchmark-live.yml and test-python-sdk.yml so the three
+    # suites serialize on the shared BENCH_DELEGATE_KEY. Do not edit one copy.
+    concurrency:
+      group: bench-account-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
+      cancel-in-progress: false
+
+    environment:
+      name: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
+
+    env:
+      ENVIRONMENT_NAME: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
+      MEMWAL_PRIVATE_KEY: ${{ secrets.BENCH_DELEGATE_KEY }}
+      MEMWAL_ACCOUNT_ID: ${{ secrets.BENCH_ACCOUNT_ID }}
+      MEMWAL_SERVER_URL: ${{ vars.BENCH_SERVER_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
+
+      - name: Build
+        run: pnpm build:sdk && pnpm --filter @mysten-incubation/memwal test
+
+      - name: Check credentials
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Without credentials the suite skips every authenticated test and
+          # the job would report success having never exercised the relayer
+          # beyond /health. Without the URL there is no safe fallback.
+          missing=0
+          for name in MEMWAL_PRIVATE_KEY MEMWAL_ACCOUNT_ID MEMWAL_SERVER_URL; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is empty — set BENCH_DELEGATE_KEY / BENCH_ACCOUNT_ID / BENCH_SERVER_URL on the ${ENVIRONMENT_NAME} environment."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "authenticated=true" >> "$GITHUB_OUTPUT"
+
+      # Push that touched services/server/**: wait until this SHA is live
+      # (Railway ~2m). Other pushes and dispatch/schedule: health + write_ready
+      # only — Railway never deploys a feature-branch SHA, and SKIPPED deploys
+      # keep serving the previous SHA.
+      - name: Wait for Railway deploy
+        uses: ./.github/actions/wait-for-relayer
+        with:
+          server-url: ${{ env.MEMWAL_SERVER_URL }}
+          expected-commit: ${{ github.event_name == 'push' && github.sha || '' }}
+          since-commit: ${{ github.event_name == 'push' && github.event.before || '' }}
+
+      - name: E2E tests
+        id: e2e
+        working-directory: packages/sdk
+        run: |
+          node --test --test-concurrency=1 \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=e2e-results.xml \
+            "test/e2e/live.e2e.mjs"
+
+      - name: Write run summary
+        if: always()
+        run: |
+          {
+            echo "## JS SDK e2e"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Environment | \`${ENVIRONMENT_NAME}\` |"
+            echo "| Relayer | \`${MEMWAL_SERVER_URL:-<unset>}\` |"
+            echo "| Authenticated | ${{ steps.config.outputs.authenticated }} |"
+            echo "| Result | ${{ steps.e2e.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload e2e results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: js-sdk-e2e-${{ env.ENVIRONMENT_NAME }}-${{ github.run_id }}
+          path: packages/sdk/e2e-results.xml
+          if-no-files-found: warn
+          retention-days: 14

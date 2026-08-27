@@ -102,9 +102,9 @@ remember → recall loop is verified manually against the production relayer.
 ## CI
 
 The `researcher-e2e` job in `.github/workflows/test.yml` provisions Postgres
-and Redis as service containers, runs the `node:test` unit suite, installs
-Chromium, and runs `pnpm test:e2e`. On failure these artifacts are uploaded and
-kept for 14 days:
+and Redis as service containers, builds the workspace SDK, runs the `node:test`
+unit suite, installs Chromium, and runs `pnpm test:e2e`. On failure these
+artifacts are uploaded and kept for 14 days:
 
 - `playwright-report-researcher/playwright-report/index.html` — HTML report
   with trace links
