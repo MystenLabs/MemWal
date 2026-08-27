@@ -137,7 +137,8 @@ jobs:
           fi
           echo "authenticated=true" >> "$GITHUB_OUTPUT"
 
-      # Push to `dev`: wait for this SHA. Dispatch/schedule: health only.
+      # Push that touched services/server/**: wait for this SHA. SDK-only
+      # pushes and dispatch/schedule: health + write_ready only.
       - name: Wait for Railway deploy
         uses: ./.github/actions/wait-for-relayer
         with:

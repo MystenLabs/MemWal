@@ -94,9 +94,10 @@ jobs:
           fi
           echo "authenticated=true" >> "$GITHUB_OUTPUT"
 
-      # Push: wait until this SHA is live (Railway ~2m). Dispatch/schedule:
-      # Railway never deploys a feature-branch SHA, so only wait until the
-      # already-deployed replica is healthy.
+      # Push that touched services/server/**: wait until this SHA is live
+      # (Railway ~2m). Other pushes and dispatch/schedule: health + write_ready
+      # only — Railway never deploys a feature-branch SHA, and SKIPPED deploys
+      # keep serving the previous SHA.
       - name: Wait for Railway deploy
         uses: ./.github/actions/wait-for-relayer
         with:

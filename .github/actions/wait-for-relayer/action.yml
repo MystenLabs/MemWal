@@ -40,27 +40,24 @@ runs:
           exit 1
         fi
 
-        expected="${EXPECTED_SHA:-}"
-        case "$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')" in
-          false|null|none) expected="" ;;
-        esac
-        since="${SINCE_SHA:-}"
+        expected="$(printf '%s' "${EXPECTED_SHA:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        since="$(printf '%s' "${SINCE_SHA:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        case "$expected" in false|null|none) expected="" ;; esac
+        case "$since" in false|null|none) since="" ;; esac
         zeros="0000000000000000000000000000000000000000"
 
         # Railway relayer watchPatterns is /services/server/**. A push that
-        # does not touch that tree is recorded SKIPPED — no build, no new SHA
-        # — so waiting for github.sha never clears (PR 804 / nikola0x0).
+        # does not touch that tree is SKIPPED — no new SHA is served — so
+        # waiting on expected-commit would hang until timeout.
         if [ -n "$expected" ] && [ -n "$since" ] && [ "$since" != "$zeros" ]; then
-          if git fetch --no-tags --depth=1 origin "$since" >/tmp/wait-relayer-fetch.log 2>&1; then
-            if ! git diff --name-only "$since" "$expected" | grep -qE '^services/server/'; then
-              echo "No services/server/** changes in this push; Railway will SKIP the relayer deploy. Waiting on write_ready only."
+          if git fetch --no-tags --depth=1 origin "$since" \
+            && changed="$(git diff --name-only "$since" "$expected")"; then
+            if ! printf '%s\n' "$changed" | grep -Eq '^services/server/'; then
+              echo "Railway will SKIP this push, so SHA wait is skipped."
               expected=""
-            else
-              echo "services/server/** changed; waiting for Railway to serve ${expected:0:12}."
             fi
           else
-            echo "Could not fetch since-commit ${since:0:12}; keeping SHA wait."
-            cat /tmp/wait-relayer-fetch.log >&2 || true
+            echo "Could not fetch/diff since-commit; keeping SHA wait."
           fi
         fi
         export EXPECTED_SHA="$expected"
