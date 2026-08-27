@@ -81,10 +81,10 @@ jobs:
     # `default` and a per-run `sdk-e2e-<uuid>` — but they do not keep the
     # *rate limit* separate: the relayer meters per delegate key and per
     # account, so the concurrency group below is what stops the three suites
-    # 429ing each other. Group name must stay identical in all three
-    # workflows — byte-identical on purpose, including branches this
-    # dev-only job never runs on, so the three land in one group whatever
-    # the expression resolves to.
+    # 429ing each other. Group name must stay identical in this file,
+    # test-sdk.yml, and benchmark-live.yml — byte-identical on purpose,
+    # including branches this dev-only job never runs on, so the three land
+    # in one group whatever the expression resolves to.
     concurrency:
       group: bench-account-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
       cancel-in-progress: false
@@ -134,6 +134,13 @@ jobs:
             exit 1
           fi
           echo "authenticated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Railway deploy
+        if: github.event_name == 'push'
+        uses: ./.github/actions/wait-for-relayer
+        with:
+          server-url: ${{ env.MEMWAL_SERVER_URL }}
+          expected-commit: ${{ github.sha }}
 
       - name: E2E tests
         id: e2e

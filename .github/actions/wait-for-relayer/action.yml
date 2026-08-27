@@ -1,0 +1,91 @@
+name: Wait for relayer
+description: Poll GET /health until Railway is serving this git SHA
+
+inputs:
+  server-url:
+    description: Relayer base URL
+    required: true
+  expected-commit:
+    description: Full git SHA to wait for. Empty waits for health only.
+    required: false
+    default: ""
+  timeout-seconds:
+    description: Give up after this many seconds (Railway deploys are ~2m, cold image longer)
+    required: false
+    default: "480"
+  poll-seconds:
+    required: false
+    default: "10"
+
+runs:
+  using: composite
+  steps:
+    - name: Wait until /health serves the expected commit
+      shell: bash
+      env:
+        SERVER_URL: ${{ inputs.server-url }}
+        EXPECTED_SHA: ${{ inputs.expected-commit }}
+        TIMEOUT_SECS: ${{ inputs.timeout-seconds }}
+        POLL_SECS: ${{ inputs.poll-seconds }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${SERVER_URL:-}" ]; then
+          echo "::error::server-url is empty"
+          exit 1
+        fi
+
+        python3 - <<'PY'
+        import json, os, sys, time, urllib.error, urllib.request
+
+        base = os.environ["SERVER_URL"].rstrip("/")
+        expected = os.environ.get("EXPECTED_SHA", "").strip().lower()
+        timeout = int(os.environ.get("TIMEOUT_SECS", "480"))
+        poll = int(os.environ.get("POLL_SECS", "10"))
+        url = f"{base}/health"
+        deadline = time.monotonic() + timeout
+
+        print(
+            f"Waiting on {url} (timeout {timeout}s, expected commit {expected or '<any>'})",
+            flush=True,
+        )
+
+        def commit_matches(commit: str) -> bool:
+            if not expected:
+                return True
+            got = commit.lower()
+            return bool(got) and (got == expected or expected.startswith(got) or got.startswith(expected))
+
+        last_error = "no successful /health response"
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    data = json.load(response)
+                status = str(data.get("status") or "")
+                ready = data.get("write_ready") is True
+                commit = str((data.get("build") or {}).get("commit") or "")
+                print(
+                    f"waiting: status={status or '?'} write_ready={str(ready).lower()} commit={commit or 'none'}",
+                    flush=True,
+                )
+                if status == "ok" and ready and commit_matches(commit):
+                    print(f"Relayer ready (commit={commit or 'none'})", flush=True)
+                    raise SystemExit(0)
+                last_error = (
+                    f"status={status!r} write_ready={ready} commit={commit or 'none'}"
+                )
+            except urllib.error.URLError as exc:
+                last_error = f"health unreachable: {exc}"
+                print(f"waiting: {last_error}", flush=True)
+            except json.JSONDecodeError as exc:
+                last_error = f"health returned non-JSON: {exc}"
+                print(f"waiting: {last_error}", flush=True)
+            time.sleep(poll)
+
+        print(
+            f"::error::Timed out after {timeout}s waiting for {url} to serve "
+            f"commit {expected or '<any>'} ({last_error}). Railway deploys take ~2m.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+        PY

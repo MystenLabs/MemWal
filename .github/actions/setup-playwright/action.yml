@@ -1,0 +1,26 @@
+name: Setup Playwright
+description: Cache and install Chromium for a workspace package
+
+inputs:
+  package:
+    description: pnpm filter name (e.g. @memwal/chatbot)
+    required: true
+  cache-id:
+    description: Cache key suffix so parallel jobs do not race one entry
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cache Playwright browsers
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: pw-${{ inputs.cache-id }}-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: |
+          pw-${{ inputs.cache-id }}-${{ runner.os }}-
+          pw-${{ runner.os }}-
+
+    - name: Install Playwright (Chromium + OS deps)
+      shell: bash
+      run: pnpm --filter ${{ inputs.package }} playwright:install
