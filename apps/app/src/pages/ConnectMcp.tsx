@@ -225,7 +225,6 @@ export default function ConnectMcp() {
                     headers: { 'content-type': 'application/json' },
                     body: JSON.stringify(payload),
                 })
-                // A listener answered and refused — different cause than nothing answering.
                 setCallbackOutcome(res.ok ? 'delivered' : 'rejected')
                 return res.ok
             } catch {
