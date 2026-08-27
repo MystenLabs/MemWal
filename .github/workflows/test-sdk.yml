@@ -2,6 +2,11 @@ name: Test JS SDK
 
 # Live JS SDK e2e against the bench relayer.
 # Unit tests stay in test.yml so they run on every PR.
+#
+# push to main/staging/dev: wait until /health.build.commit == github.sha
+#   (Railway takes ~2m to serve the new replica).
+# workflow_dispatch / schedule: wait until /health is ok — Railway does not
+#   deploy a feature-branch SHA, so this is a preview against the live replica.
 
 on:
   push:

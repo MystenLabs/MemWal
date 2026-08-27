@@ -5,6 +5,7 @@ on:
     paths:
       - 'packages/python-sdk-memwal/**'
       - '.github/workflows/test-python-sdk.yml'
+      - '.github/actions/wait-for-relayer/**'
   push:
     branches:
       - main
@@ -13,6 +14,7 @@ on:
     paths:
       - 'packages/python-sdk-memwal/**'
       - '.github/workflows/test-python-sdk.yml'
+      - '.github/actions/wait-for-relayer/**'
   workflow_dispatch:
   schedule:
     # Catches relayer drift with no code change to trigger it.
@@ -135,6 +137,7 @@ jobs:
           fi
           echo "authenticated=true" >> "$GITHUB_OUTPUT"
 
+      # Push to `dev`: wait for this SHA. Dispatch/schedule: health only.
       - name: Wait for Railway deploy
         uses: ./.github/actions/wait-for-relayer
         with:

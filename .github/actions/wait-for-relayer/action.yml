@@ -40,6 +40,9 @@ runs:
 
         base = os.environ["SERVER_URL"].rstrip("/")
         expected = os.environ.get("EXPECTED_SHA", "").strip().lower()
+        # GitHub `false && github.sha || ''` can stringify as "false".
+        if expected in {"", "false", "null", "none"}:
+            expected = ""
         timeout = int(os.environ.get("TIMEOUT_SECS", "480"))
         poll = int(os.environ.get("POLL_SECS", "10"))
         url = f"{base}/health"

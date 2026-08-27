@@ -104,11 +104,10 @@ jobs:
         run: npm ci
 
       - name: Wait for Railway deploy
-        if: github.event_name == 'push'
         uses: ./.github/actions/wait-for-relayer
         with:
           server-url: ${{ env.SERVER_URL }}
-          expected-commit: ${{ github.sha }}
+          expected-commit: ${{ github.event_name == 'push' && github.sha || '' }}
 
       - name: Run memory API latency benchmark
         shell: bash
