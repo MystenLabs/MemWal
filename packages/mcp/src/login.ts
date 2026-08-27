@@ -205,7 +205,11 @@ function readBody(req: IncomingMessage, maxBytes = 16 * 1024): Promise<string> {
  * to call this only when no valid credentials exist on disk.
  */
 export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredentials> {
-    const cfg = { ...DEFAULTS, ...opts };
+    const cfg = {
+        ...DEFAULTS,
+        ...opts,
+        timeoutMs: opts.timeoutMs ?? resolveLoginTimeoutMs(),
+    };
     const keypair = await generateKeypair();
     // Cryptographic single-use state token. Round-trip through the browser:
     // we put it in `connectUrl`, the page echoes it back in the callback
