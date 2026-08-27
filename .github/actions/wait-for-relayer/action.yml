@@ -1,5 +1,5 @@
 name: Wait for relayer
-description: Poll GET /health until Railway is serving this git SHA
+description: Poll GET /health until the relayer is write-ready (and serving this SHA if Railway built it)
 
 inputs:
   server-url:
@@ -7,6 +7,10 @@ inputs:
     required: true
   expected-commit:
     description: Full git SHA to wait for. Empty waits for health only.
+    required: false
+    default: ""
+  since-commit:
+    description: Push `github.event.before`. When set, SHA wait is skipped unless services/server/** changed (Railway watchPatterns SKIP those deploys).
     required: false
     default: ""
   timeout-seconds:
@@ -25,6 +29,7 @@ runs:
       env:
         SERVER_URL: ${{ inputs.server-url }}
         EXPECTED_SHA: ${{ inputs.expected-commit }}
+        SINCE_SHA: ${{ inputs.since-commit }}
         TIMEOUT_SECS: ${{ inputs.timeout-seconds }}
         POLL_SECS: ${{ inputs.poll-seconds }}
       run: |
@@ -35,8 +40,33 @@ runs:
           exit 1
         fi
 
+        expected="${EXPECTED_SHA:-}"
+        case "$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')" in
+          false|null|none) expected="" ;;
+        esac
+        since="${SINCE_SHA:-}"
+        zeros="0000000000000000000000000000000000000000"
+
+        # Railway relayer watchPatterns is /services/server/**. A push that
+        # does not touch that tree is recorded SKIPPED — no build, no new SHA
+        # — so waiting for github.sha never clears (PR 804 / nikola0x0).
+        if [ -n "$expected" ] && [ -n "$since" ] && [ "$since" != "$zeros" ]; then
+          if git fetch --no-tags --depth=1 origin "$since" >/tmp/wait-relayer-fetch.log 2>&1; then
+            if ! git diff --name-only "$since" "$expected" | grep -qE '^services/server/'; then
+              echo "No services/server/** changes in this push; Railway will SKIP the relayer deploy. Waiting on write_ready only."
+              expected=""
+            else
+              echo "services/server/** changed; waiting for Railway to serve ${expected:0:12}."
+            fi
+          else
+            echo "Could not fetch since-commit ${since:0:12}; keeping SHA wait."
+            cat /tmp/wait-relayer-fetch.log >&2 || true
+          fi
+        fi
+        export EXPECTED_SHA="$expected"
+
         python3 - <<'PY'
-        import json, os, sys, time, urllib.error, urllib.request
+        import http.client, json, os, sys, time, urllib.error, urllib.request
 
         base = os.environ["SERVER_URL"].rstrip("/")
         expected = os.environ.get("EXPECTED_SHA", "").strip().lower()
@@ -81,11 +111,9 @@ runs:
                 last_error = (
                     f"status={status!r} write_ready={ready} commit={commit or 'none'}"
                 )
-            except urllib.error.URLError as exc:
-                last_error = f"health unreachable: {exc}"
-                print(f"waiting: {last_error}", flush=True)
-            except json.JSONDecodeError as exc:
-                last_error = f"health returned non-JSON: {exc}"
+            except (urllib.error.URLError, OSError, http.client.HTTPException,
+                    json.JSONDecodeError) as exc:
+                last_error = f"health check failed: {exc}"
                 print(f"waiting: {last_error}", flush=True)
             time.sleep(poll)
 

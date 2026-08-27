@@ -108,6 +108,7 @@ jobs:
         with:
           server-url: ${{ env.SERVER_URL }}
           expected-commit: ${{ github.event_name == 'push' && github.sha || '' }}
+          since-commit: ${{ github.event_name == 'push' && github.event.before || '' }}
 
       - name: Run memory API latency benchmark
         shell: bash

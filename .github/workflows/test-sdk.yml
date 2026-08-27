@@ -1,10 +1,13 @@
 name: Test JS SDK
 
 # Live JS SDK e2e against the bench relayer.
-# Unit tests stay in test.yml so they run on every PR.
+# Unit tests stay in test.yml so they run on every PR; this job also runs
+# them before live writes so a typecheck-only green cannot mint memories.
 #
-# push to main/staging/dev: wait until /health.build.commit == github.sha
-#   (Railway takes ~2m to serve the new replica).
+# push that touched services/server/**: wait until /health.build.commit == github.sha
+#   (Railway takes ~2m to serve the new replica). Other pushes are SKIPPED by
+#   Railway watchPatterns, so wait-for-relayer drops the SHA and waits on
+#   write_ready only.
 # workflow_dispatch / schedule: wait until /health is ok — Railway does not
 #   deploy a feature-branch SHA, so this is a preview against the live replica.
 
@@ -68,7 +71,7 @@ jobs:
         uses: ./.github/actions/setup-js
 
       - name: Build
-        run: pnpm build:sdk
+        run: pnpm build:sdk && pnpm --filter @mysten-incubation/memwal test
 
       - name: Check credentials
         id: config
@@ -99,6 +102,7 @@ jobs:
         with:
           server-url: ${{ env.MEMWAL_SERVER_URL }}
           expected-commit: ${{ github.event_name == 'push' && github.sha || '' }}
+          since-commit: ${{ github.event_name == 'push' && github.event.before || '' }}
 
       - name: E2E tests
         id: e2e

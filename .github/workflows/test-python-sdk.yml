@@ -143,6 +143,7 @@ jobs:
         with:
           server-url: ${{ env.MEMWAL_SERVER_URL }}
           expected-commit: ${{ github.event_name == 'push' && github.sha || '' }}
+          since-commit: ${{ github.event_name == 'push' && github.event.before || '' }}
 
       - name: E2E tests
         id: e2e
