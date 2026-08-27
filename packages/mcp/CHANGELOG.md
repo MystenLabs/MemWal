@@ -1,6 +1,10 @@
 # @mysten-incubation/memwal-mcp
 
-## Unreleased
+## 0.0.12
+
+### Added
+
+- Forward the MCP client's `initialize.clientInfo` to the relayer as `x-memwal-client` / `x-memwal-client-version` so sidecar logs can name the coding agent (Claude Code, Codex, Cursor, …) on each session and tool call.
 
 ### Fixed
 

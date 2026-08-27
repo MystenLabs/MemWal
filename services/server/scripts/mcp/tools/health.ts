@@ -21,7 +21,7 @@ export function registerHealthTool(
                 "Quick connectivity check for Walrus Memory. Calls the relayer's lightweight health endpoint (no search, no decryption) and returns its status and version. Use this to confirm the server is reachable — do NOT use memwal_recall for health checks, which is a full and slow retrieval.",
             inputSchema: {},
         },
-        wrapTool<Record<string, never>>(async () => {
+        wrapTool<Record<string, never>>(session, "memwal_health", async () => {
             const result = await session.memwal.health();
             const extra = result as { write_ready?: boolean };
             const writeNote =
