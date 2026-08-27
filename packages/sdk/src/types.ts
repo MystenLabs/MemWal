@@ -168,6 +168,20 @@ export interface RecallOptions {
      * over-fetches server-side is tracked in WALM-383.
      */
     scoringWeights?: ScoringWeights;
+    /**
+     * How the relayer orders results. Defaults to `"relevance"`.
+     *
+     * - `"relevance"` — semantic similarity only, the cosine order.
+     * - `"recent"` — newest-among-matches. The relayer over-fetches semantic
+     *   candidates, orders them by write-time descending, then truncates to
+     *   `limit`.
+     *
+     * Prefer this over `scoringWeights` for anything newest-wins. `sort`
+     * widens the candidate set; weights only re-rank the set that was already
+     * returned, so weights alone cannot surface a record that fell outside
+     * the window.
+     */
+    sort?: "relevance" | "recent";
 }
 
 /** Recommended object-style recall input — preferred over positional args. */

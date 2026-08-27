@@ -1333,6 +1333,53 @@ pub struct RecallRequest {
     /// [`ScoringWeights`].
     #[serde(default)]
     pub scoring_weights: Option<ScoringWeights>,
+    /// How to order results. Omitted → [`RecallSort::Relevance`], today's
+    /// behaviour. See [`RecallSort`].
+    #[serde(default)]
+    pub sort: RecallSort,
+}
+
+/// Result ordering mode for `/api/recall`.
+///
+/// Distinct from [`ScoringWeights`], which only re-ranks the rows the vector
+/// search already returned. `sort` decides how many rows are fetched in the
+/// first place — which is the half that matters, because the candidate set is
+/// the cosine top-N and no amount of re-weighting can surface a row pgvector
+/// never returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecallSort {
+    /// Pure semantic relevance — the cosine order, unchanged. Default, so an
+    /// omitted field leaves every existing caller byte-identical.
+    #[default]
+    Relevance,
+    /// Newest-among-matches: over-fetch semantic candidates, order them by
+    /// write-time descending, then truncate to `limit`.
+    ///
+    /// Semantic similarity is the candidate *generator* and write-time decides
+    /// the order, so a newest record worded less literally than an older one
+    /// still wins. A recency *weight* cannot guarantee that — it has to
+    /// out-score the semantic gap before it reorders anything, and at a
+    /// 30-day half-life two records days apart barely differ.
+    Recent,
+}
+
+impl RecallSort {
+    /// How many rows to pull from `search_similar` to serve `limit` results.
+    ///
+    /// `Recent` needs a wider net than it returns: the newest row is often a
+    /// mediocre semantic match, so it sits deep in the cosine ordering. 5x
+    /// covers the reported failures without turning recall into a table scan,
+    /// and the 50-row ceiling bounds the cost.
+    ///
+    /// Never returns less than `limit`. A naive `min(limit * 5, 50)`
+    /// under-fetches once `limit` passes 50 and hands the caller a short page.
+    pub fn candidate_limit(self, limit: usize) -> usize {
+        match self {
+            RecallSort::Relevance => limit,
+            RecallSort::Recent => limit.saturating_mul(5).min(50).max(limit),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

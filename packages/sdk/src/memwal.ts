@@ -671,6 +671,10 @@ export class MemWal {
                 // byte-identical on the wire and the relayer keeps
                 // short-circuiting to the plain pgvector cosine order.
                 scoring_weights: scoringWeightsToWire(options.scoringWeights),
+                // Same `undefined`-is-dropped trick: an unset sort leaves the
+                // request byte-identical and the relayer applies its own
+                // "relevance" default.
+                sort: options.sort,
             }, { signal: ac.signal });
 
             let processed = result;
