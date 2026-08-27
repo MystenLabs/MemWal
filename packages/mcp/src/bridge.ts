@@ -748,9 +748,16 @@ export async function runBridge(
      * remember to check — after logout there is simply nothing left to sign
      * with. `adoptCredentials` republishes it on the next login. */
     let creds: MemWalCredentials | null = initialCreds;
-    /** Set from the MCP client's `initialize.clientInfo`; forwarded on every
-     * relayer request as `x-memwal-client` so the sidecar can log which
-     * coding agent owns the session. */
+    /**
+     * Best-effort `x-memwal-client` / `x-memwal-client-version` forwarded to
+     * the sidecar. Seeded from `lastClientInfoHeaders()`, which is only
+     * populated after the auth-required → bridge handoff (that path does not
+     * replay `initialize`). On a normal already-signed-in start this object
+     * is empty at first SSE connect: `connectInBackground` opens the stream
+     * before stdin is wired. Headers are filled when we see `initialize` and
+     * then land on reconnects / later POSTs. The sidecar treats the MCP
+     * handshake (`initialize.clientInfo`) as the authoritative source.
+     */
     const extraHeaders: Record<string, string> = { ...lastClientInfoHeaders() };
 
     let stdinClosed = false;

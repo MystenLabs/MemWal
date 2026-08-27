@@ -14,6 +14,8 @@ const MAX_TOKEN = 64;
 export function sanitizeClientToken(raw: unknown): string | null {
     if (typeof raw !== "string") return null;
     // HTTP header values cannot carry CR/LF; keep printable ASCII.
+    // Sidecar copy (`services/server/scripts/mcp/agent-client.ts`) only
+    // strips C0/DEL so JSON logs can keep non-ASCII names. Do not unify.
     const cleaned = raw.replace(/[^\x20-\x7e]/g, "").trim();
     if (!cleaned) return null;
     return cleaned.slice(0, MAX_TOKEN);

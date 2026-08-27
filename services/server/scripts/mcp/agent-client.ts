@@ -18,6 +18,33 @@ const MAX_TOKEN = 64;
 export const CLIENT_NAME_HEADER = "x-memwal-client";
 export const CLIENT_VERSION_HEADER = "x-memwal-client-version";
 
+/**
+ * Stable ids written to `session.agentClient` / sidecar logs.
+ * Keep in lockstep with the branches in `identifyAgentClient`.
+ */
+export const AGENT_CLIENT_IDS = [
+    "claude-code",
+    "codex",
+    "cursor",
+    "antigravity",
+    "opencode",
+    "windsurf",
+    "claude-desktop",
+    "vscode-copilot",
+    "chatgpt",
+    "gemini",
+    "grok",
+    "other",
+] as const;
+
+export type AgentClientId = (typeof AGENT_CLIENT_IDS)[number];
+
+/**
+ * Sidecar copy of token sanitizing. Strips C0/DEL only so JSON logs can
+ * keep non-ASCII client names. The stdio-bridge copy in
+ * `packages/mcp/src/client-info.ts` is stricter (printable ASCII) because
+ * it produces HTTP header values. Do not unify them.
+ */
 export function sanitizeClientToken(raw: unknown): string | null {
     if (typeof raw !== "string") return null;
     const cleaned = raw.replace(/[\u0000-\u001f\u007f]/g, "").trim();
@@ -26,7 +53,7 @@ export function sanitizeClientToken(raw: unknown): string | null {
 }
 
 /** Stable id used in logs. Order matters: `claude-code` before `claude`. */
-export function identifyAgentClient(rawName: string): string {
+export function identifyAgentClient(rawName: string): AgentClientId {
     const n = rawName.toLowerCase();
     if (n.includes("claude-code") || n.includes("claude code")) return "claude-code";
     if (n.includes("codex")) return "codex";
@@ -34,6 +61,8 @@ export function identifyAgentClient(rawName: string): string {
     if (n.includes("antigravity")) return "antigravity";
     if (n.includes("opencode") || n.includes("open-code")) return "opencode";
     if (n.includes("windsurf") || n.includes("codeium")) return "windsurf";
+    // Claude Desktop's web UI has historically sent `claude.ai` / `claude-ai`
+    // as clientInfo.name. Unknown names still fall through to `other`.
     if (
         n.includes("claude-desktop") ||
         n.includes("claude desktop") ||
@@ -67,8 +96,11 @@ export function clientInfoFromInitializeParams(
 }
 
 /**
- * Stamp `session.agentClient` the first time we learn a name. Idempotent:
- * later calls with the same id do not emit another log line.
+ * Stamp `session.agentClient` the first time we learn a name. Idempotent for
+ * the same id+name: later calls do not emit another log line, except when they
+ * fill in a version that the first stamp lacked (header without version, then
+ * handshake with version). A later call that omits version must not wipe one
+ * we already stored.
  */
 export function applyAgentClient(
     session: MemWalSession,
@@ -79,15 +111,22 @@ export function applyAgentClient(
     if (!name) return false;
     const id = identifyAgentClient(name);
     const version = sanitizeClientToken(input.version);
-    if (session.agentClient === id && session.clientName === name) return false;
+    const sameIdentity = session.agentClient === id && session.clientName === name;
+    if (sameIdentity && (version == null || session.clientVersion === version)) {
+        return false;
+    }
     const first = session.agentClient == null;
     session.agentClient = id;
     session.clientName = name;
-    session.clientVersion = version ?? undefined;
+    if (!sameIdentity) {
+        session.clientVersion = version ?? undefined;
+    } else if (version) {
+        session.clientVersion = version;
+    }
     log.info(first ? "session.identified" : "session.identified.updated", {
         agentClient: id,
         clientName: name,
-        clientVersion: version,
+        clientVersion: session.clientVersion ?? version,
         accountId: session.accountId,
         ...fields,
     });

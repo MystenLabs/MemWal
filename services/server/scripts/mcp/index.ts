@@ -265,6 +265,9 @@ async function handleSse(
         cleanup,
     });
 
+    // Headers are a best-effort hint (auth-required handoff / reconnect).
+    // The first SSE GET usually has none; identity is logged on
+    // session.identified once the handshake (or a later header) lands.
     applyAgentClient(auth.session, agentClientFromHeaders(req), {
         transport: "sse",
         transportId: transport.sessionId,
@@ -276,7 +279,6 @@ async function handleSse(
         accountId: auth.session.accountId,
         delegatePubKey: auth.session.delegatePubKeyHex,
         transportId: transport.sessionId,
-        agentClient: auth.session.agentClient ?? null,
     });
 
     await server.connect(transport);
@@ -328,6 +330,11 @@ async function handlePostMessage(
 
     // SSEServerTransport.handlePostMessage expects the raw IncomingMessage.
     // Express `req` is an IncomingMessage subtype; passing it through works.
+    applyAgentClient(conn.session, agentClientFromHeaders(req), {
+        transport: "sse",
+        transportId: sessionId,
+        sessionKey: conn.sessionKey,
+    });
     await conn.transport.handlePostMessage(req, res);
     identifyConnection(conn.server, conn.session, req, {
         transport: "sse",
@@ -402,6 +409,16 @@ async function handleStreamableHttp(
             );
         }
         conn.lastActiveMs = Date.now();
+        // Stamp from headers first when present. Handshake identity is
+        // applied after handleRequest because the SDK only exposes
+        // clientInfo once initialize has been processed; a request that
+        // both initializes and calls a tool can therefore emit tool.call
+        // before session.identified.
+        applyAgentClient(conn.session, agentClientFromHeaders(req), {
+            transport: "streamable",
+            transportId: sessionId,
+            sessionKey: conn.sessionKey,
+        });
         await conn.transport.handleRequest(req, res);
         identifyConnection(conn.server, conn.session, req, {
             transport: "streamable",
@@ -439,13 +456,22 @@ async function handleStreamableHttp(
 
     // Spawn a fresh transport. `sessionIdGenerator` is invoked once on
     // the first message-init response; we cache the connection only
-    // after we know the assigned id. `server` is assigned before
-    // `handleRequest`, which is when `onsessioninitialized` actually runs.
+    // after we know the assigned id. Holder (not `let server!`) so a
+    // future reorder of assign vs `onsessioninitialized` logs instead of
+    // throwing a TDZ ReferenceError.
     let initialized = false;
-    let server!: McpServer;
+    const holder: { server: McpServer | null } = { server: null };
     const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newId: string) => {
+            const server = holder.server;
+            if (!server) {
+                log.error("mcp.streamable_session_without_server", {
+                    transportId: newId,
+                });
+                releaseSlot();
+                return;
+            }
             initialized = true;
             let cleanedUp = false;
             const cleanup = () => {
@@ -469,13 +495,20 @@ async function handleStreamableHttp(
                 cleanup,
                 lastActiveMs: Date.now(),
             });
+            applyAgentClient(auth.session, agentClientFromHeaders(req), {
+                transport: "streamable",
+                transportId: newId,
+                sessionKey: auth.sessionKey,
+            });
+            // Identity is logged on session.identified once known (headers
+            // or handshake). Streamable init runs before the SDK stores
+            // clientInfo, so agentClient is usually still empty here.
             log.info("session.opened", {
                 transport: "streamable",
                 sessionKey: auth.sessionKey,
                 accountId: auth.session.accountId,
                 delegatePubKey: auth.session.delegatePubKeyHex,
                 transportId: newId,
-                agentClient: auth.session.agentClient ?? null,
             });
         },
     });
@@ -486,15 +519,15 @@ async function handleStreamableHttp(
     // the catch below handles handleRequest throwing before init completes.
     transport.onclose = releaseSlot;
 
-    server = createMcpServer(auth.session);
+    holder.server = createMcpServer(auth.session);
     try {
-        await server.connect(transport);
+        await holder.server.connect(transport);
         // The SDK's handleRequest takes the raw IncomingMessage. We
         // intentionally do NOT pre-parse the body — express.json() is not
         // mounted on this route so req still has the raw stream.
         // The transport reads the body itself.
         await transport.handleRequest(req, res);
-        identifyConnection(server, auth.session, req, {
+        identifyConnection(holder.server, auth.session, req, {
             transport: "streamable",
             transportId: transport.sessionId ?? null,
             sessionKey: auth.sessionKey,
