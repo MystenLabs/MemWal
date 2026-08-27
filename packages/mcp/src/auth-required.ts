@@ -22,6 +22,7 @@
  * and coexist.
  */
 import { loadCreds, type MemWalCredentials } from "./auth.js";
+import { rememberInitializeClientInfo } from "./client-info.js";
 import { log } from "./logger.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
@@ -407,6 +408,14 @@ function handleAuthLine(
     const method = req.method;
 
     if (method === "initialize") {
+        const clientInfo = rememberInitializeClientInfo(req.params);
+        if (clientInfo) {
+            log.info("bridge.agent_client", {
+                clientName: clientInfo.name,
+                clientVersion: clientInfo.version,
+                mode: "auth-required",
+            });
+        }
         writeStdoutMessage({
             jsonrpc: "2.0",
             id,

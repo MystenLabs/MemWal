@@ -39,7 +39,7 @@ export function registerRememberBulkTool(
                 "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
             inputSchema: REMEMBER_BULK_INPUT,
         },
-        wrapTool<{ facts: string[]; namespace?: string }>(async ({ facts, namespace }) => {
+        wrapTool<{ facts: string[]; namespace?: string }>(session, "memwal_remember_bulk", async ({ facts, namespace }) => {
             const items = facts.map((text) => ({ text, namespace }));
             const result = await session.memwal.rememberBulkAndWait(items, {
                 timeoutMs: 120_000,

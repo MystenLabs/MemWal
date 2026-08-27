@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createRequire } from "node:module";
+import { applyAgentClientFromServer } from "./agent-client.js";
 import type { MemWalSession } from "./auth.js";
 import { registerTools } from "./tools/index.js";
 
@@ -75,6 +76,12 @@ export function createMcpServer(session: MemWalSession): McpServer {
     );
 
     registerTools(server, session);
+
+    // SDK populates getClientVersion() during initialize; this fires after
+    // the client sends `notifications/initialized`.
+    server.server.oninitialized = () => {
+        applyAgentClientFromServer(server, session);
+    };
 
     return server;
 }

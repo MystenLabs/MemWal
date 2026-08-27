@@ -41,7 +41,7 @@ export function registerRememberTool(
                 "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.",
             inputSchema: REMEMBER_INPUT,
         },
-        wrapTool<{ text: string; namespace?: string }>(async ({ text, namespace }) => {
+        wrapTool<{ text: string; namespace?: string }>(session, "memwal_remember", async ({ text, namespace }) => {
             const result = await session.memwal.rememberAndWait(
                 text,
                 namespace,

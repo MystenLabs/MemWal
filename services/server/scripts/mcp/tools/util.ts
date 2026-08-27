@@ -1,6 +1,10 @@
 /**
  * Shared helpers for tool implementations.
  */
+import type { MemWalSession } from "../auth.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger("mcp");
 
 interface ToolResultLike {
     [x: string]: unknown;
@@ -43,9 +47,17 @@ export function explorerFooter(): string {
 }
 
 export function wrapTool<Args>(
+    session: MemWalSession,
+    tool: string,
     handler: (args: Args) => Promise<ToolResultLike>
 ): (args: Args) => Promise<ToolResultLike> {
     return async (args) => {
+        log.info("tool.call", {
+            tool,
+            agentClient: session.agentClient ?? null,
+            clientName: session.clientName ?? null,
+            accountId: session.accountId ?? null,
+        });
         try {
             return await handler(args);
         } catch (err: any) {
@@ -58,7 +70,7 @@ export function wrapTool<Args>(
 
             // Operator-side diagnostic — full chain to sidecar stderr.
             console.error(
-                `[mcp.tool.error] name=${name} msg=${msg}` +
+                `[mcp.tool.error] tool=${tool} agentClient=${session.agentClient ?? ""} name=${name} msg=${msg}` +
                 (cause
                     ? ` cause_name=${cause?.constructor?.name} cause_msg=${cause?.message} cause_code=${cause?.code}`
                     : "")

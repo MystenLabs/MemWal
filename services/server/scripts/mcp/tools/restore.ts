@@ -54,7 +54,7 @@ export function registerRestoreTool(
                 "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status — does not return memory texts. If truncated=true, increase limit and call again. Call memwal_recall afterwards to query the rebuilt index.",
             inputSchema: RESTORE_INPUT,
         },
-        wrapTool<{ namespace: string; limit: number }>(async ({ namespace, limit }) => {
+        wrapTool<{ namespace: string; limit: number }>(session, "memwal_restore", async ({ namespace, limit }) => {
             const result = await session.memwal.restore(namespace, limit);
             return {
                 content: [

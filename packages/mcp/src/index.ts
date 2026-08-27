@@ -125,11 +125,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         args.relayerUrl ?? process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz";
     const webUrl =
         args.webUrl ?? process.env.MEMWAL_WEB_URL ?? "https://memory.walrus.xyz";
-    // Label is the on-chain delegate-key name shown in the dashboard. We
-    // default to a generic value at registration time — the bridge updates
-    // it to the actual client's `clientInfo.name` ("Cursor", "Claude",
-    // "Antigravity", ...) after the first MCP `initialize` request. User
-    // can rename anytime from the dashboard.
+    // Label is the on-chain delegate-key name shown in the dashboard.
+    // Default is generic; the user can rename anytime. Which coding agent
+    // opened the MCP session is detected from `initialize.clientInfo` and
+    // logged on the sidecar — it is not this login-time label.
     const label = args.label ?? process.env.MEMWAL_CLIENT_LABEL ?? "MCP Client";
     // Default memory namespace applied to memory tool calls when the agent
     // omits one. CLI > env, then UNSET — we deliberately do NOT hardcode a

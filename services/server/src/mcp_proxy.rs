@@ -696,6 +696,8 @@ mod tests {
             "last-event-id",
             "x-memwal-account-id",
             "x-memwal-namespace",
+            "x-memwal-client",
+            "x-memwal-client-version",
         ] {
             let name = AxumHeaderName::from_bytes(h.as_bytes()).unwrap();
             assert!(should_forward(&name), "should forward {h}");
