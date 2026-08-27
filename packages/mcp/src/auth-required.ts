@@ -281,6 +281,7 @@ async function handleLoginToolCall(
     //
     // Concurrent memwal_login calls join this in-flight flow instead of
     // opening a second listener (that race hung later recall/remember).
+    lastLoginFailure = null;
     const session = startOrReuseLoginFlow(
         {
             relayerUrl: config.relayerUrl,
@@ -299,17 +300,13 @@ async function handleLoginToolCall(
                 delegateAddress: creds.delegateAddress,
             });
         },
+        (err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            lastLoginFailure = msg;
+            log.warn("memwal_login.bg.failed", { msg });
+            sendLogMessage("warning", `Walrus Memory sign-in did not complete: ${msg}`);
+        },
     );
-    // startOrReuseLoginFlow's onSuccess callback only covers the success
-    // path. Track failure here so the next tool call can report it (Claude
-    // Code drops notifications/message; Cursor shows them, so this is the
-    // primary channel either way).
-    session.result.catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        lastLoginFailure = msg;
-        log.warn("memwal_login.bg.failed", { msg });
-        sendLogMessage("warning", `Walrus Memory sign-in did not complete: ${msg}`);
-    });
 
     // Race the URL-ready against a short timeout. The listener bind is
     // synchronous-ish (single port allocation); 5s is a hard cap for a

@@ -586,24 +586,20 @@ async function handleLocalLogin(
                 delegateAddress: creds.delegateAddress,
             });
         },
+        (err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn("memwal_login.bridge.failed", { msg });
+            writeStdoutMessage({
+                jsonrpc: "2.0",
+                method: "notifications/message",
+                params: {
+                    level: "warning",
+                    logger: "memwal-mcp",
+                    data: `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are unchanged; call memwal_login again to retry.`,
+                },
+            });
+        },
     );
-    // startOrReuseLoginFlow's onSuccess callback only covers the success
-    // path. The tool call already returned the URL, so this notification is
-    // the only channel left for a failure. Swallowed by some clients, shown
-    // by others.
-    session.result.catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        log.warn("memwal_login.bridge.failed", { msg });
-        writeStdoutMessage({
-            jsonrpc: "2.0",
-            method: "notifications/message",
-            params: {
-                level: "warning",
-                logger: "memwal-mcp",
-                data: `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are unchanged; call memwal_login again to retry.`,
-            },
-        });
-    });
 
     const timeoutPromise = new Promise<string>((_, reject) =>
         setTimeout(

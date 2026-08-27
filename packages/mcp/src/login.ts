@@ -483,10 +483,13 @@ let inflightLogin: InflightLogin | null = null;
  * Start a login flow, or join one already in progress in this process.
  * Concurrent `memwal_login` calls share the same listener and URL so a
  * second call cannot race the first and leave the bridge on a stale session.
+ * `onSuccess` and `onFailure` are attached only when this call starts the
+ * flow, so a join cannot emit a second timeout warning.
  */
 export function startOrReuseLoginFlow(
     opts: LoginOptions = {},
     onSuccess?: (creds: MemWalCredentials) => Promise<void> | void,
+    onFailure?: (err: unknown) => void,
 ): InflightLogin {
     if (inflightLogin) return inflightLogin;
 
@@ -512,6 +515,11 @@ export function startOrReuseLoginFlow(
 
     result.catch((err) => {
         rejectUrl(err);
+        try {
+            onFailure?.(err);
+        } catch {
+            /* caller errors don't break the flow */
+        }
     });
 
     if (onSuccess) {
