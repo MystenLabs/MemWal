@@ -1786,8 +1786,9 @@ pub struct RestoreResponse {
     /// `limit` can still expand that fetch (`limit < 20`, cap = min(limit*5,
     /// 100)) — including `total == 0` in that window, because other
     /// namespaces can starve this one. Once the sidecar cap is saturated
-    /// (`limit >= 20`), an under-filled namespace is `false` so MCP agents
-    /// do not retry a restore whose limit cannot grow (WALM-431 / GH #762).
+    /// (`limit >= 20`), truncation follows this call's missing-blob page,
+    /// not on-chain `total`, so a fully restored namespace does not loop
+    /// (WALM-431 / GH #762).
     pub truncated: bool,
 }
 

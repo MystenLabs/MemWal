@@ -416,8 +416,8 @@ export interface RestoreResult {
      * missing locally than `limit` allowed this call to restore, or the
      * sidecar's owner-wide candidate fetch hit its cap *and* raising
      * `limit` can still expand that fetch (`limit < 20`). Once the cap is
-     * saturated, an under-filled namespace (including `total === 0`) is
-     * `false` so clients do not retry a restore whose limit cannot grow
+     * saturated, truncation follows this call's missing-blob page, not
+     * on-chain `total`, so a fully restored namespace does not loop
      * (WALM-431 / GH #762).
      *
      * Relayers older than WALM-319 don't send this field at all; the SDK
