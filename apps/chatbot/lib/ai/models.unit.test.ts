@@ -6,6 +6,7 @@ import {
   chatModels,
   DEFAULT_CHAT_MODEL,
   isReasoningModelId,
+  openRouterModelIds,
   TITLE_MODEL,
 } from "./models";
 
@@ -35,6 +36,7 @@ describe("curated model list", () => {
       expect(TITLE_MODEL).not.toBe(id);
       expect(ARTIFACT_MODEL).not.toBe(id);
       expect(DEFAULT_CHAT_MODEL).not.toBe(id);
+      expect(openRouterModelIds).not.toContain(id);
     }
   });
 
@@ -53,5 +55,8 @@ describe("curated model list", () => {
     expect(baseOpenRouterId("anthropic/claude-sonnet-4.5-thinking")).toBe(
       "anthropic/claude-sonnet-4.5"
     );
+    for (const id of openRouterModelIds) {
+      expect(id.endsWith("-thinking")).toBe(false);
+    }
   });
 });

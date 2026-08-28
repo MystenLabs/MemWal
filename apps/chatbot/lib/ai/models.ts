@@ -86,6 +86,17 @@ export function isReasoningModelId(modelId: string): boolean {
   );
 }
 
+// Every id the app can send upstream. OpenRouter retires ids on its own
+// schedule and answers a retired one with a 404 at request time, so keep the
+// full set in one place for check-model-ids.ts to verify against the catalog.
+export const openRouterModelIds = [
+  ...new Set([
+    ...chatModels.map((m) => baseOpenRouterId(m.id)),
+    TITLE_MODEL,
+    ARTIFACT_MODEL,
+  ]),
+];
+
 // Group models by provider for UI
 export const allowedModelIds = new Set(chatModels.map((m) => m.id));
 
