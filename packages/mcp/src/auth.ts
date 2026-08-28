@@ -10,15 +10,15 @@
  * documentation patterns transfer cleanly.
  */
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { join, dirname, basename } from "node:path";
 import {
     mkdirSync,
     readFileSync,
     writeFileSync,
-    chmodSync,
+    renameSync,
     unlinkSync,
     existsSync,
-    copyFileSync,
 } from "node:fs";
 
 export interface MemWalCredentials {
@@ -142,16 +142,49 @@ export function loadCreds(): MemWalCredentials | null {
 export function saveCreds(creds: MemWalCredentials): SaveCredsResult {
     const path = credsPath();
     const replaced = backupIfReplacingAnotherAccount(path, creds.accountId);
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(path, JSON.stringify(creds, null, 2), { encoding: "utf8", mode: 0o600 });
-    // writeFileSync's `mode` argument is only honored on file creation; ensure
-    // the permission on an existing file matches.
-    try {
-        chmodSync(path, 0o600);
-    } catch {
-        /* Windows etc. — best effort */
-    }
+    writeSecretFile(path, JSON.stringify(creds, null, 2));
     return { path, ...replaced };
+}
+
+/**
+ * Write a file whose bytes are only ever reachable through an inode this call
+ * created at `0600`.
+ *
+ * The obvious version — write to the final path, then `chmod` it — does not
+ * hold that property. `writeFileSync`'s `mode` follows POSIX `open()`: the
+ * kernel applies it when it creates the inode and ignores it for one that
+ * already exists. So a credentials file that anything outside this code left
+ * world-readable (a manual `chmod`, a restored backup, another tool) would
+ * receive the plaintext delegate key under the *old* mode, with a second,
+ * separate syscall to tighten it afterwards. Anyone reading the path in
+ * between gets the key.
+ *
+ * Writing a fresh file and renaming removes that window instead of shortening
+ * it. `rename(2)` repoints the name atomically, so a reader sees either the
+ * whole old file or the whole new one, never a permissive inode holding a new
+ * secret. `wx` (`O_EXCL`) makes a temp path that already exists — an
+ * interrupted earlier run, or a file planted by someone else — a hard failure
+ * rather than a write through a file this code did not create.
+ */
+function writeSecretFile(path: string, contents: string): void {
+    const dir = dirname(path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Named off the target and randomised, so concurrent saves cannot collide
+    // on it and no one can guess it ahead of time. Dot-prefixed to keep a
+    // crashed run's leftovers out of the way of directory listings.
+    const tmp = join(dir, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+    try {
+        writeFileSync(tmp, contents, { encoding: "utf8", mode: 0o600, flag: "wx" });
+        renameSync(tmp, path);
+    } catch (err) {
+        // Never leave a temp file holding the secret behind on a failed write.
+        try {
+            unlinkSync(tmp);
+        } catch {
+            /* already gone, or never created */
+        }
+        throw err;
+    }
 }
 
 /** What `saveCreds` did, so the caller can tell the user precisely — naming
@@ -223,8 +256,10 @@ function backupIfReplacingAnotherAccount(
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backup = join(dirname(path), `credentials.backup-${stamp}.json`);
     try {
-        copyFileSync(path, backup);
-        chmodSync(backup, 0o600);
+        // Through the same writer as the credentials file itself: the backup is
+        // a second copy of the same plaintext delegate key, and `copyFileSync`
+        // would create it under the process umask before any tightening.
+        writeSecretFile(backup, readFileSync(path, "utf8"));
         return { replacedAccountId: current.accountId, backedUpTo: backup };
     } catch {
         // Never block sign-in on a failed backup — but still report the
