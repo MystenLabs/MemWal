@@ -1,5 +1,6 @@
 import { streamObject } from "ai";
 import { z } from "zod";
+import { MAX_OUTPUT_TOKENS } from "@/lib/ai/models";
 import { codePrompt, updateDocumentPrompt } from "@/lib/ai/prompts";
 import { getArtifactModel } from "@/lib/ai/providers";
 import { createDocumentHandler } from "@/lib/artifacts/server";
@@ -12,6 +13,7 @@ export const codeDocumentHandler = createDocumentHandler<"code">({
     const { fullStream } = streamObject({
       model: getArtifactModel(),
       system: codePrompt,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
       prompt: title,
       schema: z.object({
         code: z.string(),
@@ -45,6 +47,7 @@ export const codeDocumentHandler = createDocumentHandler<"code">({
     const { fullStream } = streamObject({
       model: getArtifactModel(),
       system: updateDocumentPrompt(document.content, "code"),
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
       prompt: description,
       schema: z.object({
         code: z.string(),

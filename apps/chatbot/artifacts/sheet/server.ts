@@ -1,5 +1,6 @@
 import { streamObject } from "ai";
 import { z } from "zod";
+import { MAX_OUTPUT_TOKENS } from "@/lib/ai/models";
 import { sheetPrompt, updateDocumentPrompt } from "@/lib/ai/prompts";
 import { getArtifactModel } from "@/lib/ai/providers";
 import { createDocumentHandler } from "@/lib/artifacts/server";
@@ -12,6 +13,7 @@ export const sheetDocumentHandler = createDocumentHandler<"sheet">({
     const { fullStream } = streamObject({
       model: getArtifactModel(),
       system: sheetPrompt,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
       prompt: title,
       schema: z.object({
         csv: z.string().describe("CSV data"),
@@ -51,6 +53,7 @@ export const sheetDocumentHandler = createDocumentHandler<"sheet">({
     const { fullStream } = streamObject({
       model: getArtifactModel(),
       system: updateDocumentPrompt(document.content, "sheet"),
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
       prompt: description,
       schema: z.object({
         csv: z.string(),

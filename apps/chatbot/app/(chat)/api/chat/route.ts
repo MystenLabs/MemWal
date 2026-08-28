@@ -16,7 +16,12 @@ import { createResumableStreamContext } from "resumable-stream";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
 import { memoryNamespaceForUser } from "@/lib/ai/memory-namespace";
-import { allowedModelIds, isReasoningModelId } from "@/lib/ai/models";
+import {
+  allowedModelIds,
+  isReasoningModelId,
+  MAX_OUTPUT_TOKENS,
+  MAX_REASONING_OUTPUT_TOKENS,
+} from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel, getMemWalModel } from "@/lib/ai/providers";
 import { createDocument } from "@/lib/ai/tools/create-document";
@@ -194,6 +199,9 @@ export async function POST(request: Request) {
             : getLanguageModel(selectedChatModel),
           system: systemPrompt({ selectedChatModel, requestHints }),
           messages: modelMessages,
+          maxOutputTokens: isReasoningModel
+            ? MAX_REASONING_OUTPUT_TOKENS
+            : MAX_OUTPUT_TOKENS,
           stopWhen: stepCountIs(5),
           experimental_activeTools: isReasoningModel
             ? []

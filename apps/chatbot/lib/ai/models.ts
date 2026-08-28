@@ -72,6 +72,17 @@ export const chatModels: ChatModel[] = [
 export const TITLE_MODEL = "google/gemini-2.5-flash";
 export const ARTIFACT_MODEL = "anthropic/claude-haiku-4.5";
 
+// An uncapped request is billed as if it will emit the model's whole output
+// window, and OpenRouter reserves that much credit up front for Anthropic and
+// Google models. Left unset, picking one of those rejects the turn outright
+// ("requires more credits ... you requested up to 65535 tokens") however short
+// the answer would have been.
+export const MAX_OUTPUT_TOKENS = 4096;
+// Has to clear the thinking budget the chat route asks for, or the answer is
+// truncated before any of it reaches the reply.
+export const MAX_REASONING_OUTPUT_TOKENS = 12_000;
+export const MAX_TITLE_OUTPUT_TOKENS = 64;
+
 const THINKING_SUFFIX_REGEX = /-thinking$/;
 
 // "-thinking" is our own marker, not part of any OpenRouter id.
