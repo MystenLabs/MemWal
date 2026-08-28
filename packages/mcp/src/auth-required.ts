@@ -21,8 +21,9 @@
  * MCP spec 2025-06 — see ENG-1750. The two paths cover different surfaces
  * and coexist.
  */
-import { loadCreds, type MemWalCredentials } from "./auth.js";
+import { credsPath, loadCreds, type MemWalCredentials } from "./auth.js";
 import { rememberInitializeClientInfo } from "./client-info.js";
+import { loginPrompt, loginSuccessNotification } from "./messages.js";
 import { log } from "./logger.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
@@ -300,6 +301,18 @@ async function handleLoginToolCall(
                 accountId: creds.accountId,
                 delegateAddress: creds.delegateAddress,
             });
+            // Symmetric with the failure branch below: the tool call returned
+            // the URL immediately, so nothing is left to carry the outcome
+            // except this notification and the banner the bridge prefixes onto
+            // the next tool result.
+            sendLogMessage(
+                "info",
+                loginSuccessNotification({
+                    accountId: creds.accountId,
+                    delegateAddress: creds.delegateAddress,
+                    credentialsPath: credsPath(),
+                }),
+            );
         },
         (err) => {
             const msg = err instanceof Error ? err.message : String(err);
@@ -338,34 +351,9 @@ async function handleLoginToolCall(
     }
 
     log.info("memwal_login.tool.url_ready", { url });
-    // The URL is included MULTIPLE times in different formats so agents
-    // that try to summarize the result can't strip all of them. Some MCP
-    // clients (Claude Code) paraphrase tool output aggressively — by
-    // repeating the URL in plain, code-block, and markdown-link form, at
-    // least one survives the agent's response template.
     return {
         isError: false,
-        text: [
-            `## ⚠️ ACTION REQUIRED: User must click this URL to sign in`,
-            ``,
-            `**URL:** ${url}`,
-            ``,
-            `\`\`\``,
-            url,
-            `\`\`\``,
-            ``,
-            `[Click here to open Walrus Memory sign-in](${url})`,
-            ``,
-            `**IMPORTANT for the assistant**: do NOT summarize or omit the URL above.`,
-            `The user CANNOT proceed without seeing the exact URL. Surface it verbatim`,
-            `in your reply, then explain the steps:`,
-            ``,
-            `1. Open the URL in any browser (it may have already opened automatically)`,
-            `2. Click **Connect Sui Wallet** and approve the on-chain \`add_delegate_key\` transaction`,
-            `3. Once "Connected" appears in the browser, the assistant should retry the original request — the other memwal_* tools will then have credentials at \`~/.memwal/credentials.json\``,
-            ``,
-            `_The login link stays valid for 5 minutes. If it expires, call \`memwal_login\` again to get a fresh URL._`,
-        ].join("\n"),
+        text: loginPrompt({ url, credentialsPath: credsPath(), signedIn: false }),
     };
 }
 

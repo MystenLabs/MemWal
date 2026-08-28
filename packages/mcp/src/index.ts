@@ -11,7 +11,7 @@
  */
 import { clearCreds, credsPath, loadCreds } from "./auth.js";
 import { runAuthRequiredServer } from "./auth-required.js";
-import { runBridge } from "./bridge.js";
+import { notePendingLoginSuccess, runBridge } from "./bridge.js";
 import { loginFlow } from "./login.js";
 import { log, note } from "./logger.js";
 
@@ -207,6 +207,16 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
                 // This is what removes the historical "second reboot".
                 log.info("creds.hot_handoff_to_bridge", {
                     accountId: handoff.creds.accountId,
+                });
+                // Reaching here IS a completed sign-in: the auth-required
+                // server only hands off once `memwal_login` has written
+                // credentials mid-session. `adoptCredentials` covers the
+                // re-login case; this covers signing in from signed-out, where
+                // the bridge does not yet exist when the callback lands.
+                notePendingLoginSuccess({
+                    accountId: handoff.creds.accountId,
+                    delegateAddress: handoff.creds.delegateAddress,
+                    credentialsPath: credsPath(),
                 });
                 await runBridge(
                     handoff.creds,
