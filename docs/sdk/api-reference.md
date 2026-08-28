@@ -110,11 +110,12 @@ Submit a bulk remember request and wait until every job reaches a terminal state
 
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
-- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance?, scoringWeights? })`
+- Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance?, sort?, scoringWeights? })`
 - `limit` defaults to `10`; `topK` is an alias and wins when both are set
 - Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
-- `scoringWeights` blends recency and importance into the ranking — see [Ordering](#ordering) below
+- `sort` picks the ordering: `"relevance"` (default) or `"recent"` for newest-among-matches
+- `scoringWeights` blends recency and importance into the ranking (see [Ordering](#ordering) below)
 
 **Returns:**
 
@@ -137,7 +138,7 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 #### Ordering
 
 **By default, results are ranked by semantic relevance only. There is no
-recency guarantee — not within the returned set, and not in which records make
+recency guarantee: not within the returned set, and not in which records make
 the set at all.**
 
 That second part is the one that bites. Ranking happens server-side, before
@@ -151,16 +152,54 @@ const newest = results.sort(byCreatedAtDesc)[0];
 
 If an older record echoes the query's wording more literally than the newest
 one does, the older record outranks it and the newest falls outside the window
-entirely. Sorting client-side cannot recover a record that was never returned.
+entirely. Sorting client-side cannot recover a record the server never returned.
 
-Until a dedicated recency mode lands (WALM-383), the reliable workaround is to
-over-fetch and narrow it yourself:
+Ask the relayer for a recency ordering instead, with `sort: "recent"`:
 
 ```ts
-// Widen the window first, THEN pick the newest.
-const { results } = await memwal.recall({ query: "current task", limit: 50 });
-const newest = results.sort(byCreatedAtDesc)[0];
+// The relayer widens the candidate set first, then orders by write-time.
+const { results } = await memwal.recall({
+  query: "current task",
+  limit: 3,
+  sort: "recent",
+});
+const newest = results[0];
 ```
+
+#### `sort`
+
+`sort` decides how the relayer orders results, and how many candidates it
+considers in the first place.
+
+| Value | Behavior |
+| --- | --- |
+| `"relevance"` | Semantic similarity only, the cosine order. The default. |
+| `"recent"` | Newest among the semantic matches. |
+
+`"recent"` over-fetches. It asks for `limit * 5` candidates, caps that at 50,
+and never goes below `limit`. It then orders those candidates by `created_at`
+descending and truncates to `limit`. Records sharing a timestamp fall back to
+the closer semantic match.
+
+Semantic similarity generates the candidates and write-time picks the winners,
+so a newest record worded less literally than an older one still comes first.
+That is the part `scoringWeights` cannot do: weights reorder the rows the
+search already returned, and `sort` changes which rows those are.
+
+Selection runs before the Walrus download and SEAL decrypt, so the wider net
+costs one broader SQL query rather than five times the decrypt work.
+
+Two limits worth knowing:
+
+- `"recent"` returns the newest record among the candidates, not the newest
+  record overall. The candidate set is still the cosine top-N, so in a large
+  namespace a newer record can rank below the cutoff and stay out.
+- `maxDistance` filters client-side, after the relayer selects. Pairing it
+  with `"recent"` can drop the loosely-worded newest record that `"recent"`
+  exists to surface.
+
+Omitting `sort` leaves the request byte-identical to a plain cosine recall, so
+existing callers see no change.
 
 #### `scoringWeights`
 
@@ -173,10 +212,10 @@ const newest = results.sort(byCreatedAtDesc)[0];
 | `recencyHalfLifeDays` | `30` | Days for the recency term to halve |
 | `importance` | `0` | Weight on the per-fact importance set at extraction time |
 
-**It re-ranks the candidates the vector search already returned — it does not
+**It re-ranks the candidates the vector search already returned. It does not
 widen the search.** The relayer selects the cosine top-`limit` first and the
 ranker reorders only those, so weighting alone does not solve the problem
-above. It also has to overcome the semantic gap to reorder anything: at the
+above; `sort: "recent"` does. It also has to overcome the semantic gap to reorder anything: at the
 default 30-day half-life, two records a few days apart barely differ on the
 recency term, so a closer-worded older record still wins. Shorten
 `recencyHalfLifeDays` to make the recency term bite.
@@ -184,9 +223,9 @@ recency term, so a closer-worded older record still wins. Shorten
 Omitting `scoringWeights` leaves the request byte-identical to a plain cosine
 sort, so existing callers are unaffected.
 
-Use `created_at` to *verify* or display an order. Use `scoringWeights` to
-bias one — but raise `limit` if the record you need might not be in the
-window at all.
+Use `sort: "recent"` when you need the newest match. Use `scoringWeights` to
+bias an order without changing which records qualify. Use `created_at` to
+verify or display whatever order comes back.
 
 ### `analyze(text, namespace?): Promise<AnalyzeResult>`
 

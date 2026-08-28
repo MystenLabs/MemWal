@@ -66,9 +66,9 @@ export interface RecallMemory {
      *
      * This is the *write* time, not any event time the text itself describes.
      *
-     * Optional because relayers older than this field omit it — and because
-     * results are ranked by relevance, not recency, unless you ask for a
-     * recency weight via `RecallOptions.scoringWeights`.
+     * Optional because relayers older than this field omit it. Results are
+     * ranked by relevance, not recency, unless you ask for a recency
+     * ordering via `RecallOptions.sort`.
      */
     created_at?: string;
 }
@@ -163,9 +163,8 @@ export interface RecallOptions {
      * overcome the semantic gap to reorder: with the default 30-day half-life,
      * two records days apart barely differ on the recency term.
      *
-     * To approximate newest-wins today, raise `limit` well above what you
-     * need and sort by `created_at` yourself. A dedicated recency mode that
-     * over-fetches server-side is tracked in WALM-383.
+     * For newest-wins, use `sort: "recent"` instead. It over-fetches
+     * candidates server-side before ordering them by write-time.
      */
     scoringWeights?: ScoringWeights;
     /**
