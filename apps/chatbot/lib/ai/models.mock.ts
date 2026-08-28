@@ -11,17 +11,56 @@ const mockUsage = {
   outputTokens: { total: 20, text: 20, reasoning: 0 },
 };
 
-function getResponseForPrompt(prompt: unknown): string {
-  const promptStr = JSON.stringify(prompt).toLowerCase();
+const GREETING_REGEX = /\b(hello|hi|hey)\b/;
 
-  if (promptStr.includes("weather") || promptStr.includes("temperature")) {
+type ModelMessage = {
+  role?: string;
+  content?: unknown;
+};
+
+/**
+ * Read the newest user turn only. Matching the serialised prompt as a whole
+ * swept in the system prompt, whose prose contains "hi" inside ordinary words
+ * like "this", so every request looked like a greeting and the branches below
+ * could never be told apart from a test.
+ */
+function lastUserText(prompt: unknown): string {
+  if (!Array.isArray(prompt)) {
+    return "";
+  }
+
+  const userMessages = (prompt as ModelMessage[]).filter(
+    (message) => message?.role === "user"
+  );
+  const latest = userMessages.at(-1);
+
+  if (!latest) {
+    return "";
+  }
+  if (typeof latest.content === "string") {
+    return latest.content.toLowerCase();
+  }
+  if (!Array.isArray(latest.content)) {
+    return "";
+  }
+
+  return latest.content
+    .map((part: unknown) =>
+      part && typeof part === "object" && "text" in part
+        ? String((part as { text: unknown }).text)
+        : ""
+    )
+    .join(" ")
+    .toLowerCase();
+}
+
+function getResponseForPrompt(prompt: unknown): string {
+  const text = lastUserText(prompt);
+
+  if (text.includes("weather") || text.includes("temperature")) {
     return mockResponses.weather;
   }
-  if (
-    promptStr.includes("hello") ||
-    promptStr.includes("hi") ||
-    promptStr.includes("hey")
-  ) {
+  if (GREETING_REGEX.test(text)) {
     return mockResponses.greeting;
   }
 

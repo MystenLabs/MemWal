@@ -39,8 +39,13 @@ export const myProvider = isTestEnvironment
   : null;
 
 export function getLanguageModel(modelId: string) {
+  // The mock provider registers behaviours, not catalog ids, so every real id
+  // has to land on one of its aliases — asking it for "openai/gpt-4o-mini"
+  // throws NoSuchModelError and fails the turn.
   if (isTestEnvironment && myProvider) {
-    return myProvider.languageModel(modelId);
+    return myProvider.languageModel(
+      isReasoningModelId(modelId) ? "chat-model-reasoning" : "chat-model"
+    );
   }
 
   if (isReasoningModelId(modelId)) {
