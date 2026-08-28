@@ -1293,6 +1293,14 @@ pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
             MAX_NAMESPACE_BYTES
         )));
     }
+    // NUL (and other control chars) must not reach PostgreSQL: a `\0` in a
+    // text bind makes libpq/pg reject the query as an opaque 500. Reject here
+    // so recall/ask match remember and return HTTP 400 (WALM-439 / GH #787).
+    if namespace.chars().any(char::is_control) {
+        return Err(AppError::BadRequest(
+            "namespace contains invalid control characters".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -3075,6 +3083,14 @@ mod tests {
         assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES)).is_ok());
         assert!(validate_namespace("").is_err());
         assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn namespace_validation_rejects_nul_and_other_control_characters() {
+        assert!(validate_namespace("default\0evil").is_err());
+        assert!(validate_namespace("has\nnewline").is_err());
+        assert!(validate_namespace("has\ttab").is_err());
+        assert!(validate_namespace("normal-ns_01").is_ok());
     }
 
     // ── HealthResponse.prompt_versions wire shape ────────────────

@@ -291,6 +291,7 @@ pub async fn ask(
     if body.question.is_empty() {
         return Err(AppError::BadRequest("Question cannot be empty".into()));
     }
+    validate_namespace(&body.namespace)?;
 
     // Validate scoring_weights up front — fail fast on malformed input
     // before we burn an embed + vector search + Walrus + SEAL round-trip.
