@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { extname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   allowedModelIds,
@@ -8,6 +8,8 @@ import {
   chatModels,
   DEFAULT_CHAT_MODEL,
   isReasoningModelId,
+  MAX_OUTPUT_TOKENS,
+  MAX_REASONING_OUTPUT_TOKENS,
   openRouterModelIds,
   resolveChatModelId,
   TITLE_MODEL,
@@ -91,4 +93,59 @@ describe("chat-model cookie resolution", () => {
       expect(source).not.toMatch(/initialChatModel=\{\w*[Cc]ookie\w*\.value\}/);
     }
   );
+});
+
+const MODEL_CALL_REGEX = /\b(streamText|streamObject|generateText|generateObject)\(/g;
+const MAX_OUTPUT_TOKENS_REGEX = /maxOutputTokens:/g;
+
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      return sourceFiles(path);
+    }
+    if (entry.name.includes(".test.") || !/\.tsx?$/.test(extname(path))) {
+      return [];
+    }
+    return [path];
+  });
+}
+
+describe("output token caps", () => {
+  it("keeps the reasoning cap above the thinking budget the chat route asks for", () => {
+    const route = readFileSync(resolve("app/(chat)/api/chat/route.ts"), "utf8");
+    const budget = route.match(/budgetTokens:\s*([\d_]+)/);
+
+    expect(budget).not.toBeNull();
+    expect(MAX_REASONING_OUTPUT_TOKENS).toBeGreaterThan(
+      Number((budget?.[1] ?? "0").replace(/_/g, ""))
+    );
+  });
+
+  // An uncapped call is quoted against the model's whole output window, which
+  // Anthropic and Google reject for credit up front. Counting call sites rather
+  // than naming them is deliberate: the by-hand sweep that introduced the caps
+  // missed requestSuggestions, and a named list would have missed it again.
+  it("caps every model call in the app", () => {
+    const uncapped = ["app", "artifacts", "lib"]
+      .flatMap((dir) => sourceFiles(resolve(dir)))
+      .map((path) => {
+        const source = readFileSync(path, "utf8");
+        return {
+          path,
+          calls: source.match(MODEL_CALL_REGEX)?.length ?? 0,
+          caps: source.match(MAX_OUTPUT_TOKENS_REGEX)?.length ?? 0,
+        };
+      })
+      .filter((file) => file.calls > file.caps)
+      .map((file) => `${file.path} (${file.calls} calls, ${file.caps} capped)`);
+
+    expect(uncapped).toEqual([]);
+  });
+
+  it("keeps the caps small enough to be the point of having them", () => {
+    expect(MAX_OUTPUT_TOKENS).toBeLessThan(32_000);
+    expect(MAX_REASONING_OUTPUT_TOKENS).toBeLessThan(32_000);
+  });
 });
