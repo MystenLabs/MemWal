@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   allowedModelIds,
@@ -7,6 +9,7 @@ import {
   DEFAULT_CHAT_MODEL,
   isReasoningModelId,
   openRouterModelIds,
+  resolveChatModelId,
   TITLE_MODEL,
 } from "./models";
 
@@ -59,4 +62,33 @@ describe("curated model list", () => {
       expect(id.endsWith("-thinking")).toBe(false);
     }
   });
+});
+
+describe("chat-model cookie resolution", () => {
+  it("keeps ids the chat API still accepts", () => {
+    for (const model of chatModels) {
+      expect(resolveChatModelId(model.id)).toBe(model.id);
+    }
+  });
+
+  it("falls back to the default for missing, empty or retired ids", () => {
+    for (const value of [...RETIRED_IDS, "not-a-model", "", "  "]) {
+      expect(resolveChatModelId(value)).toBe(DEFAULT_CHAT_MODEL);
+    }
+    expect(resolveChatModelId(undefined)).toBe(DEFAULT_CHAT_MODEL);
+  });
+
+  // Both chat pages read the cookie server-side and hand it to <Chat>, which
+  // sends it as selectedChatModel, so passing cookie.value straight through is
+  // what made a retired id reject every send. Guard the call sites too.
+  it.each([["app/(chat)/page.tsx"], ["app/(chat)/chat/[id]/page.tsx"]])(
+    "routes the cookie through the resolver in %s",
+    (page) => {
+      const source = readFileSync(resolve(page), "utf8");
+      expect(source).toMatch(
+        /resolveChatModelId\(\s*cookieStore\.get\("chat-model"\)\?\.value\s*\)/
+      );
+      expect(source).not.toMatch(/initialChatModel=\{\w*[Cc]ookie\w*\.value\}/);
+    }
+  );
 });
