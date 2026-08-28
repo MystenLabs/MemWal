@@ -1,5 +1,5 @@
 import { auth } from "@/app/(auth)/auth";
-import { getSuggestionsByDocumentId } from "@/lib/db/queries";
+import { getSuggestionsByDocumentIdForUser } from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
 
 export async function GET(request: Request) {
@@ -14,22 +14,20 @@ export async function GET(request: Request) {
   }
 
   const session = await auth();
+  const userId = session?.user?.id;
 
-  if (!session?.user) {
+  if (!userId) {
     return new ChatbotError("unauthorized:suggestions").toResponse();
   }
 
-  const suggestions = await getSuggestionsByDocumentId({
+  const suggestions = await getSuggestionsByDocumentIdForUser({
     documentId,
+    userId,
   });
 
-  const [suggestion] = suggestions;
-
-  if (!suggestion) {
-    return Response.json([], { status: 200 });
-  }
-
-  if (suggestion.userId !== session.user.id) {
+  // Owner-scoped lookup already dropped other users' rows. Re-assert so a
+  // future query refactor cannot leak suggestion text through this route.
+  if (suggestions.some((suggestion) => suggestion.userId !== userId)) {
     return new ChatbotError("forbidden:api").toResponse();
   }
 
