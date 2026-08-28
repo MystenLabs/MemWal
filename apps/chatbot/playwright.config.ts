@@ -34,7 +34,8 @@ export default defineConfig({
     screenshot: "only-on-failure",
     actionTimeout: 10_000,
     // 30s to tolerate cold Next.js/Turbopack compile on 2-vCPU CI runners;
-    // globalSetup also warms `/` to make first-nav fast on the happy path.
+    // globalSetup also warms every route the suite reaches, so a first-nav
+    // should already be hitting a compiled route.
     navigationTimeout: 30_000,
   },
 
