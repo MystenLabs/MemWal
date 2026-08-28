@@ -18,6 +18,8 @@ import type {
     RememberJobStatus,
     RememberResult,
     RestoreResult,
+    NamespacesResult,
+    ListNamespacesOptions,
 } from "./types.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
 
@@ -44,6 +46,14 @@ interface MockMemory {
     namespace: string;
     sequence: number;
 }
+
+/**
+ * Fixed base for synthesised namespace timestamps. `MockMemory` carries no
+ * clock, so `updated_at` is derived from insertion order instead — keeping
+ * mock runs reproducible while preserving the real relayer's property that
+ * later writes sort later.
+ */
+const MOCK_NAMESPACE_EPOCH_MS = Date.UTC(2026, 0, 1);
 
 const MOCK_VERSION: RelayerVersionMetadata = {
     relayerVersion: "memwal-mock",
@@ -371,6 +381,49 @@ export class MemWalMock {
             namespace,
             owner: this.owner,
             truncated: false,
+        };
+    }
+
+    async listNamespaces(options: ListNamespacesOptions = {}): Promise<NamespacesResult> {
+        const grouped = new Map<string, { count: number; bytes: number; sequence: number }>();
+        for (const memory of this.memories) {
+            const entry = grouped.get(memory.namespace) ?? { count: 0, bytes: 0, sequence: 0 };
+            entry.count += 1;
+            entry.bytes += new TextEncoder().encode(memory.text).length;
+            entry.sequence = Math.max(entry.sequence, memory.sequence);
+            grouped.set(memory.namespace, entry);
+        }
+
+        const all = [...grouped.entries()]
+            .map(([name, entry]) => ({
+                id: `mock-ns-${name}`,
+                name,
+                memory_count: entry.count,
+                storage_used: entry.bytes,
+                updated_at: new Date(
+                    MOCK_NAMESPACE_EPOCH_MS + entry.sequence * 1000
+                ).toISOString(),
+            }))
+            .sort((a, b) =>
+                a.updated_at === b.updated_at
+                    ? a.name.localeCompare(b.name)
+                    : a.updated_at.localeCompare(b.updated_at)
+            );
+
+        // Mirrors the relayer's keyset walk: `cursor` is an exclusive
+        // `updated_after` watermark, and `has_more` — not page length — says
+        // whether to keep going.
+        const remaining = options.cursor
+            ? all.filter((ns) => ns.updated_at > options.cursor!)
+            : all;
+        const page = remaining.slice(0, options.limit ?? remaining.length);
+
+        return {
+            namespaces: page,
+            next_cursor: page.length ? page[page.length - 1].updated_at : null,
+            has_more: remaining.length > page.length,
+            // Matches the live relayer's current wire-format version.
+            snapshot_version: 2,
         };
     }
 

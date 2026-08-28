@@ -76,4 +76,7 @@ export type {
     RelayerBuildMetadata,
     RelayerDeprecationNotice,
     RelayerVersionMetadata,
+    NamespaceSummary,
+    NamespacesResult,
+    ListNamespacesOptions,
 } from "./types.js";

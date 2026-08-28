@@ -405,6 +405,47 @@ export interface RecallManualHit {
 }
 
 /** Result from restore() */
+/** One namespace in a `listNamespaces()` page. Mirrors the relayer wire shape. */
+export interface NamespaceSummary {
+    id: string;
+    name: string;
+    memory_count: number;
+    storage_used: number;
+    /**
+     * `MAX(updated_at)` across the namespace's memories — the same value the
+     * keyset cursor is built from, surfaced so callers can tell *what*
+     * changed rather than only that their watermark moved.
+     */
+    updated_at: string;
+}
+
+/** Result from listNamespaces() */
+export interface NamespacesResult {
+    namespaces: NamespaceSummary[];
+    /**
+     * Watermark to hand back as `cursor` on the next call. Populated on every
+     * page, including the last, so a caller that has finished syncing still
+     * has a checkpoint to poll from later.
+     */
+    next_cursor: string | null;
+    /**
+     * Authoritative "keep paginating" signal. Do NOT infer this from page
+     * length: the server silently clamps `limit`, so a caller asking for more
+     * than the cap gets exactly the cap back and would wrongly conclude it
+     * was done.
+     */
+    has_more: boolean;
+    snapshot_version: number;
+}
+
+/** Options for listNamespaces() */
+export interface ListNamespacesOptions {
+    /** Previous page's `next_cursor`, to continue a walk or poll incrementally. */
+    cursor?: string;
+    /** Page size. Server defaults to 100 and clamps to 500. */
+    limit?: number;
+}
+
 export interface RestoreResult {
     restored: number;
     skipped: number;
