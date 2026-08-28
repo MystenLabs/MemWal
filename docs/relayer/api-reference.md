@@ -158,9 +158,9 @@ Every route below requires the signed headers described in [Authentication](#aut
 
 Return the account identity the caller's delegate key resolves to. Takes no request body.
 
-Authentication already resolves the account before any handler runs, so this route just hands back what the middleware computed. Returning `account_id` is safe here precisely because the route is authenticated — the caller has proven it holds a delegate key registered against this account, so it only ever learns about itself. The public `GET /api/accounts/:owner/exists` route deliberately withholds it.
+Authentication already resolves the account before any handler runs, so this route just hands back what the middleware computed. Returning `account_id` is safe here precisely because the route is authenticated. The caller has proven it holds a delegate key registered against this account, so it only ever learns about itself. The public `GET /api/accounts/:owner/exists` route deliberately withholds it.
 
-The motivating use is rebuilding local credentials: a client that holds a working delegate key but has lost the surrounding metadata — an interrupted sign-in, a wiped config file — needs `account_id`, `owner`, and `package_id` to write a usable credentials file, and the key alone proves entitlement to all three.
+The motivating use is rebuilding local credentials: a client that holds a working delegate key but has lost the surrounding metadata (an interrupted sign-in, a wiped config file) needs `account_id`, `owner`, and `package_id` to write a usable credentials file, and the key alone proves entitlement to all three.
 
 **Response:**
 
