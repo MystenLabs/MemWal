@@ -412,13 +412,13 @@ export interface RestoreResult {
     namespace: string;
     owner: string;
     /**
-     * True when this restore is known-incomplete: either more on-chain
-     * blobs were missing locally than `limit` allowed this call to
-     * restore, or the sidecar's raw on-chain candidate fetch hit its own
-     * cap before this namespace's blobs were even filtered out of that
-     * set (WALM-319) — this can be `true` even when `total === 0`, since
-     * a cap hit elsewhere can starve this namespace's fetch entirely.
-     * Raising `limit` only helps with the first case.
+     * True when this restore is known-incomplete: more on-chain blobs were
+     * missing locally than `limit` allowed this call to restore, or the
+     * sidecar's owner-wide candidate fetch hit its cap *and* raising
+     * `limit` can still expand that fetch (`limit < 20`). Once the cap is
+     * saturated, an under-filled namespace (including `total === 0`) is
+     * `false` so clients do not retry a restore whose limit cannot grow
+     * (WALM-431 / GH #762).
      *
      * Relayers older than WALM-319 don't send this field at all; the SDK
      * defaults it to `false` in that case rather than requiring it.

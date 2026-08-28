@@ -1780,16 +1780,14 @@ pub struct RestoreResponse {
     pub total: usize,
     pub namespace: String,
     pub owner: String,
-    /// True when this restore is known-incomplete: either more on-chain
-    /// blobs were missing locally than `limit` allowed this call to
-    /// restore, or the sidecar's raw on-chain candidate fetch (bounded
-    /// per owner, shared across all of the owner's namespaces, hard-capped
-    /// independent of `limit`) hit its own cap before this namespace's
-    /// blobs were even filtered out of that set — the second
-    /// case can be `true` even when `total == 0` for this namespace,
-    /// since a cap hit elsewhere can starve this namespace's fetch
-    /// entirely. Raising `limit` only helps with the first case; past the
-    /// sidecar's cap, only a cursor/pagination-based restore would.
+    /// True when this restore is known-incomplete: more on-chain blobs were
+    /// missing locally than `limit` allowed this call to restore, or the
+    /// sidecar's owner-wide candidate fetch hit its cap *and* raising
+    /// `limit` can still expand that fetch (`limit < 20`, cap = min(limit*5,
+    /// 100)) — including `total == 0` in that window, because other
+    /// namespaces can starve this one. Once the sidecar cap is saturated
+    /// (`limit >= 20`), an under-filled namespace is `false` so MCP agents
+    /// do not retry a restore whose limit cannot grow (WALM-431 / GH #762).
     pub truncated: bool,
 }
 

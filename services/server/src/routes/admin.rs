@@ -500,23 +500,38 @@ fn paginate_missing_blobs(all_missing: Vec<String>, limit: usize) -> (Vec<String
 /// Decide restore's public `truncated` flag (WALM-431 / GH #762).
 ///
 /// `limit_truncated` is the local page slice: more missing blobs than `limit`.
-/// `source_capped` is the sidecar's owner-wide candidate cap (saturates at 100,
-/// shared across namespaces). OR-ing `source_capped` in unconditionally made
-/// `truncated=true` for every restore on a moderately-used account — including
-/// empty namespaces and namespaces far below `limit`. The MCP tool then tells
-/// agents to increase `limit` and retry, which cannot help once the clamp is
-/// already at 100.
+/// Sidecar `/walrus/query-blobs` candidate cap is `min(limit * 5, 100)`
+/// (walrus-query.ts). Raising restore `limit` still expands that fetch while
+/// `limit < 20`; at 20 the cap saturates at 100.
+const SIDECAR_CANDIDATE_CAP_SATURATES_AT_LIMIT: usize = 20;
+
+/// Decide restore's public `truncated` flag (WALM-431 / GH #762).
 ///
-/// `truncated` is true only when this call actually omitted memories from the
-/// requested namespace (`limit_truncated`), or when we filled the caller's page
-/// *and* the sidecar may still have more (`source_capped && namespace_total >= limit`).
+/// `limit_truncated` is the local page slice. `source_capped` is the sidecar's
+/// owner-wide candidate cap (shared across namespaces). OR-ing `source_capped`
+/// in unconditionally made every restore on a moderately-used account look
+/// partial — including empty namespaces at `limit=100`, where MCP agents loop
+/// because the restore clamp is already 100.
+///
+/// Keep the WALM-319 signal while raising `limit` still grows discovery
+/// (`limit < 20`). Once the sidecar cap is saturated, only claim truncation
+/// if this namespace filled the requested page (or the local slice hit).
 fn restore_is_truncated(
     limit_truncated: bool,
     source_capped: bool,
     namespace_total: usize,
     limit: usize,
 ) -> bool {
-    limit_truncated || (source_capped && namespace_total >= limit)
+    if limit_truncated {
+        return true;
+    }
+    if !source_capped {
+        return false;
+    }
+    if limit < SIDECAR_CANDIDATE_CAP_SATURATES_AT_LIMIT {
+        return true;
+    }
+    namespace_total >= limit
 }
 
 /// Clamp `/api/restore`'s `body.limit` to a sane range (GH #501 / WALM-299).
@@ -627,8 +642,8 @@ async fn restore_unbounded(
 
     if total == 0 {
         // Empty for *this* namespace. `source_capped` can still be true when
-        // other namespaces ate the owner-wide candidate cap, but advertising
-        // truncation here makes MCP agents retry a finished restore (GH #762).
+        // other namespaces ate the owner-wide candidate cap; restore_is_truncated
+        // keeps that signal only while raising `limit` still expands discovery.
         return Ok(Json(RestoreResponse {
             restored: 0,
             skipped: 0,
@@ -1069,23 +1084,34 @@ mod tests {
         assert!(!truncated);
     }
 
-    // WALM-431 / GH #762: truncated must not stick true just because the
-    // owner-wide sidecar cap fired. Empty / under-limit namespaces are done.
+    // WALM-431 / GH #762 vs WALM-319: sidecar cap still grows with limit
+    // below 20, so an under-filled namespace must stay truncated. At the
+    // MCP repro (limit=100) the cap is saturated — empty/under-limit must not
+    // loop.
     #[test]
-    fn restore_truncated_false_when_namespace_is_empty_even_if_source_capped() {
+    fn restore_truncated_false_when_cap_saturated_and_namespace_under_limit() {
         assert!(!super::restore_is_truncated(false, true, 0, 100));
         assert!(!super::restore_is_truncated(false, true, 2, 100));
+        assert!(!super::restore_is_truncated(false, true, 0, 20));
+    }
+
+    #[test]
+    fn restore_truncated_true_when_raising_limit_still_expands_sidecar_cap() {
+        assert!(super::restore_is_truncated(false, true, 0, 10));
+        assert!(super::restore_is_truncated(false, true, 2, 10));
+        assert!(super::restore_is_truncated(false, true, 19, 19));
     }
 
     #[test]
     fn restore_truncated_true_when_the_page_is_full_and_source_capped() {
         assert!(super::restore_is_truncated(false, true, 100, 100));
+        assert!(super::restore_is_truncated(false, true, 20, 20));
         assert!(super::restore_is_truncated(true, false, 2, 100));
         assert!(super::restore_is_truncated(true, true, 0, 100));
     }
 
     #[test]
-    fn restore_truncated_false_when_neither_slice_nor_full_capped_page() {
+    fn restore_truncated_false_when_source_not_capped() {
         assert!(!super::restore_is_truncated(false, false, 0, 10));
         assert!(!super::restore_is_truncated(false, false, 50, 50));
     }
