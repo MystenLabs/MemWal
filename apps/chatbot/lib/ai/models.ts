@@ -136,3 +136,4 @@ export const modelsByProvider = chatModels.reduce(
   },
   {} as Record<string, ChatModel[]>
 );
+
