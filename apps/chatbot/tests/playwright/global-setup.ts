@@ -58,15 +58,13 @@ function storeCookies(response: Response): void {
  * nothing. Redirects are followed as GET, matching how the proxy sends a
  * would-be POST through the guest handshake first.
  */
-async function fetchFollowing(url: string): Promise<Response> {
+async function fetchFollowing(
+  url: string,
+  init: { method?: string; body?: string } = {}
+): Promise<Response> {
   let target = url;
-  let method = "GET";
-  let body: string | undefined;
-
-  if (url.includes("/api/chat")) {
-    method = "POST";
-    body = "{}";
-  }
+  let method = init.method ?? "GET";
+  let body = init.body;
 
   for (let hop = 0; hop < 5; hop++) {
     const response: Response = await fetch(target, {
@@ -111,19 +109,19 @@ async function fetchFollowing(url: string): Promise<Response> {
 async function warmRoutes(): Promise<void> {
   const port = process.env.PORT ?? "3001";
   const base = `http://localhost:${port}`;
-  const paths = [
-    "/",
-    "/login",
-    "/register",
-    "/api/history?limit=1",
-    "/api/chat",
-    `/chat/${randomUUID()}`,
+  const routes: [string, { method?: string; body?: string }?][] = [
+    ["/"],
+    ["/login"],
+    ["/register"],
+    ["/api/history?limit=1"],
+    ["/api/chat", { method: "POST", body: "{}" }],
+    [`/chat/${randomUUID()}`],
   ];
 
-  for (const path of paths) {
+  for (const [path, init] of routes) {
     const started = Date.now();
     try {
-      const response = await fetchFollowing(`${base}${path}`);
+      const response = await fetchFollowing(`${base}${path}`, init);
       console.log(
         `[playwright] Warmed ${path} in ${Date.now() - started}ms (status ${response.status})`
       );
