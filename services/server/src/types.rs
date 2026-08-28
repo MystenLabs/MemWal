@@ -1333,6 +1333,53 @@ pub struct RecallRequest {
     /// [`ScoringWeights`].
     #[serde(default)]
     pub scoring_weights: Option<ScoringWeights>,
+    /// How to order results. Omitted → [`RecallSort::Relevance`], today's
+    /// behaviour. See [`RecallSort`].
+    #[serde(default)]
+    pub sort: RecallSort,
+}
+
+/// Result ordering mode for `/api/recall`.
+///
+/// Distinct from [`ScoringWeights`], which only re-ranks the rows the vector
+/// search already returned. `sort` decides how many rows are fetched in the
+/// first place — which is the half that matters, because the candidate set is
+/// the cosine top-N and no amount of re-weighting can surface a row pgvector
+/// never returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecallSort {
+    /// Pure semantic relevance — the cosine order, unchanged. Default, so an
+    /// omitted field leaves every existing caller byte-identical.
+    #[default]
+    Relevance,
+    /// Newest-among-matches: over-fetch semantic candidates, order them by
+    /// write-time descending, then truncate to `limit`.
+    ///
+    /// Semantic similarity is the candidate *generator* and write-time decides
+    /// the order, so a newest record worded less literally than an older one
+    /// still wins. A recency *weight* cannot guarantee that — it has to
+    /// out-score the semantic gap before it reorders anything, and at a
+    /// 30-day half-life two records days apart barely differ.
+    Recent,
+}
+
+impl RecallSort {
+    /// How many rows to pull from `search_similar` to serve `limit` results.
+    ///
+    /// `Recent` needs a wider net than it returns: the newest row is often a
+    /// mediocre semantic match, so it sits deep in the cosine ordering. 5x
+    /// covers the reported failures without turning recall into a table scan,
+    /// and the 50-row ceiling bounds the cost.
+    ///
+    /// Never returns less than `limit`. A naive `min(limit * 5, 50)`
+    /// under-fetches once `limit` passes 50 and hands the caller a short page.
+    pub fn candidate_limit(self, limit: usize) -> usize {
+        match self {
+            RecallSort::Relevance => limit,
+            RecallSort::Recent => limit.saturating_mul(5).min(50).max(limit),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1363,6 +1410,26 @@ pub struct RecallResult {
     /// shape byte-identical to today for default-weights requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
+    /// Write-time of the memory, from `vector_entries.created_at` — threaded
+    /// `SearchHit` → `HydratedMemory` → here by the recall handler's
+    /// `zip_search_hit_fields_onto_hydrated`.
+    ///
+    /// Present so a caller can order and verify the returned set by
+    /// write-time rather than re-ranking on a date it has to parse back out
+    /// of the memory text (WALM-383). Note this is the *write* time, not any
+    /// event time the text itself may describe.
+    ///
+    /// This alone does not make "newest wins" correct: the candidate set is
+    /// the cosine top-`limit` from `search_similar`, so the newest row can be
+    /// missing from `results` entirely and no client-side sort recovers it.
+    /// The server-side recency mode that over-fetches is still open.
+    ///
+    /// `None` only when the hydrated record had no matching `SearchHit`,
+    /// which shouldn't happen on the recall path. `skip_serializing_if`
+    /// then omits the field rather than sending a fabricated date — for a
+    /// newest-wins caller a wrong timestamp is worse than a missing one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

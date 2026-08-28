@@ -61,6 +61,42 @@ export function collapseDuplicates<T extends { text: string }>(
 }
 
 /**
+ * Render one recall hit as the line the model sees.
+ *
+ * `created_at` is the memory's write-time, shown so a model implementing
+ * "current state = the newest checkpoint" can order by it directly instead of
+ * inferring recency from rank — results are ranked by semantic distance, which
+ * carries no recency guarantee (WALM-383).
+ *
+ * The date is emitted as a bare ISO `YYYY-MM-DD` so string comparison and
+ * chronological order agree. Time-of-day is dropped: it costs tokens on every
+ * line and same-day checkpoint collisions are rare enough that the model can
+ * fall back to rank when two dates tie.
+ *
+ * An absent or unparseable `created_at` renders no date at all. Both "unknown"
+ * and a substituted current date would be worse — the first is noise on every
+ * line for older relayers, the second is a wrong answer a newest-wins caller
+ * would act on.
+ */
+export function formatRecallLine(
+    memory: { text: string; distance: number; created_at?: unknown },
+    index: number,
+): string {
+    const score = (1 - memory.distance).toFixed(3);
+    const written = isoDateOrNull(memory.created_at);
+    const stamp = written ? ` [written=${written}]` : "";
+    return `${index + 1}. [score=${score}]${stamp} ${memory.text}`;
+}
+
+/** `YYYY-MM-DD` for a parseable timestamp, else null. */
+function isoDateOrNull(value: unknown): string | null {
+    if (typeof value !== "string") return null;
+    const ms = Date.parse(value);
+    if (Number.isNaN(ms)) return null;
+    return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
  * memwal_recall — semantic search over the user's Walrus Memory memories.
  *
  * Returns top-K most relevant memories (cosine distance over embeddings),
@@ -79,7 +115,7 @@ export function registerRecallTool(
         {
             ...TOOL_METADATA.memwal_recall,
             description:
-                "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by relevance.",
+                "Search the user's Walrus Memory for relevant facts before responding. Call this PROACTIVELY at the start of a task, or whenever the user references past work, prior decisions, their preferences, or anything you may have stored earlier — don't wait to be asked. A single focused query is usually enough — recall is a real retrieval over encrypted storage, so do NOT fire multiple redundant searches for the same question. Returns matching memories ranked by semantic relevance, NOT by date: the most recent memory can fall outside `limit` when an older one happens to match your wording more literally, so do not treat the results as a complete or current view of a namespace. Each result carries `written=YYYY-MM-DD`, the date the memory was saved (not any date its text mentions) — check it rather than assuming the top result is the latest.",
             inputSchema: RECALL_INPUT,
         },
         wrapTool<{ query: string; limit: number; namespace?: string }>(session, "memwal_recall", async ({ query, limit, namespace }) => {
@@ -101,10 +137,7 @@ export function registerRecallTool(
                 };
             }
             const { unique, collapsed } = collapseDuplicates(result.results);
-            const lines = unique.map(
-                (m, i) =>
-                    `${i + 1}. [score=${(1 - m.distance).toFixed(3)}] ${m.text}`
-            );
+            const lines = unique.map((m, i) => formatRecallLine(m, i));
             // Say what was folded away rather than quietly returning fewer rows
             // than the caller asked for. It also surfaces that the same fact was
             // stored repeatedly, which is usually worth knowing.
