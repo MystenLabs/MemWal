@@ -16,7 +16,7 @@ import { createResumableStreamContext } from "resumable-stream";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
 import { memoryNamespaceForUser } from "@/lib/ai/memory-namespace";
-import { allowedModelIds } from "@/lib/ai/models";
+import { allowedModelIds, isReasoningModelId } from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel, getMemWalModel } from "@/lib/ai/providers";
 import { createDocument } from "@/lib/ai/tools/create-document";
@@ -177,10 +177,7 @@ export async function POST(request: Request) {
       });
     }
 
-    const isReasoningModel =
-      selectedChatModel.endsWith("-thinking") ||
-      (selectedChatModel.includes("reasoning") &&
-        !selectedChatModel.includes("non-reasoning"));
+    const isReasoningModel = isReasoningModelId(selectedChatModel);
 
     const modelMessages = await convertToModelMessages(uiMessages);
 

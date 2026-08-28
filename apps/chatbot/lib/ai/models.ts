@@ -24,21 +24,21 @@ export const chatModels: ChatModel[] = [
   },
   // Anthropic
   {
-    id: "anthropic/claude-3.5-haiku",
-    name: "Claude 3.5 Haiku",
+    id: "anthropic/claude-haiku-4.5",
+    name: "Claude Haiku 4.5",
     provider: "anthropic",
     description: "Fast and affordable, great for everyday tasks",
   },
   {
-    id: "anthropic/claude-3.5-sonnet",
-    name: "Claude 3.5 Sonnet",
+    id: "anthropic/claude-sonnet-4.5",
+    name: "Claude Sonnet 4.5",
     provider: "anthropic",
     description: "Best balance of speed and intelligence",
   },
   // Google
   {
-    id: "google/gemini-2.0-flash-001",
-    name: "Gemini 2.0 Flash",
+    id: "google/gemini-2.5-flash",
+    name: "Gemini 2.5 Flash",
     provider: "google",
     description: "Ultra fast and affordable",
   },
@@ -49,14 +49,42 @@ export const chatModels: ChatModel[] = [
     provider: "deepseek",
     description: "Strong open-source model",
   },
-  // Reasoning models
+  // Reasoning models. The -thinking suffix is ours, not OpenRouter's:
+  // getLanguageModel strips it and wraps the base id (see providers.ts).
   {
-    id: "anthropic/claude-3.5-sonnet-thinking",
-    name: "Claude 3.5 Sonnet (Thinking)",
+    id: "anthropic/claude-sonnet-4.5-thinking",
+    name: "Claude Sonnet 4.5 (Thinking)",
     provider: "reasoning",
     description: "Extended thinking for complex problems",
   },
 ];
+
+/**
+ * Models for the two background calls the picker never covers: chat titles and
+ * artifact content.
+ *
+ * Declared beside the curated list rather than hardcoded at the call site. The
+ * previous inline ids ("google/gemini-2.0-flash-001" for titles,
+ * "anthropic/claude-3.5-haiku" for artifacts) were retired upstream and 404'd
+ * on every request, and nothing tied them back to the models the app maintains.
+ * Keep both pointing at an id present in `chatModels`.
+ */
+export const TITLE_MODEL = "google/gemini-2.5-flash";
+export const ARTIFACT_MODEL = "anthropic/claude-haiku-4.5";
+
+const THINKING_SUFFIX_REGEX = /-thinking$/;
+
+// "-thinking" is our own marker, not part of any OpenRouter id.
+export function baseOpenRouterId(modelId: string): string {
+  return modelId.replace(THINKING_SUFFIX_REGEX, "");
+}
+
+export function isReasoningModelId(modelId: string): boolean {
+  return (
+    THINKING_SUFFIX_REGEX.test(modelId) ||
+    (modelId.includes("reasoning") && !modelId.includes("non-reasoning"))
+  );
+}
 
 // Group models by provider for UI
 export const allowedModelIds = new Set(chatModels.map((m) => m.id));
@@ -71,4 +99,3 @@ export const modelsByProvider = chatModels.reduce(
   },
   {} as Record<string, ChatModel[]>
 );
-

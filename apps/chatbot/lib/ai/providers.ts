@@ -6,8 +6,12 @@ import {
 } from "ai";
 import { withMemWal } from "@mysten-incubation/memwal/ai";
 import { isTestEnvironment } from "../constants";
-
-const THINKING_SUFFIX_REGEX = /-thinking$/;
+import {
+  ARTIFACT_MODEL,
+  baseOpenRouterId,
+  isReasoningModelId,
+  TITLE_MODEL,
+} from "./models";
 
 // OpenRouter provider (OpenAI-compatible)
 const openrouter = createOpenAI({
@@ -39,15 +43,9 @@ export function getLanguageModel(modelId: string) {
     return myProvider.languageModel(modelId);
   }
 
-  const isReasoningModel =
-    modelId.endsWith("-thinking") ||
-    (modelId.includes("reasoning") && !modelId.includes("non-reasoning"));
-
-  if (isReasoningModel) {
-    const gatewayModelId = modelId.replace(THINKING_SUFFIX_REGEX, "");
-
+  if (isReasoningModelId(modelId)) {
     return wrapLanguageModel({
-      model: openrouter.chat(gatewayModelId),
+      model: openrouter.chat(baseOpenRouterId(modelId)),
       middleware: extractReasoningMiddleware({ tagName: "thinking" }),
     });
   }
@@ -59,14 +57,14 @@ export function getTitleModel() {
   if (isTestEnvironment && myProvider) {
     return myProvider.languageModel("title-model");
   }
-  return openrouter.chat("google/gemini-2.0-flash-001");
+  return openrouter.chat(TITLE_MODEL);
 }
 
 export function getArtifactModel() {
   if (isTestEnvironment && myProvider) {
     return myProvider.languageModel("artifact-model");
   }
-  return openrouter.chat("anthropic/claude-3.5-haiku");
+  return openrouter.chat(ARTIFACT_MODEL);
 }
 
 /**
