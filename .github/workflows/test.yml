@@ -43,6 +43,35 @@ jobs:
       - name: Run check
         run: node ${{ matrix.script }}
 
+  docs-conventions:
+    name: Docs / Conventions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        # Full history so the script can diff the branch against its base.
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Fetch base branch
+        run: git fetch --quiet origin "${{ github.base_ref || 'dev' }}"
+
+      # Checks the classes of review comment the prose style pass misses:
+      # concepts that have a canonical page but are never linked, procedure
+      # and troubleshooting formatting that disagrees with sibling pages, and
+      # click-through UI changes that nobody states they ran.
+      - name: Check docs conventions
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'dev' }}
+        run: node scripts/check-docs-conventions.mjs
+
   mcp-tests:
     name: MCP / Integration (login handoff)
     runs-on: ubuntu-latest
