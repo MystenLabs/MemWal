@@ -267,6 +267,45 @@ Rebuild missing indexed entries for one namespace from Walrus. Incremental — o
 }
 ```
 
+### `listNamespaces(options?): Promise<NamespacesResult>`
+
+List the namespaces this account holds memories in. Metadata only — no blob fetch and no decryption.
+
+Recall is similarity-ranked and needs a namespace to search, so an agent connecting to an unfamiliar account would otherwise have to guess names or fall back to `"default"`.
+
+- `options.cursor` — the previous page's `next_cursor`, to continue a walk or poll incrementally
+- `options.limit` — page size; the relayer defaults to `100` and clamps to `500`
+
+**Returns:**
+
+```ts
+{
+  namespaces: Array<{
+    id: string;
+    name: string;
+    memory_count: number;
+    storage_used: number;   // bytes
+    updated_at: string;     // MAX(updated_at) across the namespace
+  }>;
+  next_cursor: string | null;
+  has_more: boolean;
+  snapshot_version: number;
+}
+```
+
+Paginate on `has_more`, not on page length — the relayer clamps `limit`, so a caller asking for more than the cap gets exactly the cap back and would wrongly conclude it was done.
+
+```ts
+let cursor: string | undefined;
+let more = true;
+while (more) {
+  const page = await memwal.listNamespaces({ cursor });
+  for (const ns of page.namespaces) console.log(ns.name, ns.memory_count);
+  cursor = page.next_cursor ?? undefined;
+  more = page.has_more;
+}
+```
+
 ### `health(): Promise<HealthResult>`
 
 Check relayer health. Does not require authentication — a successful response confirms the relayer is reachable, not that your `key`/`accountId` are valid. A signed call (e.g. `remember()`, `recall()`) can still fail with `401` immediately after a passing `health()`.

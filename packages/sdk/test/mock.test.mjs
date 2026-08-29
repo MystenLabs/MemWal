@@ -180,3 +180,45 @@ test("MemWalMock provides deterministic embeddings and seed data", async () => {
     assert.equal((await first.health()).status, "ok");
     assert.equal((await first.compatibility()).featureFlags.offlineMock, true);
 });
+
+test("MemWalMock.listNamespaces aggregates seeded memories by namespace", async () => {
+    const mock = MemWalMock.create({
+        initialMemories: [
+            { text: "one", namespace: "work" },
+            { text: "two", namespace: "work" },
+            { text: "three", namespace: "home" },
+        ],
+    });
+
+    const page = await mock.listNamespaces();
+    const byName = Object.fromEntries(page.namespaces.map((n) => [n.name, n]));
+
+    assert.deepEqual(Object.keys(byName).sort(), ["home", "work"]);
+    assert.equal(byName.work.memory_count, 2);
+    assert.equal(byName.home.memory_count, 1);
+    assert.equal(page.has_more, false);
+});
+
+test("MemWalMock.listNamespaces reports has_more when limit truncates the page", async () => {
+    const mock = MemWalMock.create({
+        initialMemories: [
+            { text: "a", namespace: "alpha" },
+            { text: "b", namespace: "bravo" },
+            { text: "c", namespace: "charlie" },
+        ],
+    });
+
+    const page = await mock.listNamespaces({ limit: 2 });
+
+    assert.equal(page.namespaces.length, 2);
+    assert.equal(page.has_more, true, "has_more is the pagination signal, not page length");
+    assert.ok(page.next_cursor, "a truncated page must hand back a cursor");
+});
+
+test("MemWalMock.listNamespaces reports the relayer's current snapshot_version", async () => {
+    // Verified against relayer.dev.memwal.ai on 2026-08-28: the live read API
+    // returns snapshot_version 2. A double that disagrees with the server on a
+    // wire-format version is a trap for anyone testing version-gated logic.
+    const page = await MemWalMock.create().listNamespaces();
+    assert.equal(page.snapshot_version, 2);
+});
