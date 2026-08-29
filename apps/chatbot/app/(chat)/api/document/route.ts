@@ -113,6 +113,12 @@ export async function DELETE(request: Request) {
 
   const [document] = documents;
 
+  // Same guard the GET handler above runs. Without it an id that matches no row
+  // reads `.userId` off undefined and the request 500s with an empty body.
+  if (!document) {
+    return new ChatbotError("not_found:document").toResponse();
+  }
+
   if (document.userId !== session.user.id) {
     return new ChatbotError("forbidden:document").toResponse();
   }
