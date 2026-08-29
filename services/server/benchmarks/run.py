@@ -156,6 +156,17 @@ def stage_ingest(
     start = time.time()
 
     concurrency = config.get("benchmarks", {}).get("concurrency", 10)
+    # when true, every analyze call routes through the two-pass
+    # critique path on the server. Doubles per-analyze LLM cost; we only
+    # flip it for the critique-stack run, not the baseline.
+    extract_with_critique = config.get("benchmarks", {}).get(
+        "extract_with_critique", False
+    )
+    if extract_with_critique:
+        print(
+            "  Two-pass critique extractor ENABLED — expect ~2x "
+            "ingestion wall time vs the single-pass baseline."
+        )
 
     # Build tasks grouped by conversation. Each conversation's chunks are
     # processed SERIALLY (to mirror real-time message ordering and avoid
@@ -222,7 +233,14 @@ def stage_ingest(
                 # pass occurred_at (RFC 3339 UTC string or None)
                 # to the server. When present, the server uses it as the
                 # temporal anchor for the extractor prompt.
-                result = client.analyze(text, namespace, occurred_at=occurred_at)
+                # extract_with_critique flips the server into the
+                # two-pass critique path; default False = single-pass.
+                result = client.analyze(
+                    text,
+                    namespace,
+                    occurred_at=occurred_at,
+                    extract_with_critique=extract_with_critique,
+                )
                 memory_ids = [fact.get("id", "") for fact in result.facts if fact.get("id")]
                 if memory_ids:
                     key = session_map_key(conv_id, session_id)
@@ -438,6 +456,12 @@ def stage_eval(
             "mode": mode,
             "judge_model": config.get("judge", {}).get("model", ""),
             "answer_model": config.get("answer", {}).get("model", ""),
+            # pin which write-path the ingest ran through so
+            # later deltas are attributable. Recorded even when False
+            # so baseline runs are explicit about it.
+            "extract_with_critique": config.get("benchmarks", {}).get(
+                "extract_with_critique", False
+            ),
         },
         metrics_overall=_dict_to_category_metrics(overall),
         metrics_by_category={cat: _dict_to_category_metrics(m) for cat, m in by_category.items()},
@@ -574,6 +598,12 @@ def build_parser() -> argparse.ArgumentParser:
     ing = sub.add_parser("ingest", help="Ingest benchmark conversations into Walrus Memory")
     ing.add_argument("benchmark", choices=list(BENCHMARKS.keys()))
     ing.add_argument("--run-id", default=None)
+    ing.add_argument(
+        "--extract-with-critique",
+        action="store_true",
+        help="Route every ingest call through the two-pass critique extractor. "
+        "Doubles per-analyze LLM cost — only flip when measuring the critique stack.",
+    )
 
     # eval
     ev = sub.add_parser("eval", help="Evaluate retrieval with a single preset")
@@ -596,6 +626,12 @@ def build_parser() -> argparse.ArgumentParser:
     full.add_argument("--mode", choices=["retrieval", "e2e"], default="e2e")
     full.add_argument("--run-id", default=None, help="Reuse an existing ingestion")
     full.add_argument("--skip-ingest", action="store_true", help="Skip ingestion stage (assumes run-id already ingested)")
+    full.add_argument(
+        "--extract-with-critique",
+        action="store_true",
+        help="Route every ingest call through the two-pass critique extractor. "
+        "Doubles per-analyze LLM cost — only flip when measuring the critique stack.",
+    )
 
     # report
     rpt = sub.add_parser("report", help="View results")
@@ -640,6 +676,14 @@ def main():
     # Commands that need config + client
     config = load_config()
     server_cfg = config["server"]
+
+    # Surface CLI flags into the config dict so stage_* helpers (which
+    # don't take args directly) can read them. Only command-level flags
+    # that influence ingestion / eval go here — top-level flags like
+    # --verbose are handled separately.
+    benchmarks_cfg = config.setdefault("benchmarks", {})
+    if getattr(args, "extract_with_critique", False):
+        benchmarks_cfg["extract_with_critique"] = True
 
     client = MemWalClient(
         server_url=server_cfg["url"],
@@ -690,7 +734,11 @@ def main():
                 "metadata. Upgrade the server to a build that exposes these fields."
             )
             sys.exit(1)
-        print(f"  prompt versions: extract={prompt_versions['extract']} ask={prompt_versions['ask']}")
+        critique_ver = prompt_versions.get("critique", "n/a")
+        print(
+            f"  prompt versions: extract={prompt_versions['extract']} "
+            f"critique={critique_ver} ask={prompt_versions['ask']}"
+        )
         # Stash on `config` so stage_eval picks it up without a signature change.
         config["_server_prompt_versions"] = prompt_versions
     except SystemExit:
