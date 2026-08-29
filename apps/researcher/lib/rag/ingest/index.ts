@@ -4,6 +4,7 @@ import { chunkDocument, estimateTokens } from "./chunking";
 import { batchEmbed } from "./embeddings";
 import { extractFromUrl, extractFromPdf } from "./extract";
 import { generateSourceMetadata } from "./metadata";
+import { fetchPublicUrl } from "./safe-fetch";
 import { createSource, createSourceChunks } from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
 import type { SourceInput } from "@/lib/ai/source-processing";
@@ -39,8 +40,9 @@ export async function processSource({
     rawText = await extractFromPdf(source.file);
   } else {
     type = "pdf";
-    // Download the PDF from the uploaded file URL
-    const response = await fetch(source.fileUrl);
+    // Download the PDF from the uploaded file URL. The URL arrives from the
+    // request body, so the destination is checked before anything is sent.
+    const response = await fetchPublicUrl(source.fileUrl);
     if (!response.ok) {
       throw new ChatbotError(
         "bad_request:api",
