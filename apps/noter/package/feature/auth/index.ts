@@ -21,10 +21,7 @@ export {
 } from "./api/form";
 
 // API Input Schemas (if needed by external features)
-export type {
-  ValidateSessionInput,
-  ConnectWalletInput,
-} from "./api/input";
+export type { ConnectWalletInput } from "./api/input";
 
 // Types
 export type {

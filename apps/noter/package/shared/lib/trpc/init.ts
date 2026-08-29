@@ -8,22 +8,42 @@ import { eq } from "drizzle-orm";
 export type Context = {
   db: typeof db;
   request: Request;
+  /**
+   * The session id the caller presented in x-session-id, whether or not it
+   * resolves to a live session. Procedures that act on a session must read it
+   * from here rather than from their input, so holding the credential is what
+   * grants access instead of merely knowing the id.
+   */
+  sessionId: string | null;
   userId: string | null;
 };
 
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function getSessionIdFromRequest(req: Request): string | null {
-  return req.headers.get("x-session-id");
+  const sessionId = req.headers.get("x-session-id")?.trim();
+
+  // Session ids are compared against uuid columns, where a malformed value makes
+  // Postgres raise rather than simply miss. Anything that is not a uuid cannot
+  // name a session, so treat it as no credential at all.
+  if (!sessionId || !UUID_REGEX.test(sessionId)) {
+    return null;
+  }
+
+  return sessionId;
 }
 
 export const createContext = async (
   opts: FetchCreateContextFnOptions
 ): Promise<Context> => {
+  const sessionId = getSessionIdFromRequest(opts.req);
   const noAuth: Context = {
     db,
     request: opts.req,
+    sessionId,
     userId: null,
   };
-  const sessionId = getSessionIdFromRequest(opts.req);
   if (!sessionId) return noAuth;
 
   // Sessions are resolved only from wallet/enoki sessions, which require proof
@@ -37,7 +57,7 @@ export const createContext = async (
     .limit(1);
 
   if (walletSession?.userId && walletSession.expiresAt > new Date()) {
-    return { db, request: opts.req, userId: walletSession.userId };
+    return { db, request: opts.req, sessionId, userId: walletSession.userId };
   }
 
   return noAuth;

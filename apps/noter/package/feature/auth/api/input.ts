@@ -8,24 +8,10 @@
  */
 
 import { z } from "zod";
-import {
-  uuidv7Schema,
-  walletSessionInsertSchema,
-} from "@/shared/db/type";
+import { walletSessionInsertSchema } from "@/shared/db/type";
 
-// ═══════════════════════════════════════════════════════════════
-// Session Management Inputs
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Input for validating existing session
- * Uses common idInputSchema pattern, aliased as sessionId
- */
-export const validateSessionInput = z.object({
-  sessionId: uuidv7Schema, // Same as idInputSchema.shape.id
-});
-
-export type ValidateSessionInput = z.infer<typeof validateSessionInput>;
+// Session id is deliberately absent here: getSession and logout take it from the
+// x-session-id header via the tRPC context, so it can never be supplied as input.
 
 // ═══════════════════════════════════════════════════════════════
 // Wallet Auth Inputs
