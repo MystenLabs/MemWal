@@ -1,4 +1,4 @@
-# Migration completion artifact
+## Migration completion artifact
 
 After a security migration, write a completion artifact that records the target
 package, reviewed manifest digest, imported counts, verification result, and

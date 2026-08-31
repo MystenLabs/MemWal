@@ -1,4 +1,4 @@
-# Security RC review workflow
+## Security RC review workflow
 
 Every release-candidate batch gets Security review capacity (human, AI, or
 combined) before it ships. Classify the change set, keep one candidate in one
@@ -11,7 +11,7 @@ mix contract, demo, and docs work in an RC.
 
 ## Classification
 
-**Security review required** — request Security review on the PR:
+**Security review required:** request Security review on the PR:
 
 - Move contract / SEAL policy
 - Relayer auth
@@ -19,7 +19,7 @@ mix contract, demo, and docs work in an RC.
 - Migration ceremony (manifest, finalize-tx, environments)
 - Anything that changes who can decrypt
 
-**Security review not required** — normal Eng review:
+**Security review not required:** normal Eng review:
 
 - Docs-only changes
 - Demo apps
