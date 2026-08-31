@@ -26,6 +26,18 @@ pub const EMBEDDING_MODEL: &str = "openai/text-embedding-3-small";
 /// on the manual write path are validated against it.
 pub const EMBEDDING_DIMS: usize = 1536;
 
+/// 16384 = 8192 tokens × 2 chars/token under cl100k; do not use admin 64KiB.
+const MAX_EMBED_INPUT_BYTES: usize = 16384;
+
+fn reject_oversized_embed_input(text: &str) -> Result<(), AppError> {
+    if text.len() > MAX_EMBED_INPUT_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "input is over the embedding input limit of {MAX_EMBED_INPUT_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embed a single text into a vector. Returns the vector or an error if
@@ -55,6 +67,7 @@ impl OpenAiEmbedder {
 impl Embedder for OpenAiEmbedder {
     #[tracing::instrument(name = "embedder.embed", skip_all, fields(text_len = text.len()))]
     async fn embed(&self, text: &str) -> Result<Vec<f32>, AppError> {
+        reject_oversized_embed_input(text)?;
         match &self.config.openai_api_key {
             Some(api_key) => {
                 // Real embedding via OpenRouter/OpenAI-compatible API
@@ -92,15 +105,17 @@ impl Embedder for OpenAiEmbedder {
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
-                    // Same transient-vs-permanent split as the
-                    // extractor: 429 + 5xx → 503 (retryable); other
-                    // 4xx → 500 (genuine bug). See
-                    // `extractor::is_upstream_status_transient`.
                     if crate::services::extractor::is_upstream_status_transient(status) {
                         return Err(AppError::UpstreamUnavailable(format!(
                             "Embedding API upstream error ({}): {}",
                             status, body
                         )));
+                    }
+                    if status == reqwest::StatusCode::BAD_REQUEST {
+                        tracing::warn!(%status, body, "embedding API returned 400");
+                        return Err(AppError::BadRequest(
+                            "embedding input exceeds the model context limit".into(),
+                        ));
                     }
                     return Err(AppError::Internal(format!(
                         "Embedding API error ({}): {}",
@@ -206,5 +221,34 @@ mod tests {
             .expect("embedder must be able to detect the same envelope shape as the extractor");
         assert_eq!(envelope.code, 504);
         assert_eq!(envelope.message, "The operation was aborted");
+    }
+
+    fn assert_bad_request(result: Result<(), crate::types::AppError>, needle: &str) {
+        match result {
+            Err(crate::types::AppError::BadRequest(msg)) => {
+                assert!(
+                    msg.contains(needle),
+                    "expected error mentioning {needle:?}, got: {msg}"
+                );
+            }
+            other => panic!("expected BadRequest containing {needle:?}, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embed_input_at_byte_limit_is_accepted() {
+        super::reject_oversized_embed_input(&"q".repeat(super::MAX_EMBED_INPUT_BYTES)).unwrap();
+    }
+
+    #[test]
+    fn embed_input_over_byte_limit_is_bad_request() {
+        assert_bad_request(
+            super::reject_oversized_embed_input(&"q".repeat(16400)),
+            "input is over the embedding input limit",
+        );
+        assert_bad_request(
+            super::reject_oversized_embed_input(&"q".repeat(16385)),
+            "input is over the embedding input limit",
+        );
     }
 }
