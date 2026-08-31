@@ -45,6 +45,9 @@ pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
 /// representable range in `routes::owner_token::issue_token`'s `expires_at`
 /// computation.
 pub const MAX_OWNER_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+/// Minimum `OWNER_TOKEN_SECRET` length in bytes when the env var is set.
+/// Unset or empty still disables the feature.
+pub const MIN_OWNER_TOKEN_SECRET_LEN: usize = 32;
 pub const DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS: u32 = 5;
 
 pub(crate) fn default_walrus_storage_epochs_for_network(network: &str) -> u32 {
@@ -445,6 +448,8 @@ pub struct Config {
     /// /v1/owner-tokens` and the `OwnerToken` extractor treat that as an
     /// unconditional rejection rather than letting an empty HMAC key
     /// validate (see `owner_token_auth::OwnerToken`'s doc comment).
+    /// When set, the value must be at least [`MIN_OWNER_TOKEN_SECRET_LEN`]
+    /// bytes or config load panics.
     pub owner_token_secret: String,
     /// The **service credential**: one static
     /// shared secret WM generates and hands to Console, which Console
@@ -638,7 +643,9 @@ impl Config {
                 .unwrap_or_default(),
             walrus_staking_pool_id: nonempty_env("WALRUS_STAKING_POOL_ID")
                 .unwrap_or_else(|| default_walrus_staking_pool_id.to_string()),
-            owner_token_secret: nonempty_env("OWNER_TOKEN_SECRET").unwrap_or_default(),
+            owner_token_secret: require_owner_token_secret_len(
+                nonempty_env("OWNER_TOKEN_SECRET").unwrap_or_default(),
+            ),
             owner_token_service_credential: nonempty_env("OWNER_TOKEN_SERVICE_CREDENTIAL")
                 .unwrap_or_default(),
             owner_token_ttl_secs: env_positive_u64("OWNER_TOKEN_TTL_SECS", 900)
@@ -696,6 +703,19 @@ fn nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn require_owner_token_secret_len(secret: String) -> String {
+    if secret.is_empty() {
+        return secret;
+    }
+    if secret.len() < MIN_OWNER_TOKEN_SECRET_LEN {
+        panic!(
+            "OWNER_TOKEN_SECRET must be at least {MIN_OWNER_TOKEN_SECRET_LEN} bytes; got {}",
+            secret.len()
+        );
+    }
+    secret
 }
 
 fn env_number<T>(name: &str, default: T) -> T
@@ -2892,6 +2912,31 @@ mod tests {
         with_auth_clock_drift_env(Some("not-a-number"), || {
             assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
         });
+    }
+
+    // ── require_owner_token_secret_len — empty disables, short panics ────
+
+    #[test]
+    fn owner_token_secret_empty_stays_disabled() {
+        assert_eq!(require_owner_token_secret_len(String::new()), "");
+    }
+
+    #[test]
+    #[should_panic(expected = "OWNER_TOKEN_SECRET must be at least 32 bytes; got 11")]
+    fn owner_token_secret_rejects_test_secret() {
+        let _ = require_owner_token_secret_len("test-secret".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "OWNER_TOKEN_SECRET must be at least 32 bytes; got 31")]
+    fn owner_token_secret_rejects_31_bytes() {
+        let _ = require_owner_token_secret_len("a".repeat(MIN_OWNER_TOKEN_SECRET_LEN - 1));
+    }
+
+    #[test]
+    fn owner_token_secret_accepts_32_bytes() {
+        let secret = "a".repeat(MIN_OWNER_TOKEN_SECRET_LEN);
+        assert_eq!(require_owner_token_secret_len(secret.clone()), secret);
     }
 
     #[test]
