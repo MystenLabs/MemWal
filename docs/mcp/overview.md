@@ -75,12 +75,18 @@ What the user actually does differs per client. Pick your row:
 | [Cursor](/mcp/cursor) | Partial | Edit `~/.cursor/mcp.json`; hook support depends on your Cursor version |
 | [Claude Desktop](/mcp/claude-desktop) | ✗ MCP-only | Edit `claude_desktop_config.json`, then [add memory instructions](/mcp/claude-desktop#add-memory-instructions) |
 | [OpenCode](/mcp/opencode) | ✗ MCP-only | Edit the OpenCode MCP config |
+| ChatGPT desktop app | ✓ Plugin | Ships Codex — follow [Codex](/mcp/codex) |
+| ChatGPT web (Connectors) | ✗ Not supported | — |
 
 <Note>
-**ChatGPT is not supported today.** MemWal's remote
-[Streamable HTTP transport](/mcp/reference#transports) needs two custom connector headers,
-but ChatGPT's connector UI exposes only a single bearer field and cannot supply the
-required `x-memwal-account-id` header.
+**"ChatGPT" means two different things here.** The macOS **ChatGPT desktop app** ships
+Codex (`/Applications/ChatGPT.app/Contents/Resources/codex`) and reads the same
+`~/.codex/config.toml`, so the [Codex](/mcp/codex) plugin install works there unchanged.
+
+**ChatGPT web connectors are not supported.** MemWal's remote
+[Streamable HTTP transport](/mcp/reference#transports) needs two custom headers, but the
+Connectors UI exposes only a single bearer field and cannot supply the required
+`x-memwal-account-id` header.
 </Note>
 
 ## Available tools
