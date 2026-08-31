@@ -11,7 +11,7 @@ const releases = [
     },
     {
         name: "Python SDK",
-        version: "0.1.8",
+        version: "0.1.9",
         manifests: [
             ["packages/python-sdk-memwal/pyproject.toml", "toml-version"],
             ["packages/python-sdk-memwal/memwal/__init__.py", "python-version"],
