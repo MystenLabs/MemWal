@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_truncated_true_when_limit_truncated_short_circuits() {
+    fn restore_truncated_limit_truncated_short_circuits() {
         assert!(super::restore_is_truncated(true, false, 2, 100));
         assert!(super::restore_is_truncated(true, true, 0, 100));
     }
