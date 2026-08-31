@@ -37,7 +37,7 @@ answer: >-
   Schedule it with `gh workflow run` or an ops cron that dispatches that workflow.
 ---
 
-# SEAL Cross-Account Synthetic
+## SEAL Cross-Account Synthetic
 
 COMG-715 adds a production-safe **negative** synthetic on top of the Move unit
 test `test_seal_approve_delegate_requires_matching_owner`. The unit test covers
