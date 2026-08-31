@@ -35,6 +35,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
+from urllib.parse import urlparse
 
 import httpx
 import nacl.signing
@@ -100,6 +101,37 @@ AUTH_REJECTED_MESSAGE = (
 
 
 logger = logging.getLogger("memwal")
+
+
+def normalize_server_url(url: str) -> str:
+    """Strip a trailing slash and warn on plaintext HTTP to a remote host.
+
+    Ports the TypeScript ``normalizeServerUrl`` helper: localhost,
+    ``127.0.0.1``, ``::1``, and ``*.localhost`` are exempt. Invalid URLs
+    are returned trimmed so the HTTP client can surface the error later.
+    """
+
+    trimmed = url.rstrip("/")
+    try:
+        parsed = urlparse(trimmed)
+        host = (parsed.hostname or "").lower()
+        is_local = (
+            host == "localhost"
+            or host == "127.0.0.1"
+            or host == "::1"
+            or host.endswith(".localhost")
+        )
+        if parsed.scheme == "http" and host and not is_local:
+            logger.warning(
+                '[memwal] serverUrl "%s" uses plaintext HTTP on a non-localhost host. '
+                "Signed requests and any bearer material will be visible to the network. "
+                "Use https:// in production.",
+                trimmed,
+            )
+    except ValueError:
+        # invalid URL — let the HTTP call surface the error at request time
+        pass
+    return trimmed
 
 
 # ============================================================
@@ -229,7 +261,7 @@ class MemWal:
         self._private_key_hex = normalize_private_key(config.key)
         self._signing_key = build_signing_key(self._private_key_hex)
         self._account_id = config.account_id
-        self._server_url = config.server_url.rstrip("/")
+        self._server_url = normalize_server_url(config.server_url)
         self._namespace = config.namespace
         self._client: Optional[httpx.AsyncClient] = None
         self._server_config: Optional[Dict[str, str]] = None

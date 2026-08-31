@@ -1,5 +1,11 @@
 # memwal
 
+## 0.1.9
+
+### Fixed
+
+- Warn when `server_url` uses plaintext `http://` against a non-localhost host, matching the TypeScript SDK `normalizeServerUrl` guard. Localhost, `127.0.0.1`, `::1`, and `*.localhost` are exempt; invalid URLs are left for the HTTP client to surface.
+
 ## 0.1.8
 
 ### Added
