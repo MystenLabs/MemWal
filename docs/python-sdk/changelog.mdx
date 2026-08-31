@@ -29,12 +29,20 @@ questions:
   - What changes were made in memwal 0.1.4?
   - Where can I find the release history for the Walrus Memory Python SDK?
 answer: >-
-  The latest Python SDK release is 0.1.8. It adds `dropped_count` on recall results, `write_ready` on health, `MemWalClockDriftError` for clock-drift 401s, and the `dev` relayer preset, and hardens hex decoding and error redaction. 0.1.7 added deterministic mock clients and idempotency keys.
+  The latest Python SDK release is 0.1.9. It warns when `server_url` uses plaintext HTTP on a non-localhost host. 0.1.8 adds `dropped_count` on recall results, `write_ready` on health, `MemWalClockDriftError` for clock-drift 401s, and the `dev` relayer preset, and hardens hex decoding and error redaction.
 ---
 
 Track what's new, changed, and fixed in `memwal` (Python).
 
 For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
+
+## 0.1.9
+
+This release warns when `server_url` uses plaintext HTTP on a non-localhost host.
+
+### Fixed
+
+- Warn when `server_url` uses plaintext `http://` against a non-localhost host, matching the TypeScript SDK `normalizeServerUrl` guard. Localhost, `127.0.0.1`, `::1`, and `*.localhost` are exempt; invalid URLs are left for the HTTP client to surface.
 
 ## 0.1.8
 
