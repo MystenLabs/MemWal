@@ -2092,6 +2092,7 @@ mod tests {
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
+            writes_paused: false,
             enable_memory_deletion: false,
             enable_security_delete: false,
             legacy_db_url: None,

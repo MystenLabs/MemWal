@@ -354,7 +354,8 @@ async function probeRelayer(name, rawBase, target) {
       }
     }
 
-    const reportedOk = isRecord(health) && health.status === 'ok'
+    const writesPaused = isRecord(health) && health.writes === 'paused'
+    const reportedOk = isRecord(health) && health.status === 'ok' && !writesPaused
     const status = response.ok ? (reportedOk ? 'operational' : 'degraded') : 'outage'
 
     return {
