@@ -174,7 +174,7 @@ AskResult(
 Rebuild missing indexed entries for one namespace from Walrus. Incremental.
 
 - `limit` defaults to `10` and caps the inspected blob set, newest-first
-- `restored` counts blobs re-indexed in this call; `skipped` counts on-chain blobs already in the local success index; `failed` counts permanent decrypt/UTF-8 failures (defaults to `0`)
+- `restored` counts blobs re-indexed in this call; `skipped` counts onchain blobs already in the local success index; `failed` counts permanent decrypt/UTF-8 failures (defaults to `0`)
 - There is no pagination cursor; use a larger `limit` for larger one-shot restores
 
 ```python
