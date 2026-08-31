@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
 import { signIn } from "@/app/(auth)/auth";
 import { isDevelopmentEnvironment } from "@/lib/constants";
+import {
+  checkGuestAuthRateLimit,
+  GUEST_AUTH_RATE_LIMIT_TTL_SECONDS,
+  GuestAuthRateLimitError,
+} from "@/lib/ratelimit";
 
 /**
  * Validate a redirect target before forwarding to auth.
@@ -43,6 +48,26 @@ export async function GET(request: Request) {
 
   if (token) {
     return NextResponse.redirect(new URL("/", request.url));
+  }
+
+  try {
+    await checkGuestAuthRateLimit(request);
+  } catch (error) {
+    if (error instanceof GuestAuthRateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        {
+          status: error.status,
+          headers: {
+            "Retry-After":
+              error.status === 429
+                ? String(GUEST_AUTH_RATE_LIMIT_TTL_SECONDS)
+                : "5",
+          },
+        }
+      );
+    }
+    throw error;
   }
 
   return signIn("guest", { redirect: true, redirectTo: redirectUrl });
