@@ -507,6 +507,37 @@ fn clamp_restore_limit(limit: usize) -> usize {
     limit.clamp(1, 100)
 }
 
+/// Count restore `skipped` / `failed`.
+///
+/// `skipped` is on-chain blobs already in the local **success** index
+/// (`existing_blob_ids`). Negative-cached blob IDs are not skipped.
+///
+/// `failed` is `failed_blob_ids.len()` (the owner+namespace negative cache)
+/// plus `newly_failed` permanent failures from this call. Callers must not
+/// include blobs already in `failed_blob_ids` in `newly_failed`.
+fn restore_skip_fail_counts(
+    on_chain_blob_ids: &[String],
+    existing_blob_ids: &[String],
+    failed_blob_ids: &[String],
+    newly_failed: usize,
+) -> (usize, usize) {
+    let existing_set: std::collections::HashSet<&str> =
+        existing_blob_ids.iter().map(|s| s.as_str()).collect();
+    let skipped = on_chain_blob_ids
+        .iter()
+        .filter(|id| existing_set.contains(id.as_str()))
+        .count();
+    (skipped, failed_blob_ids.len() + newly_failed)
+}
+
+/// One restore decrypt attempt. Permanent failures are negative-cached and
+/// counted in `RestoreResponse.failed`; transients are retried next call.
+enum RestoreDecrypt {
+    Ok(String, String),
+    PermanentFail,
+    TransientFail,
+}
+
 /// POST /api/restore
 ///
 /// Restore a namespace from Walrus:
@@ -611,6 +642,7 @@ async fn restore_unbounded(
         return Ok(Json(RestoreResponse {
             restored: 0,
             skipped: 0,
+            failed: 0,
             total: 0,
             namespace: namespace.clone(),
             owner: owner.clone(),
@@ -623,18 +655,18 @@ async fn restore_unbounded(
     // (GH #501 / WALM-299 negative cache — see `db.record_restore_failure`).
     // A foreign/attacker blob that already failed SEAL decrypt or UTF-8
     // validation for this owner+namespace is never re-downloaded and
-    // re-decrypt-attempted on a later call; it's already correctly reported
-    // as "skipped", same as any other missing-but-excluded blob.
+    // re-decrypt-attempted on a later call; it counts as `failed`, not
+    // `skipped` (COMG-719 / GH #399).
     let existing_blob_ids = state.db.get_blobs_by_namespace(owner, namespace).await?;
     let failed_blob_ids = state.db.get_failed_blob_ids(owner, namespace).await?;
-    let existing_set: std::collections::HashSet<&str> = existing_blob_ids
+    let exclude_set: std::collections::HashSet<&str> = existing_blob_ids
         .iter()
         .map(|s| s.as_str())
         .chain(failed_blob_ids.iter().map(|s| s.as_str()))
         .collect();
     let all_missing: Vec<String> = all_blob_ids
         .iter()
-        .filter(|id| !existing_set.contains(id.as_str()))
+        .filter(|id| !exclude_set.contains(id.as_str()))
         .cloned()
         .collect();
     // Apply limit — query-blobs' on-chain ordering is unspecified (the
@@ -649,12 +681,15 @@ async fn restore_unbounded(
     // can't see truncation that already happened one layer up, in the
     // sidecar's raw candidate fetch.
     let truncated = limit_truncated || source_capped;
-    let skipped = total - missing_blob_ids.len();
+    let (skipped, failed) =
+        restore_skip_fail_counts(&all_blob_ids, &existing_blob_ids, &failed_blob_ids, 0);
     tracing::info!(
-        "restore: total={} on-chain, existing={}, negative-cached={}, missing={} (limited to {}, truncated={}, source_capped={}) for ns={}",
+        "restore: total={} on-chain, existing={}, negative-cached={}, skipped={}, failed={}, missing={} (limited to {}, truncated={}, source_capped={}) for ns={}",
         total,
         existing_blob_ids.len(),
         failed_blob_ids.len(),
+        skipped,
+        failed,
         missing_blob_ids.len(),
         limit,
         truncated,
@@ -666,6 +701,7 @@ async fn restore_unbounded(
         return Ok(Json(RestoreResponse {
             restored: 0,
             skipped,
+            failed,
             total,
             namespace: namespace.clone(),
             owner: owner.clone(),
@@ -737,6 +773,7 @@ async fn restore_unbounded(
         return Ok(Json(RestoreResponse {
             restored: 0,
             skipped,
+            failed,
             total,
             namespace: namespace.clone(),
             owner: owner.clone(),
@@ -751,7 +788,7 @@ async fn restore_unbounded(
     );
 
     // Step 4: SEAL decrypt with bounded concurrency (3 at a time).
-    let decrypt_results: Vec<Option<(String, String)>> = stream::iter(downloaded)
+    let decrypt_results: Vec<RestoreDecrypt> = stream::iter(downloaded)
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
             let sidecar_url = state.config.sidecar_url.clone();
@@ -778,7 +815,7 @@ async fn restore_unbounded(
                 .await
                 {
                     Ok(plaintext) => match String::from_utf8(plaintext) {
-                        Ok(text) => Some((blob_id, text)),
+                        Ok(text) => RestoreDecrypt::Ok(blob_id, text),
                         Err(e) => {
                             tracing::warn!("restore: invalid UTF-8 for {}: {}", blob_id, e);
                             // Decrypt already succeeded here, so invalid UTF-8
@@ -794,7 +831,7 @@ async fn restore_unbounded(
                                     db_err
                                 );
                             }
-                            None
+                            RestoreDecrypt::PermanentFail
                         }
                     },
                     Err(e) => {
@@ -821,8 +858,10 @@ async fn restore_unbounded(
                                     db_err
                                 );
                             }
+                            RestoreDecrypt::PermanentFail
+                        } else {
+                            RestoreDecrypt::TransientFail
                         }
-                        None
                     }
                 }
             }
@@ -831,7 +870,18 @@ async fn restore_unbounded(
         .collect()
         .await;
 
-    let decrypted_texts: Vec<(String, String)> = decrypt_results.into_iter().flatten().collect();
+    let newly_failed = decrypt_results
+        .iter()
+        .filter(|r| matches!(r, RestoreDecrypt::PermanentFail))
+        .count();
+    let failed = failed + newly_failed;
+    let decrypted_texts: Vec<(String, String)> = decrypt_results
+        .into_iter()
+        .filter_map(|r| match r {
+            RestoreDecrypt::Ok(blob_id, text) => Some((blob_id, text)),
+            RestoreDecrypt::PermanentFail | RestoreDecrypt::TransientFail => None,
+        })
+        .collect();
     tracing::info!(
         "restore: decrypted {}/{} blobs",
         decrypted_texts.len(),
@@ -913,9 +963,10 @@ async fn restore_unbounded(
     }
 
     tracing::info!(
-        "restore complete: restored={} skipped={} total={} owner={} ns={}",
+        "restore complete: restored={} skipped={} failed={} total={} owner={} ns={}",
         restored,
         skipped,
+        failed,
         total,
         owner,
         namespace
@@ -924,6 +975,7 @@ async fn restore_unbounded(
     Ok(Json(RestoreResponse {
         restored,
         skipped,
+        failed,
         total,
         namespace: namespace.clone(),
         owner: owner.clone(),
@@ -1053,12 +1105,80 @@ mod tests {
         let resp = RestoreResponse {
             restored: 5,
             skipped: 2,
+            failed: 0,
             total: 20,
             namespace: "ns".to_string(),
             owner: "0xabc".to_string(),
             truncated: true,
         };
         assert!(resp.truncated);
+    }
+
+    #[test]
+    fn restore_response_serializes_failed_field() {
+        let resp = RestoreResponse {
+            restored: 5,
+            skipped: 2,
+            failed: 3,
+            total: 20,
+            namespace: "ns".to_string(),
+            owner: "0xabc".to_string(),
+            truncated: false,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["failed"], 3);
+        assert_eq!(json["skipped"], 2);
+        assert!(json.get("failed").is_some());
+    }
+
+    #[test]
+    fn restore_skip_fail_counts_excludes_negative_cache_from_skipped() {
+        let on_chain = vec!["a", "b", "c", "d"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let existing = vec!["a", "b"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let failed = vec!["c".to_string()];
+
+        let (skipped, failed_count) =
+            super::restore_skip_fail_counts(&on_chain, &existing, &failed, 1);
+
+        assert_eq!(skipped, 2, "skipped is on-chain success index only");
+        assert_eq!(
+            failed_count, 2,
+            "failed is negative-cache len plus new permanent failures"
+        );
+    }
+
+    #[test]
+    fn restore_skip_fail_counts_does_not_count_off_chain_existing() {
+        let on_chain = vec!["a".to_string()];
+        let existing = vec!["a".to_string(), "ghost".to_string()];
+        let none: Vec<String> = vec![];
+
+        let (skipped, failed_count) =
+            super::restore_skip_fail_counts(&on_chain, &existing, &none, 0);
+
+        assert_eq!(skipped, 1);
+        assert_eq!(failed_count, 0);
+    }
+
+    #[test]
+    fn restore_skip_fail_counts_uses_full_negative_cache_len() {
+        let on_chain = vec!["a".to_string()];
+        let none: Vec<String> = vec![];
+        let failed = vec!["old-fail".to_string()];
+
+        let (skipped, failed_count) = super::restore_skip_fail_counts(&on_chain, &none, &failed, 0);
+
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            failed_count, 1,
+            "negative-cache entries count even when not in this on-chain page"
+        );
     }
 
     // ── /api/forget + /api/stats empty-namespace validation ─────────────

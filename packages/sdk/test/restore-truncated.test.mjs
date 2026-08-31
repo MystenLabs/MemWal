@@ -60,6 +60,26 @@ test("MemWal.restore() defaults truncated to false when an older relayer omits i
     assert.equal(result.truncated, false);
 });
 
+test("MemWal.restore() preserves failed from the relayer response", async () => {
+    const memwal = client();
+    memwal.signedRequest = async () => baseResponse({ failed: 4 });
+
+    const result = await memwal.restore("demo");
+
+    assert.equal(result.failed, 4);
+});
+
+test("MemWal.restore() defaults failed to 0 when an older relayer omits it", async () => {
+    const memwal = client();
+    const raw = baseResponse();
+    delete raw.failed;
+    memwal.signedRequest = async () => raw;
+
+    const result = await memwal.restore("demo");
+
+    assert.equal(result.failed, 0);
+});
+
 test("MemWalManual.restore() preserves truncated=true from the relayer response", async () => {
     const manual = manualClient();
     manual.signedRequest = async () => baseResponse({ truncated: true });
@@ -78,4 +98,24 @@ test("MemWalManual.restore() defaults truncated to false when an older relayer o
     const result = await manual.restore("demo");
 
     assert.equal(result.truncated, false);
+});
+
+test("MemWalManual.restore() preserves failed from the relayer response", async () => {
+    const manual = manualClient();
+    manual.signedRequest = async () => baseResponse({ failed: 4 });
+
+    const result = await manual.restore("demo");
+
+    assert.equal(result.failed, 4);
+});
+
+test("MemWalManual.restore() defaults failed to 0 when an older relayer omits it", async () => {
+    const manual = manualClient();
+    const raw = baseResponse();
+    delete raw.failed;
+    manual.signedRequest = async () => raw;
+
+    const result = await manual.restore("demo");
+
+    assert.equal(result.failed, 0);
 });

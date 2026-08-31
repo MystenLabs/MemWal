@@ -2,6 +2,10 @@
 
 ## 0.1.9
 
+### Added
+
+- `restore()` results include `failed` (default `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
+
 ### Fixed
 
 - `remember_bulk_async` rejects an empty `items` list before the request and raises when the relayer returns a `job_ids` length that does not match the batch.

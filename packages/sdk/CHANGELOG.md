@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal
 
+## 0.1.6
+
+### Added
+
+- `restore()` results include optional `failed` for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
+
 ## 0.1.5
 
 ### Added

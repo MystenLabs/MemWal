@@ -1777,6 +1777,10 @@ pub struct RestoreRequest {
 pub struct RestoreResponse {
     pub restored: usize,
     pub skipped: usize,
+    /// Permanent decrypt/UTF-8 failures for this owner+namespace: the
+    /// `restore_failed_blobs` negative cache plus any new permanent
+    /// failures recorded in this call. Additive JSON field (COMG-719).
+    pub failed: usize,
     pub total: usize,
     pub namespace: String,
     pub owner: String,
@@ -2885,7 +2889,10 @@ mod tests {
     #[test]
     fn auth_clock_drift_accepts_exact_ceiling() {
         with_auth_clock_drift_env(Some("900"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), MAX_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                MAX_AUTH_CLOCK_DRIFT_SECS
+            );
         });
     }
 
@@ -2893,24 +2900,36 @@ mod tests {
     fn auth_clock_drift_rejects_just_over_ceiling() {
         // Pin the exact inclusive boundary: 900 accepted, 901 falls back.
         with_auth_clock_drift_env(Some("901"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS
+            );
         });
     }
 
     #[test]
     fn auth_clock_drift_falls_back_when_env_exceeds_cap() {
         with_auth_clock_drift_env(Some("3600"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS
+            );
         });
     }
 
     #[test]
     fn auth_clock_drift_falls_back_on_negative_or_garbage() {
         with_auth_clock_drift_env(Some("-5"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS
+            );
         });
         with_auth_clock_drift_env(Some("not-a-number"), || {
-            assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
+            assert_eq!(
+                configured_auth_clock_drift_secs(),
+                DEFAULT_AUTH_CLOCK_DRIFT_SECS
+            );
         });
     }
 

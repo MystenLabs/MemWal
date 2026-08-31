@@ -217,6 +217,10 @@ class RestoreResult:
     #: Relayers older than WALM-319 don't send this field at all; the SDK
     #: defaults it to ``False`` in that case rather than requiring it.
     truncated: bool = False
+    #: Permanent decrypt/UTF-8 failures: the owner+namespace negative cache
+    #: plus any new permanent failures this call. Relayers older than
+    #: COMG-719 omit this field; the SDK defaults it to ``0``.
+    failed: int = 0
 
 
 @dataclass

@@ -28,8 +28,16 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.5. It adds `dropped_count` on recall results and `write_ready` on health, switches `rememberManual` to sending `encryptedData`, and hardens hex decoding and error redaction. 0.1.4 pointed empty-body 401s at `memwal_login`.
+  The latest TypeScript SDK release is 0.1.6. It adds optional `failed` on `restore()` results for permanent decrypt/UTF-8 failures. 0.1.5 added `dropped_count` on recall results and `write_ready` on health, switched `rememberManual` to sending `encryptedData`, and hardened hex decoding and error redaction.
 ---
+
+## 0.1.6
+
+This release reports restore decrypt failures instead of folding them into `skipped`.
+
+### Added
+
+- `restore()` results include optional `failed` for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ## 0.1.5
 

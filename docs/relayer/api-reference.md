@@ -457,12 +457,15 @@ Rebuild missing vector entries for one namespace. Queries onchain blobs by owner
 {
   "restored": 3,
   "skipped": 7,
+  "failed": 0,
   "total": 10,
   "namespace": "demo",
   "owner": "0x...",
   "truncated": false
 }
 ```
+
+`skipped` is on-chain blobs already in the local success index. `failed` is permanent decrypt/UTF-8 failures: the owner+namespace negative cache plus any new permanent failures this call. Transient download, decrypt, or embed errors are not counted in `failed` and may be retried.
 
 `truncated` is `true` when this restore cannot complete: either more onchain blobs were missing locally than `limit` allowed this call to restore, or the sidecar's raw onchain candidate fetch (bounded per owner, shared across all of the owner's namespaces, hard-capped independent of `limit`) hit its own cap before this namespace's blobs were even filtered out of that set. The second case can produce `truncated: true` even when `total` is `0` for this namespace, because a cap hit elsewhere can starve this namespace's fetch entirely. Raising `limit` only helps with the first case. Past the sidecar's cap, only a cursor or pagination-based restore would help.
 
