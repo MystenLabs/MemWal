@@ -28,8 +28,16 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.5. It adds `dropped_count` on recall results and `write_ready` on health, switches `rememberManual` to sending `encryptedData`, and hardens hex decoding and error redaction. 0.1.4 pointed empty-body 401s at `memwal_login`.
+  The latest TypeScript SDK release is 0.1.6. Empty-body 401s now use the AUTH_REJECTED troubleshooting guide instead of telling callers to run `memwal_login`. 0.1.5 added `dropped_count` on recall results and `write_ready` on health, switched `rememberManual` to sending `encryptedData`, and hardened hex decoding and error redaction.
 ---
+
+## 0.1.6
+
+This release stops telling headless SDK clients to call `memwal_login` on empty-body 401s.
+
+### Fixed
+
+- Empty-body 401s now use the same AUTH_REJECTED troubleshooting message as credential 401s instead of telling callers to run `memwal_login`. Headless SDK clients do not have that MCP tool.
 
 ## 0.1.5
 

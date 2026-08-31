@@ -307,15 +307,11 @@ export function sanitizeServerError(
 ): { message: string; raw: string; serverCode?: string } {
     // Number() so a string "401" (some MCP / HTTP paths) still hits this branch.
     if (Number(status) === 401) {
-        // Empty body = no-session / bare relayer 401. Non-empty keeps
-        // the AUTH_REJECTED triage (wrong key / account / network).
-        const empty = !String(rawBody ?? "").trim();
         return {
-            message: empty
-                ? "Walrus Memory isn't signed in. Call the memwal_login tool, then retry."
-                : "401 from relayer: typically wrong private key, key not registered on this account, " +
-                  "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
-                  "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
+            message:
+                "401 from relayer: typically wrong private key, key not registered on this account, " +
+                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+                "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
         };
