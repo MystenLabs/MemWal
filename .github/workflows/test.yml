@@ -551,3 +551,7 @@ jobs:
       - name: Run Move unit tests
         working-directory: services/contract
         run: sui move test
+
+      - name: Require SEAL cross-account deny invariant
+        working-directory: services/contract
+        run: sui move test --filter seal_approve_delegate_requires_matching_owner

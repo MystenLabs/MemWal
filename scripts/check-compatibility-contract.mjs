@@ -126,4 +126,16 @@ for (const value of [
     assertContains("versioning policy doc", policyDoc, value);
 }
 
+const sealInvariantTest = read("services/contract/tests/account_tests.move");
+assertContains(
+    "SEAL cross-account deny invariant (COMG-714): services/contract/tests/account_tests.move",
+    sealInvariantTest,
+    "fun test_seal_approve_delegate_requires_matching_owner",
+);
+assertContains(
+    "SEAL cross-account deny invariant abort code (COMG-714): services/contract/tests/account_tests.move",
+    sealInvariantTest,
+    "ENoAccess",
+);
+
 console.log("compatibility contract OK");
