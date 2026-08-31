@@ -1,0 +1,59 @@
+name: Synthetic SEAL cross-account
+
+# Production-safe negative synthetic (COMG-715).
+# workflow_dispatch only — never on pull_request. Missing secrets skip (exit 0).
+# A live cross-account SEAL authorization fails the job with
+# SYNTHETIC_SEAL_CROSS_ACCOUNT_FAIL and should page on-call.
+#
+# Schedule from ops (not enabled here on purpose):
+#   gh workflow run synthetic-seal-cross-account.yml --ref <protected-branch>
+# or add `on.schedule` after the two-account secrets exist.
+
+on:
+  workflow_dispatch:
+    inputs:
+      relayer_url:
+        description: Relayer base URL for GET /config when SUI_RPC_URL / MEMWAL_PACKAGE_ID are unset
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic:
+    name: Cross-account SEAL deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SEAL_CROSS_ACCOUNT_A_ID: ${{ secrets.SEAL_CROSS_ACCOUNT_A_ID }}
+      SEAL_CROSS_ACCOUNT_B_ID: ${{ secrets.SEAL_CROSS_ACCOUNT_B_ID }}
+      SEAL_CROSS_ACCOUNT_A_KEY: ${{ secrets.SEAL_CROSS_ACCOUNT_A_KEY }}
+      SEAL_CROSS_ACCOUNT_B_KEY: ${{ secrets.SEAL_CROSS_ACCOUNT_B_KEY }}
+      SUI_RPC_URL: ${{ vars.SUI_RPC_URL }}
+      SUI_NETWORK: ${{ vars.SUI_NETWORK }}
+      MEMWAL_PACKAGE_ID: ${{ vars.MEMWAL_PACKAGE_ID }}
+      MEMWAL_REGISTRY_ID: ${{ vars.MEMWAL_REGISTRY_ID }}
+      MEMWAL_SEAL_POLICY_PACKAGE_ID: ${{ vars.MEMWAL_SEAL_POLICY_PACKAGE_ID }}
+      MEMWAL_SERVER_URL: ${{ inputs.relayer_url || vars.MEMWAL_SERVER_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect secrets
+        id: cfg
+        shell: bash
+        run: |
+          if [ -z "${SEAL_CROSS_ACCOUNT_A_ID:-}" ] || [ -z "${SEAL_CROSS_ACCOUNT_B_ID:-}" ] || \
+             [ -z "${SEAL_CROSS_ACCOUNT_A_KEY:-}" ] || [ -z "${SEAL_CROSS_ACCOUNT_B_KEY:-}" ]; then
+            echo "has_secrets=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_secrets=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup JS
+        if: steps.cfg.outputs.has_secrets == 'true'
+        uses: ./.github/actions/setup-js
+
+      - name: Run cross-account SEAL synthetic
+        run: node scripts/synthetic-seal-cross-account.mjs
