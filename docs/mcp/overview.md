@@ -50,6 +50,39 @@ There are two ways to use MemWal. The difference is whether you also get the **l
 The proactive behavior comes from the tool layer, so it works on both installation paths. The plugin hooks add reinforcement on the clients that support them.
 </Note>
 
+## Fastest path: let your agent set it up
+
+Paste this into the AI client you want to connect:
+
+```text
+Run `curl -sL https://memory.walrus.xyz/skills/setup` and use the returned
+instructions to connect Walrus Memory to this AI client.
+```
+
+The agent identifies the client, writes the right config or runs the right install
+command, signs you in, and verifies the memory tools. Use the per-client table below
+if you would rather do it by hand.
+
+## Which install path for your client
+
+What the user actually does differs per client. Pick your row:
+
+| Client | Automatic memory (hooks) | What you do |
+|---|:-:|---|
+| [Claude Code](/mcp/claude-code) | ✓ Plugin | `/plugin marketplace add MystenLabs/MemWal`, then `/plugin install memwal@memwal-plugins` |
+| [Codex](/mcp/codex) | ✓ Plugin | `codex plugin marketplace add MystenLabs/MemWal`, then `codex plugin add memwal@memwal-plugins`, then trust the hooks via `/hooks` |
+| [Antigravity](/mcp/antigravity) | ✓ Plugin | `npx degit MystenLabs/MemWal/packages/mcp/plugin ~/.gemini/config/plugins/memwal` |
+| [Cursor](/mcp/cursor) | Partial | Edit `~/.cursor/mcp.json`; hook support depends on your Cursor version |
+| [Claude Desktop](/mcp/claude-desktop) | ✗ MCP-only | Edit `claude_desktop_config.json`, then [add memory instructions](/mcp/claude-desktop#add-memory-instructions) |
+| [OpenCode](/mcp/opencode) | ✗ MCP-only | Edit the OpenCode MCP config |
+
+<Note>
+**ChatGPT is not supported today.** MemWal's remote
+[Streamable HTTP transport](/mcp/reference#transports) needs two custom connector headers,
+but ChatGPT's connector UI exposes only a single bearer field and cannot supply the
+required `x-memwal-account-id` header.
+</Note>
+
 ## Available tools
 
 | Tool | Description |
