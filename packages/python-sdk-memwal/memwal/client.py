@@ -463,6 +463,9 @@ class MemWal:
         capped at ``MAX_REMEMBER_TEXT_BYTES`` (= 64 KiB).
         """
 
+        if not items:
+            raise ValueError("remember_bulk_async: items must be a non-empty array")
+
         payload_items: List[Dict[str, Any]] = [
             {
                 "text": item.text,
@@ -476,8 +479,15 @@ class MemWal:
             {"items": payload_items},
             accepted_statuses=(200, 202),
         )
+        job_ids = data.get("job_ids")
+        returned = len(job_ids) if job_ids else 0
+        if not job_ids or returned != len(payload_items):
+            raise ValueError(
+                f"remember_bulk_async: server returned {returned} job_ids for "
+                f"{len(payload_items)} items"
+            )
         return RememberBulkAcceptedResult(
-            job_ids=list(data.get("job_ids", [])),
+            job_ids=list(job_ids),
             total=int(data.get("total", len(payload_items))),
             status=data.get("status", "pending"),
         )

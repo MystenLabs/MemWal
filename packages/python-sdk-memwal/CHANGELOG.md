@@ -1,5 +1,11 @@
 # memwal
 
+## 0.1.9
+
+### Fixed
+
+- `remember_bulk_async` rejects an empty `items` list before the request and raises when the relayer returns a `job_ids` length that does not match the batch.
+
 ## 0.1.8
 
 ### Added

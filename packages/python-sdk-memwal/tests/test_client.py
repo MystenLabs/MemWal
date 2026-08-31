@@ -27,6 +27,8 @@ from memwal.client import (
 from memwal.types import (
     RecallManualOptions,
     RecallParams,
+    RememberBulkAcceptedResult,
+    RememberBulkItem,
     RememberManualOptions,
     ScoringWeights,
 )
@@ -340,6 +342,90 @@ class TestRemember:
         body = json.loads(route.calls[0].request.content)
         assert body["namespace"] == "custom-ns"
         assert result.job_id == "job-2"
+        assert result.status == "pending"
+
+
+# ============================================================
+# remember_bulk_async() tests
+# ============================================================
+
+
+class TestRememberBulkAsync:
+    @respx.mock
+    async def test_empty_items_raises_without_http(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/remember/bulk").mock(
+            return_value=httpx.Response(
+                202,
+                json={"job_ids": [], "total": 0, "status": "pending"},
+            )
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="remember_bulk_async: items must be a non-empty array",
+        ):
+            await memwal_client.remember_bulk_async([])
+
+        assert not route.called
+
+    @respx.mock
+    async def test_mismatched_job_ids_raises(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/remember/bulk").mock(
+            return_value=httpx.Response(
+                202,
+                json={
+                    "job_ids": ["job-1"],
+                    "total": 1,
+                    "status": "pending",
+                },
+            )
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="remember_bulk_async: server returned 1 job_ids for 2 items",
+        ):
+            await memwal_client.remember_bulk_async(
+                [
+                    RememberBulkItem(text="I love coffee"),
+                    RememberBulkItem(text="I live in Tokyo"),
+                ]
+            )
+
+    @respx.mock
+    async def test_matching_job_ids_returns_accepted(
+        self, memwal_client: MemWal
+    ) -> None:
+        mock_seal_session_prereqs()
+        route = respx.post(f"{_TEST_SERVER}/api/remember/bulk").mock(
+            return_value=httpx.Response(
+                202,
+                json={
+                    "job_ids": ["job-1", "job-2"],
+                    "total": 2,
+                    "status": "pending",
+                },
+            )
+        )
+
+        result = await memwal_client.remember_bulk_async(
+            [
+                RememberBulkItem(text="I love coffee"),
+                RememberBulkItem(text="I live in Tokyo", namespace="profile"),
+            ]
+        )
+
+        assert route.called
+        body = json.loads(route.calls[0].request.content)
+        assert body["items"] == [
+            {"text": "I love coffee", "namespace": "default"},
+            {"text": "I live in Tokyo", "namespace": "profile"},
+        ]
+        assert isinstance(result, RememberBulkAcceptedResult)
+        assert result.job_ids == ["job-1", "job-2"]
+        assert result.total == 2
         assert result.status == "pending"
 
 
