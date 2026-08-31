@@ -5,6 +5,7 @@
 ### Fixed
 
 - `remember_bulk_async` rejects an empty `items` list before the request and raises when the relayer returns a `job_ids` length that does not match the batch.
+- restore `truncated` docs now match WALM-431 retryable semantics.
 
 ## 0.1.8
 

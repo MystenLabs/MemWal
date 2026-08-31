@@ -36,9 +36,11 @@ export function formatRestoreResult(result: {
 }): string {
     const truncated = result.truncated === true;
     return (
-        `${truncated ? "Restore partially complete" : "Restore complete"} for namespace "${result.namespace}":\n` +
+        `${truncated ? "Restore partially complete" : "Restore page finished"} for namespace "${result.namespace}":\n` +
         `  total=${result.total}  restored=${result.restored}  skipped=${result.skipped}  truncated=${truncated}` +
-        (truncated ? "\n  ⚠️ More blobs remain to restore — increase limit and call again." : "")
+        (truncated
+            ? "\n  ⚠️ More blobs remain to restore — increase limit and call again."
+            : "\n  truncated=false is not proof the sidecar saw every blob.")
     );
 }
 
@@ -51,7 +53,7 @@ export function registerRestoreTool(
         {
             ...TOOL_METADATA.memwal_restore,
             description:
-                "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status — does not return memory texts. If truncated=true, increase limit and call again. Call memwal_recall afterwards to query the rebuilt index.",
+                "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status — does not return memory texts. truncated=true is known-retryable-incomplete: increase limit and call again. truncated=false is not a completeness guarantee. Call memwal_recall afterwards to query the rebuilt index.",
             inputSchema: RESTORE_INPUT,
         },
         wrapTool<{ namespace: string; limit: number }>(session, "memwal_restore", async ({ namespace, limit }) => {

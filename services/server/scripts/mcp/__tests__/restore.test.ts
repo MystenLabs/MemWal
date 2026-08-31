@@ -16,7 +16,7 @@ test("memwal_restore warns when the API reports a truncated restore", () => {
     assert.match(text, /More blobs remain to restore/);
 });
 
-test("memwal_restore reports complete only when restore is not truncated", () => {
+test("memwal_restore reports a finished page when restore is not truncated", () => {
     const text = formatRestoreResult({
         namespace: "my-app",
         total: 10,
@@ -25,9 +25,11 @@ test("memwal_restore reports complete only when restore is not truncated", () =>
         truncated: false,
     });
 
-    assert.match(text, /^Restore complete/);
+    assert.match(text, /^Restore page finished/);
     assert.match(text, /truncated=false/);
+    assert.match(text, /not proof the sidecar saw every blob/);
     assert.doesNotMatch(text, /More blobs remain to restore/);
+    assert.doesNotMatch(text, /Restore complete/);
 });
 
 test("memwal_restore treats an omitted legacy truncated field as false", () => {
@@ -38,6 +40,7 @@ test("memwal_restore treats an omitted legacy truncated field as false", () => {
         skipped: 0,
     });
 
-    assert.match(text, /^Restore complete/);
+    assert.match(text, /^Restore page finished/);
     assert.match(text, /truncated=false/);
+    assert.match(text, /not proof the sidecar saw every blob/);
 });
