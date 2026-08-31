@@ -181,7 +181,7 @@ Rebuild missing indexed entries for one namespace from Walrus. Incremental.
 RestoreResult(restored: int, skipped: int, total: int, namespace: str, owner: str, truncated: bool = False)
 ```
 
-`truncated=true` is known-retryable-incomplete (this call's `limit`, or a still-expandable sidecar candidate fetch); `truncated=false` is not proof the sidecar saw every on-chain blob (WALM-451 `sourceCapped`).
+`truncated=true` is known-retryable-incomplete (this call's `limit`, or a still-expandable sidecar candidate fetch); `truncated=false` is not proof the sidecar saw every onchain blob (WALM-451 `sourceCapped`).
 
 ### `health() -> HealthResult`
 
