@@ -43,11 +43,11 @@ There are two ways to use MemWal. The difference is whether you also get the **l
 | MemWal MCP: memory tools (`memwal_remember`, `memwal_recall`, …) | ✓ | ✓ |
 | Lifecycle hooks: automatic recall/save reminders | ✓ | ✗ |
 
-- **MCP-only** gives the agent the memory tools. Because the tool descriptions encourage proactive use, the agent already saves and recalls on its own; you just do not get the hooks. Available on **every** MCP client.
-- **Plugin** bundles the MCP server **and** lifecycle hooks that reinforce the behavior (for example, preferring Walrus Memory over a client's built-in memory). Available on **Claude Code**, **Codex**, **Antigravity**, and **Cursor**.
+- **Plugin** bundles the MCP server **and** lifecycle hooks. The `SessionStart` hook tells the agent to prefer the `memwal_*` tools over any built-in or local memory feature, and when to save without being asked. Automatic memory works with no further instructions from you. Available on **Claude Code**, **Codex**, **Antigravity**, and **Cursor**.
+- **MCP-only** gives the agent the memory tools on **every** MCP client. The tool descriptions encourage proactive use, so agents often do save and recall on their own. Treat that as best-effort: it varies by client and model, and on a client that ships its own memory feature the built-in one commonly wins.
 
 <Note>
-The proactive behavior comes from the tool layer, so it works on both installation paths. The plugin hooks add reinforcement on the clients that support them.
+Prefer the plugin wherever you can install it. It is the tested path for reliable automatic save and recall, and it needs no extra instructions from you. On MCP-only clients, paste the client's instruction block (see [Claude Desktop](/mcp/claude-desktop#add-memory-instructions)) to get closer to the same behavior.
 </Note>
 
 ## Fastest path: let your agent set it up
@@ -70,13 +70,17 @@ What the user actually does differs per client. Pick your row:
 | Client | Automatic memory (hooks) | What you do |
 |---|:-:|---|
 | [Claude Code](/mcp/claude-code) | ✓ Plugin | `/plugin marketplace add MystenLabs/MemWal`, then `/plugin install memwal@memwal-plugins` |
-| [Codex](/mcp/codex) | ✓ Plugin | `codex plugin marketplace add MystenLabs/MemWal`, then `codex plugin add memwal@memwal-plugins`, then trust the hooks via `/hooks` |
+| [Codex](/mcp/codex) | ✓ Plugin | `codex plugin marketplace add MystenLabs/MemWal`, then `codex plugin add memwal@memwal-plugins`, then trust the hooks through `/hooks` |
 | [Antigravity](/mcp/antigravity) | ✓ Plugin | `npx degit MystenLabs/MemWal/packages/mcp/plugin ~/.gemini/config/plugins/memwal` |
 | [Cursor](/mcp/cursor) | Partial | Edit `~/.cursor/mcp.json`; hook support depends on your Cursor version |
 | [Claude Desktop](/mcp/claude-desktop) | ✗ MCP-only | Edit `claude_desktop_config.json`, then [add memory instructions](/mcp/claude-desktop#add-memory-instructions) |
 | [OpenCode](/mcp/opencode) | ✗ MCP-only | Edit the OpenCode MCP config |
-| ChatGPT desktop app | ✓ Plugin | Ships Codex — follow [Codex](/mcp/codex) |
-| ChatGPT web (Connectors) | ✗ Not supported | — |
+| ChatGPT desktop app | ✓ Plugin | Ships Codex, so follow [Codex](/mcp/codex) |
+| ChatGPT web (Connectors) | ✗ Not supported | n/a |
+
+On the plugin rows, that command is the whole setup. The plugin's hooks carry the memory
+instructions, so you do not need to add routing text to `CLAUDE.md`, `AGENTS.md`, or a
+system prompt yourself.
 
 <Note>
 **"ChatGPT" means two different things here.** The macOS **ChatGPT desktop app** ships

@@ -67,8 +67,9 @@ Quit and reopen Claude Desktop (`Cmd+Q` on macOS; closing the window is not enou
 
 Claude Desktop cannot run the lifecycle hooks that reinforce automatic memory on
 [Claude Code](/mcp/claude-code), [Codex](/mcp/codex), and [Antigravity](/mcp/antigravity).
-The tools are proactive on their own, but you can get closer to the plugin behavior by
-stating the expectation yourself.
+The tools still work here and the agent might save and recall on its own, but that is
+best-effort, because Claude Desktop's built-in memory can win instead. State the
+expectation yourself to get closer to the plugin behavior.
 
 Open **Settings → Profile → personal preferences** (applies to every conversation), or a
 single **Project's instructions** (applies only inside that project), and paste:
