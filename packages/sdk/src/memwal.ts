@@ -72,6 +72,8 @@ import {
     compatibilityErrorFromStatus,
 } from "./compatibility.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { verifyMemory } from "./verify.js";
+import type { VerifyOptions, VerifyReport } from "./verify.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -222,6 +224,22 @@ export class MemWal {
      */
     static create(config: MemWalConfig): MemWal {
         return new MemWal(config);
+    }
+
+    /**
+     * Independently verify a memory's provenance from PUBLIC INPUTS ONLY —
+     * no private key and no relayer. Resolves the on-chain Walrus `Blob`,
+     * checks its `memwal_agent_id` against the account's registered
+     * `DelegateKey`s, and confirms public-aggregator retrievability.
+     *
+     * Thin delegate to {@link verifyMemory}; `@mysten/sui` is loaded
+     * dynamically, so calling this does not pull it into the default entry.
+     *
+     * @param blobId - Walrus blob id of the memory to verify
+     * @param opts.accountId - owning MemWalAccount object id (enables the key-binding check)
+     */
+    static verify(blobId: string, opts?: VerifyOptions): Promise<VerifyReport> {
+        return verifyMemory(blobId, opts);
     }
 
     /**
