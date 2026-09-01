@@ -597,6 +597,11 @@ async function handleLocalLogin(
                 delegateAddress: creds.delegateAddress,
             });
         },
+        // This tool call has already returned "here is your URL, go sign in",
+        // so a later failure has no response left to ride home on. Without an
+        // out-of-band notification the agent sits waiting on a flow that is
+        // already dead. MCP logging notifications are fire-and-forget and safe
+        // to emit at any point in the session.
         (err) => {
             const msg = err instanceof Error ? err.message : String(err);
             log.warn("memwal_login.bridge.failed", { msg });
@@ -606,7 +611,13 @@ async function handleLocalLogin(
                 params: {
                     level: "warning",
                     logger: "memwal-mcp",
-                    data: `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are unchanged; call memwal_login again to retry.`,
+                    // The last clause is only true because of the write-ahead
+                    // record (WALM-332): a key the browser already paid to
+                    // register is no longer lost with the process.
+                    data:
+                        `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are ` +
+                        `unchanged; call memwal_login again to retry. If a delegate key was already ` +
+                        `registered on-chain, the next start reclaims it.`,
                 },
             });
         },

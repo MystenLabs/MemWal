@@ -1819,6 +1819,24 @@ pub struct AccountExistsResponse {
     pub exists: bool,
 }
 
+/// GET /api/whoami — the identity the caller's delegate key resolves to.
+///
+/// Unlike `AccountExistsResponse` this *does* carry `account_id`, which is
+/// safe here precisely because the route is authenticated: the caller proved
+/// possession of a delegate key already registered against this account, so
+/// it is being told its own identity, not anyone else's.
+///
+/// Exists so a client that holds a delegate key but lost the surrounding
+/// metadata can rebuild `credentials.json` (WALM-332). All three fields are
+/// required for that: `account_id` and `owner` come from the registry scan,
+/// `package_id` from server config.
+#[derive(Debug, Serialize)]
+pub struct WhoamiResponse {
+    pub account_id: String,
+    pub owner: String,
+    pub package_id: String,
+}
+
 /// POST /api/stats — count + stored bytes for a namespace.
 /// Used by the benchmark harness for verification. Mode-blind.
 #[derive(Debug, Deserialize)]

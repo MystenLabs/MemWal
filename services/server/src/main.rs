@@ -1665,6 +1665,11 @@ async fn main() {
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))
         .route("/api/stats", post(routes::stats))
+        // Identity echo — tells an authenticated caller which account its
+        // delegate key resolves to. Must stay inside this authed group; the
+        // account_id it returns is deliberately withheld from the public
+        // /api/accounts/{owner}/exists route. See routes::whoami.
+        .route("/api/whoami", get(routes::whoami))
         // Router::layer runs middleware bottom-to-top (last added runs first).
         // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
         .layer(middleware::from_fn_with_state(

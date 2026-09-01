@@ -1,7 +1,7 @@
 /**
  * Ed25519 helpers — pure-JS via @noble/ed25519.
  */
-import { getPublicKeyAsync, utils } from "@noble/ed25519";
+import { getPublicKeyAsync, signAsync, utils } from "@noble/ed25519";
 import { blake2b } from "@noble/hashes/blake2.js";
 
 function hex(bytes: Uint8Array): string {
@@ -46,6 +46,19 @@ export function deriveSuiAddress(pubKey: Uint8Array): string {
     buf.set(pubKey, 1);
     const digest = blake2b.create({ dkLen: 32 }).update(buf).digest();
     return "0x" + hex(digest);
+}
+
+/**
+ * Sign a canonical request message with a delegate private key.
+ *
+ * The relayer authenticates `/api/*` by Ed25519 signature over
+ * `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`
+ * (`services/server/src/auth.rs`, which calls itself the single source of
+ * truth for that format). Keep the two in lockstep.
+ */
+export async function signMessage(privateKeyHex: string, message: string): Promise<string> {
+    const sig = await signAsync(new TextEncoder().encode(message), fromHex(privateKeyHex));
+    return hex(sig);
 }
 
 export { hex as bytesToHex, fromHex as hexToBytes };

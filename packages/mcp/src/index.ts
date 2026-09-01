@@ -10,6 +10,7 @@
  *      — the next process spawn will re-trigger login.
  */
 import { clearCreds, credsPath, loadCreds } from "./auth.js";
+import { recoverPendingLogin, formatStrandedLoginNotice } from "./recovery.js";
 import { runAuthRequiredServer } from "./auth-required.js";
 import { runBridge } from "./bridge.js";
 import { loginFlow } from "./login.js";
@@ -153,6 +154,25 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // sign-in belongs to a different account (GH #628). The old file is now
     // replaced only on success, and backed up when the account changes.
     let creds = args.forceLogin ? null : loadCreds();
+    // A previous sign-in may have died after the browser registered our
+    // delegate key on-chain but before the callback saved it (WALM-332). The
+    // key was write-ahead-persisted, so try to reclaim it rather than making
+    // the user register — and pay for — a replacement. Cheap no-op when there
+    // is no pending record, which is the overwhelmingly common case: it hits
+    // the network only when there is genuinely something stranded.
+    if (!args.forceLogin) {
+        const recovery = await recoverPendingLogin();
+        if (recovery.outcome === "recovered" && recovery.credentials) {
+            creds = recovery.credentials;
+            note(
+                `Recovered credentials from an interrupted sign-in ` +
+                    `(delegate ${recovery.credentials.delegateAddress}).`,
+            );
+        } else {
+            const notice = formatStrandedLoginNotice(recovery);
+            if (notice) note(notice);
+        }
+    }
     if (creds && args.relayerUrl && creds.relayerUrl !== args.relayerUrl) {
         // Caller wants a different relayer than what's saved. NEVER silently
         // mutate the saved relayerUrl — a malicious config snippet (e.g.

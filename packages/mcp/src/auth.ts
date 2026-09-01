@@ -286,3 +286,119 @@ function isValid(obj: unknown): obj is MemWalCredentials {
         c.version === 1
     );
 }
+
+/* ------------------------------------------------------------------------- *
+ * Pending login — write-ahead for the delegate keypair (WALM-332).
+ *
+ * The browser registers our delegate public key on-chain, which costs gas and
+ * cannot be undone, and only afterwards POSTs the callback that makes us save
+ * the matching private key. Losing this process in that window used to destroy
+ * the only copy of the key, stranding a paid registration nobody could use.
+ *
+ * So the keypair is written here BEFORE the browser is given the connect URL,
+ * and cleared once `saveCreds` has the key safely in `credentials.json`. A
+ * record that outlives its flow is recovered on next start.
+ * ------------------------------------------------------------------------- */
+
+const PENDING_FILE = "login-pending.json";
+
+/**
+ * How long a stranded record stays recoverable.
+ *
+ * Deliberately far longer than the 5-minute login timeout: the whole point is
+ * to survive a client restart, and a user who quits for the evening and comes
+ * back tomorrow is exactly the case worth covering. The cost of holding it is
+ * an unregistered key on disk, which grants nothing.
+ */
+export const PENDING_LOGIN_TTL_MS = 24 * 60 * 60_000;
+
+export interface PendingLogin {
+    /** 64-hex Ed25519 private key seed. NEVER log this. */
+    delegatePrivateKey: string;
+    delegatePublicKeyHex: string;
+    delegateAddress: string;
+    /** Relayer the flow was started against — recovery must not repoint. */
+    relayerUrl: string;
+    label?: string;
+    /** ISO timestamp, for TTL expiry. */
+    createdAt: string;
+    version: 1;
+}
+
+/** Sits beside whichever credentials file `credsPath()` resolves to, so a
+ * project-local sign-in recovers into that same project. */
+export function pendingLoginPath(): string {
+    return join(dirname(credsPath()), PENDING_FILE);
+}
+
+/** Persist the pending keypair. Best-effort: a login that cannot write its
+ * write-ahead record is still better than no login at all, so this never
+ * throws — it degrades to today's behaviour. */
+export function savePendingLogin(pending: PendingLogin): void {
+    const path = pendingLoginPath();
+    try {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        writeFileSync(path, JSON.stringify(pending, null, 2), {
+            encoding: "utf8",
+            mode: 0o600,
+        });
+        try {
+            chmodSync(path, 0o600);
+        } catch {
+            /* Windows etc. — best effort */
+        }
+    } catch {
+        /* see doc comment */
+    }
+}
+
+/**
+ * Load a pending record, or null if there is none, it is malformed, or it has
+ * aged out. An expired record is deleted on read rather than left to linger.
+ */
+export function loadPendingLogin(): PendingLogin | null {
+    const path = pendingLoginPath();
+    if (!existsSync(path)) return null;
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+        clearPendingLogin();
+        return null;
+    }
+    if (!isValidPending(parsed)) {
+        clearPendingLogin();
+        return null;
+    }
+    const age = Date.now() - Date.parse(parsed.createdAt);
+    if (!Number.isFinite(age) || age > PENDING_LOGIN_TTL_MS) {
+        clearPendingLogin();
+        return null;
+    }
+    return parsed;
+}
+
+/** Remove the pending record. Safe to call when there isn't one. */
+export function clearPendingLogin(): void {
+    try {
+        const path = pendingLoginPath();
+        if (existsSync(path)) unlinkSync(path);
+    } catch {
+        /* best effort */
+    }
+}
+
+function isValidPending(obj: unknown): obj is PendingLogin {
+    if (!obj || typeof obj !== "object") return false;
+    const p = obj as Record<string, unknown>;
+    return (
+        typeof p.delegatePrivateKey === "string" &&
+        /^[0-9a-fA-F]{64}$/.test(p.delegatePrivateKey) &&
+        typeof p.delegatePublicKeyHex === "string" &&
+        /^[0-9a-fA-F]{64}$/.test(p.delegatePublicKeyHex) &&
+        typeof p.delegateAddress === "string" &&
+        typeof p.relayerUrl === "string" &&
+        typeof p.createdAt === "string" &&
+        p.version === 1
+    );
+}

@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Persist the delegate keypair before the sign-in URL is handed to the browser, and reclaim it on the next start. The browser's on-chain `add_delegate_key` is paid and irreversible, and it happens before the callback that saved the private half, so a client that died in that window destroyed the only copy of a key the user had already paid for and left an orphaned registration nobody could use. (#793)
 - Resolve the credential directory on every access instead of freezing it at module load, and let `MEMWAL_CREDS_DIR` override it. The login test sandboxed the home directory with `HOME` alone, which `os.homedir()` ignores on Windows, so running the package's test suite there wrote fixture credentials over the developer's real `~/.memwal/credentials.json` and destroyed the delegate key stored in it. (#705)
 
 ## 0.0.11

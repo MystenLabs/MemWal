@@ -6,7 +6,7 @@
 //! Console to hold a delegate key or run its own onchain scan.
 
 use axum::extract::{Path, State};
-use axum::Json;
+use axum::{Extension, Json};
 use std::sync::Arc;
 
 use crate::routes::sponsor::validate_sui_address;
@@ -74,6 +74,46 @@ pub async fn account_exists(
     Ok(Json(AccountExistsResponse { exists }))
 }
 
+/// GET /api/whoami
+///
+/// Returns the account identity the caller's delegate key resolves to.
+///
+/// Authenticated, and that is what makes returning `account_id` here
+/// acceptable where `account_exists` deliberately withholds it: the auth
+/// middleware has already proven the caller holds a delegate key registered
+/// against this account, so this only ever tells a caller about itself. Do
+/// not move this into the unauthenticated router group.
+///
+/// Motivating case (WALM-332): a login interrupted between the browser's
+/// on-chain `add_delegate_key` and the localhost callback leaves the client
+/// holding a valid delegate key but none of the surrounding metadata, so it
+/// cannot write a usable `credentials.json`. Everything needed to rebuild one
+/// is already resolved during authentication — `account_id` and `owner` from
+/// the registry scan, `package_id` from config — so this endpoint hands back
+/// what the middleware already computed rather than doing new work.
+pub async fn whoami(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthInfo>,
+) -> Result<Json<WhoamiResponse>, AppError> {
+    Ok(Json(whoami_response(auth, state.config.package_id.clone())))
+}
+
+/// The field mapping, factored out of the handler so it is testable without a
+/// live `AppState`/DB (same reason as `account_exists` above — this codebase
+/// has no axum-handler test harness).
+///
+/// Worth isolating rather than inlining: `account_id` and `owner` are both
+/// 0x-prefixed 32-byte hex, so transposing them is invisible to the type
+/// checker and would produce credentials that authenticate as the wrong
+/// identity. The test below pins the mapping.
+fn whoami_response(auth: AuthInfo, package_id: String) -> WhoamiResponse {
+    WhoamiResponse {
+        account_id: auth.account_id,
+        owner: auth.owner,
+        package_id,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +142,83 @@ mod tests {
 
         // Already-lowercase input must be unaffected (idempotent).
         assert_eq!(normalized.to_ascii_lowercase(), normalized);
+    }
+
+    // ── GET /api/whoami (WALM-332 recovery) ──────────────────────
+
+    fn auth_fixture() -> AuthInfo {
+        AuthInfo {
+            public_key: "aa".repeat(32),
+            owner: format!("0x{}", "b".repeat(64)),
+            account_id: format!("0x{}", "a".repeat(64)),
+            delegate_key: None,
+            seal_session: None,
+        }
+    }
+
+    /// `account_id` and `owner` are indistinguishable by type — both
+    /// 0x-prefixed 32-byte hex — so a transposition here would compile, pass
+    /// every other test, and hand a recovering client credentials that
+    /// authenticate as the wrong identity. Pin the mapping explicitly.
+    #[test]
+    fn whoami_maps_account_and_owner_without_transposing_them() {
+        let auth = auth_fixture();
+        let package_id = format!("0x{}", "c".repeat(64));
+
+        let resp = whoami_response(auth, package_id.clone());
+
+        assert_eq!(
+            resp.account_id,
+            format!("0x{}", "a".repeat(64)),
+            "account_id must come from AuthInfo::account_id, not owner"
+        );
+        assert_eq!(
+            resp.owner,
+            format!("0x{}", "b".repeat(64)),
+            "owner must come from AuthInfo::owner, not account_id"
+        );
+        assert_eq!(resp.package_id, package_id, "package_id comes from config");
+        assert_ne!(resp.account_id, resp.owner, "fixture must distinguish them");
+    }
+
+    /// The recovering MCP client cannot send `x-account-id` — not knowing it
+    /// is the whole reason it is calling this endpoint — so it signs the
+    /// canonical message with an empty account field and omits the header.
+    /// The server defaults the hint to `""` for exactly this case.
+    ///
+    /// This pins the literal string both sides must build. It is duplicated
+    /// verbatim in `packages/mcp/test/login-recovery-signing.test.mjs`; if the
+    /// canonical format in `auth.rs` ever changes, both fail together rather
+    /// than recovery silently breaking in production.
+    #[test]
+    fn whoami_recovery_request_canonical_message_is_stable() {
+        let timestamp = "1700000000";
+        let method = "GET";
+        let path = "/api/whoami";
+        // sha256 of an empty body — a GET carries none, but the server hashes
+        // the empty body all the same.
+        let body_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let nonce = "550e8400-e29b-41d4-a716-446655440000";
+        let account_id_for_sig = String::new();
+
+        let message = format!(
+            "{}.{}.{}.{}.{}.{}",
+            timestamp, method, path, body_hash, nonce, account_id_for_sig
+        );
+
+        let expected = concat!(
+            "1700000000.GET./api/whoami.",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.",
+            "550e8400-e29b-41d4-a716-446655440000."
+        );
+        assert_eq!(message, expected);
+        // Six fields → five separators. Nothing else in the message contains a
+        // dot: the nonce is hyphen-separated and the body hash is bare hex.
+        assert_eq!(message.matches('.').count(), 5);
+        assert!(
+            message.ends_with('.'),
+            "the empty account id leaves a trailing separator — the client must \
+             reproduce this exactly, not trim it"
+        );
     }
 }
