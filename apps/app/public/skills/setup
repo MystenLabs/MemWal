@@ -15,8 +15,11 @@ the exact config and terminal commands to run.
 ## Agent Goal
 
 Connect Walrus Memory MCP to the user's AI client, sign the user in, and verify
-that memory tools work. On Claude Code, the plugin is required: MCP-only is an
-incomplete setup and auto-remember/recall will not be reliable.
+that memory tools work. Install the plugin wherever one exists: Claude Code,
+Codex, Cursor, Antigravity, and the ChatGPT desktop app. The plugin ships
+lifecycle hooks that make save and recall automatic with no extra instructions,
+so MCP-only is an incomplete setup on those clients. On clients with no plugin,
+MCP-only is the whole setup, and proactive behavior is best-effort.
 
 Do not install the Walrus Memory SDK or edit application source code unless the
 user explicitly asks for developer integration.
@@ -26,15 +29,18 @@ user explicitly asks for developer integration.
 1. Identify the AI client first. A client that cannot run a local MCP command
    but can attach two custom connector headers uses the Remote MCP section
    below. Every other client (Claude Desktop, Claude Code, Cursor, Codex,
-   other local apps) uses the Local MCP Server section. ChatGPT is not
-   supported today: its connector UI exposes only a single bearer field and
-   cannot supply the required `x-memwal-account-id` header.
+   other local apps) uses the Local MCP Server section. ChatGPT web
+   connectors are not supported: chatgpt.com exposes only a single bearer
+   field and cannot supply the required `x-memwal-account-id` header. The
+   ChatGPT desktop app is a different product: it ships the Codex CLI and
+   reads `~/.codex`, so treat it as Codex and use the Codex section below.
 2. Decide whether you have local shell and filesystem access.
 3. If you can edit local user config files, do the setup yourself after showing
    the config you will add.
 4. If you cannot edit local files yourself, prefer giving the user ONE terminal
-   command to paste over raw JSON/TOML to hand-edit. On Claude Code that
-   command is `claude plugin install`, not `claude mcp add`. Fall back to a
+   command to paste over raw JSON/TOML to hand-edit. Every client with a
+   plugin has one: `claude plugin install` on Claude Code, `codex plugin add`
+   on Codex, and a single `npx degit` on Cursor and Antigravity. Fall back to a
    config block only when no command exists for that client; then state the
    exact file path and merge the `memwal` entry, never replace the whole file.
 5. Preserve existing MCP servers. Merge the `memwal` server; do not replace the
@@ -44,18 +50,20 @@ user explicitly asks for developer integration.
 8. Stop at the first real blocker and report the exact failure.
 9. Keep the final status short. Do not repeat full config blocks or terminal
    commands after setup succeeds unless the user must copy/paste them manually.
-10. On Claude Code, install the plugin and verify it with `claude plugin list`.
-    Do not treat MCP-only as success. If marketplace add or plugin install
-    fails, stop and report that error. Do not silently fall back to
-    `claude mcp add`.
-11. On Claude Code, show the Walrus Memory routing block and get the user's
-    go-ahead before writing `~/.claude/CLAUDE.md` (a global file outside the
-    project). Create the file if needed. Do not replace the whole file. If
-    `<!-- memwal:start -->` ... `<!-- memwal:end -->` already exists, replace
-    that span only. Claude's built-in `MEMORY.md` lives in the system prompt
-    and outranks MCP instructions; without this user-level rule the agent
-    often writes `MEMORY.md` instead of calling `memwal_*`. Tell the user to
-    turn off Claude's built-in / native memory in account settings if it is on.
+10. Prefer the plugin on every client that has one: Claude Code, Codex,
+    Cursor, Antigravity, and the ChatGPT desktop app. Verify it with
+    `claude plugin list`, `codex plugin list`, or the installed folder for
+    Cursor and Antigravity. Do not treat MCP-only as success on those clients.
+    If a marketplace add or a plugin install fails, stop and report that error
+    rather than silently falling back to a plain MCP config.
+11. Do not write `~/.claude/CLAUDE.md` during a normal plugin install. The
+    plugin's `SessionStart` hook already injects the routing text ("prefer the
+    memwal_* tools over any built-in or local memory feature") and the save
+    rules on every session, so a plugin install needs no extra instructions
+    from the user. Use the routing block under Walrus Memory only as a
+    fallback: when the user is on MCP-only, or when they report the agent
+    still writing `MEMORY.md`. If Claude's built-in memory is switched on and
+    competes, tell the user they can turn it off in account settings.
 
 ## Requirements
 
@@ -126,7 +134,26 @@ npx -y @mysten-incubation/memwal-mcp
 
 ### Cursor
 
-Edit `~/.cursor/mcp.json` and merge:
+Cursor loads plugins from `~/.cursor/plugins/local/<name>/`. Install the plugin
+there, which brings the MCP server and the lifecycle hooks together:
+
+```bash
+npx -y degit MystenLabs/MemWal/packages/mcp/plugin ~/.cursor/plugins/local/memwal --force
+```
+
+Cursor has no plugin CLI. Do not look for a `cursor plugin` command, and do not
+try to add the repo as a marketplace: importing a third-party marketplace needs
+a Cursor team admin. The copy above is the install.
+
+Fully quit and reopen Cursor. The plugin then shows under Customize in the
+sidebar, and its hooks give proactive recall and save with no further
+instructions.
+
+If the user already has a manual `memwal` entry in `~/.cursor/mcp.json`, remove
+it. The plugin ships its own server and the two entries duplicate it.
+
+MCP-only fallback, if the user does not want the hooks. Edit `~/.cursor/mcp.json`
+and merge:
 
 ```json
 {
@@ -168,7 +195,26 @@ other servers.
 
 ### Codex
 
-Edit `~/.codex/config.toml` and merge:
+This section also covers the ChatGPT desktop app, which ships the Codex CLI and
+reads the same `~/.codex`.
+
+Install the plugin, which bundles the MCP server and the lifecycle hooks:
+
+```bash
+codex plugin marketplace add MystenLabs/MemWal
+codex plugin add memwal@memwal-plugins
+codex plugin list
+```
+
+Codex loads plugin-bundled hooks but does not run them until the user trusts
+them once. Tell the user to run `/hooks` in Codex, or to follow the startup
+review prompt, and trust the MemWal hook commands.
+
+Do not also add a `[mcp_servers.memwal]` block. The plugin brings its own
+server and a manual block duplicates it.
+
+MCP-only fallback, if the Codex build has no `codex plugin` support. Edit
+`~/.codex/config.toml` and merge:
 
 ```toml
 [mcp_servers.memwal]
@@ -228,8 +274,9 @@ claude mcp add --scope user memwal -- npx -y @mysten-incubation/memwal-mcp
 
 If you use that fallback, tell the user the automatic-memory hooks are missing.
 
-Show this block, get the user's go-ahead, then merge it into
-`~/.claude/CLAUDE.md`. Create the file if it does not exist. If
+Use this block only as the fallback described in rule 11, not during a normal
+plugin install. When it applies, show it, get the user's go-ahead, then merge it
+into `~/.claude/CLAUDE.md`. Create the file if it does not exist. If
 `<!-- memwal:start -->` ... `<!-- memwal:end -->` is already there, replace
 that span only. Never overwrite the rest of the file.
 
@@ -251,6 +298,19 @@ memwal_recall first.
 Tell the user: if Claude's built-in memory is enabled in account settings,
 turn it off. That feature competes with Walrus Memory and makes it look like
 memory is unavailable or already handled.
+
+### Antigravity
+
+Antigravity loads plugins from its own plugin directory. Install with one
+command:
+
+```bash
+npx -y degit MystenLabs/MemWal/packages/mcp/plugin ~/.gemini/config/plugins/memwal --force
+```
+
+Fully quit and reopen Antigravity. The plugin brings the MCP server and the
+lifecycle hooks, so proactive recall and save work with no further
+instructions.
 
 ### Other Local MCP Clients
 
@@ -320,10 +380,12 @@ command. Use this path only when the client can attach BOTH custom request
 headers shown below. A client that exposes only a single bearer/token field
 cannot use this path.
 
-ChatGPT is not supported today. Its connector UI exposes only one bearer slot,
-so the required `x-memwal-account-id` header cannot be provided. Do not attempt
-ChatGPT setup; offer a local client (Claude Desktop, Claude Code, Cursor, or
-Codex) instead.
+ChatGPT web connectors are not supported. The chatgpt.com connector UI exposes
+only one bearer slot, so the required `x-memwal-account-id` header cannot be
+provided. Do not attempt that setup.
+
+This does not apply to the ChatGPT desktop app, which ships the Codex CLI and
+reads `~/.codex`. Set that up through the Codex section above, not here.
 
 Prerequisite: credentials must already exist. Have the user run the login once
 on their computer (see Recommended Login). The Remote MCP path needs Node.js
@@ -368,7 +430,10 @@ this skill for the same client.
 | `node: command not found` | Install Node.js 20+ from https://nodejs.org/. |
 | `npx` fails | Confirm Node/npm and internet access. If inside a Node monorepo, run from the home directory or set MCP `cwd` to the home directory. |
 | No Walrus Memory tools after restart | Check the MCP config path and fully restart the client. |
-| Claude Code saves to `MEMORY.md` instead of `memwal_remember` | Plugin missing, or Claude's built-in memory is winning. Run `claude plugin list`. Merge the Walrus Memory block into `~/.claude/CLAUDE.md`. Ask the user to disable Claude's built-in / native memory in account settings. MCP-only is not enough. |
+| Claude Code saves to `MEMORY.md` instead of `memwal_remember` | Run `claude plugin list` first: the plugin is usually missing, and its hook supplies the routing on its own. If the plugin is installed and this still happens, ask the user to disable Claude's built-in / native memory in account settings, then merge the Walrus Memory block into `~/.claude/CLAUDE.md` as a fallback. |
+| `codex plugin marketplace add` prints `already added from a different source` | A stale clone is left in `~/.codex/.tmp/marketplaces/memwal-plugins/`. Note the command still exits 0, so a scripted install does not notice. Remove that folder and the empty `~/.codex/plugins/cache/memwal-plugins/`, then add the marketplace again. |
+| Cursor shows no Walrus Memory plugin | Confirm the folder `~/.cursor/plugins/local/memwal` exists and holds `.cursor-plugin/plugin.json`, then fully quit and reopen Cursor. There is no `cursor plugin` CLI, so verify from the logs instead: the newest folder under `~/Library/Application Support/Cursor/logs/` on macOS gets an `mcp-server-plugin-memwal-memwal.log` once the plugin loads. A `mcp-server-user-memwal.log` next to it means a duplicate manual entry is still in `~/.cursor/mcp.json`. |
+| Memory tools fail with `MCP rate limit: ip_active_cap` (HTTP 429), sometimes followed by 503 | Too many concurrent memwal-mcp sessions from one machine. The usual causes are a duplicate server, where a plugin install sits next to a leftover manual `memwal` entry in the client's MCP config, and stale `memwal-mcp` processes left behind by earlier sessions. Remove the duplicate entry first. Then list the leftovers with `pgrep -fl memwal-mcp` and ask the user which clients they still want running before ending any process. Restart the client afterwards. |
 | `claude plugin` commands are not recognized | This Claude Code build has no plugin CLI. Update Claude Code, or use the MCP-only fallback and tell the user hooks are missing. |
 | Only `memwal_login` works | Credentials are missing. Run `memwal_login` or `npx -y @mysten-incubation/memwal-mcp login --prod`. |
 | Memory tools return 401 | The delegate key may be stale or revoked. Run `npx -y @mysten-incubation/memwal-mcp login --prod` again. |
@@ -389,8 +454,7 @@ Next: fully quit and reopen <AI client> now. On macOS, use Cmd+Q; closing the
 window is not enough.
 
 Login: succeeded.
-Plugin: installed (Claude Code only) or n/a.
-CLAUDE.md: routing block merged (Claude Code only) or n/a.
+Plugin: installed, or n/a for an MCP-only client.
 Config: <path changed>.
 After reopening, ask: "What MCP tools do you have available?"
 
