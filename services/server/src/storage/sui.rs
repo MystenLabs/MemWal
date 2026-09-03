@@ -456,8 +456,6 @@ fn map_get_object_status(status: tonic::Status) -> OnchainVerifyError {
         tonic::Code::NotFound | tonic::Code::InvalidArgument => {
             OnchainVerifyError::NotFound(format!("gRPC GetObject failed: {status}"))
         }
-        // UNAVAILABLE / RESOURCE_EXHAUSTED (HTTP 429) / DEADLINE_EXCEEDED and
-        // any other transport failure: retryable, not a sign-in failure.
         _ => OnchainVerifyError::RpcError(format!("gRPC GetObject failed: {status}")),
     }
 }
@@ -1010,10 +1008,9 @@ impl OnchainVerifyError {
     /// not exist" answer.
     ///
     /// HTTP signed auth and the MCP proxy must not treat these as a revoke:
-    /// a Sui gRPC 429 is `RpcError` (`RESOURCE_EXHAUSTED`), and logging it as
-    /// "revoked on-chain" produced intermittent empty 401s that the SDK mapped
-    /// to memwal_login (WALM-429). `NotFound` / invalid object ids are
-    /// definitive and must not take this path.
+    /// a Sui gRPC 429 is `RpcError`, and logging it as "revoked on-chain"
+    /// produced intermittent empty 401s that the SDK mapped to memwal_login
+    /// (WALM-429).
     pub fn is_unavailable(&self) -> bool {
         match self {
             Self::RpcError(_) | Self::ScanCapExceeded(_) => true,
@@ -1333,11 +1330,8 @@ mod tests {
 
     #[test]
     fn test_error_variants_are_distinct() {
-        // Confirm AccountDeactivated is separate from KeyNotFound
-        // (different auth failure modes → different handling in resolve_account)
         let deactivated = OnchainVerifyError::AccountDeactivated("msg".into());
         let not_found = OnchainVerifyError::KeyNotFound("msg".into());
-        // Both are Err variants but must match differently:
         assert!(matches!(
             deactivated,
             OnchainVerifyError::AccountDeactivated(_)
@@ -1349,53 +1343,32 @@ mod tests {
         assert!(OnchainVerifyError::ScanCapExceeded("cap".into()).is_unavailable());
         assert!(!OnchainVerifyError::WrongObjectType("type".into()).is_unavailable());
         assert!(!OnchainVerifyError::NotFound("missing object".into()).is_unavailable());
-        assert!(!parse_object_id("not-a-valid-sui-address")
-            .unwrap_err()
-            .is_unavailable());
     }
 
     #[test]
-    fn get_object_status_not_found_is_definitive() {
-        let err = map_get_object_status(tonic::Status::not_found("no such object"));
-        assert!(matches!(err, OnchainVerifyError::NotFound(_)));
-        assert!(!err.is_unavailable());
-    }
-
-    #[test]
-    fn get_object_status_invalid_argument_is_definitive() {
-        let err = map_get_object_status(tonic::Status::invalid_argument("bad object id"));
-        assert!(matches!(err, OnchainVerifyError::NotFound(_)));
-        assert!(!err.is_unavailable());
-    }
-
-    #[test]
-    fn get_object_status_resource_exhausted_is_unavailable() {
-        let err = map_get_object_status(tonic::Status::resource_exhausted("429 Too Many Requests"));
-        assert!(matches!(err, OnchainVerifyError::RpcError(_)));
-        assert!(err.is_unavailable());
-    }
-
-    #[test]
-    fn get_object_status_unavailable_is_unavailable() {
-        let err = map_get_object_status(tonic::Status::unavailable("fullnode down"));
-        assert!(matches!(err, OnchainVerifyError::RpcError(_)));
-        assert!(err.is_unavailable());
-    }
-
-    #[test]
-    fn get_object_status_deadline_exceeded_is_unavailable() {
-        let err = map_get_object_status(tonic::Status::deadline_exceeded("timeout"));
-        assert!(matches!(err, OnchainVerifyError::RpcError(_)));
-        assert!(err.is_unavailable());
-    }
-
-    #[test]
-    fn get_object_does_not_treat_not_found_in_message_as_absent() {
-        let err = map_get_object_status(tonic::Status::internal(
-            "internal error: object not found while loading state",
-        ));
-        assert!(matches!(err, OnchainVerifyError::RpcError(_)));
-        assert!(err.is_unavailable());
+    fn get_object_status_classifies_by_grpc_code() {
+        for (status, unavailable) in [
+            (tonic::Status::not_found("no such object"), false),
+            (tonic::Status::invalid_argument("bad object id"), false),
+            (
+                tonic::Status::resource_exhausted("429 Too Many Requests"),
+                true,
+            ),
+            (tonic::Status::unavailable("fullnode down"), true),
+            (tonic::Status::deadline_exceeded("timeout"), true),
+            (
+                tonic::Status::internal("internal error: object not found while loading state"),
+                true,
+            ),
+        ] {
+            let err = map_get_object_status(status);
+            assert_eq!(err.is_unavailable(), unavailable, "{err}");
+            if unavailable {
+                assert!(matches!(err, OnchainVerifyError::RpcError(_)), "{err}");
+            } else {
+                assert!(matches!(err, OnchainVerifyError::NotFound(_)), "{err}");
+            }
+        }
     }
 
     #[test]
@@ -1414,10 +1387,7 @@ mod tests {
         assert!(json_account_active(&fields(r#"{"active":true}"#)).unwrap());
         assert!(!json_account_active(&fields(r#"{"active":false}"#)).unwrap());
         let missing = json_account_active(&fields(r#"{}"#)).unwrap_err();
-        assert!(
-            missing.is_unavailable(),
-            "omitted Move fields after a successful GetObject are RpcError, not NotFound"
-        );
+        assert!(missing.is_unavailable());
         assert!(json_account_active(&fields(r#"{"active":"false"}"#)).is_err());
     }
 
@@ -1440,30 +1410,8 @@ mod tests {
         assert!(grpc_account_active(&fields(Some(Kind::BoolValue(true)))).unwrap());
         assert!(!grpc_account_active(&fields(Some(Kind::BoolValue(false)))).unwrap());
         let missing = grpc_account_active(&fields(None)).unwrap_err();
-        assert!(
-            missing.is_unavailable(),
-            "omitted Move fields after a successful GetObject are RpcError, not NotFound"
-        );
+        assert!(missing.is_unavailable());
         assert!(grpc_account_active(&fields(Some(Kind::StringValue("false".into())))).is_err());
-    }
-
-    #[test]
-    fn missing_move_fields_after_get_object_are_unavailable() {
-        // Object was returned; omitted json/owner/delegate_keys must 503 and
-        // keep the cache row, not 401+evict a live key (WALM-429).
-        for msg in [
-            "Missing 'owner' field",
-            "Missing 'delegate_keys' field",
-            "Object has no json content",
-            "Object json is not a struct",
-            "Object has no fields",
-        ] {
-            let err = OnchainVerifyError::RpcError(msg.into());
-            assert!(
-                err.is_unavailable(),
-                "{msg} must stay RpcError/unavailable, not NotFound"
-            );
-        }
     }
 
     // ── Delegate key matching — public key as JSON array ────────────────

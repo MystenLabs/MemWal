@@ -75,7 +75,7 @@ fn unsupported_legacy_sdk() -> StatusCode {
 /// Machine-readable 503 from signed HTTP auth / MCP when Sui cannot be
 /// consulted. Distinct from other relayer 503s (Redis, rate limiter, LLM)
 /// so SDKs only print the credential-verification copy when this header is
-/// present (WALM-429 review).
+/// present (WALM-429).
 pub(crate) const AUTH_UPSTREAM_UNAVAILABLE: &str = "AUTH_UPSTREAM_UNAVAILABLE";
 
 /// Short Retry-After for auth 503. Callers must backoff rather than
@@ -101,8 +101,7 @@ pub(crate) fn upstream_unavailable() -> Response {
         .into_response()
 }
 
-/// What Strategy 1 does with a cache row after on-chain re-verify.
-/// WALM-429: an RPC failure must not evict the row *and* must not
+/// WALM-429: an RPC failure must not evict the cache row *and* must not
 /// authenticate from it.
 #[derive(Debug)]
 enum CacheReverifyAction {

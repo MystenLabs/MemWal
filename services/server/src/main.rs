@@ -60,11 +60,9 @@ fn security_delete_cors() -> CorsLayer {
 }
 
 /// CORS layer for the main relayer routes, scoped to the configured origins.
-/// `allow_headers` are the request headers a browser may send on a signed
-/// request; `expose_headers` lists the response headers a cross-origin client
-/// may read — Fetch hides everything else, so `x-auth-error` and `Retry-After`
-/// must be exposed for the browser SDK to read the machine-readable auth-failure
-/// reason (e.g. clock-drift vs. bad signature) and the 503 backoff.
+/// Fetch hides response headers unless listed in `expose_headers`, so
+/// `x-auth-error` and `Retry-After` must be exposed for the browser SDK
+/// (clock-drift vs bad signature, and 503 backoff).
 fn relayer_cors(origins: Vec<HeaderValue>) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
@@ -177,10 +175,6 @@ mod cors_tests {
 
     #[tokio::test]
     async fn relayer_cors_exposes_x_auth_error_and_retry_after() {
-        // Browsers can only read response headers listed in
-        // Access-Control-Expose-Headers. The clock-drift reason (x-auth-error)
-        // and 503 backoff (Retry-After) must be exposed so the browser SDK can
-        // distinguish drift from a bad signature and honor auth 503s.
         let origin = "https://app.memwal.test";
         let app = Router::new()
             .route("/api/remember", post(|| async {}))
