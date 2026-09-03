@@ -97,13 +97,13 @@ pub async fn verify_delegate_key_onchain(
 
     let fields = content
         .fields
-        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no fields".into()))?;
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no fields".into()))?;
 
     // Extract owner address
     let owner = fields
         .get("owner")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'owner' field".into()))?
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'owner' field".into()))?
         .to_string();
 
     // Block deactivated accounts.
@@ -125,7 +125,7 @@ pub async fn verify_delegate_key_onchain(
     let delegate_keys = fields
         .get("delegate_keys")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'delegate_keys' field".into()))?;
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
 
     // Convert our public key to the same format as stored onchain (Vec<u8> as JSON array)
     let pk_as_numbers: Vec<serde_json::Value> = public_key_bytes
@@ -374,7 +374,7 @@ pub async fn list_delegate_keys_onchain(
 
     let fields = content
         .fields
-        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no fields".into()))?;
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no fields".into()))?;
 
     parse_delegate_keys(&fields)
 }
@@ -411,7 +411,7 @@ fn json_account_active(
     fields
         .get("active")
         .and_then(serde_json::Value::as_bool)
-        .ok_or_else(|| OnchainVerifyError::NotFound("Missing or malformed 'active' field".into()))
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing or malformed 'active' field".into()))
 }
 
 fn grpc_account_active(fields: &prost_types::Struct) -> Result<bool, OnchainVerifyError> {
@@ -419,7 +419,7 @@ fn grpc_account_active(fields: &prost_types::Struct) -> Result<bool, OnchainVeri
         .fields
         .get("active")
         .and_then(grpc_value_as_bool)
-        .ok_or_else(|| OnchainVerifyError::NotFound("Missing or malformed 'active' field".into()))
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing or malformed 'active' field".into()))
 }
 
 fn grpc_value_as_list(v: &prost_types::Value) -> Option<&[prost_types::Value]> {
@@ -517,15 +517,15 @@ async fn verify_delegate_key_onchain_grpc(
 
     let json = object
         .json
-        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no json content".into()))?;
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no json content".into()))?;
     let fields = grpc_value_as_struct(&json)
-        .ok_or_else(|| OnchainVerifyError::NotFound("Object json is not a struct".into()))?;
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object json is not a struct".into()))?;
 
     let owner = fields
         .fields
         .get("owner")
         .and_then(grpc_value_as_str)
-        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'owner' field".into()))?
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'owner' field".into()))?
         .to_string();
 
     let active = grpc_account_active(fields)?;
@@ -544,7 +544,7 @@ async fn verify_delegate_key_onchain_grpc(
         .fields
         .get("delegate_keys")
         .and_then(grpc_value_as_list)
-        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'delegate_keys' field".into()))?;
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
 
     for dk in delegate_keys {
         let Some(dk_fields) = grpc_value_as_struct(dk) else {
@@ -594,15 +594,15 @@ async fn list_delegate_keys_onchain_grpc(
 
     let json = object
         .json
-        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no json content".into()))?;
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no json content".into()))?;
     let fields = grpc_value_as_struct(&json)
-        .ok_or_else(|| OnchainVerifyError::NotFound("Object json is not a struct".into()))?;
+        .ok_or_else(|| OnchainVerifyError::RpcError("Object json is not a struct".into()))?;
 
     let delegate_keys = fields
         .fields
         .get("delegate_keys")
         .and_then(grpc_value_as_list)
-        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'delegate_keys' field".into()))?;
+        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
 
     let mut out = Vec::with_capacity(delegate_keys.len());
     for dk in delegate_keys {
@@ -1414,7 +1414,10 @@ mod tests {
         assert!(json_account_active(&fields(r#"{"active":true}"#)).unwrap());
         assert!(!json_account_active(&fields(r#"{"active":false}"#)).unwrap());
         let missing = json_account_active(&fields(r#"{}"#)).unwrap_err();
-        assert!(!missing.is_unavailable());
+        assert!(
+            missing.is_unavailable(),
+            "omitted Move fields after a successful GetObject are RpcError, not NotFound"
+        );
         assert!(json_account_active(&fields(r#"{"active":"false"}"#)).is_err());
     }
 
@@ -1436,8 +1439,31 @@ mod tests {
 
         assert!(grpc_account_active(&fields(Some(Kind::BoolValue(true)))).unwrap());
         assert!(!grpc_account_active(&fields(Some(Kind::BoolValue(false)))).unwrap());
-        assert!(grpc_account_active(&fields(None)).is_err());
+        let missing = grpc_account_active(&fields(None)).unwrap_err();
+        assert!(
+            missing.is_unavailable(),
+            "omitted Move fields after a successful GetObject are RpcError, not NotFound"
+        );
         assert!(grpc_account_active(&fields(Some(Kind::StringValue("false".into())))).is_err());
+    }
+
+    #[test]
+    fn missing_move_fields_after_get_object_are_unavailable() {
+        // Object was returned; omitted json/owner/delegate_keys must 503 and
+        // keep the cache row, not 401+evict a live key (WALM-429).
+        for msg in [
+            "Missing 'owner' field",
+            "Missing 'delegate_keys' field",
+            "Object has no json content",
+            "Object json is not a struct",
+            "Object has no fields",
+        ] {
+            let err = OnchainVerifyError::RpcError(msg.into());
+            assert!(
+                err.is_unavailable(),
+                "{msg} must stay RpcError/unavailable, not NotFound"
+            );
+        }
     }
 
     // ── Delegate key matching — public key as JSON array ────────────────
