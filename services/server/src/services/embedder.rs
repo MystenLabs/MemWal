@@ -27,6 +27,12 @@ pub const EMBEDDING_MODEL: &str = "openai/text-embedding-3-small";
 pub const EMBEDDING_DIMS: usize = 1536;
 
 /// 16384 = 8192 tokens × 2 chars/token under cl100k; do not use admin 64KiB.
+///
+/// This is a property of [`EMBEDDING_MODEL`]'s context window, not of
+/// embedding in general — so it is enforced only on the API path. The mock
+/// fallback hashes the input locally and has no such ceiling; rejecting there
+/// would break key-less deployments that legitimately embed up to
+/// `MAX_REMEMBER_TEXT_BYTES`.
 const MAX_EMBED_INPUT_BYTES: usize = 16384;
 
 fn reject_oversized_embed_input(text: &str) -> Result<(), AppError> {
@@ -36,6 +42,23 @@ fn reject_oversized_embed_input(text: &str) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+/// True when an upstream 400 blames the *input's length*.
+///
+/// OpenAI-compatible providers report that as `context_length_exceeded`, or
+/// in prose. Every other 400 — unknown model id, malformed body, a
+/// provider-side auth shape we got wrong — is our bug, not the caller's, and
+/// must stay [`AppError::Internal`]: returning 400 there tells a client to
+/// shorten a query that was never the problem, and hides a misconfiguration
+/// behind a 4xx that no dashboard alerts on.
+fn is_context_length_error(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("context_length_exceeded")
+        || lower.contains("maximum context length")
+        || lower.contains("reduce the length")
+        || lower.contains("too many tokens")
+        || lower.contains("string too long")
 }
 
 #[async_trait]
@@ -67,9 +90,11 @@ impl OpenAiEmbedder {
 impl Embedder for OpenAiEmbedder {
     #[tracing::instrument(name = "embedder.embed", skip_all, fields(text_len = text.len()))]
     async fn embed(&self, text: &str) -> Result<Vec<f32>, AppError> {
-        reject_oversized_embed_input(text)?;
         match &self.config.openai_api_key {
             Some(api_key) => {
+                // Guard the model's context window, not `embed` as a whole:
+                // only this arm reaches a model. See `MAX_EMBED_INPUT_BYTES`.
+                reject_oversized_embed_input(text)?;
                 // Real embedding via OpenRouter/OpenAI-compatible API
                 let url = format!("{}/embeddings", self.config.openai_api_base);
 
@@ -111,8 +136,9 @@ impl Embedder for OpenAiEmbedder {
                             status, body
                         )));
                     }
-                    if status == reqwest::StatusCode::BAD_REQUEST {
-                        tracing::warn!(%status, body, "embedding API returned 400");
+                    if status == reqwest::StatusCode::BAD_REQUEST && is_context_length_error(&body)
+                    {
+                        tracing::warn!(%status, body, "embedding API rejected the input length");
                         return Err(AppError::BadRequest(
                             "embedding input exceeds the model context limit".into(),
                         ));
@@ -250,5 +276,41 @@ mod tests {
             super::reject_oversized_embed_input(&"q".repeat(16385)),
             "input is over the embedding input limit",
         );
+    }
+
+    // ── upstream 400: only a length complaint is the caller's fault ──
+
+    #[test]
+    fn context_length_bodies_are_attributed_to_the_caller() {
+        for body in [
+            r#"{"error":{"code":"context_length_exceeded","message":"..."}}"#,
+            r#"{"error":{"message":"This model's maximum context length is 8192 tokens"}}"#,
+            r#"{"error":{"message":"Please reduce the length of the messages."}}"#,
+            r#"{"error":{"message":"Too many tokens in input"}}"#,
+            r#"{"error":{"message":"String too long. Expected a string with maximum length 8192"}}"#,
+        ] {
+            assert!(
+                super::is_context_length_error(body),
+                "should read as a length complaint: {body}"
+            );
+        }
+    }
+
+    /// The regression this gate exists for: a 400 that has nothing to do with
+    /// the caller's input must NOT come back as `BadRequest`, or a client
+    /// shortens a query forever against a server misconfiguration.
+    #[test]
+    fn other_400_bodies_are_not_blamed_on_the_caller() {
+        for body in [
+            r#"{"error":{"message":"The model `text-embedding-9` does not exist"}}"#,
+            r#"{"error":{"code":"invalid_api_key","message":"Incorrect API key provided"}}"#,
+            r#"{"error":{"message":"Unrecognized request argument supplied: dimensions"}}"#,
+            "",
+        ] {
+            assert!(
+                !super::is_context_length_error(body),
+                "should stay an internal error: {body}"
+            );
+        }
     }
 }
