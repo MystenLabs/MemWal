@@ -161,8 +161,15 @@ pub async fn recall(
     // Validate scoring_weights up front — fail fast on malformed input
     // (NaN, out-of-range, sub-floor half-life) BEFORE we spend an embed +
     // vector search + Walrus + SEAL round-trip just to 400 at the end.
-    let weights = body.scoring_weights.clone().unwrap_or_default();
-    weights.validate()?;
+    // Validate what the caller SENT, even when an explicit `sort` will
+    // suppress it: a malformed weight vector is a 400 either way, not
+    // something `sort` quietly excuses.
+    let requested_weights = body.scoring_weights.clone().unwrap_or_default();
+    requested_weights.validate()?;
+    // WALM-383 precedence: an explicit `sort` decides the order; weights only
+    // re-rank when `sort` is omitted. See `super::effective_scoring_weights`.
+    let sort = body.sort.unwrap_or_default();
+    let weights = super::effective_scoring_weights(body.sort, requested_weights);
 
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
@@ -186,7 +193,7 @@ pub async fn recall(
     // row is frequently a mediocre semantic match and would otherwise fall
     // outside the cosine top-`limit` entirely. `Relevance` fetches exactly
     // `limit`, so the default path issues the identical query it always has.
-    let candidate_limit = body.sort.candidate_limit(limit);
+    let candidate_limit = sort.candidate_limit(limit);
     let t1 = std::time::Instant::now();
     let hits = state
         .db
@@ -198,7 +205,7 @@ pub async fn recall(
     // only distance + created_at, both already on the row, so the over-fetch
     // costs one wider SQL query instead of 5x the Walrus downloads and SEAL
     // decrypts.
-    let hits = super::select_hits_for_sort(hits, body.sort, limit);
+    let hits = super::select_hits_for_sort(hits, sort, limit);
     let hit_count = hits.len();
 
     if hits.is_empty() {

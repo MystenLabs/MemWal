@@ -1353,10 +1353,17 @@ pub struct RecallRequest {
     /// [`ScoringWeights`].
     #[serde(default)]
     pub scoring_weights: Option<ScoringWeights>,
-    /// How to order results. Omitted → [`RecallSort::Relevance`], today's
-    /// behaviour. See [`RecallSort`].
+    /// How to order results. `None` (omitted) → [`RecallSort::Relevance`],
+    /// today's behaviour. See [`RecallSort`].
+    ///
+    /// Deliberately `Option`, not a bare [`RecallSort`] with a default: the
+    /// WALM-383 precedence contract distinguishes *omitted* from *explicit*.
+    /// An explicit `sort` — including `sort=relevance` — decides the order
+    /// outright and suppresses `scoring_weights`; only an omitted `sort`
+    /// lets the weights re-rank. A `#[serde(default)]` bare enum collapses
+    /// both cases to `Relevance` and makes that rule unexpressable.
     #[serde(default)]
-    pub sort: RecallSort,
+    pub sort: Option<RecallSort>,
 }
 
 /// Result ordering mode for `/api/recall`.
@@ -1439,10 +1446,11 @@ pub struct RecallResult {
     /// of the memory text (WALM-383). Note this is the *write* time, not any
     /// event time the text itself may describe.
     ///
-    /// This alone does not make "newest wins" correct: the candidate set is
-    /// the cosine top-`limit` from `search_similar`, so the newest row can be
-    /// missing from `results` entirely and no client-side sort recovers it.
-    /// The server-side recency mode that over-fetches is still open.
+    /// This alone does not make "newest wins" correct: a client-side sort over
+    /// `results` still only sees the cosine top-`limit` from `search_similar`,
+    /// so the newest row can be missing entirely. Ask for
+    /// [`RecallSort::Recent`] instead — it over-fetches candidates server-side
+    /// before ordering them by write-time.
     ///
     /// `None` only when the hydrated record had no matching `SearchHit`,
     /// which shouldn't happen on the recall path. `skip_serializing_if`

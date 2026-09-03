@@ -236,6 +236,29 @@ pub(super) fn select_hits_for_sort(
     hits
 }
 
+/// Which scoring weights actually reach the ranker (WALM-383 precedence).
+///
+/// An explicit `sort` **is** the order: it suppresses the caller's weights
+/// entirely. Only an omitted `sort` lets them re-rank.
+///
+/// Without this, `sort=recent` stops meaning newest-first the moment the same
+/// request carries `recency > 0`: `select_hits_for_sort` orders by write-time
+/// and truncates, and then `CompositeRanker::rank` reorders the survivors by
+/// composite score — leaving an order that is neither mode. Suppressing the
+/// weights (rather than skipping the ranker call) keeps one code path: at
+/// `ScoringWeights::default()` the ranker short-circuits and returns its input
+/// order with `score: None`, which is exactly "no ranker ran".
+pub(super) fn effective_scoring_weights(
+    sort: Option<crate::types::RecallSort>,
+    requested: crate::types::ScoringWeights,
+) -> crate::types::ScoringWeights {
+    if sort.is_some() {
+        crate::types::ScoringWeights::default()
+    } else {
+        requested
+    }
+}
+
 /// Project the ranker's output onto the `/api/recall` and `/api/ask` wire
 /// shape, preserving ranked order.
 ///
@@ -445,6 +468,61 @@ mod recall_sort_tests {
         let kept = super::select_hits_for_sort(hits, RecallSort::Recent, 10);
 
         assert_eq!(kept.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod recall_sort_precedence_tests {
+    use crate::types::{RecallSort, ScoringWeights};
+
+    /// Non-default weights: `recency` high enough that the ranker would
+    /// reorder if it ever saw them.
+    fn recency_heavy() -> ScoringWeights {
+        ScoringWeights {
+            semantic: 1.0,
+            recency: 0.8,
+            recency_half_life_days: 30.0,
+            importance: 0.0,
+        }
+    }
+
+    #[test]
+    fn omitted_sort_lets_the_caller_weights_through() {
+        let out = super::effective_scoring_weights(None, recency_heavy());
+        assert!(
+            out.is_ranker_active(),
+            "with no sort, weights must still re-rank"
+        );
+        assert_eq!(out.recency, 0.8);
+    }
+
+    /// The WALM-383 bug: `sort=recent` ordered by write-time, then the ranker
+    /// reordered the survivors by composite score and the newest row stopped
+    /// being first. An explicit sort must suppress the weights outright.
+    #[test]
+    fn explicit_recent_suppresses_the_weights() {
+        let out = super::effective_scoring_weights(Some(RecallSort::Recent), recency_heavy());
+        assert!(
+            !out.is_ranker_active(),
+            "sort=recent must not be reordered by scoring_weights"
+        );
+    }
+
+    /// Henry's contract is "any explicit sort", not "recent only" — an
+    /// explicit `relevance` is just as much a request for that exact order.
+    #[test]
+    fn explicit_relevance_also_suppresses_the_weights() {
+        let out = super::effective_scoring_weights(Some(RecallSort::Relevance), recency_heavy());
+        assert!(
+            !out.is_ranker_active(),
+            "an explicit sort=relevance must not be reordered either"
+        );
+    }
+
+    #[test]
+    fn omitted_sort_with_default_weights_is_still_the_plain_cosine_path() {
+        let out = super::effective_scoring_weights(None, ScoringWeights::default());
+        assert!(!out.is_ranker_active());
     }
 }
 

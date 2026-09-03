@@ -165,6 +165,11 @@ export interface RecallOptions {
      *
      * For newest-wins, use `sort: "recent"` instead. It over-fetches
      * candidates server-side before ordering them by write-time.
+     *
+     * IGNORED when `sort` is set. An explicit `sort` — either value — decides
+     * the order outright; weights apply only when `sort` is omitted. Otherwise
+     * `sort: "recent"` would stop meaning newest-first as soon as the same
+     * request carried `recency > 0`.
      */
     scoringWeights?: ScoringWeights;
     /**
@@ -179,6 +184,8 @@ export interface RecallOptions {
      * widens the candidate set; weights only re-rank the set that was already
      * returned, so weights alone cannot surface a record that fell outside
      * the window.
+     *
+     * Setting `sort` at all suppresses `scoringWeights` for that request.
      */
     sort?: "relevance" | "recent";
 }
