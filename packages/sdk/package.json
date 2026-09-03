@@ -28,7 +28,7 @@
         "dev": "tsc --watch",
         "typecheck": "tsc --noEmit",
         "test": "tsc && node --test \"test/**/*.test.mjs\"",
-        "test:e2e": "tsc && node --test \"test/e2e/*.e2e.mjs\""
+        "test:e2e": "tsc && node --test --test-concurrency=1 \"test/e2e/*.e2e.mjs\""
     },
     "dependencies": {
         "@noble/ed25519": "^2.3.0",

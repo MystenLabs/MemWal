@@ -40,3 +40,38 @@ test("concurrent login flows reuse one URL", async (t) => {
     assert.match(urlA, /\/connect\/mcp\?/);
     await Promise.allSettled([first.result, second.result]);
 });
+
+test("onFailure runs once when a concurrent call joins the in-flight flow", async (t) => {
+    const home = mkdtempSync(join(tmpdir(), "memwal-test-"));
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    resetInflightLogin();
+
+    t.after(() => {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = prevProfile;
+        resetInflightLogin();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    const opts = {
+        openBrowser: false,
+        timeoutMs: 400,
+        webUrl: "http://127.0.0.1:9",
+        relayerUrl: "http://127.0.0.1:9",
+        label: "singleflight-failure-test",
+    };
+    let failures = 0;
+    const first = startOrReuseLoginFlow(opts, undefined, () => {
+        failures += 1;
+    });
+    const second = startOrReuseLoginFlow(opts, undefined, () => {
+        failures += 10;
+    });
+    await Promise.allSettled([first.result, second.result]);
+    assert.equal(failures, 1);
+});

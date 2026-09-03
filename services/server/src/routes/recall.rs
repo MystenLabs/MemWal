@@ -182,12 +182,23 @@ pub async fn recall(
     // Cap limit to prevent unbounded DB scans / memory use.
     // Without this, an attacker could send limit=999999 to scan the entire DB.
     let limit = body.limit.min(100);
+    // `sort=recent` pulls a wider candidate set than it returns — the newest
+    // row is frequently a mediocre semantic match and would otherwise fall
+    // outside the cosine top-`limit` entirely. `Relevance` fetches exactly
+    // `limit`, so the default path issues the identical query it always has.
+    let candidate_limit = body.sort.candidate_limit(limit);
     let t1 = std::time::Instant::now();
     let hits = state
         .db
-        .search_similar(&query_vector, owner, namespace, limit)
+        .search_similar(&query_vector, owner, namespace, candidate_limit)
         .await?;
     let vsearch_ms = t1.elapsed().as_millis();
+
+    // Order and truncate on the SearchHits, BEFORE hydration: ranking needs
+    // only distance + created_at, both already on the row, so the over-fetch
+    // costs one wider SQL query instead of 5x the Walrus downloads and SEAL
+    // decrypts.
+    let hits = super::select_hits_for_sort(hits, body.sort, limit);
     let hit_count = hits.len();
 
     if hits.is_empty() {
@@ -250,18 +261,7 @@ pub async fn recall(
     // `recency_zero_is_short_circuit_no_reorder` tests in services::ranker.
     let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
 
-    let results: Vec<RecallResult> = ranked
-        .into_iter()
-        .map(|r| RecallResult {
-            blob_id: r.memory.blob_id,
-            text: r.memory.text,
-            distance: r.memory.distance,
-            // `score` is `Some` only when the ranker ran (recency > 0); the
-            // `#[serde(skip_serializing_if = "Option::is_none")]` on the
-            // type omits the field from the wire when default-weighted.
-            score: r.score,
-        })
-        .collect();
+    let results: Vec<RecallResult> = super::recall_results_from_ranked(ranked);
     let total = results.len();
 
     // Surface the count of silently-dropped entries (download /

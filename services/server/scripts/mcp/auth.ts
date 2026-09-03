@@ -26,6 +26,11 @@ export interface MemWalSession {
     memwal: MemWal;
     authMethod: "delegate-key";
     oauthScope?: string;
+    /** Stable coding-agent id (`claude-code`, `codex`, `other`, …). */
+    agentClient?: string;
+    /** Raw MCP `clientInfo.name` after sanitizing. */
+    clientName?: string;
+    clientVersion?: string;
 }
 
 export interface AuthResolution {

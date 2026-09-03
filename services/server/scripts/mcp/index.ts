@@ -16,16 +16,23 @@
  *   X-MemWal-Namespace: <optional namespace default>
  * =============================================================================
  */
-import type { Express, Request, Response } from "express";
+import type { Request, Response, Router } from "express";
 import { randomUUID } from "node:crypto";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import type { AuthResolution } from "./auth.js";
+import type { AuthResolution, MemWalSession } from "./auth.js";
 import { McpAuthError, resolveAuth } from "./auth.js";
+import {
+    applyAgentClient,
+    applyAgentClientFromServer,
+    CLIENT_NAME_HEADER,
+    CLIENT_VERSION_HEADER,
+} from "./agent-client.js";
 import { createLogger } from "./logger.js";
 import { createMcpServer } from "./server.js";
 import { McpRateLimiter, clientIpFromRequest } from "./rateLimit.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 const log = createLogger("mcp");
 
@@ -70,6 +77,8 @@ function rateLimitDeny(
 
 interface McpConnection {
     sessionKey: string;
+    session: MemWalSession;
+    server: McpServer;
     transport: SSEServerTransport;
     cleanup: () => void;
 }
@@ -87,9 +96,35 @@ const sessionsById = new Map<string, McpConnection>();
  */
 interface StreamableConnection {
     sessionKey: string;
+    session: MemWalSession;
+    server: McpServer;
     transport: StreamableHTTPServerTransport;
     cleanup: () => void;
     lastActiveMs: number;
+}
+
+function headerToken(req: Request, name: string): string | null {
+    const raw = req.headers[name];
+    return typeof raw === "string" ? raw : null;
+}
+
+function agentClientFromHeaders(req: Request): {
+    name: string | null;
+    version: string | null;
+} {
+    return {
+        name: headerToken(req, CLIENT_NAME_HEADER),
+        version: headerToken(req, CLIENT_VERSION_HEADER),
+    };
+}
+
+function identifyConnection(
+    server: McpServer,
+    session: MemWalSession,
+    req: Request,
+    fields: Record<string, unknown>,
+): void {
+    applyAgentClientFromServer(server, session, agentClientFromHeaders(req), fields);
 }
 const streamableSessions = new Map<string, StreamableConnection>();
 
@@ -215,6 +250,7 @@ async function handleSse(
         log.info("session.closed", {
             sessionKey: auth.sessionKey,
             transportId: transport.sessionId,
+            agentClient: auth.session.agentClient ?? null,
         });
     };
 
@@ -223,8 +259,19 @@ async function handleSse(
 
     sessionsById.set(transport.sessionId, {
         sessionKey: auth.sessionKey,
+        session: auth.session,
+        server,
         transport,
         cleanup,
+    });
+
+    // Headers are a best-effort hint (auth-required handoff / reconnect).
+    // The first SSE GET usually has none; identity is logged on
+    // session.identified once the handshake (or a later header) lands.
+    applyAgentClient(auth.session, agentClientFromHeaders(req), {
+        transport: "sse",
+        transportId: transport.sessionId,
+        sessionKey: auth.sessionKey,
     });
 
     log.info("session.opened", {
@@ -283,7 +330,17 @@ async function handlePostMessage(
 
     // SSEServerTransport.handlePostMessage expects the raw IncomingMessage.
     // Express `req` is an IncomingMessage subtype; passing it through works.
+    applyAgentClient(conn.session, agentClientFromHeaders(req), {
+        transport: "sse",
+        transportId: sessionId,
+        sessionKey: conn.sessionKey,
+    });
     await conn.transport.handlePostMessage(req, res);
+    identifyConnection(conn.server, conn.session, req, {
+        transport: "sse",
+        transportId: sessionId,
+        sessionKey: conn.sessionKey,
+    });
 }
 
 /**
@@ -352,7 +409,22 @@ async function handleStreamableHttp(
             );
         }
         conn.lastActiveMs = Date.now();
+        // Stamp from headers first when present. Handshake identity is
+        // applied after handleRequest because the SDK only exposes
+        // clientInfo once initialize has been processed; a request that
+        // both initializes and calls a tool can therefore emit tool.call
+        // before session.identified.
+        applyAgentClient(conn.session, agentClientFromHeaders(req), {
+            transport: "streamable",
+            transportId: sessionId,
+            sessionKey: conn.sessionKey,
+        });
         await conn.transport.handleRequest(req, res);
+        identifyConnection(conn.server, conn.session, req, {
+            transport: "streamable",
+            transportId: sessionId,
+            sessionKey: conn.sessionKey,
+        });
         return;
     }
 
@@ -384,11 +456,22 @@ async function handleStreamableHttp(
 
     // Spawn a fresh transport. `sessionIdGenerator` is invoked once on
     // the first message-init response; we cache the connection only
-    // after we know the assigned id.
+    // after we know the assigned id. Holder (not `let server!`) so a
+    // future reorder of assign vs `onsessioninitialized` logs instead of
+    // throwing a TDZ ReferenceError.
     let initialized = false;
+    const holder: { server: McpServer | null } = { server: null };
     const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newId: string) => {
+            const server = holder.server;
+            if (!server) {
+                log.error("mcp.streamable_session_without_server", {
+                    transportId: newId,
+                });
+                releaseSlot();
+                return;
+            }
             initialized = true;
             let cleanedUp = false;
             const cleanup = () => {
@@ -400,15 +483,26 @@ async function handleStreamableHttp(
                     transport: "streamable",
                     sessionKey: auth.sessionKey,
                     transportId: newId,
+                    agentClient: auth.session.agentClient ?? null,
                 });
             };
             transport.onclose = cleanup;
             streamableSessions.set(newId, {
                 sessionKey: auth.sessionKey,
+                session: auth.session,
+                server,
                 transport,
                 cleanup,
                 lastActiveMs: Date.now(),
             });
+            applyAgentClient(auth.session, agentClientFromHeaders(req), {
+                transport: "streamable",
+                transportId: newId,
+                sessionKey: auth.sessionKey,
+            });
+            // Identity is logged on session.identified once known (headers
+            // or handshake). Streamable init runs before the SDK stores
+            // clientInfo, so agentClient is usually still empty here.
             log.info("session.opened", {
                 transport: "streamable",
                 sessionKey: auth.sessionKey,
@@ -425,14 +519,19 @@ async function handleStreamableHttp(
     // the catch below handles handleRequest throwing before init completes.
     transport.onclose = releaseSlot;
 
-    const server = createMcpServer(auth.session);
+    holder.server = createMcpServer(auth.session);
     try {
-        await server.connect(transport);
+        await holder.server.connect(transport);
         // The SDK's handleRequest takes the raw IncomingMessage. We
         // intentionally do NOT pre-parse the body — express.json() is not
         // mounted on this route so req still has the raw stream.
         // The transport reads the body itself.
         await transport.handleRequest(req, res);
+        identifyConnection(holder.server, auth.session, req, {
+            transport: "streamable",
+            transportId: transport.sessionId ?? null,
+            sessionKey: auth.sessionKey,
+        });
         if (!initialized) {
             releaseSlot();
             await transport.close().catch((err) => {
@@ -461,7 +560,11 @@ export interface MountMcpOptions {
  *                              bound to the session opener)
  */
 export function mountMcpRoutes(
-    app: Express,
+    // `Router`, not `Express`: this only ever calls `.get` / `.post` /
+    // `.delete`, all of which `Router` provides, and `Express` extends
+    // `Router` so existing app-level callers are unaffected. Typing it as
+    // `Express` rejected the `express.Router()` the integration test mounts.
+    app: Router,
     options: MountMcpOptions = {}
 ): void {
     const relayerUrl = options.relayerUrl ?? "http://localhost:3001";

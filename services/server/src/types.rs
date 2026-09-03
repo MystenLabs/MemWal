@@ -45,6 +45,9 @@ pub const MAX_WALRUS_STORAGE_EPOCHS: u32 = 15;
 /// representable range in `routes::owner_token::issue_token`'s `expires_at`
 /// computation.
 pub const MAX_OWNER_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+/// Minimum `OWNER_TOKEN_SECRET` length in bytes when the env var is set.
+/// Unset or empty still disables the feature.
+pub const MIN_OWNER_TOKEN_SECRET_LEN: usize = 32;
 pub const DEFAULT_TESTNET_WALRUS_STORAGE_EPOCHS: u32 = 5;
 
 pub(crate) fn default_walrus_storage_epochs_for_network(network: &str) -> u32 {
@@ -445,6 +448,8 @@ pub struct Config {
     /// /v1/owner-tokens` and the `OwnerToken` extractor treat that as an
     /// unconditional rejection rather than letting an empty HMAC key
     /// validate (see `owner_token_auth::OwnerToken`'s doc comment).
+    /// When set, the value must be at least [`MIN_OWNER_TOKEN_SECRET_LEN`]
+    /// bytes or config load panics.
     pub owner_token_secret: String,
     /// The **service credential**: one static
     /// shared secret WM generates and hands to Console, which Console
@@ -638,7 +643,9 @@ impl Config {
                 .unwrap_or_default(),
             walrus_staking_pool_id: nonempty_env("WALRUS_STAKING_POOL_ID")
                 .unwrap_or_else(|| default_walrus_staking_pool_id.to_string()),
-            owner_token_secret: nonempty_env("OWNER_TOKEN_SECRET").unwrap_or_default(),
+            owner_token_secret: require_owner_token_secret_len(
+                nonempty_env("OWNER_TOKEN_SECRET").unwrap_or_default(),
+            ),
             owner_token_service_credential: nonempty_env("OWNER_TOKEN_SERVICE_CREDENTIAL")
                 .unwrap_or_default(),
             owner_token_ttl_secs: env_positive_u64("OWNER_TOKEN_TTL_SECS", 900)
@@ -696,6 +703,19 @@ fn nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn require_owner_token_secret_len(secret: String) -> String {
+    if secret.is_empty() {
+        return secret;
+    }
+    if secret.len() < MIN_OWNER_TOKEN_SECRET_LEN {
+        panic!(
+            "OWNER_TOKEN_SECRET must be at least {MIN_OWNER_TOKEN_SECRET_LEN} bytes; got {}",
+            secret.len()
+        );
+    }
+    secret
 }
 
 fn env_number<T>(name: &str, default: T) -> T
@@ -1333,6 +1353,53 @@ pub struct RecallRequest {
     /// [`ScoringWeights`].
     #[serde(default)]
     pub scoring_weights: Option<ScoringWeights>,
+    /// How to order results. Omitted → [`RecallSort::Relevance`], today's
+    /// behaviour. See [`RecallSort`].
+    #[serde(default)]
+    pub sort: RecallSort,
+}
+
+/// Result ordering mode for `/api/recall`.
+///
+/// Distinct from [`ScoringWeights`], which only re-ranks the rows the vector
+/// search already returned. `sort` decides how many rows are fetched in the
+/// first place — which is the half that matters, because the candidate set is
+/// the cosine top-N and no amount of re-weighting can surface a row pgvector
+/// never returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecallSort {
+    /// Pure semantic relevance — the cosine order, unchanged. Default, so an
+    /// omitted field leaves every existing caller byte-identical.
+    #[default]
+    Relevance,
+    /// Newest-among-matches: over-fetch semantic candidates, order them by
+    /// write-time descending, then truncate to `limit`.
+    ///
+    /// Semantic similarity is the candidate *generator* and write-time decides
+    /// the order, so a newest record worded less literally than an older one
+    /// still wins. A recency *weight* cannot guarantee that — it has to
+    /// out-score the semantic gap before it reorders anything, and at a
+    /// 30-day half-life two records days apart barely differ.
+    Recent,
+}
+
+impl RecallSort {
+    /// How many rows to pull from `search_similar` to serve `limit` results.
+    ///
+    /// `Recent` needs a wider net than it returns: the newest row is often a
+    /// mediocre semantic match, so it sits deep in the cosine ordering. 5x
+    /// covers the reported failures without turning recall into a table scan,
+    /// and the 50-row ceiling bounds the cost.
+    ///
+    /// Never returns less than `limit`. A naive `min(limit * 5, 50)`
+    /// under-fetches once `limit` passes 50 and hands the caller a short page.
+    pub fn candidate_limit(self, limit: usize) -> usize {
+        match self {
+            RecallSort::Relevance => limit,
+            RecallSort::Recent => limit.saturating_mul(5).min(50).max(limit),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1363,6 +1430,26 @@ pub struct RecallResult {
     /// shape byte-identical to today for default-weights requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
+    /// Write-time of the memory, from `vector_entries.created_at` — threaded
+    /// `SearchHit` → `HydratedMemory` → here by the recall handler's
+    /// `zip_search_hit_fields_onto_hydrated`.
+    ///
+    /// Present so a caller can order and verify the returned set by
+    /// write-time rather than re-ranking on a date it has to parse back out
+    /// of the memory text (WALM-383). Note this is the *write* time, not any
+    /// event time the text itself may describe.
+    ///
+    /// This alone does not make "newest wins" correct: the candidate set is
+    /// the cosine top-`limit` from `search_similar`, so the newest row can be
+    /// missing from `results` entirely and no client-side sort recovers it.
+    /// The server-side recency mode that over-fetches is still open.
+    ///
+    /// `None` only when the hydrated record had no matching `SearchHit`,
+    /// which shouldn't happen on the recall path. `skip_serializing_if`
+    /// then omits the field rather than sending a fabricated date — for a
+    /// newest-wins caller a wrong timestamp is worse than a missing one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2825,6 +2912,31 @@ mod tests {
         with_auth_clock_drift_env(Some("not-a-number"), || {
             assert_eq!(configured_auth_clock_drift_secs(), DEFAULT_AUTH_CLOCK_DRIFT_SECS);
         });
+    }
+
+    // ── require_owner_token_secret_len — empty disables, short panics ────
+
+    #[test]
+    fn owner_token_secret_empty_stays_disabled() {
+        assert_eq!(require_owner_token_secret_len(String::new()), "");
+    }
+
+    #[test]
+    #[should_panic(expected = "OWNER_TOKEN_SECRET must be at least 32 bytes; got 11")]
+    fn owner_token_secret_rejects_test_secret() {
+        let _ = require_owner_token_secret_len("test-secret".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "OWNER_TOKEN_SECRET must be at least 32 bytes; got 31")]
+    fn owner_token_secret_rejects_31_bytes() {
+        let _ = require_owner_token_secret_len("a".repeat(MIN_OWNER_TOKEN_SECRET_LEN - 1));
+    }
+
+    #[test]
+    fn owner_token_secret_accepts_32_bytes() {
+        let secret = "a".repeat(MIN_OWNER_TOKEN_SECRET_LEN);
+        assert_eq!(require_owner_token_secret_len(secret.clone()), secret);
     }
 
     #[test]

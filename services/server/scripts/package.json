@@ -5,6 +5,7 @@
     "type": "module",
     "scripts": {
         "sidecar": "tsx sidecar-server.ts",
+    "typecheck": "tsc --noEmit",
         "test": "node --test --import tsx './mcp/__tests__/*.test.ts' './__tests__/*.test.ts'"
     },
     "dependencies": {

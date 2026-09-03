@@ -1,0 +1,123 @@
+name: Wait for relayer
+description: Poll GET /health until the relayer is write-ready (and serving this SHA if Railway built it)
+
+inputs:
+  server-url:
+    description: Relayer base URL
+    required: true
+  expected-commit:
+    description: Full git SHA to wait for. Empty waits for health only.
+    required: false
+    default: ""
+  since-commit:
+    description: Push `github.event.before`. When set, SHA wait is skipped unless services/server/** changed (Railway watchPatterns SKIP those deploys).
+    required: false
+    default: ""
+  timeout-seconds:
+    description: Give up after this many seconds (Railway deploys are ~2m, cold image longer)
+    required: false
+    default: "480"
+  poll-seconds:
+    required: false
+    default: "10"
+
+runs:
+  using: composite
+  steps:
+    - name: Wait until /health serves the expected commit
+      shell: bash
+      env:
+        SERVER_URL: ${{ inputs.server-url }}
+        EXPECTED_SHA: ${{ inputs.expected-commit }}
+        SINCE_SHA: ${{ inputs.since-commit }}
+        TIMEOUT_SECS: ${{ inputs.timeout-seconds }}
+        POLL_SECS: ${{ inputs.poll-seconds }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${SERVER_URL:-}" ]; then
+          echo "::error::server-url is empty"
+          exit 1
+        fi
+
+        expected="$(printf '%s' "${EXPECTED_SHA:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        since="$(printf '%s' "${SINCE_SHA:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        case "$expected" in false|null|none) expected="" ;; esac
+        case "$since" in false|null|none) since="" ;; esac
+        zeros="0000000000000000000000000000000000000000"
+
+        # Railway relayer watchPatterns is /services/server/**. A push that
+        # does not touch that tree is SKIPPED — no new SHA is served — so
+        # waiting on expected-commit would hang until timeout.
+        if [ -n "$expected" ] && [ -n "$since" ] && [ "$since" != "$zeros" ]; then
+          if git fetch --no-tags --depth=1 origin "$since" \
+            && changed="$(git diff --name-only "$since" "$expected")"; then
+            if ! printf '%s\n' "$changed" | grep -Eq '^services/server/'; then
+              echo "Railway will SKIP this push, so SHA wait is skipped."
+              expected=""
+            fi
+          else
+            echo "Could not fetch/diff since-commit; keeping SHA wait."
+          fi
+        fi
+        export EXPECTED_SHA="$expected"
+
+        python3 - <<'PY'
+        import http.client, json, os, sys, time, urllib.error, urllib.request
+
+        base = os.environ["SERVER_URL"].rstrip("/")
+        expected = os.environ.get("EXPECTED_SHA", "").strip().lower()
+        # GitHub `false && github.sha || ''` can stringify as "false".
+        if expected in {"", "false", "null", "none"}:
+            expected = ""
+        timeout = int(os.environ.get("TIMEOUT_SECS", "480"))
+        poll = int(os.environ.get("POLL_SECS", "10"))
+        url = f"{base}/health"
+        deadline = time.monotonic() + timeout
+
+        print(
+            f"Waiting on {url} (timeout {timeout}s, expected commit {expected or '<any>'})",
+            flush=True,
+        )
+
+        def commit_matches(commit: str) -> bool:
+            if not expected:
+                return True
+            got = commit.lower()
+            return bool(got) and (got == expected or expected.startswith(got) or got.startswith(expected))
+
+        last_error = "no successful /health response"
+        while time.monotonic() < deadline:
+            try:
+                request = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "MemWal-ci-wait-for-relayer"},
+                )
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    data = json.load(response)
+                status = str(data.get("status") or "")
+                ready = data.get("write_ready") is True
+                commit = str((data.get("build") or {}).get("commit") or "")
+                print(
+                    f"waiting: status={status or '?'} write_ready={str(ready).lower()} commit={commit or 'none'}",
+                    flush=True,
+                )
+                if status == "ok" and ready and commit_matches(commit):
+                    print(f"Relayer ready (commit={commit or 'none'})", flush=True)
+                    raise SystemExit(0)
+                last_error = (
+                    f"status={status!r} write_ready={ready} commit={commit or 'none'}"
+                )
+            except (urllib.error.URLError, OSError, http.client.HTTPException,
+                    json.JSONDecodeError) as exc:
+                last_error = f"health check failed: {exc}"
+                print(f"waiting: {last_error}", flush=True)
+            time.sleep(poll)
+
+        print(
+            f"::error::Timed out after {timeout}s waiting for {url} to serve "
+            f"commit {expected or '<any>'} ({last_error}). Railway deploys take ~2m.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+        PY

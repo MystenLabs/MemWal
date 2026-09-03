@@ -17,9 +17,14 @@
 import type { MemWalCredentials } from "./auth.js";
 import { clearCreds, credsPath } from "./auth.js";
 import { TOOL_DEFINITIONS } from "./auth-required.js";
+import {
+    clientInfoHeaders,
+    lastClientInfoHeaders,
+    rememberInitializeClientInfo,
+} from "./client-info.js";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
 import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
-import { startOrReuseLoginFlow } from "./login.js";
+import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { log, note } from "./logger.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
@@ -179,7 +184,6 @@ const LOCAL_TOOLS_LIST = {
     ],
 };
 
-const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
 const URL_READY_TIMEOUT_MS = 5_000;
 
 /** Maximum silence we tolerate on the SSE stream before assuming the
@@ -249,16 +253,21 @@ interface SseHandshakeResult {
     abort: () => void;
 }
 
-function mcpAuthHeaders(creds: MemWalCredentials): Record<string, string> {
+function mcpAuthHeaders(
+    creds: MemWalCredentials,
+    extra: Record<string, string> = {},
+): Record<string, string> {
     return {
         authorization: `Bearer ${creds.delegatePrivateKey}`,
         "x-memwal-account-id": creds.accountId,
+        ...extra,
     };
 }
 
 async function openSseStream(
     relayerUrl: string,
     creds: MemWalCredentials,
+    extraHeaders: Record<string, string> = {},
 ): Promise<SseHandshakeResult> {
     const connectTimeoutMs = resolveConnectTimeoutMs();
     // One shared budget for the WHOLE attempt: the compatibility check (GET
@@ -300,7 +309,7 @@ async function openSseStream(
         resp = await fetch(url, {
             method: "GET",
             headers: {
-                ...mcpAuthHeaders(creds),
+                ...mcpAuthHeaders(creds, extraHeaders),
                 accept: "text/event-stream",
                 "cache-control": "no-cache",
             },
@@ -526,11 +535,12 @@ async function postMessage(
     postUrl: string,
     msg: RpcMessage,
     creds: MemWalCredentials,
+    extraHeaders: Record<string, string> = {},
 ): Promise<number> {
     const resp = await fetch(postUrl, {
         method: "POST",
         headers: {
-            ...mcpAuthHeaders(creds),
+            ...mcpAuthHeaders(creds, extraHeaders),
             "content-type": "application/json",
         },
         body: JSON.stringify(msg),
@@ -577,7 +587,7 @@ async function handleLocalLogin(
             relayerUrl: config.relayerUrl,
             webUrl: config.webUrl,
             label: config.label,
-            timeoutMs: LOGIN_BG_TIMEOUT_MS,
+            timeoutMs: resolveLoginTimeoutMs(),
             openBrowser: false,
         },
         async (creds) => {
@@ -585,6 +595,19 @@ async function handleLocalLogin(
             log.info("memwal_login.bridge.success", {
                 accountId: creds.accountId,
                 delegateAddress: creds.delegateAddress,
+            });
+        },
+        (err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn("memwal_login.bridge.failed", { msg });
+            writeStdoutMessage({
+                jsonrpc: "2.0",
+                method: "notifications/message",
+                params: {
+                    level: "warning",
+                    logger: "memwal-mcp",
+                    data: `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are unchanged; call memwal_login again to retry.`,
+                },
             });
         },
     );
@@ -725,6 +748,17 @@ export async function runBridge(
      * remember to check — after logout there is simply nothing left to sign
      * with. `adoptCredentials` republishes it on the next login. */
     let creds: MemWalCredentials | null = initialCreds;
+    /**
+     * Best-effort `x-memwal-client` / `x-memwal-client-version` forwarded to
+     * the sidecar. Seeded from `lastClientInfoHeaders()`, which is only
+     * populated after the auth-required → bridge handoff (that path does not
+     * replay `initialize`). On a normal already-signed-in start this object
+     * is empty at first SSE connect: `connectInBackground` opens the stream
+     * before stdin is wired. Headers are filled when we see `initialize` and
+     * then land on reconnects / later POSTs. The sidecar treats the MCP
+     * handshake (`initialize.clientInfo`) as the authoritative source.
+     */
+    const extraHeaders: Record<string, string> = { ...lastClientInfoHeaders() };
 
     let stdinClosed = false;
     /** Set by `memwal_logout`. Unlike `stdinClosed` the process stays up and
@@ -763,7 +797,7 @@ export async function runBridge(
         postCreds: MemWalCredentials,
     ): Promise<number> {
         if (epoch !== sessionEpoch) return Promise.resolve(0);
-        return postMessage(postUrl, msg, postCreds);
+        return postMessage(postUrl, msg, postCreds, extraHeaders);
     }
     let credentialGeneration = 0;
     let activeCredentialGeneration = 0;
@@ -937,6 +971,7 @@ export async function runBridge(
                     const candidate = await openSseStream(
                         openingCreds.relayerUrl,
                         openingCreds,
+                        extraHeaders,
                     );
 
                     // Logout can also land mid-handshake. Same reasoning as the
@@ -1326,6 +1361,14 @@ export async function runBridge(
                 // session negotiates capabilities — but suppress that upstream
                 // reply, since the client already has this one.
                 if (msg.method === "initialize" && msg.id != null) {
+                    const clientInfo = rememberInitializeClientInfo(msg.params);
+                    if (clientInfo) {
+                        Object.assign(extraHeaders, clientInfoHeaders(clientInfo));
+                        log.info("bridge.agent_client", {
+                            clientName: clientInfo.name,
+                            clientVersion: clientInfo.version,
+                        });
+                    }
                     writeStdoutMessage({
                         jsonrpc: "2.0",
                         id: msg.id,
@@ -1717,7 +1760,7 @@ export async function runBridge(
             }
             const openingGeneration = credentialGeneration;
             try {
-                const candidate = await openSseStream(creds.relayerUrl, creds);
+                const candidate = await openSseStream(creds.relayerUrl, creds, extraHeaders);
                 if (stdinClosed) {
                     candidate.abort();
                     break;

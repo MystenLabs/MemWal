@@ -1,0 +1,20 @@
+name: Upload Playwright report
+description: Upload Playwright HTML report and traces
+
+inputs:
+  app:
+    description: Directory name under apps/
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Upload Playwright report + traces
+      uses: actions/upload-artifact@v4
+      with:
+        name: playwright-report-${{ inputs.app }}
+        path: |
+          apps/${{ inputs.app }}/playwright-report
+          apps/${{ inputs.app }}/test-results
+        retention-days: 14
+        if-no-files-found: ignore
