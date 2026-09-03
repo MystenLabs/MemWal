@@ -72,7 +72,7 @@ What the user actually does differs per client. Pick your row:
 | [Claude Code](/mcp/claude-code) | ✓ Plugin | `/plugin marketplace add MystenLabs/MemWal`, then `/plugin install memwal@memwal-plugins` |
 | [Codex](/mcp/codex) | ✓ Plugin | `codex plugin marketplace add MystenLabs/MemWal`, then `codex plugin add memwal@memwal-plugins`, then trust the hooks through `/hooks` |
 | [Antigravity](/mcp/antigravity) | ✓ Plugin | `npx degit MystenLabs/MemWal/packages/mcp/plugin ~/.gemini/config/plugins/memwal` |
-| [Cursor](/mcp/cursor) | Partial | Edit `~/.cursor/mcp.json`; hook support depends on your Cursor version |
+| [Cursor](/mcp/cursor) | ✓ Plugin | `npx -y degit MystenLabs/MemWal/packages/mcp/plugin ~/.cursor/plugins/local/memwal` |
 | [Claude Desktop](/mcp/claude-desktop) | ✗ MCP-only | Edit `claude_desktop_config.json`, then [add memory instructions](/mcp/claude-desktop#add-memory-instructions) |
 | [OpenCode](/mcp/opencode) | ✗ MCP-only | Edit the OpenCode MCP config |
 | ChatGPT desktop app | ✓ Plugin | Ships Codex, so follow [Codex](/mcp/codex) |
