@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { filterByMaxDistance, formatRecallLine } from "../tools/recall.js";
+import { emptyRecallText, filterByMaxDistance, formatRecallLine } from "../tools/recall.js";
 
 const row = (text: string, distance: number) => ({ text, distance });
 
@@ -45,6 +45,16 @@ test("keeps hits whose distance is below maxDistance", () => {
             { text: "ok", distance: 0.499 },
         ],
     );
+});
+
+test("all hits outside maxDistance does not use decrypt-failure wording", () => {
+    const results = [row("far", 0.9), row("farther", 1.1)];
+    const filtered = filterByMaxDistance(results, 0.5);
+    assert.equal(filtered.length, 0);
+    const text = emptyRecallText(results.length, 3);
+    assert.match(text, /outside maxDistance/);
+    assert.doesNotMatch(text, /decrypt/);
+    assert.doesNotMatch(text, /download/);
 });
 
 test("displayed score is 1 minus cosine distance", () => {

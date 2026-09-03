@@ -82,6 +82,22 @@ export function filterByMaxDistance<T extends { distance: number }>(
 }
 
 /**
+ * Empty-result copy after the maxDistance filter.
+ *
+ * Decrypted hits that all missed the cutoff are not a download/decrypt
+ * failure, even when `dropped_count` is also > 0.
+ */
+export function emptyRecallText(resultCount: number, dropped: number): string {
+    if (resultCount > 0) {
+        return "All matching memories were outside maxDistance.";
+    }
+    if (dropped > 0) {
+        return `No matching memories could be returned (${dropped} matched but failed to download or decrypt). This is not an empty namespace.`;
+    }
+    return "No matching memories found.";
+}
+
+/**
  * Render one recall hit as the line the model sees.
  *
  * `created_at` is the memory's write-time, shown so a model implementing
@@ -146,15 +162,11 @@ export function registerRecallTool(
             const dropped = typeof droppedRaw === "number" ? droppedRaw : 0;
             const filtered = filterByMaxDistance(result.results, maxDistance);
             if (filtered.length === 0) {
-                const empty =
-                    dropped > 0
-                        ? `No matching memories could be returned (${dropped} matched but failed to download or decrypt). This is not an empty namespace.`
-                        : "No matching memories found.";
                 return {
                     content: [
                         {
                             type: "text",
-                            text: empty,
+                            text: emptyRecallText(result.results.length, dropped),
                         },
                     ],
                 };
