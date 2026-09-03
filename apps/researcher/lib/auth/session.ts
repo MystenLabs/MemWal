@@ -2,14 +2,14 @@ import "server-only";
 
 import { jwtVerify } from "jose";
 import { cookies } from "next/headers";
-import { getUserById } from "@/lib/db/queries";
+import { getAuthSecretKey } from "@/lib/auth/auth-secret";
 import {
   SESSION_MAX_AGE_SECONDS,
   signSessionIdentity,
 } from "@/lib/auth/session-token";
+import { getUserById } from "@/lib/db/queries";
 
 const COOKIE_NAME = "session";
-const secret = new TextEncoder().encode(process.env.AUTH_SECRET);
 
 type SessionUser = {
   id: string;
@@ -28,7 +28,7 @@ export async function getSession(): Promise<{ user: SessionUser } | null> {
   if (!token) return null;
 
   try {
-    const { payload } = await jwtVerify(token, secret);
+    const { payload } = await jwtVerify(token, getAuthSecretKey());
     if (typeof payload.userId !== "string") return null;
 
     const user = await getUserById(payload.userId);
@@ -55,7 +55,7 @@ export async function createSession(
 ): Promise<void> {
   const token = await signSessionIdentity(
     { userId, publicKey, accountId },
-    secret
+    getAuthSecretKey()
   );
   const cookieStore = await cookies();
   cookieStore.set(COOKIE_NAME, token, {
