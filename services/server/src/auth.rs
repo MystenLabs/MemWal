@@ -767,8 +767,14 @@ mod tests {
     fn reported_repro_45s_offset_is_within_default_window() {
         // The issue's repro used a +45s client offset; it is comfortably inside
         // the default 300s window and is accepted (i.e. does not reproduce).
-        assert!(is_timestamp_fresh(45, crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS));
-        assert!(is_timestamp_fresh(-45, crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS));
+        assert!(is_timestamp_fresh(
+            45,
+            crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS
+        ));
+        assert!(is_timestamp_fresh(
+            -45,
+            crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS
+        ));
     }
 
     #[test]
@@ -795,8 +801,14 @@ mod tests {
         // Pin the exact derivation at default and ceiling so it cannot regress:
         //   default: 2*300 + 300 = 900
         //   ceiling: 2*900 + 300 = 2100
-        assert_eq!(nonce_ttl_secs(crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS), 900);
-        assert_eq!(nonce_ttl_secs(crate::types::MAX_AUTH_CLOCK_DRIFT_SECS), 2100);
+        assert_eq!(
+            nonce_ttl_secs(crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS),
+            900
+        );
+        assert_eq!(
+            nonce_ttl_secs(crate::types::MAX_AUTH_CLOCK_DRIFT_SECS),
+            2100
+        );
     }
 
     // ── Timestamp-drift reason header (safe to distinguish) ──────
