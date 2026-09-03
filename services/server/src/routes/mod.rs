@@ -527,6 +527,135 @@ mod recall_sort_precedence_tests {
 }
 
 #[cfg(test)]
+mod recall_sort_precedence_regression_tests {
+    //! Proof that the defect is real, not just that the fix compiles.
+    //!
+    //! These replay the recall handler's actual ordering pipeline —
+    //! `select_hits_for_sort` → `CompositeRanker::rank` — over the two rows
+    //! from the WALM-383 report. `apply_precedence: false` is `dev` today.
+
+    use crate::engine::HydratedMemory;
+    use crate::services::ranker::{CompositeRanker, Ranker};
+    use crate::types::{RecallSort, ScoringWeights, SearchHit};
+
+    /// Fixed "now" so the decay term is deterministic.
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        ts("2026-07-06T00:00:00Z")
+    }
+
+    fn ts(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn hit(blob_id: &str, distance: f64, created_at: &str) -> SearchHit {
+        SearchHit {
+            blob_id: blob_id.to_string(),
+            distance,
+            created_at: ts(created_at),
+            importance: 0.5,
+        }
+    }
+
+    /// The reported shape: the newest checkpoint is worded naturally so it
+    /// matches poorly, while a month-old row echoes the query literally.
+    fn reported_hits() -> Vec<SearchHit> {
+        vec![
+            hit("old-but-close", 0.10, "2026-06-06T00:00:00Z"),
+            hit("newest-but-far", 0.90, "2026-07-06T00:00:00Z"),
+        ]
+    }
+
+    /// Non-default weights a caller might reasonably pair with `sort=recent`,
+    /// thinking the two reinforce each other.
+    fn recency_weights() -> ScoringWeights {
+        ScoringWeights {
+            semantic: 1.0,
+            recency: 0.3,
+            recency_half_life_days: 30.0,
+            importance: 0.0,
+        }
+    }
+
+    /// Replay `recall`'s ordering. With `apply_precedence == false` the
+    /// caller's weights reach the ranker, which is what `dev` does today.
+    fn ordering(
+        sort: Option<RecallSort>,
+        requested: ScoringWeights,
+        apply_precedence: bool,
+    ) -> Vec<String> {
+        let weights = if apply_precedence {
+            super::effective_scoring_weights(sort, requested)
+        } else {
+            requested
+        };
+        let selected = super::select_hits_for_sort(reported_hits(), sort.unwrap_or_default(), 2);
+        let hydrated: Vec<HydratedMemory> = selected
+            .into_iter()
+            .map(|h| HydratedMemory {
+                blob_id: h.blob_id,
+                text: String::new(),
+                distance: h.distance,
+                created_at: Some(h.created_at),
+                importance: Some(h.importance),
+            })
+            .collect();
+        CompositeRanker
+            .rank(hydrated, &weights, now())
+            .into_iter()
+            .map(|r| r.memory.blob_id)
+            .collect()
+    }
+
+    /// `select_hits_for_sort` does its job: newest first, before the ranker.
+    #[test]
+    fn selection_alone_puts_the_newest_row_first() {
+        let selected = super::select_hits_for_sort(reported_hits(), RecallSort::Recent, 2);
+        assert_eq!(selected[0].blob_id, "newest-but-far");
+    }
+
+    /// THE BUG. Composite score with these weights:
+    ///   old-but-close = 1.0*(1-0.10) + 0.3*2^(-30/30) = 0.90 + 0.15 = 1.05
+    ///   newest-but-far = 1.0*(1-0.90) + 0.3*2^(0/30)  = 0.10 + 0.30 = 0.40
+    /// so the ranker undoes the write-time order that `sort=recent` just
+    /// established, and the caller gets the stale row first — the exact
+    /// failure WALM-383 was filed for.
+    #[test]
+    fn dev_today_lets_scoring_weights_undo_sort_recent() {
+        let order = ordering(Some(RecallSort::Recent), recency_weights(), false);
+        assert_eq!(
+            order[0], "old-but-close",
+            "reproduces the defect: sort=recent ordered newest-first, then the \
+             ranker reordered by composite score and the stale row won"
+        );
+    }
+
+    /// With precedence applied the weights are suppressed, the ranker
+    /// short-circuits at default weights, and selection order survives.
+    #[test]
+    fn precedence_keeps_the_newest_row_first() {
+        let order = ordering(Some(RecallSort::Recent), recency_weights(), true);
+        assert_eq!(
+            order[0], "newest-but-far",
+            "sort=recent must mean newest-first regardless of scoring_weights"
+        );
+    }
+
+    /// The fix must not touch the omitted-sort path: weights still re-rank.
+    #[test]
+    fn omitted_sort_still_lets_weights_reorder() {
+        let with_fix = ordering(None, recency_weights(), true);
+        let without_fix = ordering(None, recency_weights(), false);
+        assert_eq!(
+            with_fix, without_fix,
+            "no sort means no precedence rule; behaviour must be unchanged"
+        );
+        assert_eq!(with_fix[0], "old-but-close");
+    }
+}
+
+#[cfg(test)]
 mod recall_result_mapping_tests {
     use crate::engine::HydratedMemory;
     use crate::services::ranker::RankedHit;
