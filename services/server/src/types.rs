@@ -1303,6 +1303,15 @@ fn default_namespace() -> String {
     "default".to_string()
 }
 
+/// Reject empty, oversized, or control-character namespaces before they
+/// reach PostgreSQL. libpq/sqlx cannot bind a TEXT parameter containing
+/// NUL (`\0`); that path used to surface as an opaque HTTP 500 from
+/// `search_similar`. Other C0/C1 controls are equally invalid as
+/// namespace identifiers. Call this on every handler that forwards
+/// `namespace` into SQL — write paths (`remember`, `analyze`, `forget`,
+/// `restore`, `stats`) already did; read paths (`recall`, `recall_manual`,
+/// `ask`) must too, otherwise an empty namespace 200s with no results
+/// and a NUL namespace 500s.
 pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
     if namespace.is_empty() {
         return Err(AppError::BadRequest("namespace cannot be empty".into()));
@@ -1312,6 +1321,11 @@ pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
             "namespace exceeds maximum length of {} bytes",
             MAX_NAMESPACE_BYTES
         )));
+    }
+    if namespace.chars().any(char::is_control) {
+        return Err(AppError::BadRequest(
+            "namespace cannot contain control characters".into(),
+        ));
     }
     Ok(())
 }
@@ -3114,12 +3128,36 @@ mod tests {
         assert!(!ScoringWeights::default().is_ranker_active());
     }
 
+    fn assert_namespace_bad_request(result: Result<(), AppError>, needle: &str) {
+        match result {
+            Err(AppError::BadRequest(msg)) => {
+                assert!(
+                    msg.contains(needle),
+                    "expected BadRequest containing {needle:?}, got: {msg:?}"
+                );
+            }
+            other => panic!("expected BadRequest containing {needle:?}, got: {other:?}"),
+        }
+    }
+
     #[test]
-    fn namespace_validation_rejects_empty_and_oversized_values() {
+    fn namespace_validation_rejects_empty_oversized_and_control_characters() {
         assert!(validate_namespace("default").is_ok());
         assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES)).is_ok());
-        assert!(validate_namespace("").is_err());
-        assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES + 1)).is_err());
+        // Ordinary punctuation / UTF-8 is fine — only C0/C1 controls are rejected.
+        assert!(validate_namespace("team/alpha").is_ok());
+        assert!(validate_namespace("ns-名前").is_ok());
+
+        assert_namespace_bad_request(validate_namespace(""), "empty");
+        assert_namespace_bad_request(
+            validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES + 1)),
+            "maximum length",
+        );
+        // GH #787 / WALM-462: `"default\u0000evil"` used to reach pgvector
+        // as a TEXT bind and 500. Same 400 as empty / over-length.
+        assert_namespace_bad_request(validate_namespace("default\0evil"), "control characters");
+        assert_namespace_bad_request(validate_namespace("ns\nbreak"), "control characters");
+        assert_namespace_bad_request(validate_namespace("ns\tbreak"), "control characters");
     }
 
     // ── HealthResponse.prompt_versions wire shape ────────────────
