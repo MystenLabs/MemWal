@@ -133,6 +133,8 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 
 `distance` is cosine distance — lower is more similar.
 
+MCP `memwal_recall` displays `score = 1 - distance` (higher = more similar). Do not apply an SDK `maxDistance` threshold to those scores — the polarities are inverted.
+
 `created_at` is when the fact was **written**, not any date its text describes.
 
 #### Ordering
