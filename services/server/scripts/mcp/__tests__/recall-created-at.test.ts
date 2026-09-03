@@ -54,7 +54,7 @@ test("keeps the existing numbering and score format", () => {
     const line = formatRecallLine(row({ created_at: "2026-07-06T12:00:00Z" }), 2);
 
     assert.ok(line.startsWith("3. "), `expected 1-based numbering, got: ${line}`);
-    assert.match(line, /\[score=0\.750\]/);
+    assert.match(line, /\[score=0\.750 distance=0\.250\]/);
 });
 
 test("a malformed created_at is dropped, not rendered raw", () => {

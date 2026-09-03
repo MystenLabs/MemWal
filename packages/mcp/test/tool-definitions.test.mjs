@@ -38,6 +38,20 @@ test("signed-out tools/list keeps conservative remember wording", () => {
     assert.doesNotMatch(recall, /PROACTIVELY/);
 });
 
+test("cold-start memwal_recall schema exposes maxDistance as cosine distance", () => {
+    const signedIn = TOOL_DEFINITIONS.find((t) => t.name === "memwal_recall");
+    const signedOut = SIGNED_OUT_TOOL_DEFINITIONS.find((t) => t.name === "memwal_recall");
+    assert.ok(signedIn);
+    assert.ok(signedOut);
+    for (const tool of [signedIn, signedOut]) {
+        const maxDistance = tool.inputSchema.properties.maxDistance;
+        assert.equal(maxDistance.type, "number");
+        assert.match(maxDistance.description, /cosine-distance/i);
+        assert.match(maxDistance.description, /distance >= maxDistance/);
+        assert.ok(!(tool.inputSchema.required ?? []).includes("maxDistance"));
+    }
+});
+
 test("memwal_recall is advertised as a read-only search", () => {
     assert.deepEqual(annotations(TOOL_DEFINITIONS, "memwal_recall"), {
         readOnlyHint: true,

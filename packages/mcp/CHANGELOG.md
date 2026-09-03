@@ -5,6 +5,7 @@
 ### Added
 
 - Forward the MCP client's `initialize.clientInfo` to the relayer as `x-memwal-client` / `x-memwal-client-version` so sidecar logs can name the coding agent (Claude Code, Codex, Cursor, …) on each session and tool call.
+- Optional `maxDistance` on `memwal_recall`: cosine-distance cutoff (low = similar). Hits with `distance >= maxDistance` are dropped. Result lines now include both `score` (`1 − cosine distance`) and `distance`. (#373)
 
 ### Fixed
 

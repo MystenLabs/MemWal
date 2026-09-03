@@ -98,6 +98,11 @@ function buildToolDefinitions(proactive: boolean) {
                 query: { type: "string", minLength: 1 },
                 limit: { type: "integer", minimum: 1, maximum: 100, default: 10 },
                 namespace: { type: "string" },
+                maxDistance: {
+                    type: "number",
+                    description:
+                        "Optional cosine-distance cutoff (low = similar; 0 = identical). Hits with distance >= maxDistance are dropped. Omit to apply no cutoff. Displayed score is 1 - distance (high = similar); do not treat score as the cutoff.",
+                },
             },
             required: ["query"],
             additionalProperties: false,

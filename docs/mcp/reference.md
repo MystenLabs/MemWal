@@ -73,11 +73,14 @@ Save several durable facts in one batched call. Prefer this over repeated `memwa
 
 Search the user's Walrus Memory for facts relevant to a query. The agent calls this **proactively** at the start of a task or when the user references past work, decisions, or preferences. Returns matches ranked by relevance.
 
+Each result line includes `score` and `distance`. `distance` is cosine distance (low = similar). Displayed `score` is `1 − cosine distance` (high = similar). Optional `maxDistance` is a cosine-distance cutoff: hits with `distance >= maxDistance` are dropped. Omit `maxDistance` to apply no cutoff.
+
 | **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
 | `query` | string | yes | Natural-language query to match against stored memories. |
 | `limit` | integer (1–100) | no | Max memories to return. Default `10`. |
 | `namespace` | string | no | Namespace bucket to search. |
+| `maxDistance` | number | no | Cosine-distance cutoff (low = similar). Hits with `distance >= maxDistance` are dropped. Omit for no cutoff. |
 
 ### memwal_analyze
 
