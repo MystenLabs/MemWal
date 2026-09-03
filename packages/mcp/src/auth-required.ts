@@ -100,6 +100,7 @@ function buildToolDefinitions(proactive: boolean) {
                 namespace: { type: "string" },
                 maxDistance: {
                     type: "number",
+                    minimum: 0,
                     description:
                         "Optional cosine-distance cutoff (low = similar; 0 = identical). Hits with distance >= maxDistance are dropped. Omit to apply no cutoff. Displayed score is 1 - distance (high = similar); do not treat score as the cutoff.",
                 },

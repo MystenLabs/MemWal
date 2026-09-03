@@ -21,40 +21,38 @@ test("omitting maxDistance leaves every hit in place", () => {
     assert.deepEqual(filterByMaxDistance(results, undefined), results);
 });
 
-test("drops hits whose distance is at or above maxDistance", () => {
+test("the cutoff is exclusive: keeps below maxDistance, drops at or above", () => {
     const kept = filterByMaxDistance(
-        [row("kept", 0.49), row("equal", 0.5), row("worse", 0.9)],
+        [row("best", 0.1), row("ok", 0.499), row("boundary", 0.5), row("worse", 0.9)],
         0.5,
     );
     assert.deepEqual(
         kept.map((m) => m.text),
-        ["kept"],
+        ["best", "ok"],
     );
 });
 
-test("keeps hits whose distance is below maxDistance", () => {
-    const kept = filterByMaxDistance([
-        row("best", 0.1),
-        row("ok", 0.499),
-        row("boundary", 0.5),
-    ], 0.5);
-    assert.deepEqual(
-        kept.map((m) => ({ text: m.text, distance: m.distance })),
-        [
-            { text: "best", distance: 0.1 },
-            { text: "ok", distance: 0.499 },
-        ],
-    );
-});
-
-test("all hits outside maxDistance does not use decrypt-failure wording", () => {
+test("all hits outside maxDistance is not reported as a decrypt failure", () => {
     const results = [row("far", 0.9), row("farther", 1.1)];
     const filtered = filterByMaxDistance(results, 0.5);
     assert.equal(filtered.length, 0);
-    const text = emptyRecallText(results.length, 3);
+    const text = emptyRecallText(results.length, 0);
     assert.match(text, /outside maxDistance/);
     assert.doesNotMatch(text, /decrypt/);
     assert.doesNotMatch(text, /download/);
+});
+
+test("undecrypted matches are reported alongside the cutoff, not hidden by it", () => {
+    // Their distance was never computed, so "all outside maxDistance" would
+    // claim more than we know: they may well have been inside the cutoff.
+    const text = emptyRecallText(2, 3);
+    assert.match(text, /outside maxDistance/);
+    assert.match(text, /3 further matches/);
+    assert.match(text, /decrypt/);
+});
+
+test("a single undecrypted match reads as singular", () => {
+    assert.match(emptyRecallText(2, 1), /1 further match was/);
 });
 
 test("displayed score is 1 minus cosine distance", () => {
@@ -63,5 +61,4 @@ test("displayed score is 1 minus cosine distance", () => {
         0,
     );
     assert.match(line, /\[score=0\.750 distance=0\.250\]/);
-    assert.equal((1 - 0.25).toFixed(3), "0.750");
 });

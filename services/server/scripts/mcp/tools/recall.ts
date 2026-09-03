@@ -25,6 +25,7 @@ const RECALL_INPUT = {
         ),
     maxDistance: z
         .number()
+        .nonnegative()
         .optional()
         .describe(
             "Optional cosine-distance cutoff (low = similar; 0 = identical). Hits with distance >= maxDistance are dropped. Omit to apply no cutoff. Displayed score is 1 - distance (high = similar); do not treat score as the cutoff."
@@ -72,6 +73,9 @@ export function collapseDuplicates<T extends { text: string }>(
  * Same polarity as the SDK: cosine distance is low-is-similar, keep
  * `distance < maxDistance`. Omit `maxDistance` (or pass a non-number) to
  * leave the list unchanged.
+ *
+ * TODO(WALM-428): drop this once the sidecar SDK pin moves off 0.0.3 — 0.1.x
+ * applies the identical filter inside `recall({ maxDistance })`.
  */
 export function filterByMaxDistance<T extends { distance: number }>(
     results: T[],
@@ -85,11 +89,18 @@ export function filterByMaxDistance<T extends { distance: number }>(
  * Empty-result copy after the maxDistance filter.
  *
  * Decrypted hits that all missed the cutoff are not a download/decrypt
- * failure, even when `dropped_count` is also > 0.
+ * failure, so the decrypt copy must not claim the whole result. But an
+ * undecrypted match never had a distance computed, so the cutoff copy cannot
+ * speak for it either: when both counts are non-zero, say both rather than
+ * letting "outside maxDistance" imply the namespace held nothing relevant.
  */
 export function emptyRecallText(resultCount: number, dropped: number): string {
     if (resultCount > 0) {
-        return "All matching memories were outside maxDistance.";
+        const unchecked =
+            dropped > 0
+                ? ` (${dropped} further ${dropped === 1 ? "match was" : "matches were"} never checked against the cutoff: they failed to download or decrypt.)`
+                : "";
+        return `All matching memories were outside maxDistance.${unchecked}`;
     }
     if (dropped > 0) {
         return `No matching memories could be returned (${dropped} matched but failed to download or decrypt). This is not an empty namespace.`;

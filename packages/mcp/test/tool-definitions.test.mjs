@@ -46,6 +46,9 @@ test("cold-start memwal_recall schema exposes maxDistance as cosine distance", (
     for (const tool of [signedIn, signedOut]) {
         const maxDistance = tool.inputSchema.properties.maxDistance;
         assert.equal(maxDistance.type, "number");
+        // A negative cutoff drops every hit and reads as an empty namespace,
+        // so the schema rejects it rather than returning a plausible nothing.
+        assert.equal(maxDistance.minimum, 0);
         assert.match(maxDistance.description, /cosine-distance/i);
         assert.match(maxDistance.description, /distance >= maxDistance/);
         assert.ok(!(tool.inputSchema.required ?? []).includes("maxDistance"));
