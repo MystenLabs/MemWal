@@ -420,6 +420,10 @@ export interface RestoreResult {
      * on-chain `total`, so a fully restored namespace does not loop
      * (WALM-431 / GH #762).
      *
+     * `truncated=false` is not proof the sidecar saw every on-chain blob.
+     * Blobs beyond the owner-wide sidecar candidate cap can still be
+     * missing. Follow-up field: WALM-451 (`sourceCapped`).
+     *
      * Relayers older than WALM-319 don't send this field at all; the SDK
      * defaults it to `false` in that case rather than requiring it.
      */
