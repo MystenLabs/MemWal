@@ -408,6 +408,12 @@ export interface RecallManualHit {
 export interface RestoreResult {
     restored: number;
     skipped: number;
+    /**
+     * Permanent decrypt/UTF-8 failures: the owner+namespace negative cache
+     * plus any new permanent failures this call. Relayers older than
+     * COMG-719 omit this field; the SDK defaults it to `0`.
+     */
+    failed?: number;
     total: number;
     namespace: string;
     owner: string;

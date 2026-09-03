@@ -854,6 +854,7 @@ class TestRestore:
         assert body["limit"] == 100
         assert result.restored == 5
         assert result.skipped == 2
+        assert result.failed == 0
         assert result.truncated is False
 
     @respx.mock
@@ -905,6 +906,55 @@ class TestRestore:
         result = await memwal_client.restore("my-app", limit=100)
 
         assert result.truncated is False
+
+    @respx.mock
+    async def test_restore_preserves_failed(
+        self, memwal_client: MemWal
+    ) -> None:
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/restore").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "restored": 5,
+                    "skipped": 2,
+                    "failed": 3,
+                    "total": 10,
+                    "namespace": "my-app",
+                    "owner": "0xowner",
+                    "truncated": False,
+                },
+            )
+        )
+
+        result = await memwal_client.restore("my-app", limit=100)
+
+        assert result.failed == 3
+
+    @respx.mock
+    async def test_restore_failed_defaults_zero_when_omitted(
+        self, memwal_client: MemWal
+    ) -> None:
+        """Relayers older than COMG-719 omit `failed` — the SDK must
+        default it to 0 rather than requiring the field."""
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/restore").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "restored": 5,
+                    "skipped": 2,
+                    "total": 7,
+                    "namespace": "my-app",
+                    "owner": "0xowner",
+                    "truncated": False,
+                },
+            )
+        )
+
+        result = await memwal_client.restore("my-app", limit=100)
+
+        assert result.failed == 0
 
 
 class TestHealth:

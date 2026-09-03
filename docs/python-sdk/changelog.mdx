@@ -29,7 +29,7 @@ questions:
   - What changes were made in memwal 0.1.4?
   - Where can I find the release history for the Walrus Memory Python SDK?
 answer: >-
-  The latest Python SDK release is 0.1.9. It rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`. 0.1.8 added `dropped_count` on recall results, `write_ready` on health, `MemWalClockDriftError` for clock-drift 401s, and the `dev` relayer preset.
+  The latest Python SDK release is 0.1.9. It adds `failed` on `restore()` results for permanent decrypt/UTF-8 failures, and rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`. 0.1.8 added `dropped_count` on recall results, `write_ready` on health, `MemWalClockDriftError` for clock-drift 401s, and the `dev` relayer preset.
 ---
 
 Track what's new, changed, and fixed in `memwal` (Python).
@@ -38,7 +38,11 @@ For the latest version, see the [PyPI project page](https://pypi.org/project/mem
 
 ## 0.1.9
 
-This release aligns Python bulk remember with the TypeScript SDK by refusing empty batches and mismatched job ids.
+This release reports restore decrypt failures instead of folding them into `skipped`, and aligns Python bulk remember with the TypeScript SDK by refusing empty batches and mismatched job ids.
+
+### Added
+
+- `restore()` results include `failed` (default `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ### Fixed
 

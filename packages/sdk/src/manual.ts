@@ -923,6 +923,11 @@ export class MemWalManual {
         // Relayers older than WALM-319 omit `truncated` entirely — treat
         // "not present" as "not known to be truncated" rather than drop
         // the field or require every relayer version to send it.
-        return { ...result, truncated: result.truncated ?? false };
+        // Relayers older than COMG-719 omit `failed`; default to 0.
+        return {
+            ...result,
+            truncated: result.truncated ?? false,
+            failed: result.failed ?? 0,
+        };
     }
 }

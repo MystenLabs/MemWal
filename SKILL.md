@@ -155,7 +155,7 @@ const stored = await memwal.waitForRememberJob(accepted.job_id, {
 | `recall({ query, limit?, topK?, namespace?, maxDistance? })` *(preferred)* or `recall(query, limit?, namespace?)` | Semantic search for memories | `{ results: [{ blob_id, text, distance }], total }` |
 | `analyze(text, namespace?)` | Extract facts and accept one memory job per fact | `{ job_ids, facts, fact_count, status, owner }` |
 | `analyzeAndWait(text, namespace?, opts?)` | Extract facts and wait for all fact jobs to complete | `{ results, facts, total, succeeded, failed, owner }` |
-| `restore(namespace, limit?)` | Rebuild missing index entries from Walrus | `{ restored, skipped, total, namespace, owner }` |
+| `restore(namespace, limit?)` | Rebuild missing index entries from Walrus | `{ restored, skipped, failed, total, namespace, owner }` |
 | `health()` | Check relayer health | `{ status, version }` |
 | `getPublicKeyHex()` | Get hex-encoded public key | `string` |
 
@@ -271,6 +271,7 @@ interface EmbedResult {
 interface RestoreResult {
   restored: number;
   skipped: number;
+  failed?: number;
   total: number;
   namespace: string;
   owner: string;
@@ -355,12 +356,13 @@ Cross-namespace and cross-owner reads are not just filtered out of results — t
 | Field | Counts | Notes |
 |---|---|---|
 | `restored` | Blobs the relayer just rebuilt this call | Pulled from Walrus → SEAL decrypted → re-embedded → inserted as a new row |
-| `skipped` | On-chain blobs already in the local index | No work needed; relayer left them as-is |
+| `skipped` | On-chain blobs already in the local **success** index | No work needed; relayer left them as-is. Does not include decrypt/UTF-8 failures. |
+| `failed` | Permanent decrypt/UTF-8 failures | Negative cache for this owner+namespace plus new permanent failures this call. Older relayers omit the field; SDKs default it to `0`. |
 | `total` | All on-chain blobs the relayer saw for `(owner, namespace)` | Before the limit was applied |
 | `namespace` | Echo of the request | |
 | `owner` | Resolved owner address | |
 
-**Silent drops.** A blob that *cannot* be decrypted or embedded (e.g. wrong delegate key, malformed ciphertext, embedding API down) is dropped without counting in `restored` *or* `skipped`. `restored + skipped` is therefore a lower bound on healthy entries, not a strict equality with `total`.
+Permanent decrypt or invalid-UTF-8 failures count in `failed`, not `skipped`. Transient download/decrypt/embed errors are still not counted in `restored`, `skipped`, or `failed` and may be retried. `restored + skipped + failed` is therefore a lower bound on inspected blobs, not a strict equality with `total`.
 
 #### Default and limit
 
