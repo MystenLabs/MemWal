@@ -9,7 +9,7 @@ import { z } from "zod";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { normalizeSuiAddress } from "@mysten/sui/utils";
 import { uuidv7 } from "uuidv7";
-import { validateSessionInput, connectWalletInput } from "./input";
+import { connectWalletInput } from "./input";
 import { AUTH_ERRORS } from "../constant";
 import { walletSessions } from "@/shared/db/schema";
 import * as authService from "../domain/service";
@@ -38,24 +38,29 @@ const suiAddressSchema = z
 
 export const authRouter = router({
   /**
-   * Get current session (for resuming auth state).
+   * Get the caller's own session (for resuming auth state).
    * Resolves wallet / enoki sessions only; the legacy zkLogin table is not trusted.
+   *
+   * The session id is read from the x-session-id header via ctx, never from the
+   * input, so a caller cannot read a session it does not already hold. Returns
+   * null for a missing, unknown, or expired session, which is how the client
+   * detects a stale stored session and clears it.
    */
-  getSession: procedure
-    .input(validateSessionInput)
-    .query(({ ctx, input }) =>
-      authService.getActiveSession(ctx.db, input.sessionId)
-    ),
+  getSession: procedure.query(({ ctx }) =>
+    ctx.sessionId ? authService.getActiveSession(ctx.db, ctx.sessionId) : null
+  ),
 
   /**
-   * Logout - clear session (works for both zkLogin and wallet)
+   * Logout - clear the caller's own session (works for both zkLogin and wallet).
+   * Like getSession, the id comes from the header, so knowing another user's
+   * session id is not enough to end their session.
    */
-  logout: procedure
-    .input(validateSessionInput)
-    .mutation(async ({ ctx, input }) => {
-      await authService.deleteSession(ctx.db, input.sessionId);
-      return { success: true };
-    }),
+  logout: procedure.mutation(async ({ ctx }) => {
+    if (ctx.sessionId) {
+      await authService.deleteSession(ctx.db, ctx.sessionId);
+    }
+    return { success: true };
+  }),
 
   /**
    * Connect wallet - authenticate with Sui wallet (Slush, Sui Wallet)
