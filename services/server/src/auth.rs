@@ -93,8 +93,8 @@ pub(crate) fn upstream_unavailable() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         [
-            ("retry-after", "5"),
-            ("x-auth-error", AUTH_UPSTREAM_UNAVAILABLE),
+            ("retry-after", AUTH_UPSTREAM_RETRY_AFTER_SECS.to_string()),
+            ("x-auth-error", AUTH_UPSTREAM_UNAVAILABLE.to_string()),
         ],
         "upstream unavailable",
     )
@@ -975,11 +975,12 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some(AUTH_UPSTREAM_UNAVAILABLE),
         );
+        let retry_after = AUTH_UPSTREAM_RETRY_AFTER_SECS.to_string();
         assert_eq!(
             resp.headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok()),
-            Some("5"),
+            Some(retry_after.as_str()),
         );
         assert_eq!(AUTH_UPSTREAM_RETRY_AFTER_SECS, 5);
         let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
@@ -1003,6 +1004,15 @@ mod tests {
     #[test]
     fn resolve_account_cache_hit_key_not_found_evicts() {
         let action = cache_reverify_action(Err(OnchainVerifyError::KeyNotFound("gone".into())));
+        assert!(matches!(action, CacheReverifyAction::Evict { .. }));
+    }
+
+    #[test]
+    fn resolve_account_cache_hit_object_not_found_evicts() {
+        // Typo'd x-account-id / gRPC NOT_FOUND is a sign-in failure, not a 503.
+        let action = cache_reverify_action(Err(OnchainVerifyError::NotFound(
+            "gRPC GetObject failed: not found".into(),
+        )));
         assert!(matches!(action, CacheReverifyAction::Evict { .. }));
     }
 

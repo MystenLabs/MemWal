@@ -80,12 +80,12 @@ pub async fn verify_delegate_key_onchain(
 
     let result = rpc_response
         .result
-        .ok_or_else(|| OnchainVerifyError::RpcError("No result in RPC response".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("No result in RPC response".into()))?;
 
     let content = result
         .data
         .and_then(|d| d.content)
-        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no content".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no content".into()))?;
 
     // #398: reject foreign/lookalike objects — verify the Move type against the
     // configured immutable type-origin package id before trusting any field.
@@ -97,13 +97,13 @@ pub async fn verify_delegate_key_onchain(
 
     let fields = content
         .fields
-        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no fields".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no fields".into()))?;
 
     // Extract owner address
     let owner = fields
         .get("owner")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'owner' field".into()))?
+        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'owner' field".into()))?
         .to_string();
 
     // Block deactivated accounts.
@@ -125,7 +125,7 @@ pub async fn verify_delegate_key_onchain(
     let delegate_keys = fields
         .get("delegate_keys")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'delegate_keys' field".into()))?;
 
     // Convert our public key to the same format as stored onchain (Vec<u8> as JSON array)
     let pk_as_numbers: Vec<serde_json::Value> = public_key_bytes
@@ -360,11 +360,11 @@ pub async fn list_delegate_keys_onchain(
 
     let result = rpc_response
         .result
-        .ok_or_else(|| OnchainVerifyError::RpcError("No result in RPC response".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("No result in RPC response".into()))?;
     let content = result
         .data
         .and_then(|d| d.content)
-        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no content".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no content".into()))?;
 
     ensure_memwal_account_type(
         content.object_type.as_deref(),
@@ -374,7 +374,7 @@ pub async fn list_delegate_keys_onchain(
 
     let fields = content
         .fields
-        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no fields".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no fields".into()))?;
 
     parse_delegate_keys(&fields)
 }
@@ -411,7 +411,7 @@ fn json_account_active(
     fields
         .get("active")
         .and_then(serde_json::Value::as_bool)
-        .ok_or_else(|| OnchainVerifyError::RpcError("Missing or malformed 'active' field".into()))
+        .ok_or_else(|| OnchainVerifyError::NotFound("Missing or malformed 'active' field".into()))
 }
 
 fn grpc_account_active(fields: &prost_types::Struct) -> Result<bool, OnchainVerifyError> {
@@ -419,7 +419,7 @@ fn grpc_account_active(fields: &prost_types::Struct) -> Result<bool, OnchainVeri
         .fields
         .get("active")
         .and_then(grpc_value_as_bool)
-        .ok_or_else(|| OnchainVerifyError::RpcError("Missing or malformed 'active' field".into()))
+        .ok_or_else(|| OnchainVerifyError::NotFound("Missing or malformed 'active' field".into()))
 }
 
 fn grpc_value_as_list(v: &prost_types::Value) -> Option<&[prost_types::Value]> {
@@ -441,23 +441,32 @@ fn grpc_value_as_u64(v: &prost_types::Value) -> Option<u64> {
     }
 }
 
-/// gRPC counterpart of `verify_delegate_key_onchain` above — same checks
-/// (owner, active, delegate_keys membership), fetched via
-/// LedgerService.GetObject instead of JSON-RPC's `sui_getObject`.
-///
-/// The gRPC `.json` object representation is flatter than JSON-RPC's
-/// `.fields` shape and encodes delegate key `public_key` as base64 (not a
-/// byte-array) — verified live against real testnet objects while migrating
-/// the sidecar and web app to gRPC for this same JSON-RPC sunset.
-async fn verify_delegate_key_onchain_grpc(
+fn parse_object_id(account_object_id: &str) -> Result<sui_sdk_types::Address, OnchainVerifyError> {
+    account_object_id
+        .parse()
+        .map_err(|error| OnchainVerifyError::NotFound(format!("invalid object id: {error}")))
+}
+
+/// Classify LedgerService.GetObject failures by gRPC *code*, never by message
+/// text. tonic's Display embeds the code's English name, so matching "not found"
+/// in the string would also fire on INTERNAL errors that merely mention a
+/// missing object.
+fn map_get_object_status(status: tonic::Status) -> OnchainVerifyError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::InvalidArgument => {
+            OnchainVerifyError::NotFound(format!("gRPC GetObject failed: {status}"))
+        }
+        // UNAVAILABLE / RESOURCE_EXHAUSTED (HTTP 429) / DEADLINE_EXCEEDED and
+        // any other transport failure: retryable, not a sign-in failure.
+        _ => OnchainVerifyError::RpcError(format!("gRPC GetObject failed: {status}")),
+    }
+}
+
+async fn grpc_get_object(
     mut client: sui_rpc::Client,
     account_object_id: &str,
-    public_key_bytes: &[u8],
-    expected_type_origin_package_id: &str,
-) -> Result<String, OnchainVerifyError> {
-    let address: sui_sdk_types::Address = account_object_id
-        .parse()
-        .map_err(|e| OnchainVerifyError::RpcError(format!("invalid object id: {}", e)))?;
+) -> Result<sui_rpc::proto::sui::rpc::v2::Object, OnchainVerifyError> {
+    let address = parse_object_id(account_object_id)?;
     let mut request = sui_rpc::proto::sui::rpc::v2::GetObjectRequest::new(&address);
     request.read_mask = Some(prost_types::FieldMask {
         paths: vec!["json".to_string(), "object_type".to_string()],
@@ -476,11 +485,28 @@ async fn verify_delegate_key_onchain_grpc(
         started.elapsed(),
     );
 
-    let object = response
-        .map_err(|e| OnchainVerifyError::RpcError(format!("gRPC GetObject failed: {}", e)))?
+    response
+        .map_err(map_get_object_status)?
         .into_inner()
         .object
-        .ok_or_else(|| OnchainVerifyError::RpcError("gRPC response missing object".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("gRPC response missing object".into()))
+}
+
+/// gRPC counterpart of `verify_delegate_key_onchain` above — same checks
+/// (owner, active, delegate_keys membership), fetched via
+/// LedgerService.GetObject instead of JSON-RPC's `sui_getObject`.
+///
+/// The gRPC `.json` object representation is flatter than JSON-RPC's
+/// `.fields` shape and encodes delegate key `public_key` as base64 (not a
+/// byte-array) — verified live against real testnet objects while migrating
+/// the sidecar and web app to gRPC for this same JSON-RPC sunset.
+async fn verify_delegate_key_onchain_grpc(
+    client: sui_rpc::Client,
+    account_object_id: &str,
+    public_key_bytes: &[u8],
+    expected_type_origin_package_id: &str,
+) -> Result<String, OnchainVerifyError> {
+    let object = grpc_get_object(client, account_object_id).await?;
 
     // #398: verify the Move type before trusting any field (gRPC path).
     ensure_memwal_account_type(
@@ -491,15 +517,15 @@ async fn verify_delegate_key_onchain_grpc(
 
     let json = object
         .json
-        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no json content".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no json content".into()))?;
     let fields = grpc_value_as_struct(&json)
-        .ok_or_else(|| OnchainVerifyError::RpcError("Object json is not a struct".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Object json is not a struct".into()))?;
 
     let owner = fields
         .fields
         .get("owner")
         .and_then(grpc_value_as_str)
-        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'owner' field".into()))?
+        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'owner' field".into()))?
         .to_string();
 
     let active = grpc_account_active(fields)?;
@@ -518,7 +544,7 @@ async fn verify_delegate_key_onchain_grpc(
         .fields
         .get("delegate_keys")
         .and_then(grpc_value_as_list)
-        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'delegate_keys' field".into()))?;
 
     for dk in delegate_keys {
         let Some(dk_fields) = grpc_value_as_struct(dk) else {
@@ -554,36 +580,11 @@ async fn verify_delegate_key_onchain_grpc(
 /// representation (unlike JSON-RPC's array-of-numbers), but `/agents`
 /// doesn't need the key bytes at all — only `sui_address`/`label`/`created_at`.
 async fn list_delegate_keys_onchain_grpc(
-    mut client: sui_rpc::Client,
+    client: sui_rpc::Client,
     account_object_id: &str,
     expected_type_origin_package_id: &str,
 ) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
-    let address: sui_sdk_types::Address = account_object_id
-        .parse()
-        .map_err(|e| OnchainVerifyError::RpcError(format!("invalid object id: {}", e)))?;
-    let mut request = sui_rpc::proto::sui::rpc::v2::GetObjectRequest::new(&address);
-    request.read_mask = Some(prost_types::FieldMask {
-        paths: vec!["json".to_string(), "object_type".to_string()],
-    });
-
-    let started = std::time::Instant::now();
-    let response = client.ledger_client().get_object(request).await;
-    let status_label = match &response {
-        Ok(_) => "200".to_string(),
-        Err(status) => status.code().to_string(),
-    };
-    crate::observability::observe_external(
-        "sui_grpc",
-        "GetObject",
-        &status_label,
-        started.elapsed(),
-    );
-
-    let object = response
-        .map_err(|e| OnchainVerifyError::RpcError(format!("gRPC GetObject failed: {}", e)))?
-        .into_inner()
-        .object
-        .ok_or_else(|| OnchainVerifyError::RpcError("gRPC response missing object".into()))?;
+    let object = grpc_get_object(client, account_object_id).await?;
 
     ensure_memwal_account_type(
         object.object_type.as_deref(),
@@ -593,15 +594,15 @@ async fn list_delegate_keys_onchain_grpc(
 
     let json = object
         .json
-        .ok_or_else(|| OnchainVerifyError::RpcError("Object has no json content".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Object has no json content".into()))?;
     let fields = grpc_value_as_struct(&json)
-        .ok_or_else(|| OnchainVerifyError::RpcError("Object json is not a struct".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Object json is not a struct".into()))?;
 
     let delegate_keys = fields
         .fields
         .get("delegate_keys")
         .and_then(grpc_value_as_list)
-        .ok_or_else(|| OnchainVerifyError::RpcError("Missing 'delegate_keys' field".into()))?;
+        .ok_or_else(|| OnchainVerifyError::NotFound("Missing 'delegate_keys' field".into()))?;
 
     let mut out = Vec::with_capacity(delegate_keys.len());
     for dk in delegate_keys {
@@ -842,7 +843,7 @@ pub async fn find_account_by_delegate_key(
                     );
                     return Ok((account_id.to_string(), owner));
                 }
-                Err(OnchainVerifyError::KeyNotFound(_)) => {
+                Err(OnchainVerifyError::KeyNotFound(_) | OnchainVerifyError::NotFound(_)) => {
                     continue;
                 }
                 Err(e) => {
@@ -966,6 +967,10 @@ struct ObjectContent {
 pub enum OnchainVerifyError {
     RpcError(String),
     KeyNotFound(String),
+    /// The named object does not exist, the id is unparseable, or GetObject
+    /// returned no object. Distinct from `KeyNotFound` (the account exists
+    /// but this key is not in `delegate_keys`).
+    NotFound(String),
     /// Returned when MemWalAccount.active == false.
     /// Prevents deactivated accounts from authenticating.
     AccountDeactivated(String),
@@ -983,6 +988,7 @@ impl std::fmt::Display for OnchainVerifyError {
         match self {
             OnchainVerifyError::RpcError(msg) => write!(f, "Sui RPC error: {}", msg),
             OnchainVerifyError::KeyNotFound(msg) => write!(f, "Key not found: {}", msg),
+            OnchainVerifyError::NotFound(msg) => write!(f, "Object not found: {}", msg),
             OnchainVerifyError::AccountDeactivated(msg) => {
                 write!(f, "Account deactivated: {}", msg)
             }
@@ -1000,16 +1006,21 @@ impl std::error::Error for OnchainVerifyError {}
 
 impl OnchainVerifyError {
     /// True when the chain could not be consulted, as opposed to a definitive
-    /// "this key is not registered / this account is dead" answer.
+    /// "this key is not registered / this account is dead / this object does
+    /// not exist" answer.
     ///
     /// HTTP signed auth and the MCP proxy must not treat these as a revoke:
-    /// a Sui gRPC 429 is `RpcError`, and logging it as "revoked on-chain"
-    /// produced intermittent empty 401s that the SDK mapped to memwal_login
-    /// (WALM-429).
+    /// a Sui gRPC 429 is `RpcError` (`RESOURCE_EXHAUSTED`), and logging it as
+    /// "revoked on-chain" produced intermittent empty 401s that the SDK mapped
+    /// to memwal_login (WALM-429). `NotFound` / invalid object ids are
+    /// definitive and must not take this path.
     pub fn is_unavailable(&self) -> bool {
         match self {
             Self::RpcError(_) | Self::ScanCapExceeded(_) => true,
-            Self::KeyNotFound(_) | Self::AccountDeactivated(_) | Self::WrongObjectType(_) => false,
+            Self::NotFound(_)
+            | Self::KeyNotFound(_)
+            | Self::AccountDeactivated(_)
+            | Self::WrongObjectType(_) => false,
         }
     }
 }
@@ -1337,6 +1348,61 @@ mod tests {
         assert!(OnchainVerifyError::RpcError("429".into()).is_unavailable());
         assert!(OnchainVerifyError::ScanCapExceeded("cap".into()).is_unavailable());
         assert!(!OnchainVerifyError::WrongObjectType("type".into()).is_unavailable());
+        assert!(!OnchainVerifyError::NotFound("missing object".into()).is_unavailable());
+        assert!(!parse_object_id("not-a-valid-sui-address")
+            .unwrap_err()
+            .is_unavailable());
+    }
+
+    #[test]
+    fn get_object_status_not_found_is_definitive() {
+        let err = map_get_object_status(tonic::Status::not_found("no such object"));
+        assert!(matches!(err, OnchainVerifyError::NotFound(_)));
+        assert!(!err.is_unavailable());
+    }
+
+    #[test]
+    fn get_object_status_invalid_argument_is_definitive() {
+        let err = map_get_object_status(tonic::Status::invalid_argument("bad object id"));
+        assert!(matches!(err, OnchainVerifyError::NotFound(_)));
+        assert!(!err.is_unavailable());
+    }
+
+    #[test]
+    fn get_object_status_resource_exhausted_is_unavailable() {
+        let err = map_get_object_status(tonic::Status::resource_exhausted("429 Too Many Requests"));
+        assert!(matches!(err, OnchainVerifyError::RpcError(_)));
+        assert!(err.is_unavailable());
+    }
+
+    #[test]
+    fn get_object_status_unavailable_is_unavailable() {
+        let err = map_get_object_status(tonic::Status::unavailable("fullnode down"));
+        assert!(matches!(err, OnchainVerifyError::RpcError(_)));
+        assert!(err.is_unavailable());
+    }
+
+    #[test]
+    fn get_object_status_deadline_exceeded_is_unavailable() {
+        let err = map_get_object_status(tonic::Status::deadline_exceeded("timeout"));
+        assert!(matches!(err, OnchainVerifyError::RpcError(_)));
+        assert!(err.is_unavailable());
+    }
+
+    #[test]
+    fn get_object_does_not_treat_not_found_in_message_as_absent() {
+        let err = map_get_object_status(tonic::Status::internal(
+            "internal error: object not found while loading state",
+        ));
+        assert!(matches!(err, OnchainVerifyError::RpcError(_)));
+        assert!(err.is_unavailable());
+    }
+
+    #[test]
+    fn invalid_object_id_is_not_unavailable() {
+        let err = parse_object_id("not-a-sui-object-id").unwrap_err();
+        assert!(matches!(err, OnchainVerifyError::NotFound(_)));
+        assert!(!err.is_unavailable());
     }
 
     // ── Deactivated account field parsing ────────────────────────
@@ -1347,7 +1413,8 @@ mod tests {
 
         assert!(json_account_active(&fields(r#"{"active":true}"#)).unwrap());
         assert!(!json_account_active(&fields(r#"{"active":false}"#)).unwrap());
-        assert!(json_account_active(&fields(r#"{}"#)).is_err());
+        let missing = json_account_active(&fields(r#"{}"#)).unwrap_err();
+        assert!(!missing.is_unavailable());
         assert!(json_account_active(&fields(r#"{"active":"false"}"#)).is_err());
     }
 
@@ -1873,6 +1940,9 @@ mod tests {
             "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6",
         )
         .await;
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(OnchainVerifyError::NotFound(_))),
+            "missing object must be NotFound, not unavailable RpcError, got: {result:?}"
+        );
     }
 }
