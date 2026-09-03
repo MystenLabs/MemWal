@@ -1,7 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { jwtVerify } from "jose";
-import { getAuthSecretKey } from "@/lib/auth/auth-secret";
 import { isTestEnvironment } from "@/lib/constants";
+
+const secret = new TextEncoder().encode(process.env.AUTH_SECRET);
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -20,10 +21,6 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Read the secret whether or not a cookie came with the request. Deferring it
-  // until a token shows up would let a deployment with no AUTH_SECRET serve the
-  // login page as if nothing were wrong.
-  const secret = getAuthSecretKey();
   const token = request.cookies.get("session")?.value;
   let isAuthenticated = false;
 

@@ -5,7 +5,6 @@ import { normalizeSuiAddress } from "@mysten/sui/utils";
 import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { jwtVerify, SignJWT } from "jose";
 import { cookies } from "next/headers";
-import { getAuthSecretKey } from "@/lib/auth/auth-secret";
 import {
   requireSharedRedisClient,
   SharedRedisUnavailableError,
@@ -16,6 +15,14 @@ const CHALLENGE_TTL_SECONDS = 5 * 60;
 const CHALLENGE_REDIS_PREFIX = "enoki-auth:challenge:";
 
 type SuiNetwork = "mainnet" | "testnet";
+
+function getSecret(): Uint8Array {
+  const value = process.env.AUTH_SECRET;
+  if (!value || value.length < 32) {
+    throw new Error("AUTH_SECRET must contain at least 32 characters");
+  }
+  return new TextEncoder().encode(value);
+}
 
 function getNetwork(): SuiNetwork {
   return process.env.NEXT_PUBLIC_SUI_NETWORK === "mainnet"
@@ -49,7 +56,7 @@ export async function issueEnokiChallenge(rawAddress: string): Promise<string> {
     .setJti(nonce)
     .setIssuedAt()
     .setExpirationTime(`${CHALLENGE_TTL_SECONDS}s`)
-    .sign(getAuthSecretKey());
+    .sign(getSecret());
 
   try {
     const redis = await requireSharedRedisClient();
@@ -104,7 +111,7 @@ export async function verifyAndConsumeEnokiChallenge({
 
   try {
     const address = normalizeSuiAddress(rawAddress);
-    const { payload } = await jwtVerify(token, getAuthSecretKey(), {
+    const { payload } = await jwtVerify(token, getSecret(), {
       algorithms: ["HS256"],
       audience: "enoki-auth",
       issuer: "walrus-memory-researcher",
