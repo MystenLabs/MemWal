@@ -80,6 +80,15 @@ pub async fn analyze(
         )));
     }
     validate_namespace(&body.namespace)?;
+    if crate::storage::v2::gate_v2_label(&state, &auth, &body.namespace)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict {
+            code: "v2_writes_disabled".into(),
+            message: "/api/analyze does not write V2 namespaces".into(),
+        });
+    }
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -534,6 +543,8 @@ pub async fn analyze(
                 agent_public_key: Some(auth_pubkey_base.clone()),
                 remember_job_id: Some(job_id.clone()),
                 epochs: state.config.walrus_storage_epochs,
+                v2_namespace_object_id: None,
+                v2_key_version: None,
             },
         )
         .await

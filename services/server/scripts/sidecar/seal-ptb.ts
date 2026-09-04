@@ -133,3 +133,31 @@ export function buildSealApproveTx(
     }
     return tx;
 }
+
+/** V2 namespace DEK policy: never `account::seal_approve`. */
+export function buildNamespaceSealApproveTx(
+    packageId: string,
+    namespaceRegistryId: string,
+    accountRegistryId: string,
+    accountId: string,
+    namespaceId: string,
+    ids: string[],
+): Transaction {
+    const tx = new Transaction();
+    for (const id of ids) {
+        const idBytes = Array.from(
+            Uint8Array.from(id.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16))),
+        );
+        tx.moveCall({
+            target: `${packageId}::namespace::seal_approve`,
+            arguments: [
+                tx.pure("vector<u8>", idBytes),
+                tx.object(namespaceRegistryId),
+                tx.object(accountRegistryId),
+                tx.object(accountId),
+                tx.object(namespaceId),
+            ],
+        });
+    }
+    return tx;
+}

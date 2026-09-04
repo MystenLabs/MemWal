@@ -34,10 +34,16 @@ import { createSealClient, sealEncryptClient, suiClient } from "../clients.js";
 import { buildSealEncryptId, fetchSealEncryptIdentity, type SealEncryptPurpose } from "../seal-identity.js";
 import {
   buildSealApproveTx,
+  buildNamespaceSealApproveTx,
   sealApproveArgsError,
   sealIdentityPackageError,
   sealApprovePackageId,
 } from "../seal-ptb.js";
+import {
+  decodeMemwalV2Envelope,
+  encodeMemwalV2Envelope,
+  namespaceSealKeyIdHex,
+} from "../v2-envelope.js";
 import { requestIdFor } from "../log.js";
 import { isRetryableRpcError } from "../retry/rpc.js";
 import { errorMessage, errorName, formattedError } from "../util.js";
@@ -478,5 +484,136 @@ export function registerSealRoutes(app: Express, policy = DEFAULT_SEAL_ROUTE_POL
       } catch (err: any) {
             sendSealFailure(res, "seal/decrypt-batch", phase, err, requestIdFor(req));
     }
+    });
+
+    app.post("/seal/wrap-dek", express.json({ limit: "64kb" }), async (req, res) => {
+        let phase = "validate";
+        try {
+            const { dek, namespaceId, keyVersion, packageId } = req.body;
+            if (!dek || !namespaceId || keyVersion === undefined || !packageId) {
+                return res.status(400).json({
+                    error: "Missing required fields: dek, namespaceId, keyVersion, packageId",
+                });
+            }
+            const dekBytes = Buffer.from(dek, "base64");
+            if (dekBytes.length !== 32) {
+                return res.status(400).json({ error: "dek must be 32 bytes" });
+            }
+            phase = "encrypt";
+            const result = await sealEncryptClient.encrypt({
+                threshold: SEAL_THRESHOLD,
+                packageId: normalizeSuiAddress(packageId),
+                id: namespaceSealKeyIdHex(namespaceId, BigInt(keyVersion)),
+                data: new Uint8Array(dekBytes),
+            });
+            res.json({ wrappedDek: Buffer.from(result.encryptedObject).toString("base64") });
+        } catch (err: any) {
+            sendSealFailure(res, "seal/wrap-dek", phase, err, requestIdFor(req));
+        }
+    });
+
+    app.post("/seal/unwrap-dek", express.json({ limit: "64kb" }), async (req, res) => {
+        let phase = "validate";
+        try {
+            const {
+                wrappedDek,
+                packageId,
+                namespaceRegistryId,
+                accountRegistryId,
+                accountId,
+                namespaceId,
+            } = req.body;
+            if (
+                !wrappedDek ||
+                !packageId ||
+                !namespaceRegistryId ||
+                !accountRegistryId ||
+                !accountId ||
+                !namespaceId
+            ) {
+                return res.status(400).json({
+                    error: "Missing required fields: wrappedDek, packageId, namespaceRegistryId, accountRegistryId, accountId, namespaceId",
+                });
+            }
+            phase = "resolve_session";
+            const sessionKey = await resolveSessionKey(req, normalizeSuiAddress(packageId));
+            if (!sessionKey) {
+                return res.status(400).json({
+                    error: "Missing credential: provide x-seal-session (preferred) or x-delegate-key header",
+                });
+            }
+            phase = "parse";
+            const encryptedData = new Uint8Array(Buffer.from(wrappedDek, "base64"));
+            const parsed = EncryptedObject.parse(encryptedData);
+            if (normalizeSuiAddress(parsed.packageId) !== normalizeSuiAddress(packageId)) {
+                return res.status(400).json({ error: "Ciphertext packageId does not match request packageId" });
+            }
+            phase = "build_ptb";
+            const tx = buildNamespaceSealApproveTx(
+                normalizeSuiAddress(packageId),
+                namespaceRegistryId,
+                accountRegistryId,
+                accountId,
+                namespaceId,
+                [parsed.id],
+            );
+            const txBytes = await tx.build({ client: suiClient as any, onlyTransactionKind: true });
+            phase = "fetch_keys";
+            const sealClient = createSealClient();
+            await sealClient.fetchKeys({
+                ids: [parsed.id],
+                txBytes,
+                sessionKey,
+                threshold: SEAL_THRESHOLD,
+            });
+            phase = "decrypt";
+            const dek = await sealClient.decrypt({
+                data: encryptedData,
+                sessionKey,
+                txBytes,
+            });
+            res.json({ dek: Buffer.from(dek).toString("base64") });
+        } catch (err: any) {
+            sendSealFailure(res, "seal/unwrap-dek", phase, err, requestIdFor(req));
+        }
+    });
+
+    app.post("/seal/aes-gcm-encrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), async (req, res) => {
+        try {
+            const { dek, plaintext, namespaceId, keyVersion } = req.body;
+            if (!dek || !plaintext || !namespaceId || keyVersion === undefined) {
+                return res.status(400).json({
+                    error: "Missing required fields: dek, plaintext, namespaceId, keyVersion",
+                });
+            }
+            const { envelope, ciphertextDigest } = encodeMemwalV2Envelope({
+                dek: Buffer.from(dek, "base64"),
+                plaintext: Buffer.from(plaintext, "base64"),
+                namespaceId,
+                keyVersion: BigInt(keyVersion),
+            });
+            res.json({
+                envelope: envelope.toString("base64"),
+                ciphertextDigest: ciphertextDigest.toString("base64"),
+            });
+        } catch (err: any) {
+            sendSealFailure(res, "seal/aes-gcm-encrypt", "encrypt", err, requestIdFor(req));
+        }
+    });
+
+    app.post("/seal/aes-gcm-decrypt", express.json({ limit: JSON_LIMIT_SEAL_ENCRYPT }), async (req, res) => {
+        try {
+            const { dek, envelope } = req.body;
+            if (!dek || !envelope) {
+                return res.status(400).json({ error: "Missing required fields: dek, envelope" });
+            }
+            const plaintext = decodeMemwalV2Envelope({
+                dek: Buffer.from(dek, "base64"),
+                envelope: Buffer.from(envelope, "base64"),
+            });
+            res.json({ plaintext: plaintext.toString("base64") });
+        } catch (err: any) {
+            sendSealFailure(res, "seal/aes-gcm-decrypt", "decrypt", err, requestIdFor(req));
+        }
     });
 }

@@ -43,7 +43,9 @@ import {
     InvalidSealPersistenceFenceError,
     parseSealPersistenceFence,
     setMetadataAndTransferBlobs,
+    type SealPersistenceFence,
 } from "../blob-metadata.js";
+import { writeCommitmentV1 } from "../v2-envelope.js";
 
 export async function uploadWalrusBlobWithEffectsRetry(
     flow: any,
@@ -303,6 +305,25 @@ export function registerWalrusUploadRoute(app: Express): void {
             const blob = await timedPhase("get_blob", () => flow.getBlob());
 
             const blobObjectId = extractBlobObjectId(blob);
+            const blobId =
+                typeof (blob as { blobId?: string })?.blobId === "string"
+                    ? (blob as { blobId: string }).blobId
+                    : undefined;
+            let transferFence: SealPersistenceFence = sealFence;
+            if (sealFence.sealAbi === "v2-write-fence" && blobId && blobObjectId) {
+                transferFence = {
+                    ...sealFence,
+                    commitment: Array.from(
+                        writeCommitmentV1({
+                            namespaceId: sealFence.namespaceId,
+                            keyVersion: sealFence.keyVersion,
+                            blobId,
+                            blobObjectId,
+                            envelope: blobData,
+                        })
+                    ),
+                };
+            }
 
             // Set on-chain metadata + transfer blob to user in a single transaction
             if (!deferTransfer && owner && owner !== signerAddress && blobObjectId) {
@@ -312,7 +333,7 @@ export function registerWalrusUploadRoute(app: Express): void {
                         () =>
                             setMetadataAndTransferBlobs(
                             signer,
-                                [{ blobObjectId, namespace, sealFence }],
+                                [{ blobObjectId, namespace, sealFence: transferFence }],
                             owner,
                             packageId,
                             agentId,

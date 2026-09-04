@@ -15,6 +15,7 @@ import { suiClient } from "./clients.js";
 import type { EnokiFallbackPolicy } from "./enoki.js";
 import { dedupeAddresses, shortAddress } from "./util.js";
 import { assertFinalizedTransactionSuccess, submitRebuildableWalletTransaction } from "./wallet.js";
+import { namespaceSealKeyId } from "./v2-envelope.js";
 
 export type MetadataTransferBlob = {
     blobObjectId: string;
@@ -30,6 +31,17 @@ export type SealPersistenceFence =
           registryId: string;
           policyPackageId: string;
           idBytes: number[];
+      }
+    | {
+          sealAbi: "v2-write-fence";
+          packageId: string;
+          nsRegistryId: string;
+          accountRegistryId: string;
+          accountId: string;
+          namespaceId: string;
+          keyVersion: number;
+          idBytes: number[];
+          commitment: number[];
       };
 
 export class InvalidSealPersistenceFenceError extends Error {
@@ -67,8 +79,56 @@ export function parseSealPersistenceFence(
         }
         return { sealAbi: "v1" };
     }
+    if (input.sealAbi === "v2-write-fence") {
+        const {
+            namespaceRegistryId,
+            accountRegistryId,
+            accountId,
+            namespaceId,
+            keyVersion,
+            commitment,
+        } = input as Record<string, unknown>;
+        if (typeof accountId !== "string" || !SUI_ADDRESS.test(accountId)) {
+            invalidFence("Invalid or missing accountId for v2 write_fence");
+        }
+        if (typeof namespaceRegistryId !== "string" || !SUI_ADDRESS.test(namespaceRegistryId)) {
+            invalidFence("Invalid or missing namespaceRegistryId for v2 write_fence");
+        }
+        if (typeof accountRegistryId !== "string" || !SUI_ADDRESS.test(accountRegistryId)) {
+            invalidFence("Invalid or missing accountRegistryId for v2 write_fence");
+        }
+        if (typeof namespaceId !== "string" || !SUI_ADDRESS.test(namespaceId)) {
+            invalidFence("Invalid or missing namespaceId for v2 write_fence");
+        }
+        if (typeof immutablePackageId !== "string" || !SUI_ADDRESS.test(immutablePackageId)) {
+            invalidFence("Invalid or missing packageId for v2 write_fence");
+        }
+        const version = typeof keyVersion === "number" ? keyVersion : Number(keyVersion);
+        if (!Number.isFinite(version) || version < 0) {
+            invalidFence("Invalid keyVersion for v2 write_fence");
+        }
+        const idBytes = Array.from(namespaceSealKeyId(namespaceId, BigInt(version)));
+        let commitmentBytes: number[] = [];
+        if (typeof commitment === "string" && commitment.length > 0) {
+            commitmentBytes = Array.from(Buffer.from(commitment, "base64"));
+        }
+        if (commitmentBytes.length !== 0 && commitmentBytes.length !== 32) {
+            invalidFence("v2 write_fence commitment must be 32 bytes");
+        }
+        return {
+            sealAbi: "v2-write-fence",
+            packageId: normalizeSuiAddress(immutablePackageId),
+            nsRegistryId: normalizeSuiAddress(namespaceRegistryId),
+            accountRegistryId: normalizeSuiAddress(accountRegistryId),
+            accountId: normalizeSuiAddress(accountId),
+            namespaceId: normalizeSuiAddress(namespaceId),
+            keyVersion: version,
+            idBytes,
+            commitment: commitmentBytes,
+        };
+    }
     if (input.sealAbi !== "v1-new") {
-        invalidFence("sealAbi must be explicitly set to v1 or v1-new");
+        invalidFence("sealAbi must be explicitly set to v1, v1-new, or v2-write-fence");
     }
     if (typeof input.accountId !== "string" || !SUI_ADDRESS.test(input.accountId)) {
         invalidFence("Invalid or missing accountId for v1-new persistence fence");
@@ -118,9 +178,51 @@ export function parseSealPersistenceFence(
 
 export function appendSealPersistenceFence(tx: Transaction, fence: SealPersistenceFence): void {
     if (fence.sealAbi === "v1") return;
+    if (fence.sealAbi === "v2-write-fence") {
+        if (fence.commitment.length !== 32) {
+            invalidFence("v2 write_fence commitment must be 32 bytes before submit");
+        }
+        appendV2WriteFence(tx, {
+            packageId: fence.packageId,
+            idBytes: fence.idBytes,
+            nsRegistryId: fence.nsRegistryId,
+            accountRegistryId: fence.accountRegistryId,
+            accountId: fence.accountId,
+            namespaceId: fence.namespaceId,
+            commitment: fence.commitment,
+        });
+        return;
+    }
     tx.moveCall({
         target: `${fence.policyPackageId}::account::seal_encrypt_fence`,
         arguments: [tx.pure("vector<u8>", fence.idBytes), tx.object(fence.registryId), tx.object(fence.accountId)],
+    });
+}
+
+export type V2WriteFenceArgs = {
+    packageId: string;
+    idBytes: number[];
+    nsRegistryId: string;
+    accountRegistryId: string;
+    accountId: string;
+    namespaceId: string;
+    commitment: number[];
+    clockId?: string;
+};
+
+/** `namespace::write_fence(id, nsRegistry, accountRegistry, account, namespace, commitment, clock)`. */
+export function appendV2WriteFence(tx: Transaction, args: V2WriteFenceArgs): void {
+    tx.moveCall({
+        target: `${args.packageId}::namespace::write_fence`,
+        arguments: [
+            tx.pure("vector<u8>", args.idBytes),
+            tx.object(args.nsRegistryId),
+            tx.object(args.accountRegistryId),
+            tx.object(args.accountId),
+            tx.object(args.namespaceId),
+            tx.pure("vector<u8>", args.commitment),
+            tx.object(args.clockId ?? "0x6"),
+        ],
     });
 }
 

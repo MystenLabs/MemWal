@@ -21,6 +21,7 @@ import {
 } from "./middleware.js";
 import { registerHealthRoute, registerWalletMetricsRoute } from "./routes/health.js";
 import { registerSealRoutes } from "./routes/seal.js";
+import { registerV2Routes } from "./routes/v2.js";
 import { registerSponsorRoutes } from "./routes/sponsor.js";
 import {
     registerWalrusMetadataRoute,
@@ -60,10 +61,12 @@ export function createSidecarApp(mode: "full" | "writer" = SIDECAR_ROUTE_MODE): 
     if (mode === "writer") {
         registerWalrusUploadJournalRoute(app);
         registerWalrusMetadataRoute(app, true);
+        registerV2Routes(app);
         return app;
     }
 
     registerSealRoutes(app);
+    registerV2Routes(app);
     registerWalrusUploadJournalRoute(app);
     registerWalrusUploadRoute(app);
     registerWalrusMetadataRoutes(app);

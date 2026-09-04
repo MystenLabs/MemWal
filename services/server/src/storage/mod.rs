@@ -18,7 +18,9 @@
 
 pub mod db;
 pub mod legacy_db;
+pub mod oyster;
 pub mod seal;
 pub mod security_delete_store;
 pub mod sui;
+pub mod v2;
 pub mod walrus;

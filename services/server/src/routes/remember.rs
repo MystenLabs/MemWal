@@ -25,6 +25,8 @@ use apalis::prelude::Storage as _;
 use crate::jobs::{BulkRememberItem, WalletOperation};
 use crate::rate_limit;
 use crate::services::llm_chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
+use crate::storage::seal::SealCredential;
+use crate::storage::v2::{self, V2Namespace};
 use crate::types::*;
 
 use super::{collect_bounded_results, enqueue_wallet_job};
@@ -93,6 +95,184 @@ async fn mark_remember_jobs_failed(state: &AppState, job_ids: &[String], msg: &s
 // ============================================================
 // Async preparation tasks
 // ============================================================
+
+fn spawn_prepare_v2_remember_job(
+    state: Arc<AppState>,
+    job_id: String,
+    text: String,
+    auth: AuthInfo,
+    namespace_label: String,
+    ns: V2Namespace,
+) {
+    let request_context = crate::observability::current_context();
+    tokio::spawn(async move {
+        let work = async move {
+            let result: Result<(), AppError> = async {
+                let needs_summary =
+                    text.len() > SUMMARIZE_THRESHOLD_BYTES && state.config.openai_api_key.is_some();
+                let embed_input: std::borrow::Cow<'_, str> = if needs_summary {
+                    let summary =
+                        summarize_for_embedding(&state.http_client, &state.config, &text).await?;
+                    std::borrow::Cow::Owned(summary)
+                } else {
+                    std::borrow::Cow::Borrowed(text.as_str())
+                };
+                let vector = state.embedder.embed(&embed_input).await?;
+
+                let package_id = state.config.memwal_v2_package_id.as_deref().ok_or_else(|| {
+                    AppError::Internal("MEMWAL_V2_PACKAGE_ID is not set".into())
+                })?;
+                let ns_registry = state
+                    .config
+                    .memwal_v2_namespace_registry_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        AppError::Internal("MEMWAL_V2_NAMESPACE_REGISTRY_ID is not set".into())
+                    })?;
+                let account_registry = state.config.memwal_v2_registry_id.as_deref().ok_or_else(|| {
+                    AppError::Internal("MEMWAL_V2_REGISTRY_ID is not set".into())
+                })?;
+                let credential = SealCredential::from_auth_or_fallback(
+                    &auth,
+                    state.config.sui_private_key.as_deref(),
+                )
+                .ok_or_else(|| {
+                    AppError::Internal(
+                        "SEAL credential required (x-seal-session, x-delegate-key, or SERVER_SUI_PRIVATE_KEY)"
+                            .into(),
+                    )
+                })?;
+                let dek = crate::storage::seal::unwrap_namespace_dek(
+                    &state.http_client,
+                    &state.config.sidecar_url,
+                    state.config.sidecar_secret.as_deref(),
+                    &ns.wrapped_dek,
+                    &credential,
+                    package_id,
+                    ns_registry,
+                    account_registry,
+                    &auth.account_id,
+                    &ns.object_id,
+                )
+                .await?;
+                let envelope = crate::storage::seal::encrypt_v2_envelope(
+                    &state.http_client,
+                    &state.config.sidecar_url,
+                    state.config.sidecar_secret.as_deref(),
+                    &dek,
+                    text.as_bytes(),
+                    &ns.object_id,
+                    ns.current_key_version,
+                )
+                .await?;
+                rate_limit::check_storage_quota(&state, &auth.owner, envelope.len() as i64).await?;
+
+                let wallet_index = state.key_pool.next_index().ok_or_else(|| {
+                    AppError::Internal(
+                        "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                            .into(),
+                    )
+                })?;
+
+                if state.config.memwal_v2_managed_oyster {
+                    let oyster_key =
+                        crate::storage::oyster::blob_object_key(&ns.object_id, &job_id);
+                    let stored = crate::storage::oyster::put_blob(
+                        &state.http_client,
+                        state.config.oyster_base_url.as_deref(),
+                        state.config.oyster_api_key.as_deref(),
+                        &state.config.oyster_bucket,
+                        &oyster_key,
+                        &envelope,
+                    )
+                    .await?;
+                    let commitment = v2::write_commitment_v1(
+                        &ns.object_id,
+                        ns.current_key_version,
+                        &stored.blob_id,
+                        stored.pooled_blob_object_id.as_deref(),
+                        &envelope,
+                    )?;
+                    let ciphertext_digest = v2::blake2b256(&envelope).to_vec();
+                    let _ = sqlx::query(
+                        "UPDATE remember_jobs SET blob_id = $1, namespace_object_id = $2, key_version = $3,
+                         storage_mode = 'managed_oyster', oyster_bucket = $4, oyster_key = $5,
+                         pooled_blob_object_id = $6, ciphertext_digest = $7, commitment = $8, updated_at = NOW()
+                         WHERE id = $9",
+                    )
+                    .bind(&stored.blob_id)
+                    .bind(&ns.object_id)
+                    .bind(ns.current_key_version as i64)
+                    .bind(&state.config.oyster_bucket)
+                    .bind(&oyster_key)
+                    .bind(&stored.pooled_blob_object_id)
+                    .bind(&ciphertext_digest)
+                    .bind(commitment.as_slice())
+                    .bind(&job_id)
+                    .execute(state.db.pool())
+                    .await;
+                    enqueue_wallet_job(
+                        &state,
+                        wallet_index,
+                        WalletOperation::V2WriteFence {
+                            owner: auth.owner.clone(),
+                            namespace: namespace_label.clone(),
+                            account_id: auth.account_id.clone(),
+                            namespace_object_id: ns.object_id.clone(),
+                            key_version: ns.current_key_version,
+                            commitment: commitment.to_vec(),
+                            blob_id: stored.blob_id,
+                            vector,
+                            blob_size_bytes: envelope.len() as i64,
+                            importance: crate::services::extractor::IMPORTANCE_STANDARD,
+                            oyster_bucket: state.config.oyster_bucket.clone(),
+                            oyster_key,
+                            pooled_blob_object_id: stored.pooled_blob_object_id,
+                            ciphertext_digest,
+                            storage_mode: "managed_oyster".into(),
+                            remember_job_id: Some(job_id.clone()),
+                        },
+                    )
+                    .await?;
+                } else {
+                    let encrypted_b64 =
+                        base64::engine::general_purpose::STANDARD.encode(&envelope);
+                    enqueue_wallet_job(
+                        &state,
+                        wallet_index,
+                        WalletOperation::UploadAndTransfer {
+                            encrypted_b64,
+                            vector,
+                            importance: crate::services::extractor::IMPORTANCE_STANDARD,
+                            owner: auth.owner.clone(),
+                            namespace: namespace_label.clone(),
+                            package_id: package_id.to_string(),
+                            account_id: auth.account_id.clone(),
+                            agent_public_key: Some(auth.public_key.clone()),
+                            remember_job_id: Some(job_id.clone()),
+                            epochs: state.config.walrus_storage_epochs,
+                            v2_namespace_object_id: Some(ns.object_id.clone()),
+                            v2_key_version: Some(ns.current_key_version),
+                        },
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = result {
+                let msg = e.to_string();
+                tracing::error!("v2 remember preparation failed: job_id={} {}", job_id, msg);
+                mark_remember_job_failed(&state, &job_id, &msg).await;
+            }
+        };
+        if let Some(request_context) = request_context {
+            crate::observability::with_request_context(request_context, work).await;
+        } else {
+            work.await;
+        }
+    });
+}
 
 fn spawn_prepare_remember_job(
     state: Arc<AppState>,
@@ -169,6 +349,8 @@ fn spawn_prepare_remember_job(
                         agent_public_key: Some(agent_public_key.clone()),
                         remember_job_id: Some(job_id.clone()),
                         epochs: state.config.walrus_storage_epochs,
+                        v2_namespace_object_id: None,
+                        v2_key_version: None,
                     },
                 )
                 .await?;
@@ -642,6 +824,10 @@ pub async fn remember(
     let owner_owned = owner.clone();
     let namespace_owned = namespace.clone();
     let text = body.text;
+    let v2_ns = v2::gate_v2_label(&state, &auth, namespace).await?;
+    if let Some(ref ns) = v2_ns {
+        v2::authorize_v2_write(&state, &auth, ns).await?;
+    }
 
     let job_id = uuid::Uuid::new_v4().to_string();
 
@@ -655,15 +841,26 @@ pub async fn remember(
     .await
     .map_err(|e| AppError::Internal(format!("Failed to create job row: {}", e)))?;
 
-    spawn_prepare_remember_job(
-        Arc::clone(&state),
-        job_id.clone(),
-        text,
-        owner_owned,
-        auth.account_id.clone(),
-        namespace_owned,
-        auth.public_key.clone(),
-    );
+    if let Some(ns) = v2_ns {
+        spawn_prepare_v2_remember_job(
+            Arc::clone(&state),
+            job_id.clone(),
+            text,
+            auth.clone(),
+            namespace_owned,
+            ns,
+        );
+    } else {
+        spawn_prepare_remember_job(
+            Arc::clone(&state),
+            job_id.clone(),
+            text,
+            owner_owned,
+            auth.account_id.clone(),
+            namespace_owned,
+            auth.public_key.clone(),
+        );
+    }
 
     tracing::info!(
         "remember accepted: job_id={} owner={} ns={}",
@@ -773,6 +970,16 @@ pub async fn remember_bulk(
     }
 
     let owner = &auth.owner;
+    for item in &body.items {
+        if v2::gate_v2_label(&state, &auth, &item.namespace)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::BadRequest(
+                "V2 namespaces must use POST /api/remember (bulk is V1-only)".into(),
+            ));
+        }
+    }
     tracing::info!(
         "remember_bulk: {} items owner={}",
         body.items.len(),
@@ -921,6 +1128,14 @@ pub async fn remember_manual(
     // of an opaque 500 after the paid upload.
     validate_embedding_vector(&body.vector)?;
     validate_namespace(&body.namespace)?;
+    if v2::gate_v2_label(&state, &auth, &body.namespace)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::BadRequest(
+            "V2 namespaces are not supported on /api/remember/manual".into(),
+        ));
+    }
 
     let owner = &auth.owner;
     let namespace = &body.namespace;
@@ -1134,6 +1349,16 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: String::new(),
             walrus_system_object_id: String::new(),
+            memwal_v2_package_id: None,
+            memwal_v2_registry_id: None,
+            memwal_v2_namespace_registry_id: None,
+            memwal_v2_namespaces_enabled: false,
+            memwal_v2_writes_enabled: false,
+            memwal_v2_managed_oyster: true,
+            memwal_v2_writer_addresses: vec![],
+            oyster_base_url: None,
+            oyster_api_key: None,
+            oyster_bucket: "memwal".to_string(),
         }
     }
 

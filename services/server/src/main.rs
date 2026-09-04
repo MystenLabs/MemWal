@@ -575,30 +575,6 @@ async fn main() {
     // Wrap the immutable config so the MemoryEngine + handlers share it.
     let config = Arc::new(config);
 
-    // Select the persistence engine. Production = WalrusSealEngine (SEAL
-    // encrypt happens in the handler/client; the engine uploads the
-    // ciphertext to Walrus and indexes the row, with the Redis blob
-    // cache + reactive cleanup on the read path). Benchmark =
-    // PlaintextEngine (plaintext straight to Postgres, no SEAL/Walrus).
-    // BENCHMARK_MODE is off by default and IS NOT FOR PRODUCTION USE.
-    let engine: Arc<dyn MemoryEngine> = if config.benchmark_mode {
-        tracing::warn!("⚠️  BENCHMARK_MODE=true — using PlaintextEngine.");
-        tracing::warn!("⚠️  Memories will be stored UNENCRYPTED in Postgres.");
-        tracing::warn!("⚠️  This is a benchmark-only mode. UNSAFE for production.");
-        Arc::new(PlaintextEngine::new(Arc::clone(&db)))
-    } else {
-        tracing::info!("  storage: WalrusSealEngine (production)");
-        Arc::new(WalrusSealEngine::new(
-            Arc::clone(&db),
-            http_client.clone(),
-            Arc::clone(&key_pool),
-            Arc::clone(&config),
-            redis.clone(),
-            blob_cache_ttl,
-            blob_cache_max_bytes,
-        ))
-    };
-
     // Service-layer capabilities — shared (Arc<dyn …>) so alternative
     // implementations can be swapped at startup. Both wrap the same
     // http_client + config; behaviour is identical to the inline
@@ -624,6 +600,31 @@ async fn main() {
     if let Some(url) = config.sui_grpc_url.as_deref() {
         tracing::info!("  Sui gRPC: {}", url);
     }
+
+    // Select the persistence engine. Production = WalrusSealEngine (SEAL
+    // encrypt happens in the handler/client; the engine uploads the
+    // ciphertext to Walrus and indexes the row, with the Redis blob
+    // cache + reactive cleanup on the read path). Benchmark =
+    // PlaintextEngine (plaintext straight to Postgres, no SEAL/Walrus).
+    // BENCHMARK_MODE is off by default and IS NOT FOR PRODUCTION USE.
+    let engine: Arc<dyn MemoryEngine> = if config.benchmark_mode {
+        tracing::warn!("⚠️  BENCHMARK_MODE=true — using PlaintextEngine.");
+        tracing::warn!("⚠️  Memories will be stored UNENCRYPTED in Postgres.");
+        tracing::warn!("⚠️  This is a benchmark-only mode. UNSAFE for production.");
+        Arc::new(PlaintextEngine::new(Arc::clone(&db)))
+    } else {
+        tracing::info!("  storage: WalrusSealEngine (production)");
+        Arc::new(WalrusSealEngine::new(
+            Arc::clone(&db),
+            http_client.clone(),
+            Arc::clone(&key_pool),
+            Arc::clone(&config),
+            sui_grpc_client.clone(),
+            redis.clone(),
+            blob_cache_ttl,
+            blob_cache_max_bytes,
+        ))
+    };
 
     #[cfg(not(all(feature = "ci-offline-onchain", debug_assertions)))]
     {

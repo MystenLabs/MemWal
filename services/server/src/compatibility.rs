@@ -86,7 +86,35 @@ fn feature_flags() -> BTreeMap<String, bool> {
         ("remember.asyncJobs".to_string(), true),
         ("remember.bulk".to_string(), true),
         ("runtime.versionEndpoint".to_string(), true),
+        (
+            "runtime.v2Namespaces".to_string(),
+            env_flag("MEMWAL_V2_NAMESPACES_ENABLED", false),
+        ),
+        (
+            "runtime.v2WriteFence".to_string(),
+            env_flag("MEMWAL_V2_WRITES_ENABLED", false),
+        ),
+        (
+            "runtime.v2ManagedOyster".to_string(),
+            env_flag("MEMWAL_V2_MANAGED_OYSTER", true),
+        ),
     ])
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let trimmed = v.trim().to_ascii_lowercase();
+            if matches!(trimmed.as_str(), "1" | "true" | "yes" | "on") {
+                true
+            } else if matches!(trimmed.as_str(), "0" | "false" | "no" | "off") {
+                false
+            } else {
+                default
+            }
+        }
+        Err(_) => default,
+    }
 }
 
 fn deprecations() -> Vec<DeprecationNotice> {
@@ -146,6 +174,9 @@ mod tests {
             response.feature_flags.get("runtime.versionEndpoint"),
             Some(&true)
         );
+        assert!(response.feature_flags.contains_key("runtime.v2Namespaces"));
+        assert!(response.feature_flags.contains_key("runtime.v2WriteFence"));
+        assert!(response.feature_flags.contains_key("runtime.v2ManagedOyster"));
         assert!(response
             .deprecations
             .iter()

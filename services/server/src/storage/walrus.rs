@@ -101,6 +101,14 @@ struct WalrusUploadRequest {
     registry_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_package_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    namespace_registry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_registry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    namespace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_version: Option<u64>,
     epochs: u64,
     defer_transfer: bool,
     #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
@@ -148,6 +156,14 @@ struct SetMetadataBatchRequest {
     registry_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_package_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    namespace_registry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_registry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    namespace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_version: Option<u64>,
     #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
     key_index: usize,
@@ -157,6 +173,7 @@ struct SetMetadataBatchRequest {
 #[serde(rename_all = "kebab-case")]
 enum SealAbi {
     V1New,
+    V2WriteFence,
 }
 
 pub enum SealPersistence<'a> {
@@ -165,22 +182,58 @@ pub enum SealPersistence<'a> {
         registry_id: &'a str,
         policy_package_id: &'a str,
     },
+    V2WriteFence {
+        account_id: &'a str,
+        namespace_registry_id: &'a str,
+        account_registry_id: &'a str,
+        namespace_id: &'a str,
+        key_version: u64,
+    },
 }
 
-fn seal_persistence_fields(
-    persistence: SealPersistence<'_>,
-) -> (SealAbi, Option<String>, Option<String>, Option<String>) {
+struct SealPersistenceFields {
+    seal_abi: SealAbi,
+    account_id: Option<String>,
+    registry_id: Option<String>,
+    policy_package_id: Option<String>,
+    namespace_registry_id: Option<String>,
+    account_registry_id: Option<String>,
+    namespace_id: Option<String>,
+    key_version: Option<u64>,
+}
+
+fn seal_persistence_fields(persistence: SealPersistence<'_>) -> SealPersistenceFields {
     match persistence {
         SealPersistence::V1New {
             account_id,
             registry_id,
             policy_package_id,
-        } => (
-            SealAbi::V1New,
-            Some(account_id.to_string()),
-            Some(registry_id.to_string()),
-            Some(policy_package_id.to_string()),
-        ),
+        } => SealPersistenceFields {
+            seal_abi: SealAbi::V1New,
+            account_id: Some(account_id.to_string()),
+            registry_id: Some(registry_id.to_string()),
+            policy_package_id: Some(policy_package_id.to_string()),
+            namespace_registry_id: None,
+            account_registry_id: None,
+            namespace_id: None,
+            key_version: None,
+        },
+        SealPersistence::V2WriteFence {
+            account_id,
+            namespace_registry_id,
+            account_registry_id,
+            namespace_id,
+            key_version,
+        } => SealPersistenceFields {
+            seal_abi: SealAbi::V2WriteFence,
+            account_id: Some(account_id.to_string()),
+            registry_id: None,
+            policy_package_id: None,
+            namespace_registry_id: Some(namespace_registry_id.to_string()),
+            account_registry_id: Some(account_registry_id.to_string()),
+            namespace_id: Some(namespace_id.to_string()),
+            key_version: Some(key_version),
+        },
     }
 }
 
@@ -250,8 +303,7 @@ async fn upload_blob_inner(
     let url = format!("{}/walrus/upload", sidecar_url);
     let data_b64 = BASE64.encode(data);
 
-    let (seal_abi, account_id, registry_id, policy_package_id) =
-        seal_persistence_fields(seal_persistence);
+    let fields = seal_persistence_fields(seal_persistence);
     let mut req = client.post(&url).json(&WalrusUploadRequest {
         data: data_b64,
         key_index,
@@ -259,10 +311,14 @@ async fn upload_blob_inner(
         owner: owner_address.to_string(),
         namespace: namespace.to_string(),
         package_id: package_id.to_string(),
-        seal_abi,
-        account_id,
-        registry_id,
-        policy_package_id,
+        seal_abi: fields.seal_abi,
+        account_id: fields.account_id,
+        registry_id: fields.registry_id,
+        policy_package_id: fields.policy_package_id,
+        namespace_registry_id: fields.namespace_registry_id,
+        account_registry_id: fields.account_registry_id,
+        namespace_id: fields.namespace_id,
+        key_version: fields.key_version,
         epochs,
         defer_transfer,
         agent_id: agent_id.map(|s| s.to_string()),
@@ -379,16 +435,19 @@ pub async fn set_metadata_batch(
     seal_persistence: SealPersistence<'_>,
 ) -> Result<usize, AppError> {
     let url = format!("{}/walrus/set-metadata-batch", sidecar_url);
-    let (seal_abi, account_id, registry_id, policy_package_id) =
-        seal_persistence_fields(seal_persistence);
+    let fields = seal_persistence_fields(seal_persistence);
     let mut req = client.post(&url).json(&SetMetadataBatchRequest {
         blobs,
         owner: owner_address.to_string(),
         package_id: package_id.to_string(),
-        seal_abi,
-        account_id,
-        registry_id,
-        policy_package_id,
+        seal_abi: fields.seal_abi,
+        account_id: fields.account_id,
+        registry_id: fields.registry_id,
+        policy_package_id: fields.policy_package_id,
+        namespace_registry_id: fields.namespace_registry_id,
+        account_registry_id: fields.account_registry_id,
+        namespace_id: fields.namespace_id,
+        key_version: fields.key_version,
         agent_id: agent_id.map(|s| s.to_string()),
         key_index,
     });

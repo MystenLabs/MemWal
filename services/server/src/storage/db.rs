@@ -45,6 +45,7 @@ mod tests {
             include_str!("../../migrations/003_rate_limiter.sql"),
             include_str!("../../migrations/008_benchmark_plaintext.sql"),
             include_str!("../../migrations/009_importance_signal.sql"),
+            include_str!("../../migrations/010_v2_columns.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -302,6 +303,12 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
 
+        let migration_010 = include_str!("../../migrations/010_v2_columns.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self { pool })
@@ -368,6 +375,128 @@ impl VectorDb {
             blob_size_bytes
         );
         Ok(())
+    }
+
+    /// Insert a vector row with optional V2 oyster/write_fence columns.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_vector_v2(
+        &self,
+        id: &str,
+        owner: &str,
+        namespace: &str,
+        blob_id: &str,
+        vector: &[f32],
+        blob_size_bytes: i64,
+        importance: f32,
+        v2: &crate::storage::v2::V2StoredMeta,
+    ) -> Result<(), AppError> {
+        let embedding = Vector::from(vector.to_vec());
+        let started = std::time::Instant::now();
+        let result = sqlx::query(
+            "INSERT INTO vector_entries (
+                id, owner, namespace, blob_id, embedding, blob_size_bytes, importance,
+                namespace_object_id, key_version, storage_mode, oyster_bucket, oyster_key,
+                pooled_blob_object_id, ciphertext_digest, commitment, fence_tx_digest
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             ON CONFLICT (id) DO UPDATE SET
+                owner = EXCLUDED.owner,
+                namespace = EXCLUDED.namespace,
+                blob_id = EXCLUDED.blob_id,
+                embedding = EXCLUDED.embedding,
+                blob_size_bytes = EXCLUDED.blob_size_bytes,
+                importance = EXCLUDED.importance,
+                namespace_object_id = EXCLUDED.namespace_object_id,
+                key_version = EXCLUDED.key_version,
+                storage_mode = EXCLUDED.storage_mode,
+                oyster_bucket = EXCLUDED.oyster_bucket,
+                oyster_key = EXCLUDED.oyster_key,
+                pooled_blob_object_id = EXCLUDED.pooled_blob_object_id,
+                ciphertext_digest = EXCLUDED.ciphertext_digest,
+                commitment = EXCLUDED.commitment,
+                fence_tx_digest = EXCLUDED.fence_tx_digest",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(namespace)
+        .bind(blob_id)
+        .bind(embedding)
+        .bind(blob_size_bytes)
+        .bind(importance)
+        .bind(&v2.namespace_object_id)
+        .bind(v2.key_version)
+        .bind(&v2.storage_mode)
+        .bind(&v2.oyster_bucket)
+        .bind(&v2.oyster_key)
+        .bind(&v2.pooled_blob_object_id)
+        .bind(&v2.ciphertext_digest)
+        .bind(&v2.commitment)
+        .bind(&v2.fence_tx_digest)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to insert V2 vector: {}", e)));
+        crate::observability::observe_db("vector.insert_v2", db_status(&result), started.elapsed());
+        result?;
+        Ok(())
+    }
+
+    pub async fn get_v2_blob_meta(
+        &self,
+        blob_id: &str,
+        owner: &str,
+        namespace: &str,
+    ) -> Result<Option<crate::storage::v2::V2StoredMeta>, AppError> {
+        let started = std::time::Instant::now();
+        let result: Result<
+            Option<(
+                Option<String>,
+                Option<i64>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<Vec<u8>>,
+                Option<Vec<u8>>,
+                Option<String>,
+            )>,
+            AppError,
+        > = sqlx::query_as(
+            "SELECT namespace_object_id, key_version, storage_mode, oyster_bucket, oyster_key,
+                    pooled_blob_object_id, ciphertext_digest, commitment, fence_tx_digest
+             FROM vector_entries
+             WHERE blob_id = $1 AND owner = $2 AND namespace = $3
+             LIMIT 1",
+        )
+        .bind(blob_id)
+        .bind(owner)
+        .bind(namespace)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch V2 blob meta: {}", e)));
+        crate::observability::observe_db("vector.get_v2_meta", db_status(&result), started.elapsed());
+        Ok(result?.map(
+            |(
+                namespace_object_id,
+                key_version,
+                storage_mode,
+                oyster_bucket,
+                oyster_key,
+                pooled_blob_object_id,
+                ciphertext_digest,
+                commitment,
+                fence_tx_digest,
+            )| crate::storage::v2::V2StoredMeta {
+                namespace_object_id,
+                key_version,
+                storage_mode,
+                oyster_bucket,
+                oyster_key,
+                pooled_blob_object_id,
+                ciphertext_digest,
+                commitment,
+                fence_tx_digest,
+            },
+        ))
     }
 
     /// Insert a vector entry with its plaintext (benchmark mode only —

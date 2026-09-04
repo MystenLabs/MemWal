@@ -345,6 +345,19 @@ pub struct Config {
     pub expiry_margin_epochs: u64,
     pub walrus_package_id: String,
     pub walrus_system_object_id: String,
+    /// V2 type-origin package. When set, `x-account-id` may be a V2 MemWalAccount.
+    pub memwal_v2_package_id: Option<String>,
+    pub memwal_v2_registry_id: Option<String>,
+    pub memwal_v2_namespace_registry_id: Option<String>,
+    pub memwal_v2_namespaces_enabled: bool,
+    pub memwal_v2_writes_enabled: bool,
+    /// Default true. When false, V2 remember uses native Walrus Blob + in-PTB write_fence.
+    pub memwal_v2_managed_oyster: bool,
+    pub memwal_v2_writer_addresses: Vec<String>,
+    /// Already includes `/api/v1` (e.g. `http://127.0.0.1:3000/api/v1`).
+    pub oyster_base_url: Option<String>,
+    pub oyster_api_key: Option<String>,
+    pub oyster_bucket: String,
 }
 
 impl Config {
@@ -478,7 +491,26 @@ impl Config {
             walrus_package_id: nonempty_env("WALRUS_PACKAGE_ID").unwrap_or_default(),
             walrus_system_object_id: nonempty_env("WALRUS_SYSTEM_OBJECT_ID")
                 .unwrap_or_default(),
+            memwal_v2_package_id: nonempty_env("MEMWAL_V2_PACKAGE_ID"),
+            memwal_v2_registry_id: nonempty_env("MEMWAL_V2_REGISTRY_ID"),
+            memwal_v2_namespace_registry_id: nonempty_env("MEMWAL_V2_NAMESPACE_REGISTRY_ID"),
+            memwal_v2_namespaces_enabled: env_bool("MEMWAL_V2_NAMESPACES_ENABLED"),
+            memwal_v2_writes_enabled: env_bool("MEMWAL_V2_WRITES_ENABLED"),
+            memwal_v2_managed_oyster: env_bool_or("MEMWAL_V2_MANAGED_OYSTER", true),
+            memwal_v2_writer_addresses: parse_sui_address_list(
+                nonempty_env("MEMWAL_V2_WRITER_ADDRESSES").as_deref(),
+            ),
+            oyster_base_url: nonempty_env("OYSTER_BASE_URL"),
+            oyster_api_key: nonempty_env("OYSTER_API_KEY"),
+            oyster_bucket: nonempty_env("OYSTER_BUCKET")
+                .unwrap_or_else(|| "memwal".to_string()),
         }
+    }
+
+    pub fn v2_chain_configured(&self) -> bool {
+        self.memwal_v2_package_id.is_some()
+            && self.memwal_v2_registry_id.is_some()
+            && self.memwal_v2_namespace_registry_id.is_some()
     }
 }
 
@@ -662,14 +694,40 @@ pub fn security_delete_routes_enabled(config: &Config) -> bool {
 }
 
 fn env_bool(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
+    env_bool_or(name, false)
+}
+
+fn env_bool_or(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let trimmed = v.trim().to_ascii_lowercase();
+            if matches!(trimmed.as_str(), "1" | "true" | "yes" | "on") {
+                true
+            } else if matches!(trimmed.as_str(), "0" | "false" | "no" | "off") {
+                false
+            } else {
+                default
+            }
+        }
+        Err(_) => default,
+    }
+}
+
+fn parse_sui_address_list(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match s.parse::<sui_sdk_types::Address>() {
+            Ok(addr) => Some(addr.to_string()),
+            Err(_) => {
+                tracing::warn!("ignoring invalid Sui address in writer list: {}", s);
+                None
+            }
         })
-        .unwrap_or(false)
+        .collect()
 }
 
 fn parse_walrus_aggregator_urls(primary: &str, extra_csv: Option<&str>) -> Vec<String> {
@@ -1546,6 +1604,8 @@ pub enum AppError {
     BadRequest(String),
     #[allow(dead_code)]
     Unauthorized(String),
+    Forbidden(String),
+    Conflict { code: String, message: String },
     Internal(String),
     /// Walrus blob not found (expired or deleted) — triggers cleanup
     BlobNotFound(String),
@@ -1569,6 +1629,8 @@ impl std::fmt::Display for AppError {
         match self {
             AppError::BadRequest(msg) => write!(f, "Bad Request: {}", msg),
             AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
+            AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
+            AppError::Conflict { code, message } => write!(f, "Conflict ({code}): {message}"),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
             AppError::BlobNotFound(msg) => write!(f, "Blob Not Found: {}", msg),
             AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
@@ -1581,9 +1643,17 @@ impl std::fmt::Display for AppError {
 impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         crate::observability::record_app_error(self.kind());
-        let (status, message) = match &self {
-            AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg.clone()),
+        let (status, message, code) = match &self {
+            AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone(), None),
+            AppError::Unauthorized(msg) => {
+                (axum::http::StatusCode::UNAUTHORIZED, msg.clone(), None)
+            }
+            AppError::Forbidden(msg) => (axum::http::StatusCode::FORBIDDEN, msg.clone(), None),
+            AppError::Conflict { code, message } => (
+                axum::http::StatusCode::CONFLICT,
+                message.clone(),
+                Some(code.clone()),
+            ),
             AppError::Internal(msg) => {
                 // SEC: Never leak internal error details to the client.
                 // Log the full message server-side with a request ID so
@@ -1598,11 +1668,16 @@ impl axum::response::IntoResponse for AppError {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Internal server error (traceId: {})", trace_id),
+                    None,
                 )
             }
-            AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone()),
-            AppError::RateLimited(msg) => (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone()),
-            AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
+            AppError::BlobNotFound(msg) => (axum::http::StatusCode::NOT_FOUND, msg.clone(), None),
+            AppError::RateLimited(msg) => {
+                (axum::http::StatusCode::TOO_MANY_REQUESTS, msg.clone(), None)
+            }
+            AppError::QuotaExceeded(msg) => {
+                (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone(), None)
+            }
             AppError::UpstreamUnavailable(msg) => {
                 // log the upstream details server-side, return
                 // 503 so the SDK / harness will retry per their
@@ -1619,11 +1694,16 @@ impl axum::response::IntoResponse for AppError {
                 (
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
                     format!("Upstream temporarily unavailable (traceId: {})", trace_id),
+                    None,
                 )
             }
         };
 
-        let body = serde_json::json!({ "error": message });
+        let body = if let Some(code) = code {
+            serde_json::json!({ "error": message, "code": code })
+        } else {
+            serde_json::json!({ "error": message })
+        };
         (status, axum::Json(body)).into_response()
     }
 }
@@ -1633,6 +1713,8 @@ impl AppError {
         match self {
             AppError::BadRequest(_) => "bad_request",
             AppError::Unauthorized(_) => "unauthorized",
+            AppError::Forbidden(_) => "forbidden",
+            AppError::Conflict { .. } => "conflict",
             AppError::Internal(_) => "internal",
             AppError::BlobNotFound(_) => "blob_not_found",
             AppError::RateLimited(_) => "rate_limited",
@@ -1781,6 +1863,16 @@ mod tests {
             expiry_margin_epochs: 1,
             walrus_package_id: "0x3".into(),
             walrus_system_object_id: "0x4".into(),
+            memwal_v2_package_id: None,
+            memwal_v2_registry_id: None,
+            memwal_v2_namespace_registry_id: None,
+            memwal_v2_namespaces_enabled: false,
+            memwal_v2_writes_enabled: false,
+            memwal_v2_managed_oyster: true,
+            memwal_v2_writer_addresses: Vec::new(),
+            oyster_base_url: None,
+            oyster_api_key: None,
+            oyster_bucket: "memwal".into(),
         }
     }
 
@@ -2303,6 +2395,15 @@ mod tests {
         assert!(AppError::Unauthorized("x".into())
             .to_string()
             .contains("Unauthorized"));
+        assert!(AppError::Forbidden("x".into())
+            .to_string()
+            .contains("Forbidden"));
+        assert!(AppError::Conflict {
+            code: "v2_writes_disabled".into(),
+            message: "x".into(),
+        }
+        .to_string()
+        .contains("Conflict"));
         assert!(AppError::Internal("x".into())
             .to_string()
             .contains("Internal"));

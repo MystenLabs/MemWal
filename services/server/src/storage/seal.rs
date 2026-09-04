@@ -458,6 +458,339 @@ pub async fn seal_decrypt_batch(
     Ok(out)
 }
 
+fn sidecar_auth(
+    mut req: reqwest::RequestBuilder,
+    sidecar_secret: Option<&str>,
+    credential: Option<&SealCredential>,
+) -> reqwest::RequestBuilder {
+    if let Some(credential) = credential {
+        req = match credential {
+            SealCredential::Session(s) => req.header("x-seal-session", s),
+            SealCredential::DelegateKey(k) => req.header("x-delegate-key", k),
+        };
+    }
+    if let Some(secret) = sidecar_secret {
+        req = req.header("authorization", format!("Bearer {}", secret));
+    }
+    crate::observability::apply_request_id_header(req)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WrapDekRequest {
+    dek: String,
+    namespace_id: String,
+    key_version: u64,
+    package_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WrapDekResponse {
+    wrapped_dek: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnwrapDekRequest {
+    wrapped_dek: String,
+    package_id: String,
+    namespace_registry_id: String,
+    account_registry_id: String,
+    account_id: String,
+    namespace_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnwrapDekResponse {
+    dek: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvelopeEncryptRequest {
+    dek: String,
+    plaintext: String,
+    namespace_id: String,
+    key_version: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvelopeEncryptResponse {
+    envelope: String,
+    ciphertext_digest: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvelopeDecryptRequest {
+    dek: String,
+    envelope: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvelopeDecryptResponse {
+    plaintext: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct V2WriteFenceRequest {
+    key_index: usize,
+    package_id: String,
+    namespace_registry_id: String,
+    account_registry_id: String,
+    account_id: String,
+    namespace_id: String,
+    key_version: u64,
+    commitment: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V2WriteFenceResponse {
+    digest: String,
+}
+
+async fn sidecar_json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    op: &'static str,
+) -> Result<T, AppError> {
+    if !resp.status().is_success() {
+        crate::observability::record_sidecar_failure(op, "http_error");
+        let body = resp.text().await.unwrap_or_default();
+        if let Ok(err) = serde_json::from_str::<SidecarError>(&body) {
+            return Err(AppError::Internal(format!("{op} failed: {}", err.error)));
+        }
+        return Err(AppError::Internal(format!("{op} failed: {body}")));
+    }
+    resp.json()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to parse {op} response: {e}")))
+}
+
+#[allow(dead_code)]
+pub async fn wrap_namespace_dek(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    dek: &[u8],
+    namespace_id: &str,
+    key_version: u64,
+    package_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let url = format!("{}/seal/wrap-dek", sidecar_url);
+    let req = sidecar_auth(
+        client.post(&url).json(&WrapDekRequest {
+            dek: BASE64.encode(dek),
+            namespace_id: namespace_id.to_string(),
+            key_version,
+            package_id: package_id.to_string(),
+        }),
+        sidecar_secret,
+        None,
+    );
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "wrap_dek",
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("Sidecar seal/wrap-dek failed: {e}"))
+    })?;
+    crate::observability::observe_external(
+        "sidecar",
+        "wrap_dek",
+        &resp.status().as_u16().to_string(),
+        started.elapsed(),
+    );
+    let parsed: WrapDekResponse = sidecar_json(resp, "seal/wrap-dek").await?;
+    BASE64
+        .decode(&parsed.wrapped_dek)
+        .map_err(|e| AppError::Internal(format!("wrap-dek base64: {e}")))
+}
+
+pub async fn unwrap_namespace_dek(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    wrapped_dek: &[u8],
+    credential: &SealCredential,
+    package_id: &str,
+    namespace_registry_id: &str,
+    account_registry_id: &str,
+    account_id: &str,
+    namespace_id: &str,
+) -> Result<Vec<u8>, AppError> {
+    let url = format!("{}/seal/unwrap-dek", sidecar_url);
+    let req = sidecar_auth(
+        client.post(&url).json(&UnwrapDekRequest {
+            wrapped_dek: BASE64.encode(wrapped_dek),
+            package_id: package_id.to_string(),
+            namespace_registry_id: namespace_registry_id.to_string(),
+            account_registry_id: account_registry_id.to_string(),
+            account_id: account_id.to_string(),
+            namespace_id: namespace_id.to_string(),
+        }),
+        sidecar_secret,
+        Some(credential),
+    );
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "unwrap_dek",
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("Sidecar seal/unwrap-dek failed: {e}"))
+    })?;
+    crate::observability::observe_external(
+        "sidecar",
+        "unwrap_dek",
+        &resp.status().as_u16().to_string(),
+        started.elapsed(),
+    );
+    let parsed: UnwrapDekResponse = sidecar_json(resp, "seal/unwrap-dek").await?;
+    BASE64
+        .decode(&parsed.dek)
+        .map_err(|e| AppError::Internal(format!("unwrap-dek base64: {e}")))
+}
+
+pub async fn encrypt_v2_envelope(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    dek: &[u8],
+    plaintext: &[u8],
+    namespace_id: &str,
+    key_version: u64,
+) -> Result<Vec<u8>, AppError> {
+    let url = format!("{}/seal/aes-gcm-encrypt", sidecar_url);
+    let req = sidecar_auth(
+        client.post(&url).json(&EnvelopeEncryptRequest {
+            dek: BASE64.encode(dek),
+            plaintext: BASE64.encode(plaintext),
+            namespace_id: namespace_id.to_string(),
+            key_version,
+        }),
+        sidecar_secret,
+        None,
+    );
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "aes_gcm_encrypt",
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("Sidecar seal/aes-gcm-encrypt failed: {e}"))
+    })?;
+    crate::observability::observe_external(
+        "sidecar",
+        "aes_gcm_encrypt",
+        &resp.status().as_u16().to_string(),
+        started.elapsed(),
+    );
+    let parsed: EnvelopeEncryptResponse = sidecar_json(resp, "seal/aes-gcm-encrypt").await?;
+    BASE64
+        .decode(&parsed.envelope)
+        .map_err(|e| AppError::Internal(format!("envelope base64: {e}")))
+}
+
+pub async fn decrypt_v2_envelope(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    dek: &[u8],
+    envelope: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let url = format!("{}/seal/aes-gcm-decrypt", sidecar_url);
+    let req = sidecar_auth(
+        client.post(&url).json(&EnvelopeDecryptRequest {
+            dek: BASE64.encode(dek),
+            envelope: BASE64.encode(envelope),
+        }),
+        sidecar_secret,
+        None,
+    );
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "aes_gcm_decrypt",
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("Sidecar seal/aes-gcm-decrypt failed: {e}"))
+    })?;
+    crate::observability::observe_external(
+        "sidecar",
+        "aes_gcm_decrypt",
+        &resp.status().as_u16().to_string(),
+        started.elapsed(),
+    );
+    let parsed: EnvelopeDecryptResponse = sidecar_json(resp, "seal/aes-gcm-decrypt").await?;
+    BASE64
+        .decode(&parsed.plaintext)
+        .map_err(|e| AppError::Internal(format!("plaintext base64: {e}")))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn v2_write_fence(
+    client: &reqwest::Client,
+    sidecar_url: &str,
+    sidecar_secret: Option<&str>,
+    key_index: usize,
+    package_id: &str,
+    namespace_registry_id: &str,
+    account_registry_id: &str,
+    account_id: &str,
+    namespace_id: &str,
+    key_version: u64,
+    commitment: &[u8],
+) -> Result<String, AppError> {
+    let url = format!("{}/sui/v2-write-fence", sidecar_url);
+    let req = sidecar_auth(
+        client.post(&url).json(&V2WriteFenceRequest {
+            key_index,
+            package_id: package_id.to_string(),
+            namespace_registry_id: namespace_registry_id.to_string(),
+            account_registry_id: account_registry_id.to_string(),
+            account_id: account_id.to_string(),
+            namespace_id: namespace_id.to_string(),
+            key_version,
+            commitment: BASE64.encode(commitment),
+        }),
+        sidecar_secret,
+        None,
+    );
+    let started = std::time::Instant::now();
+    let resp = req.send().await.map_err(|e| {
+        crate::observability::observe_external(
+            "sidecar",
+            "v2_write_fence",
+            "transport_error",
+            started.elapsed(),
+        );
+        AppError::Internal(format!("Sidecar sui/v2-write-fence failed: {e}"))
+    })?;
+    crate::observability::observe_external(
+        "sidecar",
+        "v2_write_fence",
+        &resp.status().as_u16().to_string(),
+        started.elapsed(),
+    );
+    let parsed: V2WriteFenceResponse = sidecar_json(resp, "sui/v2-write-fence").await?;
+    Ok(parsed.digest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -157,6 +157,7 @@ pub async fn recall(
     if body.query.is_empty() {
         return Err(AppError::BadRequest("Query cannot be empty".into()));
     }
+    crate::storage::v2::gate_v2_label(&state, &auth, &body.namespace).await?;
 
     // Validate scoring_weights up front — fail fast on malformed input
     // (NaN, out-of-range, sub-floor half-life) BEFORE we spend an embed +
@@ -326,6 +327,7 @@ pub async fn recall_manual(
     // opaque 500; reject it here with an actionable 400. (No upload/gas on this
     // read path, unlike remember_manual — this is purely a clearer-error improvement.)
     validate_embedding_vector(&body.vector)?;
+    crate::storage::v2::gate_v2_label(&state, &auth, &body.namespace).await?;
 
     // Validate scoring_weights up front (NaN / out-of-range / sub-floor
     // half-life) before the vector search, mirroring `recall`. Previously

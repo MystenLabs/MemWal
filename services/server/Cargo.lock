@@ -1679,6 +1679,7 @@ dependencies = [
  "axum",
  "base64",
  "bcs",
+ "blake2",
  "chrono",
  "dotenvy",
  "ed25519-dalek",

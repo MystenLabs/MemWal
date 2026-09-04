@@ -294,18 +294,36 @@ async fn resolve_account(
     pk_bytes: &[u8; 32],
     account_id_hint: Option<String>,
 ) -> Result<(String, String), String> {
-    // Strategy 1: Check PostgreSQL cache
-    if let Ok(Some((cached_account_id, _cached_owner))) =
-        state.db.get_cached_account(public_key_hex).await
-    {
-        // Verify the cached mapping is still valid onchain
+    // Strategy 1: Check PostgreSQL cache. Keys include the type-origin package
+    // so a V2 MemWalAccount cannot be reused as a V1 cache hit.
+    for package_id in auth_package_ids(state) {
+        let cache_key = delegate_cache_key(package_id, public_key_hex);
+        let cached = match state.db.get_cached_account(&cache_key).await {
+            Ok(hit) => hit,
+            Err(_) => continue,
+        };
+        // Unprefixed V1 rows predate package-scoped keys.
+        let cached = match cached {
+            Some(hit) => Some((hit, cache_key.clone())),
+            None if package_id == state.config.package_id => state
+                .db
+                .get_cached_account(public_key_hex)
+                .await
+                .ok()
+                .flatten()
+                .map(|hit| (hit, public_key_hex.to_string())),
+            None => None,
+        };
+        let Some(((cached_account_id, _cached_owner), stored_key)) = cached else {
+            continue;
+        };
         match verify_delegate_key_onchain(
             &state.http_client,
             &state.config.sui_rpc_url,
             state.sui_grpc_client.as_ref(),
             &cached_account_id,
             pk_bytes,
-            &state.config.package_id,
+            package_id,
         )
         .await
         {
@@ -314,15 +332,12 @@ async fn resolve_account(
                 return Ok((cached_account_id, owner));
             }
             Err(_) => {
-                // Key was revoked on-chain. Delete the stale cache row
-                // immediately so subsequent requests don't loop: cache-hit → RPC fail →
-                // fall-through, burning RPC quota and generating log noise on every call.
                 tracing::warn!(
                     "delegate key {} revoked on-chain for account {}; evicting from cache",
                     public_key_hex,
                     cached_account_id
                 );
-                let _ = state.db.delete_cached_key(public_key_hex).await;
+                let _ = state.db.delete_cached_key(&stored_key).await;
             }
         }
     }
@@ -337,13 +352,10 @@ async fn resolve_account(
         .as_deref()
         .or(state.config.memwal_account_id.as_deref())
     {
-        let owner = verify_delegate_key_onchain(
-            &state.http_client,
-            &state.config.sui_rpc_url,
-            state.sui_grpc_client.as_ref(),
+        let (owner, package_id) = verify_delegate_key_dual(
+            state,
             exact_account_id,
             pk_bytes,
-            &state.config.package_id,
         )
         .await
         .map_err(|e| {
@@ -355,7 +367,11 @@ async fn resolve_account(
 
         let _ = state
             .db
-            .cache_delegate_key(public_key_hex, exact_account_id, &owner)
+            .cache_delegate_key(
+                &delegate_cache_key(&package_id, public_key_hex),
+                exact_account_id,
+                &owner,
+            )
             .await;
 
         tracing::debug!(
@@ -409,7 +425,11 @@ async fn resolve_account(
             // Cache for future requests
             let _ = state
                 .db
-                .cache_delegate_key(public_key_hex, &account_id, &owner)
+                .cache_delegate_key(
+                    &delegate_cache_key(&state.config.package_id, public_key_hex),
+                    &account_id,
+                    &owner,
+                )
                 .await;
             return Ok((account_id, owner));
         }
@@ -426,6 +446,62 @@ async fn resolve_account(
     }
 
     Err("no account found: not in cache, exact account id, or registry".to_string())
+}
+
+fn auth_package_ids(state: &AppState) -> Vec<&str> {
+    let mut ids = vec![state.config.package_id.as_str()];
+    if let Some(v2) = state.config.memwal_v2_package_id.as_deref() {
+        if v2 != state.config.package_id {
+            ids.push(v2);
+        }
+    }
+    ids
+}
+
+fn delegate_cache_key(package_id: &str, public_key_hex: &str) -> String {
+    format!("{package_id}:{public_key_hex}")
+}
+
+async fn verify_delegate_key_dual(
+    state: &AppState,
+    account_id: &str,
+    pk_bytes: &[u8; 32],
+) -> Result<(String, String), String> {
+    match verify_delegate_key_onchain(
+        &state.http_client,
+        &state.config.sui_rpc_url,
+        state.sui_grpc_client.as_ref(),
+        account_id,
+        pk_bytes,
+        &state.config.package_id,
+    )
+    .await
+    {
+        Ok(owner) => Ok((owner, state.config.package_id.clone())),
+        Err(e) => {
+            let retry_v2 = matches!(e, OnchainVerifyError::WrongObjectType(_))
+                && state.config.memwal_v2_package_id.is_some();
+            let Some(v2) = state.config.memwal_v2_package_id.as_deref() else {
+                return Err(e.to_string());
+            };
+            if !retry_v2 {
+                return Err(e.to_string());
+            }
+            match verify_delegate_key_onchain(
+                &state.http_client,
+                &state.config.sui_rpc_url,
+                state.sui_grpc_client.as_ref(),
+                account_id,
+                pk_bytes,
+                v2,
+            )
+            .await
+            {
+                Ok(owner) => Ok((owner, v2.to_string())),
+                Err(v2_err) => Err(format!("v1: {e}; v2: {v2_err}")),
+            }
+        }
+    }
 }
 
 // ============================================================
