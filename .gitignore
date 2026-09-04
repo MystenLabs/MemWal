@@ -146,3 +146,5 @@ temp/
 
 # Devstack local state (private keys, docker/container state — never commit)
 .devstack/
+.env.v2e2e
+scripts/v2e2e/.secrets/
