@@ -1,0 +1,57 @@
+name: Check model ids
+
+# Verifies the OpenRouter ids apps/chatbot can send still exist upstream.
+#
+# Its own workflow rather than a job in test.yml because the failure it catches
+# arrives with no commit attached: OpenRouter retires ids on its own timetable,
+# which is how a retired title model reached production unnoticed. test.yml has
+# no schedule trigger, so a weekly job there would mean guarding every other job
+# in the file against a scheduled run.
+#
+# The catalog endpoint is public, so this needs no key and no environment.
+
+on:
+  pull_request:
+    # Only when the curated list or the check itself moves. Every other PR would
+    # be taking a network dependency on OpenRouter for nothing.
+    paths:
+      - "apps/chatbot/lib/ai/models.ts"
+      - "apps/chatbot/scripts/check-model-ids.ts"
+      - ".github/workflows/check-model-ids.yml"
+  schedule:
+    # Reads nothing shared, so it does not need the bench-account offsets the
+    # other weekly suites coordinate around.
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: check-model-ids-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  model-ids:
+    name: Model ids live on OpenRouter
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Check curated model ids against the live catalog
+        run: pnpm --filter @memwal/chatbot check:models

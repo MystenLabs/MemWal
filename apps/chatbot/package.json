@@ -20,7 +20,8 @@
     "test:e2e": "PLAYWRIGHT=True playwright test",
     "test:e2e:ui": "PLAYWRIGHT=True playwright test --ui",
     "test": "pnpm test:e2e",
-    "test:unit": "vitest run"
+    "test:unit": "vitest run",
+    "check:models": "tsx scripts/check-model-ids.ts"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^3.0.15",

@@ -1,4 +1,5 @@
 import { smoothStream, streamText } from "ai";
+import { MAX_OUTPUT_TOKENS } from "@/lib/ai/models";
 import { updateDocumentPrompt } from "@/lib/ai/prompts";
 import { getArtifactModel } from "@/lib/ai/providers";
 import { createDocumentHandler } from "@/lib/artifacts/server";
@@ -13,6 +14,7 @@ export const textDocumentHandler = createDocumentHandler<"text">({
       system:
         "Write about the given topic. Markdown is supported. Use headings wherever appropriate.",
       experimental_transform: smoothStream({ chunking: "word" }),
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
       prompt: title,
     });
 
@@ -41,6 +43,7 @@ export const textDocumentHandler = createDocumentHandler<"text">({
       model: getArtifactModel(),
       system: updateDocumentPrompt(document.content, "text"),
       experimental_transform: smoothStream({ chunking: "word" }),
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
       prompt: description,
       providerOptions: {
         openai: {

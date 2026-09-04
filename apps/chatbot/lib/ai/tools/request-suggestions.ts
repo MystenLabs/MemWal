@@ -5,6 +5,7 @@ import { getDocumentByIdForUser, saveSuggestions } from "@/lib/db/queries";
 import type { Suggestion } from "@/lib/db/schema";
 import type { ChatMessage } from "@/lib/types";
 import { generateUUID } from "@/lib/utils";
+import { MAX_OUTPUT_TOKENS } from "../models";
 import { getArtifactModel } from "../providers";
 
 type RequestSuggestionsProps = {
@@ -63,6 +64,7 @@ export const requestSuggestions = ({
         model: getArtifactModel(),
         system:
           "You are a help writing assistant. Given a piece of writing, please offer suggestions to improve the piece of writing and describe the change. It is very important for the edits to contain full sentences instead of just words. Max 5 suggestions.",
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
         prompt: document.content,
         output: Output.array({
           element: z.object({

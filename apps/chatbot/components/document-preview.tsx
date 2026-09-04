@@ -102,7 +102,7 @@ export function DocumentPreview({
   }
 
   return (
-    <div className="relative w-full max-w-[450px] cursor-pointer">
+    <div className="relative w-full max-w-[450px] cursor-pointer" data-testid="document-preview">
       <HitboxLayer
         hitboxRef={hitboxRef}
         result={result}
