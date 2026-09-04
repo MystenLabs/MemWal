@@ -307,12 +307,21 @@ export function sanitizeServerError(
 ): { message: string; raw: string; serverCode?: string } {
     // Number() so a string "401" (some MCP / HTTP paths) still hits this branch.
     if (Number(status) === 401) {
-        // Empty body = no-session / bare relayer 401. Non-empty keeps
-        // the AUTH_REJECTED triage (wrong key / account / network).
+        // Empty body = bare relayer 401 (no JSON). That is not "unsigned MCP
+        // session": headless SDK clients already send a key and still hit it
+        // when the delegate/account/network is wrong (WALM-469 / GH #829).
+        // memwal_login stays in the MCP package (`auth-required.ts`).
         const empty = !String(rawBody ?? "").trim();
         return {
             message: empty
-                ? "Walrus Memory isn't signed in. Call the memwal_login tool, then retry."
+                ? "401 from relayer: the request was not authorized. " +
+                  "If you authenticate with MemWal.create({ key, accountId }) " +
+                  "(or MEMWAL_PRIVATE_KEY), check that the key is a registered " +
+                  "delegate on this account, the account ID is correct, and " +
+                  "serverUrl matches mainnet vs staging. memwal_login is only " +
+                  "the MCP browser sign-in; it cannot authorize a headless SDK " +
+                  "client. Full troubleshooting: " +
+                  "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
                 : "401 from relayer: typically wrong private key, key not registered on this account, " +
                   "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
                   "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
