@@ -10,7 +10,7 @@
 import type { MemWal } from "@mysten-incubation/memwal";
 import { Type } from "@sinclair/typebox";
 import { looksLikeInjection } from "../capture.js";
-import { escapeForPrompt, toolError, withTimeout } from "../format.js";
+import { escapeForPrompt, relevancePercent, relevanceRatio, toolError, withTimeout } from "../format.js";
 import type { PluginConfig } from "../types.js";
 import { DEFAULT_SEARCH_LIMIT } from "../constants.js";
 
@@ -71,10 +71,11 @@ export function registerSearchTool(api: any, client: MemWal, config: PluginConfi
             };
           }
 
-          // Walrus Memory returns L2 distance — convert to similarity % for readability
+          // Cosine distance is [0, 2]; clamp so orthogonal/opposite hits
+          // cannot print a negative relevance % (WALM-441 / GH #798).
           const formatted = safe
             .map((r: any, i: number) => {
-              const relevance = Math.round((1 - r.distance) * 100);
+              const relevance = relevancePercent(r.distance);
               return `${i + 1}. ${escapeForPrompt(r.text)} (${relevance}% relevance)`;
             })
             .join("\n");
@@ -92,7 +93,7 @@ export function registerSearchTool(api: any, client: MemWal, config: PluginConfi
               memories: safe.map((r: any) => ({
                 text: r.text,
                 blob_id: r.blob_id,
-                relevance: Math.round((1 - r.distance) * 100) / 100,
+                relevance: relevanceRatio(r.distance),
               })),
             },
           };

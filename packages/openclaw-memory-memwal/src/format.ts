@@ -42,6 +42,25 @@ export function escapeForPrompt(text: string): string {
 }
 
 /**
+ * Map pgvector cosine distance `[0, 2]` to similarity in `[0, 1]`.
+ * Non-finite values clamp to 0 so a bad hit cannot print negative %.
+ */
+export function cosineSimilarity(distance: number): number {
+  if (!Number.isFinite(distance)) return 0;
+  return Math.min(1, Math.max(0, 1 - distance));
+}
+
+/** Integer 0–100 relevance for prompt display. */
+export function relevancePercent(distance: number): number {
+  return Math.round(cosineSimilarity(distance) * 100);
+}
+
+/** Two-decimal 0–1 relevance for tool/CLI details. */
+export function relevanceRatio(distance: number): number {
+  return Math.round(cosineSimilarity(distance) * 100) / 100;
+}
+
+/**
  * Format recalled memories for prompt injection with security warning.
  *
  * Wraps memories in `<memwal-memories>` tags with an instruction header

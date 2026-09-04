@@ -6,6 +6,7 @@
 
 import type { MemWal } from "@mysten-incubation/memwal";
 import { resolveAgent } from "../config.js";
+import { relevanceRatio } from "../format.js";
 import type { PluginConfig } from "../types.js";
 
 /** Register the `openclaw memwal search` command. */
@@ -25,7 +26,7 @@ export function registerSearchCommand(cmd: any, client: MemWal, config: PluginCo
         const output = result.results.map((r: any) => ({
           text: r.text,
           blob_id: r.blob_id,
-          relevance: Math.round((1 - r.distance) * 100) / 100,
+          relevance: relevanceRatio(r.distance),
         }));
         console.log(JSON.stringify(output, null, 2));
       } catch (err) {

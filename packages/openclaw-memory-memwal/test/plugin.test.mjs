@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { parseConfig, resolveAgent, keyPreview } from "../dist/config.js";
-import { withTimeout, withRetry, escapeForPrompt, formatMemoriesForPrompt, stripMemoryTags } from "../dist/format.js";
+import { withTimeout, withRetry, escapeForPrompt, formatMemoriesForPrompt, stripMemoryTags, cosineSimilarity, relevancePercent, relevanceRatio } from "../dist/format.js";
 import { looksLikeInjection, shouldCapture } from "../dist/capture.js";
 import { registerHooks } from "../dist/hooks/index.js";
 
@@ -263,4 +263,17 @@ test("trivial and filler turns are not captured", () => {
   assert.equal(shouldCapture("ok"), false);
   assert.equal(shouldCapture("short"), false);
   assert.equal(shouldCapture("I prefer TypeScript over Rust for backend services at work"), true);
+});
+
+test("cosine similarity clamps to [0, 1] so relevance cannot go negative", () => {
+  assert.equal(cosineSimilarity(0), 1);
+  assert.equal(cosineSimilarity(0.25), 0.75);
+  assert.equal(cosineSimilarity(1), 0);
+  assert.equal(cosineSimilarity(1.35), 0);
+  assert.equal(cosineSimilarity(2), 0);
+  assert.equal(cosineSimilarity(Number.NaN), 0);
+  assert.equal(relevancePercent(1.35), 0);
+  assert.equal(relevanceRatio(1.35), 0);
+  assert.equal(relevancePercent(0.25), 75);
+  assert.equal(relevanceRatio(0.25), 0.75);
 });
