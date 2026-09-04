@@ -1,4 +1,4 @@
-## Security-sweep reconcile (COMG-726 / Postmortem AI-13)
+## Security-sweep reconcile (COMG-726 / postmortem AI-13)
 
 | Field | Value |
 |---|---|

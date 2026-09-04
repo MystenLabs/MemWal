@@ -124,7 +124,7 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Restore Memory Index",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index \u2014 use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status \u2014 does not return memory texts. If truncated=true, increase limit and call again. Call memwal_recall afterwards to query the rebuilt index.",
+            "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index \u2014 use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status \u2014 does not return memory texts. truncated=true is known-retryable-incomplete: raising limit expands the sidecar cap only while limit < 20; after the cap saturates, truncation follows this call's missing-blob page. truncated=false is not completeness; WALM-451 will add sourceCapped. Call memwal_recall afterwards to query the rebuilt index.",
         inputSchema: {
             type: "object",
             properties: {

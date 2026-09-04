@@ -1303,6 +1303,14 @@ fn default_namespace() -> String {
     "default".to_string()
 }
 
+/// Shared namespace validation for every request that carries a namespace.
+///
+/// API-compatibility note: this rejects the empty string, and the read paths
+/// (`recall`, `recall_manual`, `ask`) call it, so an explicit
+/// `"namespace": ""` returns HTTP 400 where it previously returned HTTP 200
+/// with an empty result set. That matches the write paths, but it is
+/// client-visible: a caller that sends `""` to mean "unset" must omit the
+/// field instead and let `default_namespace` apply.
 pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
     if namespace.is_empty() {
         return Err(AppError::BadRequest("namespace cannot be empty".into()));
@@ -1312,6 +1320,20 @@ pub fn validate_namespace(namespace: &str) -> Result<(), AppError> {
             "namespace exceeds maximum length of {} bytes",
             MAX_NAMESPACE_BYTES
         )));
+    }
+    // NUL must not reach PostgreSQL: a `\0` in a text bind makes libpq/pg
+    // reject the query as an opaque 500. Reject here so recall/ask match
+    // remember and return HTTP 400 (WALM-439 / GH #787).
+    //
+    // Deliberately NUL-only, not every Unicode Cc character: `\t`, `\n`, `\r`,
+    // DEL and C1 are all valid Postgres `text` and stored fine before this
+    // check existed. Because this validator also guards the read and delete
+    // paths, rejecting them here would strand any namespace already written
+    // with one — unreadable via recall/ask/stats and undeletable via forget.
+    if namespace.contains('\0') {
+        return Err(AppError::BadRequest(
+            "namespace contains a NUL byte".into(),
+        ));
     }
     Ok(())
 }
@@ -1780,16 +1802,15 @@ pub struct RestoreResponse {
     pub total: usize,
     pub namespace: String,
     pub owner: String,
-    /// True when this restore is known-incomplete: either more on-chain
-    /// blobs were missing locally than `limit` allowed this call to
-    /// restore, or the sidecar's raw on-chain candidate fetch (bounded
-    /// per owner, shared across all of the owner's namespaces, hard-capped
-    /// independent of `limit`) hit its own cap before this namespace's
-    /// blobs were even filtered out of that set — the second
-    /// case can be `true` even when `total == 0` for this namespace,
-    /// since a cap hit elsewhere can starve this namespace's fetch
-    /// entirely. Raising `limit` only helps with the first case; past the
-    /// sidecar's cap, only a cursor/pagination-based restore would.
+    /// True when this restore is known-incomplete: more on-chain blobs were
+    /// missing locally than `limit` allowed this call to restore, or the
+    /// sidecar's owner-wide candidate fetch hit its cap *and* raising
+    /// `limit` can still expand that fetch (`limit < 20`, cap = min(limit*5,
+    /// 100)) — including `total == 0` in that window, because other
+    /// namespaces can starve this one. Once the sidecar cap is saturated
+    /// (`limit >= 20`), truncation follows this call's missing-blob page,
+    /// not on-chain `total`, so a fully restored namespace does not loop
+    /// (WALM-431 / GH #762).
     pub truncated: bool,
 }
 
@@ -3120,6 +3141,17 @@ mod tests {
         assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES)).is_ok());
         assert!(validate_namespace("").is_err());
         assert!(validate_namespace(&"n".repeat(MAX_NAMESPACE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn namespace_validation_rejects_nul_bytes() {
+        assert!(validate_namespace("default\0evil").is_err());
+        assert!(validate_namespace("normal-ns_01").is_ok());
+        // Other control characters stay accepted: Postgres stores them without
+        // complaint, and this validator also gates recall/ask/stats/forget, so
+        // rejecting them would strand namespaces written before the NUL check.
+        assert!(validate_namespace("has\nnewline").is_ok());
+        assert!(validate_namespace("has\ttab").is_ok());
     }
 
     // ── HealthResponse.prompt_versions wire shape ────────────────
