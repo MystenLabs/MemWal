@@ -1293,14 +1293,23 @@ export class MemWal {
             const clockDriftError = clockDriftErrorFromResponse(res);
             if (clockDriftError) throw clockDriftError;
 
-            const { message, serverCode } = sanitizeServerError(res.status, raw);
+            const { message, serverCode } = sanitizeServerError(
+                res.status,
+                raw,
+                res.headers.get("x-auth-error"),
+            );
             const err = new Error(message) as Error & {
                 status?: number;
                 serverCode?: string;
+                retryAfterSeconds?: number;
                 cause?: string;
             };
             err.status = res.status;
             if (serverCode) err.serverCode = serverCode;
+            const retryAfter = Number(res.headers.get("retry-after"));
+            if (Number.isFinite(retryAfter) && retryAfter > 0) {
+                err.retryAfterSeconds = retryAfter;
+            }
             // Preserve raw body on `cause` for in-process debugging only.
             err.cause = raw;
             throw err;

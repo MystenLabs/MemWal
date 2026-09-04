@@ -186,9 +186,8 @@ async fn legacy_delegate_registered(
     .await
     {
         Ok(_) => McpAuthOutcome::Passthrough,
-        Err(crate::storage::sui::OnchainVerifyError::RpcError(msg))
-        | Err(crate::storage::sui::OnchainVerifyError::ScanCapExceeded(msg)) => {
-            tracing::warn!(error = %msg, "mcp delegate on-chain verify unavailable");
+        Err(err) if err.is_unavailable() => {
+            tracing::warn!(error = %err, "mcp delegate on-chain verify unavailable");
             McpAuthOutcome::Unavailable
         }
         Err(err) => {
@@ -353,9 +352,7 @@ pub async fn sse_proxy(
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
         }
-        McpAuthOutcome::Unavailable => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
-        }
+        McpAuthOutcome::Unavailable => return crate::auth::upstream_unavailable(),
     };
     if let Err(code) = apply_internal_headers(
         &mut forwarded,
@@ -466,9 +463,7 @@ pub async fn messages_proxy(
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
         }
-        McpAuthOutcome::Unavailable => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
-        }
+        McpAuthOutcome::Unavailable => return crate::auth::upstream_unavailable(),
     };
     if let Err(code) = apply_internal_headers(
         &mut forwarded,
@@ -586,9 +581,7 @@ pub async fn streamable_proxy(
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
         }
-        McpAuthOutcome::Unavailable => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "upstream unavailable").into_response()
-        }
+        McpAuthOutcome::Unavailable => return crate::auth::upstream_unavailable(),
     };
     if let Err(code) = apply_internal_headers(
         &mut forwarded,

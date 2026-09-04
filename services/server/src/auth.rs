@@ -50,11 +50,10 @@ async fn constant_time_reject() -> StatusCode {
 
 /// Machine-readable reason for a stale/future-dated timestamp, surfaced on the
 /// `x-auth-error` header so a client can distinguish clock drift from a bad
-/// signature. Only emitted for the timestamp check: it depends solely on the
-/// client's own clock, not on whether the account or key exists, so exposing it
-/// leaks nothing about server-side identity state. Signature, nonce, and
-/// account-resolution failures keep the bare uniform 401 (no reason header) so
-/// they remain indistinguishable and cannot be used to enumerate accounts.
+/// signature. Identity 401s (signature, nonce, account-resolution) keep the
+/// bare uniform 401 so they cannot be used to enumerate accounts. 503 auth
+/// unavailability uses the same header with `AUTH_UPSTREAM_UNAVAILABLE` — that
+/// path does not leak whether the key exists.
 const ERR_TIMESTAMP_OUT_OF_BOUNDS: &str = "ERR_TIMESTAMP_OUT_OF_BOUNDS";
 
 /// 401 carrying `x-auth-error: <code>`, after the same constant delay as
@@ -71,6 +70,72 @@ async fn constant_time_reject_with_reason(code: &'static str) -> Response {
 
 fn unsupported_legacy_sdk() -> StatusCode {
     StatusCode::UPGRADE_REQUIRED
+}
+
+/// Machine-readable 503 from signed HTTP auth / MCP when Sui cannot be
+/// consulted. Distinct from other relayer 503s (Redis, rate limiter, LLM)
+/// so SDKs only print the credential-verification copy when this header is
+/// present (WALM-429).
+pub(crate) const AUTH_UPSTREAM_UNAVAILABLE: &str = "AUTH_UPSTREAM_UNAVAILABLE";
+
+/// Short Retry-After for auth 503. Callers must backoff rather than
+/// immediately re-hitting a 429ing Sui fullnode. Not a substitute for the
+/// 100 ms 401 timing pad — that path stays 401-only.
+pub(crate) const AUTH_UPSTREAM_RETRY_AFTER_SECS: u64 = 5;
+
+/// Matches the MCP proxy: Sui could not be consulted, so this is not a login
+/// failure. Empty 401 here is what made the SDK print memwal_login (WALM-429).
+///
+/// Fail-closed: do not authenticate from a cached mapping while the chain
+/// is unreachable. Keep the cache row (do not evict), return 503 with
+/// `x-auth-error: AUTH_UPSTREAM_UNAVAILABLE` and `Retry-After`.
+pub(crate) fn upstream_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            ("retry-after", AUTH_UPSTREAM_RETRY_AFTER_SECS.to_string()),
+            ("x-auth-error", AUTH_UPSTREAM_UNAVAILABLE.to_string()),
+        ],
+        "upstream unavailable",
+    )
+        .into_response()
+}
+
+/// WALM-429: an RPC failure must not evict the cache row *and* must not
+/// authenticate from it.
+#[derive(Debug)]
+enum CacheReverifyAction {
+    Authenticate { owner: String },
+    UnavailableKeepCache { reason: String },
+    Evict { reason: String },
+}
+
+fn cache_reverify_action(result: Result<String, OnchainVerifyError>) -> CacheReverifyAction {
+    match result {
+        Ok(owner) => CacheReverifyAction::Authenticate { owner },
+        Err(e) if e.is_unavailable() => CacheReverifyAction::UnavailableKeepCache {
+            reason: e.to_string(),
+        },
+        Err(e) => CacheReverifyAction::Evict {
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// Outcome of resolving a signed delegate key to a MemWal account.
+enum AccountResolveError {
+    /// Identity could not be established. Maps to a timing-normalized 401.
+    Unauthorized(String),
+    /// On-chain lookup could not be completed. Maps to 503 — retryable.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for AccountResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthorized(msg) | Self::Unavailable(msg) => write!(f, "{msg}"),
+        }
+    }
 }
 
 /// Whether a request whose signed timestamp is `age` seconds old (negative =
@@ -326,12 +391,17 @@ pub async fn verify_signature(
     }
 
     // Step 2: Resolve account — cache → signed header hint/config fallback → registry scan
-    // Always use constant_time_reject so that timing of the resolution error
-    // ("account not found" vs "key not in account") cannot be observed by callers.
+    // Identity failures stay on constant_time_reject (bare 401) so "account not
+    // found" vs "key not in account" cannot be timed. RPC/scan unavailability
+    // is 503: a Sui 429 is not a revoke (WALM-429).
     let (account_id, owner) =
         match resolve_account(&state, &public_key_hex, &pk_array, account_id_hint).await {
             Ok(pair) => pair,
-            Err(e) => {
+            Err(AccountResolveError::Unavailable(e)) => {
+                tracing::warn!("Account resolution unavailable: {}", e);
+                return Ok(upstream_unavailable());
+            }
+            Err(AccountResolveError::Unauthorized(e)) => {
                 tracing::warn!("Account resolution failed: {}", e);
                 return Err(constant_time_reject().await);
             }
@@ -366,34 +436,48 @@ async fn resolve_account(
     public_key_hex: &str,
     pk_bytes: &[u8; 32],
     account_id_hint: Option<String>,
-) -> Result<(String, String), String> {
+) -> Result<(String, String), AccountResolveError> {
     // Strategy 1: Check PostgreSQL cache
     if let Ok(Some((cached_account_id, _cached_owner))) =
         state.db.get_cached_account(public_key_hex).await
     {
-        // Verify the cached mapping is still valid onchain
-        match verify_delegate_key_onchain(
-            &state.http_client,
-            &state.config.sui_rpc_url,
-            state.sui_grpc_client.as_ref(),
-            &cached_account_id,
-            pk_bytes,
-            &state.config.package_id,
-        )
-        .await
-        {
-            Ok(owner) => {
+        // Re-verify the cached mapping on-chain when Sui is reachable.
+        // A transient RPC failure is *not* a revoke: keep the row, but
+        // fail closed with 503 so a revoked key cannot ride a 24h cache
+        // through a Sui outage. Definitive misses evict.
+        match cache_reverify_action(
+            verify_delegate_key_onchain(
+                &state.http_client,
+                &state.config.sui_rpc_url,
+                state.sui_grpc_client.as_ref(),
+                &cached_account_id,
+                pk_bytes,
+                &state.config.package_id,
+            )
+            .await,
+        ) {
+            CacheReverifyAction::Authenticate { owner } => {
                 tracing::debug!("account resolved from cache: {}", cached_account_id);
                 return Ok((cached_account_id, owner));
             }
-            Err(_) => {
-                // Key was revoked on-chain. Delete the stale cache row
-                // immediately so subsequent requests don't loop: cache-hit → RPC fail →
-                // fall-through, burning RPC quota and generating log noise on every call.
+            CacheReverifyAction::UnavailableKeepCache { reason } => {
                 tracing::warn!(
-                    "delegate key {} revoked on-chain for account {}; evicting from cache",
+                    "on-chain re-verify unavailable for key {} on account {} ({}); keeping cached mapping, not authenticating from it",
                     public_key_hex,
-                    cached_account_id
+                    cached_account_id,
+                    reason
+                );
+                return Err(AccountResolveError::Unavailable(format!(
+                    "on-chain re-verify unavailable for cached account {}: {}",
+                    cached_account_id, reason
+                )));
+            }
+            CacheReverifyAction::Evict { reason } => {
+                tracing::warn!(
+                    "cached delegate key {} is stale for account {} ({}); evicting from cache",
+                    public_key_hex,
+                    cached_account_id,
+                    reason
                 );
                 let _ = state.db.delete_cached_key(public_key_hex).await;
             }
@@ -410,7 +494,7 @@ async fn resolve_account(
         .as_deref()
         .or(state.config.memwal_account_id.as_deref())
     {
-        let owner = verify_delegate_key_onchain(
+        match verify_delegate_key_onchain(
             &state.http_client,
             &state.config.sui_rpc_url,
             state.sui_grpc_client.as_ref(),
@@ -419,32 +503,41 @@ async fn resolve_account(
             &state.config.package_id,
         )
         .await
-        .map_err(|e| {
-            format!(
-                "exact account {} verification failed: {}",
-                exact_account_id, e
-            )
-        })?;
+        {
+            Ok(owner) => {
+                let _ = state
+                    .db
+                    .cache_delegate_key(public_key_hex, exact_account_id, &owner)
+                    .await;
 
-        let _ = state
-            .db
-            .cache_delegate_key(public_key_hex, exact_account_id, &owner)
-            .await;
-
-        tracing::debug!(
-            "account resolved from exact account id: {}",
-            exact_account_id
-        );
-        return Ok((exact_account_id.to_string(), owner));
+                tracing::debug!(
+                    "account resolved from exact account id: {}",
+                    exact_account_id
+                );
+                return Ok((exact_account_id.to_string(), owner));
+            }
+            Err(e) if e.is_unavailable() => {
+                return Err(AccountResolveError::Unavailable(format!(
+                    "exact account {} verification unavailable: {}",
+                    exact_account_id, e
+                )));
+            }
+            Err(e) => {
+                return Err(AccountResolveError::Unauthorized(format!(
+                    "exact account {} verification failed: {}",
+                    exact_account_id, e
+                )));
+            }
+        }
     }
 
     // Strategy 3: The legacy registry scan uses JSON-RPC. Testnet no longer
     // serves JSON-RPC, so fail closed when a modern signed x-account-id hint
     // is absent instead of silently contacting a retired endpoint.
     if state.config.sui_network == "testnet" {
-        return Err(
+        return Err(AccountResolveError::Unauthorized(
             "x-account-id is required for delegate-key authentication on testnet".to_string(),
-        );
+        ));
     }
 
     // Non-testnet compatibility path: scan AccountRegistry only when no exact
@@ -453,19 +546,20 @@ async fn resolve_account(
     // unknown-key floods can't stack unbounded scans, and a per-scan page
     // cap (MEMWAL_REGISTRY_SCAN_MAX_PAGES) inside the scan itself. Both
     // rejection messages name the x-account-id remediation, but they surface
-    // only in server logs: the middleware collapses every auth failure to a
-    // bare 401 (no oracle). A key past the page cap therefore cannot
-    // self-resolve — operators must diagnose the lockout from the warn logs
-    // and either raise the cap or have the client send the header hint,
-    // which Strategy 2 verifies directly without any scan.
+    // only in server logs: the middleware collapses identity failures to a
+    // bare 401 (no oracle) and RPC/scan unavailability to 503. A key past the
+    // page cap therefore cannot self-resolve — operators must diagnose the
+    // lockout from the warn logs and either raise the cap or have the client
+    // send the header hint, which Strategy 2 verifies directly without any
+    // scan.
     let _scan_permit = match state.registry_scan_semaphore.try_acquire() {
         Ok(permit) => permit,
         Err(_) => {
-            return Err(
+            return Err(AccountResolveError::Unavailable(
                 "registry scan concurrency limit reached; retry, or send the x-account-id \
                  header hint to skip the registry scan"
                     .to_string(),
-            );
+            ));
         }
     };
     match find_account_by_delegate_key(
@@ -486,19 +580,21 @@ async fn resolve_account(
                 .await;
             return Ok((account_id, owner));
         }
-        Err(e @ OnchainVerifyError::ScanCapExceeded(_)) => {
-            tracing::warn!("registry scan capped: {}", e);
-            return Err(format!(
+        Err(e) if e.is_unavailable() => {
+            tracing::warn!("registry scan unavailable: {}", e);
+            return Err(AccountResolveError::Unavailable(format!(
                 "{}; send the x-account-id header hint to authenticate without a scan",
                 e
-            ));
+            )));
         }
         Err(e) => {
             tracing::debug!("registry scan did not find key: {}", e);
         }
     }
 
-    Err("no account found: not in cache, exact account id, or registry".to_string())
+    Err(AccountResolveError::Unauthorized(
+        "no account found: not in cache, exact account id, or registry".to_string(),
+    ))
 }
 
 /// Combined auth dispatcher for `read_api_routes`: tries the owner-scoped
@@ -767,8 +863,14 @@ mod tests {
     fn reported_repro_45s_offset_is_within_default_window() {
         // The issue's repro used a +45s client offset; it is comfortably inside
         // the default 300s window and is accepted (i.e. does not reproduce).
-        assert!(is_timestamp_fresh(45, crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS));
-        assert!(is_timestamp_fresh(-45, crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS));
+        assert!(is_timestamp_fresh(
+            45,
+            crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS
+        ));
+        assert!(is_timestamp_fresh(
+            -45,
+            crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS
+        ));
     }
 
     #[test]
@@ -795,8 +897,14 @@ mod tests {
         // Pin the exact derivation at default and ceiling so it cannot regress:
         //   default: 2*300 + 300 = 900
         //   ceiling: 2*900 + 300 = 2100
-        assert_eq!(nonce_ttl_secs(crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS), 900);
-        assert_eq!(nonce_ttl_secs(crate::types::MAX_AUTH_CLOCK_DRIFT_SECS), 2100);
+        assert_eq!(
+            nonce_ttl_secs(crate::types::DEFAULT_AUTH_CLOCK_DRIFT_SECS),
+            900
+        );
+        assert_eq!(
+            nonce_ttl_secs(crate::types::MAX_AUTH_CLOCK_DRIFT_SECS),
+            2100
+        );
     }
 
     // ── Timestamp-drift reason header (safe to distinguish) ──────
@@ -854,6 +962,65 @@ mod tests {
     async fn constant_time_reject_returns_unauthorized() {
         let status = constant_time_reject().await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn upstream_unavailable_is_503_not_401() {
+        let resp = upstream_unavailable();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get("x-auth-error")
+                .and_then(|v| v.to_str().ok()),
+            Some(AUTH_UPSTREAM_UNAVAILABLE),
+        );
+        let retry_after = AUTH_UPSTREAM_RETRY_AFTER_SECS.to_string();
+        assert_eq!(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some(retry_after.as_str()),
+        );
+        assert_eq!(AUTH_UPSTREAM_RETRY_AFTER_SECS, 5);
+        let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        assert_eq!(&body[..], b"upstream unavailable");
+    }
+
+    #[test]
+    fn resolve_account_cache_hit_rpc_error_keeps_row_without_authenticating() {
+        // WALM-429: a Sui 429 used to evict the cache and 401 a live key.
+        // Keep the row (so a later verify can succeed) but do not treat the
+        // cached mapping as authorization while the chain is unreachable.
+        let action = cache_reverify_action(Err(OnchainVerifyError::RpcError(
+            "gRPC GetObject failed: 429 Too Many Requests".into(),
+        )));
+        assert!(matches!(
+            action,
+            CacheReverifyAction::UnavailableKeepCache { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_account_cache_hit_key_not_found_evicts() {
+        let action = cache_reverify_action(Err(OnchainVerifyError::KeyNotFound("gone".into())));
+        assert!(matches!(action, CacheReverifyAction::Evict { .. }));
+    }
+
+    #[test]
+    fn resolve_account_cache_hit_object_not_found_evicts() {
+        // Typo'd x-account-id / gRPC NOT_FOUND is a sign-in failure, not a 503.
+        let action = cache_reverify_action(Err(OnchainVerifyError::NotFound(
+            "gRPC GetObject failed: not found".into(),
+        )));
+        assert!(matches!(action, CacheReverifyAction::Evict { .. }));
+    }
+
+    #[test]
+    fn resolve_account_cache_hit_ok_authenticates() {
+        match cache_reverify_action(Ok("0xowner".into())) {
+            CacheReverifyAction::Authenticate { owner } => assert_eq!(owner, "0xowner"),
+            other => panic!("expected authenticate, got {other:?}"),
+        }
     }
 
     #[test]

@@ -60,11 +60,9 @@ fn security_delete_cors() -> CorsLayer {
 }
 
 /// CORS layer for the main relayer routes, scoped to the configured origins.
-/// `allow_headers` are the request headers a browser may send on a signed
-/// request; `expose_headers` lists the response headers a cross-origin client
-/// may read — Fetch hides everything else, so `x-auth-error` must be exposed
-/// for the browser SDK to read the machine-readable auth-failure reason (e.g.
-/// clock-drift vs. bad signature). Only that header is exposed.
+/// Fetch hides response headers unless listed in `expose_headers`, so
+/// `x-auth-error` and `Retry-After` must be exposed for the browser SDK
+/// (clock-drift vs bad signature, and 503 backoff).
 fn relayer_cors(origins: Vec<HeaderValue>) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
@@ -90,7 +88,10 @@ fn relayer_cors(origins: Vec<HeaderValue>) -> CorsLayer {
             // so this custom header must be preflight-allowed)
             "x-admin-api-key".parse::<header::HeaderName>().unwrap(),
         ])
-        .expose_headers(["x-auth-error".parse::<header::HeaderName>().unwrap()])
+        .expose_headers([
+            "x-auth-error".parse::<header::HeaderName>().unwrap(),
+            header::RETRY_AFTER,
+        ])
 }
 
 #[cfg(test)]
@@ -173,11 +174,7 @@ mod cors_tests {
     }
 
     #[tokio::test]
-    async fn relayer_cors_exposes_only_x_auth_error() {
-        // Browsers can only read response headers listed in
-        // Access-Control-Expose-Headers. The clock-drift reason (x-auth-error)
-        // must be exposed so the browser SDK can distinguish drift from a bad
-        // signature; nothing else should cross origins.
+    async fn relayer_cors_exposes_x_auth_error_and_retry_after() {
         let origin = "https://app.memwal.test";
         let app = Router::new()
             .route("/api/remember", post(|| async {}))
@@ -208,10 +205,14 @@ mod cors_tests {
             names.iter().any(|n| n.eq_ignore_ascii_case("x-auth-error")),
             "x-auth-error must be exposed, got: {exposed}"
         );
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("retry-after")),
+            "retry-after must be exposed, got: {exposed}"
+        );
         assert_eq!(
             names.len(),
-            1,
-            "only x-auth-error should be exposed, got: {exposed}"
+            2,
+            "only x-auth-error and retry-after should be exposed, got: {exposed}"
         );
     }
 }
@@ -1394,8 +1395,7 @@ async fn main() {
             if let Err(e) = evict_state.db.prune_unconsumed_oauth_clients().await {
                 tracing::error!("MCP OAuth client pruning failed: {}", e);
             }
-            if let Err(e) = evict_state.db.sweep_expired_tombstones().await
-            {
+            if let Err(e) = evict_state.db.sweep_expired_tombstones().await {
                 tracing::error!("tombstone retention sweep failed: {}", e);
             }
         }
