@@ -3,6 +3,7 @@
  */
 
 import {
+    cancelUninitializedNamespace,
     createNamespace,
     generateAndWrapNamespaceDek as sdkGenerateAndWrapNamespaceDek,
     grantAccess,
@@ -11,6 +12,7 @@ import {
 } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Ed25519PublicKey } from '@mysten/sui/keypairs/ed25519'
+import { getJsonRpcFullnodeUrl, SuiJsonRpcClient } from '@mysten/sui/jsonRpc'
 import { Transaction } from '@mysten/sui/transactions'
 import {
     fromHex,
@@ -26,8 +28,8 @@ export const PERMISSION_READ = 1
 export const PERMISSION_WRITE = 2
 export const PERMISSION_SHARE = 4
 
-const MAX_EVENT_PAGES = 8
 const EVENT_PAGE_SIZE = 50
+const MAX_OWNER_EVENT_PAGES = 100
 
 const DEFAULT_SEAL_SERVERS: Record<'testnet' | 'mainnet', string[]> = {
     testnet: [
@@ -59,14 +61,26 @@ export type V2NamespaceRow = {
 
 export type WalletSignerLike = WalletSigner
 
+export type SealServerConfig = {
+    objectId: string
+    weight: number
+    aggregatorUrl?: string
+    apiKeyName?: string
+    apiKey?: string
+}
+
 type EventsClient = {
     queryEvents: (input: {
-        query: { MoveEventType: string }
+        query: { Sender: string }
         cursor?: unknown
         limit?: number
         order?: 'ascending' | 'descending'
     }) => Promise<{
-        data: Array<{ parsedJson?: Record<string, unknown> | null; json?: Record<string, unknown> | null }>
+        data: Array<{
+            type?: string
+            parsedJson?: Record<string, unknown> | null
+            json?: Record<string, unknown> | null
+        }>
         nextCursor?: unknown
         hasNextPage?: boolean
     }>
@@ -81,6 +95,25 @@ type InspectClient = {
         error?: unknown
         effects?: { status?: { status?: string; error?: unknown } }
     }>
+}
+
+let jsonRpcClient: SuiJsonRpcClient | undefined
+
+function v2JsonRpcUrl(): string {
+    if (config.localE2eJsonRpc) return config.suiRpcUrl || 'http://127.0.0.1:9000'
+    if (config.suiRpcUrl) return config.suiRpcUrl
+    return getJsonRpcFullnodeUrl(config.suiNetwork)
+}
+
+/** Dedicated JSON-RPC client for queryEvents / devInspect (gRPC has neither). */
+export function getV2JsonRpcClient(): SuiJsonRpcClient {
+    if (!jsonRpcClient) {
+        jsonRpcClient = new SuiJsonRpcClient({
+            url: v2JsonRpcUrl(),
+            network: config.suiClientNetwork,
+        })
+    }
+    return jsonRpcClient
 }
 
 function sdkTxOpts(accountId: string, walletSigner: WalletSignerLike, suiClient: unknown) {
@@ -105,10 +138,14 @@ export function normalizeLabelForSubmit(raw: string): string {
     return sanitizeLabelInput(raw).trim()
 }
 
+export function utf8ByteLength(value: string): number {
+    return new TextEncoder().encode(value).length
+}
+
 export function validateNamespaceLabel(label: string): string | null {
     if (!label) return 'Namespace label cannot be empty'
-    if (label.length > NAMESPACE_LABEL_MAX_LENGTH) {
-        return 'Namespace label must be 64 characters or fewer'
+    if (utf8ByteLength(label) > NAMESPACE_LABEL_MAX_LENGTH) {
+        return 'Namespace label must be 64 bytes or fewer'
     }
     return null
 }
@@ -206,7 +243,49 @@ export function principalsToGrant(
     return out
 }
 
-export function v2SealServerConfigs(): Array<{ objectId: string; weight: number }> {
+export function sharePrincipalBlockedReason(principal: string, ownerAddress: string): string | null {
+    if (!principal) return null
+    if (/^0x0+$/i.test(principal.trim())) return 'The zero address cannot be granted access'
+    if (!isValidSuiAddress(principal)) return 'Enter a valid Sui address'
+    const normalized = normalizeSuiAddress(principal)
+    if (isValidSuiAddress(ownerAddress) && normalized === normalizeSuiAddress(ownerAddress)) {
+        return 'The owner already has implicit access'
+    }
+    return null
+}
+
+export function playgroundMemwalAccountId(opts: {
+    namespace: string
+    v2Namespaces: ReadonlyArray<{ label: string; active: boolean }>
+    v2AccountId: string | null
+    v1AccountId: string | null
+}): string | null {
+    const isV2 = opts.v2Namespaces.some((row) => row.active && row.label === opts.namespace)
+    if (isV2) return opts.v2AccountId
+    return opts.v1AccountId
+}
+
+export function playgroundNamespaceOptions(v2Labels: readonly string[], current: string): string[] {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const label of ['default', ...v2Labels, current]) {
+        if (!label || seen.has(label)) continue
+        seen.add(label)
+        out.push(label)
+    }
+    return out
+}
+
+export function mergeNamespaceRows(fetched: V2NamespaceRow[], local: V2NamespaceRow[]): V2NamespaceRow[] {
+    const fetchedIds = new Set(fetched.map((row) => row.id))
+    const extras = local.filter((row) => !fetchedIds.has(row.id) && !row.destroyed)
+    return [...fetched, ...extras]
+}
+
+export function v2SealServerConfigs(): SealServerConfig[] {
+    if (config.sealServerConfigs.length > 0) {
+        return config.sealServerConfigs.map((server) => ({ ...server }))
+    }
     const ids = config.sealKeyServers.length > 0
         ? [...config.sealKeyServers]
         : DEFAULT_SEAL_SERVERS[config.suiNetwork]
@@ -214,6 +293,7 @@ export function v2SealServerConfigs(): Array<{ objectId: string; weight: number 
 }
 
 export function v2SealThreshold(): number {
+    if (config.sealThreshold >= 1) return config.sealThreshold
     const totalWeight = v2SealServerConfigs().reduce((sum, server) => sum + (server.weight || 1), 0)
     return totalWeight > 0 ? Math.min(2, totalWeight) : 2
 }
@@ -248,27 +328,56 @@ export async function fetchV2DelegateAddresses(suiClient: unknown, accountId: st
     return addresses
 }
 
-export async function listOwnedV2Namespaces(suiClient: unknown, owner: string): Promise<V2NamespaceRow[]> {
-    if (!config.v2PackageId || !owner) return []
-    const client = suiClient as Partial<EventsClient>
-    if (typeof client.queryEvents !== 'function') {
-        throw new Error('This Sui client cannot query events; namespace listing needs JSON-RPC')
+export async function readV2NamespaceRow(
+    suiClient: unknown,
+    id: string,
+    ownerFallback: string,
+): Promise<V2NamespaceRow | null> {
+    const fields = await fetchObjectJson(suiClient, id)
+    if (!fields) return null
+    if (Boolean(fields.destroyed)) return null
+    return {
+        id,
+        label: typeof fields.label === 'string' ? fields.label : '',
+        active: Boolean(fields.active),
+        keyVersion: Number(fields.current_key_version ?? 0),
+        keyInitialized: Boolean(fields.key_initialized),
+        destroyed: false,
+        owner: typeof fields.owner === 'string' ? fields.owner : ownerFallback,
+        accountId: asObjectId(fields.account_id),
     }
+}
+
+function eventIsNamespaceCreated(type: string): boolean {
+    if (!/::namespace::NamespaceCreated$/.test(type)) return false
+    if (!config.v2PackageId) return true
+    const pkg = type.split('::')[0] ?? ''
+    try {
+        return normalizeSuiAddress(pkg) === normalizeSuiAddress(config.v2PackageId)
+    } catch {
+        return type.startsWith(config.v2PackageId)
+    }
+}
+
+export async function listOwnedV2Namespaces(_suiClient: unknown, owner: string): Promise<V2NamespaceRow[]> {
+    if (!config.v2PackageId || !owner) return []
+    const rpc = getV2JsonRpcClient() as unknown as EventsClient
     const ownerNormalized = normalizeSuiAddress(owner)
     const ids: string[] = []
     const seen = new Set<string>()
     let cursor: unknown
-    for (let page = 0; page < MAX_EVENT_PAGES; page++) {
-        const response = await client.queryEvents({
-            query: { MoveEventType: `${config.v2PackageId}::namespace::NamespaceCreated` },
+    for (let page = 0; page < MAX_OWNER_EVENT_PAGES; page++) {
+        const response = await rpc.queryEvents({
+            query: { Sender: ownerNormalized },
             limit: EVENT_PAGE_SIZE,
             order: 'descending',
             cursor,
         })
         for (const event of response.data) {
+            if (!eventIsNamespaceCreated(String(event.type ?? ''))) continue
             const parsed = event.parsedJson ?? event.json ?? {}
-            const eventOwner = typeof parsed.owner === 'string' ? parsed.owner : ''
-            if (!eventOwner || normalizeSuiAddress(eventOwner) !== ownerNormalized) continue
+            const eventOwner = typeof parsed.owner === 'string' ? parsed.owner : owner
+            if (normalizeSuiAddress(eventOwner) !== ownerNormalized) continue
             const id = asObjectId(parsed.namespace_id)
             if (!id || seen.has(id)) continue
             seen.add(id)
@@ -279,21 +388,9 @@ export async function listOwnedV2Namespaces(suiClient: unknown, owner: string): 
         if (cursor == null) break
     }
 
-    const rows: Array<V2NamespaceRow | null> = await Promise.all(ids.map(async (id) => {
-        const fields = await fetchObjectJson(suiClient, id)
-        if (!fields) return null
-        if (Boolean(fields.destroyed)) return null
-        return {
-            id,
-            label: typeof fields.label === 'string' ? fields.label : '',
-            active: Boolean(fields.active),
-            keyVersion: Number(fields.current_key_version ?? 0),
-            keyInitialized: Boolean(fields.key_initialized),
-            destroyed: false,
-            owner: typeof fields.owner === 'string' ? fields.owner : owner,
-            accountId: asObjectId(fields.account_id),
-        }
-    }))
+    const rows: Array<V2NamespaceRow | null> = await Promise.all(
+        ids.map((id) => readV2NamespaceRow(rpc, id, owner)),
+    )
     return rows.filter((row): row is V2NamespaceRow => row != null)
 }
 
@@ -304,16 +401,13 @@ function decodeReturnU8(result: Awaited<ReturnType<InspectClient['devInspectTran
 }
 
 export async function lookupNamespacePermissions(
-    suiClient: unknown,
+    _suiClient: unknown,
     namespaceId: string,
     principal: string,
     sender: string,
 ): Promise<GrantBits> {
     if (!isValidSuiAddress(principal)) throw new Error('Enter a valid Sui address')
-    const client = suiClient as Partial<InspectClient>
-    if (typeof client.devInspectTransactionBlock !== 'function') {
-        throw new Error('This Sui client cannot inspect view calls')
-    }
+    const client = getV2JsonRpcClient() as unknown as InspectClient
     const tx = new Transaction()
     tx.moveCall({
         target: `${config.v2PackageId}::namespace::permissions`,
@@ -393,6 +487,8 @@ export async function grantV2NamespaceAccess(opts: {
     const invalid = validateGrantBits(bits)
     if (invalid) throw new Error(invalid)
     if (!isValidSuiAddress(opts.principal)) throw new Error('Enter a valid Sui address')
+    const blocked = sharePrincipalBlockedReason(opts.principal, opts.walletSigner.address)
+    if (blocked) throw new Error(blocked)
 
     return grantAccess({
         ...sdkTxOpts(opts.accountId, opts.walletSigner, opts.suiClient),
@@ -401,5 +497,17 @@ export async function grantV2NamespaceAccess(opts: {
         canRead: bits.canRead,
         canWrite: bits.canWrite,
         canShare: bits.canShare,
+    })
+}
+
+export async function cancelV2UninitializedNamespace(opts: {
+    suiClient: unknown
+    walletSigner: WalletSignerLike
+    accountId: string
+    namespaceId: string
+}): Promise<{ digest: string }> {
+    return cancelUninitializedNamespace({
+        ...sdkTxOpts(opts.accountId, opts.walletSigner, opts.suiClient),
+        namespaceId: opts.namespaceId,
     })
 }

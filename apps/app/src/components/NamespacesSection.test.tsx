@@ -3,11 +3,22 @@ import { beforeEach, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
     v2NamespacesEnabled: false,
-    namespaces: [] as Array<{ id: string; label: string; active: boolean; keyVersion: number }>,
+    namespaces: [] as Array<{
+        id: string
+        label: string
+        active: boolean
+        keyVersion: number
+        keyInitialized: boolean
+        destroyed: boolean
+        owner: string
+        accountId: string
+    }>,
     v2AccountId: null as string | null,
     loading: false,
     error: '',
     refresh: vi.fn(),
+    upsertNamespace: vi.fn(),
+    removeNamespace: vi.fn(),
 }))
 
 vi.mock('../config', () => ({
@@ -44,6 +55,8 @@ vi.mock('../hooks/useV2Namespaces', () => ({
         loading: mocks.loading,
         error: mocks.error,
         refresh: mocks.refresh,
+        upsertNamespace: mocks.upsertNamespace,
+        removeNamespace: mocks.removeNamespace,
     }),
 }))
 
@@ -69,4 +82,22 @@ it('shows an English empty state when enabled and none exist', () => {
     render(<NamespacesSection />)
     expect(screen.getByText('Namespaces')).toBeInTheDocument()
     expect(screen.getByText(/No namespaces yet/)).toBeInTheDocument()
+})
+
+it('offers finish initialize and cancel on uninitialized rows', () => {
+    mocks.v2NamespacesEnabled = true
+    mocks.v2AccountId = '0xacc'
+    mocks.namespaces = [{
+        id: '0xns',
+        label: 'draft',
+        active: false,
+        keyVersion: 0,
+        keyInitialized: false,
+        destroyed: false,
+        owner: '0x' + '11'.repeat(32),
+        accountId: '0xacc',
+    }]
+    render(<NamespacesSection />)
+    expect(screen.getByRole('button', { name: 'Finish initialize' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel reservation' })).toBeInTheDocument()
 })

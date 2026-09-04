@@ -10,6 +10,49 @@ function parseCsv(value: string | undefined, fallback = '') {
         .filter(Boolean)
 }
 
+type SealServerConfigEnv = {
+    objectId: string
+    weight: number
+    aggregatorUrl?: string
+    apiKeyName?: string
+    apiKey?: string
+}
+
+/** Same JSON shape as the relayer SEAL_SERVER_CONFIGS array. */
+function parseSealServerConfigsJson(raw: string | undefined): SealServerConfigEnv[] {
+    const trimmed = (raw || '').trim()
+    if (!trimmed) return []
+    try {
+        const parsed = JSON.parse(trimmed) as unknown
+        if (!Array.isArray(parsed)) return []
+        return parsed.flatMap((entry) => {
+            if (!entry || typeof entry !== 'object') return []
+            const row = entry as Record<string, unknown>
+            const objectId = typeof row.objectId === 'string' ? row.objectId.trim() : ''
+            if (!objectId) return []
+            const weight = typeof row.weight === 'number' && Number.isInteger(row.weight) && row.weight >= 1
+                ? row.weight
+                : 1
+            const aggregatorUrl = typeof row.aggregatorUrl === 'string' ? row.aggregatorUrl.trim() : ''
+            const apiKeyName = typeof row.apiKeyName === 'string' ? row.apiKeyName.trim() : ''
+            const apiKey = typeof row.apiKey === 'string' ? row.apiKey.trim() : ''
+            return [{
+                objectId,
+                weight,
+                ...(aggregatorUrl ? { aggregatorUrl } : {}),
+                ...(apiKeyName && apiKey ? { apiKeyName, apiKey } : {}),
+            }]
+        })
+    } catch {
+        return []
+    }
+}
+
+function parseSealThreshold(raw: string | undefined): number {
+    const value = Number((raw || '').trim())
+    return Number.isInteger(value) && value >= 1 ? value : 0
+}
+
 const memwalPackageId = import.meta.env.VITE_MEMWAL_PACKAGE_ID as string ||
     '0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6'
 const memwalRegistryId = import.meta.env.VITE_MEMWAL_REGISTRY_ID as string ||
@@ -55,6 +98,9 @@ export const config = {
     // gRPC endpoint used by the security-delete subsystem's dedicated client.
     suiGrpcUrl: import.meta.env.VITE_SUI_GRPC_URL as string || '',
     sealKeyServers,
+    // Unwrap committee must match the relayer (SEAL_SERVER_CONFIGS / SEAL_THRESHOLD).
+    sealServerConfigs: parseSealServerConfigsJson(import.meta.env.VITE_SEAL_SERVER_CONFIGS as string),
+    sealThreshold: parseSealThreshold(import.meta.env.VITE_SEAL_THRESHOLD as string),
     // Same cutover rationale as legacyMemwalPackageId: legacy blobs were
     // encrypted against the pre-cutover key-server committee. Unset falls
     // back to the current set.

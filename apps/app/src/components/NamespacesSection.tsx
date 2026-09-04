@@ -12,6 +12,7 @@ import { config } from '../config'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useV2Namespaces } from '../hooks/useV2Namespaces'
 import {
+    cancelV2UninitializedNamespace,
     compactObjectId,
     createV2Namespace,
     generateAndWrapNamespaceDek,
@@ -23,7 +24,9 @@ import {
     NAMESPACE_LABEL_MAX_LENGTH,
     normalizeLabelForSubmit,
     principalsToGrant,
+    readV2NamespaceRow,
     sanitizeLabelInput,
+    sharePrincipalBlockedReason,
     suiAddressFromEd25519PublicKeyHex,
     validateGrantBits,
     validateNamespaceLabel,
@@ -41,7 +44,16 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
     const { mutateAsync: signPersonalMsg } = useSignPersonalMessage()
     const { delegatePublicKey } = useDelegateKey()
     const owner = previewMode ? '' : (currentAccount?.address || '')
-    const { namespaces, v2AccountId, delegateAddresses, loading, error, refresh } = useV2Namespaces(owner)
+    const {
+        namespaces,
+        v2AccountId,
+        delegateAddresses,
+        loading,
+        error,
+        refresh,
+        upsertNamespace,
+        removeNamespace,
+    } = useV2Namespaces(owner)
 
     const [showCreate, setShowCreate] = useState(false)
     const [newLabel, setNewLabel] = useState('memories')
@@ -59,6 +71,8 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
     const [lookupResult, setLookupResult] = useState<GrantBits | null>(null)
     const [lookupError, setLookupError] = useState('')
     const [lookingUp, setLookingUp] = useState(false)
+    const [finishing, setFinishing] = useState(false)
+    const [cancelling, setCancelling] = useState(false)
     const [sessionGrants, setSessionGrants] = useState<SessionGrant[]>([])
     const [copied, setCopied] = useState<string | null>(null)
 
@@ -73,11 +87,13 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
 
     const selected = namespaces.find((row) => row.id === selectedId) ?? namespaces[0] ?? null
     const shareAllowed = isCurrentAccountDelegate(sharePrincipal, delegateAddresses)
+    const shareBlocked = sharePrincipalBlockedReason(sharePrincipal, owner)
     const shareBits = grantBitsFromCheckboxes({
         read: shareRead,
         write: shareWrite,
         share: shareShare && shareAllowed,
     })
+    const lifecycleBusy = creating || finishing || cancelling
 
     useEffect(() => {
         if (!selectedId && namespaces[0]) setSelectedId(namespaces[0].id)
@@ -91,6 +107,78 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
         setCopied(id)
         window.setTimeout(() => setCopied(null), 2000)
     }, [])
+
+    const grantWritersAndDelegate = useCallback(async (
+        namespaceId: string,
+        setPhase: (next: string) => void,
+    ) => {
+        if (!walletSigner || !v2AccountId || !owner) return
+        let delegateAddress: string | null = null
+        if (delegatePublicKey) {
+            try {
+                delegateAddress = suiAddressFromEd25519PublicKeyHex(delegatePublicKey)
+            } catch {
+                delegateAddress = null
+            }
+        }
+        const principals = principalsToGrant(config.v2WriterAddresses, delegateAddress, owner)
+        for (const [index, principal] of principals.entries()) {
+            setPhase(`Granting read/write (${index + 1}/${principals.length})`)
+            const bits: GrantBits = { canRead: true, canWrite: true, canShare: false }
+            await grantV2NamespaceAccess({
+                suiClient,
+                walletSigner,
+                accountId: v2AccountId,
+                namespaceId,
+                principal,
+                bits,
+            })
+            setSessionGrants((prev) => [...prev, { principal, namespaceId, ...bits }])
+        }
+    }, [walletSigner, v2AccountId, owner, delegatePublicKey, suiClient])
+
+    const initializeAndGrant = useCallback(async (
+        namespaceId: string,
+        setPhase: (next: string) => void,
+    ) => {
+        if (!walletSigner || !v2AccountId) return
+        setPhase('Wrapping namespace key')
+        const wrappedDek = await generateAndWrapNamespaceDek({
+            suiClient,
+            namespaceId,
+        })
+        setPhase('Initializing key')
+        await initializeV2NamespaceKey({
+            suiClient,
+            walletSigner,
+            accountId: v2AccountId,
+            namespaceId,
+            wrappedDek,
+        })
+        await grantWritersAndDelegate(namespaceId, setPhase)
+        const live = await readV2NamespaceRow(suiClient, namespaceId, owner)
+        if (live) {
+            upsertNamespace(live)
+            return
+        }
+        upsertNamespace({
+            id: namespaceId,
+            label: '',
+            active: true,
+            keyVersion: 0,
+            keyInitialized: true,
+            destroyed: false,
+            owner,
+            accountId: v2AccountId,
+        })
+    }, [
+        walletSigner,
+        v2AccountId,
+        suiClient,
+        grantWritersAndDelegate,
+        owner,
+        upsertNamespace,
+    ])
 
     const handleCreate = useCallback(async () => {
         if (!walletSigner || !owner) return
@@ -124,48 +212,23 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
                 accountId: v2AccountId,
                 label,
             })
-
-            setPhase('Wrapping namespace key')
-            const wrappedDek = await generateAndWrapNamespaceDek({
-                suiClient,
-                namespaceId: created.namespaceId,
-            })
-
-            setPhase('Initializing key')
-            await initializeV2NamespaceKey({
-                suiClient,
-                walletSigner,
+            const createdRow = await readV2NamespaceRow(suiClient, created.namespaceId, owner)
+            upsertNamespace(createdRow ?? {
+                id: created.namespaceId,
+                label,
+                active: false,
+                keyVersion: 0,
+                keyInitialized: false,
+                destroyed: false,
+                owner,
                 accountId: v2AccountId,
-                namespaceId: created.namespaceId,
-                wrappedDek,
             })
+            setSelectedId(created.namespaceId)
 
-            let delegateAddress: string | null = null
-            if (delegatePublicKey) {
-                try {
-                    delegateAddress = suiAddressFromEd25519PublicKeyHex(delegatePublicKey)
-                } catch {
-                    delegateAddress = null
-                }
-            }
-            const principals = principalsToGrant(config.v2WriterAddresses, delegateAddress, owner)
-            for (const [index, principal] of principals.entries()) {
-                setPhase(`Granting read/write (${index + 1}/${principals.length})`)
-                const bits: GrantBits = { canRead: true, canWrite: true, canShare: false }
-                await grantV2NamespaceAccess({
-                    suiClient,
-                    walletSigner,
-                    accountId: v2AccountId,
-                    namespaceId: created.namespaceId,
-                    principal,
-                    bits,
-                })
-                setSessionGrants((prev) => [...prev, { principal, namespaceId: created.namespaceId, ...bits }])
-            }
+            await initializeAndGrant(created.namespaceId, setPhase)
 
             setShowCreate(false)
             setNewLabel('memories')
-            setSelectedId(created.namespaceId)
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err)
             setCreateError(phase ? `${phase} failed: ${message}` : message)
@@ -180,12 +243,63 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
         v2AccountId,
         newLabel,
         suiClient,
-        delegatePublicKey,
+        upsertNamespace,
+        initializeAndGrant,
         refresh,
     ])
 
+    const handleFinishInitialize = useCallback(async () => {
+        if (!walletSigner || !selected || selected.keyInitialized || !v2AccountId) return
+        setFinishing(true)
+        setCreateError('')
+        let phase = ''
+        const setPhase = (next: string) => {
+            phase = next
+            setCreatePhase(next)
+        }
+        try {
+            await initializeAndGrant(selected.id, setPhase)
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            setCreateError(phase ? `${phase} failed: ${message}` : message)
+        } finally {
+            setCreatePhase('')
+            setFinishing(false)
+            await refresh()
+        }
+    }, [walletSigner, selected, v2AccountId, initializeAndGrant, refresh])
+
+    const handleCancelReservation = useCallback(async () => {
+        if (!walletSigner || !selected || selected.keyInitialized || !v2AccountId) return
+        setCancelling(true)
+        setCreateError('')
+        setCreatePhase('Cancelling reservation')
+        try {
+            await cancelV2UninitializedNamespace({
+                suiClient,
+                walletSigner,
+                accountId: v2AccountId,
+                namespaceId: selected.id,
+            })
+            removeNamespace(selected.id)
+            setSelectedId(null)
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            setCreateError(`Cancelling reservation failed: ${message}`)
+        } finally {
+            setCreatePhase('')
+            setCancelling(false)
+            await refresh()
+        }
+    }, [walletSigner, selected, v2AccountId, suiClient, removeNamespace, refresh])
+
     const handleShare = useCallback(async () => {
         if (!walletSigner || !selected || !v2AccountId) return
+        const blocked = sharePrincipalBlockedReason(sharePrincipal, owner)
+        if (blocked) {
+            setShareError(blocked)
+            return
+        }
         if (!isValidSuiAddress(sharePrincipal)) {
             setShareError('Enter a valid Sui address')
             return
@@ -277,7 +391,7 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
                             setCreateError('')
                             setShowCreate(true)
                         }}
-                        disabled={showCreate || creating || previewMode || !v2AccountId}
+                        disabled={showCreate || lifecycleBusy || previewMode || !v2AccountId}
                     >
                         Create <Plus size={18} strokeWidth={2.5} aria-hidden="true" />
                     </button>
@@ -321,14 +435,14 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
                         <button
                             className="btn btn-secondary btn-sm dashboard-add-key-cancel"
                             onClick={() => setShowCreate(false)}
-                            disabled={creating}
+                            disabled={lifecycleBusy}
                         >
                             Cancel
                         </button>
                         <button
                             className="btn btn-primary btn-sm dashboard-add-key-create"
                             onClick={() => void handleCreate()}
-                            disabled={creating || !v2AccountId || !walletSigner}
+                            disabled={lifecycleBusy || !v2AccountId || !walletSigner}
                             aria-busy={creating}
                         >
                             {creating ? 'Creating...' : 'Create'}
@@ -411,6 +525,31 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
 
             {selected && (
                 <div className="dashboard-add-key-form" style={{ marginTop: 20 }}>
+                    {!selected.keyInitialized && (
+                        <>
+                            <p className="dashboard-add-key-note">
+                                This namespace is reserved but not initialized. Finish wrapping the key, or cancel the reservation to reuse the label.
+                            </p>
+                            <div className="dashboard-add-key-actions">
+                                <button
+                                    className="btn btn-secondary btn-sm dashboard-add-key-cancel"
+                                    onClick={() => void handleCancelReservation()}
+                                    disabled={lifecycleBusy || !walletSigner}
+                                    aria-busy={cancelling}
+                                >
+                                    {cancelling ? 'Cancelling...' : 'Cancel reservation'}
+                                </button>
+                                <button
+                                    className="btn btn-primary btn-sm dashboard-add-key-create"
+                                    onClick={() => void handleFinishInitialize()}
+                                    disabled={lifecycleBusy || !walletSigner}
+                                    aria-busy={finishing}
+                                >
+                                    {finishing ? 'Initializing...' : 'Finish initialize'}
+                                </button>
+                            </div>
+                        </>
+                    )}
                     <div className="dashboard-add-key-field">
                         <label className="dashboard-add-key-label">Share {selected.label || compactObjectId(selected.id)}</label>
                         <input
@@ -464,6 +603,9 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
                         </label>
                     </div>
                     <p className="dashboard-add-key-note">Share is limited to current account delegates.</p>
+                    {shareBlocked && (
+                        <p className="dashboard-add-key-note">{shareBlocked}</p>
+                    )}
                     {shareError && (
                         <p className="dashboard-add-key-note" style={{ color: 'var(--danger)' }}>{shareError}</p>
                     )}
@@ -471,7 +613,7 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
                         <button
                             className="btn btn-primary btn-sm dashboard-add-key-create"
                             onClick={() => void handleShare()}
-                            disabled={sharing || !selected.active || !walletSigner}
+                            disabled={sharing || lifecycleBusy || !selected.active || !walletSigner || Boolean(shareBlocked)}
                             aria-busy={sharing}
                         >
                             {sharing ? 'Granting...' : 'Grant access'}

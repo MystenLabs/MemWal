@@ -27,6 +27,7 @@ import { Card } from '../components/Card'
 import { config } from '../config'
 import { useV2Namespaces } from '../hooks/useV2Namespaces'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import { playgroundMemwalAccountId, playgroundNamespaceOptions } from '../utils/v2Namespace'
 
 const walrusCodeTheme = {
     hljs: {
@@ -190,29 +191,34 @@ export default function Playground() {
     // ============================================================
 
     const [namespace, setNamespace] = useState('default')
-    const { namespaces: v2Namespaces } = useV2Namespaces(
+    const { namespaces: v2Namespaces, v2AccountId } = useV2Namespaces(
         config.v2NamespacesEnabled ? address : '',
     )
     const v2NamespaceLabels = useMemo(
         () => v2Namespaces.filter((row) => row.active && row.label).map((row) => row.label),
         [v2Namespaces],
     )
-    const namespaceSelectOptions = useMemo(() => {
-        const labels = ['default', ...v2NamespaceLabels]
-        if (namespace && !labels.includes(namespace)) labels.push(namespace)
-        return labels
-    }, [v2NamespaceLabels, namespace])
+    const namespaceSelectOptions = useMemo(
+        () => playgroundNamespaceOptions(v2NamespaceLabels, namespace),
+        [v2NamespaceLabels, namespace],
+    )
     const showV2NamespaceSelect = config.v2NamespacesEnabled && v2NamespaceLabels.length > 0
+    const memwalAccountId = playgroundMemwalAccountId({
+        namespace,
+        v2Namespaces,
+        v2AccountId,
+        v1AccountId: accountObjectId,
+    })
 
     const memwal = useMemo(() => {
-        if (!delegateKey || !accountObjectId) return null
+        if (!delegateKey || !memwalAccountId) return null
         return MemWal.create({
             key: delegateKey,
-            accountId: accountObjectId,
+            accountId: memwalAccountId,
             serverUrl,
             namespace: namespace || undefined,
         })
-    }, [delegateKey, accountObjectId, serverUrl, namespace])
+    }, [delegateKey, memwalAccountId, serverUrl, namespace])
 
     // Step states
 
@@ -730,7 +736,7 @@ export default function Playground() {
 
 const memwal = MemWal.create({
   key: delegateKeyHex,
-  accountId: "${accountObjectId?.slice(0, 10)}...",
+  accountId: "${(memwalAccountId ?? accountObjectId)?.slice(0, 10)}...",
   serverUrl: "${serverUrl}",
   namespace: "${namespace || 'default'}",
 })
