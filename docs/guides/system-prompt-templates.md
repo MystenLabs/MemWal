@@ -223,7 +223,7 @@ Four rules carry most of the effect:
 
 1. **Name the trigger, not the goal.** "Call memwal_remember when the user states a preference" works. "Remember important things" does not.
 2. **Say "in the same turn, before you finish replying."** Without it, agents acknowledge the fact in prose and never call the tool.
-3. **Say what to skip.** An agent told only to write produces noise, and noisy memory makes recall worse.
+3. **Say what to skip.** An agent told only to write writes noise, and noisy memory makes recall worse.
 4. **Pin the namespace.** Unscoped writes land in the default namespace and mix contexts that should stay apart. See [Memory space](/fundamentals/concepts/memory-space).
 
 ## Related
