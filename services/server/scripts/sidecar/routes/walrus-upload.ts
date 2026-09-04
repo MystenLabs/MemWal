@@ -325,10 +325,11 @@ export function registerWalrusUploadRoute(app: Express): void {
                 };
             }
 
+            let metadataTransferDigest: string | undefined;
             // Set on-chain metadata + transfer blob to user in a single transaction
             if (!deferTransfer && owner && owner !== signerAddress && blobObjectId) {
                 try {
-                    const metadataTransferDigest = await timedPhase(
+                    metadataTransferDigest = await timedPhase(
                         "metadata_transfer",
                         () =>
                             setMetadataAndTransferBlobs(
@@ -390,6 +391,7 @@ export function registerWalrusUploadRoute(app: Express): void {
                 blobId: blob.blobId,
                 objectId: blobObjectId,
                 transferStatus: deferTransfer ? "deferred" : "ok",
+                digest: metadataTransferDigest,
             });
         } catch (err: any) {
             const message = err?.message || String(err);

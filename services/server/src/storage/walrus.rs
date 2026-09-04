@@ -13,6 +13,8 @@ pub struct UploadResult {
     /// Sui object ID of the Blob object (hex, e.g. "0x...")
     #[allow(dead_code)]
     pub object_id: Option<String>,
+    /// Metadata+transfer digest when the sidecar included the fence in that PTB.
+    pub digest: Option<String>,
 }
 
 #[derive(Debug)]
@@ -122,6 +124,8 @@ struct WalrusUploadResponse {
     object_id: Option<String>,
     #[serde(default)]
     transfer_status: Option<String>,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -141,6 +145,8 @@ pub struct SetMetadataBatchEntry {
     pub namespace: String,
     #[serde(rename = "encryptedData", skip_serializing_if = "Option::is_none")]
     pub encrypted_data: Option<String>,
+    #[serde(rename = "blobId", skip_serializing_if = "Option::is_none")]
+    pub blob_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -419,6 +425,7 @@ async fn upload_blob_inner(
     Ok(UploadResult {
         blob_id: result.blob_id,
         object_id: result.object_id,
+        digest: result.digest,
     })
 }
 

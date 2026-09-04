@@ -27,6 +27,7 @@ import {
 import { DURABLE_WALLET_FALLBACK_POLICY } from "../wallet.js";
 import { ownerMatchesRecipient, readBlobObject } from "./walrus-query.js";
 import { assertUploadExecutionIdentity, parseUploadExecutionIdentity } from "./health.js";
+import { writeCommitmentV1 } from "../v2-envelope.js";
 
 export function metadataReceiptAlreadyApplied(
     reconcileOnly: boolean,
@@ -41,8 +42,21 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
         const traceId = requestIdFor(req);
         let releaseWalrusUploadSlots: (() => void) | undefined;
         try {
-            const { blobs, owner, packageId, policyPackageId, registryId, accountId, sealAbi, agentId, keyIndex } =
-                req.body;
+            const {
+                blobs,
+                owner,
+                packageId,
+                policyPackageId,
+                registryId,
+                accountId,
+                sealAbi,
+                agentId,
+                keyIndex,
+                namespaceRegistryId,
+                accountRegistryId,
+                namespaceId,
+                keyVersion,
+            } = req.body;
             if (!Array.isArray(blobs) || blobs.length === 0 || !owner || keyIndex === undefined) {
                 return res.status(400).json({
                     error: "Missing required fields: blobs, owner, keyIndex",
@@ -77,23 +91,47 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
                 }
                 const namespace =
                     typeof blob?.namespace === "string" && blob.namespace.length > 0 ? blob.namespace : "default";
+                let sealFence = parseSealPersistenceFence(
+                    {
+                        sealAbi,
+                        accountId,
+                        registryId,
+                        policyPackageId,
+                        namespaceRegistryId,
+                        accountRegistryId,
+                        namespaceId,
+                        keyVersion,
+                        data: blob?.encryptedData,
+                    },
+                    packageId,
+                    {
+                        allowLegacySealAbi: SIDECAR_ENABLE_LEGACY_SEAL_ABI,
+                        policyPackageId: SEAL_POLICY_PACKAGE_ID,
+                    }
+                );
+                if (
+                    sealFence.sealAbi === "v2-write-fence" &&
+                    sealFence.commitment.length !== 32 &&
+                    typeof blob?.encryptedData === "string" &&
+                    typeof blob?.blobId === "string"
+                ) {
+                    sealFence = {
+                        ...sealFence,
+                        commitment: Array.from(
+                            writeCommitmentV1({
+                                namespaceId: sealFence.namespaceId,
+                                keyVersion: sealFence.keyVersion,
+                                blobId: blob.blobId,
+                                blobObjectId,
+                                envelope: Buffer.from(blob.encryptedData, "base64"),
+                            })
+                        ),
+                    };
+                }
                 return {
                     blobObjectId,
                     namespace,
-                    sealFence: parseSealPersistenceFence(
-                        {
-                            sealAbi,
-                            accountId,
-                            registryId,
-                            policyPackageId,
-                            data: blob?.encryptedData,
-                        },
-                        packageId,
-                        {
-                            allowLegacySealAbi: SIDECAR_ENABLE_LEGACY_SEAL_ABI,
-                            policyPackageId: SEAL_POLICY_PACKAGE_ID,
-                        }
-                    ),
+                    sealFence,
                 };
             });
 

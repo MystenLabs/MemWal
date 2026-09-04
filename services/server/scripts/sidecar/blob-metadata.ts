@@ -69,6 +69,11 @@ export function parseSealPersistenceFence(
         registryId?: unknown;
         policyPackageId?: unknown;
         data?: unknown;
+        namespaceRegistryId?: unknown;
+        accountRegistryId?: unknown;
+        namespaceId?: unknown;
+        keyVersion?: unknown;
+        commitment?: unknown;
     },
     immutablePackageId: unknown,
     policy: { allowLegacySealAbi: boolean; policyPackageId: string }

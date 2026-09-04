@@ -294,76 +294,32 @@ async fn resolve_account(
     pk_bytes: &[u8; 32],
     account_id_hint: Option<String>,
 ) -> Result<(String, String), String> {
-    // Strategy 1: Check PostgreSQL cache. Keys include the type-origin package
-    // so a V2 MemWalAccount cannot be reused as a V1 cache hit.
-    for package_id in auth_package_ids(state) {
-        let cache_key = delegate_cache_key(package_id, public_key_hex);
-        let cached = match state.db.get_cached_account(&cache_key).await {
-            Ok(hit) => hit,
-            Err(_) => continue,
-        };
-        // Unprefixed V1 rows predate package-scoped keys.
-        let cached = match cached {
-            Some(hit) => Some((hit, cache_key.clone())),
-            None if package_id == state.config.package_id => state
-                .db
-                .get_cached_account(public_key_hex)
-                .await
-                .ok()
-                .flatten()
-                .map(|hit| (hit, public_key_hex.to_string())),
-            None => None,
-        };
-        let Some(((cached_account_id, _cached_owner), stored_key)) = cached else {
-            continue;
-        };
-        match verify_delegate_key_onchain(
-            &state.http_client,
-            &state.config.sui_rpc_url,
-            state.sui_grpc_client.as_ref(),
-            &cached_account_id,
-            pk_bytes,
-            package_id,
-        )
-        .await
-        {
-            Ok(owner) => {
-                tracing::debug!("account resolved from cache: {}", cached_account_id);
-                return Ok((cached_account_id, owner));
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "delegate key {} revoked on-chain for account {}; evicting from cache",
-                    public_key_hex,
-                    cached_account_id
-                );
-                let _ = state.db.delete_cached_key(&stored_key).await;
-            }
-        }
-    }
-
-    // Strategy 2: Use exact account hint/config fallback before any registry scan.
-    //
-    // Modern SDKs always send x-account-id and sign it in the
-    // canonical signature, so an intermediary cannot swap this hint. Verifying
-    // the signed object directly avoids an expensive AccountRegistry scan that
-    // fetches many account objects on cache miss.
+    // When x-account-id is present, only a cache row for that object may hit.
+    // Walking V1-then-V2 pubkey keys and returning the first live mapping would
+    // bind a V2 hint to a previously cached V1 account (same delegate on both).
     if let Some(exact_account_id) = account_id_hint
         .as_deref()
         .or(state.config.memwal_account_id.as_deref())
     {
-        let (owner, package_id) = verify_delegate_key_dual(
+        if let Some((account_id, owner)) = try_cached_account(
             state,
-            exact_account_id,
+            public_key_hex,
             pk_bytes,
+            Some(exact_account_id),
         )
         .await
-        .map_err(|e| {
-            format!(
-                "exact account {} verification failed: {}",
-                exact_account_id, e
-            )
-        })?;
+        {
+            return Ok((account_id, owner));
+        }
+
+        let (owner, package_id) = verify_delegate_key_dual(state, exact_account_id, pk_bytes)
+            .await
+            .map_err(|e| {
+                format!(
+                    "exact account {} verification failed: {}",
+                    exact_account_id, e
+                )
+            })?;
 
         let _ = state
             .db
@@ -379,6 +335,12 @@ async fn resolve_account(
             exact_account_id
         );
         return Ok((exact_account_id.to_string(), owner));
+    }
+
+    if let Some((account_id, owner)) =
+        try_cached_account(state, public_key_hex, pk_bytes, None).await
+    {
+        return Ok((account_id, owner));
     }
 
     // Strategy 3: The legacy registry scan uses JSON-RPC. Testnet no longer
@@ -446,6 +408,74 @@ async fn resolve_account(
     }
 
     Err("no account found: not in cache, exact account id, or registry".to_string())
+}
+
+async fn try_cached_account(
+    state: &AppState,
+    public_key_hex: &str,
+    pk_bytes: &[u8; 32],
+    required_account_id: Option<&str>,
+) -> Option<(String, String)> {
+    for package_id in auth_package_ids(state) {
+        let cache_key = delegate_cache_key(package_id, public_key_hex);
+        let cached = match state.db.get_cached_account(&cache_key).await {
+            Ok(hit) => hit,
+            Err(_) => continue,
+        };
+        let cached = match cached {
+            Some(hit) => Some((hit, cache_key.clone())),
+            None if package_id == state.config.package_id => state
+                .db
+                .get_cached_account(public_key_hex)
+                .await
+                .ok()
+                .flatten()
+                .map(|hit| (hit, public_key_hex.to_string())),
+            None => None,
+        };
+        let Some(((cached_account_id, _cached_owner), stored_key)) = cached else {
+            continue;
+        };
+        if let Some(required) = required_account_id {
+            if !same_sui_object_id(&cached_account_id, required) {
+                continue;
+            }
+        }
+        match verify_delegate_key_onchain(
+            &state.http_client,
+            &state.config.sui_rpc_url,
+            state.sui_grpc_client.as_ref(),
+            &cached_account_id,
+            pk_bytes,
+            package_id,
+        )
+        .await
+        {
+            Ok(owner) => {
+                tracing::debug!("account resolved from cache: {}", cached_account_id);
+                return Some((cached_account_id, owner));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "delegate key {} revoked on-chain for account {}; evicting from cache",
+                    public_key_hex,
+                    cached_account_id
+                );
+                let _ = state.db.delete_cached_key(&stored_key).await;
+            }
+        }
+    }
+    None
+}
+
+fn same_sui_object_id(left: &str, right: &str) -> bool {
+    match (
+        left.parse::<sui_sdk_types::Address>(),
+        right.parse::<sui_sdk_types::Address>(),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => left.eq_ignore_ascii_case(right),
+    }
 }
 
 fn auth_package_ids(state: &AppState) -> Vec<&str> {
@@ -651,6 +681,22 @@ mod tests {
     }
 
     // ── account_id included in signed canonical message ─────────
+
+    #[test]
+    #[test]
+    fn same_sui_object_id_normalizes_padding_and_case() {
+        let full = format!("0x{}", "a".repeat(64));
+        let short = "0xa";
+        assert!(same_sui_object_id(&full, &full.to_uppercase()));
+        assert!(same_sui_object_id(
+            &format!("0x{}", "0".repeat(63) + "a"),
+            short
+        ));
+        assert!(!same_sui_object_id(
+            &format!("0x{}", "1".repeat(64)),
+            &format!("0x{}", "2".repeat(64))
+        ));
+    }
 
     #[test]
     fn canonical_message_format_with_account_id() {

@@ -112,6 +112,8 @@ pub enum WalletOperation {
         account_id: Option<String>,
         #[serde(default)]
         policy_package_id: Option<String>,
+        #[serde(default)]
+        v2: Option<V2IndexFields>,
     },
     /// Operator-signed `namespace::write_fence` only (managed oyster).
     V2WriteFence {
@@ -150,7 +152,26 @@ pub enum WalletOperation {
         /// recovery jobs enqueued before this field existed.
         #[serde(default = "default_importance")]
         importance: f32,
+        #[serde(default)]
+        v2: Option<V2IndexFields>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct V2IndexFields {
+    pub namespace_object_id: String,
+    pub key_version: u64,
+    pub storage_mode: String,
+    #[serde(default)]
+    pub oyster_bucket: Option<String>,
+    #[serde(default)]
+    pub oyster_key: Option<String>,
+    #[serde(default)]
+    pub pooled_blob_object_id: Option<String>,
+    pub ciphertext_digest: Vec<u8>,
+    pub commitment: Vec<u8>,
+    #[serde(default)]
+    pub fence_tx_digest: Option<String>,
 }
 
 fn default_epochs() -> u32 {
@@ -538,18 +559,21 @@ pub(crate) async fn execute_wallet_job(
             encrypted_b64,
             account_id,
             policy_package_id,
+            v2,
         } => {
             let result = execute_set_metadata_and_transfer(
                 state,
                 enqueued_wallet_index,
-                blob_object_id,
+                blob_object_id.clone(),
                 owner.clone(),
                 namespace.clone(),
                 package_id.clone(),
                 agent_id.clone(),
-                encrypted_b64,
-                account_id,
+                encrypted_b64.clone(),
+                account_id.clone(),
                 policy_package_id,
+                v2.as_ref(),
+                blob_id.clone(),
             )
             .await;
 
@@ -566,6 +590,7 @@ pub(crate) async fn execute_wallet_job(
                             blob_size_bytes,
                             importance,
                             enqueued_wallet_index,
+                            v2.as_ref(),
                         )
                         .await
                         {
@@ -580,6 +605,7 @@ pub(crate) async fn execute_wallet_job(
                                 vector,
                                 blob_size_bytes,
                                 importance,
+                                v2.clone(),
                             )
                             .await
                             {
@@ -695,6 +721,7 @@ pub(crate) async fn execute_wallet_job(
             vector,
             blob_size_bytes,
             importance,
+            v2,
         } => {
             insert_vector_and_mark_remember_done(
                 state,
@@ -706,6 +733,7 @@ pub(crate) async fn execute_wallet_job(
                 blob_size_bytes,
                 importance,
                 enqueued_wallet_index,
+                v2.as_ref(),
             )
             .await
         }
@@ -733,7 +761,28 @@ fn recovery_seal_persistence<'a>(
     registry_id: &'a str,
     policy_package_id: Option<&'a str>,
     encrypted_b64: Option<&str>,
+    v2: Option<&'a V2IndexFields>,
+    v2_ns_registry: Option<&'a str>,
+    v2_account_registry: Option<&'a str>,
 ) -> Result<crate::storage::walrus::SealPersistence<'a>, WalletJobError> {
+    if let Some(v2) = v2 {
+        let ns_reg = v2_ns_registry.filter(|s| !s.is_empty()).ok_or_else(|| {
+            WalletJobError::Permanent("V2 metadata recovery lacks namespace registry id".into())
+        })?;
+        let acc_reg = v2_account_registry.filter(|s| !s.is_empty()).ok_or_else(|| {
+            WalletJobError::Permanent("V2 metadata recovery lacks account registry id".into())
+        })?;
+        let account_id = account_id.filter(|s| !s.is_empty()).ok_or_else(|| {
+            WalletJobError::Permanent("V2 metadata recovery lacks account id".into())
+        })?;
+        return Ok(crate::storage::walrus::SealPersistence::V2WriteFence {
+            account_id,
+            namespace_registry_id: ns_reg,
+            account_registry_id: acc_reg,
+            namespace_id: &v2.namespace_object_id,
+            key_version: v2.key_version,
+        });
+    }
     match (account_id, policy_package_id, encrypted_b64) {
         (Some(account_id), Some(policy_package_id), Some(ciphertext))
             if !account_id.is_empty()
@@ -764,12 +813,17 @@ async fn execute_set_metadata_and_transfer(
     encrypted_b64: Option<String>,
     account_id: Option<String>,
     policy_package_id: Option<String>,
+    v2: Option<&V2IndexFields>,
+    blob_id: Option<String>,
 ) -> Result<(), WalletJobError> {
     let seal_persistence = recovery_seal_persistence(
         account_id.as_deref(),
         &state.config.registry_id,
         policy_package_id.as_deref(),
         encrypted_b64.as_deref(),
+        v2,
+        state.config.memwal_v2_namespace_registry_id.as_deref(),
+        state.config.memwal_v2_registry_id.as_deref(),
     )?;
     let set_metadata_result = crate::storage::walrus::set_metadata_batch(
         &state.http_client,
@@ -783,6 +837,7 @@ async fn execute_set_metadata_and_transfer(
             blob_object_id,
             namespace: namespace.clone(),
             encrypted_data: encrypted_b64,
+            blob_id,
         }],
         seal_persistence,
     )
@@ -825,23 +880,41 @@ async fn insert_vector_and_mark_remember_done(
     blob_size_bytes: i64,
     importance: f32,
     wallet_index: usize,
+    v2: Option<&V2IndexFields>,
 ) -> Result<(), WalletJobError> {
     let vector_id = remember_job_id
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    if let Err(e) = state
-        .db
-        .insert_vector(
-            &vector_id,
-            owner,
-            namespace,
-            blob_id,
-            vector,
-            blob_size_bytes,
-            importance,
-        )
-        .await
+    let insert_result = if let Some(v2) = v2 {
+        state
+            .db
+            .insert_vector_v2(
+                &vector_id,
+                owner,
+                namespace,
+                blob_id,
+                vector,
+                blob_size_bytes,
+                importance,
+                &v2_stored_meta(v2),
+            )
+            .await
+    } else {
+        state
+            .db
+            .insert_vector(
+                &vector_id,
+                owner,
+                namespace,
+                blob_id,
+                vector,
+                blob_size_bytes,
+                importance,
+            )
+            .await
+    };
+    if let Err(e) = insert_result
     {
         let msg = format!("insert_vector failed: {}", e);
         let classified = WalletJobError::classify_sidecar_error(&msg);
@@ -877,6 +950,49 @@ async fn insert_vector_and_mark_remember_done(
     Ok(())
 }
 
+fn v2_stored_meta(v2: &V2IndexFields) -> crate::storage::v2::V2StoredMeta {
+    crate::storage::v2::V2StoredMeta {
+        namespace_object_id: Some(v2.namespace_object_id.clone()),
+        key_version: Some(v2.key_version as i64),
+        storage_mode: Some(v2.storage_mode.clone()),
+        oyster_bucket: v2.oyster_bucket.clone(),
+        oyster_key: v2.oyster_key.clone(),
+        pooled_blob_object_id: v2.pooled_blob_object_id.clone(),
+        ciphertext_digest: Some(v2.ciphertext_digest.clone()),
+        commitment: Some(v2.commitment.clone()),
+        fence_tx_digest: v2.fence_tx_digest.clone(),
+    }
+}
+
+fn self_hosted_v2_index(
+    namespace_object_id: &str,
+    key_version: u64,
+    blob_id: &str,
+    blob_object_id: Option<&str>,
+    envelope: &[u8],
+    fence_tx_digest: Option<String>,
+) -> Result<V2IndexFields, WalletJobError> {
+    let commitment = crate::storage::v2::write_commitment_v1(
+        namespace_object_id,
+        key_version,
+        blob_id,
+        blob_object_id,
+        envelope,
+    )
+    .map_err(|e| WalletJobError::Permanent(e.to_string()))?;
+    Ok(V2IndexFields {
+        namespace_object_id: namespace_object_id.to_string(),
+        key_version,
+        storage_mode: "self_hosted".into(),
+        oyster_bucket: None,
+        oyster_key: None,
+        pooled_blob_object_id: blob_object_id.map(str::to_owned),
+        ciphertext_digest: crate::storage::v2::blake2b256(envelope).to_vec(),
+        commitment: commitment.to_vec(),
+        fence_tx_digest,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_v2_write_fence(
     state: &AppState,
@@ -898,26 +1014,21 @@ async fn execute_v2_write_fence(
     storage_mode: String,
     remember_job_id: Option<String>,
 ) -> Result<(), WalletJobError> {
-    let existing: Option<(Option<String>,)> = if let Some(jid) = remember_job_id.as_deref() {
-        sqlx::query_as("SELECT fence_tx_digest FROM remember_jobs WHERE id = $1")
-            .bind(jid)
-            .fetch_optional(state.db.pool())
-            .await
-            .unwrap_or(None)
+    let existing_digest = if let Some(jid) = remember_job_id.as_deref() {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT fence_tx_digest FROM remember_jobs WHERE id = $1")
+                .bind(jid)
+                .fetch_optional(state.db.pool())
+                .await
+                .map_err(|e| {
+                    WalletJobError::Transient(format!("failed to read fence_tx_digest: {e}"))
+                })?;
+        row.and_then(|(digest,)| digest).filter(|d| !d.is_empty())
     } else {
         None
     };
-    let fence_digest = if let Some((Some(digest),)) = existing {
-        if !digest.is_empty() {
-            digest
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
-    let fence_digest = if !fence_digest.is_empty() {
-        fence_digest
+    let fence_digest = if let Some(digest) = existing_digest {
+        digest
     } else {
         let package_id = state
             .config
@@ -966,14 +1077,17 @@ async fn execute_v2_write_fence(
     };
 
     if let Some(jid) = remember_job_id.as_deref() {
-        let _ = sqlx::query(
+        sqlx::query(
             "UPDATE remember_jobs SET fence_tx_digest = $1, blob_id = $2, updated_at = NOW() WHERE id = $3",
         )
         .bind(&fence_digest)
         .bind(&blob_id)
         .bind(jid)
         .execute(state.db.pool())
-        .await;
+        .await
+        .map_err(|e| {
+            WalletJobError::Transient(format!("failed to persist fence_tx_digest: {e}"))
+        })?;
     }
 
     let vector_id = remember_job_id
@@ -1033,6 +1147,7 @@ async fn enqueue_finalize_uploaded_blob(
     vector: Vec<f32>,
     blob_size_bytes: i64,
     importance: f32,
+    v2: Option<V2IndexFields>,
 ) -> Result<(), WalletJobError> {
     let mut storage = state.wallet_storage.clone();
     storage
@@ -1047,6 +1162,7 @@ async fn enqueue_finalize_uploaded_blob(
                 vector,
                 blob_size_bytes,
                 importance,
+                v2,
             },
         }))
         .await
@@ -1199,7 +1315,7 @@ async fn execute_upload_and_transfer(
                     wallet_index,
                     congestion_requeues: 0,
                     operation: WalletOperation::SetMetadataAndTransfer {
-                        blob_object_id: object_id,
+                        blob_object_id: object_id.clone(),
                         owner,
                         namespace,
                         package_id: Some(package_id),
@@ -1212,6 +1328,18 @@ async fn execute_upload_and_transfer(
                         encrypted_b64: Some(encrypted_b64.clone()),
                         account_id: Some(account_id.clone()),
                         policy_package_id: Some(state.config.seal_policy_package_id.clone()),
+                        v2: match (v2_namespace_object_id.as_deref(), v2_key_version) {
+                            (Some(ns_id), Some(kv)) => self_hosted_v2_index(
+                                ns_id,
+                                kv,
+                                &blob_id,
+                                Some(&object_id),
+                                &encrypted,
+                                None,
+                            )
+                            .ok(),
+                            _ => None,
+                        },
                     },
                 }))
                 .await
@@ -1270,7 +1398,11 @@ async fn execute_upload_and_transfer(
 
                 let delay_secs = congestion_backoff_secs(congestion_requeues);
                 let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
-                let next_wallet = (wallet_index + 1) % state.key_pool.len().max(1);
+                let next_wallet = if v2_namespace_object_id.is_some() {
+                    wallet_index
+                } else {
+                    (wallet_index + 1) % state.key_pool.len().max(1)
+                };
                 let job_id_for_log = remember_job_id.as_deref().unwrap_or("-").to_string();
                 let mut storage = state.wallet_storage.clone();
                 match storage
@@ -1408,6 +1540,17 @@ async fn execute_upload_and_transfer(
 
     // The sidecar's `/walrus/upload` endpoint already performs metadata+transfer
     // atomically. A successful upload response means the blob is ready to index.
+    let v2_index = match (v2_namespace_object_id.as_deref(), v2_key_version) {
+        (Some(ns_id), Some(kv)) => Some(self_hosted_v2_index(
+            ns_id,
+            kv,
+            &blob_id,
+            upload.object_id.as_deref(),
+            &encrypted,
+            upload.digest.clone(),
+        )?),
+        _ => None,
+    };
     insert_vector_and_mark_remember_done(
         state,
         remember_job_id.as_deref(),
@@ -1418,6 +1561,7 @@ async fn execute_upload_and_transfer(
         encrypted.len() as i64,
         importance,
         wallet_index,
+        v2_index.as_ref(),
     )
     .await
 }
@@ -2201,8 +2345,8 @@ mod tests {
         escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
         is_walrus_package_version_mismatch, mark_remember_job_failed, parse_locked_object_info,
         parse_wal_balance_alert_info, recovery_seal_persistence, wallet_index_for_upload_attempt,
-        wallet_job_request, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
-        MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
+        wallet_job_request, V2IndexFields, WalletJob, WalletJobAttemptInfo, WalletJobError,
+        WalletOperation, MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
     };
 
     /// The exact production error string from the object-lock incident
@@ -2350,6 +2494,45 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     }
 
     #[test]
+    #[test]
+    fn v2_metadata_recovery_rebuilds_write_fence_not_v1_new() {
+        let v2 = V2IndexFields {
+            namespace_object_id: format!("0x{}", "4".repeat(64)),
+            key_version: 0,
+            storage_mode: "self_hosted".into(),
+            oyster_bucket: None,
+            oyster_key: None,
+            pooled_blob_object_id: None,
+            ciphertext_digest: vec![1; 32],
+            commitment: vec![2; 32],
+            fence_tx_digest: None,
+        };
+        let persistence = recovery_seal_persistence(
+            Some("0xaccount"),
+            "0xv1registry",
+            Some("0xpolicy"),
+            Some("YQ=="),
+            Some(&v2),
+            Some("0xnsregistry"),
+            Some("0xv2registry"),
+        )
+        .expect("v2 recovery fence");
+        match persistence {
+            crate::storage::walrus::SealPersistence::V2WriteFence {
+                namespace_id,
+                key_version,
+                ..
+            } => {
+                assert_eq!(namespace_id, v2.namespace_object_id.as_str());
+                assert_eq!(key_version, 0);
+            }
+            crate::storage::walrus::SealPersistence::V1New { .. } => {
+                panic!("V2 recovery must not attach account::seal_encrypt_fence");
+            }
+        }
+    }
+
+    #[test]
     fn wallet_job_payload_without_congestion_field_deserializes() {
         // Jobs already queued in Postgres before the field existed must keep
         // deserializing (serde default = 0).
@@ -2364,6 +2547,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 vector: vec![0.1],
                 blob_size_bytes: 1,
                 importance: 0.5,
+                v2: None,
             },
         };
         let mut value = serde_json::to_value(&job).expect("serialize");
@@ -2574,11 +2758,19 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     #[test]
     fn metadata_recovery_requires_complete_v1_new_seal_fence() {
         assert!(matches!(
-            recovery_seal_persistence(None, "0xregistry", None, None),
+            recovery_seal_persistence(None, "0xregistry", None, None, None, None, None),
             Err(WalletJobError::Permanent(_))
         ));
         assert!(matches!(
-            recovery_seal_persistence(Some("0xaccount"), "", Some("0xpackage"), Some("ciphertext"),),
+            recovery_seal_persistence(
+                Some("0xaccount"),
+                "",
+                Some("0xpackage"),
+                Some("ciphertext"),
+                None,
+                None,
+                None,
+            ),
             Err(WalletJobError::Permanent(_))
         ));
         assert!(matches!(
@@ -2587,6 +2779,9 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 "0xregistry",
                 Some("0xpackage"),
                 Some("ciphertext"),
+                None,
+                None,
+                None,
             ),
             Ok(crate::storage::walrus::SealPersistence::V1New { .. })
         ));
@@ -2769,6 +2964,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
                 vector: vec![],
                 blob_size_bytes: 0,
                 importance: crate::services::extractor::IMPORTANCE_STANDARD,
+                v2: None,
             },
         });
 

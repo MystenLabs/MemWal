@@ -332,7 +332,9 @@ impl WalrusSealEngine {
             return Some((ciphertext, true));
         }
         if let Ok(Some(meta)) = self.db.get_v2_blob_meta(blob_id, owner, namespace).await {
-            if meta.namespace_object_id.is_some() {
+            if meta.namespace_object_id.is_some()
+                && meta.storage_mode.as_deref() != Some("self_hosted")
+            {
                 return self
                     .fetch_v2_envelope(blob_id, &meta)
                     .await

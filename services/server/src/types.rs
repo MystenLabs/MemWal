@@ -238,6 +238,66 @@ impl KeyPool {
     pub fn len(&self) -> usize {
         self.keys.len()
     }
+
+    pub fn keys(&self) -> &[String] {
+        &self.keys
+    }
+
+    /// First pool slot whose derived Sui address matches `address`.
+    pub fn index_for_sui_address(&self, address: &str) -> Option<usize> {
+        let Ok(want) = address.parse::<sui_sdk_types::Address>() else {
+            return None;
+        };
+        self.keys.iter().position(|key| {
+            sui_address_from_private_key(key)
+                .ok()
+                .and_then(|got| got.parse::<sui_sdk_types::Address>().ok())
+                == Some(want)
+        })
+    }
+}
+
+/// Derive a Sui address from a `suiprivkey1…` bech32 or 32-byte hex secret.
+pub fn sui_address_from_private_key(raw: &str) -> Result<String, AppError> {
+    let secret = decode_sui_ed25519_secret(raw)?;
+    Ok(sui_crypto::ed25519::Ed25519PrivateKey::new(secret)
+        .public_key()
+        .derive_address()
+        .to_string())
+}
+
+fn decode_sui_ed25519_secret(raw: &str) -> Result<[u8; 32], AppError> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("suiprivkey") {
+        let (hrp, data, _variant) = bech32::decode(trimmed)
+            .map_err(|e| AppError::Internal(format!("invalid suiprivkey bech32: {e}")))?;
+        if hrp != "suiprivkey" {
+            return Err(AppError::Internal(format!(
+                "unexpected private-key HRP {hrp}"
+            )));
+        }
+        let bytes: Vec<u8> = bech32::FromBase32::from_base32(&data)
+            .map_err(|e| AppError::Internal(format!("invalid suiprivkey payload: {e}")))?;
+        if bytes.len() != 33 {
+            return Err(AppError::Internal(
+                "suiprivkey must decode to flag + 32-byte secret".into(),
+            ));
+        }
+        if bytes[0] != 0 {
+            return Err(AppError::Internal(
+                "only ED25519 suiprivkey values are supported".into(),
+            ));
+        }
+        return bytes[1..].try_into().map_err(|_| {
+            AppError::Internal("suiprivkey secret must be 32 bytes".into())
+        });
+    }
+    let hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    let decoded = hex::decode(hex)
+        .map_err(|_| AppError::Internal("private key must be suiprivkey or hex".into()))?;
+    decoded
+        .try_into()
+        .map_err(|_| AppError::Internal("hex private key must be 32 bytes".into()))
 }
 
 // ============================================================
@@ -2325,6 +2385,19 @@ mod tests {
         assert_eq!(pool.next_index(), Some(0));
         assert_eq!(pool.next_index(), Some(1));
         assert_eq!(pool.next_index(), Some(0));
+    }
+
+    #[test]
+    fn key_pool_index_for_sui_address_matches_derived_key() {
+        let secret_a = [3u8; 32];
+        let secret_b = [9u8; 32];
+        let addr_b = sui_crypto::ed25519::Ed25519PrivateKey::new(secret_b)
+            .public_key()
+            .derive_address()
+            .to_string();
+        let pool = KeyPool::new(vec![hex::encode(secret_a), hex::encode(secret_b)]);
+        assert_eq!(pool.index_for_sui_address(&addr_b), Some(1));
+        assert_eq!(pool.index_for_sui_address("0xdead"), None);
     }
 
     // ── SponsorRateLimitConfig defaults ─────────────────────────────────

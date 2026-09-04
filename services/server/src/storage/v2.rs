@@ -69,6 +69,8 @@ pub fn sui_address_from_ed25519_pubkey_hex(public_key_hex: &str) -> Result<Strin
     Ok(Ed25519PublicKey::new(array).derive_address().to_string())
 }
 
+pub use crate::types::sui_address_from_private_key;
+
 pub fn parse_object_id32(id: &str) -> Result<[u8; 32], AppError> {
     let addr: Address = id
         .parse()
@@ -351,7 +353,7 @@ pub async fn authorize_v2_write(
     state: &AppState,
     auth: &AuthInfo,
     namespace: &V2Namespace,
-) -> Result<String, AppError> {
+) -> Result<usize, AppError> {
     let principal = sui_address_from_ed25519_pubkey_hex(&auth.public_key)?;
     if !namespace_has_permission(state, namespace, &principal, true).await? {
         return Err(AppError::Forbidden(
@@ -363,13 +365,19 @@ pub async fn authorize_v2_write(
             "MEMWAL_V2_WRITER_ADDRESSES is empty".into(),
         ));
     }
-    for writer in &state.config.memwal_v2_writer_addresses {
-        if namespace_has_permission(state, namespace, writer, true).await? {
-            return Ok(writer.clone());
+    for (idx, key) in state.key_pool.keys().iter().enumerate() {
+        let Ok(addr) = sui_address_from_private_key(key) else {
+            continue;
+        };
+        if !writer_in_pool(&state.config, &addr) {
+            continue;
+        }
+        if namespace_has_permission(state, namespace, &addr, true).await? {
+            return Ok(idx);
         }
     }
     Err(AppError::Forbidden(
-        "no writer-pool address has WRITE on this V2 namespace".into(),
+        "no key-pool signer is in MEMWAL_V2_WRITER_ADDRESSES with WRITE on this namespace".into(),
     ))
 }
 
@@ -936,5 +944,24 @@ mod tests {
         .unwrap();
         assert_ne!(c1, c3);
         assert_eq!(blake2b256(envelope).len(), 32);
+    }
+
+    #[test]
+    fn private_key_hex_and_suiprivkey_derive_the_same_address() {
+        use bech32::ToBase32;
+        let secret = [7u8; 32];
+        let hex = hex::encode(secret);
+        let from_hex = crate::types::sui_address_from_private_key(&hex).unwrap();
+        let mut payload = vec![0u8];
+        payload.extend_from_slice(&secret);
+        let bech = bech32::encode("suiprivkey", payload.to_base32(), bech32::Variant::Bech32)
+            .unwrap();
+        let from_bech = crate::types::sui_address_from_private_key(&bech).unwrap();
+        assert_eq!(from_hex, from_bech);
+        let expected = sui_crypto::ed25519::Ed25519PrivateKey::new(secret)
+            .public_key()
+            .derive_address()
+            .to_string();
+        assert_eq!(from_hex, expected);
     }
 }

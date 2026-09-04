@@ -103,6 +103,7 @@ fn spawn_prepare_v2_remember_job(
     auth: AuthInfo,
     namespace_label: String,
     ns: V2Namespace,
+    writer_index: usize,
 ) {
     let request_context = crate::observability::current_context();
     tokio::spawn(async move {
@@ -167,12 +168,7 @@ fn spawn_prepare_v2_remember_job(
                 .await?;
                 rate_limit::check_storage_quota(&state, &auth.owner, envelope.len() as i64).await?;
 
-                let wallet_index = state.key_pool.next_index().ok_or_else(|| {
-                    AppError::Internal(
-                        "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
-                            .into(),
-                    )
-                })?;
+                let wallet_index = writer_index;
 
                 if state.config.memwal_v2_managed_oyster {
                     let oyster_key =
@@ -825,9 +821,11 @@ pub async fn remember(
     let namespace_owned = namespace.clone();
     let text = body.text;
     let v2_ns = v2::gate_v2_label(&state, &auth, namespace).await?;
-    if let Some(ref ns) = v2_ns {
-        v2::authorize_v2_write(&state, &auth, ns).await?;
-    }
+    let v2_writer_index = if let Some(ref ns) = v2_ns {
+        Some(v2::authorize_v2_write(&state, &auth, ns).await?)
+    } else {
+        None
+    };
 
     let job_id = uuid::Uuid::new_v4().to_string();
 
@@ -849,6 +847,7 @@ pub async fn remember(
             auth.clone(),
             namespace_owned,
             ns,
+            v2_writer_index.expect("authorized writer index"),
         );
     } else {
         spawn_prepare_remember_job(
