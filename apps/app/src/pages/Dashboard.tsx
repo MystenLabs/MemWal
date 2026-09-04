@@ -23,6 +23,7 @@ SyntaxHighlighter.registerLanguage('javascript', js)
 SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
+import NamespacesSection from '../components/NamespacesSection'
 import SecurityDeleteSection from '../components/SecurityDeleteSection'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
@@ -1264,6 +1265,10 @@ const result = await generateText({
                         </div>
                     )}
                 </Card>
+
+                {config.v2NamespacesEnabled && (
+                    <NamespacesSection previewMode={previewMode} />
+                )}
 
                 {/* Quick Start: SDK */}
                 <Card

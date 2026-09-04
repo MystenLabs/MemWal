@@ -25,6 +25,7 @@ import { MemWalManual } from '@mysten-incubation/memwal/manual'
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
 import { config } from '../config'
+import { useV2Namespaces } from '../hooks/useV2Namespaces'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 
 const walrusCodeTheme = {
@@ -189,6 +190,19 @@ export default function Playground() {
     // ============================================================
 
     const [namespace, setNamespace] = useState('default')
+    const { namespaces: v2Namespaces } = useV2Namespaces(
+        config.v2NamespacesEnabled ? address : '',
+    )
+    const v2NamespaceLabels = useMemo(
+        () => v2Namespaces.filter((row) => row.active && row.label).map((row) => row.label),
+        [v2Namespaces],
+    )
+    const namespaceSelectOptions = useMemo(() => {
+        const labels = ['default', ...v2NamespaceLabels]
+        if (namespace && !labels.includes(namespace)) labels.push(namespace)
+        return labels
+    }, [v2NamespaceLabels, namespace])
+    const showV2NamespaceSelect = config.v2NamespacesEnabled && v2NamespaceLabels.length > 0
 
     const memwal = useMemo(() => {
         if (!delegateKey || !accountObjectId) return null
@@ -682,13 +696,28 @@ export default function Playground() {
                     </div>
                     <div className="demo-server-tag demo-server-tag--namespace">
                         <span>namespace:</span>
-                        <input
-                            className="demo-namespace-input"
-                            value={namespace}
-                            onChange={(e) => setNamespace(e.target.value)}
-                            placeholder="default"
-                            size={Math.max(namespace.length, 7)}
-                        />
+                        {showV2NamespaceSelect ? (
+                            <select
+                                className="demo-namespace-input"
+                                value={namespace}
+                                onChange={(e) => setNamespace(e.target.value)}
+                                aria-label="Memory namespace"
+                            >
+                                {namespaceSelectOptions.map((label) => (
+                                    <option key={label} value={label}>
+                                        {label}
+                                    </option>
+                                ))}
+                            </select>
+                        ) : (
+                            <input
+                                className="demo-namespace-input"
+                                value={namespace}
+                                onChange={(e) => setNamespace(e.target.value)}
+                                placeholder="default"
+                                size={Math.max(namespace.length, 7)}
+                            />
+                        )}
                     </div>
                 </div>
 

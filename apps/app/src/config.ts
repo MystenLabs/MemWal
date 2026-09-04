@@ -106,6 +106,26 @@ export const config = {
     // Must be enabled together with the relayer's ENABLE_MEMORY_DELETION.
     enableMemoryDeletion: (import.meta.env.VITE_ENABLE_MEMORY_DELETION as string || '') === 'true',
     securityDeleteEnabled: (import.meta.env.VITE_SECURITY_DELETE_ENABLED as string || '') === 'true',
+    // V2 namespace slice. V1 package/registry defaults above stay unchanged.
+    // Testnet object-id fallbacks match scripts/v2e2e/STATE.md only when the
+    // VITE_MEMWAL_V2_* vars are unset — never override an explicit env value.
+    v2PackageId: (import.meta.env.VITE_MEMWAL_V2_PACKAGE_ID as string) || (
+        (import.meta.env.VITE_SUI_NETWORK as string || 'testnet') === 'testnet'
+            ? '0xdf67385f0842bcdd7234b73d9822f1b29f7d7991115c219a589118d8c5501dfc'
+            : ''
+    ),
+    v2RegistryId: (import.meta.env.VITE_MEMWAL_V2_REGISTRY_ID as string) || (
+        (import.meta.env.VITE_SUI_NETWORK as string || 'testnet') === 'testnet'
+            ? '0x0e04320f37466a449d7bf6980bf8dad22d563da41faf98a0aab8b82c802eff86'
+            : ''
+    ),
+    v2NamespaceRegistryId: (import.meta.env.VITE_MEMWAL_V2_NAMESPACE_REGISTRY_ID as string) || (
+        (import.meta.env.VITE_SUI_NETWORK as string || 'testnet') === 'testnet'
+            ? '0x1d0a9f1bf04832387fa911cbb83e59c99332439d93e89e1e868f23f5a08cb995'
+            : ''
+    ),
+    v2NamespacesEnabled: (import.meta.env.VITE_V2_NAMESPACES_ENABLED as string || '') === 'true',
+    v2WriterAddresses: parseCsv(import.meta.env.VITE_MEMWAL_V2_WRITER_ADDRESSES as string),
     demoUrls: (import.meta.env.VITE_DEMO_URLS as string || '')
         .split(',').map(s => s.trim()).filter(Boolean)
         .map(entry => {
