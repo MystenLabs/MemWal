@@ -1268,18 +1268,16 @@ pub async fn remember_bulk(
                 i, MAX_REMEMBER_TEXT_BYTES
             )));
         }
-        if item.namespace.is_empty() {
-            return Err(AppError::BadRequest(format!(
-                "items[{}].namespace cannot be empty",
-                i
-            )));
-        }
-        if item.namespace.len() > MAX_NAMESPACE_BYTES {
-            return Err(AppError::BadRequest(format!(
-                "items[{}].namespace exceeds maximum length of {} bytes",
-                i, MAX_NAMESPACE_BYTES
-            )));
-        }
+        // Delegate to the shared validator rather than re-checking empty and
+        // length inline, so bulk inherits every namespace rule the single-item
+        // paths enforce (notably the NUL rejection — a `\0` bound into the
+        // `remember_jobs` insert below is an opaque 500). Its messages all
+        // start with "namespace ", so prefixing with the item index reproduces
+        // the previous `items[{i}].namespace ...` wording verbatim.
+        validate_namespace(&item.namespace).map_err(|e| match e {
+            AppError::BadRequest(msg) => AppError::BadRequest(format!("items[{}].{}", i, msg)),
+            other => other,
+        })?;
     }
 
     let owner = &auth.owner;
