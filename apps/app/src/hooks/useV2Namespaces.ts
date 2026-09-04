@@ -41,18 +41,34 @@ export function useV2Namespaces(ownerAddress: string) {
         setLoading(true)
         setError('')
         try {
-            const accountId = await fetchV2AccountId(suiClient, ownerAddress)
-            const [rows, delegates] = await Promise.all([
-                listOwnedV2Namespaces(suiClient, ownerAddress),
-                accountId ? fetchV2DelegateAddresses(suiClient, accountId) : Promise.resolve([]),
-            ])
+            let accountId: string | null = null
+            let accountError = ''
+            try {
+                accountId = await fetchV2AccountId(suiClient, ownerAddress)
+            } catch (err) {
+                accountError = err instanceof Error ? err.message : String(err)
+            }
             if (request !== requestGeneration.current) return
             setV2AccountId(accountId)
-            setNamespaces((prev) => mergeNamespaceRows(rows, prev))
-            setDelegateAddresses(delegates)
-        } catch (err) {
+
+            const [listResult, delegates] = await Promise.all([
+                listOwnedV2Namespaces(suiClient, ownerAddress).then(
+                    (rows): { rows: V2NamespaceRow[]; error: string } => ({ rows, error: '' }),
+                    (err: unknown): { rows: null; error: string } => ({
+                        rows: null,
+                        error: err instanceof Error ? err.message : String(err),
+                    }),
+                ),
+                accountId
+                    ? fetchV2DelegateAddresses(suiClient, accountId).catch(() => [] as string[])
+                    : Promise.resolve([] as string[]),
+            ])
             if (request !== requestGeneration.current) return
-            setError(err instanceof Error ? err.message : String(err))
+            setDelegateAddresses(delegates)
+            if (listResult.rows) {
+                setNamespaces((prev) => mergeNamespaceRows(listResult.rows, prev))
+            }
+            setError(listResult.error || accountError)
         } finally {
             if (request === requestGeneration.current) setLoading(false)
         }

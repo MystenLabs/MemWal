@@ -19,13 +19,18 @@ type SealServerConfigEnv = {
 }
 
 /** Same JSON shape as the relayer SEAL_SERVER_CONFIGS array. */
-function parseSealServerConfigsJson(raw: string | undefined): SealServerConfigEnv[] {
+function parseSealServerConfigsJson(raw: string | undefined): {
+    configs: SealServerConfigEnv[]
+    error: string | null
+} {
     const trimmed = (raw || '').trim()
-    if (!trimmed) return []
+    if (!trimmed) return { configs: [], error: null }
     try {
         const parsed = JSON.parse(trimmed) as unknown
-        if (!Array.isArray(parsed)) return []
-        return parsed.flatMap((entry) => {
+        if (!Array.isArray(parsed)) {
+            return { configs: [], error: 'VITE_SEAL_SERVER_CONFIGS must be a JSON array' }
+        }
+        const configs = parsed.flatMap((entry) => {
             if (!entry || typeof entry !== 'object') return []
             const row = entry as Record<string, unknown>
             const objectId = typeof row.objectId === 'string' ? row.objectId.trim() : ''
@@ -43,8 +48,13 @@ function parseSealServerConfigsJson(raw: string | undefined): SealServerConfigEn
                 ...(apiKeyName && apiKey ? { apiKeyName, apiKey } : {}),
             }]
         })
-    } catch {
-        return []
+        if (configs.length === 0) {
+            return { configs: [], error: 'VITE_SEAL_SERVER_CONFIGS has no valid server entries' }
+        }
+        return { configs, error: null }
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return { configs: [], error: `VITE_SEAL_SERVER_CONFIGS is not valid JSON (${message})` }
     }
 }
 
@@ -58,6 +68,9 @@ const memwalPackageId = import.meta.env.VITE_MEMWAL_PACKAGE_ID as string ||
 const memwalRegistryId = import.meta.env.VITE_MEMWAL_REGISTRY_ID as string ||
     '0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437'
 const sealKeyServers = parseCsv(import.meta.env.VITE_SEAL_KEY_SERVERS as string)
+const sealServerConfigsParsed = parseSealServerConfigsJson(
+    import.meta.env.VITE_SEAL_SERVER_CONFIGS as string,
+)
 const legacySealKeyServers = parseCsv(import.meta.env.VITE_LEGACY_SEAL_KEY_SERVERS as string)
 const localE2eJsonRpc = import.meta.env.DEV &&
     (import.meta.env.VITE_SUI_LOCAL_E2E_JSON_RPC as string || '') === 'true'
@@ -99,7 +112,8 @@ export const config = {
     suiGrpcUrl: import.meta.env.VITE_SUI_GRPC_URL as string || '',
     sealKeyServers,
     // Unwrap committee must match the relayer (SEAL_SERVER_CONFIGS / SEAL_THRESHOLD).
-    sealServerConfigs: parseSealServerConfigsJson(import.meta.env.VITE_SEAL_SERVER_CONFIGS as string),
+    sealServerConfigs: sealServerConfigsParsed.configs,
+    sealServerConfigsError: sealServerConfigsParsed.error,
     sealThreshold: parseSealThreshold(import.meta.env.VITE_SEAL_THRESHOLD as string),
     // Same cutover rationale as legacyMemwalPackageId: legacy blobs were
     // encrypted against the pre-cutover key-server committee. Unset falls

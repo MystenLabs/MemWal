@@ -391,14 +391,14 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
                             setCreateError('')
                             setShowCreate(true)
                         }}
-                        disabled={showCreate || lifecycleBusy || previewMode || !v2AccountId}
+                        disabled={showCreate || lifecycleBusy || previewMode || !v2AccountId || Boolean(config.sealServerConfigsError)}
                     >
                         Create <Plus size={18} strokeWidth={2.5} aria-hidden="true" />
                     </button>
                 </div>
             }
         >
-            {(error || createError) && (
+            {(error || createError || config.sealServerConfigsError) && (
                 <div style={{
                     background: 'rgba(248,113,113,0.08)',
                     border: '1px solid rgba(248,113,113,0.2)',
@@ -408,7 +408,7 @@ export default function NamespacesSection({ previewMode = false }: { previewMode
                     color: 'var(--danger)',
                     fontSize: '0.82rem',
                 }}>
-                    {createError || error}
+                    {createError || error || config.sealServerConfigsError}
                 </div>
             )}
             {createPhase && (

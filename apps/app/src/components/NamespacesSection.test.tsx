@@ -84,6 +84,16 @@ it('shows an English empty state when enabled and none exist', () => {
     expect(screen.getByText(/No namespaces yet/)).toBeInTheDocument()
 })
 
+it('does not claim a missing V2 account when the account id is known', () => {
+    mocks.v2NamespacesEnabled = true
+    mocks.v2AccountId = '0xacc'
+    mocks.error = 'queryEvents failed'
+    render(<NamespacesSection />)
+    expect(screen.getByText('queryEvents failed')).toBeInTheDocument()
+    expect(screen.queryByText(/No V2 Walrus Memory account found/)).not.toBeInTheDocument()
+    expect(screen.getByText(/No namespaces yet/)).toBeInTheDocument()
+})
+
 it('offers finish initialize and cancel on uninitialized rows', () => {
     mocks.v2NamespacesEnabled = true
     mocks.v2AccountId = '0xacc'

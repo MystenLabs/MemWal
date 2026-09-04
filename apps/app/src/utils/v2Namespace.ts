@@ -283,6 +283,9 @@ export function mergeNamespaceRows(fetched: V2NamespaceRow[], local: V2Namespace
 }
 
 export function v2SealServerConfigs(): SealServerConfig[] {
+    if (config.sealServerConfigsError) {
+        throw new Error(config.sealServerConfigsError)
+    }
     if (config.sealServerConfigs.length > 0) {
         return config.sealServerConfigs.map((server) => ({ ...server }))
     }
