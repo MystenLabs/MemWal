@@ -287,8 +287,8 @@ export async function addDelegateKey(
         arguments: [
             tx.object(opts.accountId),
             tx.object(opts.registryId),
-            tx.pure("vector<u8>", Array.from(pkBytes)),
-            tx.pure("string", opts.label),
+            tx.pure.vector("u8", Array.from(pkBytes)),
+            tx.pure.string(opts.label),
             tx.object(SUI_CLOCK),
         ],
     });
@@ -338,7 +338,7 @@ export async function removeDelegateKey(
         arguments: [
             tx.object(opts.accountId),
             tx.object(opts.registryId),
-            tx.pure("vector<u8>", Array.from(pkBytes)),
+            tx.pure.vector("u8", Array.from(pkBytes)),
         ],
     });
 
