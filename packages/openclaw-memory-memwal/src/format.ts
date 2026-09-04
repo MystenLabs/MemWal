@@ -42,6 +42,19 @@ export function escapeForPrompt(text: string): string {
 }
 
 /**
+ * Convert pgvector cosine distance to a [0, 1] similarity for display.
+ *
+ * MemWal recall returns cosine distance (`<=>`), not L2: 0 = identical
+ * direction, 1 = orthogonal, 2 = opposite. `1 - distance` is cosine
+ * similarity and goes negative when distance > 1; clamp so OpenClaw
+ * prompts never show "(-30% relevance)".
+ */
+export function cosineRelevance(distance: number): number {
+  if (!Number.isFinite(distance)) return 0;
+  return Math.min(1, Math.max(0, 1 - distance));
+}
+
+/**
  * Format recalled memories for prompt injection with security warning.
  *
  * Wraps memories in `<memwal-memories>` tags with an instruction header
