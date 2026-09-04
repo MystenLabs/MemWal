@@ -54,6 +54,44 @@ function lastUserText(prompt: unknown): string {
     .toLowerCase();
 }
 
+const DOCUMENT_PROMPT_REGEX = /\b(essay|create a document|write a document)\b/;
+const CREATE_DOCUMENT_CALL_ID = "call_doc";
+const CREATE_DOCUMENT_INPUT = JSON.stringify({
+  title: "Test Artifact",
+  kind: "text",
+});
+
+function promptAlreadyCalledTools(prompt: unknown): boolean {
+  if (!Array.isArray(prompt)) {
+    return false;
+  }
+  for (const message of prompt as ModelMessage[]) {
+    if (message?.role === "tool") {
+      return true;
+    }
+    if (!Array.isArray(message?.content)) {
+      continue;
+    }
+    for (const part of message.content as Array<{ type?: string }>) {
+      if (
+        part?.type === "tool-call" ||
+        part?.type === "tool-result" ||
+        part?.type === "tool-createDocument"
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function shouldCreateDocument(prompt: unknown): boolean {
+  return (
+    !promptAlreadyCalledTools(prompt) &&
+    DOCUMENT_PROMPT_REGEX.test(lastUserText(prompt))
+  );
+}
+
 function getResponseForPrompt(prompt: unknown): string {
   const text = lastUserText(prompt);
 
@@ -67,6 +105,34 @@ function getResponseForPrompt(prompt: unknown): string {
   return mockResponses.default;
 }
 
+function enqueueCreateDocument(controller: ReadableStreamDefaultController) {
+  controller.enqueue({
+    type: "tool-input-start",
+    id: CREATE_DOCUMENT_CALL_ID,
+    toolName: "createDocument",
+  });
+  controller.enqueue({
+    type: "tool-input-delta",
+    id: CREATE_DOCUMENT_CALL_ID,
+    delta: CREATE_DOCUMENT_INPUT,
+  });
+  controller.enqueue({
+    type: "tool-input-end",
+    id: CREATE_DOCUMENT_CALL_ID,
+  });
+  controller.enqueue({
+    type: "tool-call",
+    toolCallId: CREATE_DOCUMENT_CALL_ID,
+    toolName: "createDocument",
+    input: CREATE_DOCUMENT_INPUT,
+  });
+  controller.enqueue({
+    type: "finish",
+    finishReason: "tool-calls",
+    usage: mockUsage,
+  });
+}
+
 const createMockModel = (): LanguageModel => {
   return {
     specificationVersion: "v3",
@@ -74,13 +140,44 @@ const createMockModel = (): LanguageModel => {
     modelId: "mock-model",
     defaultObjectGenerationMode: "tool",
     supportedUrls: {},
-    doGenerate: async ({ prompt }: { prompt: unknown }) => ({
-      finishReason: "stop",
-      usage: mockUsage,
-      content: [{ type: "text", text: getResponseForPrompt(prompt) }],
-      warnings: [],
-    }),
+    doGenerate: async ({ prompt }: { prompt: unknown }) => {
+      if (shouldCreateDocument(prompt)) {
+        return {
+          finishReason: "tool-calls",
+          usage: mockUsage,
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: CREATE_DOCUMENT_CALL_ID,
+              toolName: "createDocument",
+              input: CREATE_DOCUMENT_INPUT,
+            },
+          ],
+          warnings: [],
+        };
+      }
+      return {
+        finishReason: "stop",
+        usage: mockUsage,
+        content: [{ type: "text", text: getResponseForPrompt(prompt) }],
+        warnings: [],
+      };
+    },
     doStream: ({ prompt }: { prompt: unknown }) => {
+      if (shouldCreateDocument(prompt)) {
+        return {
+          stream: new ReadableStream({
+            async start(controller) {
+              await new Promise((resolve) => {
+                setTimeout(resolve, 500);
+              });
+              enqueueCreateDocument(controller);
+              controller.close();
+            },
+          }),
+        };
+      }
+
       const response = getResponseForPrompt(prompt);
       const words = response.split(" ");
 

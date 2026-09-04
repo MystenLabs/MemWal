@@ -93,6 +93,26 @@ test.describe("Conversation", () => {
     });
   });
 
+  test("creates a text artifact through the retired-id-safe artifact model", async ({
+    page,
+  }) => {
+    // ARTIFACT_MODEL used to be a retired OpenRouter id, so createDocument
+    // 404'd before any panel opened. The mock emits the same tool call the
+    // chat model would, then the artifact model fills the document.
+    await page.goto("/");
+    await page
+      .getByTestId("multimodal-input")
+      .fill("Create a document about Silicon Valley");
+    await page.getByTestId("send-button").click();
+
+    const preview = page.getByTestId("document-preview");
+    await expect(preview).toBeVisible({ timeout: 20_000 });
+    await expect(preview).toContainText("Test Artifact");
+
+    await preview.click();
+    await expect(page.getByTestId("artifact")).toBeVisible();
+  });
+
   test("recovers when the chat-model cookie holds a retired id", async ({
     page,
     context,

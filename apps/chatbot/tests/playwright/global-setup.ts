@@ -115,6 +115,7 @@ async function warmRoutes(): Promise<void> {
     ["/register"],
     ["/api/history?limit=1"],
     ["/api/chat", { method: "POST", body: "{}" }],
+    [`/api/document?id=${randomUUID()}`],
     [`/chat/${randomUUID()}`],
   ];
 
