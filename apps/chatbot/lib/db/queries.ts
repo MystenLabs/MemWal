@@ -443,16 +443,26 @@ export async function saveSuggestions({
   }
 }
 
-export async function getSuggestionsByDocumentId({
+// Owner-scoped lookup: filters on both documentId AND userId so a caller can
+// never resolve another user's suggestion text. An unscoped by-documentId
+// lookup was the footgun behind the getSuggestions IDOR (WALM-438 / GH #786).
+export async function getSuggestionsByDocumentIdForUser({
   documentId,
+  userId,
 }: {
   documentId: string;
+  userId: string;
 }) {
   try {
     return await db
       .select()
       .from(suggestion)
-      .where(eq(suggestion.documentId, documentId));
+      .where(
+        and(
+          eq(suggestion.documentId, documentId),
+          eq(suggestion.userId, userId)
+        )
+      );
   } catch (_error) {
     throw new ChatbotError(
       "bad_request:database",
