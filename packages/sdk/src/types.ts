@@ -519,3 +519,117 @@ export interface RemoveDelegateKeyOpts extends AccountTxOpts {
     /** Ed25519 public key to remove (32 bytes Uint8Array or hex string) */
     publicKey: Uint8Array | string;
 }
+
+// ============================================================
+// Namespace Management Types (V2)
+// ============================================================
+
+/** Base options for on-chain namespace transactions */
+interface NamespaceTxOpts extends AccountTxOpts {
+    /** NamespaceRegistry shared object ID */
+    namespaceRegistryId: string;
+    /** AccountRegistry shared object ID */
+    accountRegistryId: string;
+    /** MemWalAccount object ID */
+    accountId: string;
+}
+
+/** Options for createNamespace() */
+export interface CreateNamespaceOpts extends NamespaceTxOpts {
+    /** Namespace label (1..=64 UTF-8 bytes) */
+    label: string;
+}
+
+/** Result from createNamespace() */
+export interface CreateNamespaceResult {
+    /** Created MemoryNamespace shared object ID */
+    namespaceId: string;
+    /** Transaction digest */
+    digest: string;
+}
+
+/** Options for initializeKey() */
+export interface InitializeKeyOpts extends NamespaceTxOpts {
+    /** MemoryNamespace shared object ID */
+    namespaceId: string;
+    /** Seal-wrapped 32-byte DEK (raw encrypted-object bytes) */
+    wrappedDek: Uint8Array;
+}
+
+/** Options for grantAccess() */
+export interface GrantAccessOpts extends NamespaceTxOpts {
+    /** MemoryNamespace shared object ID */
+    namespaceId: string;
+    /** Principal Sui address */
+    principal: string;
+    canRead: boolean;
+    canWrite: boolean;
+    canShare: boolean;
+}
+
+/** Options for revokeAccess() */
+export interface RevokeAccessOpts extends NamespaceTxOpts {
+    /** MemoryNamespace shared object ID */
+    namespaceId: string;
+    /** Principal Sui address */
+    principal: string;
+    /** Replacement Seal-wrapped DEK (revoke always rotates) */
+    newWrappedDek: Uint8Array;
+}
+
+/** Options for rotateKey() */
+export interface RotateKeyOpts extends NamespaceTxOpts {
+    /** MemoryNamespace shared object ID */
+    namespaceId: string;
+    /** Replacement Seal-wrapped DEK */
+    newWrappedDek: Uint8Array;
+}
+
+/** Options for cancelUninitializedNamespace() */
+export interface CancelUninitializedNamespaceOpts extends NamespaceTxOpts {
+    /** MemoryNamespace shared object ID */
+    namespaceId: string;
+}
+
+/** Options for wrapNamespaceDek() */
+export interface WrapNamespaceDekOpts {
+    /** Immutable package ID Seal encrypts under */
+    packageId: string;
+    /** MemoryNamespace object ID (Seal suffix) */
+    namespaceId: string;
+    /** Key version (0 at initialize) */
+    keyVersion: bigint | number;
+    /** 32-byte AES-256 DEK plaintext */
+    dek: Uint8Array;
+    /** Seal threshold (shares required to decrypt) */
+    threshold: number;
+    /**
+     * Pre-built Seal client. Provide EITHER this OR `sealServerConfigs`.
+     */
+    sealClient?: any;
+    /**
+     * Seal key-server configs used to construct a SealClient when `sealClient`
+     * is omitted. Requires `suiClient` (or the SDK will try to create one).
+     */
+    sealServerConfigs?: SealServerConfig[];
+    /** Pre-configured Sui client (needed when constructing SealClient) */
+    suiClient?: any;
+    /** Sui network (default: mainnet) when constructing a SuiClient */
+    suiNetwork?: "testnet" | "mainnet";
+}
+
+/** Result from wrapNamespaceDek() — never includes the raw DEK */
+export interface WrapNamespaceDekResult {
+    wrappedDek: Uint8Array;
+    dek?: never;
+}
+
+/** Options for generateAndWrapNamespaceDek() */
+export type GenerateAndWrapNamespaceDekOpts = Omit<WrapNamespaceDekOpts, "dek">;
+
+/** Result from generateAndWrapNamespaceDek() */
+export interface GenerateAndWrapNamespaceDekResult {
+    /** 32-byte DEK — keep in memory only; never persist */
+    dek: Uint8Array;
+    wrappedDek: Uint8Array;
+}

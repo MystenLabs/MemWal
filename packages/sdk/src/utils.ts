@@ -88,6 +88,53 @@ export function u64ToLeHex(value: bigint): string {
     return hex;
 }
 
+function toU64(value: bigint | number, label: string): bigint {
+    if (typeof value === "bigint") {
+        return value;
+    }
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+        throw new Error(`${label}: ${value} is not a u64`);
+    }
+    return BigInt(value);
+}
+
+/**
+ * Canonical 40-byte Seal ID suffix: BCS(namespace object ID) || BCS(key_version u64 LE).
+ *
+ * Sui IDs are 32 bytes; short hex (e.g. `0xcafe`) is left-padded. The returned
+ * bytes contain no `0x` prefix — Seal `encrypt({ id })` wants this as hex.
+ */
+export function namespaceSealKeyId(
+    namespaceId: string,
+    keyVersion: bigint | number,
+): Uint8Array {
+    if (typeof namespaceId !== "string") {
+        throw new TypeError("namespaceSealKeyId: namespaceId must be a string");
+    }
+    const clean =
+        namespaceId.startsWith("0x") || namespaceId.startsWith("0X")
+            ? namespaceId.slice(2)
+            : namespaceId;
+    if (clean.length === 0) {
+        throw new Error("namespaceSealKeyId: empty namespaceId");
+    }
+    if (!/^[0-9a-fA-F]+$/.test(clean)) {
+        throw new Error("namespaceSealKeyId: namespaceId contains non-hex characters");
+    }
+    const even = clean.length % 2 === 0 ? clean : `0${clean}`;
+    if (even.length > 64) {
+        throw new Error(
+            `namespaceSealKeyId: namespaceId must be at most 32 bytes, got ${even.length / 2}`,
+        );
+    }
+    const idBytes = hexToBytes(even.padStart(64, "0"));
+    const versionBytes = hexToBytes(u64ToLeHex(toU64(keyVersion, "namespaceSealKeyId")));
+    const id = new Uint8Array(40);
+    id.set(idBytes, 0);
+    id.set(versionBytes, 32);
+    return id;
+}
+
 export function scoringWeightsToWire(weights?: ScoringWeights): object | undefined {
     if (!weights) return undefined;
 
