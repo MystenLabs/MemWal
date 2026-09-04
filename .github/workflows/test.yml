@@ -1,32 +1,14 @@
 name: Tests
 
+# Monorepo CI: unit, lint, Playwright, contract, docs, MCP.
+# Live JS SDK e2e against a relayer is .github/workflows/test-sdk.yml.
+
 on:
   pull_request:
     branches: [main, staging, dev]
   push:
     branches: [main, staging, dev]
   workflow_dispatch:
-    inputs:
-      target_environment:
-        description: Benchmark environment to run the authenticated SDK e2e suite against
-        required: false
-        type: choice
-        default: dev
-        options:
-          - dev
-          - staging
-          - production
-  schedule:
-    # Catches relayer drift with no code change to trigger it. Only sdk-e2e
-    # runs on this trigger — every other job carries
-    # `if: github.event_name != 'schedule'` so a weekly run does not spin up
-    # Playwright, cargo and the docker services for nothing.
-    #
-    # Offset from benchmark-live.yml (0 9 * * 1) and test-python-sdk.yml
-    # (17 9 * * 1) so the three suites do not write through the shared bench
-    # account at once. The concurrency group below now enforces that too;
-    # the offsets remain as a second line of defence.
-    - cron: '47 9 * * 1'
 
 concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
@@ -36,320 +18,67 @@ permissions:
   contents: read
 
 jobs:
-  compatibility-contract:
-    name: Compatibility / Contract metadata
-    if: github.event_name != 'schedule'
+  meta:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Check compatibility contract
-        run: node scripts/check-compatibility-contract.mjs
-
-  docs-code-sync:
-    name: Docs / Code references match packages
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      # Snippets in docs/ are copies (Mintlify cannot import code from
-      # repository files at build time). This validates every docs page
-      # against the workspace: package names and entry points come from each
-      # packages/*/package.json, and MCP config blocks from the packages/mcp
-      # README. Failing the job blocks the merge, so drift is fixed in the
-      # same pull request.
-      - name: Check docs code references against the packages
-        run: node scripts/check-docs-code-sync.mjs
-
-  docs-freshness:
-    name: Docs / Freshness
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Check docs freshness
-        run: node scripts/check-docs-freshness.mjs
-
-  mcp-tests:
-    name: MCP / Integration (login handoff)
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
-
-      # Builds the package (tsc) then runs the node:test integration suite:
-      # spawns the real stdio MCP with empty creds, writes credentials
-      # mid-process, and asserts memwal_recall is served against a mock relayer
-      # without a restart (auth-required -> bridge hot-handoff).
-      - name: MCP integration tests
-        run: pnpm --filter @mysten-incubation/memwal-mcp test
-
-  sdk-changed:
-    name: SDK / Change detection
-    # sdk-e2e never runs on pull requests, so the full-history checkout below
-    # would be pure cost on every PR. Skipping here also skips sdk-e2e, which
-    # is what its own `if` already asks for.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      sdk: ${{ steps.filter.outputs.sdk }}
-
-    # test-sdk.yml gated its whole workflow on `paths: packages/sdk/**`. This
-    # workflow cannot: a `paths:` filter here would gate all 13 jobs. Without
-    # some gate the live e2e would fire on every dev merge — roughly 100
-    # weighted requests a run against a 500/hour per-account budget, which is
-    # the very limit the concurrency group exists to stay under. So detect the
-    # change here and let sdk-e2e decide.
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Did the SDK change?
-        id: filter
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # schedule and workflow_dispatch have no diff to inspect, and both
-          # are deliberate requests to exercise the relayer. Always run.
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "sdk=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          base="${{ github.event.before }}"
-          # A new branch, a force-push, or a pruned commit leaves no usable
-          # base. Run rather than skip: a false positive costs one e2e run, a
-          # false negative ships an untested SDK.
-          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
-             || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            echo "base commit unavailable — running the suite"
-            echo "sdk=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if git diff --name-only "$base" "${{ github.sha }}" \
-               | grep -qE '^(packages/sdk/|\.github/workflows/test\.yml$)'; then
-            echo "sdk=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "sdk=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  sdk-checks:
-    name: SDK / Unit (Node ${{ matrix.node-version }})
-    # No schedule guard: sdk-e2e needs this job, so skipping it on the weekly
-    # cron would skip the e2e run the cron exists for.
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     strategy:
       fail-fast: false
       matrix:
-        # 22 is what the rest of this workflow runs on; 24 is the active LTS.
+        include:
+          - name: Compatibility / Contract metadata
+            script: scripts/check-compatibility-contract.mjs
+          - name: Docs / Code references match packages
+            script: scripts/check-docs-code-sync.mjs
+          - name: Docs / Freshness
+            script: scripts/check-docs-freshness.mjs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run check
+        run: node ${{ matrix.script }}
+
+  mcp-tests:
+    name: MCP / Integration (login handoff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
+
+      - name: MCP integration tests
+        run: pnpm --filter @mysten-incubation/memwal-mcp test
+
+  sdk-checks:
+    name: SDK / Unit (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
         node-version: ["22", "24"]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
         with:
           node-version: ${{ matrix.node-version }}
-          cache: pnpm
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
 
       - name: Typecheck, build and unit tests
         run: pnpm --filter @mysten-incubation/memwal test
 
-  sdk-e2e:
-    # Deliberately static. A `${{ ... }}` name renders unevaluated in the
-    # checks UI when the job is skipped, which is most of the time. The target
-    # environment is already visible in `environment:` and the run summary.
-    name: SDK / E2E (live relayer)
-    runs-on: ubuntu-latest
-    needs: [sdk-checks, sdk-changed]
-    timeout-minutes: 30
-
-    # Each long-lived branch tests the deployment it corresponds to. Pull
-    # requests are excluded because environment secrets are withheld from fork
-    # PRs, and every authenticated run writes real memories. The sdk-changed
-    # clause replaces the `paths:` filter test-sdk.yml carried before this job
-    # moved into a workflow shared with twelve unrelated jobs.
-    if: >-
-      needs.sdk-changed.outputs.sdk == 'true' &&
-      (github.event_name == 'workflow_dispatch' ||
-       github.event_name == 'schedule' ||
-       (github.event_name == 'push' &&
-        (github.ref_name == 'dev' ||
-         github.ref_name == 'staging' ||
-         github.ref_name == 'main')))
-
-    # Serializes against benchmark-live.yml and test-python-sdk.yml, which
-    # sign with the same BENCH_DELEGATE_KEY. The relayer rate-limits per
-    # delegate key (30 weighted-req/min) and per account (60/min, 500/hr), so
-    # two suites hitting one bench account concurrently 429 each other —
-    # exactly what broke this job and the benchmark on 2026-08-21. Namespace
-    # isolation does not help: the limiter keys on the credential, not the
-    # namespace. The expression is byte-identical in all three workflows on
-    # purpose, so they land in one group whatever it resolves to.
-    concurrency:
-      group: bench-account-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
-      cancel-in-progress: false
-
-    # Reuses the credentials benchmark-live.yml and test-python-sdk.yml already
-    # rely on, so this needs no new secrets. The benchmark writes to the
-    # `benchmark` namespace while these tests use a per-run `sdk-e2e-<random>`.
-    #
-    # main maps to benchmark-production, so a push to main writes real
-    # memories through the live Walrus pipeline on the production benchmark
-    # account. That is intentional, and the per-run namespace is what keeps it
-    # contained — never point this job at an account holding user data, and
-    # never relax the namespace isolation in live.e2e.mjs.
-    environment:
-      name: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
-
-    env:
-      # Which deployment this run targets. Mirrors the `environment:` name
-      # above so error messages and the run summary can name it.
-      ENVIRONMENT_NAME: benchmark-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'production' || github.ref_name == 'staging' && 'staging' || 'dev') }}
-      # BENCH_DELEGATE_KEY is the delegate private key the SDK signs with,
-      # which test/e2e/live.e2e.mjs reads as MEMWAL_PRIVATE_KEY. Stored in Sui
-      # bech32 (`suiprivkey1...`) form; the SDK normalizes both that and hex.
-      MEMWAL_PRIVATE_KEY: ${{ secrets.BENCH_DELEGATE_KEY }}
-      MEMWAL_ACCOUNT_ID: ${{ secrets.BENCH_ACCOUNT_ID }}
-      # Public URL, set per environment (docs/relayer/benchmark-ci-setup.md).
-      # Deliberately NOT defaulted: with three environments in play, a literal
-      # fallback would silently run the production job against whichever
-      # relayer the default names. A missing variable fails the job instead.
-      MEMWAL_SERVER_URL: ${{ vars.BENCH_SERVER_URL }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
-
-      - name: Build
-        run: pnpm build:sdk
-
-      - name: Check credentials
-        id: config
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # Without the credentials the suite skips every authenticated test,
-          # and the job would report success having never exercised the
-          # relayer beyond /health. Without the URL there is no safe guess to
-          # fall back on. Fail instead of reporting a green run that proved
-          # nothing, or running the wrong deployment.
-          missing=0
-          for name in MEMWAL_PRIVATE_KEY MEMWAL_ACCOUNT_ID MEMWAL_SERVER_URL; do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::${name} is empty — set BENCH_DELEGATE_KEY / BENCH_ACCOUNT_ID / BENCH_SERVER_URL on the ${ENVIRONMENT_NAME} environment."
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            exit 1
-          fi
-          echo "authenticated=true" >> "$GITHUB_OUTPUT"
-
-      - name: E2E tests
-        id: e2e
-        working-directory: packages/sdk
-        run: |
-          node --test \
-            --test-reporter=spec --test-reporter-destination=stdout \
-            --test-reporter=junit --test-reporter-destination=e2e-results.xml \
-            "test/e2e/live.e2e.mjs"
-
-      - name: Write run summary
-        if: always()
-        run: |
-          {
-            echo "## JS SDK e2e"
-            echo
-            echo "| Field | Value |"
-            echo "| --- | --- |"
-            echo "| Environment | \`${ENVIRONMENT_NAME}\` |"
-            echo "| Relayer | \`${MEMWAL_SERVER_URL:-<unset>}\` |"
-            echo "| Authenticated | ${{ steps.config.outputs.authenticated }} |"
-            echo "| Result | ${{ steps.e2e.outcome }} |"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload e2e results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: js-sdk-e2e-${{ env.ENVIRONMENT_NAME }}-${{ github.run_id }}
-          path: packages/sdk/e2e-results.xml
-          if-no-files-found: warn
-          retention-days: 14
-
   chatbot-e2e:
     name: Chatbot / Playwright E2E
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -384,53 +113,32 @@ jobs:
       NODE_ENV: test
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
-
-      # Build only. The SDK's own suite runs in sdk-checks below; running it
-      # here too just made a Playwright job fail for an unrelated reason.
-      - name: Build SDK (workspace dep of chatbot)
+      - name: Build SDK
         run: pnpm build:sdk
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
+      - name: Setup Playwright
+        timeout-minutes: 8
+        uses: ./.github/actions/setup-playwright
         with:
-          path: ~/.cache/ms-playwright
-          key: pw-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: pw-${{ runner.os }}-
-
-      - name: Install Playwright (Chromium + OS deps)
-        run: pnpm --filter @memwal/chatbot playwright:install
+          package: "@memwal/chatbot"
+          cache-id: chatbot
 
       - name: Run Playwright E2E
         run: pnpm --filter @memwal/chatbot test:e2e
 
-      - name: Upload Playwright report + traces
+      - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/upload-playwright-report
         with:
-          name: playwright-report-chatbot
-          path: |
-            apps/chatbot/playwright-report
-            apps/chatbot/test-results
-          retention-days: 14
-          if-no-files-found: ignore
+          app: chatbot
 
   researcher-e2e:
     name: Researcher / Unit + Playwright E2E
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -460,68 +168,41 @@ jobs:
       REDIS_URL: redis://localhost:6379
       AUTH_SECRET: ci-test-secret-not-for-production
       OPENROUTER_API_KEY: mock-not-used-tests-use-local-mocks
-      # Only read by the delegate-account binding mock to fabricate the
-      # MemWalAccount type; any non-empty 0x id works.
       NEXT_PUBLIC_MEMWAL_PACKAGE_ID: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
       PORT: "3000"
       PLAYWRIGHT: "True"
       NODE_ENV: test
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
+      - name: Build SDK
+        run: pnpm build:sdk
 
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
-
-      - name: Test and build SDK (workspace dep of researcher)
-        run: pnpm --filter @mysten-incubation/memwal test
-
-      # Fast node:test unit tests (no DB/browser). Includes the retired-model
-      # regression tests for the title-model production incident.
       - name: Unit tests
         run: pnpm --filter researcher test:unit
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
+      - name: Setup Playwright
+        timeout-minutes: 8
+        uses: ./.github/actions/setup-playwright
         with:
-          path: ~/.cache/ms-playwright
-          # Separate from chatbot's/noter's `pw-` keys so the jobs don't race
-          # the same cache entry. Fall back to the shared prefix on a cold start.
-          key: pw-researcher-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            pw-researcher-${{ runner.os }}-
-            pw-${{ runner.os }}-
-
-      - name: Install Playwright (Chromium + OS deps)
-        run: pnpm --filter researcher playwright:install
+          package: researcher
+          cache-id: researcher
 
       - name: Run Playwright E2E
         run: pnpm --filter researcher test:e2e
 
-      - name: Upload Playwright report + traces
+      - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/upload-playwright-report
         with:
-          name: playwright-report-researcher
-          path: |
-            apps/researcher/playwright-report
-            apps/researcher/test-results
-          retention-days: 14
-          if-no-files-found: ignore
+          app: researcher
 
   noter-e2e:
     name: Noter / Playwright E2E
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -545,72 +226,40 @@ jobs:
       PORT: "3002"
       NODE_ENV: test
       PLAYWRIGHT: "True"
-      # NEXT_PUBLIC_* Enoki/Sui vars are inlined at build time — placeholders
-      # are fine here since the e2e suite authenticates via delegate key, not
-      # the Google/Enoki popup flow (that needs a real OAuth session and stays
-      # a manual check, same as researcher's live-Walrus canary in #680).
       NEXT_PUBLIC_ENOKI_API_KEY: ci-placeholder-not-used-tests-use-delegate-key
       NEXT_PUBLIC_GOOGLE_CLIENT_ID: ci-placeholder-not-used-tests-use-delegate-key
       NEXT_PUBLIC_SUI_NETWORK: testnet
       NEXT_PUBLIC_MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
       NEXT_PUBLIC_MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
       NEXT_PUBLIC_MEMWAL_SERVER_URL: https://relayer.dev.memwal.ai
-      # No live-Walrus canary in this suite: isTestEnvironment flips the
-      # binding check onto the fixture pool, so even a real on-chain key
-      # would fail at login. CI covers auth + note CRUD + the memory API
-      # contract; remember → recall against production stays a manual check.
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
-
-      - name: Build SDK (workspace dep of noter)
+      - name: Build SDK
         run: pnpm build:sdk
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          # Separate from chatbot's `pw-` key so the two jobs don't race the
-          # same cache entry. Fall back to the shared prefix on a cold start.
-          key: pw-noter-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            pw-noter-${{ runner.os }}-
-            pw-${{ runner.os }}-
-
-      - name: Install Playwright (Chromium + OS deps)
+      - name: Setup Playwright
         timeout-minutes: 8
-        run: pnpm --filter @memwal/noter playwright:install
+        uses: ./.github/actions/setup-playwright
+        with:
+          package: "@memwal/noter"
+          cache-id: noter
 
       - name: Run Playwright E2E
         run: pnpm --filter @memwal/noter test:e2e
 
-      - name: Upload Playwright report + traces
+      - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/upload-playwright-report
         with:
-          name: playwright-report-noter
-          path: |
-            apps/noter/playwright-report
-            apps/noter/test-results
-          retention-days: 14
-          if-no-files-found: ignore
+          app: noter
 
   server-e2e:
     name: Server / E2E
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -641,26 +290,14 @@ jobs:
       PORT: "8000"
       TEST_BASE_URL: http://localhost:8000
       RUST_LOG: info
-      # Required by Config::from_env(). This HTTP-only job uses the compile-time
-      # ci-offline-onchain feature below until the new contract is published;
-      # release builds remain on the strict onchain-validation path.
       SUI_NETWORK: testnet
-      # Testnet no longer serves JSON-RPC, so the server and the sidecar both
-      # refuse to start on testnet without a gRPC endpoint. Boot-only here: the
-      # CI-scoped tests never issue an onchain call through it.
       SUI_GRPC_URL: "https://fullnode.testnet.sui.io:443"
       MEMWAL_PACKAGE_ID: "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6"
       MEMWAL_REGISTRY_ID: "0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437"
-      # Dummy token — sidecar (scripts/sidecar-server.ts) refuses to start
-      # without it, and the server panics when the sidecar doesn't come up.
-      # Not a real secret; SEAL encrypt / Walrus upload paths aren't exercised
-      # by the CI-scoped tests, so the sidecar running in degraded mode is
-      # fine for /health + auth-contract checks.
       SIDECAR_AUTH_TOKEN: ci-test-sidecar-token-not-for-production
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -682,8 +319,6 @@ jobs:
 
       - name: Install sidecar deps
         working-directory: services/server/scripts
-        # Server boot spawns `npx tsx sidecar-server.ts` which imports express
-        # et al — those must be installed up-front or the spawn fails fast.
         run: |
           if [ -f package-lock.json ]; then
             npm ci
@@ -708,7 +343,6 @@ jobs:
       - name: Start server in background
         working-directory: services/server
         run: |
-          # Prefer the named binary; fall back to the only produced bin.
           BIN=$(ls -1 target/debug/memwal-server target/debug/memwal 2>/dev/null | head -n1)
           if [ -z "$BIN" ]; then
             BIN=$(find target/debug -maxdepth 1 -type f -perm -u+x -not -name '*.d' | head -n1)
@@ -751,58 +385,37 @@ jobs:
 
   chatbot-checks:
     name: Chatbot / Lint + Build
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
-
-      - name: Build SDK (workspace dep of chatbot)
+      - name: Build SDK
         run: pnpm build:sdk
 
       # Soft-fail: ultracite 7.3.0 passes a `--skip` flag the bundled biome
-      # rejects (verified locally on `dev`). Pre-existing, unrelated to this
-      # CI ticket. Stage kept so the signal surfaces in logs; flip to
-      # hard-fail once the ultracite/biome version mismatch is fixed.
+      # rejects. Flip to hard-fail once the version mismatch is fixed.
       - name: Lint (biome/ultracite)
         continue-on-error: true
         run: pnpm --filter @memwal/chatbot lint
 
-      # Fast unit tests (vitest, no DB/browser). Includes the document-tool
-      # ownership regression test. This step fails the job on a regression, so
-      # the signal surfaces on the PR; note it is not yet wired as a required
-      # status check in branch protection, so it does not by itself block merge.
       - name: Unit tests (vitest)
         run: pnpm --filter @memwal/chatbot test:unit
 
       - name: Build (Next.js, type-check inclusive)
         working-directory: apps/chatbot
-        # Bypass the package.json `build` script's `tsx lib/db/migrate` step —
-        # we aren't running a server here, just verifying the build + types.
         run: pnpm exec next build
 
   noter-checks:
     name: Noter / Unit tests + Build
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     env:
-      # Dummy DB — next build type-checks route handlers but doesn't connect.
       DATABASE_URL: postgresql://dummy:dummy@localhost:5432/dummy
       NEXT_PUBLIC_ENOKI_API_KEY: ci-placeholder-build-only
       NEXT_PUBLIC_GOOGLE_CLIENT_ID: ci-placeholder-build-only
@@ -812,27 +425,14 @@ jobs:
       NEXT_PUBLIC_MEMWAL_SERVER_URL: https://relayer.dev.memwal.ai
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
-
-      - name: Build SDK (workspace dep of noter)
+      - name: Build SDK
         run: pnpm build:sdk
 
-      # Fast unit tests (vitest, no DB/browser). Covers the Enoki auth security
-      # properties: ownership-challenge purpose scoping, single-use/replay, and
-      # the insert-only delegate-credential guard. Fails the job on a regression.
       - name: Unit tests (vitest)
         run: pnpm --filter @memwal/noter test:unit
 
@@ -846,7 +446,6 @@ jobs:
 
   server-checks:
     name: Server / Clippy + Unit tests
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -876,8 +475,7 @@ jobs:
       REDIS_URL: redis://localhost:6379
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain (+ clippy)
         uses: dtolnay/rust-toolchain@stable
@@ -894,11 +492,8 @@ jobs:
           key: cargo-checks-${{ runner.os }}-${{ hashFiles('services/server/Cargo.lock') }}
           restore-keys: cargo-checks-${{ runner.os }}-
 
-      # Soft-fail: services/server emits 25+ pre-existing clippy errors with
-      # `-D warnings` on `dev` (`useless_vec`, `unnecessary_min_or_max`,
-      # `doc_lazy_continuation`, etc., verified locally). Unrelated to this
-      # CI ticket. Stage kept so the signal surfaces in logs; flip to
-      # `-- -D warnings` once the warnings are cleaned up in a follow-up.
+      # Soft-fail: services/server emits pre-existing clippy warnings with
+      # `-D warnings`. Flip to `-- -D warnings` once those are cleaned up.
       - name: Clippy
         continue-on-error: true
         working-directory: services/server
@@ -910,18 +505,14 @@ jobs:
 
   move-contract:
     name: Move / Contract tests
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     env:
-      # Keep pinned so CI is reproducible for the contract package.
-      # Bump this together with any Move feature that requires a newer CLI.
       SUI_VERSION: testnet-v1.74.0
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Cache Sui CLI
         id: sui-cache
@@ -939,9 +530,6 @@ jobs:
           curl -fsSL \
             "https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz" \
             -o sui.tgz
-          # Archive ships every Sui binary at its root (./sui, ./sui-node, ...).
-          # Extracting the whole thing is simpler than pattern-matching and is
-          # robust across release layout changes.
           tar -xzf sui.tgz
           SUI_BIN="$(find . -maxdepth 2 -type f -name sui -perm -u+x | head -n1)"
           if [ -z "$SUI_BIN" ]; then
@@ -963,3 +551,10 @@ jobs:
       - name: Run Move unit tests
         working-directory: services/contract
         run: sui move test
+
+      - name: Require SEAL cross-account deny invariant
+        working-directory: services/contract
+        run: |
+          set -o pipefail
+          sui move test seal_approve_delegate_requires_matching_owner | tee /tmp/seal-invariant.log
+          grep -q 'test_seal_approve_delegate_requires_matching_owner' /tmp/seal-invariant.log

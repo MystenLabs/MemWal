@@ -209,7 +209,7 @@ What merging to `dev` triggers, and how to try the result end-to-end.
 
 | Surface | Trigger | Result |
 |---|---|---|
-| npm prerelease | `release-mcp.yml` (path `packages/mcp/**`) | `@mysten-incubation/memwal-mcp@0.0.11-dev.N` under the `dev` dist-tag (`latest` stays 0.0.10 until `main`) |
+| npm prerelease | `release-mcp.yml` (path `packages/mcp/**`) | `@mysten-incubation/memwal-mcp@0.0.12-dev.N` under the `dev` dist-tag (`latest` stays 0.0.11 until `main`) |
 | Plugin marketplace (Claude Code) | none needed — `dev` is the repo's **default branch** | `/plugin marketplace add MystenLabs/MemWal` serves the new plugin immediately after merge |
 | Plugin marketplace (Codex) | none needed — `codex plugin marketplace add` reads `.agents/plugins/marketplace.json` off the ref you give it, default branch or not | `codex plugin marketplace add MystenLabs/MemWal` serves the new plugin immediately after merge; can also be tested pre-merge with `codex plugin marketplace add .` from a local checkout |
 | Sidecar tools (Layer 1) | Railway image rebuild (`services/server/Dockerfile` copies `scripts/mcp/`) | New agentic descriptions + `memwal_remember_bulk`/`memwal_health` on `relayer.dev.memwal.ai` — **verify the Railway dev environment actually redeployed**; this is not a repo workflow |
@@ -273,5 +273,5 @@ node /tmp/memwal-plugin/scripts/install_codex_hooks.mjs
 ### Step 5 — Promotion sanity (before merging dev → main later)
 
 - [ ] Prod relayer redeployed with the new sidecar (same Step 1 check against `relayer.memory.walrus.xyz`)
-- [ ] `npm view @mysten-incubation/memwal-mcp dist-tags` — `dev` points at `0.0.11-dev.N`; after main merge, `latest` = `0.0.11`
+- [ ] `npm view @mysten-incubation/memwal-mcp dist-tags` — `dev` points at `0.0.12-dev.N`; after main merge, `latest` = `0.0.12`
 - [ ] Mintlify docs published (the 6 provider pages + reference + changelog render, nav matches)

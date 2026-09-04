@@ -1,5 +1,16 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.12
+
+### Added
+
+- Forward the MCP client's `initialize.clientInfo` to the relayer as `x-memwal-client` / `x-memwal-client-version` so sidecar logs can name the coding agent (Claude Code, Codex, Cursor, …) on each session and tool call.
+
+### Fixed
+
+- Clarify `memwal_restore` `truncated=true` as known-retryable-incomplete: raising `limit` expands the sidecar cap only while `limit < 20`; `truncated=false` is not completeness (WALM-451 `sourceCapped`).
+- Resolve the credential directory on every access instead of freezing it at module load, and let `MEMWAL_CREDS_DIR` override it. The login test sandboxed the home directory with `HOME` alone, which `os.homedir()` ignores on Windows, so running the package's test suite there wrote fixture credentials over the developer's real `~/.memwal/credentials.json` and destroyed the delegate key stored in it. (#705)
+
 ## 0.0.11
 
 ### Fixed

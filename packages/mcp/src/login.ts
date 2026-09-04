@@ -55,6 +55,19 @@ const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl">> & { label: strin
     openBrowser: true,
 };
 
+/** How long the background login listener stays bound, shared by every
+ * caller (auth-required mode and the bridge) so one env var controls the
+ * same deadline everywhere instead of each call site hard-coding its own.
+ * Override via `MEMWAL_MCP_LOGIN_TIMEOUT_MS`, mostly for tests — waiting the
+ * full 5 min to observe a failed sign-in is not a testable deadline. */
+export function resolveLoginTimeoutMs(): number {
+    const raw = process.env.MEMWAL_MCP_LOGIN_TIMEOUT_MS;
+    if (!raw) return DEFAULTS.timeoutMs;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 100) return DEFAULTS.timeoutMs;
+    return n;
+}
+
 interface CallbackPayload {
     accountId: string;
     walletAddress: string;
@@ -192,7 +205,11 @@ function readBody(req: IncomingMessage, maxBytes = 16 * 1024): Promise<string> {
  * to call this only when no valid credentials exist on disk.
  */
 export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredentials> {
-    const cfg = { ...DEFAULTS, ...opts };
+    const cfg = {
+        ...DEFAULTS,
+        ...opts,
+        timeoutMs: opts.timeoutMs ?? resolveLoginTimeoutMs(),
+    };
     const keypair = await generateKeypair();
     // Cryptographic single-use state token. Round-trip through the browser:
     // we put it in `connectUrl`, the page echoes it back in the callback
@@ -466,10 +483,13 @@ let inflightLogin: InflightLogin | null = null;
  * Start a login flow, or join one already in progress in this process.
  * Concurrent `memwal_login` calls share the same listener and URL so a
  * second call cannot race the first and leave the bridge on a stale session.
+ * `onSuccess` and `onFailure` are attached only when this call starts the
+ * flow, so a join cannot emit a second timeout warning.
  */
 export function startOrReuseLoginFlow(
     opts: LoginOptions = {},
     onSuccess?: (creds: MemWalCredentials) => Promise<void> | void,
+    onFailure?: (err: unknown) => void,
 ): InflightLogin {
     if (inflightLogin) return inflightLogin;
 
@@ -495,6 +515,11 @@ export function startOrReuseLoginFlow(
 
     result.catch((err) => {
         rejectUrl(err);
+        try {
+            onFailure?.(err);
+        } catch {
+            /* caller errors don't break the flow */
+        }
     });
 
     if (onSuccess) {

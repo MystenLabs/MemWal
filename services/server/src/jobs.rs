@@ -2518,6 +2518,26 @@ impl WalletJobError {
         lower.contains("timed out waiting for") && lower.contains("upload slot")
     }
 
+    /// True if `msg` is a pool-wallet WAL shortfall. Deliberately the
+    /// substring half of `parse_wal_balance_alert_info` without its
+    /// `available < WAL_BALANCE_LOW_THRESHOLD_MIST` gate: that threshold
+    /// decides whether ops gets paged, and a shortfall on a large blob can
+    /// hold well over 2 WAL and still fail. Both are pool-wallet funding.
+    pub fn is_walrus_wal_shortfall(msg: &str) -> bool {
+        let lower = msg.to_ascii_lowercase();
+        lower.contains("insufficient balance") && lower.contains("::wal::wal")
+    }
+
+    /// True if `msg` is a failure of the relayer's own pool wallets or upload
+    /// pipeline rather than anything the caller controls. Gates client-facing
+    /// error replacement; each arm matches on substrings only, with no
+    /// alert-threshold coupling.
+    pub fn is_infrastructure_funding_error(msg: &str) -> bool {
+        Self::is_gas_pool_budget_error(msg)
+            || Self::is_upload_slot_congestion_error(msg)
+            || Self::is_walrus_wal_shortfall(msg)
+    }
+
     pub fn classify_sidecar_error(msg: &str) -> Self {
         let lower = msg.to_ascii_lowercase();
         // PostgreSQL B-tree tuple-size failures are deterministic for the

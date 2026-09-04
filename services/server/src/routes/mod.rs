@@ -208,6 +208,59 @@ pub(super) fn zip_search_hit_fields_onto_hydrated(
     }
 }
 
+/// Choose which search hits to hydrate, and in what order.
+///
+/// Runs on `SearchHit`s — **before** the Walrus download + SEAL decrypt — so
+/// `Recent`'s over-fetch costs one wider SQL query rather than five times the
+/// decrypt work. Nothing here needs the plaintext: distance and `created_at`
+/// both come back from `search_similar` on the same row.
+pub(super) fn select_hits_for_sort(
+    mut hits: Vec<SearchHit>,
+    sort: crate::types::RecallSort,
+    limit: usize,
+) -> Vec<SearchHit> {
+    if sort == crate::types::RecallSort::Recent {
+        // Newest first, falling back to the better semantic match when two
+        // rows share a timestamp — otherwise same-instant writes would be
+        // ordered arbitrarily by sort instability.
+        hits.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then(a.distance.total_cmp(&b.distance))
+        });
+    }
+    // `Relevance` needs no sort: `search_similar` already returns cosine
+    // order. Truncation is shared — for `Recent` it must happen AFTER the
+    // sort, which is the whole point of the over-fetch.
+    hits.truncate(limit);
+    hits
+}
+
+/// Project the ranker's output onto the `/api/recall` and `/api/ask` wire
+/// shape, preserving ranked order.
+///
+/// Shared by both handlers so the set of fields that reach a client is
+/// decided in one place — they previously carried identical inline `map`
+/// closures, and `created_at` (WALM-383) would otherwise have had to be
+/// added to each by hand.
+pub(super) fn recall_results_from_ranked(
+    ranked: Vec<crate::services::ranker::RankedHit>,
+) -> Vec<crate::types::RecallResult> {
+    ranked
+        .into_iter()
+        .map(|r| crate::types::RecallResult {
+            blob_id: r.memory.blob_id,
+            text: r.memory.text,
+            distance: r.memory.distance,
+            // `score` is `Some` only when the ranker ran (recency > 0); the
+            // `#[serde(skip_serializing_if = "Option::is_none")]` on the
+            // type omits the field from the wire when default-weighted.
+            score: r.score,
+            created_at: r.memory.created_at,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{collect_bounded_results, truncate_str};
@@ -271,5 +324,187 @@ mod tests {
         let s = "🦀hello";
         let t = truncate_str(s, 2);
         assert_eq!(t, ""); // can't include partial emoji
+    }
+}
+
+#[cfg(test)]
+mod recall_sort_tests {
+    use crate::types::{RecallSort, SearchHit};
+
+    fn ts(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// `distance` ascending is the order pgvector hands back.
+    fn search_hit(blob_id: &str, distance: f64, created_at: &str) -> SearchHit {
+        SearchHit {
+            blob_id: blob_id.to_string(),
+            distance,
+            created_at: ts(created_at),
+            importance: 0.5,
+        }
+    }
+
+    // ── candidate_limit ──────────────────────────────────────
+
+    #[test]
+    fn relevance_fetches_exactly_what_the_caller_asked_for() {
+        assert_eq!(RecallSort::Relevance.candidate_limit(10), 10);
+        assert_eq!(RecallSort::Relevance.candidate_limit(100), 100);
+    }
+
+    #[test]
+    fn recent_over_fetches_five_times_the_limit() {
+        assert_eq!(RecallSort::Recent.candidate_limit(3), 15);
+        assert_eq!(RecallSort::Recent.candidate_limit(10), 50);
+    }
+
+    #[test]
+    fn recent_over_fetch_is_capped_so_recall_is_not_a_table_scan() {
+        assert_eq!(RecallSort::Recent.candidate_limit(20), 50);
+    }
+
+    #[test]
+    fn recent_never_fetches_fewer_rows_than_the_caller_asked_for() {
+        // A naive `min(limit * 5, 50)` returns 50 here — fewer than the 100
+        // requested — and the caller silently gets a short page.
+        assert_eq!(RecallSort::Recent.candidate_limit(100), 100);
+        assert_eq!(RecallSort::Recent.candidate_limit(60), 60);
+    }
+
+    // ── selection ────────────────────────────────────────────
+
+    #[test]
+    fn relevance_keeps_the_cosine_order_and_truncates() {
+        let hits = vec![
+            search_hit("close-old", 0.10, "2026-07-01T00:00:00Z"),
+            search_hit("mid", 0.30, "2026-07-03T00:00:00Z"),
+            search_hit("far-new", 0.50, "2026-07-06T00:00:00Z"),
+        ];
+
+        let kept = super::select_hits_for_sort(hits, RecallSort::Relevance, 2);
+
+        let ids: Vec<&str> = kept.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(ids, vec!["close-old", "mid"]);
+    }
+
+    /// The exact failure from WALM-383: the newest checkpoint is the WORST
+    /// semantic match, so cosine ordering pushes it out of a `limit=2` window.
+    /// `Recent` must return it first.
+    #[test]
+    fn recent_surfaces_the_newest_row_even_when_it_ranks_last_semantically() {
+        let hits = vec![
+            search_hit("close-old", 0.10, "2026-07-01T00:00:00Z"),
+            search_hit("mid", 0.30, "2026-07-03T00:00:00Z"),
+            search_hit("far-new", 0.50, "2026-07-06T00:00:00Z"),
+        ];
+
+        let kept = super::select_hits_for_sort(hits, RecallSort::Recent, 2);
+
+        let ids: Vec<&str> = kept.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(ids, vec!["far-new", "mid"]);
+    }
+
+    #[test]
+    fn recent_truncates_after_sorting_not_before() {
+        // Truncating first would keep the two closest matches and drop the
+        // newest — the bug this whole mode exists to prevent.
+        let hits = vec![
+            search_hit("a", 0.10, "2026-07-01T00:00:00Z"),
+            search_hit("b", 0.20, "2026-07-02T00:00:00Z"),
+            search_hit("newest", 0.90, "2026-07-09T00:00:00Z"),
+        ];
+
+        let kept = super::select_hits_for_sort(hits, RecallSort::Recent, 1);
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].blob_id, "newest");
+    }
+
+    #[test]
+    fn recent_breaks_a_created_at_tie_on_semantic_distance() {
+        // Two checkpoints written the same instant: fall back to the better
+        // match rather than leaving the order to sort instability.
+        let hits = vec![
+            search_hit("worse-match", 0.60, "2026-07-06T00:00:00Z"),
+            search_hit("better-match", 0.20, "2026-07-06T00:00:00Z"),
+        ];
+
+        let kept = super::select_hits_for_sort(hits, RecallSort::Recent, 2);
+
+        let ids: Vec<&str> = kept.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(ids, vec!["better-match", "worse-match"]);
+    }
+
+    #[test]
+    fn selection_is_a_no_op_when_fewer_hits_than_the_limit() {
+        let hits = vec![search_hit("only", 0.4, "2026-07-06T00:00:00Z")];
+
+        let kept = super::select_hits_for_sort(hits, RecallSort::Recent, 10);
+
+        assert_eq!(kept.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod recall_result_mapping_tests {
+    use crate::engine::HydratedMemory;
+    use crate::services::ranker::RankedHit;
+
+    fn ts(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn hit(blob_id: &str, created_at: Option<chrono::DateTime<chrono::Utc>>) -> RankedHit {
+        RankedHit {
+            memory: HydratedMemory {
+                blob_id: blob_id.to_string(),
+                text: format!("text for {blob_id}"),
+                distance: 0.25,
+                created_at,
+                importance: Some(0.5),
+            },
+            score: None,
+        }
+    }
+
+    /// Ask #1 of WALM-383: a caller implementing "newest wins" must be able to
+    /// order results by write-time without parsing it back out of the memory
+    /// text.
+    #[test]
+    fn mapping_carries_the_hydrated_created_at_onto_the_result() {
+        let written_at = ts("2026-07-06T12:00:00Z");
+
+        let results = super::recall_results_from_ranked(vec![hit("blob-1", Some(written_at))]);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].created_at, Some(written_at));
+    }
+
+    /// `zip_search_hit_fields_onto_hydrated` leaves `created_at` as `None` for
+    /// a hydrated record with no matching SearchHit. That must stay absent
+    /// rather than become a fabricated timestamp — for a newest-wins caller a
+    /// wrong date is worse than a missing one.
+    #[test]
+    fn mapping_preserves_a_missing_created_at_as_none() {
+        let results = super::recall_results_from_ranked(vec![hit("blob-1", None)]);
+
+        assert_eq!(results[0].created_at, None);
+    }
+
+    /// Order is the ranker's output order; the mapping must not re-sort.
+    #[test]
+    fn mapping_preserves_ranked_order() {
+        let results = super::recall_results_from_ranked(vec![
+            hit("blob-1", Some(ts("2026-07-01T00:00:00Z"))),
+            hit("blob-2", Some(ts("2026-07-06T00:00:00Z"))),
+        ]);
+
+        let ids: Vec<&str> = results.iter().map(|r| r.blob_id.as_str()).collect();
+        assert_eq!(ids, vec!["blob-1", "blob-2"]);
     }
 }

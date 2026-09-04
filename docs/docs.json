@@ -58,6 +58,7 @@
           {
             "group": "Guides",
             "pages": [
+              "guides/system-prompt-templates",
               "guides/agent-runtimes",
               "guides/delete-old-memories",
               "guides/delete-memories-programmatically"
@@ -71,6 +72,7 @@
           {
             "group": "Guides",
             "pages": [
+              "guides/system-prompt-templates",
               "guides/returning-user",
               "guides/manage-your-memory",
               "guides/delete-old-memories",
@@ -194,6 +196,7 @@
               "mcp/claude-connector",
               "mcp/antigravity",
               "mcp/opencode",
+              "guides/system-prompt-templates",
               "mcp/reference",
               "mcp/changelog"
             ]

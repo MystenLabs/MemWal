@@ -1,5 +1,12 @@
 # @mysten-incubation/memwal
 
+## 0.1.6
+
+### Added
+
+- `recall()` results include optional `created_at` (RFC3339 write-time of the stored fact).
+- `RecallOptions` accepts `sort: "relevance" | "recent"` and `scoringWeights`. `sort: "recent"` over-fetches semantic candidates (5x `limit`, capped at 50), orders them by write-time descending, then truncates to `limit`.
+
 ## 0.1.5
 
 ### Added

@@ -105,8 +105,13 @@ function projectCredsPath(): string | null {
  * Presence-based on purpose: creating the local file is the opt-in, so this is
  * purely additive. Resolved per call rather than at module load, because the
  * working directory is not knowable at import time.
+ *
+ * `MEMWAL_CREDS_DIR` overrides both project and global resolution when set,
+ * and is re-read on every call.
  */
 export function credsPath(): string {
+    const override = process.env.MEMWAL_CREDS_DIR;
+    if (override) return join(override, CREDS_FILE);
     return projectCredsPath() ?? globalCredsPath();
 }
 

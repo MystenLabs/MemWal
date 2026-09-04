@@ -648,6 +648,7 @@ export function registerWalrusQueryRoute(app: Express): void {
             // `limit`; cap work when no exact blob IDs were supplied.
             const cap =
                 useRecentTxPath && !requestedBlobIds ? Math.max(1, Math.min(desiredMatches * 5, 100)) : Infinity;
+            // Rust `SIDECAR_CANDIDATE_CAP_SATURATES_AT_LIMIT = 20` is derived from this formula.
             // Probe with `cap + 1` (when finite) so the raw fetch can prove
             // whether more than `cap` candidates actually exist, rather than
             // inferring "capped" merely from hitting `cap` exactly — an

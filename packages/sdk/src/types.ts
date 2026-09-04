@@ -59,6 +59,18 @@ export interface RecallMemory {
     blob_id: string;
     text: string;
     distance: number;
+    /**
+     * RFC3339 write-time of the memory, as recorded by the relayer when the
+     * fact was stored. Lets a caller implement "newest wins" deterministically
+     * instead of re-ranking on a date parsed back out of `text` (WALM-383).
+     *
+     * This is the *write* time, not any event time the text itself describes.
+     *
+     * Optional because relayers older than this field omit it. Results are
+     * ranked by relevance, not recency, unless you ask for a recency
+     * ordering via `RecallOptions.sort`.
+     */
+    created_at?: string;
 }
 
 /**
@@ -135,6 +147,40 @@ export interface RecallOptions {
      * consulted when `maxTokens` is set.
      */
     countTokens?: (text: string) => number;
+    /**
+     * Composite-scoring weights applied by the relayer's ranker before results
+     * are returned.
+     *
+     * Omit for the default behaviour: pure semantic ranking by cosine
+     * distance, with no recency guarantee. Supply `recency` to blend
+     * write-time into the score.
+     *
+     * IMPORTANT — this re-ranks the candidates the vector search already
+     * returned; it does not widen the search. The relayer selects the cosine
+     * top-`limit` first and the ranker reorders only those, so a record that
+     * fell outside the window (because an older one matched your wording more
+     * literally) cannot be recovered by any weighting. Weighting also has to
+     * overcome the semantic gap to reorder: with the default 30-day half-life,
+     * two records days apart barely differ on the recency term.
+     *
+     * For newest-wins, use `sort: "recent"` instead. It over-fetches
+     * candidates server-side before ordering them by write-time.
+     */
+    scoringWeights?: ScoringWeights;
+    /**
+     * How the relayer orders results. Defaults to `"relevance"`.
+     *
+     * - `"relevance"` — semantic similarity only, the cosine order.
+     * - `"recent"` — newest-among-matches. The relayer over-fetches semantic
+     *   candidates, orders them by write-time descending, then truncates to
+     *   `limit`.
+     *
+     * Prefer this over `scoringWeights` for anything newest-wins. `sort`
+     * widens the candidate set; weights only re-rank the set that was already
+     * returned, so weights alone cannot surface a record that fell outside
+     * the window.
+     */
+    sort?: "relevance" | "recent";
 }
 
 /** Recommended object-style recall input — preferred over positional args. */
@@ -366,13 +412,17 @@ export interface RestoreResult {
     namespace: string;
     owner: string;
     /**
-     * True when this restore is known-incomplete: either more on-chain
-     * blobs were missing locally than `limit` allowed this call to
-     * restore, or the sidecar's raw on-chain candidate fetch hit its own
-     * cap before this namespace's blobs were even filtered out of that
-     * set (WALM-319) — this can be `true` even when `total === 0`, since
-     * a cap hit elsewhere can starve this namespace's fetch entirely.
-     * Raising `limit` only helps with the first case.
+     * True when this restore is known-incomplete: more on-chain blobs were
+     * missing locally than `limit` allowed this call to restore, or the
+     * sidecar's owner-wide candidate fetch hit its cap *and* raising
+     * `limit` can still expand that fetch (`limit < 20`). Once the cap is
+     * saturated, truncation follows this call's missing-blob page, not
+     * on-chain `total`, so a fully restored namespace does not loop
+     * (WALM-431 / GH #762).
+     *
+     * `truncated=false` is not proof the sidecar saw every on-chain blob.
+     * Blobs beyond the owner-wide sidecar candidate cap can still be
+     * missing. Follow-up field: WALM-451 (`sourceCapped`).
      *
      * Relayers older than WALM-319 don't send this field at all; the SDK
      * defaults it to `false` in that case rather than requiring it.

@@ -22,8 +22,9 @@
  * and coexist.
  */
 import { loadCreds, type MemWalCredentials } from "./auth.js";
+import { rememberInitializeClientInfo } from "./client-info.js";
 import { log } from "./logger.js";
-import { startOrReuseLoginFlow } from "./login.js";
+import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
@@ -123,7 +124,7 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Restore Memory Index",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index \u2014 use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status \u2014 does not return memory texts. If truncated=true, increase limit and call again. Call memwal_recall afterwards to query the rebuilt index.",
+            "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index \u2014 use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status \u2014 does not return memory texts. truncated=true is known-retryable-incomplete: raising limit expands the sidecar cap only while limit < 20; after the cap saturates, truncation follows this call's missing-blob page. truncated=false is not completeness; WALM-451 will add sourceCapped. Call memwal_recall afterwards to query the rebuilt index.",
         inputSchema: {
             type: "object",
             properties: {
@@ -171,11 +172,6 @@ export const TOOL_DEFINITIONS = buildToolDefinitions(true);
  * a stream of auth errors. */
 export const SIGNED_OUT_TOOL_DEFINITIONS = buildToolDefinitions(false);
 
-/** Maximum time we'll keep the login HTTP listener bound after the user
- * clicks `memwal_login`. The user paces themselves — wallet popups, ledger
- * sign, MetaMask review — so we give 5 min before the port closes. */
-const LOGIN_BG_TIMEOUT_MS = 5 * 60_000;
-
 /** How long to wait for the local listener to bind + emit its URL before we
  * give up and return an error. Should be near-instant; 5s is paranoia. */
 const URL_READY_TIMEOUT_MS = 5_000;
@@ -196,6 +192,28 @@ const LOGIN_INSTRUCTION = [
     "Either path opens a browser tab — click **Connect Sui Wallet** and approve the on-chain",
     "`add_delegate_key` transaction. Credentials land at `~/.memwal/credentials.json`.",
 ].join("\n");
+
+/** Set when a background `memwal_login` ends without credentials. The tool call
+ * already returned the URL by then, so this is the only place left to say so. */
+let lastLoginFailure: string | null = null;
+
+/** Prefix explaining that a sign-in was attempted and did not complete. */
+function loginFailureNotice(): string {
+    if (!lastLoginFailure) return "";
+    return [
+        "⚠️ A sign-in was started but never completed, so there are still no credentials.",
+        "",
+        `Reason: ${lastLoginFailure}`,
+        "",
+        "The unused key from this attempt may already be registered on your account. Remove it",
+        "from the dashboard if you are not using it. Sign in again and open the new link",
+        "straight away. A retry only helps once the MCP client is left running through the",
+        "wallet prompt.",
+        "",
+        "---",
+        "",
+    ].join("\n");
+}
 
 function writeStdoutMessage(msg: RpcMessage): void {
     process.stdout.write(JSON.stringify(msg) + "\n");
@@ -245,7 +263,7 @@ function sendLogMessage(level: "info" | "warning" | "error", text: string): void
  *     reporting to the user, leaving them stuck.
  *   - `notifications/message` is filtered out by some clients.
  *
- * The login HTTP listener stays alive for LOGIN_BG_TIMEOUT_MS in the
+ * The login HTTP listener stays alive for resolveLoginTimeoutMs() in the
  * background. Once the user clicks the link and approves the wallet, the
  * callback writes credentials to ~/.memwal/credentials.json. The user then
  * issues any other memwal_* tool to verify — which now succeeds because
@@ -264,22 +282,30 @@ async function handleLoginToolCall(
     //
     // Concurrent memwal_login calls join this in-flight flow instead of
     // opening a second listener (that race hung later recall/remember).
+    lastLoginFailure = null;
     const session = startOrReuseLoginFlow(
         {
             relayerUrl: config.relayerUrl,
             webUrl: config.webUrl,
             label: config.label,
-            timeoutMs: LOGIN_BG_TIMEOUT_MS,
+            timeoutMs: resolveLoginTimeoutMs(),
             openBrowser: false,
             onUrl: (url) => {
                 sendLogMessage("info", `Walrus Memory MCP login URL: ${url}`);
             },
         },
         (creds) => {
+            lastLoginFailure = null;
             log.info("memwal_login.bg.success", {
                 accountId: creds.accountId,
                 delegateAddress: creds.delegateAddress,
             });
+        },
+        (err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            lastLoginFailure = msg;
+            log.warn("memwal_login.bg.failed", { msg });
+            sendLogMessage("warning", `Walrus Memory sign-in did not complete: ${msg}`);
         },
     );
 
@@ -382,6 +408,14 @@ function handleAuthLine(
     const method = req.method;
 
     if (method === "initialize") {
+        const clientInfo = rememberInitializeClientInfo(req.params);
+        if (clientInfo) {
+            log.info("bridge.agent_client", {
+                clientName: clientInfo.name,
+                clientVersion: clientInfo.version,
+                mode: "auth-required",
+            });
+        }
         writeStdoutMessage({
             jsonrpc: "2.0",
             id,
@@ -445,13 +479,18 @@ function handleAuthLine(
         // no client restart (the historical "second reboot"). Otherwise nudge
         // the agent to sign in first.
         const creds = loadCreds();
-        if (creds) return { creds };
+        if (creds) {
+            lastLoginFailure = null;
+            return { creds };
+        }
 
         writeStdoutMessage({
             jsonrpc: "2.0",
             id,
             result: {
-                content: [{ type: "text", text: LOGIN_INSTRUCTION }],
+                content: [
+                    { type: "text", text: `${loginFailureNotice()}${LOGIN_INSTRUCTION}` },
+                ],
                 isError: true,
             },
         });
