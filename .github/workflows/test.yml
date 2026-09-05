@@ -32,6 +32,8 @@ jobs:
             script: scripts/check-docs-code-sync.mjs
           - name: Docs / Freshness
             script: scripts/check-docs-freshness.mjs
+          - name: Migration / Completion artifact
+            script: scripts/write-migration-completion-artifact.mjs --self-test
 
     steps:
       - uses: actions/checkout@v4
