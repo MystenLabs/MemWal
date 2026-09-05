@@ -12,7 +12,16 @@ import { errorMessage, parseWalrusKeySlot } from "../util.js";
 import { appendV2WriteFence } from "../blob-metadata.js";
 import { namespaceSealKeyId } from "../v2-envelope.js";
 import { Transaction } from "@mysten/sui/transactions";
-import { DURABLE_WALLET_FALLBACK_POLICY, submitRebuildableWalletTransaction } from "../wallet.js";
+import { ENOKI_FALLBACK_TO_DIRECT_SIGN } from "../config.js";
+import { submitRebuildableWalletTransaction } from "../wallet.js";
+import type { EnokiFallbackPolicy } from "../enoki.js";
+
+const V2_FENCE_FALLBACK_POLICY: EnokiFallbackPolicy = {
+    directSignIfUnconfigured: true,
+    // Enoki's testnet allowlist does not include namespace::write_fence.
+    directSignAfterSponsorFailure: ENOKI_FALLBACK_TO_DIRECT_SIGN,
+    gasMode: "addressBalance",
+};
 
 const WRITER_ADDRESSES = (process.env.MEMWAL_V2_WRITER_ADDRESSES || "")
     .split(",")
@@ -93,7 +102,7 @@ export function registerV2Routes(app: Express): void {
                 signer,
                 [signer.toSuiAddress()],
                 { traceId, namespaceId },
-                DURABLE_WALLET_FALLBACK_POLICY
+                V2_FENCE_FALLBACK_POLICY
             );
             res.json({ digest });
         } catch (err: unknown) {

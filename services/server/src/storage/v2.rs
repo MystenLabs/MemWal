@@ -110,9 +110,19 @@ pub fn namespace_seal_id_suffix(namespace_id: &str, key_version: u64) -> Result<
 }
 
 pub fn decode_walrus_blob_id_le(blob_id: &str) -> Result<[u8; 32], AppError> {
+    let raw = blob_id.trim();
+    let hex = raw.strip_prefix("0x").unwrap_or(raw);
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+                .map_err(|e| AppError::Internal(format!("invalid hex blob_id: {e}")))?;
+        }
+        return Ok(out);
+    }
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(blob_id.trim())
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(blob_id.trim()))
+        .decode(raw)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(raw))
         .map_err(|e| AppError::Internal(format!("invalid oyster/walrus blob_id: {e}")))?;
     bytes
         .try_into()

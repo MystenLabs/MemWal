@@ -45,7 +45,12 @@ export function blake2b256(data: Uint8Array): Buffer {
 }
 
 export function decodeWalrusBlobIdLe(blobId: string): Buffer {
-    const bytes = Buffer.from(blobId, "base64url");
+    const raw = blobId.trim();
+    const hex = raw.startsWith("0x") || raw.startsWith("0X") ? raw.slice(2) : raw;
+    if (/^[0-9a-fA-F]{64}$/.test(hex)) {
+        return Buffer.from(hex, "hex");
+    }
+    const bytes = Buffer.from(raw, "base64url");
     if (bytes.length !== 32) {
         throw new Error("blob_id must decode to 32 bytes");
     }

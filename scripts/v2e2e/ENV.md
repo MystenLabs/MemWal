@@ -33,3 +33,9 @@ VITE_SEAL_THRESHOLD=<same as SEAL_THRESHOLD>
 ```
 
 Never point `DATABASE_URL` at Railway production. Relayer Oyster client reads `OYSTER_BASE_URL` (must include `/api/v1`), not `OYSTER_URL`.
+
+Live E2E notes (testnet):
+- Enoki does not allowlist `namespace::write_fence`. Set `ENOKI_FALLBACK_TO_DIRECT_SIGN=true` so the writer key pays gas.
+- Relayer Oyster PUT/GET uses a 300s client timeout (Walrus-backed oysterd is slow).
+- Local oysterd with `SUI_RPC_URL`+Walrus objects can stall at `target_nodes=0`. Filesystem store (omit those env vars) is enough to prove PUT/GET + fence.
+- Public Sui JSON-RPC is deprecated; dashboard namespace *listing* (`queryEvents`) may show `Failed to fetch` unless `VITE_SUI_RPC_URL` points at a still-working JSON-RPC.

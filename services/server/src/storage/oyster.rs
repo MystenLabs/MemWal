@@ -7,6 +7,18 @@
 use crate::types::AppError;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::Deserialize;
+use std::time::Duration;
+
+/// Walrus-backed Oyster PUT encodes a 66MB unit; the shared relayer client
+/// is 30s and times out before oysterd returns.
+const OYSTER_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn oyster_http_client() -> Result<reqwest::Client, AppError> {
+    reqwest::Client::builder()
+        .timeout(OYSTER_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| AppError::Internal(format!("oyster HTTP client: {e}")))
+}
 
 /// Encode `/` and other reserved bytes so `{namespace}/{job}` is one path segment.
 const OYSTER_PATH_SEGMENT: &AsciiSet = &CONTROLS
@@ -74,10 +86,12 @@ pub async fn put_blob(
     key: &str,
     bytes: &[u8],
 ) -> Result<OysterStoreResponse, AppError> {
+    let _ = client;
     let (base, api_key) = require_oyster_config(base_url, api_key)?;
     let url = blob_url(base, bucket, key);
     let started = std::time::Instant::now();
-    let resp = client
+    let http = oyster_http_client()?;
+    let resp = http
         .put(&url)
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {api_key}"))
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
@@ -124,7 +138,7 @@ pub async fn get_blob(
         AppError::Internal("OYSTER_BASE_URL is required for V2 oyster reads".into())
     })?;
     let url = blob_url(base, bucket, key);
-    get_bytes(client, url, api_key, "get_blob").await
+    get_bytes(&oyster_http_client()?, url, api_key, "get_blob").await
 }
 
 /// GET `{base}/blobs/by-blob-id/{blob_id}` recall fallback.
@@ -138,7 +152,7 @@ pub async fn get_blob_by_id(
         AppError::Internal("OYSTER_BASE_URL is required for V2 oyster reads".into())
     })?;
     let url = blob_by_id_url(base, blob_id);
-    get_bytes(client, url, api_key, "get_blob_by_id").await
+    get_bytes(&oyster_http_client()?, url, api_key, "get_blob_by_id").await
 }
 
 async fn get_bytes(
