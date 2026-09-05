@@ -10,7 +10,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { parseConfig, resolveAgent, keyPreview } from "../dist/config.js";
-import { withTimeout, withRetry, escapeForPrompt, formatMemoriesForPrompt, stripMemoryTags } from "../dist/format.js";
+import { withTimeout, withRetry, cosineRelevance, escapeForPrompt, formatMemoriesForPrompt, stripMemoryTags } from "../dist/format.js";
+import { registerSearchTool } from "../dist/tools/search.js";
 import { looksLikeInjection, shouldCapture } from "../dist/capture.js";
 import { registerHooks } from "../dist/hooks/index.js";
 
@@ -206,6 +207,55 @@ test("recalled memories are escaped and framed as untrusted", () => {
 
 test("escapeForPrompt escapes every injection-relevant character", () => {
   assert.equal(escapeForPrompt(`<a href="x">&'`), "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
+});
+
+test("cosineRelevance clamps pgvector cosine distance to [0, 1]", () => {
+  assert.equal(cosineRelevance(0), 1);
+  assert.equal(cosineRelevance(0.13), 0.87);
+  assert.equal(cosineRelevance(1), 0);
+  assert.equal(cosineRelevance(1.3), 0);
+  assert.equal(cosineRelevance(2), 0);
+  assert.equal(cosineRelevance(-0.01), 1);
+  assert.equal(cosineRelevance(Number.NaN), 0);
+  assert.equal(cosineRelevance(Number.POSITIVE_INFINITY), 0);
+});
+
+test("memory_search never prints a negative relevance percent", async () => {
+  let execute;
+  const mockApi = {
+    registerTool: (def) => {
+      execute = def.execute;
+    },
+  };
+  const mockClient = {
+    recall: async () => ({
+      results: [
+        { text: "close match", distance: 0.13, blob_id: "a" },
+        { text: "orthogonal", distance: 1, blob_id: "b" },
+        { text: "dissimilar", distance: 1.3, blob_id: "c" },
+        { text: "opposite", distance: 2, blob_id: "d" },
+      ],
+    }),
+  };
+
+  registerSearchTool(mockApi, mockClient, {
+    defaultNamespace: "default",
+    requestTimeoutMs: 5_000,
+  });
+
+  const result = await execute("call-1", { query: "anything" });
+  const text = result.content[0].text;
+
+  assert.match(text, /1\. close match \(87% relevance\)/);
+  assert.match(text, /2\. orthogonal \(0% relevance\)/);
+  assert.match(text, /3\. dissimilar \(0% relevance\)/);
+  assert.match(text, /4\. opposite \(0% relevance\)/);
+  assert.doesNotMatch(text, /\(-\d+% relevance\)/);
+
+  assert.deepEqual(
+    result.details.memories.map((m) => m.relevance),
+    [0.87, 0, 0, 0],
+  );
 });
 
 test("stripMemoryTags removes injected blocks to prevent a capture feedback loop", () => {
