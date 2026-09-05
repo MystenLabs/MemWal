@@ -25,6 +25,11 @@ VITE_MEMWAL_V2_REGISTRY_ID=0x0e04320f37466a449d7bf6980bf8dad22d563da41faf98a0aab
 VITE_MEMWAL_V2_NAMESPACE_REGISTRY_ID=0x1d0a9f1bf04832387fa911cbb83e59c99332439d93e89e1e868f23f5a08cb995
 VITE_V2_NAMESPACES_ENABLED=true
 VITE_MEMWAL_V2_WRITER_ADDRESSES=<same operator>
+# Must match relayer SEAL_SERVER_CONFIGS JSON (objectId, weight, aggregatorUrl).
+# Vite only exposes VITE_* — unprefixed SEAL_SERVER_CONFIGS is invisible to the app.
+# A committee server needs aggregatorUrl; independent servers must omit it.
+VITE_SEAL_SERVER_CONFIGS=<same JSON array as SEAL_SERVER_CONFIGS>
+VITE_SEAL_THRESHOLD=<same as SEAL_THRESHOLD>
 ```
 
-Never point `DATABASE_URL` at Railway production.
+Never point `DATABASE_URL` at Railway production. Relayer Oyster client reads `OYSTER_BASE_URL` (must include `/api/v1`), not `OYSTER_URL`.
