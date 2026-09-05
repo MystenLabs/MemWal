@@ -53,8 +53,14 @@ Pearl wallet (funded 2 SUI + 20 WAL from `memwal-master`):
 | `expires_at` | **not in 0.14.2 JSON** (even on-chain path) |
 | `encoded_size` | 66034000 (Walrus min unit) |
 
-## Not in this spike
+## FE→BE slice (landed on this branch)
 
-- Real Seal wrap of the AES DEK (`initialize_key` used dummy bytes). B **can** `seal_approve` (ACL). Committee unwrap of a real DEK is the next glue step (`rotate_key` + `@mysten/seal`).
-- Relayer V2 write path / Postgres index.
-- Console UI.
+Vertical-slice bible: `docs/architecture/v2-e2e-vertical-slice.md`. Local env: `scripts/v2e2e/ENV.md`.
+
+Implemented: SDK namespace PTBs + real Seal wrap DEK; relayer dual auth, Oyster PUT, MEMWALV2 envelope, `namespace::write_fence`; dashboard create/share/playground V2. Flags default **off**. Memory does **not** auto-extend.
+
+Still out: indexer hash chain, Console decrypt/ACL GET, analyze fence (WALM-403), Python/MCP, production merge.
+
+## Original object-only spike leftovers
+
+The first spike `initialize_key` used dummy wrapped bytes. The product path now Seal-wraps a 32-byte AES DEK. Console UI is still Phase 1 (list/identity only).
