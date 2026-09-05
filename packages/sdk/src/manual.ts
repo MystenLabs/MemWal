@@ -505,7 +505,7 @@ export class MemWalManual {
                 tx.moveCall({
                     target: `${this.config.sealPolicyPackageId ?? this.config.packageId}::account::seal_approve`,
                     arguments: [
-                        tx.pure("vector<u8>", idBytes),
+                        tx.pure.vector("u8", idBytes),
                         tx.object(this.config.registryId),
                         tx.object(this.config.accountId),
                     ],
