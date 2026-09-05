@@ -454,6 +454,9 @@ fn wallet_attempt_info_from_request<T>(
 /// starting wallet is chosen when the job is enqueued; retries advance from that
 /// start index deterministically so concurrent jobs cannot consume this job's
 /// next pool candidate through the global round-robin cursor.
+///
+/// V1-only. V2 self-hosted uploads must not rotate: see
+/// [`wallet_index_for_self_hosted_upload`].
 fn wallet_index_for_upload_attempt(
     starting_wallet_index: usize,
     attempt: usize,
@@ -467,6 +470,28 @@ fn wallet_index_for_upload_attempt(
     Some(start.wrapping_add(offset) % pool_size)
 }
 
+/// Wallet used for a self-hosted `UploadAndTransfer` attempt.
+///
+/// V1 walks the gas pool from the enqueued start (`wallet_index_for_upload_attempt`).
+/// V2 pins every attempt to `enqueued_wallet_index`: `namespace::write_fence`
+/// requires `ctx.sender()` to be the authorized WRITE member, and rotating onto
+/// a non-writer aborts `ENoWriteAccess` (Permanent). Empty pool → `None`.
+fn wallet_index_for_self_hosted_upload(
+    enqueued_wallet_index: usize,
+    attempt: usize,
+    pool_size: usize,
+    is_v2: bool,
+) -> Option<usize> {
+    if pool_size == 0 {
+        return None;
+    }
+    if is_v2 {
+        Some(enqueued_wallet_index)
+    } else {
+        wallet_index_for_upload_attempt(enqueued_wallet_index, attempt, pool_size)
+    }
+}
+
 // ============================================================
 // execute_wallet_job — dispatcher for WalletJob
 // ============================================================
@@ -474,10 +499,10 @@ fn wallet_index_for_upload_attempt(
 /// Apalis worker handler for WalletJob.
 ///
 /// Multiple concurrent invocations of this handler share the `wallet_jobs`
-/// queue. Upload jobs derive the execution wallet from the enqueued starting
-/// wallet and current attempt; legacy metadata-transfer jobs keep their pinned
-/// wallet because the blob object is owned by the wallet that
-/// registered/certified it.
+/// queue. V1 upload jobs derive the execution wallet from the enqueued starting
+/// wallet and current attempt; V2 self-hosted uploads stay on the authorized
+/// writer. Legacy metadata-transfer jobs keep their pinned wallet because the
+/// blob object is owned by the wallet that registered/certified it.
 pub(crate) async fn execute_wallet_job(
     job: WalletJob,
     ctx: Data<Arc<AppState>>,
@@ -502,10 +527,11 @@ pub(crate) async fn execute_wallet_job(
             v2_namespace_object_id,
             v2_key_version,
         } => {
-            let wallet_index = match wallet_index_for_upload_attempt(
+            let wallet_index = match wallet_index_for_self_hosted_upload(
                 enqueued_wallet_index,
                 attempt_info.current,
                 state.key_pool.len(),
+                v2_namespace_object_id.is_some(),
             ) {
                 Some(index) => index,
                 None => {
@@ -2344,8 +2370,9 @@ mod tests {
         classify_wallet_remember_handoff_failure, congestion_backoff_secs,
         escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
         is_walrus_package_version_mismatch, mark_remember_job_failed, parse_locked_object_info,
-        parse_wal_balance_alert_info, recovery_seal_persistence, wallet_index_for_upload_attempt,
-        wallet_job_request, V2IndexFields, WalletJob, WalletJobAttemptInfo, WalletJobError,
+        parse_wal_balance_alert_info, recovery_seal_persistence,
+        wallet_index_for_self_hosted_upload, wallet_index_for_upload_attempt, wallet_job_request,
+        V2IndexFields, WalletJob, WalletJobAttemptInfo, WalletJobError,
         WalletOperation, MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
     };
 
@@ -2753,6 +2780,29 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             .map(|attempt| wallet_index_for_upload_attempt(3, attempt, 4).unwrap())
             .collect();
         assert_eq!(picked, vec![3, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn v2_self_hosted_upload_stays_on_enqueued_writer_across_attempts() {
+        // V2 write fence: Apalis retries must not rotate onto a non-writer.
+        let v2: Vec<_> = (1..=5)
+            .map(|attempt| wallet_index_for_self_hosted_upload(3, attempt, 4, true).unwrap())
+            .collect();
+        assert_eq!(v2, vec![3, 3, 3, 3, 3]);
+        assert_eq!(
+            wallet_index_for_self_hosted_upload(3, 2, 4, true).unwrap(),
+            3,
+            "V2 attempt 2 stays on the authorized writer"
+        );
+
+        // V1 still walks the gas pool from the enqueued start.
+        let v1: Vec<_> = (1..=5)
+            .map(|attempt| wallet_index_for_self_hosted_upload(3, attempt, 4, false).unwrap())
+            .collect();
+        assert_eq!(v1, vec![3, 0, 1, 2, 3]);
+
+        assert!(wallet_index_for_self_hosted_upload(0, 1, 0, true).is_none());
+        assert!(wallet_index_for_self_hosted_upload(0, 1, 0, false).is_none());
     }
 
     #[test]
