@@ -3,21 +3,26 @@ import test from "node:test";
 
 import { sanitizeServerError } from "../dist/utils.js";
 
-const LOGIN =
-    "Walrus Memory isn't signed in. Call the memwal_login tool, then retry.";
-
-test("empty-body 401 points at memwal_login instead of <no message>", () => {
+test("empty-body 401 triages SDK/headless auth instead of memwal_login", () => {
     const { message, serverCode } = sanitizeServerError(401, "");
     assert.equal(serverCode, "AUTH_REJECTED");
-    assert.equal(message, LOGIN);
     assert.doesNotMatch(message, /<no message>/);
+    assert.doesNotMatch(message, /Call the memwal_login tool, then retry/);
+    assert.match(message, /MemWal\.create\(\{ key, accountId \}\)/);
+    assert.match(message, /MEMWAL_PRIVATE_KEY/);
+    assert.match(message, /registered delegate/);
+    assert.match(message, /memwal_login is only the MCP browser sign-in/);
+    assert.match(
+        message,
+        /docs\.wal\.app\/walrus-memory\/troubleshooting\/overview/,
+    );
 });
 
-test("string status \"401\" with an empty body uses the login hint", () => {
+test("string status \"401\" with an empty body uses the same SDK triage", () => {
     const { message, serverCode } = sanitizeServerError("401", "   ");
     assert.equal(serverCode, "AUTH_REJECTED");
-    assert.equal(message, LOGIN);
-    assert.doesNotMatch(message, /<no message>/);
+    assert.doesNotMatch(message, /Call the memwal_login tool, then retry/);
+    assert.match(message, /MemWal\.create\(\{ key, accountId \}\)/);
 });
 
 test("non-empty 401 keeps the AUTH_REJECTED troubleshooting URL", () => {
