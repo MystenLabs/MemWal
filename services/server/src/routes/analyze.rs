@@ -106,6 +106,34 @@ const EMBED_TIMEOUT_MS: u64 = 800;
 const SEARCH_TIMEOUT_MS: u64 = 300;
 const FETCH_TIMEOUT_MS: u64 = 500;
 
+/// Largest input handed straight to the embedder for the pre-extraction dedup
+/// query. `text-embedding-3-small` caps at 8192 tokens and the embedder does
+/// not truncate, so oversized input is rejected outright with
+/// `Invalid 'input': maximum context length is 8192` — after the request has
+/// already cost a round-trip (~560ms observed in production).
+///
+/// Measured bytes-per-token over representative corpora runs ~1.4 (base64)
+/// to ~4.5 (English prose), so the byte length at which 8192 tokens is
+/// reached varies from ~11 KiB to ~36 KiB depending on content. No single
+/// byte threshold is exact; this one sits below the densest case so the
+/// guard never lets a doomed call through.
+///
+/// Deliberately a separate constant from `remember`'s
+/// `SUMMARIZE_THRESHOLD_BYTES`, which holds the same value today. That one
+/// decides when to pay for an LLM summary before storing a *permanent*
+/// embedding; this one decides when to abandon a *throwaway* dedup query
+/// vector. Different trade-offs, so they are free to diverge.
+const MAX_PRE_EXTRACT_EMBED_BYTES: usize = 8 * 1024;
+
+/// Whether to skip the pre-extraction dedup embed for an input of this size.
+///
+/// Skipping costs the extractor its dedup context, which is why the boundary
+/// is inclusive: input of exactly `MAX_PRE_EXTRACT_EMBED_BYTES` is still
+/// handed to the embedder.
+fn should_skip_pre_extract_embed(text_len: usize) -> bool {
+    text_len > MAX_PRE_EXTRACT_EMBED_BYTES
+}
+
 /// One fact that has finished embed + SEAL encrypt and is ready to enqueue:
 /// `(plaintext, importance, embedding, ciphertext)`.
 type PreparedFact = (String, f32, Vec<f32>, Vec<u8>);
@@ -199,6 +227,19 @@ pub async fn analyze(
 
     let related_memories: Vec<crate::engine::HydratedMemory> = if !namespace_has_memories {
         pre_extract_status = "skipped_empty_namespace";
+        Vec::new()
+    } else if should_skip_pre_extract_embed(body.text.len()) {
+        // Oversized input (task WALM-411): the embedding API rejects anything
+        // past its 8192-token ceiling and the embedder does not truncate, so
+        // this call cannot succeed. Skip it rather than spend the round-trip
+        // (~560ms observed in production) to arrive at the same empty context.
+        //
+        // The consequence is that large inputs extract without dedup context.
+        // Recovering it would need summarize-before-embed, the way
+        // `remember` does it — not affordable here, where pre-extraction is
+        // inline on the caller's request under a ~1.6s total budget while
+        // `remember` summarizes inside a spawned job.
+        pre_extract_status = "skipped_oversized";
         Vec::new()
     } else {
         // Embed the input as a query. On embed failure, log + degrade —
@@ -913,8 +954,8 @@ pub async fn analyze(
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_fact_idempotency_key, classify_analyze_job_reuse, AnalyzeJobReuse,
-        ANALYZE_CONCURRENCY, MAX_ANALYZE_TEXT_BYTES,
+        analyze_fact_idempotency_key, classify_analyze_job_reuse, should_skip_pre_extract_embed,
+        AnalyzeJobReuse, ANALYZE_CONCURRENCY, MAX_ANALYZE_TEXT_BYTES, MAX_PRE_EXTRACT_EMBED_BYTES,
     };
     use crate::routes::remember::MAX_REMEMBER_TEXT_BYTES;
     use crate::services::extractor::MAX_ANALYZE_FACTS;
@@ -931,6 +972,48 @@ mod tests {
         // Analyze does fact extraction in a single LLM call without
         // chunking, so its ceiling must stay below remember's.
         const { assert!(MAX_ANALYZE_TEXT_BYTES < MAX_REMEMBER_TEXT_BYTES) }
+    }
+
+    // ── Pre-extraction embed size guard (WALM-411) ───────────────
+
+    #[test]
+    fn max_pre_extract_embed_bytes_is_8kb() {
+        assert_eq!(MAX_PRE_EXTRACT_EMBED_BYTES, 8 * 1024);
+    }
+
+    #[test]
+    fn pre_extract_guard_is_reachable_below_the_accepted_input_ceiling() {
+        // If the guard sat at or above the endpoint's own cap it could never
+        // fire, and the skip would be dead code.
+        const { assert!(MAX_PRE_EXTRACT_EMBED_BYTES < MAX_ANALYZE_TEXT_BYTES) }
+    }
+
+    #[test]
+    fn embed_is_attempted_at_and_below_the_threshold() {
+        assert!(!should_skip_pre_extract_embed(0));
+        assert!(!should_skip_pre_extract_embed(1));
+        assert!(!should_skip_pre_extract_embed(
+            MAX_PRE_EXTRACT_EMBED_BYTES - 1
+        ));
+        // Boundary: exactly at the limit is still handed to the embedder.
+        assert!(!should_skip_pre_extract_embed(MAX_PRE_EXTRACT_EMBED_BYTES));
+    }
+
+    #[test]
+    fn embed_is_skipped_above_the_threshold() {
+        assert!(should_skip_pre_extract_embed(
+            MAX_PRE_EXTRACT_EMBED_BYTES + 1
+        ));
+        assert!(should_skip_pre_extract_embed(MAX_ANALYZE_TEXT_BYTES));
+    }
+
+    #[test]
+    fn observed_production_rejection_would_now_be_skipped() {
+        // Regression anchor: a real 31,782-byte /api/analyze input was
+        // rejected by the embedding API on 2026-08-27 with
+        // `Invalid 'input': maximum context length is 8192`, after burning
+        // 564ms. That request must not reach the embedder again.
+        assert!(should_skip_pre_extract_embed(31_782));
     }
 
     // ── Analyze concurrency + weight ────────────────────
