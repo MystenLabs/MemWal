@@ -398,6 +398,10 @@ pub struct Config {
     /// bypassing SEAL + Walrus. **Not for production.** Off by default;
     /// set `BENCHMARK_MODE=true` to enable. Surfaced via `GET /health`.
     pub benchmark_mode: bool,
+    /// Operator write-pause flag from `WRITES_PAUSED`. Surfaced on
+    /// `GET /health` as `writes: "paused"` vs `"ok"`. Distinct from
+    /// sidecar liveness (`write_ready`).
+    pub writes_paused: bool,
     /// Master visibility flag for the memory-deletion feature family.
     pub enable_memory_deletion: bool,
     /// Selects the tracked, backend-built security-delete flow. The master
@@ -602,6 +606,7 @@ impl Config {
             benchmark_mode: std::env::var("BENCHMARK_MODE")
                 .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false),
+            writes_paused: env_bool("WRITES_PAUSED"),
             enable_memory_deletion: env_bool("ENABLE_MEMORY_DELETION"),
             enable_security_delete: env_bool("ENABLE_SECURITY_DELETE"),
             legacy_db_url: nonempty_env("LEGACY_DB_URL"),
@@ -911,6 +916,15 @@ fn env_bool(name: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// `/health` `writes` wire value: `"paused"` when `WRITES_PAUSED` is set.
+pub(crate) fn writes_health_status(paused: bool) -> String {
+    if paused {
+        "paused".to_string()
+    } else {
+        "ok".to_string()
+    }
 }
 
 fn parse_walrus_aggregator_urls(primary: &str, extra_csv: Option<&str>) -> Vec<String> {
@@ -1878,6 +1892,9 @@ pub struct HealthResponse {
     /// This is sidecar liveness, not a guarantee that remember/analyze will
     /// succeed. `status` stays `"ok"` while the relayer process is up.
     pub write_ready: bool,
+    /// Write-path admission: `"ok"` or `"paused"`. `"paused"` when
+    /// `WRITES_PAUSED` is set. Distinct from `write_ready`.
+    pub writes: String,
 }
 
 /// prompt version constants surfaced on `/health`. See the
@@ -2267,6 +2284,7 @@ mod tests {
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
+            writes_paused: false,
             enable_memory_deletion: false,
             enable_security_delete: false,
             legacy_db_url: None,
@@ -3161,7 +3179,25 @@ mod tests {
         // The benchmark harness reads exactly these field names — pin the
         // wire shape so a rename can't silently break the run-artifact
         // pipeline.
-        let resp = HealthResponse {
+        let resp = sample_health_response("ok");
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["prompt_versions"]["extract"], "extract.v1");
+        assert_eq!(json["prompt_versions"]["ask"], "ask.v1");
+        assert_eq!(json["write_ready"], true);
+        assert_eq!(json["writes"], "ok");
+        assert_eq!(
+            json["apiVersion"],
+            crate::compatibility::RELAYER_API_VERSION
+        );
+        assert_eq!(json["relayerVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            json["minSupportedSdk"]["typescript"],
+            crate::compatibility::MIN_TYPESCRIPT_SDK_VERSION
+        );
+    }
+
+    fn sample_health_response(writes: &str) -> HealthResponse {
+        HealthResponse {
             status: "ok".to_string(),
             version: "0.1.0".to_string(),
             compatibility: crate::compatibility::version_response(),
@@ -3171,19 +3207,21 @@ mod tests {
                 ask: "ask.v1".to_string(),
             },
             write_ready: true,
-        };
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["prompt_versions"]["extract"], "extract.v1");
-        assert_eq!(json["prompt_versions"]["ask"], "ask.v1");
-        assert_eq!(json["write_ready"], true);
+            writes: writes.to_string(),
+        }
+    }
+
+    #[test]
+    fn health_response_writes_ok_vs_paused() {
+        assert_eq!(writes_health_status(false), "ok");
+        assert_eq!(writes_health_status(true), "paused");
         assert_eq!(
-            json["apiVersion"],
-            crate::compatibility::RELAYER_API_VERSION
+            serde_json::to_value(&sample_health_response("ok")).unwrap()["writes"],
+            "ok"
         );
-        assert_eq!(json["relayerVersion"], env!("CARGO_PKG_VERSION"));
         assert_eq!(
-            json["minSupportedSdk"]["typescript"],
-            crate::compatibility::MIN_TYPESCRIPT_SDK_VERSION
+            serde_json::to_value(&sample_health_response("paused")).unwrap()["writes"],
+            "paused"
         );
     }
 }

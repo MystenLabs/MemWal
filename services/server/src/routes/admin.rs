@@ -149,6 +149,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             ask: ASK_SYSTEM_PROMPT_VERSION.to_string(),
         },
         write_ready: sidecar_write_ready(&state).await,
+        writes: writes_health_status(state.config.writes_paused),
     })
 }
 
