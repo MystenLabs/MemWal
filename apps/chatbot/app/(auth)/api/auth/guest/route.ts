@@ -23,7 +23,8 @@ export async function GET(request: Request) {
   }
 
   try {
-    await checkGuestAuthRateLimit(request);
+    // Peek only: signIn("guest") runs authorize() in-process, which consumes.
+    await checkGuestAuthRateLimit(request, { consume: false });
   } catch (error) {
     if (error instanceof GuestAuthRateLimitError) {
       return NextResponse.json(
