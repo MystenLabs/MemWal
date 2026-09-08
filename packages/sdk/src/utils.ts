@@ -391,6 +391,105 @@ export function clockDriftErrorFromResponse(
 }
 
 // ============================================================
+// Bounded fetch (WALM-598)
+// ============================================================
+
+/**
+ * Default deadline for the unauthenticated preflight round-trips
+ * (`GET /version`, `GET /health`, `GET /config`) the SDK makes before it can
+ * dispatch a signed request.
+ *
+ * These used to run with no signal and no timeout at all. Because they are
+ * awaited *inside* a caller's request budget, a relayer whose `/health` p50
+ * had drifted to ~9s silently consumed most of `recall()`'s 15s
+ * `AbortController` window, and the resulting `AbortError` surfaced on the
+ * `/api/recall` fetch even though recall itself was healthy (GH #438).
+ * Each preflight now carries its own independent budget so it can neither
+ * hang forever nor eat someone else's.
+ */
+export const DEFAULT_PREFLIGHT_TIMEOUT_MS = 5_000;
+
+/** Default deadline for the `/api/recall` request itself. */
+export const DEFAULT_RECALL_TIMEOUT_MS = 15_000;
+
+/**
+ * Error thrown when one of the SDK's bounded fetches blows its deadline.
+ *
+ * `phase` names the round-trip that actually stalled — `"preflight GET
+ * /version"`, `"POST /api/recall"` — which is the diagnostic that was missing
+ * when every stall in the chain surfaced as an unlabeled `AbortError` on the
+ * final request.
+ */
+export interface TimeoutError extends Error {
+    name: "TimeoutError";
+    /** Which round-trip exceeded its budget. */
+    phase: string;
+    /** The budget that was exceeded, in milliseconds. */
+    timeoutMs: number;
+}
+
+/** True when `err` is a `TimeoutError` raised by `fetchWithDeadline`. */
+export function isTimeoutError(err: unknown): err is TimeoutError {
+    return err instanceof Error && err.name === "TimeoutError" && "phase" in err;
+}
+
+function timeoutError(phase: string, timeoutMs: number, cause: unknown): TimeoutError {
+    const err = new Error(
+        `Walrus Memory request timed out after ${timeoutMs}ms during ${phase}.`,
+    ) as TimeoutError;
+    err.name = "TimeoutError";
+    err.phase = phase;
+    err.timeoutMs = timeoutMs;
+    (err as Error & { cause?: unknown }).cause = cause;
+    return err;
+}
+
+/**
+ * `fetch` under an independent abort budget.
+ *
+ * A non-finite or non-positive `timeoutMs` disables the deadline (the caller
+ * opted out); an `external` signal is still honoured in that case.
+ *
+ * Aborts triggered by our own timer are rethrown as a `TimeoutError` tagged
+ * with `phase`; an abort that came from `external` is left alone so callers
+ * keep distinguishing "I cancelled this" from "this timed out".
+ */
+export async function fetchWithDeadline(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+    phase: string,
+    external?: AbortSignal,
+): Promise<Response> {
+    const bounded = Number.isFinite(timeoutMs) && timeoutMs > 0;
+    if (!bounded && !external) return fetch(url, init);
+
+    const ac = new AbortController();
+    let timedOut = false;
+    const onExternalAbort = () => ac.abort();
+    if (external) {
+        if (external.aborted) ac.abort();
+        else external.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    const tid = bounded
+        ? setTimeout(() => {
+              timedOut = true;
+              ac.abort();
+          }, timeoutMs)
+        : undefined;
+
+    try {
+        return await fetch(url, { ...init, signal: ac.signal });
+    } catch (err) {
+        if (timedOut) throw timeoutError(phase, timeoutMs, err);
+        throw err;
+    } finally {
+        if (tid !== undefined) clearTimeout(tid);
+        external?.removeEventListener("abort", onExternalAbort);
+    }
+}
+
+// ============================================================
 // Delegate Key → Sui Address Derivation
 // ============================================================
 

@@ -24,6 +24,15 @@ export {
 
 // Delegate key utilities (no @mysten/sui dependency)
 export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
+// WALM-598: request-deadline surface. `isTimeoutError` lets callers tell a
+// blown budget apart from a transport failure, and `phase` says which
+// round-trip blew it.
+export {
+    isTimeoutError,
+    DEFAULT_RECALL_TIMEOUT_MS,
+    DEFAULT_PREFLIGHT_TIMEOUT_MS,
+} from "./utils.js";
+export type { TimeoutError } from "./utils.js";
 export {
     estimateTokens,
     truncateToTokenBudget,
