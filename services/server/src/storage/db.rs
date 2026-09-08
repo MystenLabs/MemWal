@@ -3,10 +3,22 @@ use std::sync::Arc;
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 
 use crate::alerts::AlertManager;
 use crate::types::{AppError, SearchHit};
+
+/// Keep the first hit for each `blob_id` (closest: callers already order by
+/// cosine distance). `vector_entries` has no UNIQUE on blob_id, so a
+/// remember retry or restore can insert a second row for the same Walrus
+/// blob; returning both spends `limit` on one memory (WALM-594 / GH #694).
+pub(crate) fn unique_hits_by_blob_id(hits: Vec<SearchHit>) -> Vec<SearchHit> {
+    let mut seen = HashSet::with_capacity(hits.len());
+    hits.into_iter()
+        .filter(|hit| seen.insert(hit.blob_id.clone()))
+        .collect()
+}
 
 /// Tombstone retention for both the read-API `must_resync` clock and the
 /// background sweep. Keep a single constant so the two cannot drift.
@@ -817,6 +829,116 @@ mod tests {
             vec![(other_namespace, blob_id)],
             "the cleanup must not delete an identical blob_id in another namespace"
         );
+    }
+
+    fn hit(blob_id: &str, distance: f64) -> crate::types::SearchHit {
+        crate::types::SearchHit {
+            blob_id: blob_id.to_string(),
+            distance,
+            created_at: chrono::Utc::now(),
+            importance: 0.5,
+        }
+    }
+
+    #[test]
+    fn unique_hits_by_blob_id_keeps_first_and_distinct() {
+        let unique = super::unique_hits_by_blob_id(vec![
+            hit("dup", 0.10),
+            hit("dup", 0.10),
+            hit("other", 0.20),
+            hit("dup", 0.30),
+        ]);
+        let ids: Vec<&str> = unique.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(ids, vec!["dup", "other"]);
+        assert_eq!(unique[0].distance, 0.10);
+    }
+
+    #[test]
+    fn unique_hits_by_blob_id_empty() {
+        assert!(super::unique_hits_by_blob_id(vec![]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_similar_returns_each_blob_id_once() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrecall-dedupe-owner-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let blob_id = format!("dup-blob-{suffix}");
+        let other_blob = format!("other-blob-{suffix}");
+        let query = vec![1.0_f32; 1536];
+        let near = vec![1.0_f32; 1536];
+        let far = {
+            let mut v = vec![0.0_f32; 1536];
+            v[0] = 1.0;
+            v
+        };
+
+        db.insert_vector(
+            &format!("row-a-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_id,
+            &near,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("row-b-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_id,
+            &near,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("row-c-{suffix}"),
+            &owner,
+            &namespace,
+            &other_blob,
+            &far,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let hits = db
+            .search_similar(&query, &owner, &namespace, 10)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = hits.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(
+            ids.iter().filter(|id| **id == blob_id).count(),
+            1,
+            "the remembered blob must appear once, not once per index row"
+        );
+        assert!(ids.contains(&blob_id.as_str()));
+        assert!(ids.contains(&other_blob.as_str()));
+        assert_eq!(ids.len(), 2);
     }
 
     #[tokio::test]
@@ -2802,8 +2924,8 @@ impl VectorDb {
         Ok(row.and_then(|(plaintext,)| plaintext))
     }
 
-    /// Search for similar vectors using pgvector cosine distance (<=>)
-    /// Returns blob_id and distance for each match
+    /// Search for similar vectors using pgvector cosine distance (<=>).
+    /// Each `blob_id` appears at most once (closest row wins).
     pub async fn search_similar(
         &self,
         query_vector: &[f32],
@@ -2856,7 +2978,7 @@ impl VectorDb {
             })
             .collect();
 
-        Ok(results)
+        Ok(unique_hits_by_blob_id(results))
     }
 
     /// Get all blob_ids for a given owner + namespace (used by restore flow)
