@@ -50,6 +50,8 @@ import {
     sanitizeServerError,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
+    fetchWithDeadline,
+    DEFAULT_PREFLIGHT_TIMEOUT_MS,
 } from "./utils.js";
 import { assertCompatibleRelayer, compatibilityErrorFromStatus } from "./compatibility.js";
 import { resolveLimitOrOptions } from "./recall-args.js";
@@ -158,6 +160,8 @@ export class MemWalManual {
     private namespace: string;
     private relayerVersionMetadata: RelayerVersionMetadata | null = null;
     private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
+    /** WALM-598: per-round-trip budget for the compatibility preflight. */
+    private preflightTimeoutMs: number;
 
     // Lazily initialized heavy clients (typed as any to avoid peer dep compile errors)
     private _suiClient: any = null;
@@ -191,6 +195,7 @@ export class MemWalManual {
             throw new Error("namespace cannot be empty");
         }
         this.namespace = config.namespace ?? "default";
+        this.preflightTimeoutMs = config.preflightTimeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS;
     }
 
     /**
@@ -828,17 +833,26 @@ export class MemWalManual {
     }
 
     private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
-        const versionRes = await fetch(`${this.serverUrl}/version`, {
-            method: "GET",
-        });
+        // WALM-598: bounded like the relayer-mode client's preflight — these
+        // run inside whatever signed request triggered them, so an untimed
+        // fetch here drains that caller's budget (and can hang forever).
+        const versionRes = await fetchWithDeadline(
+            `${this.serverUrl}/version`,
+            { method: "GET" },
+            this.preflightTimeoutMs,
+            "preflight GET /version",
+        );
         let body: Partial<RelayerVersionMetadata>;
 
         if (versionRes.ok) {
             body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
         } else if (versionRes.status === 404 || versionRes.status === 405) {
-            const healthRes = await fetch(`${this.serverUrl}/health`, {
-                method: "GET",
-            });
+            const healthRes = await fetchWithDeadline(
+                `${this.serverUrl}/health`,
+                { method: "GET" },
+                this.preflightTimeoutMs,
+                "preflight GET /health",
+            );
             if (!healthRes.ok) {
                 throw new Error(
                     `Walrus Memory compatibility check failed: GET /version returned ` +
