@@ -15,6 +15,7 @@ use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 
 use crate::services::llm_chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
+use crate::storage::db::VectorInsert;
 use crate::storage::{seal, walrus};
 use crate::types::*;
 
@@ -1241,55 +1242,82 @@ async fn restore_unbounded(
         .flatten()
         .collect();
 
-    // Step 6: Insert only new entries (no delete!)
+    // Step 6: Insert only new entries (no delete!), atomically.
+    //
+    // GH #566 / WALM-591: this used to be a plain `for` loop of autocommitted
+    // `insert_vector` calls. `restore()` wraps this future in a 55s
+    // `tokio::time::timeout`, so a slow batch had its future DROPPED mid-loop
+    // and every row inserted up to that point stayed committed — a silently
+    // half-written index that a later `recall` read back as duplicated or
+    // truncated results, with `restored` never reported to the caller. A
+    // mid-loop DB error behaved identically.
+    //
+    // Building the whole batch first and handing it to `insert_vectors_atomic`
+    // makes the step all-or-nothing: SQLx rolls the transaction back both when
+    // a row errors and when the future is dropped, so a failed restore leaves
+    // zero rows and the client can simply retry. `limit` is clamped to at most
+    // 100 (`clamp_restore_limit`) and `results` is a subset of that page, so
+    // this is a bounded, short-lived transaction.
     transient_unresolved += decrypted_texts.len().saturating_sub(results.len());
     let restored = results.len();
     let truncated =
         restore_truncated_after_page(truncated, restored, newly_failed, transient_unresolved);
-    for (blob_id, vector) in &results {
-        let id = uuid::Uuid::new_v4().to_string();
-        let blob_size = blob_sizes.get(blob_id).copied().unwrap_or_else(|| {
-            tracing::warn!(
-                "restore: missing blob size for {}, defaulting to 0 for quota tracking",
-                blob_id
-            );
-            0
-        });
-        let (agent_id, package_id) = blob_provenance
-            .get(blob_id)
-            .cloned()
-            .unwrap_or((None, String::new()));
-        // The sidecar sends "agentId" as a present-but-empty string when no
-        // delegate key was recorded (the common case) — #[serde(default)]
-        // only fires on a MISSING key, so an empty string deserializes to
-        // Some(""), not None. Normalize both provenance fields the same way
-        // so a blob with no known agent gets a real SQL NULL, not "".
-        let agent_id = agent_id.filter(|s| !s.is_empty());
-        state
-            .db
-            .insert_vector(
-                &id,
+    // Owned per-row values first: `VectorInsert` borrows them, so they must
+    // outlive the batch slice built below.
+    let row_values: Vec<(String, i64, Option<String>, String)> = results
+        .iter()
+        .map(|(blob_id, _)| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let blob_size = blob_sizes.get(blob_id).copied().unwrap_or_else(|| {
+                tracing::warn!(
+                    "restore: missing blob size for {}, defaulting to 0 for quota tracking",
+                    blob_id
+                );
+                0
+            });
+            let (agent_id, package_id) = blob_provenance
+                .get(blob_id)
+                .cloned()
+                .unwrap_or((None, String::new()));
+            // The sidecar sends "agentId" as a present-but-empty string when no
+            // delegate key was recorded (the common case) — #[serde(default)]
+            // only fires on a MISSING key, so an empty string deserializes to
+            // Some(""), not None. Normalize both provenance fields the same way
+            // so a blob with no known agent gets a real SQL NULL, not "".
+            let agent_id = agent_id.filter(|s| !s.is_empty());
+            (id, blob_size, agent_id, package_id)
+        })
+        .collect();
+
+    let batch: Vec<VectorInsert<'_>> = results
+        .iter()
+        .zip(row_values.iter())
+        .map(
+            |((blob_id, vector), (id, blob_size, agent_id, package_id))| VectorInsert {
+                id,
                 owner,
                 namespace,
                 blob_id,
                 vector,
-                blob_size,
+                blob_size_bytes: *blob_size,
                 // restore flow re-indexes existing Walrus blobs after
                 // they fell out of pgvector. The original importance value is
                 // not preserved in the blob (it's a row-level signal). Use the
                 // neutral "standard" bucket so restored memories rank as
                 // average — neither boosted nor penalized.
-                crate::services::extractor::IMPORTANCE_STANDARD,
-                agent_id.as_deref(),
-                if package_id.is_empty() {
+                importance: crate::services::extractor::IMPORTANCE_STANDARD,
+                agent_id: agent_id.as_deref(),
+                package_id: if package_id.is_empty() {
                     None
                 } else {
                     Some(package_id.as_str())
                 },
-                None,
-            )
-            .await?;
-    }
+                end_epoch: None,
+            },
+        )
+        .collect();
+
+    state.db.insert_vectors_atomic(&batch).await?;
 
     tracing::info!(
         "restore complete: restored={} skipped={} failed={} total={} owner={} ns={}",
