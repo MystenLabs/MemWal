@@ -112,7 +112,7 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 
 - Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance?, sort?, scoringWeights? })`
 - `limit` defaults to `10`; `topK` is an alias and wins when both are set
-- Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
+- Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`. `recall(query, namespace)` throws `TypeError` — namespace is not a valid second argument.
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 - `sort` picks the ordering: `"relevance"` (default) or `"recent"` for newest-among-matches
 - `scoringWeights` blends recency and importance into the ranking (see [Ordering](#ordering) below)

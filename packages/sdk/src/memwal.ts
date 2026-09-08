@@ -76,6 +76,7 @@ import {
 } from "./compatibility.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
 import { pollingDelayMs } from "./polling-delay.js";
+import { resolveRecallCall } from "./recall-args.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -934,6 +935,8 @@ export class MemWal {
      * - `recall(query, limit, namespace)`
      * - `recall(query, { limit, namespace, maxDistance, topK })`
      *
+     * `recall(query, namespace)` is invalid and throws `TypeError`.
+     *
      * `topK` and `limit` are aliases; if both are set, `topK` wins.
      *
      * @returns RecallResult with decrypted text results
@@ -980,9 +983,16 @@ export class MemWal {
      * `recall({ query, limit, namespace })`. Positional will be removed in a
      * future major version of the SDK.
      */
+    async recall(query: string, options: RecallOptions): Promise<RecallResult>;
+    /**
+     * @deprecated Positional `recall(query, limit, namespace)` is easy to
+     * misread as `recall(query, namespace)`. Prefer the object form
+     * `recall({ query, limit, namespace })`. Positional will be removed in a
+     * future major version of the SDK.
+     */
     async recall(
         query: string,
-        limitOrOptions?: number | RecallOptions,
+        limit?: number,
         namespace?: string,
     ): Promise<RecallResult>;
     async recall(
@@ -990,27 +1000,11 @@ export class MemWal {
         limitOrOptions: number | RecallOptions | undefined = 10,
         namespace?: string,
     ): Promise<RecallResult> {
-        let query: string;
-        let options: RecallOptions;
-        if (typeof queryOrParams === "object") {
-            const { query: q, ...rest } = queryOrParams;
-            query = q;
-            options = rest;
-        } else {
-            query = queryOrParams;
-            if (limitOrOptions == null) {
-                options = { limit: 10, namespace };
-            } else if (typeof limitOrOptions === "number") {
-                options = { limit: limitOrOptions, namespace };
-            } else {
-                // Positional namespace fills an options object that omitted it.
-                // An explicit options.namespace still wins. (#1038)
-                options = { ...limitOrOptions };
-                if (options.namespace === undefined && namespace !== undefined) {
-                    options.namespace = namespace;
-                }
-            }
-        }
+        const { query, options } = resolveRecallCall(
+            queryOrParams,
+            limitOrOptions,
+            namespace,
+        );
         const limit = options.topK ?? options.limit ?? 10;
         const resolvedNamespace = options.namespace ?? this.namespace;
 

@@ -231,3 +231,11 @@ test("manual recall returns valid memories when another ciphertext package is fo
     assert.equal(errors.length, 1);
     assert.match(errors[0], /Skipping ciphertext foreign: packageId does not match/);
 });
+
+test("manual recall rejects a string second argument", async () => {
+    const { manual } = manualWithAccountResponse({});
+    await assert.rejects(() => manual.recallManual("query", "profile"), {
+        name: "TypeError",
+        message: /recallManual/,
+    });
+});
