@@ -920,6 +920,25 @@ export class MemWal {
     }
 
     /**
+     * Estimate the token cost of a string using the SDK's default
+     * character-based approximation (~chars/4, code-point aware). Useful to weigh
+     * a recall payload before injecting it into a model context:
+     *
+     * ```ts
+     * const hits = await memwal.recall({ query, limit: 8 });
+     * const joined = hits.results.map((h) => h.text).join("\n---\n");
+     * if (memwal.countTokens(joined) > 2048) { /* re-query with maxTokens *\/ }
+     * ```
+     *
+     * This is an estimate, not an exact tokenizer count — see `estimateTokens`
+     * for accuracy caveats. For exact counts, pass your own counter to
+     * `recall({ maxTokens, countTokens })`.
+     */
+    countTokens(text: string): number {
+        return estimateTokens(text);
+    }
+
+    /**
      * Recall memories similar to a query — server handles:
      * verify → embed query → search → Walrus download → decrypt → return plaintext.
      *
@@ -957,36 +976,17 @@ export class MemWal {
      * const result2 = await memwal.recall("food allergies", 5, "profile");
      * ```
      */
-    /**
-     * Estimate the token cost of a string using the SDK's default
-     * character-based approximation (~chars/4, code-point aware). Useful to weigh
-     * a recall payload before injecting it into a model context:
-     *
-     * ```ts
-     * const hits = await memwal.recall({ query, limit: 8 });
-     * const joined = hits.results.map((h) => h.text).join("\n---\n");
-     * if (memwal.countTokens(joined) > 2048) { /* re-query with maxTokens *\/ }
-     * ```
-     *
-     * This is an estimate, not an exact tokenizer count — see `estimateTokens`
-     * for accuracy caveats. For exact counts, pass your own counter to
-     * `recall({ maxTokens, countTokens })`.
-     */
-    countTokens(text: string): number {
-        return estimateTokens(text);
-    }
-
     async recall(params: RecallParams): Promise<RecallResult>;
     /**
      * @deprecated Positional `recall(query, limit, namespace)` is easy to
-     * misread as `recall(query, namespace)`. Prefer the object form
+     * misread as `recall(query, namespace)`, which throws `TypeError`. Prefer
      * `recall({ query, limit, namespace })`. Positional will be removed in a
      * future major version of the SDK.
      */
     async recall(query: string, options: RecallOptions): Promise<RecallResult>;
     /**
      * @deprecated Positional `recall(query, limit, namespace)` is easy to
-     * misread as `recall(query, namespace)`. Prefer the object form
+     * misread as `recall(query, namespace)`, which throws `TypeError`. Prefer
      * `recall({ query, limit, namespace })`. Positional will be removed in a
      * future major version of the SDK.
      */

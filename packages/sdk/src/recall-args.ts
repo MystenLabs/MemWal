@@ -1,9 +1,6 @@
 import type { RecallOptions, RecallParams } from "./types.js";
 
-/**
- * Parse `limit` / options for deprecated positional recall-style calls.
- * A string second argument is the `recall(query, namespace)` footgun (#293).
- */
+/** String second argument is a namespace, not options. */
 export function resolveLimitOrOptions<T extends { limit?: number; namespace?: string }>(
     method: string,
     limitOrOptions: number | T | undefined | null,
@@ -25,11 +22,17 @@ export function resolveLimitOrOptions<T extends { limit?: number; namespace?: st
         }
         return limitOrOptions;
     }
-    throw new TypeError(
+    throw new TypeError(invalidSecondArgMessage(method));
+}
+
+function invalidSecondArgMessage(method: string): string {
+    const shared =
         `${method}() second argument must be a number (limit) or an options object, not a string. ` +
-            `Namespace goes in ${method}({ query, namespace }) or as the third argument: ` +
-            `${method}(query, limit, namespace).`,
-    );
+        `Namespace belongs in an options object (${method}(query, { namespace })) or as the third argument (${method}(query, limit, namespace)).`;
+    if (method === "recall") {
+        return `${shared} Preferred form: recall({ query, namespace }).`;
+    }
+    return shared;
 }
 
 /** Normalize object-style and positional `recall()` arguments. */

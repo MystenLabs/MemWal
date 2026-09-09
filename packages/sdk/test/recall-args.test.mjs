@@ -21,11 +21,16 @@ test("resolveRecallCall maps object and positional forms", () => {
 test("resolveRecallCall rejects a namespace string as the second argument", () => {
     assert.throws(() => resolveRecallCall("food allergies", "profile"), {
         name: "TypeError",
-        message: /recall\(\{ query, namespace \}\)/,
+        message:
+            "recall() second argument must be a number (limit) or an options object, not a string. " +
+            "Namespace belongs in an options object (recall(query, { namespace })) or as the third argument (recall(query, limit, namespace)). " +
+            "Preferred form: recall({ query, namespace }).",
     });
     assert.throws(() => resolveLimitOrOptions("recallManual", "profile"), {
         name: "TypeError",
-        message: /recallManual/,
+        message:
+            "recallManual() second argument must be a number (limit) or an options object, not a string. " +
+            "Namespace belongs in an options object (recallManual(query, { namespace })) or as the third argument (recallManual(query, limit, namespace)).",
     });
     assert.throws(() => resolveRecallCall("food", ["profile"]), TypeError);
 });

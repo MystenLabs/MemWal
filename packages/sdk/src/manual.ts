@@ -380,6 +380,9 @@ export class MemWalManual {
      * 2. Search server for matching vectors
      * 3. Download blobs from Walrus
      * 4. SEAL decrypt each blob
+     *
+     * `recallManual(query, { limit?, namespace? })` is valid.
+     * `recallManual(query, namespace)` throws `TypeError`.
      */
     async recallManual(query: string, options: MemWalManualRecallOptions): Promise<RecallManualResult>;
     async recallManual(query: string, limit?: number, namespace?: string): Promise<RecallManualResult>;

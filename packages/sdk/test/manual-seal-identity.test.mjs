@@ -236,6 +236,8 @@ test("manual recall rejects a string second argument", async () => {
     const { manual } = manualWithAccountResponse({});
     await assert.rejects(() => manual.recallManual("query", "profile"), {
         name: "TypeError",
-        message: /recallManual/,
+        message:
+            "recallManual() second argument must be a number (limit) or an options object, not a string. " +
+            "Namespace belongs in an options object (recallManual(query, { namespace })) or as the third argument (recallManual(query, limit, namespace)).",
     });
 });
