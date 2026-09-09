@@ -20,6 +20,31 @@ pub(crate) fn unique_hits_by_blob_id(hits: Vec<SearchHit>) -> Vec<SearchHit> {
         .collect()
 }
 
+/// ANN over-fetch ceiling: `fetch_limit <= limit * this`. Stops a
+/// single heavily duplicated nearest blob from walking the whole
+/// namespace one unique-shortfall at a time.
+const SEARCH_SIMILAR_OVERFETCH_FACTOR: usize = 4;
+
+/// Next ANN `LIMIT` after collapsing `dropped` duplicate rows from a
+/// full page. Grows by the observed duplicate count in the current
+/// window (not `limit + dropped`, which only adds the unique shortfall).
+/// `None` means stop: no dups, no growth, or the cap is hit.
+pub(crate) fn next_search_fetch_limit(
+    limit: usize,
+    fetch_limit: usize,
+    dropped: usize,
+) -> Option<usize> {
+    if dropped == 0 {
+        return None;
+    }
+    let cap = limit.saturating_mul(SEARCH_SIMILAR_OVERFETCH_FACTOR).max(limit);
+    if fetch_limit >= cap {
+        return None;
+    }
+    let next = fetch_limit.saturating_add(dropped).min(cap);
+    (next > fetch_limit).then_some(next)
+}
+
 /// Tombstone retention for both the read-API `must_resync` clock and the
 /// background sweep. Keep a single constant so the two cannot drift.
 pub const TOMBSTONE_RETENTION: chrono::Duration = chrono::Duration::days(30);
@@ -858,6 +883,27 @@ mod tests {
         assert!(super::unique_hits_by_blob_id(vec![]).is_empty());
     }
 
+    #[test]
+    fn next_search_fetch_limit_grows_by_dropped_not_unique_shortfall() {
+        // limit=2, two copies of A: first page unique=1, dropped=1 → LIMIT 3.
+        assert_eq!(super::next_search_fetch_limit(2, 2, 1), Some(3));
+        // Three copies of A: LIMIT 3 is still all A (dropped=2) → LIMIT 5,
+        // not stop after the first widen.
+        assert_eq!(super::next_search_fetch_limit(2, 3, 2), Some(5));
+        // Cap at limit * 4.
+        assert_eq!(super::next_search_fetch_limit(2, 5, 4), Some(8));
+        assert_eq!(super::next_search_fetch_limit(2, 8, 7), None);
+    }
+
+    #[test]
+    fn next_search_fetch_limit_uniform_2x_at_http_cap() {
+        // limit=100, half the page duplicate: grow by dropped (50), not
+        // by unique shortfall alone. 100 → 150, then 150 → 225.
+        assert_eq!(super::next_search_fetch_limit(100, 100, 50), Some(150));
+        assert_eq!(super::next_search_fetch_limit(100, 150, 75), Some(225));
+        assert_eq!(super::next_search_fetch_limit(100, 400, 50), None);
+    }
+
     #[tokio::test]
     async fn search_similar_returns_each_blob_id_once() {
         let Some(db) = test_db().await else {
@@ -1015,6 +1061,67 @@ mod tests {
 
         let ids: Vec<&str> = hits.iter().map(|h| h.blob_id.as_str()).collect();
         assert_eq!(ids.len(), 2, "limit=2 must refill after collapsing blob A");
+        assert!(ids.contains(&blob_a.as_str()));
+        assert!(ids.contains(&blob_b.as_str()));
+    }
+
+    #[tokio::test]
+    async fn search_similar_widens_again_when_three_copies_crowd_limit_two() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrecall-dedupe-triple-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let blob_a = format!("blob-a-{suffix}");
+        let blob_b = format!("blob-b-{suffix}");
+        let query = vec![1.0_f32; 1536];
+        let near = vec![1.0_f32; 1536];
+        let far = {
+            let mut v = vec![0.0_f32; 1536];
+            v[0] = 1.0;
+            v
+        };
+
+        for (row, blob, embedding) in [
+            ("a1", blob_a.as_str(), &near),
+            ("a2", blob_a.as_str(), &near),
+            ("a3", blob_a.as_str(), &near),
+            ("b", blob_b.as_str(), &far),
+        ] {
+            db.insert_vector(
+                &format!("row-{row}-{suffix}"),
+                &owner,
+                &namespace,
+                blob,
+                embedding,
+                1,
+                0.5,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        let hits = db
+            .search_similar(&query, &owner, &namespace, 2)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = hits.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "first widen (LIMIT 3) is still all A; second widen must include B"
+        );
         assert!(ids.contains(&blob_a.as_str()));
         assert!(ids.contains(&blob_b.as_str()));
     }
@@ -3017,8 +3124,8 @@ impl VectorDb {
         }
 
         // First-wins unique after ANN `LIMIT` is HNSW-friendly, but duplicate
-        // index rows consume that window. Widen by the number dropped until
-        // `limit` unique blobs are filled or the namespace is exhausted.
+        // index rows consume that window. Widen by the dropped count in the
+        // current window (duplicate factor), capped at `limit * 4`.
         let mut fetch_limit = limit;
         loop {
             let rows = self
@@ -3034,10 +3141,9 @@ impl VectorDb {
                 return Ok(unique);
             }
             let dropped = fetched - unique.len();
-            let next = limit.saturating_add(dropped);
-            if next <= fetch_limit {
+            let Some(next) = next_search_fetch_limit(limit, fetch_limit, dropped) else {
                 return Ok(unique);
-            }
+            };
             fetch_limit = next;
         }
     }
