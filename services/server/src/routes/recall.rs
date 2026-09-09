@@ -85,12 +85,10 @@ async fn generate_recall_embedding_cached(
 /// `text` (the ranker never reads text; manual recall never decrypts).
 ///
 /// The ranked output is mapped back to the original `SearchHit`s **by
-/// original index, not by `blob_id`**. `search_similar` already collapses
-/// duplicate blob_ids (WALM-594), but this remap still must not key on
-/// `blob_id`: the ranker only reads distance/recency/importance, and we
-/// stash each hit's input index in the throwaway `HydratedMemory`'s
-/// `blob_id` slot so a duplicate-bearing input cannot silently drop or
-/// reorder hits. Indices are unique, so `results.len() == hits.len()`.
+/// original index, not by `blob_id`**. The ranker treats `blob_id` as
+/// opaque carry-through (it scores only distance/recency/importance), so
+/// we stash each hit's input index in that slot. Indices are unique, so a
+/// blob_id-keyed round-trip cannot drop hits and `results.len() == hits.len()`.
 ///
 /// At default weights `rank()` short-circuits, so the input (cosine) order
 /// is returned unchanged.
@@ -644,11 +642,8 @@ Available: 10708877";
         assert_eq!(ranked[0].created_at, t_now() - chrono::Duration::days(7));
     }
 
-    /// Ranker remap is by input index, not `blob_id`. `search_similar`
-    /// collapses duplicate blob_ids (WALM-594); this still pins that a
-    /// blob_id-keyed round-trip would drop/reorder if duplicates ever
-    /// reached the ranker. Tested at BOTH default (short-circuit) and
-    /// active weights.
+    /// Remap is by input index, not blob_id, so two hits sharing a blob_id
+    /// are both kept. Tested at default (short-circuit) and active weights.
     #[test]
     fn manual_ranking_keeps_duplicate_blob_ids() {
         use crate::services::extractor::{IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};

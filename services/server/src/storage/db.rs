@@ -942,6 +942,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_similar_fills_limit_when_duplicate_rows_crowd_the_window() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrecall-dedupe-limit-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let blob_a = format!("blob-a-{suffix}");
+        let blob_b = format!("blob-b-{suffix}");
+        let query = vec![1.0_f32; 1536];
+        let near = vec![1.0_f32; 1536];
+        let far = {
+            let mut v = vec![0.0_f32; 1536];
+            v[0] = 1.0;
+            v
+        };
+
+        db.insert_vector(
+            &format!("row-a1-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_a,
+            &near,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("row-a2-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_a,
+            &near,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("row-b-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_b,
+            &far,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let hits = db
+            .search_similar(&query, &owner, &namespace, 2)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = hits.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "limit=2 must refill after collapsing blob A");
+        assert!(ids.contains(&blob_a.as_str()));
+        assert!(ids.contains(&blob_b.as_str()));
+    }
+
+    #[tokio::test]
     async fn insert_vector_persists_agent_and_package_id() {
         let Some(db) = test_db().await else {
             eprintln!("skipping DB integration test: DATABASE_URL is not configured");
@@ -2925,13 +3003,51 @@ impl VectorDb {
     }
 
     /// Search for similar vectors using pgvector cosine distance (<=>).
-    /// Each `blob_id` appears at most once (closest row wins).
+    /// Each `blob_id` appears at most once (closest row wins). Duplicate
+    /// index rows are over-fetched so `limit` still fills with distinct blobs.
     pub async fn search_similar(
         &self,
         query_vector: &[f32],
         owner: &str,
         namespace: &str,
         limit: usize,
+    ) -> Result<Vec<SearchHit>, AppError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+
+        // First-wins unique after ANN `LIMIT` is HNSW-friendly, but duplicate
+        // index rows consume that window. Widen by the number dropped until
+        // `limit` unique blobs are filled or the namespace is exhausted.
+        let mut fetch_limit = limit;
+        loop {
+            let rows = self
+                .search_similar_rows(query_vector, owner, namespace, fetch_limit)
+                .await?;
+            let fetched = rows.len();
+            let mut unique = unique_hits_by_blob_id(rows);
+            if unique.len() >= limit {
+                unique.truncate(limit);
+                return Ok(unique);
+            }
+            if fetched < fetch_limit {
+                return Ok(unique);
+            }
+            let dropped = fetched - unique.len();
+            let next = limit.saturating_add(dropped);
+            if next <= fetch_limit {
+                return Ok(unique);
+            }
+            fetch_limit = next;
+        }
+    }
+
+    async fn search_similar_rows(
+        &self,
+        query_vector: &[f32],
+        owner: &str,
+        namespace: &str,
+        fetch_limit: usize,
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
 
@@ -2957,7 +3073,7 @@ impl VectorDb {
             .bind(embedding)
             .bind(owner)
             .bind(namespace)
-            .bind(limit as i64)
+            .bind(fetch_limit as i64)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
@@ -2968,7 +3084,7 @@ impl VectorDb {
         );
         let rows = result?;
 
-        let results = rows
+        Ok(rows
             .into_iter()
             .map(|(blob_id, distance, created_at, importance)| SearchHit {
                 blob_id,
@@ -2976,9 +3092,7 @@ impl VectorDb {
                 created_at,
                 importance,
             })
-            .collect();
-
-        Ok(unique_hits_by_blob_id(results))
+            .collect())
     }
 
     /// Get all blob_ids for a given owner + namespace (used by restore flow)
