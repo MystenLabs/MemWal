@@ -50,8 +50,10 @@ function makeClient() {
 }
 
 // pollIntervalMs floors to 100ms inside pollingDelayMs, so the first backoff is
-// 75-125ms. A 20ms budget therefore guarantees exactly one poll before the
-// deadline, with no dependence on wall-clock jitter.
+// 75-125ms. A 20ms budget therefore gets at least one immediate poll and then
+// expires during a backoff. The deadline is checked before the sleep, so a stub
+// that returns in a couple of milliseconds can still enter a second iteration —
+// these tests assert `polls >= 1`, never an exact count.
 const ONE_POLL = { pollIntervalMs: 0, timeoutMs: 20 };
 
 // ============================================================
@@ -109,6 +111,72 @@ test("waitForRememberJob timeout without any successful poll still reports the j
     // Nothing was observed, so these stay undefined rather than lying with "".
     assert.equal(err.lastStatus, undefined);
     assert.equal(err.lastBlobId, undefined);
+});
+
+test("a 404 after an 'uploaded' poll still reports what was observed", async () => {
+    // Job cleanup can retire the row between polls. The blob may well be
+    // durable; the caller needs the id to check rather than rewrite.
+    let polls = 0;
+    stubFetch({
+        "/api/remember/cleaned-job": () => {
+            polls += 1;
+            if (polls === 1) {
+                return Response.json({
+                    job_id: "cleaned-job",
+                    status: "uploaded",
+                    blob_id: "blob-uploaded",
+                });
+            }
+            return Response.json({ status: "not_found" }, { status: 404 });
+        },
+    });
+
+    const err = await makeClient()
+        .waitForRememberJob("cleaned-job", { pollIntervalMs: 0, timeoutMs: 5_000 })
+        .then(
+            () => assert.fail("expected a 404"),
+            (e) => e,
+        );
+
+    assert.equal(err.status, 404);
+    assert.equal(err.jobId, "cleaned-job");
+    assert.equal(err.lastStatus, "uploaded");
+    assert.equal(err.lastBlobId, "blob-uploaded");
+});
+
+test("a server-reported failure after an 'uploaded' poll still reports what was observed", async () => {
+    let polls = 0;
+    stubFetch({
+        "/api/remember/late-fail-job": () => {
+            polls += 1;
+            if (polls === 1) {
+                return Response.json({
+                    job_id: "late-fail-job",
+                    status: "uploaded",
+                    blob_id: "blob-uploaded",
+                });
+            }
+            return Response.json({
+                job_id: "late-fail-job",
+                status: "failed",
+                error: "indexing rejected the blob",
+            });
+        },
+    });
+
+    const err = await makeClient()
+        .waitForRememberJob("late-fail-job", { pollIntervalMs: 0, timeoutMs: 5_000 })
+        .then(
+            () => assert.fail("expected a failure"),
+            (e) => e,
+        );
+
+    assert.equal(err.status, 500);
+    // lastStatus tracks the most recent poll, so a terminal failure names
+    // itself; lastBlobId is the part that survives — the blob may be durable
+    // even though indexing gave up on it.
+    assert.equal(err.lastStatus, "failed");
+    assert.equal(err.lastBlobId, "blob-uploaded");
 });
 
 test("waitForRememberJob resolves across the uploaded -> done transition", async () => {
@@ -257,6 +325,35 @@ test("waitForRememberJobs counts a timeout separately from a failure", async () 
     assert.equal(bulk.results[1].error, "walrus rejected blob");
     assert.equal(bulk.results[2].status, "timeout");
     assert.equal(bulk.results[2].last_status, "running");
+});
+
+test("a bulk failure after an 'uploaded' poll keeps the blob id already folded in", async () => {
+    // Timeout was not the only path that discarded state: a terminal overwrite
+    // replaced the whole entry, resetting blob_id to "".
+    let round = 0;
+    stubFetch({
+        "/api/remember/bulk/status": (body) => {
+            round += 1;
+            return Response.json({
+                results: body.job_ids.map((jobId) =>
+                    round === 1
+                        ? { job_id: jobId, status: "uploaded", blob_id: "blob-uploaded" }
+                        : { job_id: jobId, status: "failed", error: "indexing rejected the blob" },
+                ),
+            });
+        },
+    });
+
+    const bulk = await makeClient().waitForRememberJobs(["late-fail-job"], ["notes"], {
+        pollIntervalMs: 0,
+        timeoutMs: 5_000,
+    });
+
+    const [item] = bulk.results;
+    assert.equal(item.status, "failed");
+    assert.equal(item.error, "indexing rejected the blob");
+    assert.equal(item.blob_id, "blob-uploaded");
+    assert.equal(item.last_status, "uploaded");
 });
 
 test("waitForRememberJobs marks a done job with no blob_id as failed, not done", async () => {
