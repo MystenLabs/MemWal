@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { MemWal } from "../dist/memwal.js";
-import { isTimeoutError, DEFAULT_RECALL_TIMEOUT_MS } from "../dist/utils.js";
+import { fetchWithDeadline, isTimeoutError, DEFAULT_RECALL_TIMEOUT_MS } from "../dist/utils.js";
 
 // WALM-598 / GH #438.
 //
@@ -201,6 +201,50 @@ test("health() is bounded by the preflight budget", async () => {
         assert.equal(err.phase, "GET /health");
         return true;
     });
+});
+
+test("the deadline covers the response body, not just the headers", async () => {
+    // fetch() resolves at the headers. A server that answers promptly and then
+    // trickles the body must still blow the budget the caller named, and blow
+    // it as a phase-tagged TimeoutError rather than a bare AbortError.
+    globalThis.fetch = async (_url, init = {}) =>
+        new Response(
+            new ReadableStream({
+                start(controller) {
+                    init.signal?.addEventListener(
+                        "abort",
+                        () => controller.error(abortError()),
+                        { once: true },
+                    );
+                },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+        );
+
+    const res = await fetchWithDeadline(
+        "https://relayer.test/api/recall",
+        { method: "POST" },
+        25,
+        "POST /api/recall",
+    );
+    await assert.rejects(res.json(), (err) => {
+        assert.ok(isTimeoutError(err));
+        assert.equal(err.phase, "POST /api/recall");
+        assert.equal(err.timeoutMs, 25);
+        return true;
+    });
+});
+
+test("a body read inside the deadline releases the timer", async () => {
+    globalThis.fetch = async () => new Response(JSON.stringify({ ok: true }), { status: 200 });
+
+    const res = await fetchWithDeadline(
+        "https://relayer.test/version",
+        { method: "GET" },
+        5_000,
+        "preflight GET /version",
+    );
+    assert.deepEqual(await res.json(), { ok: true });
 });
 
 test("the default recall budget is unchanged at 15s", async () => {

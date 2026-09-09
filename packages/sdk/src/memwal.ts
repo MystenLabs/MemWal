@@ -125,10 +125,10 @@ interface SignedRequestOptions {
     /** Caller-owned cancellation, honoured alongside `timeoutMs`. */
     signal?: AbortSignal;
     /**
-     * WALM-598: deadline for the signed request itself. The clock starts
-     * after the preflights resolve, so this is never charged for a slow
-     * `/version`, `/health` or `/config`. Omit (or pass 0) for no deadline —
-     * which is what every route other than recall does today.
+     * Deadline for the signed request itself. The clock starts after the
+     * preflights resolve, so this is never charged for a slow `/version`,
+     * `/health` or `/config`. Omit (or pass 0) for no deadline — which is what
+     * every route other than recall does today (WALM-598).
      */
     timeoutMs?: number;
 }
@@ -341,10 +341,9 @@ export class MemWal {
     /** Deadline applied to any request that does not name its own. */
     private requestTimeoutMs: number;
     /**
-     * WALM-598: recall's abort budget, and the independent per-round-trip
-     * budget for the unauthenticated preflights that precede it. Kept
-     * separate so a slow `/version`, `/health` or `/config` can no longer
-     * be charged against the recall request it precedes.
+     * Recall's abort budget, and the independent per-round-trip budget for the
+     * unauthenticated preflights that precede it. Separate so a slow
+     * `/version`, `/health` or `/config` is never charged against recall.
      */
     private recallTimeoutMs: number;
     private preflightTimeoutMs: number;

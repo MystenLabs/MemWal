@@ -188,8 +188,8 @@ const POSTGRES_EXTEND_HEADROOM_BYTES: i64 = 1024 * 1024;
 ///
 /// `tokio::sync::RwLock`, not `std::sync::Mutex`, for two reasons:
 ///
-/// 1. This is taken on an async request path. A blocking mutex parked a
-///    Tokio worker thread for the duration of the outbound probe.
+/// 1. The write guard now spans the probe (single-flight), and a
+///    `std::sync::Mutex` must not be held across an `.await`.
 /// 2. `std::sync::Mutex` poisons. The read side recovered with
 ///    `unwrap_or_else(|e| e.into_inner())` but the write side was a bare
 ///    `if let Ok(..)`, so a single panic while the lock was held froze the
@@ -377,11 +377,8 @@ fn postgres_can_accept_writes(used_bytes: i64, max_bytes: i64) -> bool {
 }
 
 /// One outbound `GET {sidecar}/health`, instrumented like every other sidecar
-/// call in this codebase (`storage/walrus.rs`, `storage/seal.rs`). Before
-/// WALM-598 this path emitted no metric at all and logged failures at
-/// `debug!`, which production log levels filter out — so neither the probe's
-/// latency nor its failure rate was measurable while `/health` p50 was being
-/// blamed for SDK aborts.
+/// call in this codebase (`storage/walrus.rs`, `storage/seal.rs`) so the
+/// probe's latency and failure rate are measurable.
 async fn probe_sidecar_write_ready(state: &std::sync::Arc<AppState>) -> bool {
     let url = format!("{}/health", state.config.sidecar_url.trim_end_matches('/'));
     let started = std::time::Instant::now();

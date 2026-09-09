@@ -158,7 +158,7 @@ export class MemWalManual {
     private namespace: string;
     private relayerVersionMetadata: RelayerVersionMetadata | null = null;
     private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
-    /** WALM-598: per-round-trip budget for the compatibility preflight. */
+    /** Per-round-trip budget for the compatibility preflight (WALM-598). */
     private preflightTimeoutMs: number;
 
     // Lazily initialized heavy clients (typed as any to avoid peer dep compile errors)
@@ -815,9 +815,8 @@ export class MemWalManual {
     }
 
     private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
-        // WALM-598: bounded like the relayer-mode client's preflight — these
-        // run inside whatever signed request triggered them, so an untimed
-        // fetch here drains that caller's budget (and can hang forever).
+        // Bounded like the relayer-mode client's preflight: these run inside
+        // whatever signed request triggered them.
         const versionRes = await fetchWithDeadline(
             `${this.serverUrl}/version`,
             { method: "GET" },

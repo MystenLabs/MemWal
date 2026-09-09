@@ -399,13 +399,9 @@ export function clockDriftErrorFromResponse(
  * (`GET /version`, `GET /health`, `GET /config`) the SDK makes before it can
  * dispatch a signed request.
  *
- * These used to run with no signal and no timeout at all. Because they are
- * awaited *inside* a caller's request budget, a relayer whose `/health` p50
- * had drifted to ~9s silently consumed most of `recall()`'s 15s
- * `AbortController` window, and the resulting `AbortError` surfaced on the
- * `/api/recall` fetch even though recall itself was healthy (GH #438).
- * Each preflight now carries its own independent budget so it can neither
- * hang forever nor eat someone else's.
+ * Each preflight carries its own budget: they are awaited inside a caller's
+ * request budget, so an unbounded one both hangs forever and spends someone
+ * else's deadline (WALM-598).
  */
 export const DEFAULT_PREFLIGHT_TIMEOUT_MS = 5_000;
 
@@ -478,15 +474,60 @@ export async function fetchWithDeadline(
           }, timeoutMs)
         : undefined;
 
-    try {
-        return await fetch(url, { ...init, signal: ac.signal });
-    } catch (err) {
-        if (timedOut) throw timeoutError(phase, timeoutMs, err);
-        throw err;
-    } finally {
+    // A response nobody reads must not hold the event loop open.
+    (tid as unknown as { unref?: () => void } | undefined)?.unref?.();
+
+    const release = () => {
         if (tid !== undefined) clearTimeout(tid);
         external?.removeEventListener("abort", onExternalAbort);
+    };
+    const relabel = (err: unknown) => (timedOut ? timeoutError(phase, timeoutMs, err) : err);
+
+    let res: Response;
+    try {
+        res = await fetch(url, { ...init, signal: ac.signal });
+    } catch (err) {
+        release();
+        throw relabel(err);
     }
+    return armBodyDeadline(res, release, relabel);
+}
+
+/**
+ * Keep the deadline armed until the response body settles.
+ *
+ * `fetch()` resolves when the response *headers* arrive, so clearing the timer
+ * there would leave `res.json()` / `res.text()` unbounded: a server that sends
+ * headers promptly and then trickles the body could outlive the budget the
+ * caller named. The read methods carry the timer instead, and relabel an abort
+ * our own timer caused so a slow body still surfaces as a phase-tagged
+ * `TimeoutError` rather than a bare `AbortError`.
+ */
+function armBodyDeadline(
+    res: Response,
+    release: () => void,
+    relabel: (err: unknown) => unknown,
+): Response {
+    const target = res as unknown as Record<string, unknown>;
+    for (const name of ["json", "text", "arrayBuffer", "blob", "formData"]) {
+        const original = target[name];
+        if (typeof original !== "function") continue;
+        const read = (original as (...args: unknown[]) => Promise<unknown>).bind(res);
+        Object.defineProperty(target, name, {
+            configurable: true,
+            writable: true,
+            value: async (...args: unknown[]) => {
+                try {
+                    return await read(...args);
+                } catch (err) {
+                    throw relabel(err);
+                } finally {
+                    release();
+                }
+            },
+        });
+    }
+    return res;
 }
 
 // ============================================================
