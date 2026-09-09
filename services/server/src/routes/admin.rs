@@ -1242,22 +1242,10 @@ async fn restore_unbounded(
         .flatten()
         .collect();
 
-    // Step 6: Insert only new entries (no delete!), atomically.
-    //
-    // GH #566 / WALM-591: this used to be a plain `for` loop of autocommitted
-    // `insert_vector` calls. `restore()` wraps this future in a 55s
-    // `tokio::time::timeout`, so a slow batch had its future DROPPED mid-loop
-    // and every row inserted up to that point stayed committed — a silently
-    // half-written index that a later `recall` read back as duplicated or
-    // truncated results, with `restored` never reported to the caller. A
-    // mid-loop DB error behaved identically.
-    //
-    // Building the whole batch first and handing it to `insert_vectors_atomic`
-    // makes the step all-or-nothing: SQLx rolls the transaction back both when
-    // a row errors and when the future is dropped, so a failed restore leaves
-    // zero rows and the client can simply retry. `limit` is clamped to at most
-    // 100 (`clamp_restore_limit`) and `results` is a subset of that page, so
-    // this is a bounded, short-lived transaction.
+    // Step 6: Insert only new entries (no delete!), all-or-nothing via
+    // `insert_vectors_atomic` — restore runs under a 55s timeout, and a
+    // partially committed batch is a half-written index (GH #566 / WALM-591).
+    // `limit` is clamped to 100 (`clamp_restore_limit`), so the batch is small.
     transient_unresolved += decrypted_texts.len().saturating_sub(results.len());
     let restored = results.len();
     let truncated =

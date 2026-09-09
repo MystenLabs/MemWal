@@ -1342,10 +1342,7 @@ mod tests {
             .unwrap();
     }
 
-    /// GH #566 / WALM-591: restore used to persist its batch with a loop of
-    /// autocommitted inserts, so a row that failed partway through left every
-    /// earlier row committed — a half-written index `recall` would read back.
-    /// The batch must now be all-or-nothing.
+    /// A row that fails partway through must not leave earlier rows committed.
     #[tokio::test]
     async fn restore_batch_insert_rolls_back_every_row_when_one_fails() {
         let Some(db) = test_db().await else {
@@ -1478,7 +1475,12 @@ mod tests {
             .zip(blob_ids.iter())
             .map(|(id, blob_id)| restore_row(id, &owner, &namespace, blob_id, &vector))
             .collect();
-        let deadline = (full_batch_time / 2).max(Duration::from_micros(1));
+        // Floored at 5ms: on a fast pool half a sub-millisecond warm-up
+        // cancels before `BEGIN` is even sent, and `landed == 0` would then
+        // pass without the rollback ever being exercised. If the floor lets the
+        // batch finish instead, the `Ok(Ok(()))` arm asserts a full commit — a
+        // real check either way.
+        let deadline = (full_batch_time / 2).max(Duration::from_millis(5));
         let cancelled = tokio::time::timeout(deadline, db.insert_vectors_atomic(&batch)).await;
 
         let landed = rows_for_owner(&db, &owner, &namespace).await;
@@ -2520,28 +2522,16 @@ impl VectorDb {
     /// Persist a whole batch of vector rows in ONE transaction: either every
     /// row lands or none of them do.
     ///
-    /// GH #566 / WALM-591 — why this exists. Namespace restore used to persist
-    /// its batch with a plain `for` loop of autocommitted `insert_vector`
-    /// calls. `POST /api/restore` wraps the whole restore in
-    /// `tokio::time::timeout(55s, ..)`, so a slow batch had its future DROPPED
-    /// mid-loop: every row inserted up to that point stayed committed while the
-    /// caller got `UpstreamUnavailable` and never learned how many rows landed.
-    /// A later `recall` then read a silently half-written index. A mid-loop DB
-    /// error had exactly the same effect, because `?` returned after earlier
-    /// rows had already committed.
+    /// One transaction, so neither a mid-batch `?` nor a dropped future can
+    /// commit a prefix: restore runs under `tokio::time::timeout(55s, ..)`, and
+    /// a prefix is a half-written index (GH #566 / WALM-591). SQLx queues a
+    /// `ROLLBACK` when a dropped `Transaction` returns its connection to the
+    /// pool — the property `jobs::JobUploadLock` also relies on — so a drop
+    /// before Postgres has processed `COMMIT` leaves zero rows. A drop after
+    /// that lands the whole batch; either way it is never partial.
     ///
-    /// One transaction closes both paths, including the dropped-future one:
-    /// SQLx queues a `ROLLBACK` when a dropped `Transaction` hands its
-    /// connection back to the pool — the same cancellation-safety property
-    /// `jobs::JobUploadLock` relies on — so cancelling this future at any point
-    /// leaves zero rows behind. Nothing is visible to another session until
-    /// `commit()` returns, so restore is now all-or-nothing rather than
-    /// silently partial.
-    ///
-    /// Callers must keep the batch bounded. The only production caller,
-    /// restore, clamps its page to 100 rows (`clamp_restore_limit`), so this is
-    /// a small, short-lived transaction that holds no user-visible locks beyond
-    /// the rows it writes.
+    /// Callers must keep the batch bounded. Restore clamps its page to 100 rows
+    /// (`clamp_restore_limit`), so this stays short-lived.
     pub async fn insert_vectors_atomic(&self, rows: &[VectorInsert<'_>]) -> Result<(), AppError> {
         if rows.is_empty() {
             return Ok(());
