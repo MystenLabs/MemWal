@@ -11,8 +11,9 @@ const REDIS_CONNECT_TIMEOUT_MS = 1000;
 const REDIS_MAX_RECONNECT_ATTEMPTS = 2;
 
 export const GUEST_AUTH_RATE_LIMIT_PER_IP = 5;
-export const GUEST_AUTH_RATE_LIMIT_GLOBAL = 60;
-export const GUEST_AUTH_RATE_LIMIT_TTL_SECONDS = 15 * 60;
+/** Site-wide admission cap: every unauthenticated visitor hits GET /api/auth/guest. */
+export const GUEST_AUTH_RATE_LIMIT_GLOBAL = 150;
+export const GUEST_AUTH_RATE_LIMIT_TTL_SECONDS = 60;
 
 const GUEST_AUTH_RATE_LIMIT_LUA = `
 local ip_key       = KEYS[1]
@@ -76,46 +77,51 @@ function ensureRedisClient(): RedisClient | null {
   return client;
 }
 
-function beginConnect(redis: RedisClient): void {
-  if (redis.isOpen || connectPromise) {
-    return;
-  }
-
-  connectPromise = redis.connect().then(
+function startConnect(redis: RedisClient): Promise<void> {
+  const pending = redis.connect().then(
     () => undefined,
     () => {
       client = null;
     }
   );
+  connectPromise = pending;
+  void pending.finally(() => {
+    if (connectPromise === pending) {
+      connectPromise = null;
+    }
+  });
+  return pending;
 }
 
-function getClient() {
-  const redis = ensureRedisClient();
-  if (redis) {
-    beginConnect(redis);
+async function drainConnectPromise(): Promise<void> {
+  if (!connectPromise) {
+    return;
   }
-  return redis;
+  try {
+    await connectPromise;
+  } finally {
+    connectPromise = null;
+  }
 }
 
+/** One await-and-clear helper. Do not fire-and-forget connect() — leftover settled promises skip reconnect. */
 async function getReadyRedisClient(): Promise<RedisClient | null> {
   const redis = ensureRedisClient();
   if (!redis) {
     return null;
   }
 
-  if (redis.isReady) {
-    return redis;
+  await drainConnectPromise();
+
+  const current = client ?? ensureRedisClient();
+  if (!current) {
+    return null;
   }
 
-  beginConnect(redis);
-
-  if (connectPromise) {
-    try {
-      await connectPromise;
-    } finally {
-      connectPromise = null;
-    }
+  if (!current.isOpen && !connectPromise) {
+    startConnect(current);
   }
+  await drainConnectPromise();
 
   return client?.isReady ? client : null;
 }
@@ -145,8 +151,8 @@ export async function checkIpRateLimit(ip: string | undefined) {
     return;
   }
 
-  const redis = getClient();
-  if (!redis?.isReady) {
+  const redis = await getReadyRedisClient();
+  if (!redis) {
     return;
   }
 
@@ -180,6 +186,49 @@ export class GuestAuthRateLimitError extends Error {
     this.name = "GuestAuthRateLimitError";
     this.status = status;
   }
+}
+
+const GUEST_AUTH_SIGNIN_CODES = {
+  too_many_requests: 429,
+  service_unavailable: 503,
+} as const;
+
+export function guestAuthSignInCode(
+  status: 429 | 503
+): keyof typeof GUEST_AUTH_SIGNIN_CODES {
+  return status === 429 ? "too_many_requests" : "service_unavailable";
+}
+
+/** Unwrap Auth.js CallbackRouteError / CredentialsSignin back to a guest limiter error. */
+export function guestAuthLimitFromError(
+  error: unknown
+): GuestAuthRateLimitError | null {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof GuestAuthRateLimitError) {
+      return current;
+    }
+    if (typeof current !== "object") {
+      return null;
+    }
+    const rec = current as { code?: unknown; cause?: unknown };
+    if (rec.code === "too_many_requests") {
+      return new GuestAuthRateLimitError(429);
+    }
+    if (rec.code === "service_unavailable") {
+      return new GuestAuthRateLimitError(503);
+    }
+    const cause = rec.cause;
+    current =
+      cause && typeof cause === "object" && cause !== null && "err" in cause
+        ? (cause as { err: unknown }).err
+        : cause;
+  }
+
+  return null;
 }
 
 function memoryCount(key: string): number {

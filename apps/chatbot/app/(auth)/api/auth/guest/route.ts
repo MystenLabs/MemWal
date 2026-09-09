@@ -6,7 +6,23 @@ import {
   checkGuestAuthRateLimit,
   GUEST_AUTH_RATE_LIMIT_TTL_SECONDS,
   GuestAuthRateLimitError,
+  guestAuthLimitFromError,
 } from "@/lib/ratelimit";
+
+function guestAuthLimitResponse(error: GuestAuthRateLimitError) {
+  return NextResponse.json(
+    { error: error.message },
+    {
+      status: error.status,
+      headers: {
+        "Retry-After":
+          error.status === 429
+            ? String(GUEST_AUTH_RATE_LIMIT_TTL_SECONDS)
+            : "5",
+      },
+    }
+  );
+}
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -26,22 +42,20 @@ export async function GET(request: Request) {
     // Peek only: signIn("guest") runs authorize() in-process, which consumes.
     await checkGuestAuthRateLimit(request, { consume: false });
   } catch (error) {
-    if (error instanceof GuestAuthRateLimitError) {
-      return NextResponse.json(
-        { error: error.message },
-        {
-          status: error.status,
-          headers: {
-            "Retry-After":
-              error.status === 429
-                ? String(GUEST_AUTH_RATE_LIMIT_TTL_SECONDS)
-                : "5",
-          },
-        }
-      );
+    const limited = guestAuthLimitFromError(error);
+    if (limited) {
+      return guestAuthLimitResponse(limited);
     }
     throw error;
   }
 
-  return signIn("guest", { redirect: true, redirectTo: redirectUrl });
+  try {
+    return await signIn("guest", { redirect: true, redirectTo: redirectUrl });
+  } catch (error) {
+    const limited = guestAuthLimitFromError(error);
+    if (limited) {
+      return guestAuthLimitResponse(limited);
+    }
+    throw error;
+  }
 }

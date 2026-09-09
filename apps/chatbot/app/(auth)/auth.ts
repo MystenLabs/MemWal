@@ -1,11 +1,11 @@
 import { compare } from "bcrypt-ts";
-import NextAuth, { type DefaultSession } from "next-auth";
+import NextAuth, { CredentialsSignin, type DefaultSession } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
 import { headers } from "next/headers";
 import { DUMMY_PASSWORD } from "@/lib/constants";
 import { createGuestUser, getUser } from "@/lib/db/queries";
-import { checkGuestAuthRateLimit } from "@/lib/ratelimit";
+import { checkGuestAuthRateLimit, GuestAuthRateLimitError, guestAuthSignInCode } from "@/lib/ratelimit";
 import { authConfig } from "./auth.config";
 
 export type UserType = "guest" | "regular";
@@ -70,11 +70,20 @@ export const {
       id: "guest",
       credentials: {},
       async authorize() {
-        await checkGuestAuthRateLimit(
-          new Request("http://127.0.0.1/api/auth/callback/guest", {
-            headers: await headers(),
-          })
-        );
+        try {
+          await checkGuestAuthRateLimit(
+            new Request("http://127.0.0.1/api/auth/callback/guest", {
+              headers: await headers(),
+            })
+          );
+        } catch (error) {
+          if (error instanceof GuestAuthRateLimitError) {
+            const signInError = new CredentialsSignin();
+            signInError.code = guestAuthSignInCode(error.status);
+            throw signInError;
+          }
+          throw error;
+        }
         const [guestUser] = await createGuestUser();
         return { ...guestUser, type: "guest" };
       },

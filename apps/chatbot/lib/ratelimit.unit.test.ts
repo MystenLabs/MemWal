@@ -54,8 +54,10 @@ vi.mock("redis", () => ({
 
 import {
   checkGuestAuthRateLimit,
+  checkIpRateLimit,
   GUEST_AUTH_RATE_LIMIT_PER_IP,
   GuestAuthRateLimitError,
+  guestAuthLimitFromError,
   getClientIp,
   resetMemoryGuestAuthRateLimit,
 } from "@/lib/ratelimit";
@@ -283,6 +285,34 @@ describe("checkGuestAuthRateLimit", () => {
       status: 503,
     });
   });
+
+  it("reconnects after chat traffic left a settled connectPromise", async () => {
+    limiterEnv.production = true;
+    process.env.REDIS_URL = "redis://127.0.0.1:6379";
+    redisHarness.connect.mockImplementation(async () => {
+      redisHarness.isOpen = true;
+      redisHarness.isReady = true;
+    });
+
+    await checkIpRateLimit("203.0.113.10");
+    expect(redisHarness.connect).toHaveBeenCalled();
+
+    redisHarness.isOpen = false;
+    redisHarness.isReady = false;
+    redisHarness.connect.mockClear();
+    redisHarness.connect.mockImplementation(async () => {
+      redisHarness.isOpen = true;
+      redisHarness.isReady = true;
+    });
+
+    await expect(
+      checkGuestAuthRateLimit(
+        requestWithHeaders({ "x-real-ip": "203.0.113.10" })
+      )
+    ).resolves.toBeUndefined();
+    expect(redisHarness.connect).toHaveBeenCalled();
+    expect(redisHarness.eval).toHaveBeenCalled();
+  });
 });
 
 describe("guest auth call sites", () => {
@@ -292,10 +322,32 @@ describe("guest auth call sites", () => {
     expect(guestRouteSource.indexOf("checkGuestAuthRateLimit")).toBeLessThan(
       guestRouteSource.indexOf('signIn("guest"')
     );
+    expect(guestRouteSource).toContain("guestAuthLimitFromError");
 
     expect(authSource).toContain("checkGuestAuthRateLimit");
+    expect(authSource).toContain("CredentialsSignin");
     expect(authSource.indexOf("checkGuestAuthRateLimit")).toBeLessThan(
       authSource.indexOf("createGuestUser()")
     );
+  });
+});
+
+describe("guestAuthLimitFromError", () => {
+  it("unwraps Auth.js CredentialsSignin codes and CallbackRouteError cause", () => {
+    expect(
+      guestAuthLimitFromError(
+        Object.assign(new Error("CredentialsSignin"), {
+          code: "too_many_requests",
+        })
+      )
+    ).toMatchObject({ status: 429 });
+    expect(
+      guestAuthLimitFromError(
+        Object.assign(new Error("CallbackRouteError"), {
+          cause: { err: new GuestAuthRateLimitError(503) },
+        })
+      )
+    ).toMatchObject({ status: 503 });
+    expect(guestAuthLimitFromError(new Error("unrelated"))).toBeNull();
   });
 });
