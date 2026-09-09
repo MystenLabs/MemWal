@@ -165,45 +165,19 @@ const SEARCH_SIMILAR_SQL: &str =
              ORDER BY embedding <=> $1
              LIMIT $4";
 
-/// The same query with the memories the security-delete subsystem has
-/// already given up on filtered out (WALM-592 / GH #591).
+/// `SEARCH_SIMILAR_SQL` with the memories the security-delete subsystem has
+/// already claimed hidden (WALM-592).
 ///
-/// `POST /api/forget` hard-`DELETE`s its rows inside one transaction, so it
-/// never had a stale-read window. The dashboard delete does: `prepare_deletion`
-/// only flips `delete_blobs_tracking.state` to `deleting`, and the matching
-/// `vector_entries` rows survive until the Sui transaction confirms and
-/// `finalize_batch_deleted` runs — inline on submit, or up to one 30s
-/// reconciler tick later. That gap is the reported 5–15s of stale recall
-/// hits, and it is worse than a merely redundant row: the Redis ciphertext
-/// cache (`memwal:blob:v1:`, 14-day TTL) is never invalidated on delete, so
-/// a surviving row can hydrate the deleted plaintext long after the Walrus
-/// blob is gone. Filtering in SQL keeps the row out of the candidate set
-/// entirely, so hydration — and therefore that cache — is never reached for it.
+/// Anti-join rather than a soft-delete column: migration 020 keeps deletion
+/// state out of `vector_entries` on purpose. `delete_blobs_tracking`'s primary
+/// key is `(owner, blob_id)` — the anti-join key — so the HNSW scan still
+/// drives the plan and no new index is needed.
 ///
-/// This is an anti-join, not a soft-delete column: migration 020 records the
-/// deliberate decision to keep deletion state out of `vector_entries`
-/// ("21 production queries read that table; a missed soft-delete filter
-/// would leak content or over-count storage").
-///
-/// Cost: `delete_blobs_tracking`'s primary key is `(owner, blob_id)` — exactly
-/// the anti-join key — so each surviving candidate costs one index probe and
-/// the HNSW scan still drives the plan. No new index is required.
-///
-/// The line between the six tracking states is "is the Walrus Blob object
-/// gone, or going": `deleting` (claimed by a live batch — the reported bug),
-/// `deleted` (our own delete confirmed on chain; `finalize_batch_deleted`
-/// removes the row in the same transaction, so this is belt-and-braces) and
-/// `deleted_external` (`batch_get_objects` no longer returns the object at
-/// all). The other three are left alone because the object is still there and
-/// still readable: `deletable` is an ordinary live memory, `not_owner` only
-/// means the relayer cannot delete it on chain, and `expired` is a
-/// look-ahead — `terminal_state` applies `EXPIRY_MARGIN_EPOCHS` (default 1)
-/// so a blob is marked expired a full Walrus epoch before its content
-/// actually lapses. Recall applies no `expires_at` filter today, and adding
-/// one here would silently retire live memories early; that belongs with
-/// per-memory expiry, not with this fix.
-///
-/// Pinned against the store's own constants by
+/// Only the three states where the Walrus Blob object is gone or going are
+/// filtered. `expired` in particular must stay visible: `terminal_state`
+/// applies `EXPIRY_MARGIN_EPOCHS` ahead of the real lapse, so filtering it
+/// would retire live memories early. The state list is pinned against the
+/// store's own constants by
 /// `pending_delete_filter_matches_the_security_delete_store`.
 const SEARCH_SIMILAR_EXCLUDING_PENDING_DELETES_SQL: &str =
     "SELECT v.blob_id, (v.embedding <=> $1)::float8 AS distance, v.created_at, v.importance
@@ -1570,6 +1544,31 @@ mod tests {
         Some(db)
     }
 
+    /// A probe that errors must not turn off a filter a previous probe
+    /// enabled. `main` re-probes after `LegacyDb::new()`; a transient failure
+    /// there used to disable the filter for the life of the process.
+    #[tokio::test]
+    async fn a_failed_probe_keeps_the_pending_delete_filter_it_already_had() {
+        let Some(db) = security_delete_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        assert!(
+            db.pending_delete_filter_enabled(),
+            "security_delete_test_db must hand back a db with the filter on"
+        );
+
+        // Closing the pool makes the next probe fail the way a transient
+        // connection error would.
+        db.pool().close().await;
+
+        assert!(
+            db.refresh_pending_delete_filter().await,
+            "a failed probe must keep the filter that was already enabled"
+        );
+        assert!(db.pending_delete_filter_enabled());
+    }
+
     /// WALM-592 / GH #591. The dashboard delete claims a memory by flipping
     /// its tracking row to `deleting`; the `vector_entries` row then survives
     /// until the Sui transaction confirms and `finalize_batch_deleted` runs
@@ -2201,10 +2200,11 @@ impl VectorDb {
     /// first boot that turns security deletion on would keep serving
     /// pending-delete rows until the next restart.
     ///
-    /// A failed probe leaves the filter off. Recall is the hottest read path
-    /// in the service and referencing a missing table would turn every
-    /// recall into an `undefined_table` 500, so the failure mode here is
-    /// "behave exactly as before", never "break recall".
+    /// The flag starts `false`, so a table that is genuinely absent can never
+    /// turn recall into an `undefined_table` 500. A probe that *errors* is not
+    /// evidence of absence, though: it leaves the current setting alone, or a
+    /// transient failure on the `main` re-probe would disable a working filter
+    /// for the life of the process.
     pub async fn refresh_pending_delete_filter(&self) -> bool {
         let present: bool =
             match sqlx::query_scalar("SELECT to_regclass('delete_blobs_tracking') IS NOT NULL")
@@ -2213,12 +2213,14 @@ impl VectorDb {
             {
                 Ok(present) => present,
                 Err(e) => {
+                    let current = self.pending_delete_filter_enabled();
                     tracing::warn!(
-                        "could not probe for delete_blobs_tracking; recall will not \
-                         filter pending security deletes: {}",
+                        enabled = current,
+                        "could not probe for delete_blobs_tracking; keeping the current \
+                         recall pending-security-delete filter setting: {}",
                         e
                     );
-                    false
+                    return current;
                 }
             };
         let previous = self
