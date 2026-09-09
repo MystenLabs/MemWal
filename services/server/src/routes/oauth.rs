@@ -651,8 +651,11 @@ enum DelegateVerifyOutcome {
 
 impl DelegateVerifyOutcome {
     /// Only a definitive answer spends the one-time authorization session. A
-    /// retryable upstream failure must leave it `pending` so the user can hit
-    /// "connect" again instead of restarting `/oauth/authorize` (WALM-605).
+    /// retryable upstream failure must leave it `pending` so the consent UI can
+    /// re-POST `/complete` instead of restarting `/oauth/authorize` (WALM-605).
+    ///
+    /// `session_complete` encodes this in its match arms; the tests below pin
+    /// the rule itself.
     fn consumes_session(&self) -> bool {
         !matches!(self, Self::Retryable { .. })
     }
@@ -714,12 +717,9 @@ pub async fn session_complete(
         .await
         .map_err(|_| OAuthError::invalid_request("wallet ownership proof is invalid"))?;
 
-    // Read the session WITHOUT claiming it. The claim moved below the on-chain
-    // read because it is irreversible: consuming first meant a Sui 429 during
-    // verification burned the session and forced the user to restart the whole
-    // authorize flow (WALM-605). Single-use is unaffected — no code is minted
-    // until `claim_oauth_session` wins the `WHERE status = 'pending'` update,
-    // and the wallet ownership proof above already gates reaching this point.
+    // Read WITHOUT claiming: the claim is irreversible and belongs below the
+    // on-chain read (WALM-605). Single-use is unaffected — no code is minted
+    // until `claim_oauth_session` wins the `WHERE status = 'pending'` update.
     let pending = state
         .db
         .fetch_oauth_session(&session_id)
@@ -755,16 +755,10 @@ pub async fn session_complete(
         )
         .await,
     );
-    // Claiming is irreversible, so only a definitive answer earns it: a
-    // "registered" and a "not registered" both spend the session exactly as
-    // this handler did before WALM-605, while an unreachable chain leaves the
-    // row `pending` for the user to re-submit against.
-    let claimed = if outcome.consumes_session() {
-        Some(claim_oauth_session(&state, &session_id).await?)
-    } else {
-        None
-    };
-    let verified_owner = match outcome {
+    // Claim only after a definitive on-chain answer; Retryable must leave
+    // status='pending'. Claiming per-arm rather than behind a boolean keeps the
+    // compiler, not a convention, responsible for that.
+    let (session, verified_owner) = match outcome {
         DelegateVerifyOutcome::Retryable { reason } => {
             // Deliberately no session_id: possession of one plus a wallet
             // signature mints a code, so it does not belong in logs.
@@ -777,13 +771,15 @@ pub async fn session_complete(
             )));
         }
         DelegateVerifyOutcome::Unregistered { reason } => {
+            claim_oauth_session(&state, &session_id).await?;
             return Err(OAuthError::invalid_request(format!(
                 "delegate key is not registered on-chain: {reason}"
             )));
         }
-        DelegateVerifyOutcome::Verified { owner } => owner,
+        DelegateVerifyOutcome::Verified { owner } => {
+            (claim_oauth_session(&state, &session_id).await?, owner)
+        }
     };
-    let session = claimed.expect("a verified outcome always claims the session");
     if !verified_owner.eq_ignore_ascii_case(&owner_address) {
         return Err(OAuthError::invalid_request(
             "verified owner does not match connected account",
@@ -850,9 +846,8 @@ pub async fn session_cancel(
     Json(req): Json<SessionCancelRequest>,
 ) -> Result<Json<RedirectResponse>, OAuthError> {
     require_oauth(&state)?;
-    // Unlike `session_complete`, cancelling consults nothing off-box, so there
-    // is no retryable failure that could strand the user: the denial itself is
-    // the definitive outcome and burning the session is the point (WALM-605).
+    // Cancelling consults nothing off-box, so there is no retryable failure:
+    // the denial is definitive and burning the session is the point.
     let session = claim_oauth_session(&state, &session_id).await?;
 
     let error = req
@@ -1222,12 +1217,9 @@ mod tests {
 
     // ── WALM-605: a Sui 429 must not read as "unregistered" ──────────
     //
-    // These cover the decision, not the handler: `services/server` has no
-    // dev-dependencies and no HTTP/gRPC mock harness, so `session_complete`
-    // itself (which needs a Postgres pool, a Sui client and a wallet verifier)
-    // cannot be driven from a unit test. `classify_delegate_verify` +
-    // `consumes_session` are the whole of the fix's logic, and the handler has
-    // exactly one call site for each.
+    // These cover the decision, not the handler: `session_complete` needs a
+    // Postgres pool, a Sui client and a wallet verifier, and this crate has no
+    // mock harness for them.
 
     #[test]
     fn rpc_error_during_verify_is_retryable_and_spares_the_session() {

@@ -28,7 +28,7 @@
  *   6. `window.location.replace(redirect_url)` — hands control back to
  *      Claude (or whatever OAuth client started the flow).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
     ConnectModal,
     useCurrentAccount,
@@ -44,11 +44,21 @@ import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 
 const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
 
+/** The `POST /complete` body, plus the analytics flag that goes with it. */
+type CompletePayload = {
+    account_id: string
+    owner_address: string
+    owner_signature: string
+    tx_digest: string
+    reused_delegate: boolean
+}
+
 type Step =
     | 'loading'
     | 'consent'
     | 'signing'
     | 'finishing'
+    | 'retry-complete'
     | 'redirecting'
     | 'no-account'
     | 'error'
@@ -82,6 +92,8 @@ async function resolveAccountId(
     }
 }
 
+type OAuthRequestError = Error & { status: number; oauthError?: string }
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetch(url, {
         ...init,
@@ -89,13 +101,28 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     })
     const body = await res.json().catch(() => null)
     if (!res.ok) {
+        const envelope = body && typeof body === 'object' ? (body as Record<string, unknown>) : null
         const description =
-            body && typeof body === 'object' && 'error_description' in body
-                ? String((body as { error_description: unknown }).error_description)
+            envelope && 'error_description' in envelope
+                ? String(envelope.error_description)
                 : `request failed (${res.status})`
-        throw new Error(description)
+        const err = new Error(description) as OAuthRequestError
+        err.status = res.status
+        if (envelope && typeof envelope.error === 'string') err.oauthError = envelope.error
+        throw err
     }
     return body as T
+}
+
+/**
+ * The relayer could not reach Sui, so it left the authorization session
+ * `pending` instead of burning it (WALM-605). Re-POSTing `/complete` alone is
+ * the recovery — restarting `handleConnect` would re-submit `add_delegate_key`
+ * for a key that is already on chain, which aborts with code 0.
+ */
+function isRetryableComplete(err: unknown): boolean {
+    const e = err as Partial<OAuthRequestError> | null
+    return e?.oauthError === 'temporarily_unavailable' || e?.status === 503
 }
 
 export default function ConnectClaude() {
@@ -145,6 +172,53 @@ export default function ConnectClaude() {
         if (!sessionValid) return
         sessionStorage.setItem('memwal_claude_connect', JSON.stringify({ session: sessionId }))
     }, [sessionValid, sessionId])
+
+    // Everything `POST /complete` needs, kept so a retry re-sends exactly this
+    // request. Re-running `handleConnect` instead would re-submit
+    // `add_delegate_key` for a key already on chain (abort code 0).
+    const pendingComplete = useRef<CompletePayload | null>(null)
+
+    const completeSession = useCallback(async (payload: CompletePayload) => {
+        pendingComplete.current = payload
+        setStep('finishing')
+        try {
+            const { redirect_url } = await fetchJson<{ redirect_url: string }>(
+                `${apiBase}/api/oauth/session/${sessionId}/complete`,
+                {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        account_id: payload.account_id,
+                        owner_address: payload.owner_address,
+                        owner_signature: payload.owner_signature,
+                        tx_digest: payload.tx_digest,
+                    }),
+                },
+            )
+            sessionStorage.removeItem('memwal_claude_connect')
+            setStep('redirecting')
+            trackEvent('claude_connect_complete', { reused_delegate: payload.reused_delegate })
+            window.location.replace(redirect_url)
+        } catch (err) {
+            if (!isRetryableComplete(err)) throw err
+            // The session is still pending, so offer this one request again
+            // rather than dropping into the terminal error state.
+            setErrorMsg(err instanceof Error ? err.message : String(err))
+            setStep('retry-complete')
+            trackEvent('claude_connect_failed', { error_type: 'sui_unavailable' })
+        }
+    }, [apiBase, sessionId])
+
+    const handleRetryComplete = useCallback(async () => {
+        const payload = pendingComplete.current
+        if (!payload) return
+        try {
+            await completeSession(payload)
+        } catch (err) {
+            setErrorMsg(err instanceof Error ? err.message : String(err))
+            setStep('error')
+            trackEvent('claude_connect_failed', { error_type: getAnalyticsErrorType(err) })
+        }
+    }, [completeSession])
 
     const handleConnect = useCallback(async () => {
         if (!session) return
@@ -220,28 +294,19 @@ export default function ConnectClaude() {
                 `Walrus Memory OAuth authorization\nsession:${sessionId}\naccount:${accountId.toLowerCase()}\nowner:${currentAccount.address.toLowerCase()}`,
             )
             const { signature: ownerSignature } = await signPersonalMessage({ message: proofMessage })
-            const { redirect_url } = await fetchJson<{ redirect_url: string }>(
-                `${apiBase}/api/oauth/session/${sessionId}/complete`,
-                {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        account_id: accountId,
-                        owner_address: currentAccount.address,
-                        owner_signature: ownerSignature,
-                        tx_digest: txDigest || 'reused-delegate',
-                    }),
-                },
-            )
-            sessionStorage.removeItem('memwal_claude_connect')
-            setStep('redirecting')
-            trackEvent('claude_connect_complete', { reused_delegate: !preflight.needs_onchain_registration })
-            window.location.replace(redirect_url)
+            await completeSession({
+                account_id: accountId,
+                owner_address: currentAccount.address,
+                owner_signature: ownerSignature,
+                tx_digest: txDigest || 'reused-delegate',
+                reused_delegate: !preflight.needs_onchain_registration,
+            })
         } catch (err) {
             setErrorMsg(err instanceof Error ? err.message : String(err))
             setStep('error')
             trackEvent('claude_connect_failed', { error_type: getAnalyticsErrorType(err) })
         }
-    }, [session, currentAccount, suiClient, signAndExecute, signPersonalMessage, apiBase, sessionId])
+    }, [session, currentAccount, suiClient, signAndExecute, signPersonalMessage, completeSession])
 
     const handleCancel = useCallback(async () => {
         try {
@@ -318,6 +383,23 @@ export default function ConnectClaude() {
                             </p>
                             <div className="setup-classic-actions">
                                 <Link to="/setup" className="lp-btn-yellow">Create account and continue</Link>
+                            </div>
+                        </div>
+                    )}
+
+                    {step === 'retry-complete' && (
+                        <div className="setup-classic-intro">
+                            <h2 className="setup-classic-title">Sui is busy — try again</h2>
+                            <p className="setup-classic-description">
+                                Your delegate key is registered and this authorization is still valid. We just
+                                couldn't reach Sui to verify it. Nothing needs redoing — press the button to
+                                finish.
+                            </p>
+                            <p className="setup-classic-description" style={errorTextStyle}>{errorMsg}</p>
+                            <div className="setup-classic-actions">
+                                <button type="button" className="lp-btn-yellow" onClick={handleRetryComplete}>
+                                    Finish connecting
+                                </button>
                             </div>
                         </div>
                     )}
