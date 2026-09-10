@@ -467,15 +467,14 @@ export async function fetchWithDeadline(
         if (external.aborted) ac.abort();
         else external.addEventListener("abort", onExternalAbort, { once: true });
     }
+    // Deliberately not `unref()`d: this timer is what bounds the body read
+    // below, so it has to be able to fire on an otherwise-idle loop.
     const tid = bounded
         ? setTimeout(() => {
               timedOut = true;
               ac.abort();
           }, timeoutMs)
         : undefined;
-
-    // A response nobody reads must not hold the event loop open.
-    (tid as unknown as { unref?: () => void } | undefined)?.unref?.();
 
     const release = () => {
         if (tid !== undefined) clearTimeout(tid);
