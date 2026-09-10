@@ -356,6 +356,35 @@ test("a bulk failure after an 'uploaded' poll keeps the blob id already folded i
     assert.equal(item.last_status, "uploaded");
 });
 
+test("a bulk job first seen as failed keeps the blob id on that same poll", async () => {
+    // The relayer's mark_remember_job_failed updates status and error only, so
+    // an uploaded-then-failed row still carries blob_id. A caller that polls
+    // after other work can see `failed` on the very first poll, with no earlier
+    // observation to fold in.
+    stubFetch({
+        "/api/remember/bulk/status": (body) =>
+            Response.json({
+                results: body.job_ids.map((jobId) => ({
+                    job_id: jobId,
+                    status: "failed",
+                    blob_id: "blob-minted",
+                    error: "indexing rejected the blob",
+                })),
+            }),
+    });
+
+    const bulk = await makeClient().waitForRememberJobs(["first-fail-job"], ["notes"], {
+        pollIntervalMs: 0,
+        timeoutMs: 5_000,
+    });
+
+    const [item] = bulk.results;
+    assert.equal(item.status, "failed");
+    // Empty would contradict the documented meaning: "" means never seen at
+    // uploaded, not "status is failed".
+    assert.equal(item.blob_id, "blob-minted");
+});
+
 test("waitForRememberJobs marks a done job with no blob_id as failed, not done", async () => {
     stubFetch({
         "/api/remember/bulk/status": (body) =>
