@@ -56,7 +56,7 @@ Config:
 For the full config surface, see [Configuration](/reference/configuration).
 
 `recallTimeoutMs` covers the recall request alone. The preflights that run
-before it — the relayer compatibility check and the SEAL session build — are
+before it (the relayer compatibility check and the SEAL session build) are
 bounded separately by `preflightTimeoutMs`, so a slow relayer preflight cannot
 consume recall's budget.
 
@@ -125,7 +125,7 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 - `scoringWeights` blends recency and importance into the ranking (see [Ordering](#ordering) below)
 - `timeoutMs` overrides the client's `recallTimeoutMs` for this call. On expiry
   recall throws a `TimeoutError` whose `phase` names the round-trip that
-  stalled — `"POST /api/recall"`, or `"preflight GET /version"` when it was the
+  stalled: `"POST /api/recall"`, or `"preflight GET /version"` when it was the
   compatibility check. Use the exported `isTimeoutError(err)` to detect it.
 
 **Returns:**
