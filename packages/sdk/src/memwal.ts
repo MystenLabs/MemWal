@@ -569,9 +569,6 @@ export class MemWal {
                 });
             }
 
-            // Remember what we saw before branching, so a later timeout can
-            // report the last known state even if this poll is non-terminal.
-            lastStatus = status.status;
             if (status.blob_id) lastBlobId = status.blob_id;
 
             if (status.status === "done") {
@@ -602,6 +599,13 @@ export class MemWal {
                     { status: 500, jobId, lastStatus, lastBlobId },
                 );
             }
+
+            // Non-terminal (pending | running | uploaded). Record it only here,
+            // so `lastStatus` means "how far the job got", the same as the bulk
+            // path's `last_status`. Assigning before the branches made a 500
+            // report "failed" and a 502 report "done" — the terminal poll, not
+            // the progress a caller needs to decide whether to recover.
+            lastStatus = status.status;
         }
 
         const observed = [

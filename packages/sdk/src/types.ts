@@ -93,7 +93,11 @@ export interface RememberJobTimeoutError extends Error {
     status: number;
     /** The job that was being polled. Always set. */
     jobId: string;
-    /** Last non-terminal status observed, if the job was seen at all. */
+    /**
+     * Last non-terminal status observed, if the job was seen at all. This is
+     * how far the job got, not the poll that ended the wait, so it matches the
+     * bulk path's `last_status`.
+     */
     lastStatus?: RememberJobStatus["status"];
     /** Last blob_id observed (set from "uploaded" onwards), if any. */
     lastBlobId?: string;
@@ -292,11 +296,13 @@ export interface RememberBulkItemResult {
     /** job_id returned by the server */
     id: string;
     /**
-     * Walrus blob_id once the job completes ("" if failed).
+     * Walrus blob_id once the job completes.
      *
-     * On `status: "timeout"` this carries the last blob_id observed while
-     * polling — non-empty when the job had reached "uploaded" — so a timeout
-     * no longer throws the blob id away.
+     * On any non-`done` item this carries the last blob_id observed while
+     * polling, so `failed` and `timeout` items keep it too. Empty means the job
+     * was never seen at `uploaded`, NOT that the status is `failed`: a
+     * non-empty value on a failed item is the handle for recovering a blob that
+     * was minted before indexing gave up.
      */
     blob_id: string;
     /** Final status reported by the server: "done" | "failed" | "timeout" */
@@ -306,9 +312,9 @@ export interface RememberBulkItemResult {
     /** Error message if status !== "done" */
     error?: string;
     /**
-     * Last non-terminal job status observed while polling. Only set when
-     * `status` is "timeout" and the job was seen at least once, so callers can
-     * tell "never observed" from "was still uploading when we gave up".
+     * Last non-terminal job status observed while polling, on any non-`done`
+     * item. Unset means the job was never observed, which is how callers tell
+     * that apart from "was still uploading when we gave up".
      */
     last_status?: RememberJobStatus["status"];
 }

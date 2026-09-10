@@ -172,10 +172,10 @@ test("a server-reported failure after an 'uploaded' poll still reports what was 
         );
 
     assert.equal(err.status, 500);
-    // lastStatus tracks the most recent poll, so a terminal failure names
-    // itself; lastBlobId is the part that survives — the blob may be durable
-    // even though indexing gave up on it.
-    assert.equal(err.lastStatus, "failed");
+    // lastStatus is how far the job got, not the poll that ended the wait, so
+    // it matches the bulk path's last_status. lastBlobId is the recovery
+    // handle: the blob may be durable even though indexing gave up on it.
+    assert.equal(err.lastStatus, "uploaded");
     assert.equal(err.lastBlobId, "blob-uploaded");
 });
 

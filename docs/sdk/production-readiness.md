@@ -103,12 +103,12 @@ if (bad.length > 0) {
 ```
 
 `settled.failed` counts only jobs the relayer itself reported as failed. A job
-that was still running when the poll deadline expired is counted in
-`settled.timedOut` instead, because its outcome is unknown rather than known-bad
-— it may still complete server-side. Gate on `failed + timedOut` (or, as above,
-on every result that is not `done`); `failed > 0` alone would treat a timed-out
-batch as persisted. A timed-out item carries `last_status` and, once the job
-reached `uploaded`, `blob_id`, so you can poll it again instead of rewriting it.
+that still ran when the poll deadline expired is counted in `settled.timedOut`
+instead, because its outcome is unknown rather than known-bad. It might still
+complete server-side. Gate on `failed + timedOut`, or, as above, on every result
+that is not `done`. `failed > 0` alone would treat a timed-out batch as
+persisted. A timed-out item carries `last_status` and, once the job reached
+`uploaded`, `blob_id`, so you can poll it again instead of rewriting it.
 
 <Warning>
 A job reaching `done` confirms that the relayer stored the memory, but the vector index can briefly lag behind that signal, so a `recall` fired in the same instant might not return the memory yet. For read-after-write critical paths, tolerate a short delay or re-query rather than treating an empty first result as a missing memory.
