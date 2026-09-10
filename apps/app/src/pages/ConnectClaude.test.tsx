@@ -175,6 +175,27 @@ describe('ConnectClaude /complete recovery', () => {
         expect(mocks.signAndExecute).not.toHaveBeenCalled()
     })
 
+    it('a definitive rejection leaves nothing to resume after a reload', async () => {
+        // The session is spent on a 400, so a reload must land on the error and
+        // not loop on the "Sui is busy" retry screen.
+        stubRelayer([
+            () => json({ error: 'invalid_request', error_description: 'delegate key is not registered on-chain' }, 400),
+        ])
+
+        await approve()
+        await screen.findByText('Something went wrong')
+
+        cleanup()
+        render(
+            <MemoryRouter initialEntries={[`/connect/claude?session=${SESSION}`]}>
+                <ConnectClaude />
+            </MemoryRouter>,
+        )
+
+        await screen.findByRole('button', { name: 'Approve' })
+        expect(screen.queryByRole('button', { name: /finish connecting/i })).toBeNull()
+    })
+
     it('does not replay a stored payload against a different session', async () => {
         sessionStorage.setItem(
             'memwal_claude_pending_complete',
