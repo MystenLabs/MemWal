@@ -70,7 +70,10 @@ const SESSION_VIEW = {
  * `/complete` POST to the next entry of `completeResponses`. Returns a counter
  * of how many times each endpoint was called.
  */
-function stubRelayer(completeResponses: (() => Response)[]) {
+function stubRelayer(
+    completeResponses: (() => Response)[],
+    { needsOnchainRegistration = false }: { needsOnchainRegistration?: boolean } = {},
+) {
     const calls = { account: 0, complete: 0 }
     vi.stubGlobal(
         'fetch',
@@ -82,7 +85,7 @@ function stubRelayer(completeResponses: (() => Response)[]) {
                 // Reused delegate: no add_delegate_key transaction is needed,
                 // so the test isolates the /complete round-trip.
                 return json({
-                    needs_onchain_registration: false,
+                    needs_onchain_registration: needsOnchainRegistration,
                     delegate_public_key: SESSION_VIEW.delegate_public_key,
                     delegate_sui_address: SESSION_VIEW.delegate_sui_address,
                 })
@@ -215,6 +218,40 @@ describe('ConnectClaude /complete recovery', () => {
         // Lands on consent, not on someone else's half-finished authorization.
         await screen.findByRole('button', { name: 'Approve' })
         expect(screen.queryByRole('button', { name: /finish connecting/i })).toBeNull()
+    })
+
+    // `account.move`: EDelegateKeyAlreadyExists = 0, ENotOwner = 4. Mapping 0 to
+    // "not the owner" dead-ended the WALM-605 journey — the key was already on
+    // chain from the attempt whose verify hit a 429, so re-running the flow
+    // aborts with 0 and the user was told to switch wallets.
+    it('treats add_delegate_key abort 0 as already-registered and completes', async () => {
+        const calls = stubRelayer(
+            [() => json({ redirect_url: 'https://claude.ai/callback?code=abc' })],
+            { needsOnchainRegistration: true },
+        )
+        mocks.signAndExecute.mockRejectedValue(
+            new Error('MoveAbort ... add_delegate_key ... abort code: 0'),
+        )
+
+        await approve()
+
+        await screen.findByText(/Redirecting you back/)
+        expect(calls.complete).toBe(1)
+        expect(screen.queryByText('Something went wrong')).toBeNull()
+    })
+
+    it('still reports abort 4 as an owner mismatch', async () => {
+        stubRelayer([() => json({ redirect_url: 'https://claude.ai/callback?code=abc' })], {
+            needsOnchainRegistration: true,
+        })
+        mocks.signAndExecute.mockRejectedValue(
+            new Error('MoveAbort ... add_delegate_key ... abort code: 4'),
+        )
+
+        await approve()
+
+        await screen.findByText('Something went wrong')
+        expect(await screen.findByText(/is not the owner of Walrus Memory account/)).toBeTruthy()
     })
 
     it('still fails terminally on a definitive rejection', async () => {

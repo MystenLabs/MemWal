@@ -335,12 +335,22 @@ export default function ConnectClaude() {
                         tx.object('0x6'),
                     ],
                 })
+                // `account.move` abort codes: EDelegateKeyAlreadyExists = 0,
+                // ETooManyDelegateKeys = 2, ENotOwner = 4.
                 let result
+                let alreadyOnChain = false
                 try {
                     result = await signAndExecute({ transaction: tx })
                 } catch (txErr: unknown) {
                     const m = txErr instanceof Error ? txErr.message : String(txErr)
                     if (m.includes('abort code: 0') && m.includes('add_delegate_key')) {
+                        // This session's key is already registered, so a previous
+                        // attempt landed the tx and then failed further along —
+                        // WALM-605's Sui 429 during verify is exactly that. There
+                        // is nothing left to submit: go straight to /complete
+                        // rather than reporting the abort as an error.
+                        alreadyOnChain = true
+                    } else if (m.includes('abort code: 4') && m.includes('add_delegate_key')) {
                         setErrorMsg(
                             `This wallet (${currentAccount.address.slice(0, 10)}…${currentAccount.address.slice(-6)}) is not the owner of Walrus Memory account ${accountId.slice(0, 10)}…${accountId.slice(-6)}. ` +
                             `Switch to the wallet that created this account, or run /setup for a new one.`
@@ -348,19 +358,21 @@ export default function ConnectClaude() {
                         trackEvent('claude_connect_failed', { error_type: 'owner_mismatch' })
                         setStep('error')
                         return
-                    }
-                    if (m.includes('abort code: 2') && m.includes('add_delegate_key')) {
+                    } else if (m.includes('abort code: 2') && m.includes('add_delegate_key')) {
                         setErrorMsg(
                             `This account already has the maximum number of delegate keys (20). Go to /dashboard and revoke an unused key, then try again.`
                         )
                         trackEvent('claude_connect_failed', { error_type: 'max_delegate_keys' })
                         setStep('error')
                         return
+                    } else {
+                        throw txErr
                     }
-                    throw txErr
                 }
-                await suiClient.waitForTransaction({ digest: result.digest })
-                txDigest = result.digest
+                if (!alreadyOnChain && result) {
+                    await suiClient.waitForTransaction({ digest: result.digest })
+                    txDigest = result.digest
+                }
             }
 
             setStep('finishing')
