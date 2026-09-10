@@ -235,16 +235,41 @@ test("the deadline covers the response body, not just the headers", async () => 
     });
 });
 
-test("a body read inside the deadline releases the timer", async () => {
-    globalThis.fetch = async () => new Response(JSON.stringify({ ok: true }), { status: 200 });
+test("the timer survives the headers and is released by the body read", async () => {
+    // Both halves of the fix in one assertion pair: the deadline must still be
+    // armed when fetch() resolves (otherwise a trickled body is unbounded), and
+    // it must be cleared once the body settles (otherwise every request leaks a
+    // pending timer). Asserting only that json() returns would pass either way.
+    const live = new Set();
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    globalThis.setTimeout = (...args) => {
+        const id = realSetTimeout(...args);
+        live.add(id);
+        return id;
+    };
+    globalThis.clearTimeout = (id) => {
+        live.delete(id);
+        return realClearTimeout(id);
+    };
 
-    const res = await fetchWithDeadline(
-        "https://relayer.test/version",
-        { method: "GET" },
-        5_000,
-        "preflight GET /version",
-    );
-    assert.deepEqual(await res.json(), { ok: true });
+    try {
+        globalThis.fetch = async () => new Response(JSON.stringify({ ok: true }), { status: 200 });
+
+        const res = await fetchWithDeadline(
+            "https://relayer.test/version",
+            { method: "GET" },
+            5_000,
+            "preflight GET /version",
+        );
+        assert.equal(live.size, 1, "the deadline must outlive the response headers");
+
+        assert.deepEqual(await res.json(), { ok: true });
+        assert.equal(live.size, 0, "reading the body must release the deadline");
+    } finally {
+        globalThis.setTimeout = realSetTimeout;
+        globalThis.clearTimeout = realClearTimeout;
+    }
 });
 
 test("the default recall budget is unchanged at 15s", async () => {
