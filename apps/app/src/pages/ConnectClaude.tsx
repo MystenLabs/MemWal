@@ -206,11 +206,21 @@ export default function ConnectClaude() {
     // request. Re-running `handleConnect` instead would re-submit
     // `add_delegate_key` for a key already on chain (abort code 0).
     //
-    // Mirrored into the existing sessionStorage breadcrumb because a ref does
-    // not survive a reload, and a reload is the obvious thing to try when the
-    // relayer says "retry". Without it the first-time path re-runs
-    // `handleConnect` and dead-ends on that abort.
+    // A ref does not survive a reload, and a reload is the obvious thing to try
+    // when the relayer says "retry"; without a durable copy the first-time path
+    // re-runs `handleConnect` and dead-ends on that abort. It gets its own key
+    // rather than joining `memwal_claude_connect`, which the mount effect
+    // rewrites to `{ session }` on every load and would drop the payload.
     const pendingComplete = useRef<CompletePayload | null>(null)
+
+    const forgetPendingComplete = useCallback(() => {
+        pendingComplete.current = null
+        try {
+            sessionStorage.removeItem(PENDING_COMPLETE_KEY)
+        } catch {
+            // Nothing to clean up if storage is unavailable.
+        }
+    }, [])
 
     const rememberPendingComplete = useCallback(
         (payload: CompletePayload) => {
@@ -235,7 +245,9 @@ export default function ConnectClaude() {
     }, [sessionId])
 
     const completeSession = useCallback(async (payload: CompletePayload) => {
-        rememberPendingComplete(payload)
+        // The ref covers an in-flight /complete; only a retryable failure earns
+        // a durable crumb, so a definitive 400 cannot leave one behind.
+        pendingComplete.current = payload
         setStep('finishing')
         try {
             const { redirect_url } = await fetchJson<{ redirect_url: string }>(
@@ -256,14 +268,20 @@ export default function ConnectClaude() {
             trackEvent('claude_connect_complete', { reused_delegate: payload.reused_delegate })
             window.location.replace(redirect_url)
         } catch (err) {
-            if (!isRetryableComplete(err)) throw err
+            if (!isRetryableComplete(err)) {
+                // Definitive: the session is spent. Clear the crumb so a reload
+                // lands on the error rather than looping on "Sui is busy".
+                forgetPendingComplete()
+                throw err
+            }
             // The session is still pending, so offer this one request again
             // rather than dropping into the terminal error state.
+            rememberPendingComplete(payload)
             setErrorMsg(err instanceof Error ? err.message : String(err))
             setStep('retry-complete')
             trackEvent('claude_connect_failed', { error_type: 'sui_unavailable' })
         }
-    }, [apiBase, sessionId, rememberPendingComplete])
+    }, [apiBase, sessionId, rememberPendingComplete, forgetPendingComplete])
 
     const handleRetryComplete = useCallback(async () => {
         const payload = readPendingComplete()
