@@ -7,7 +7,7 @@
  * `add_delegate_key` for a key already on chain, which aborts with code 0 and
  * surfaces as a misleading "not the owner".
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -109,6 +109,7 @@ async function approve() {
 
 beforeEach(() => {
     vi.clearAllMocks()
+    sessionStorage.clear()
     mocks.signPersonalMessage.mockResolvedValue({ signature: 'sig' })
     // jsdom refuses a real navigation; the page only needs the call to not throw.
     vi.stubGlobal('location', { ...window.location, replace: vi.fn() })
@@ -142,6 +143,57 @@ describe('ConnectClaude /complete recovery', () => {
         expect(calls.account).toBe(1)
         expect(mocks.signAndExecute).not.toHaveBeenCalled()
         await screen.findByText(/Redirecting you back/)
+    })
+
+    it('a reload mid-recovery resumes at the retry step, not at consent', async () => {
+        // The ref does not survive a remount. Without the sessionStorage copy the
+        // user lands back on consent, and a first-time connect re-submits
+        // add_delegate_key for a key already on chain (abort code 0).
+        const calls = stubRelayer([
+            () => json({ error: 'temporarily_unavailable', error_description: 'sui unavailable' }, 503),
+            () => json({ redirect_url: 'https://claude.ai/callback?code=abc' }),
+        ])
+
+        await approve()
+        await screen.findByRole('button', { name: /finish connecting/i })
+        expect(calls.account).toBe(1)
+
+        // Remount, as a browser reload would.
+        cleanup()
+        render(
+            <MemoryRouter initialEntries={[`/connect/claude?session=${SESSION}`]}>
+                <ConnectClaude />
+            </MemoryRouter>,
+        )
+
+        const retry = await screen.findByRole('button', { name: /finish connecting/i })
+        await userEvent.click(retry)
+
+        await waitFor(() => expect(calls.complete).toBe(2))
+        // Still no second preflight and no second transaction after the reload.
+        expect(calls.account).toBe(1)
+        expect(mocks.signAndExecute).not.toHaveBeenCalled()
+    })
+
+    it('does not replay a stored payload against a different session', async () => {
+        sessionStorage.setItem(
+            'memwal_claude_pending_complete',
+            JSON.stringify({
+                session: 'mws_' + 'z'.repeat(24),
+                payload: { account_id: '0xa', owner_address: '0xb', owner_signature: 'sig', tx_digest: 'd', reused_delegate: true },
+            }),
+        )
+        stubRelayer([() => json({ redirect_url: 'https://claude.ai/callback?code=abc' })])
+
+        render(
+            <MemoryRouter initialEntries={[`/connect/claude?session=${SESSION}`]}>
+                <ConnectClaude />
+            </MemoryRouter>,
+        )
+
+        // Lands on consent, not on someone else's half-finished authorization.
+        await screen.findByRole('button', { name: 'Approve' })
+        expect(screen.queryByRole('button', { name: /finish connecting/i })).toBeNull()
     })
 
     it('still fails terminally on a definitive rejection', async () => {

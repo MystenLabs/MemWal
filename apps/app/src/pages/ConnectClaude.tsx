@@ -53,6 +53,31 @@ type CompletePayload = {
     reused_delegate: boolean
 }
 
+/** Where the in-flight `POST /complete` payload survives a reload. */
+const PENDING_COMPLETE_KEY = 'memwal_claude_pending_complete'
+
+/**
+ * The saved `POST /complete` payload for this session, if any.
+ *
+ * Session-scoped on purpose: one authorization's wallet signature must never be
+ * replayed against another.
+ */
+function loadStoredComplete(sessionId: string): CompletePayload | null {
+    try {
+        const raw = sessionStorage.getItem(PENDING_COMPLETE_KEY)
+        if (!raw) return null
+        const saved = JSON.parse(raw) as { session?: string; payload?: CompletePayload }
+        if (saved.session !== sessionId || !saved.payload?.owner_signature) return null
+        return saved.payload
+    } catch {
+        return null
+    }
+}
+
+function hasStoredComplete(sessionId: string): boolean {
+    return loadStoredComplete(sessionId) !== null
+}
+
 type Step =
     | 'loading'
     | 'consent'
@@ -153,7 +178,10 @@ export default function ConnectClaude() {
             .then((view) => {
                 if (cancelled) return
                 setSession(view)
-                setStep('consent')
+                // A reload mid-recovery resumes at the retry step. Landing on
+                // consent would re-run handleConnect, and on the first-time path
+                // that re-submits add_delegate_key for a key already on chain.
+                setStep(hasStoredComplete(sessionId) ? 'retry-complete' : 'consent')
             })
             .catch((err) => {
                 if (cancelled) return
@@ -173,13 +201,41 @@ export default function ConnectClaude() {
         sessionStorage.setItem('memwal_claude_connect', JSON.stringify({ session: sessionId }))
     }, [sessionValid, sessionId])
 
+
     // Everything `POST /complete` needs, kept so a retry re-sends exactly this
     // request. Re-running `handleConnect` instead would re-submit
     // `add_delegate_key` for a key already on chain (abort code 0).
+    //
+    // Mirrored into the existing sessionStorage breadcrumb because a ref does
+    // not survive a reload, and a reload is the obvious thing to try when the
+    // relayer says "retry". Without it the first-time path re-runs
+    // `handleConnect` and dead-ends on that abort.
     const pendingComplete = useRef<CompletePayload | null>(null)
 
+    const rememberPendingComplete = useCallback(
+        (payload: CompletePayload) => {
+            pendingComplete.current = payload
+            try {
+                sessionStorage.setItem(
+                    PENDING_COMPLETE_KEY,
+                    JSON.stringify({ session: sessionId, payload }),
+                )
+            } catch {
+                // Private mode or a full quota: the in-page button still works.
+            }
+        },
+        [sessionId],
+    )
+
+    const readPendingComplete = useCallback((): CompletePayload | null => {
+        if (pendingComplete.current) return pendingComplete.current
+        const saved = loadStoredComplete(sessionId)
+        if (saved) pendingComplete.current = saved
+        return saved
+    }, [sessionId])
+
     const completeSession = useCallback(async (payload: CompletePayload) => {
-        pendingComplete.current = payload
+        rememberPendingComplete(payload)
         setStep('finishing')
         try {
             const { redirect_url } = await fetchJson<{ redirect_url: string }>(
@@ -195,6 +251,7 @@ export default function ConnectClaude() {
                 },
             )
             sessionStorage.removeItem('memwal_claude_connect')
+            sessionStorage.removeItem(PENDING_COMPLETE_KEY)
             setStep('redirecting')
             trackEvent('claude_connect_complete', { reused_delegate: payload.reused_delegate })
             window.location.replace(redirect_url)
@@ -206,10 +263,10 @@ export default function ConnectClaude() {
             setStep('retry-complete')
             trackEvent('claude_connect_failed', { error_type: 'sui_unavailable' })
         }
-    }, [apiBase, sessionId])
+    }, [apiBase, sessionId, rememberPendingComplete])
 
     const handleRetryComplete = useCallback(async () => {
-        const payload = pendingComplete.current
+        const payload = readPendingComplete()
         if (!payload) return
         try {
             await completeSession(payload)
@@ -218,8 +275,7 @@ export default function ConnectClaude() {
             setStep('error')
             trackEvent('claude_connect_failed', { error_type: getAnalyticsErrorType(err) })
         }
-    }, [completeSession])
-
+    }, [completeSession, readPendingComplete])
     const handleConnect = useCallback(async () => {
         if (!session) return
         if (!currentAccount) {
@@ -325,6 +381,7 @@ export default function ConnectClaude() {
     // Auto-proceed once the wallet popup resolves.
     useEffect(() => {
         if (!walletPickerOpen && currentAccount && step === 'consent') {
+            if (hasStoredComplete(sessionId)) return
             void handleConnect()
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -391,8 +448,8 @@ export default function ConnectClaude() {
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title">Sui is busy — try again</h2>
                             <p className="setup-classic-description">
-                                Your delegate key is registered and this authorization is still valid. We just
-                                couldn't reach Sui to verify it. Nothing needs redoing — press the button to
+                                We couldn't reach Sui to verify your delegate key, so this authorization is
+                                still pending rather than spent. Nothing needs redoing — press the button to
                                 finish.
                             </p>
                             <p className="setup-classic-description" style={errorTextStyle}>{errorMsg}</p>
