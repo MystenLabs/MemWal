@@ -558,6 +558,12 @@ pub struct SessionAccountResponse {
     pub needs_onchain_registration: bool,
     pub delegate_public_key: String,
     pub delegate_sui_address: String,
+    /// True when this session's own pending key is already on the account, so
+    /// an earlier attempt landed `add_delegate_key` and only `/complete` is
+    /// left. Distinguishes that resume from the reuse case, which also sets
+    /// `needs_onchain_registration: false` but points at a delegate from an
+    /// earlier grant.
+    pub resume_pending_registration: bool,
 }
 
 pub async fn session_account(
@@ -566,6 +572,7 @@ pub async fn session_account(
     Json(req): Json<SessionAccountRequest>,
 ) -> Result<Json<SessionAccountResponse>, OAuthError> {
     require_oauth(&state)?;
+    let account_id = sanitize_sui_object_id(&req.account_id)?;
     let session = state
         .db
         .fetch_oauth_session(&session_id)
@@ -576,15 +583,12 @@ pub async fn session_account(
     // (from a prior grant, any client)? If so, the consent UI can skip the
     // on-chain `add_delegate_key` tx entirely — this is what keeps a
     // reconnect from burning another slot toward the on-chain 20-key cap.
-    if let Some(existing) = state
-        .db
-        .find_reusable_oauth_delegate(&req.account_id)
-        .await?
-    {
+    if let Some(existing) = state.db.find_reusable_oauth_delegate(&account_id).await? {
         return Ok(Json(SessionAccountResponse {
             needs_onchain_registration: false,
             delegate_public_key: existing.delegate_public_key,
             delegate_sui_address: existing.delegate_address,
+            resume_pending_registration: false,
         }));
     }
 
@@ -594,10 +598,47 @@ pub async fn session_account(
         .await?
         .ok_or_else(|| OAuthError::server_error("session references an unknown delegate"))?;
 
+    // This session's own key can already be on the account: an earlier attempt
+    // landed `add_delegate_key` and then failed further along, which is exactly
+    // what a Sui 429 during `/complete` verify used to cause (WALM-605).
+    // Re-submitting aborts with `EDelegateKeyAlreadyExists`, and the consent UI
+    // cannot recognise that abort — it signs through the sponsor proxy, and
+    // `sponsor::mask_upstream` turns any upstream 5xx into a bare 502
+    // `sponsor_upstream_error` that never echoes the Move abort. So the skip has
+    // to be decided here, against the chain, rather than by string-matching a
+    // transaction error that does not survive the proxy.
+    let public_key_bytes = hex::decode(&delegate.delegate_public_key)
+        .map_err(|_| OAuthError::server_error("stored delegate public key is invalid"))?;
+    let resume = match classify_pending_key_preflight(
+        verify_delegate_key_onchain(
+            &state.http_client,
+            &state.config.sui_rpc_url,
+            state.sui_grpc_client.as_ref(),
+            &account_id,
+            &public_key_bytes,
+            &state.config.package_id,
+            GET_OBJECT_ATTEMPTS,
+        )
+        .await,
+    ) {
+        PendingKeyPreflight::Resume => true,
+        PendingKeyPreflight::Register => false,
+        PendingKeyPreflight::Unknown { reason } => {
+            tracing::warn!(
+                %reason,
+                "oauth session_account: Sui unavailable, cannot tell whether this session's delegate key is already registered"
+            );
+            return Err(OAuthError::temporarily_unavailable(format!(
+                "could not check the delegate key on-chain right now, please retry: {reason}"
+            )));
+        }
+    };
+
     Ok(Json(SessionAccountResponse {
-        needs_onchain_registration: true,
+        needs_onchain_registration: !resume,
         delegate_public_key: delegate.delegate_public_key,
         delegate_sui_address: delegate.delegate_address,
+        resume_pending_registration: resume,
     }))
 }
 
@@ -674,6 +715,36 @@ fn classify_delegate_verify(result: Result<String, OnchainVerifyError>) -> Deleg
         Err(e) => DelegateVerifyOutcome::Unregistered {
             reason: e.to_string(),
         },
+    }
+}
+
+/// What `/account` should tell the consent UI about this session's own pending
+/// delegate key, given what the chain said about it.
+#[derive(Debug)]
+enum PendingKeyPreflight {
+    /// Already on the account: an earlier attempt landed `add_delegate_key` and
+    /// only `/complete` is left. Re-submitting would abort with
+    /// `EDelegateKeyAlreadyExists`, which the consent UI cannot see.
+    Resume,
+    /// Definitively absent — the ordinary first-time path.
+    Register,
+    /// The chain could not be consulted, so there is no safe guess: telling the
+    /// UI to register walks into a sponsor 502 it cannot classify, and telling
+    /// it to skip sends `/complete` at a key that is not on the account, which
+    /// is definitive Unregistered and burns the one-time session.
+    Unknown { reason: String },
+}
+
+/// Reuse `classify_delegate_verify` rather than re-reading `is_unavailable()`,
+/// so the preflight and `session_complete` cannot drift apart on what a Sui 429
+/// means (WALM-429 / WALM-605).
+fn classify_pending_key_preflight(
+    result: Result<String, OnchainVerifyError>,
+) -> PendingKeyPreflight {
+    match classify_delegate_verify(result) {
+        DelegateVerifyOutcome::Verified { .. } => PendingKeyPreflight::Resume,
+        DelegateVerifyOutcome::Unregistered { .. } => PendingKeyPreflight::Register,
+        DelegateVerifyOutcome::Retryable { reason } => PendingKeyPreflight::Unknown { reason },
     }
 }
 
@@ -1213,7 +1284,10 @@ mod tests {
     use crate::security_delete_auth::{NativeWalletSignatureVerifier, WalletSignatureVerifier};
     use crate::storage::sui::OnchainVerifyError;
 
-    use super::{classify_delegate_verify, oauth_owner_proof_message, DelegateVerifyOutcome};
+    use super::{
+        classify_delegate_verify, classify_pending_key_preflight, oauth_owner_proof_message,
+        DelegateVerifyOutcome, PendingKeyPreflight,
+    };
 
     // ── WALM-605: a Sui 429 must not read as "unregistered" ──────────
     //
@@ -1233,6 +1307,86 @@ mod tests {
             !outcome.consumes_session(),
             "a 429 must leave the one-time session pending so the user can retry"
         );
+    }
+
+    // ── WALM-605: `/account` decides the duplicate-key skip, not the SPA ──
+    //
+    // The consent UI signs through the sponsor proxy, and `sponsor::mask_upstream`
+    // replaces any upstream 5xx with a bare 502 that never echoes the Move
+    // abort. So `EDelegateKeyAlreadyExists` is invisible to the client, and the
+    // "is a second add_delegate_key needed" question has to be answered here.
+
+    #[test]
+    fn a_key_already_on_the_account_tells_the_ui_to_resume_at_complete() {
+        // The WALM-605 journey: the transaction landed, then verify hit a 429.
+        let outcome = classify_pending_key_preflight(Ok("0xowner".into()));
+        assert!(matches!(outcome, PendingKeyPreflight::Resume));
+    }
+
+    #[test]
+    fn a_key_definitively_absent_tells_the_ui_to_register() {
+        for err in [
+            OnchainVerifyError::KeyNotFound("not in delegate_keys".into()),
+            OnchainVerifyError::NotFound("no such object".into()),
+            OnchainVerifyError::WrongObjectType("not a MemWalAccount".into()),
+        ] {
+            let label = err.to_string();
+            assert!(
+                matches!(
+                    classify_pending_key_preflight(Err(err)),
+                    PendingKeyPreflight::Register
+                ),
+                "{label} is a definitive no, so the first-time path is correct"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreachable_chain_refuses_to_guess_the_preflight() {
+        // Guessing "register" dead-ends on a sponsor 502 the SPA cannot read;
+        // guessing "skip" burns the session as Unregistered. The preflight
+        // claims nothing, so refusing costs the user only a retry.
+        for err in [
+            OnchainVerifyError::RpcError("gRPC GetObject failed: 429 Too Many Requests".into()),
+            OnchainVerifyError::ScanCapExceeded("registry scan cap".into()),
+        ] {
+            let label = err.to_string();
+            assert!(
+                matches!(
+                    classify_pending_key_preflight(Err(err)),
+                    PendingKeyPreflight::Unknown { .. }
+                ),
+                "{label} is not evidence either way"
+            );
+        }
+    }
+
+    #[test]
+    fn the_preflight_and_complete_agree_on_what_is_definitive() {
+        // Both read `OnchainVerifyError::is_unavailable()`. If one ever stops,
+        // a 429 becomes "unregistered" on that path again (WALM-429).
+        // Built twice rather than cloned: `OnchainVerifyError` is not `Clone`,
+        // and both classifiers take the value.
+        let cases: [fn() -> OnchainVerifyError; 6] = [
+            || OnchainVerifyError::RpcError("429".into()),
+            || OnchainVerifyError::ScanCapExceeded("cap".into()),
+            || OnchainVerifyError::KeyNotFound("absent".into()),
+            || OnchainVerifyError::NotFound("missing".into()),
+            || OnchainVerifyError::AccountDeactivated("dead".into()),
+            || OnchainVerifyError::WrongObjectType("foreign".into()),
+        ];
+        for build in cases {
+            let label = build().to_string();
+            let complete_is_definitive = classify_delegate_verify(Err(build())).consumes_session();
+            let preflight_is_definitive = !matches!(
+                classify_pending_key_preflight(Err(build())),
+                PendingKeyPreflight::Unknown { .. }
+            );
+            assert_eq!(
+                complete_is_definitive, preflight_is_definitive,
+                "{label} must be definitive on both paths or neither"
+            );
+        }
     }
 
     #[test]

@@ -3,9 +3,13 @@
  *
  * A Sui outage during `POST /complete` leaves the authorization session
  * `pending` instead of burning it. That only helps if the consent UI can
- * re-send *that one request*: re-running the whole flow would re-submit
- * `add_delegate_key` for a key already on chain, which aborts with code 0 and
- * surfaces as a misleading "not the owner".
+ * re-send *that one request*: re-running the whole flow re-asks the wallet to
+ * sign and re-submits `add_delegate_key` for a key already on chain.
+ *
+ * The duplicate submission is decided server-side, by `/account`'s on-chain
+ * check. It cannot be decided here: this page signs through the sponsor proxy,
+ * and `sponsor::mask_upstream` replaces every upstream 5xx with a bare 502 that
+ * carries no Move abort, so the consent UI never sees which abort fired.
  */
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -71,28 +75,39 @@ const SESSION_VIEW = {
  * of how many times each endpoint was called.
  */
 function stubRelayer(
-    completeResponses: (() => Response)[],
-    { needsOnchainRegistration = false }: { needsOnchainRegistration?: boolean } = {},
+    completeResponses: (() => Response | Promise<Response>)[],
+    {
+        needsOnchainRegistration = false,
+        resumePendingRegistration = false,
+        accountResponse,
+    }: {
+        needsOnchainRegistration?: boolean
+        resumePendingRegistration?: boolean
+        accountResponse?: () => Response
+    } = {},
 ) {
-    const calls = { account: 0, complete: 0 }
+    const calls = { account: 0, complete: 0, completeBodies: [] as string[] }
     vi.stubGlobal(
         'fetch',
-        vi.fn(async (input: RequestInfo | URL) => {
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
             const url = String(input)
             if (url.endsWith(`/session/${SESSION}`)) return json(SESSION_VIEW)
             if (url.endsWith('/account')) {
                 calls.account += 1
-                // Reused delegate: no add_delegate_key transaction is needed,
-                // so the test isolates the /complete round-trip.
+                if (accountResponse) return accountResponse()
+                // Default: reused delegate, so no add_delegate_key transaction
+                // is needed and the test isolates the /complete round-trip.
                 return json({
                     needs_onchain_registration: needsOnchainRegistration,
                     delegate_public_key: SESSION_VIEW.delegate_public_key,
                     delegate_sui_address: SESSION_VIEW.delegate_sui_address,
+                    resume_pending_registration: resumePendingRegistration,
                 })
             }
             if (url.endsWith('/complete')) {
                 const next = completeResponses[calls.complete] ?? completeResponses.at(-1)
                 calls.complete += 1
+                calls.completeBodies.push(String(init?.body ?? ''))
                 return next!()
             }
             throw new Error(`unexpected fetch: ${url}`)
@@ -149,9 +164,9 @@ describe('ConnectClaude /complete recovery', () => {
     })
 
     it('a reload mid-recovery resumes at the retry step, not at consent', async () => {
-        // The ref does not survive a remount. Without the sessionStorage copy the
-        // user lands back on consent, and a first-time connect re-submits
-        // add_delegate_key for a key already on chain (abort code 0).
+        // The ref does not survive a remount. Without the sessionStorage copy
+        // the user lands back on consent, and a first-time connect re-asks the
+        // wallet and re-submits add_delegate_key for a key already on chain.
         const calls = stubRelayer([
             () => json({ error: 'temporarily_unavailable', error_description: 'sui unavailable' }, 503),
             () => json({ redirect_url: 'https://claude.ai/callback?code=abc' }),
@@ -220,38 +235,119 @@ describe('ConnectClaude /complete recovery', () => {
         expect(screen.queryByRole('button', { name: /finish connecting/i })).toBeNull()
     })
 
-    // `account.move`: EDelegateKeyAlreadyExists = 0, ENotOwner = 4. Mapping 0 to
-    // "not the owner" dead-ended the WALM-605 journey — the key was already on
-    // chain from the attempt whose verify hit a 429, so re-running the flow
-    // aborts with 0 and the user was told to switch wallets.
-    it('treats add_delegate_key abort 0 as already-registered and completes', async () => {
+    it('a reload while /complete is in flight resumes at the retry step', async () => {
+        // The gap a ref cannot cover, and the reason the crumb is written
+        // before the request rather than after it fails: /complete never
+        // answered, so there is no 503 to react to, yet the transaction above
+        // has already landed and the wallet has already signed.
+        // Never settles: a reload destroys the context that issued it, so this
+        // response is never processed by anyone. Resolving it here instead
+        // would let the dead page run its success path and clear the crumb,
+        // which no real reload can do.
+        const inFlight = new Promise<Response>(() => {})
         const calls = stubRelayer(
-            [() => json({ redirect_url: 'https://claude.ai/callback?code=abc' })],
+            [() => inFlight, () => json({ redirect_url: 'https://claude.ai/callback?code=abc' })],
             { needsOnchainRegistration: true },
         )
-        mocks.signAndExecute.mockRejectedValue(
-            new Error('MoveAbort ... add_delegate_key ... abort code: 0'),
+        mocks.signAndExecute.mockResolvedValue({ digest: '0xdigest' })
+
+        await approve()
+        await waitFor(() => expect(calls.complete).toBe(1))
+        expect(mocks.signAndExecute).toHaveBeenCalledTimes(1)
+
+        // Reload before the relayer answers.
+        cleanup()
+        render(
+            <MemoryRouter initialEntries={[`/connect/claude?session=${SESSION}`]}>
+                <ConnectClaude />
+            </MemoryRouter>,
         )
+
+        const retry = await screen.findByRole('button', { name: /finish connecting/i })
+        await userEvent.click(retry)
+
+        await waitFor(() => expect(calls.complete).toBe(2))
+        // No second preflight, and above all no second wallet signature or
+        // second add_delegate_key for a key the chain already took.
+        expect(calls.account).toBe(1)
+        expect(mocks.signAndExecute).toHaveBeenCalledTimes(1)
+    })
+
+    it('skips add_delegate_key when /account says this session key is already on chain', async () => {
+        // The WALM-605 journey: an earlier attempt landed the transaction and
+        // then hit a 429 during verify. The chain, not a transaction error, is
+        // what tells us there is nothing left to submit.
+        const calls = stubRelayer([() => json({ redirect_url: 'https://claude.ai/callback?code=abc' })], {
+            needsOnchainRegistration: false,
+            resumePendingRegistration: true,
+        })
 
         await approve()
 
         await screen.findByText(/Redirecting you back/)
+        expect(mocks.signAndExecute).not.toHaveBeenCalled()
         expect(calls.complete).toBe(1)
-        expect(screen.queryByText('Something went wrong')).toBeNull()
+        // Named honestly: this is not a delegate reused from an earlier grant.
+        expect(JSON.parse(calls.completeBodies[0]!).tx_digest).toBe('already-on-chain')
     })
 
-    it('still reports abort 4 as an owner mismatch', async () => {
-        stubRelayer([() => json({ redirect_url: 'https://claude.ai/callback?code=abc' })], {
+    it('does not read a duplicate-key abort out of the masked sponsor 502', async () => {
+        // Built from the real exports, so the fixture cannot drift from the
+        // wrapper the way a hand-written 'MoveAbort ... abort code: 0' string
+        // did: that string is not what production throws, so a test using it
+        // passes while the user dead-ends.
+        const { SponsorHttpError, sponsorFailureMessage } = await vi.importActual<
+            typeof import('../hooks/useSponsoredTransaction')
+        >('../hooks/useSponsoredTransaction')
+        const masked = sponsorFailureMessage(
+            new SponsorHttpError(
+                'sponsor',
+                502,
+                JSON.stringify({
+                    error: 'Sponsor service error',
+                    code: 'sponsor_upstream_error',
+                    traceId: 'tr_1',
+                }),
+            ),
+        )
+        // The premise: an Enoki dry-run abort reaches the SPA with no Move text.
+        expect(masked).not.toMatch(/abort code/)
+        expect(masked).not.toMatch(/add_delegate_key/)
+
+        const calls = stubRelayer([() => json({ redirect_url: 'https://claude.ai/callback?code=abc' })], {
             needsOnchainRegistration: true,
         })
-        mocks.signAndExecute.mockRejectedValue(
-            new Error('MoveAbort ... add_delegate_key ... abort code: 4'),
-        )
+        mocks.signAndExecute.mockRejectedValue(new Error(masked))
 
         await approve()
 
         await screen.findByText('Something went wrong')
-        expect(await screen.findByText(/is not the owner of Walrus Memory account/)).toBeTruthy()
+        // The load-bearing assertion: a sponsor 502 must not be treated as
+        // "already registered" and POSTed to /complete. ENotOwner,
+        // ETooManyDelegateKeys and EDelegateKeyAlreadyExists are
+        // indistinguishable here, and guessing the last one burns the session
+        // as Unregistered for the other two.
+        expect(calls.complete).toBe(0)
+    })
+
+    it('does not submit a transaction when /account cannot reach Sui', async () => {
+        const calls = stubRelayer([() => json({ redirect_url: 'https://claude.ai/callback?code=abc' })], {
+            accountResponse: () =>
+                json(
+                    { error: 'temporarily_unavailable', error_description: 'sui unavailable' },
+                    503,
+                ),
+        })
+
+        await approve()
+
+        await screen.findByText('Something went wrong')
+        // Stopping beats guessing: submitting dead-ends on the masked 502 if
+        // the key is already there, and skipping burns the session as
+        // Unregistered if it is not. The preflight claims nothing, so the user
+        // can simply start again.
+        expect(mocks.signAndExecute).not.toHaveBeenCalled()
+        expect(calls.complete).toBe(0)
     })
 
     it('still fails terminally on a definitive rejection', async () => {
