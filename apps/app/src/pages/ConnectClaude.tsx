@@ -142,8 +142,9 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 /**
  * The relayer could not reach Sui, so it left the authorization session
  * `pending` instead of burning it (WALM-605). Re-POSTing `/complete` alone is
- * the recovery — restarting `handleConnect` would re-submit `add_delegate_key`
- * for a key that is already on chain, which aborts with code 0.
+ * the recovery: the wallet signature and the on-chain registration from the
+ * first attempt are both still good, so restarting `handleConnect` would only
+ * re-ask the wallet and re-submit a transaction the chain has already taken.
  */
 function isRetryableComplete(err: unknown): boolean {
     const e = err as Partial<OAuthRequestError> | null
@@ -179,8 +180,8 @@ export default function ConnectClaude() {
                 if (cancelled) return
                 setSession(view)
                 // A reload mid-recovery resumes at the retry step. Landing on
-                // consent would re-run handleConnect, and on the first-time path
-                // that re-submits add_delegate_key for a key already on chain.
+                // consent would re-run handleConnect, which re-asks the wallet
+                // to sign and re-sends a transaction the chain already took.
                 setStep(hasStoredComplete(sessionId) ? 'retry-complete' : 'consent')
             })
             .catch((err) => {
@@ -203,14 +204,15 @@ export default function ConnectClaude() {
 
 
     // Everything `POST /complete` needs, kept so a retry re-sends exactly this
-    // request. Re-running `handleConnect` instead would re-submit
-    // `add_delegate_key` for a key already on chain (abort code 0).
+    // request instead of re-running `handleConnect`, which would re-ask the
+    // wallet for a signature and re-submit `add_delegate_key` for a key that
+    // is already on chain.
     //
     // A ref does not survive a reload, and a reload is the obvious thing to try
-    // when the relayer says "retry"; without a durable copy the first-time path
-    // re-runs `handleConnect` and dead-ends on that abort. It gets its own key
-    // rather than joining `memwal_claude_connect`, which the mount effect
-    // rewrites to `{ session }` on every load and would drop the payload.
+    // when the relayer says "retry", so the payload also goes to sessionStorage.
+    // It gets its own key rather than joining `memwal_claude_connect`, which
+    // the mount effect rewrites to `{ session }` on every load and would drop
+    // the payload.
     const pendingComplete = useRef<CompletePayload | null>(null)
 
     const forgetPendingComplete = useCallback(() => {
@@ -245,9 +247,18 @@ export default function ConnectClaude() {
     }, [sessionId])
 
     const completeSession = useCallback(async (payload: CompletePayload) => {
-        // The ref covers an in-flight /complete; only a retryable failure earns
-        // a durable crumb, so a definitive 400 cannot leave one behind.
-        pendingComplete.current = payload
+        // Durable before the request, not after it fails. A reload while
+        // /complete is still in flight is the gap a ref cannot cover, and on
+        // the first-time path it is the expensive one: without the crumb the
+        // page lands on consent, re-runs handleConnect, and re-submits
+        // add_delegate_key for a key the tx above already put on chain. That
+        // no longer dead-ends now that /account detects it, but it still costs
+        // a wallet round-trip and a sponsored transaction.
+        //
+        // Writing early is safe because every terminal exit clears it: success
+        // below, and a definitive 400 in the catch. A spent session therefore
+        // cannot leave a crumb that loops the user on "Sui is busy".
+        rememberPendingComplete(payload)
         setStep('finishing')
         try {
             const { redirect_url } = await fetchJson<{ redirect_url: string }>(
@@ -275,8 +286,8 @@ export default function ConnectClaude() {
                 throw err
             }
             // The session is still pending, so offer this one request again
-            // rather than dropping into the terminal error state.
-            rememberPendingComplete(payload)
+            // rather than dropping into the terminal error state. The crumb
+            // written above is what the retry step and a reload both read.
             setErrorMsg(err instanceof Error ? err.message : String(err))
             setStep('retry-complete')
             trackEvent('claude_connect_failed', { error_type: 'sui_unavailable' })
@@ -316,6 +327,9 @@ export default function ConnectClaude() {
                 needs_onchain_registration: boolean
                 delegate_public_key: string
                 delegate_sui_address: string
+                // Absent on a relayer older than WALM-605, which is the
+                // pre-existing behaviour: no resume, just the first-time path.
+                resume_pending_registration?: boolean
             }>(`${apiBase}/api/oauth/session/${sessionId}/account`, {
                 method: 'POST',
                 body: JSON.stringify({ account_id: accountId, owner_address: currentAccount.address }),
@@ -335,44 +349,20 @@ export default function ConnectClaude() {
                         tx.object('0x6'),
                     ],
                 })
-                // `account.move` abort codes: EDelegateKeyAlreadyExists = 0,
-                // ETooManyDelegateKeys = 2, ENotOwner = 4.
-                let result
-                let alreadyOnChain = false
-                try {
-                    result = await signAndExecute({ transaction: tx })
-                } catch (txErr: unknown) {
-                    const m = txErr instanceof Error ? txErr.message : String(txErr)
-                    if (m.includes('abort code: 0') && m.includes('add_delegate_key')) {
-                        // This session's key is already registered, so a previous
-                        // attempt landed the tx and then failed further along —
-                        // WALM-605's Sui 429 during verify is exactly that. There
-                        // is nothing left to submit: go straight to /complete
-                        // rather than reporting the abort as an error.
-                        alreadyOnChain = true
-                    } else if (m.includes('abort code: 4') && m.includes('add_delegate_key')) {
-                        setErrorMsg(
-                            `This wallet (${currentAccount.address.slice(0, 10)}…${currentAccount.address.slice(-6)}) is not the owner of Walrus Memory account ${accountId.slice(0, 10)}…${accountId.slice(-6)}. ` +
-                            `Switch to the wallet that created this account, or run /setup for a new one.`
-                        )
-                        trackEvent('claude_connect_failed', { error_type: 'owner_mismatch' })
-                        setStep('error')
-                        return
-                    } else if (m.includes('abort code: 2') && m.includes('add_delegate_key')) {
-                        setErrorMsg(
-                            `This account already has the maximum number of delegate keys (20). Go to /dashboard and revoke an unused key, then try again.`
-                        )
-                        trackEvent('claude_connect_failed', { error_type: 'max_delegate_keys' })
-                        setStep('error')
-                        return
-                    } else {
-                        throw txErr
-                    }
-                }
-                if (!alreadyOnChain && result) {
-                    await suiClient.waitForTransaction({ digest: result.digest })
-                    txDigest = result.digest
-                }
+                // Deliberately no `account.move` abort-code branches here.
+                // This page signs through `useSponsoredTransaction`, which
+                // throws `new Error(sponsorFailureMessage(...))`, and the
+                // relayer's `sponsor::mask_upstream` collapses any upstream
+                // 5xx into a bare 502 `sponsor_upstream_error` that never
+                // echoes the Move abort. `EDelegateKeyAlreadyExists` (0),
+                // `ETooManyDelegateKeys` (2) and `ENotOwner` (4) therefore all
+                // reach us as the same opaque sponsor string; matching on them
+                // read like recovery while never firing. The duplicate-key
+                // case is settled before this point, by `/account`'s on-chain
+                // check (`resume_pending_registration`).
+                const result = await signAndExecute({ transaction: tx })
+                await suiClient.waitForTransaction({ digest: result.digest })
+                txDigest = result.digest
             }
 
             setStep('finishing')
@@ -380,12 +370,16 @@ export default function ConnectClaude() {
                 `Walrus Memory OAuth authorization\nsession:${sessionId}\naccount:${accountId.toLowerCase()}\nowner:${currentAccount.address.toLowerCase()}`,
             )
             const { signature: ownerSignature } = await signPersonalMessage({ message: proofMessage })
+            const resuming = preflight.resume_pending_registration === true
             await completeSession({
                 account_id: accountId,
                 owner_address: currentAccount.address,
                 owner_signature: ownerSignature,
-                tx_digest: txDigest || 'reused-delegate',
-                reused_delegate: !preflight.needs_onchain_registration,
+                // `/complete` requires a non-empty digest. When no tx was sent
+                // this call names why, rather than claiming a reused delegate
+                // for a key this session registered on an earlier attempt.
+                tx_digest: txDigest || (resuming ? 'already-on-chain' : 'reused-delegate'),
+                reused_delegate: !preflight.needs_onchain_registration && !resuming,
             })
         } catch (err) {
             setErrorMsg(err instanceof Error ? err.message : String(err))
