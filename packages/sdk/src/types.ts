@@ -121,7 +121,14 @@ export type TruncationStrategy = "high-relevance-only" | "per-hit-cap" | "drop-t
 
 /** Options for recall(). */
 export interface RecallOptions {
-    /** Max number of nearest memories to request from the relayer (default: 10). */
+    /**
+     * Max number of nearest memories to request from the relayer (default: 10).
+     *
+     * NOTE: results are silently capped at this value — the response carries no
+     * "truncated" flag. If `results.length === limit`, more matches likely exist:
+     * raise the limit for completeness-critical reads (leaderboards, accuracy
+     * computations, deduplication passes).
+     */
     limit?: number;
     /** Alias for limit, useful when describing top-K search behaviour. */
     topK?: number;
