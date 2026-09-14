@@ -46,6 +46,18 @@ export function explorerFooter(): string {
     return `Explorer: ${walruscanBlobUrl("<blob_id>")} for any blob_id above.`;
 }
 
+/**
+ * Above this, a completed tool call is logged at `warn` instead of `info`.
+ * Tuned to sit above a healthy `memwal_health` (single unsigned GET to the
+ * relayer, tens of milliseconds) and below a healthy `memwal_remember`
+ * (embed + SEAL + Walrus), so the threshold catches a slow hop to the
+ * relayer without crying about work that is slow by nature.
+ */
+const SLOW_TOOL_WARN_MS = Number.parseInt(
+    process.env.MCP_TOOL_SLOW_WARN_MS ?? "5000",
+    10
+);
+
 export function wrapTool<Args>(
     session: MemWalSession,
     tool: string,
@@ -58,9 +70,36 @@ export function wrapTool<Args>(
             clientName: session.clientName ?? null,
             accountId: session.accountId ?? null,
         });
+        // How long the call took is the only number that shows a slow hop to
+        // the relayer. Per-request latency on the relayer side cannot: it
+        // measures the request once it lands, so a minute spent reaching it
+        // reads as a healthy few milliseconds there and as silence here.
+        const startedAt = Date.now();
+        const durationMs = () => Date.now() - startedAt;
+        const outcomeFields = () => ({
+            tool,
+            durationMs: durationMs(),
+            relayerUrl: session.relayerUrl ?? null,
+            agentClient: session.agentClient ?? null,
+            accountId: session.accountId ?? null,
+        });
         try {
-            return await handler(args);
+            const result = await handler(args);
+            const elapsed = durationMs();
+            if (
+                Number.isFinite(SLOW_TOOL_WARN_MS) &&
+                elapsed >= SLOW_TOOL_WARN_MS
+            ) {
+                log.warn("tool.slow", {
+                    ...outcomeFields(),
+                    thresholdMs: SLOW_TOOL_WARN_MS,
+                });
+            } else {
+                log.info("tool.done", outcomeFields());
+            }
+            return result;
         } catch (err: any) {
+            log.warn("tool.failed", outcomeFields());
             const name = err?.constructor?.name ?? "Error";
             const msg = err?.message ?? String(err);
             const cause = err?.cause;
