@@ -373,3 +373,229 @@ test("a call buffered behind a failing handshake is answered, and says why", asy
         )}`,
     );
 });
+
+/** Serves exactly one healthy session, then refuses every reconnect and 404s
+ * any POST against the dead session — the way the real relayer does. The
+ * sibling mock above fails from the first handshake, which lands the request
+ * in `pendingForward`; that path is already covered and cannot reach the
+ * mid-session case. */
+function startHealthyThenDeadRelayer() {
+    let sseGetCount = 0;
+    let postCount = 0;
+    let sessionAlive = false;
+    let liveSession = null;
+    let liveHeartbeat = null;
+    const server = http.createServer((req, res) => {
+        const url = new URL(req.url, "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/version") {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(
+                JSON.stringify({
+                    apiVersion: "1.0.0",
+                    relayerVersion: "1.0.0",
+                    minSupportedSdk: { mcp: "0.0.1" },
+                }),
+            );
+            return;
+        }
+        if (req.method === "GET" && url.pathname === "/api/mcp/sse") {
+            if (!hasBridgeAuth(req)) {
+                res.writeHead(401);
+                res.end();
+                return;
+            }
+            sseGetCount += 1;
+            if (sseGetCount > 1) {
+                res.writeHead(503, { "content-type": "text/plain" });
+                res.end("upstream unavailable");
+                return;
+            }
+            res.writeHead(200, {
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                connection: "keep-alive",
+            });
+            res.write("event: endpoint\ndata: /api/mcp/messages?sessionId=session-1\n\n");
+            liveSession = res;
+            sessionAlive = true;
+            liveHeartbeat = setInterval(() => {
+                if (!res.writableEnded) res.write(":\n\n");
+            }, 200);
+            liveHeartbeat.unref?.();
+            res.on("close", () => clearInterval(liveHeartbeat));
+            return;
+        }
+        if (req.method === "POST" && url.pathname === "/api/mcp/messages") {
+            postCount += 1;
+            // A POST against a session that no longer exists is a 404 here, as
+            // it is on the relayer. Answering 202 would let a stray post look
+            // delivered and quietly flip the request to "sent".
+            res.writeHead(!hasBridgeAuth(req) ? 401 : sessionAlive ? 202 : 404);
+            res.end();
+            return;
+        }
+        res.writeHead(404);
+        res.end();
+    });
+    return new Promise((ready) => {
+        server.listen(0, "127.0.0.1", () => {
+            const { port } = server.address();
+            ready({
+                server,
+                base: `http://127.0.0.1:${port}`,
+                getSseGetCount: () => sseGetCount,
+                getPostCount: () => postCount,
+                killSession: () => {
+                    sessionAlive = false;
+                    if (liveHeartbeat) clearInterval(liveHeartbeat);
+                    if (liveSession && !liveSession.writableEnded) liveSession.end();
+                },
+                closeStreams: () => {
+                    sessionAlive = false;
+                    if (liveHeartbeat) clearInterval(liveHeartbeat);
+                    if (liveSession && !liveSession.writableEnded) liveSession.end();
+                },
+            });
+        });
+    });
+}
+
+test("a call issued after the session dies is answered on the stalled deadline", async (t) => {
+    // `neverSent` used to be read from `pendingForward` membership, and nothing
+    // refills that buffer once `firstConnectDone` is set — so in the reported
+    // shape (the bridge worked, then the relayer stopped answering) the call
+    // looked sent, kept the full call timeout, and blamed a dropped connection
+    // for a request that never left the process.
+    //
+    // Every step below is confirmed from the bridge's own stderr before the
+    // next one runs. Two earlier attempts at this test raced an internal state
+    // transition the mock cannot see, and failed in ways the output could not
+    // explain; if this one fails, the assertion says which precondition broke.
+    const mock = await startHealthyThenDeadRelayer();
+    const home = mkdtempSync(join(tmpdir(), "memwal-midsession-stalled-test-"));
+    const credsPath = join(home, ".memwal", "credentials.json");
+    mkdirSync(dirname(credsPath), { recursive: true });
+    writeFileSync(credsPath, JSON.stringify(makeCreds(mock.base)), { mode: 0o600 });
+
+    const child = spawn(process.execPath, [BIN, "--relayer", mock.base, "--web-url", mock.base], {
+        env: {
+            ...process.env,
+            HOME: home,
+            USERPROFILE: home,
+            MEMWAL_MCP_CONNECT_TIMEOUT_MS: String(CONNECT_TIMEOUT_MS),
+            MEMWAL_MCP_CALL_TIMEOUT_MS: String(CALL_TIMEOUT_MS),
+            MEMWAL_MCP_STALLED_HANDSHAKE_MS: String(STALLED_HANDSHAKE_MS),
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const received = [];
+    const listeners = new Set();
+    let buf = "";
+    child.stdout.on("data", (d) => {
+        buf += d.toString();
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            if (!line.trim()) continue;
+            let msg;
+            try {
+                msg = JSON.parse(line);
+            } catch {
+                continue;
+            }
+            received.push(msg);
+            for (const l of [...listeners]) l(msg);
+        }
+    });
+    let stderrBuf = "";
+    child.stderr.on("data", (d) => (stderrBuf += d.toString()));
+
+    const dump = (what) =>
+        `${what}\n--- stderr ---\n${stderrBuf}\n--- received ---\n${received.map((m) => JSON.stringify(m)).join("\n")}`;
+    const send = (obj) => child.stdin.write(JSON.stringify(obj) + "\n");
+    const waitFor = (pred, ms, what) => {
+        const hit = received.find(pred);
+        if (hit) return Promise.resolve(hit);
+        return new Promise((res, rej) => {
+            const timer = setTimeout(() => {
+                listeners.delete(l);
+                rej(new Error(dump(`timed out waiting for ${what}`)));
+            }, ms);
+            const l = (m) => {
+                if (pred(m)) {
+                    clearTimeout(timer);
+                    listeners.delete(l);
+                    res(m);
+                }
+            };
+            listeners.add(l);
+        });
+    };
+    /** Poll a condition, and fail with the full bridge output naming it. */
+    const until = async (pred, ms, what) => {
+        const deadline = Date.now() + ms;
+        while (Date.now() < deadline) {
+            if (pred()) return;
+            await new Promise((r) => setTimeout(r, 50));
+        }
+        throw new Error(dump(`precondition never held: ${what}`));
+    };
+
+    t.after(() => {
+        child.kill("SIGKILL");
+        mock.closeStreams();
+        mock.server.close();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    // 1. initialize is answered locally.
+    send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    await waitFor((m) => m.id === 1 && m.result, 10_000, "the local initialize reply");
+
+    // 2. the first session is genuinely up, so `firstConnectDone` is set and
+    //    this cannot degenerate into the cold-start case.
+    await until(() => /"event":"bridge\.connected"/.test(stderrBuf), 15_000, "bridge.connected");
+
+    // 3. the relayer goes away and refuses every reconnect.
+    mock.killSession();
+    await until(
+        () => /"event":"bridge\.reconnect_failed"/.test(stderrBuf),
+        20_000,
+        "bridge.reconnect_failed (so sse is null and the handshake is on record as failing)",
+    );
+
+    // 4. only now is the call issued — it must take the never-sent path.
+    const postsBefore = mock.getPostCount();
+    const sentAt = Date.now();
+    send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "memwal_remember", arguments: { text: "anything" } },
+    });
+
+    const reply = await waitFor(
+        (m) => m.id === 2,
+        Math.floor(CALL_TIMEOUT_MS * 0.6),
+        "the tool-call answer on the stalled-handshake deadline",
+    );
+    const waitedMs = Date.now() - sentAt;
+
+    assert.equal(
+        mock.getPostCount(),
+        postsBefore,
+        dump("the call must never have been POSTed — that is what earns the short deadline"),
+    );
+    assert.ok(
+        waitedMs < CALL_TIMEOUT_MS,
+        `must expire on the ${STALLED_HANDSHAKE_MS}ms stalled deadline, not the ${CALL_TIMEOUT_MS}ms ` +
+            `call timeout — waiting out the latter with no feedback is the reported bug; waited ${waitedMs}ms`,
+    );
+    assert.equal(reply.result?.isError, true, dump("expected a tool-error envelope"));
+    const text = JSON.stringify(reply.result);
+    assert.match(text, /could not reach the relayer/i, dump("must name the failing connection"));
+    assert.match(text, /nothing was\\?\s*stored/i, dump("must say the call never ran"));
+    assert.equal(child.exitCode, null, "bridge should still be running, not exited");
+});
