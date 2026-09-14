@@ -77,7 +77,23 @@ for (const pluginPath of [
         );
     }
 }
-console.log(`MCP package ${mcpVersion}: plugin npx args pin ${expectedPluginArgs[1]}`);
+const installerPath = "packages/mcp/plugin/scripts/install_codex_hooks.mjs";
+const installer = readFileSync(installerPath, "utf8");
+const expectedPin = expectedPluginArgs[1];
+if (installer.includes('["-y", "@mysten-incubation/memwal-mcp"]')) {
+    throw new Error(
+        `${installerPath}: expected ${JSON.stringify(expectedPluginArgs)}, received ${JSON.stringify(["-y", "@mysten-incubation/memwal-mcp"])}`,
+    );
+}
+if (
+    !installer.includes(expectedPin) &&
+    !installer.includes("@mysten-incubation/memwal-mcp@${")
+) {
+    throw new Error(
+        `${installerPath}: expected ${JSON.stringify(expectedPluginArgs)}, received missing version pin`,
+    );
+}
+console.log(`MCP package ${mcpVersion}: plugin npx args pin ${expectedPin}`);
 
 function readVersion(content, kind) {
     if (kind === "version") return JSON.parse(content).version;

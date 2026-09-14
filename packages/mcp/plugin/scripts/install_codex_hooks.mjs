@@ -32,6 +32,25 @@ import { fileURLToPath } from "node:url";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(SCRIPT_DIR);
 
+function resolveMcpVersion() {
+    let dir = SCRIPT_DIR;
+    while (true) {
+        const manifestPath = join(dir, "package.json");
+        if (existsSync(manifestPath)) {
+            try {
+                const pkg = JSON.parse(readFileSync(manifestPath, "utf8"));
+                if (pkg.name === "@mysten-incubation/memwal-mcp" && pkg.version) {
+                    return pkg.version;
+                }
+            } catch {}
+        }
+        const parent = dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+    }
+    return JSON.parse(readFileSync(join(PLUGIN_ROOT, "plugin.json"), "utf8")).version;
+}
+
 const CODEX_DIR = join(homedir(), ".codex");
 const HOOKS_FILE = join(CODEX_DIR, "hooks.json");
 const CONFIG_FILE = join(CODEX_DIR, "config.toml");
@@ -98,10 +117,11 @@ function ensureMcpRegistered() {
     mkdirSync(CODEX_DIR, { recursive: true });
     let content = existsSync(CONFIG_FILE) ? readFileSync(CONFIG_FILE, "utf8") : "";
     if (content.includes("[mcp_servers.memwal]")) return false;
+    const spec = `@mysten-incubation/memwal-mcp@${resolveMcpVersion()}`;
     const block =
         "\n[mcp_servers.memwal]\n" +
         'command = "npx"\n' +
-        'args = ["-y", "@mysten-incubation/memwal-mcp"]\n';
+        `args = ["-y", "${spec}"]\n`;
     writeFileSync(CONFIG_FILE, (content.trimEnd() + "\n" + block).trimStart());
     return true;
 }
