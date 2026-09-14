@@ -33,6 +33,7 @@ import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
 import ConnectClaude from './pages/ConnectClaude'
+import PromptTemplatesRedirect from './pages/PromptTemplatesRedirect'
 import { useRouteAnalytics } from './hooks/useRouteAnalytics'
 
 
@@ -305,6 +306,7 @@ function AppContent() {
       )} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="/connect/claude" element={<ConnectClaude />} />
+      <Route path="/prompt-templates" element={<PromptTemplatesRedirect />} />
       <Route path="/admin" element={<AdminDashboard />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

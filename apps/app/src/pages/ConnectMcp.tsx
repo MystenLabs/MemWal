@@ -40,6 +40,7 @@ import { Ed25519PublicKey } from '@mysten/sui/keypairs/ed25519'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { config } from '../config'
+import { docsUrl } from '../utils/docsUrl'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 
@@ -626,7 +627,7 @@ function SuccessCard({
                         Remove it from the dashboard if you are not using it.{' '}
                         {config.docsUrl && (
                             <a
-                                href={`${config.docsUrl}/troubleshooting/overview#sign-in-succeeds-but-credentials-are-not-saved`}
+                                href={docsUrl('troubleshooting/overview#sign-in-succeeds-but-credentials-are-not-saved')}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 onClick={() =>
@@ -705,22 +706,20 @@ function StarterPromptCard() {
                 <button type="button" onClick={handleCopy} style={copyButtonStyle}>
                     {copied ? 'Copied' : 'Copy prompt'}
                 </button>
-                {config.docsUrl && (
-                    <a
-                        href={`${config.docsUrl}/guides/system-prompt-templates`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={promptLinkStyle}
-                        onClick={() =>
-                            trackEvent('outbound_link_click', {
-                                link: 'docs',
-                                location: 'connect_mcp_prompt_templates',
-                            })
-                        }
-                    >
-                        More templates (coding, research, support)
-                    </a>
-                )}
+                <a
+                    href={docsUrl('guides/system-prompt-templates')}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={promptLinkStyle}
+                    onClick={() =>
+                        trackEvent('outbound_link_click', {
+                            link: 'docs',
+                            location: 'connect_mcp_prompt_templates',
+                        })
+                    }
+                >
+                    More templates (coding, research, support)
+                </a>
             </div>
         </div>
     )
