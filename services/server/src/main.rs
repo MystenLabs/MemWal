@@ -1507,6 +1507,15 @@ async fn main() {
                     before - evicted
                 );
             }
+
+            // The two log samplers are the last per-account state that was
+            // not swept here. They expire on insert, but only at the cap, so
+            // an account that went quiet an hour ago holds its slot until
+            // some unrelated overflow reclaims it.
+            let evicted = observability::sweep_log_samplers();
+            if evicted > 0 {
+                tracing::debug!("log sampler sweep: evicted {} idle accounts", evicted);
+            }
         }
     });
 

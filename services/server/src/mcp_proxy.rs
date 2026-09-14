@@ -239,7 +239,23 @@ async fn note_connect_attempt(state: &AppState, headers: &HeaderMap) {
         return;
     };
     let mut episodes = state.mcp_connect_episodes.write().await;
-    if episodes.contains_key(id) || episodes.len() >= crate::observability::MCP_CONNECT_EPISODE_MAX {
+    if episodes.contains_key(id) {
+        return;
+    }
+    // Expire before consulting the cap, as the rejection cache and the log
+    // samplers do. This runs before authentication on a route with no rate
+    // limit, keyed on a header the caller chooses, so without it a few
+    // thousand made-up connect ids hold every slot until the 300s sweep —
+    // and while they do, no legitimate client is timed at all, which blinds
+    // `time_to_session` during exactly the incident it exists to measure.
+    //
+    // It self-heals once the spam stops; it does not stop a caller who keeps
+    // it up. Bounding that needs an authenticated key, or the measurement
+    // moved to the bridge, which already knows its own elapsed time.
+    if episodes.len() >= crate::observability::MCP_CONNECT_EPISODE_MAX {
+        episodes.retain(|_, started| crate::observability::connect_episode_is_fresh(*started));
+    }
+    if episodes.len() >= crate::observability::MCP_CONNECT_EPISODE_MAX {
         return;
     }
     episodes.insert(id.to_string(), std::time::Instant::now());
@@ -955,6 +971,41 @@ mod tests {
         let long = "a".repeat(500);
         let h = axum_headers(&[("x-memwal-client", &long)]);
         assert_eq!(sanitized_client(&h, "x-memwal-client").len(), 64);
+    }
+
+    #[test]
+    fn expired_episodes_do_not_hold_the_cap_against_a_real_client() {
+        // `note_connect_attempt` runs BEFORE authentication, on a route with
+        // no rate limit, keyed on a header the caller picks. Without expiring
+        // at the cap, a few thousand made-up connect ids hold every slot for
+        // the full 300s sweep interval — and while they do, no legitimate
+        // client is ever recorded, so `time_to_session` observes nothing
+        // during exactly the incident it was added to measure.
+        //
+        // This pins the policy; the retain itself is inline in
+        // `note_connect_attempt`, which needs an `AppState`. Keep them in step.
+        let mut episodes: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        let abandoned = std::time::Instant::now()
+            - (crate::observability::MCP_CONNECT_EPISODE_TTL + std::time::Duration::from_secs(1));
+        for i in 0..crate::observability::MCP_CONNECT_EPISODE_MAX {
+            episodes.insert(format!("spam-{i}"), abandoned);
+        }
+        assert!(
+            episodes.len() >= crate::observability::MCP_CONNECT_EPISODE_MAX,
+            "precondition: the cap is full, so a real client would be turned away"
+        );
+
+        episodes.retain(|_, started| crate::observability::connect_episode_is_fresh(*started));
+
+        assert!(
+            episodes.is_empty(),
+            "every seeded episode is past the TTL, so none may be kept"
+        );
+        assert!(
+            episodes.len() < crate::observability::MCP_CONNECT_EPISODE_MAX,
+            "after expiring, a real client can be timed again"
+        );
     }
 
     #[test]

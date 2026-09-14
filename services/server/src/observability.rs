@@ -666,6 +666,48 @@ pub fn should_log_refusal(account: &str) -> bool {
     should_log_refusal_at(&mut seen, account, std::time::Instant::now())
 }
 
+static MCP_STALE_SERVE_LOG_SEEN: LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Whether this stale-grace serve should be written out.
+///
+/// Same policy and same window as the refusal line, and for the same reason:
+/// it fires on the hot path (every signed request and every MCP envelope) and
+/// fires *hardest* during a Sui outage, when many requests fall past the TTL
+/// at once — the 155,874 x 503 shape this PR measures. One line per request
+/// there is the same unbounded repetition the refusal sampler was added to
+/// stop.
+///
+/// Its own map, though. An account being refused must not suppress the very
+/// different fact that it is being authenticated from a stale verification,
+/// and vice versa — sharing one map would let either hide the other.
+pub fn should_log_stale_serve(account: &str) -> bool {
+    let Ok(mut seen) = MCP_STALE_SERVE_LOG_SEEN.lock() else {
+        return false;
+    };
+    should_log_refusal_at(&mut seen, account, std::time::Instant::now())
+}
+
+/// Drop sampler entries that have aged out of their window.
+///
+/// Both maps already expire on insert, but only once they reach the cap, so
+/// an account that was noisy an hour ago holds its slot until some unrelated
+/// overflow reclaims it. Every other per-account map this service keeps is
+/// swept periodically; this makes these two consistent with them. Returns how
+/// many entries were dropped, for the sweep log.
+pub fn sweep_log_samplers() -> usize {
+    let now = std::time::Instant::now();
+    let mut evicted = 0;
+    for map in [&*MCP_REFUSAL_LOG_SEEN, &*MCP_STALE_SERVE_LOG_SEEN] {
+        let Ok(mut seen) = map.lock() else { continue };
+        let before = seen.len();
+        seen.retain(|_, last| now.duration_since(*last) < MCP_REFUSAL_LOG_INTERVAL);
+        evicted += before - seen.len();
+    }
+    evicted
+}
+
 // ── MCP connect episodes ────────────────────────────────────────────
 //
 // State for `time_to_session`. Lives here rather than in `mcp_proxy`
@@ -913,6 +955,36 @@ mod refusal_log_tests {
     use super::*;
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_refusal_and_a_stale_serve_do_not_share_a_sampling_slot() {
+        // Same policy, same window, deliberately different maps. They report
+        // unrelated things — "this key was refused" versus "this key is being
+        // authenticated from a verification we could not refresh" — and an
+        // account in trouble tends to produce both. One map would let
+        // whichever fired first silence the other for the whole window, which
+        // is exactly the attribution problem this PR set out to fix.
+        let account = "0xsampler-independence-probe";
+        assert!(
+            should_log_refusal(account),
+            "first refusal for this account must be written"
+        );
+        assert!(
+            should_log_stale_serve(account),
+            "the stale-serve line must not be suppressed by the refusal that just fired"
+        );
+        assert!(
+            !should_log_stale_serve(account),
+            "but it is still sampled within its own window"
+        );
+        // Fresh entries are never swept, so this is deterministic regardless
+        // of what else ran before it.
+        assert_eq!(
+            sweep_log_samplers(),
+            0,
+            "entries inside the window must survive the periodic sweep"
+        );
+    }
 
     #[test]
     fn one_account_is_logged_once_per_window_however_hard_it_retries() {

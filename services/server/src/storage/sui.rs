@@ -602,12 +602,19 @@ pub async fn verify_delegate_key_cached(
                 .map(|c| (c.owner.clone(), c.verified_at.elapsed()));
             match stale {
                 Some((owner, age)) => {
-                    tracing::warn!(
-                        account_id = %account_object_id,
-                        age_secs = age.as_secs(),
-                        error = %err,
-                        "serving stale delegate verification while Sui is unavailable"
-                    );
+                    // Sampled per account, like the refusal line. This runs on
+                    // every signed request and every MCP envelope, and it fires
+                    // hardest exactly when an outage is pushing many requests
+                    // past the TTL at once — one line per request there is the
+                    // repetition the sampler exists to stop.
+                    if crate::observability::should_log_stale_serve(account_object_id) {
+                        tracing::warn!(
+                            account_id = %account_object_id,
+                            age_secs = age.as_secs(),
+                            error = %err,
+                            "serving stale delegate verification while Sui is unavailable (sampled)"
+                        );
+                    }
                     Ok(owner)
                 }
                 None => Err(err),
