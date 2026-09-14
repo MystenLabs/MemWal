@@ -15,6 +15,7 @@
 - Confirm a completed sign-in instead of only writing it to the log file. The failure path already reported itself twice (a notification and a notice on the next tool call) while success reported nothing, so a user who approved in the browser could not tell whether credentials had landed, the bridge had adopted them, or a retry was worth trying. Success now sends the matching notification and prefixes a one-shot banner naming the account, the delegate, and the resolved credentials path onto the next tool result. (#633)
 - Stop the `memwal_login` prompt claiming you are already signed in when you are not. The bridge assumed it only ever runs with credentials on disk, but `memwal_logout` deletes them and login is intercepted before the signed-out guard, so a login after a logout in the same session announced that a stored delegate key would be replaced, reading as though the logout had not taken. Both prompts now read the credentials file instead of assuming the mode. (#633)
 - Serve one `memwal_login` prompt in both modes. The signed-out stub and the signed-in bridge had drifted into different assistant instructions, step wording, and closing lines, and both claimed credentials land at `~/.memwal/credentials.json` even when the resolved path was project-local. (#633, #628)
+- Plugin `.mcp.json` (and Cursor/Codex copies) now pin `@mysten-incubation/memwal-mcp@0.0.13` so npx cannot keep a cached 0.0.5. (WALM-627)
 
 ## 0.0.12
 
