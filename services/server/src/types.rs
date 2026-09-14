@@ -233,8 +233,8 @@ pub struct AppState {
     /// when the request body sets `scoring_weights`; default weights
     /// preserve the pgvector cosine order exactly.
     pub ranker: Arc<dyn Ranker>,
-    /// Redis multiplexed connection for rate limiting
-    pub redis: redis::aio::MultiplexedConnection,
+    /// Redis connection manager for rate limiting (reconnects after a drop)
+    pub redis: redis::aio::ConnectionManager,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
     /// Bounds concurrent AccountRegistry fallback scans (auth Strategy 3).

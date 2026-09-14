@@ -11,7 +11,6 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
-    client_ip::canonical_client_ip,
     storage::db::{StorageAdmission, StorageReservationRequest},
     types::{AppError, AppState, AuthInfo},
 };
@@ -171,19 +170,22 @@ fn endpoint_weight(path: &str) -> i64 {
 // Redis Client
 // ============================================================
 
-/// Create a Redis multiplexed connection for shared use across the app.
-pub async fn create_redis_client(
-    redis_url: &str,
-) -> Result<redis::aio::MultiplexedConnection, String> {
+/// Reconnect so a dropped Redis connection does not fail-close
+/// unauthenticated limiters for the process lifetime.
+pub async fn create_redis_client(redis_url: &str) -> Result<redis::aio::ConnectionManager, String> {
     let client = redis::Client::open(redis_url)
         .map_err(|e| format!("Failed to create Redis client: {}", e))?;
 
-    let conn = client
-        .get_multiplexed_async_connection()
+    // Bound reconnect so a dead Redis still 503s promptly instead of
+    // stalling fail-closed routes.
+    let config = redis::aio::ConnectionManagerConfig::new()
+        .set_connection_timeout(Duration::from_secs(2))
+        .set_response_timeout(Duration::from_secs(2))
+        .set_max_delay(2_000)
+        .set_number_of_retries(3);
+    redis::aio::ConnectionManager::new_with_config(client, config)
         .await
-        .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
-
-    Ok(conn)
+        .map_err(|e| format!("Failed to connect to Redis: {}", e))
 }
 
 // ============================================================
@@ -247,15 +249,18 @@ enum WindowCheckResult {
 /// The Lua script executes as a single atomic Redis operation, preventing the
 /// TOCTOU race where two concurrent requests could both pass the check before
 /// either records, then both record and collectively exceed the limit.
-async fn check_and_record_window(
-    redis: &mut redis::aio::MultiplexedConnection,
+async fn check_and_record_window<C>(
+    redis: &mut C,
     key: &str,
     window_start: f64,
     now: f64,
     limit: i64,
     weight: i64,
     ttl_seconds: i64,
-) -> Result<WindowCheckResult, redis::RedisError> {
+) -> Result<WindowCheckResult, redis::RedisError>
+where
+    C: redis::aio::ConnectionLike,
+{
     // The UUID keeps members distinct across concurrent requests, processes,
     // and replicas even when they share an identical millisecond timestamp.
     let request_id = Uuid::new_v4().to_string();
@@ -891,8 +896,8 @@ fn stable_hash_i64(s: &str) -> i64 {
 /// check/log/fail-open boilerplate that already exists inline in
 /// `rate_limit_middleware`'s per-account layer and in the global
 /// sponsor/account limiters below.
-async fn check_owner_window_limit(
-    redis: &mut redis::aio::MultiplexedConnection,
+async fn check_owner_window_limit<C>(
+    redis: &mut C,
     scope: &str,
     key: &str,
     window_start: f64,
@@ -902,7 +907,10 @@ async fn check_owner_window_limit(
     ttl_seconds: i64,
     owner: &str,
     deny_message: impl FnOnce() -> String,
-) -> Result<(), AppError> {
+) -> Result<(), AppError>
+where
+    C: redis::aio::ConnectionLike,
+{
     match check_and_record_window(redis, key, window_start, now, limit, weight, ttl_seconds).await {
         Ok(WindowCheckResult::Denied) => {
             crate::observability::record_rate_limit_denial(scope);
@@ -1127,6 +1135,21 @@ pub async fn charge_explicit_weight(
 }
 
 // ============================================================
+// Client IP for unauthenticated IP limiters
+// ============================================================
+
+/// Resolve the rate-limit client IP. Missing `ConnectInfo` uses `0.0.0.0`
+/// so hops=0 still shares one unknown bucket and hops>0 still read XFF.
+fn rate_limit_peer_addr(request: &Request, trusted_proxy_hops: usize) -> std::net::IpAddr {
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0)
+        .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
+    crate::client_ip::canonical_client_ip(request.headers(), peer, trusted_proxy_hops)
+}
+
+// ============================================================
 // Sponsor Rate Limit Middleware (IP-based, unauthenticated)
 // ============================================================
 
@@ -1151,18 +1174,7 @@ pub async fn sponsor_rate_limit_middleware(
     // XFF is ignored by default. Only walk back through the explicitly
     // configured number of trusted proxy hops, using the same resolver as
     // the MCP proxy path.
-    let ip = match request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
-    {
-        Some(ip) => ip.to_string(),
-        None => {
-            // Cannot determine IP — fail-closed: deny rather than allow unknown callers.
-            tracing::warn!("sponsor_rate_limit_middleware: cannot determine client IP, denying");
-            return rate_limiter_unavailable_response();
-        }
-    };
+    let ip = rate_limit_peer_addr(&request, state.config.trusted_proxy_hops).to_string();
 
     let config = &state.config.sponsor_rate_limit;
     let mut redis = state.redis.clone();
@@ -1375,18 +1387,7 @@ pub async fn accounts_rate_limit_middleware(
     // XFF is ignored by default. Only walk back through the explicitly
     // configured number of trusted proxy hops, using the same resolver as
     // the sponsor and MCP proxy paths.
-    let ip = match request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
-    {
-        Some(ip) => ip.to_string(),
-        None => {
-            // Cannot determine IP — fail-closed: deny rather than allow unknown callers.
-            tracing::warn!("accounts_rate_limit_middleware: cannot determine client IP, denying");
-            return rate_limiter_unavailable_response();
-        }
-    };
+    let ip = rate_limit_peer_addr(&request, state.config.trusted_proxy_hops).to_string();
 
     let config = &state.config.accounts_rate_limit;
     let mut redis = state.redis.clone();
@@ -1535,19 +1536,7 @@ pub async fn owner_token_ip_rate_limit_middleware(
         return next.run(request).await;
     }
 
-    let ip = match request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| canonical_client_ip(request.headers(), ci.0, state.config.trusted_proxy_hops))
-    {
-        Some(ip) => ip.to_string(),
-        None => {
-            tracing::warn!(
-                "owner_token_ip_rate_limit_middleware: cannot determine client IP, denying"
-            );
-            return rate_limiter_unavailable_response();
-        }
-    };
+    let ip = rate_limit_peer_addr(&request, state.config.trusted_proxy_hops).to_string();
 
     let config = &state.config.owner_token_rate_limit;
     let mut redis = state.redis.clone();
@@ -1915,6 +1904,64 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         // Verify Retry-After header is present
         assert!(resp.headers().contains_key("retry-after"));
+    }
+
+    // ---- Missing ConnectInfo must still be rate-limited (WALM-626) ----
+
+    fn rate_limit_request(peer: Option<std::net::SocketAddr>, xff: Option<&str>) -> Request {
+        let mut builder = axum::http::Request::builder().uri("/");
+        if let Some(xff) = xff {
+            builder = builder.header("x-forwarded-for", xff);
+        }
+        let mut request = builder.body(axum::body::Body::empty()).unwrap();
+        if let Some(peer) = peer {
+            request
+                .extensions_mut()
+                .insert(axum::extract::ConnectInfo(peer));
+        }
+        request
+    }
+
+    #[test]
+    fn missing_connect_info_with_zero_hops_uses_unspecified_peer() {
+        let request = rate_limit_request(None, Some("198.51.100.7"));
+        assert_eq!(
+            rate_limit_peer_addr(&request, 0),
+            "0.0.0.0".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn connect_info_present_with_zero_hops_ignores_xff() {
+        let peer = "203.0.113.9:443".parse().unwrap();
+        let request = rate_limit_request(Some(peer), Some("198.51.100.7"));
+        assert_eq!(
+            rate_limit_peer_addr(&request, 0),
+            "203.0.113.9".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_connect_info_with_trusted_hop_uses_xff() {
+        let request = rate_limit_request(None, Some("198.51.100.7"));
+        assert_eq!(
+            rate_limit_peer_addr(&request, 1),
+            "198.51.100.7".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_connect_info_with_trusted_hop_falls_back_without_xff() {
+        let no_xff = rate_limit_request(None, None);
+        let malformed = rate_limit_request(None, Some("not-an-ip"));
+        assert_eq!(
+            rate_limit_peer_addr(&no_xff, 1),
+            "0.0.0.0".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(
+            rate_limit_peer_addr(&malformed, 1),
+            "0.0.0.0".parse::<std::net::IpAddr>().unwrap()
+        );
     }
 
     // ---- Read API rate limit config + response shape ----
