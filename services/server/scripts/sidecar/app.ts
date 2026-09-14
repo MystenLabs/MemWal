@@ -57,6 +57,10 @@ export function createSidecarApp(mode: "full" | "writer" = SIDECAR_ROUTE_MODE): 
     if (mode === "full") {
         mountMcpRoutes(app, {
             relayerUrl: process.env.MEMWAL_RELAYER_URL ?? "http://localhost:3001",
+            // Set by the Rust parent only when an operator supplied
+            // MEMWAL_RELAYER_URL. Absent means the sidecar dials loopback and
+            // has no public origin to name.
+            publicRelayerUrl: process.env.MEMWAL_PUBLIC_RELAYER_URL,
         });
     }
 

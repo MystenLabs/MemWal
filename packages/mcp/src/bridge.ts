@@ -15,7 +15,7 @@
  * Re-auth requires an explicit `memwal-mcp login` from the user.
  */
 import type { MemWalCredentials } from "./auth.js";
-import { clearCreds, credsPath } from "./auth.js";
+import { clearCreds, credsPath, loadCreds } from "./auth.js";
 import { TOOL_DEFINITIONS } from "./auth-required.js";
 import {
     clientInfoHeaders,
@@ -26,6 +26,12 @@ import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibilit
 import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { log, note } from "./logger.js";
+import {
+    loginPrompt,
+    loginSuccessNotice,
+    loginSuccessNotification,
+    type LoginSuccessInfo,
+} from "./messages.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
 /** Bridge mode runtime config — the URLs / label resolved at boot from
@@ -66,6 +72,38 @@ const NAMESPACE_TOOLS = new Set([
  *   - the caller already supplied a non-empty `namespace` — an explicit
  *     per-call namespace always wins over the configured default.
  */
+/**
+ * Name the relayer this process dialled in a `memwal_health` result.
+ *
+ * The relayer-side text can only report an origin its deployment published, and
+ * stays silent on a self-hosted or local one, where the sidecar knows nothing
+ * but the loopback address it dials. This side always knows the URL it
+ * connected to — it is exactly what `--prod` / `--relayer` / `MEMWAL_SERVER_URL`
+ * selected — so a client bound to the wrong network sees that here instead of
+ * by noticing its memories are missing.
+ *
+ * Rewrites an existing `relayer=` field rather than appending a second one: when
+ * both sides know the origin they describe the same session, and two
+ * conflicting fields would be worse than neither.
+ */
+export function annotateHealthResult(
+    result: { content?: unknown; isError?: unknown },
+    relayerUrl: string,
+): void {
+    // A failed health call has no session to describe; naming a relayer beside
+    // an error reads as though that relayer answered.
+    if (result.isError) return;
+    if (!Array.isArray(result.content)) return;
+    const block = (result.content as { type?: string; text?: string }[]).find(
+        (c) => c?.type === "text" && typeof c.text === "string",
+    );
+    if (!block || typeof block.text !== "string") return;
+    const existing = /\brelayer=\S+/;
+    block.text = existing.test(block.text)
+        ? block.text.replace(existing, `relayer=${relayerUrl}`)
+        : `${block.text} relayer=${relayerUrl}`;
+}
+
 export function applyDefaultNamespace(msg: RpcMessage, namespace?: string): RpcMessage {
     if (!namespace) return msg;
     if (msg.method !== "tools/call") return msg;
@@ -594,6 +632,14 @@ function readStdinLines(onLine: (line: string) => void): Promise<void> {
         });
         process.stdin.on("end", () => resolve());
         process.stdin.on("close", () => resolve());
+        // Attaching a `data` listener only starts the flow on a stream that was
+        // never explicitly paused. The auth-required stub hands off by calling
+        // `process.stdin.pause()`, and a stream paused that way stays paused no
+        // matter how many listeners attach — so after an in-session
+        // `memwal_login` the bridge read NOTHING beyond the requests replayed
+        // from `pendingLines`, and every later call hung unanswered. Harmless
+        // on the cold path, where stdin is already flowing.
+        process.stdin.resume();
     });
 }
 
@@ -622,6 +668,22 @@ async function handleLocalLogin(
             log.info("memwal_login.bridge.success", {
                 accountId: creds.accountId,
                 delegateAddress: creds.delegateAddress,
+            });
+            // The tool call returned the URL long ago, so — exactly as on the
+            // failure path below — this notification and the banner on the next
+            // tool result are the only ways left to say the sign-in landed.
+            writeStdoutMessage({
+                jsonrpc: "2.0",
+                method: "notifications/message",
+                params: {
+                    level: "info",
+                    logger: "memwal-mcp",
+                    data: loginSuccessNotification({
+                        accountId: creds.accountId,
+                        delegateAddress: creds.delegateAddress,
+                        credentialsPath: credsPath(),
+                    }),
+                },
             });
         },
         (err) => {
@@ -658,27 +720,15 @@ async function handleLocalLogin(
 
     return {
         isError: false,
-        text: [
-            `## ⚠️ ACTION REQUIRED: User must click this URL to sign in`,
-            ``,
-            `**URL:** ${url}`,
-            ``,
-            `\`\`\``,
+        // Read from disk, never assumed from the mode. The bridge usually runs
+        // with credentials, but `memwal_logout` in this same session deletes
+        // them and login is intercepted before the signed-out guard — claiming
+        // "already signed in" there tells the user logout did not take.
+        text: loginPrompt({
             url,
-            `\`\`\``,
-            ``,
-            `[Click here to open Walrus Memory sign-in](${url})`,
-            ``,
-            `**IMPORTANT for the assistant**: do NOT summarize or omit the URL above.`,
-            `Surface it verbatim so the user can click it.`,
-            ``,
-            `Steps:`,
-            `1. Open the URL in any browser`,
-            `2. Click **Connect Sui Wallet** and approve the on-chain \`add_delegate_key\` transaction`,
-            `3. Once "Connected" appears, retry the previous request — credentials at \`~/.memwal/credentials.json\` get overwritten with the new wallet's delegate key`,
-            ``,
-            `_The login link stays valid for 5 minutes._`,
-        ].join("\n"),
+            credentialsPath: credsPath(),
+            signedIn: loadCreds() !== null,
+        }),
     };
 }
 
@@ -728,6 +778,52 @@ function handleLocalLogout(): { text: string; isError: boolean } {
             text: `❌ Logout failed: ${err instanceof Error ? err.message : String(err)}`,
         };
     }
+}
+
+/**
+ * A completed sign-in waiting to be reported to the client.
+ *
+ * Set when credentials are adopted — either mid-session via `adoptCredentials`
+ * or on the cold hand-off from the auth-required stub, which is why this is
+ * module state with a setter rather than a local inside `runBridge`: on the
+ * cold path the sign-in happens before the bridge exists.
+ *
+ * Consumed by {@link takePendingLoginSuccess}, so it can only ever be reported
+ * once.
+ */
+let pendingLoginSuccess: LoginSuccessInfo | null = null;
+
+/** Record a completed sign-in for the next tool result to carry. */
+export function notePendingLoginSuccess(info: LoginSuccessInfo): void {
+    pendingLoginSuccess = info;
+}
+
+/** Read the pending sign-in AND clear it — the read is the consumption. */
+function takePendingLoginSuccess(): LoginSuccessInfo | null {
+    const pending = pendingLoginSuccess;
+    pendingLoginSuccess = null;
+    return pending;
+}
+
+/**
+ * Prefix the sign-in banner onto a tool result, if one is pending.
+ *
+ * Only ever called for a `tools/call` reply. A `tools/list` or `ping` response
+ * would consume the banner into somewhere the user never reads it, so the
+ * caller checks which request is being answered first.
+ */
+function applyPendingLoginSuccess(value: RpcMessage): void {
+    const result = value.result as { content?: unknown } | undefined;
+    if (!result || typeof result !== "object" || !Array.isArray(result.content)) return;
+
+    const first = result.content[0] as { type?: string; text?: string } | undefined;
+    if (!first || first.type !== "text" || typeof first.text !== "string") return;
+
+    const pending = takePendingLoginSuccess();
+    if (!pending) return;
+
+    first.text = `${loginSuccessNotice(pending)}${first.text}`;
+    log.info("bridge.login_success_notice_attached", { accountId: pending.accountId });
 }
 
 /**
@@ -945,6 +1041,12 @@ export async function runBridge(
      * locally-served `memwal_login` + `memwal_logout` tools so the MCP
      * client surfaces them in its tool palette. */
     const pendingListIds = new Set<string | number>();
+
+    /** IDs of forwarded `memwal_health` calls, each against the relayer URL the
+     * call went out on. Captured at send time rather than read at reply time so
+     * a reconnect that swapped credentials mid-flight cannot label the answer
+     * with a relayer it did not come from. */
+    const pendingHealthIds = new Map<string | number, string>();
 
     /** Reopen the SSE stream and replay outstanding `inFlight` requests against
      * the fresh session. All callers await the SAME reconnect via
@@ -1183,6 +1285,7 @@ export async function runBridge(
             const purge = (msg: RpcMessage): void => {
                 if (msg.id == null) return; // notification — nothing to reply to
                 pendingListIds.delete(msg.id);
+                pendingHealthIds.delete(msg.id);
                 if (msg.method === "initialize") {
                     return;
                 }
@@ -1238,6 +1341,15 @@ export async function runBridge(
         releaseLogoutPark?.();
         releaseLogoutPark = null;
         logoutPark = null;
+
+        // Queue the confirmation only once the session is actually live, so
+        // the banner cannot claim an authenticated connection before there is
+        // one. It rides out on the next `tools/call` result.
+        notePendingLoginSuccess({
+            accountId: creds.accountId,
+            delegateAddress: creds.delegateAddress,
+            credentialsPath: credsPath(),
+        });
     }
 
     /**
@@ -1355,6 +1467,16 @@ export async function runBridge(
                         inFlight.delete(value.id);
                         continue;
                     }
+                    // Which request this reply answers. Captured BEFORE the
+                    // `inFlight.delete` below drops the entry, so the sign-in
+                    // banner can tell a `tools/call` result from a `tools/list`
+                    // or a `ping` and avoid being consumed by a response the
+                    // user never reads.
+                    const answeredMethod =
+                        value && value.id !== undefined && value.id !== null
+                            ? inFlight.get(value.id)?.msg.method
+                            : undefined;
+
                     // Clear in-flight tracking once the response lands.
                     if (
                         value &&
@@ -1387,6 +1509,31 @@ export async function runBridge(
                             );
                             result.tools = [...upstream, ...LOCAL_TOOL_DEFINITIONS];
                         }
+                    }
+                    if (
+                        value &&
+                        value.id !== undefined &&
+                        value.id !== null &&
+                        pendingHealthIds.has(value.id) &&
+                        value.result &&
+                        typeof value.result === "object"
+                    ) {
+                        const dialled = pendingHealthIds.get(value.id);
+                        pendingHealthIds.delete(value.id);
+                        if (dialled !== undefined) {
+                            annotateHealthResult(
+                                value.result as { content?: unknown; isError?: unknown },
+                                dialled,
+                            );
+                        }
+                    }
+                    // Health annotation runs BEFORE the sign-in banner. Both
+                    // rewrite the same first text block, and annotateHealthResult
+                    // replaces the first `relayer=` it finds — so a banner
+                    // prefixed first would be the thing it rewrote if that text
+                    // ever names a relayer.
+                    if (answeredMethod === "tools/call") {
+                        applyPendingLoginSuccess(value);
                     }
                     writeStdoutMessage(value);
                 }
@@ -1548,6 +1695,16 @@ export async function runBridge(
                 // our local tools into the upstream response.
                 if (msg.method === "tools/list" && msg.id != null) {
                     pendingListIds.add(msg.id);
+                }
+
+                // Same idea for `memwal_health`: record the relayer this
+                // session is bound to so the pump can name it on the reply.
+                if (
+                    msg.method === "tools/call" &&
+                    msg.id != null &&
+                    (msg.params as { name?: string } | undefined)?.name === "memwal_health"
+                ) {
+                    pendingHealthIds.set(msg.id, creds?.relayerUrl ?? config.relayerUrl);
                 }
 
                 // Track requests (have both method and id) so we can replay

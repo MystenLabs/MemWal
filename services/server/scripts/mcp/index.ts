@@ -167,7 +167,8 @@ function expressHeadersToWeb(req: Request): Headers {
 async function handleSse(
     req: Request,
     res: Response,
-    relayerUrl: string
+    relayerUrl: string,
+    publicRelayerUrl: string | undefined
 ): Promise<void> {
     // Rate limit BEFORE resolveAuth — see comment on `rateLimiter` above.
     // resolveAuth only checks header shape, so we must cap concurrent SSE
@@ -187,7 +188,7 @@ async function handleSse(
 
     let auth: AuthResolution;
     try {
-        auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl);
+        auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl, publicRelayerUrl);
     } catch (err) {
         releaseSlot();
         if (err instanceof McpAuthError) {
@@ -287,7 +288,8 @@ async function handleSse(
 async function handlePostMessage(
     req: Request,
     res: Response,
-    relayerUrl: string
+    relayerUrl: string,
+    publicRelayerUrl: string | undefined
 ): Promise<void> {
     const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : undefined;
     if (!sessionId) {
@@ -300,7 +302,7 @@ async function handlePostMessage(
 
     let auth: AuthResolution;
     try {
-        auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl);
+        auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl, publicRelayerUrl);
     } catch (err) {
         if (err instanceof McpAuthError) {
             res.setHeader(
@@ -357,14 +359,15 @@ async function handlePostMessage(
 async function handleStreamableHttp(
     req: Request,
     res: Response,
-    relayerUrl: string
+    relayerUrl: string,
+    publicRelayerUrl: string | undefined
 ): Promise<void> {
     // 1) Auth — bearer + accountId same as SSE path. Cheap to re-run per
     //    request; resolveAuth's on-chain lookup is cached by the SDK once
     //    we mint the Walrus Memory client per session.
     let auth: AuthResolution;
     try {
-        auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl);
+        auth = await resolveAuth(expressHeadersToWeb(req), relayerUrl, publicRelayerUrl);
     } catch (err) {
         if (err instanceof McpAuthError) {
             res.setHeader(
@@ -549,6 +552,13 @@ async function handleStreamableHttp(
 export interface MountMcpOptions {
     /** Relayer base URL that tool calls hit. Default: `http://localhost:3001`. */
     relayerUrl?: string;
+    /**
+     * The relayer's public origin, when the deployment states one. Reported by
+     * `memwal_health` as the network the session is bound to. Deliberately
+     * separate from `relayerUrl`, which is only the address the sidecar dials
+     * and is loopback on every deployment that does not override it.
+     */
+    publicRelayerUrl?: string;
 }
 
 /**
@@ -568,10 +578,11 @@ export function mountMcpRoutes(
     options: MountMcpOptions = {}
 ): void {
     const relayerUrl = options.relayerUrl ?? "http://localhost:3001";
+    const publicRelayerUrl = options.publicRelayerUrl;
 
     app.get("/mcp/sse", async (req, res) => {
         try {
-            await handleSse(req, res, relayerUrl);
+            await handleSse(req, res, relayerUrl, publicRelayerUrl);
         } catch (err) {
             log.error("mcp.sse.error", {
                 err: err instanceof Error ? err.message : String(err),
@@ -589,7 +600,7 @@ export function mountMcpRoutes(
         // transport's internal raw-body parser.
         async (req, res) => {
             try {
-                await handlePostMessage(req, res, relayerUrl);
+                await handlePostMessage(req, res, relayerUrl, publicRelayerUrl);
             } catch (err) {
                 log.error("mcp.post.error", {
                     err: err instanceof Error ? err.message : String(err),
@@ -613,7 +624,7 @@ export function mountMcpRoutes(
     // req.method.
     const streamableHandler = async (req: Request, res: Response) => {
         try {
-            await handleStreamableHttp(req, res, relayerUrl);
+            await handleStreamableHttp(req, res, relayerUrl, publicRelayerUrl);
         } catch (err) {
             log.error("mcp.streamable.error", {
                 err: err instanceof Error ? err.message : String(err),
@@ -634,6 +645,7 @@ export function mountMcpRoutes(
             "GET|POST|DELETE /mcp (streamable HTTP)",
         ],
         relayerUrl,
+        publicRelayerUrl: publicRelayerUrl ?? null,
     });
 }
 

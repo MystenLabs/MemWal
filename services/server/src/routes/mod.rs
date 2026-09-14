@@ -72,15 +72,28 @@ pub async fn enqueue_wallet_job(
     operation: WalletOperation,
 ) -> Result<usize, AppError> {
     let mut storage = state.wallet_storage.clone();
-    storage
+    match storage
         .push_request(wallet_job_request(WalletJob {
             wallet_index,
             congestion_requeues: 0,
             operation,
         }))
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to enqueue WalletJob: {}", e)))?;
-    Ok(wallet_index)
+    {
+        Ok(_) => Ok(wallet_index),
+        Err(e) => {
+            crate::alerts::maybe_alert_sqlx_postgres_storage_exhausted(
+                &state.alerts,
+                &state.config.sui_network,
+                &e,
+            )
+            .await;
+            Err(AppError::Internal(format!(
+                "Failed to enqueue WalletJob: {}",
+                e
+            )))
+        }
+    }
 }
 
 // ============================================================

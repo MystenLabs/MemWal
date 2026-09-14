@@ -11,20 +11,26 @@ import type { ScoringWeights } from "./types.js";
 // ============================================================
 
 /**
- * Isomorphic SHA-256 hash — uses Web Crypto API (browser) or Node.js crypto (server).
+ * Isomorphic SHA-256 hash.
+ *
+ * Hashes in userland rather than reaching for a platform digest, so there is no
+ * Node builtin to import and nothing for a browser bundler to externalise —
+ * the WALM-136 / GH #322 landmine, where Vite quietly stubs `crypto`, the app
+ * builds clean, and the browser crashes the first time the path runs.
+ *
+ * This previously preferred WebCrypto and fell back to `node:crypto`. The
+ * fallback could never help a browser — when `crypto.subtle` is missing it is
+ * because the page is not a secure context, and `node:crypto` is not there
+ * either — so it only served Node <19 (EOL April 2025) while being the sole
+ * source of the bundler exposure. `sha256hex` is on the signed-request path,
+ * so every remember and recall runs through it.
+ *
+ * Stays `async` though `sha256` is synchronous: the signature is public API and
+ * callers already await it.
  */
 export async function sha256hex(data: string): Promise<string> {
-    const bytes = new TextEncoder().encode(data);
-    // Try Web Crypto API first (browser + modern Node.js)
-    if (typeof globalThis.crypto?.subtle?.digest === "function") {
-        const hashBuf = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-        return Array.from(new Uint8Array(hashBuf))
-            .map((b) => b.toString(16).padStart(2, "0"))
-            .join("");
-    }
-    // Fallback to Node.js crypto
-    const crypto = await import("crypto");
-    return crypto.createHash("sha256").update(data).digest("hex");
+    const { sha256 } = await import("@noble/hashes/sha2.js");
+    return bytesToHex(sha256(new TextEncoder().encode(data)));
 }
 
 // ============================================================
