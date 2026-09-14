@@ -149,7 +149,7 @@ MemWal/
 │   ├── indexer/     # Rust Sui event indexer
 │   └── contract/    # Move smart contract
 ├── docs/            # Mintlify documentation site
-└── SKILL.md         # Agent-first integration guide
+└── packages/mcp/plugin/skills/memwal/SKILL.md  # Agent-first guide, bundled in the plugin
 ```
 
 ## Troubleshooting
