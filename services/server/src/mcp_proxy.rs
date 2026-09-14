@@ -700,18 +700,30 @@ pub async fn messages_proxy(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
+    // Same reason as the SSE and streamable allowlists: the sidecar rate
+    // limits this route too, and dropping `retry-after` leaves the client
+    // unable to tell a cap that clears on a timer from one that clears when
+    // somebody else disconnects (WALM-386). Captured before `bytes()`
+    // consumes the response.
+    let retry_after = upstream
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| HeaderValue::from_str(v).ok());
 
     match upstream.bytes().await {
-        Ok(bytes) => (
-            status,
-            [(
+        Ok(bytes) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(
                 axum::http::header::CONTENT_TYPE,
                 HeaderValue::from_str(&content_type)
                     .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
-            )],
-            bytes,
-        )
-            .into_response(),
+            );
+            if let Some(value) = retry_after {
+                headers.insert(axum::http::header::RETRY_AFTER, value);
+            }
+            (status, headers, bytes).into_response()
+        }
         Err(err) => (
             StatusCode::BAD_GATEWAY,
             format!("MCP sidecar read failed: {}", err),
