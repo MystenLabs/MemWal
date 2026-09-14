@@ -118,8 +118,8 @@ static ERRORS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
 static MCP_HANDSHAKE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     prometheus::register_int_counter_vec!(
         "memwal_mcp_handshake_total",
-        "MCP handshake attempts by outcome and, when refused, why.",
-        &["outcome", "reason"]
+        "MCP handshake attempts by route and outcome and, when refused, why.",
+        &["route", "outcome", "reason"]
     )
     .expect("register memwal_mcp_handshake_total")
 });
@@ -611,8 +611,6 @@ pub fn record_app_error(kind: &'static str) {
     ERRORS_TOTAL.with_label_values(&[kind, &route]).inc();
 }
 
-/// Count one MCP handshake. `reason` is `"none"` on success — Prometheus
-/// label sets must be uniform, and an empty string reads as missing data.
 // ── Refusal log sampling ────────────────────────────────────────────
 //
 // `/api/mcp/*` has no rate limit ahead of it and a stuck client retries
@@ -694,10 +692,16 @@ pub fn connect_episode_is_fresh(started: std::time::Instant) -> bool {
     started.elapsed() < MCP_CONNECT_EPISODE_TTL
 }
 
-
-pub fn record_mcp_handshake(outcome: &str, reason: &str) {
+/// Count one MCP handshake. `reason` is `"none"` on success — Prometheus
+/// label sets must be uniform, and an empty string reads as missing data.
+///
+/// `route` names the `/api/mcp/*` entry point. Without it the SSE refusal
+/// ratio cannot be read at all: `classify_and_resolve` runs on the handshake
+/// *and* on every JSON-RPC envelope, so one live session's POSTs outnumber
+/// the GET this metric exists to measure.
+pub fn record_mcp_handshake(route: &str, outcome: &str, reason: &str) {
     MCP_HANDSHAKE_TOTAL
-        .with_label_values(&[outcome, reason])
+        .with_label_values(&[route, outcome, reason])
         .inc();
 }
 

@@ -126,6 +126,17 @@ const CLIENT_NAME_HEADER: &str = "x-memwal-client";
 const CLIENT_VERSION_HEADER: &str = "x-memwal-client-version";
 const BRIDGE_VERSION_HEADER: &str = "x-memwal-bridge-version";
 
+/// Which `/api/mcp/*` entry point a handshake outcome came from.
+///
+/// A label rather than three metrics, so the SSE refusal ratio can be
+/// queried on its own. `classify_and_resolve` runs on every JSON-RPC
+/// envelope as well as on the handshake, so without this the `ok` bucket
+/// counts a live session's POSTs and the ratio WALM-618 was diagnosed from
+/// reads far healthier than it is.
+const ROUTE_SSE: &str = "sse";
+const ROUTE_MESSAGES: &str = "messages";
+const ROUTE_STREAMABLE: &str = "streamable";
+
 /// Why a handshake was refused. Stable, low-cardinality strings: they are a
 /// Prometheus label and a log field, and they never carry a token, a key, or
 /// anything else caller-supplied.
@@ -191,12 +202,13 @@ fn sanitized_client(headers: &HeaderMap, name: &str) -> String {
 /// 70% of this route's traffic — was invisible in both logs and dashboards.
 fn refuse(
     reason: HandshakeRejection,
+    route: &str,
     headers: &HeaderMap,
     oauth_err: Option<crate::oauth::OAuthBearerError>,
 ) -> McpAuthOutcome {
     // Counter first and unconditionally — it is the signal a dashboard reads,
     // and it must not depend on whether this particular refusal was sampled.
-    crate::observability::record_mcp_handshake("unauthorized", reason.code());
+    crate::observability::record_mcp_handshake(route, "unauthorized", reason.code());
     crate::observability::record_app_error("mcp_unauthorized");
     // The line carries what the counter cannot, but this route has no rate
     // limit in front of it and a stuck client retries forever, so it is
@@ -308,12 +320,13 @@ async fn legacy_delegate_registered(
     state: &AppState,
     headers: &HeaderMap,
     token: &str,
+    route: &str,
 ) -> McpAuthOutcome {
     let Some(account_id) = account_id_header(headers) else {
-        return refuse(HandshakeRejection::NoAccountHeader, headers, None);
+        return refuse(HandshakeRejection::NoAccountHeader, route, headers, None);
     };
     let Some(pk) = public_key_from_delegate_hex(token) else {
-        return refuse(HandshakeRejection::MalformedDelegateKey, headers, None);
+        return refuse(HandshakeRejection::MalformedDelegateKey, route, headers, None);
     };
     // Cached: this runs on the SSE handshake and on every JSON-RPC envelope,
     // so an uncached read here is one fullnode call per envelope.
@@ -330,7 +343,7 @@ async fn legacy_delegate_registered(
     .await
     {
         Ok(_) => {
-            crate::observability::record_mcp_handshake("ok", "none");
+            crate::observability::record_mcp_handshake(route, "ok", "none");
             McpAuthOutcome::Passthrough
         }
         Err(err) if err.is_unavailable() => {
@@ -341,41 +354,45 @@ async fn legacy_delegate_registered(
                 error = %err,
                 "mcp delegate on-chain verify unavailable"
             );
-            crate::observability::record_mcp_handshake("unavailable", "sui_unavailable");
+            crate::observability::record_mcp_handshake(route, "unavailable", "sui_unavailable");
             crate::observability::record_app_error("mcp_upstream_unavailable");
             McpAuthOutcome::Unavailable
         }
         Err(err) => {
             tracing::debug!(error = %err, "mcp delegate rejected on chain");
-            refuse(HandshakeRejection::NotRegistered, headers, None)
+            refuse(HandshakeRejection::NotRegistered, route, headers, None)
         }
     }
 }
 
-async fn classify_and_resolve(state: &AppState, headers: &HeaderMap) -> McpAuthOutcome {
+async fn classify_and_resolve(
+    state: &AppState,
+    headers: &HeaderMap,
+    route: &str,
+) -> McpAuthOutcome {
     let Some(token) = bearer_token(headers) else {
-        return refuse(HandshakeRejection::NoBearer, headers, None);
+        return refuse(HandshakeRejection::NoBearer, route, headers, None);
     };
 
     if is_legacy_delegate_bearer(token) {
-        return legacy_delegate_registered(state, headers, token).await;
+        return legacy_delegate_registered(state, headers, token, route).await;
     }
 
     if state.config.mcp_oauth.is_none() {
-        return refuse(HandshakeRejection::OauthNotConfigured, headers, None);
+        return refuse(HandshakeRejection::OauthNotConfigured, route, headers, None);
     }
 
     match crate::oauth::resolve_oauth_bearer(state, token).await {
         Ok(identity) => {
-            crate::observability::record_mcp_handshake("ok", "none");
+            crate::observability::record_mcp_handshake(route, "ok", "none");
             McpAuthOutcome::Oauth(Box::new(identity))
         }
         Err(crate::oauth::OAuthBearerError::NotOAuthToken) => {
-            refuse(HandshakeRejection::NotOauthToken, headers, None)
+            refuse(HandshakeRejection::NotOauthToken, route, headers, None)
         }
         Err(err) => {
             tracing::debug!("mcp_proxy oauth bearer detail: {:?}", err);
-            refuse(HandshakeRejection::OauthRejected, headers, Some(err))
+            refuse(HandshakeRejection::OauthRejected, route, headers, Some(err))
         }
     }
 }
@@ -507,7 +524,7 @@ pub async fn sse_proxy(
         state.config.trusted_proxy_hops,
     );
     note_connect_attempt(&state, &headers).await;
-    let identity = match classify_and_resolve(&state, &headers).await {
+    let identity = match classify_and_resolve(&state, &headers, ROUTE_SSE).await {
         McpAuthOutcome::Passthrough => {
             finish_connect_episode(&state, &headers).await;
             None
@@ -625,7 +642,7 @@ pub async fn messages_proxy(
         state.config.trusted_proxy_hops,
     );
     note_connect_attempt(&state, &headers).await;
-    let identity = match classify_and_resolve(&state, &headers).await {
+    let identity = match classify_and_resolve(&state, &headers, ROUTE_MESSAGES).await {
         McpAuthOutcome::Passthrough => {
             finish_connect_episode(&state, &headers).await;
             None
@@ -750,7 +767,7 @@ pub async fn streamable_proxy(
         state.config.trusted_proxy_hops,
     );
     note_connect_attempt(&state, &headers).await;
-    let identity = match classify_and_resolve(&state, &headers).await {
+    let identity = match classify_and_resolve(&state, &headers, ROUTE_STREAMABLE).await {
         McpAuthOutcome::Passthrough => {
             finish_connect_episode(&state, &headers).await;
             None
