@@ -295,11 +295,20 @@ function parseRetryAfterMs(raw: string | null): number | null {
     if (trimmed === "") return null;
     if (/^\d+$/.test(trimmed)) {
         const seconds = Number(trimmed);
-        return Number.isFinite(seconds) ? seconds * 1000 : null;
+        // Non-positive is not advice. `Retry-After: 0` is a real thing to
+        // receive (some intermediaries emit it for "unknown"), and taking it
+        // literally puts us back on the ~500ms geometric backoff that
+        // WALM-386 exists to stop — while still reporting `serverAdvised`,
+        // which would also suppress the one hint the user can act on. Treat
+        // it as no usable header and fall back to the floor.
+        return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
     }
     const at = Date.parse(trimmed);
     if (!Number.isFinite(at)) return null;
-    return Math.max(0, at - Date.now());
+    // Same for an HTTP-date already in the past — which a correct server can
+    // produce simply by being a second behind the client's clock.
+    const waitMs = at - Date.now();
+    return waitMs > 0 ? waitMs : null;
 }
 
 /** The relayer refused the handshake with HTTP 429. Carried as a typed error so

@@ -335,6 +335,42 @@ test("a 429 with Retry-After is waited out, not retried after 500ms", async (t) 
     );
 });
 
+test("a 429 with Retry-After: 0 falls back to the floor, not to 500ms", async (t) => {
+    // `0` parses, so it used to satisfy `advised ?? floor` and set the wait to
+    // zero — the backoff collapsed to the ~500ms geometric retry this whole
+    // feature exists to remove, and `serverAdvised` stayed true, suppressing
+    // the concurrent-cap hint as well. It is only reachable in production
+    // since the relayer started forwarding `retry-after` at all.
+    const mock = await startThrottlingRelayer({ throttleCount: 1, retryAfterSeconds: 0 });
+    const bridge = startBridge(t, mock, { MEMWAL_MCP_THROTTLE_FLOOR_MS: "2500" });
+
+    bridge.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    await bridge.waitFor((m) => m.id === 1 && m.result, 5_000);
+
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "memwal_recall", arguments: { query: "anything" } },
+    });
+    await bridge.waitFor((m) => m.id === 2, 20_000);
+
+    assert.ok(
+        mock.sseGetAt.length >= 2,
+        `expected a retry after the 429, saw ${mock.sseGetAt.length} attempts`,
+    );
+    const gap = mock.sseGetAt[1] - mock.sseGetAt[0];
+    assert.ok(
+        gap >= 2_000,
+        `a zero Retry-After must be ignored in favour of the floor; retry came after ${gap}ms`,
+    );
+
+    assert.equal(bridge.child.exitCode, null, "bridge should still be running, not exited");
+    // Treating it as no usable header also restores `serverAdvised: false`,
+    // so the user still gets the one remediation that clears a live cap.
+    assert.match(bridge.stderr(), /closing another\s+MCP client/);
+});
+
 test("a 429 with no Retry-After falls back to the throttle floor", async (t) => {
     // The ip_active_cap shape: a concurrent cap, so the relayer deliberately
     // sends no header — there is no honest ETA to give.
