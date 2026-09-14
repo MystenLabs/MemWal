@@ -15,7 +15,7 @@
  * Re-auth requires an explicit `memwal-mcp login` from the user.
  */
 import type { MemWalCredentials } from "./auth.js";
-import { clearCreds, credsPath } from "./auth.js";
+import { clearCreds, credsPath, loadCreds } from "./auth.js";
 import { TOOL_DEFINITIONS } from "./auth-required.js";
 import {
     clientInfoHeaders,
@@ -26,6 +26,12 @@ import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibilit
 import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { log, note } from "./logger.js";
+import {
+    loginPrompt,
+    loginSuccessNotice,
+    loginSuccessNotification,
+    type LoginSuccessInfo,
+} from "./messages.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
 /** Bridge mode runtime config — the URLs / label resolved at boot from
@@ -66,6 +72,38 @@ const NAMESPACE_TOOLS = new Set([
  *   - the caller already supplied a non-empty `namespace` — an explicit
  *     per-call namespace always wins over the configured default.
  */
+/**
+ * Name the relayer this process dialled in a `memwal_health` result.
+ *
+ * The relayer-side text can only report an origin its deployment published, and
+ * stays silent on a self-hosted or local one, where the sidecar knows nothing
+ * but the loopback address it dials. This side always knows the URL it
+ * connected to — it is exactly what `--prod` / `--relayer` / `MEMWAL_SERVER_URL`
+ * selected — so a client bound to the wrong network sees that here instead of
+ * by noticing its memories are missing.
+ *
+ * Rewrites an existing `relayer=` field rather than appending a second one: when
+ * both sides know the origin they describe the same session, and two
+ * conflicting fields would be worse than neither.
+ */
+export function annotateHealthResult(
+    result: { content?: unknown; isError?: unknown },
+    relayerUrl: string,
+): void {
+    // A failed health call has no session to describe; naming a relayer beside
+    // an error reads as though that relayer answered.
+    if (result.isError) return;
+    if (!Array.isArray(result.content)) return;
+    const block = (result.content as { type?: string; text?: string }[]).find(
+        (c) => c?.type === "text" && typeof c.text === "string",
+    );
+    if (!block || typeof block.text !== "string") return;
+    const existing = /\brelayer=\S+/;
+    block.text = existing.test(block.text)
+        ? block.text.replace(existing, `relayer=${relayerUrl}`)
+        : `${block.text} relayer=${relayerUrl}`;
+}
+
 export function applyDefaultNamespace(msg: RpcMessage, namespace?: string): RpcMessage {
     if (!namespace) return msg;
     if (msg.method !== "tools/call") return msg;
@@ -166,6 +204,21 @@ const SIGNED_OUT_FAILURE = {
     errorMessage: SIGNED_OUT_TEXT,
 } as const;
 
+/** Reply for every request once the relayer has rejected the saved delegate
+ * key. An empty recall and a rejected key used to be indistinguishable to the
+ * agent — the queued call simply waited out the orphan sweeper and came back as
+ * "connection dropped, please retry", which is advice that cannot work. Name
+ * the cause and the way back in instead (GH #365 / WALM-602). */
+const UNAUTHORIZED_TEXT =
+    "❌ Walrus Memory rejected the saved credentials (HTTP 401). The delegate key may have been revoked or is no longer registered on this account. Call `memwal_login` to sign in again — saved credentials were NOT modified.";
+
+/** `failRequest` options for every credentials-rejected refusal, so one refused
+ * at handshake time and one refused on arrival afterwards read identically. */
+const UNAUTHORIZED_FAILURE = {
+    toolText: UNAUTHORIZED_TEXT,
+    errorMessage: UNAUTHORIZED_TEXT,
+} as const;
+
 /** The `tools/list` we serve LOCALLY at cold start: the memory tools (from the
  * same source as auth-required mode) plus the locally-handled login/logout
  * tools. We strip any locally-served name from the imported list first —
@@ -242,6 +295,18 @@ interface RpcMessage {
 interface InFlightEntry {
     msg: RpcMessage;
     startedAt: number;
+}
+
+/** The relayer rejected the saved delegate key (HTTP 401 on the handshake).
+ * Distinct from every other connect failure because retrying cannot fix it:
+ * the caller must re-authenticate. Carrying it as a type keeps the background
+ * connect loop from backing off forever on a key that will never be accepted,
+ * which left tool calls parked until the orphan sweeper's deadline (WALM-602). */
+class RelayerUnauthorizedError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "RelayerUnauthorizedError";
+    }
 }
 
 interface SseHandshakeResult {
@@ -340,7 +405,7 @@ async function openSseStream(
         // Auto-wiping the seed turns any one of those into a permanent
         // outage that forces re-login. Force-fail loud instead; the user
         // runs `memwal-mcp login` if they want to actually rotate.
-        throw new Error(
+        throw new RelayerUnauthorizedError(
             "Walrus Memory relayer rejected credentials (HTTP 401). " +
                 "Delegate key may have been revoked, the relayer may be " +
                 "rate-limiting, or a proxy may be interposed. Saved " +
@@ -567,6 +632,14 @@ function readStdinLines(onLine: (line: string) => void): Promise<void> {
         });
         process.stdin.on("end", () => resolve());
         process.stdin.on("close", () => resolve());
+        // Attaching a `data` listener only starts the flow on a stream that was
+        // never explicitly paused. The auth-required stub hands off by calling
+        // `process.stdin.pause()`, and a stream paused that way stays paused no
+        // matter how many listeners attach — so after an in-session
+        // `memwal_login` the bridge read NOTHING beyond the requests replayed
+        // from `pendingLines`, and every later call hung unanswered. Harmless
+        // on the cold path, where stdin is already flowing.
+        process.stdin.resume();
     });
 }
 
@@ -595,6 +668,22 @@ async function handleLocalLogin(
             log.info("memwal_login.bridge.success", {
                 accountId: creds.accountId,
                 delegateAddress: creds.delegateAddress,
+            });
+            // The tool call returned the URL long ago, so — exactly as on the
+            // failure path below — this notification and the banner on the next
+            // tool result are the only ways left to say the sign-in landed.
+            writeStdoutMessage({
+                jsonrpc: "2.0",
+                method: "notifications/message",
+                params: {
+                    level: "info",
+                    logger: "memwal-mcp",
+                    data: loginSuccessNotification({
+                        accountId: creds.accountId,
+                        delegateAddress: creds.delegateAddress,
+                        credentialsPath: credsPath(),
+                    }),
+                },
             });
         },
         (err) => {
@@ -631,27 +720,15 @@ async function handleLocalLogin(
 
     return {
         isError: false,
-        text: [
-            `## ⚠️ ACTION REQUIRED: User must click this URL to sign in`,
-            ``,
-            `**URL:** ${url}`,
-            ``,
-            `\`\`\``,
+        // Read from disk, never assumed from the mode. The bridge usually runs
+        // with credentials, but `memwal_logout` in this same session deletes
+        // them and login is intercepted before the signed-out guard — claiming
+        // "already signed in" there tells the user logout did not take.
+        text: loginPrompt({
             url,
-            `\`\`\``,
-            ``,
-            `[Click here to open Walrus Memory sign-in](${url})`,
-            ``,
-            `**IMPORTANT for the assistant**: do NOT summarize or omit the URL above.`,
-            `Surface it verbatim so the user can click it.`,
-            ``,
-            `Steps:`,
-            `1. Open the URL in any browser`,
-            `2. Click **Connect Sui Wallet** and approve the on-chain \`add_delegate_key\` transaction`,
-            `3. Once "Connected" appears, retry the previous request — credentials at \`~/.memwal/credentials.json\` get overwritten with the new wallet's delegate key`,
-            ``,
-            `_The login link stays valid for 5 minutes._`,
-        ].join("\n"),
+            credentialsPath: credsPath(),
+            signedIn: loadCreds() !== null,
+        }),
     };
 }
 
@@ -701,6 +778,52 @@ function handleLocalLogout(): { text: string; isError: boolean } {
             text: `❌ Logout failed: ${err instanceof Error ? err.message : String(err)}`,
         };
     }
+}
+
+/**
+ * A completed sign-in waiting to be reported to the client.
+ *
+ * Set when credentials are adopted — either mid-session via `adoptCredentials`
+ * or on the cold hand-off from the auth-required stub, which is why this is
+ * module state with a setter rather than a local inside `runBridge`: on the
+ * cold path the sign-in happens before the bridge exists.
+ *
+ * Consumed by {@link takePendingLoginSuccess}, so it can only ever be reported
+ * once.
+ */
+let pendingLoginSuccess: LoginSuccessInfo | null = null;
+
+/** Record a completed sign-in for the next tool result to carry. */
+export function notePendingLoginSuccess(info: LoginSuccessInfo): void {
+    pendingLoginSuccess = info;
+}
+
+/** Read the pending sign-in AND clear it — the read is the consumption. */
+function takePendingLoginSuccess(): LoginSuccessInfo | null {
+    const pending = pendingLoginSuccess;
+    pendingLoginSuccess = null;
+    return pending;
+}
+
+/**
+ * Prefix the sign-in banner onto a tool result, if one is pending.
+ *
+ * Only ever called for a `tools/call` reply. A `tools/list` or `ping` response
+ * would consume the banner into somewhere the user never reads it, so the
+ * caller checks which request is being answered first.
+ */
+function applyPendingLoginSuccess(value: RpcMessage): void {
+    const result = value.result as { content?: unknown } | undefined;
+    if (!result || typeof result !== "object" || !Array.isArray(result.content)) return;
+
+    const first = result.content[0] as { type?: string; text?: string } | undefined;
+    if (!first || first.type !== "text" || typeof first.text !== "string") return;
+
+    const pending = takePendingLoginSuccess();
+    if (!pending) return;
+
+    first.text = `${loginSuccessNotice(pending)}${first.text}`;
+    log.info("bridge.login_success_notice_attached", { accountId: pending.accountId });
 }
 
 /**
@@ -768,6 +891,10 @@ export async function runBridge(
      * checks this alongside `stdinClosed`; `adoptCredentials` clears it when a
      * new login lands. */
     let loggedOut = false;
+    /** Set when the relayer 401s the handshake, cleared on the next successful
+     * connect. While set, requests fail fast with `UNAUTHORIZED_FAILURE` rather
+     * than parking in `pendingForward` behind a connect that cannot succeed. */
+    let credentialsRejected = false;
     /** Resolves once a post-logout `memwal_login` has published a fresh session
      * (or stdin closed). The server pump parks on this instead of exiting, so
      * signing back in resumes streaming without the user restarting their MCP
@@ -915,6 +1042,12 @@ export async function runBridge(
      * client surfaces them in its tool palette. */
     const pendingListIds = new Set<string | number>();
 
+    /** IDs of forwarded `memwal_health` calls, each against the relayer URL the
+     * call went out on. Captured at send time rather than read at reply time so
+     * a reconnect that swapped credentials mid-flight cannot label the answer
+     * with a relayer it did not come from. */
+    const pendingHealthIds = new Map<string | number, string>();
+
     /** Reopen the SSE stream and replay outstanding `inFlight` requests against
      * the fresh session. All callers await the SAME reconnect via
      * `reconnectPromise` — returning immediately while one is active would let
@@ -960,9 +1093,13 @@ export async function runBridge(
                     });
                 });
             }
+            // Hoisted so the catch below can ask whether the credentials moved
+            // since the handshake that threw was opened — a 401 for a key a
+            // login has already replaced says nothing about the new one.
+            let openingGeneration = credentialGeneration;
             try {
                 while (!stdinClosed && !loggedOut) {
-                    const openingGeneration = credentialGeneration;
+                    openingGeneration = credentialGeneration;
                     const openingCreds = creds;
                     // Signed out between the guard above and here: the key is
                     // gone, so there is nothing to authorize a new session
@@ -1001,6 +1138,18 @@ export async function runBridge(
                     firstConnectDone = true;
                     activeCredentialGeneration = openingGeneration;
                     reconnectAttempt = 0;
+                    // An accepted handshake retires any earlier rejection —
+                    // `memwal_login` re-registers a key and lands here, not on
+                    // the background connect's publish path, so clearing only
+                    // there would leave every later request refused (WALM-602).
+                    credentialsRejected = false;
+                    // Usually a no-op: the pump is past `firstConnect` by the
+                    // time anything reconnects. It is NOT a no-op when this is
+                    // the first session to exist at all — a login after the
+                    // saved key was rejected — and without it the pump would
+                    // stay parked until the background connect's backoff
+                    // happened to expire, with nothing draining this stream.
+                    signalFirstConnect();
                     log.info("bridge.reconnected", {
                         relayer: openingCreds.relayerUrl,
                         replayCount: inFlight.size,
@@ -1079,6 +1228,23 @@ export async function runBridge(
                 log.error("bridge.reconnect_failed", {
                     err: err instanceof Error ? err.message : String(err),
                 });
+                // A key revoked mid-session lands here rather than on the
+                // background connect, and retrying cannot fix it either. Answer
+                // the replay set now instead of letting the orphan sweeper hand
+                // back "connection dropped, please retry" four minutes later —
+                // the same WALM-602 symptom, one path over.
+                //
+                // This does not strand the transient case: the server pump is
+                // still looping on the dead stream, so it keeps driving
+                // `reconnect()` on its own growing backoff, and the publish
+                // above clears the flag the moment a handshake is accepted.
+                if (
+                    err instanceof RelayerUnauthorizedError &&
+                    openingGeneration === credentialGeneration
+                ) {
+                    credentialsRejected = true;
+                    failInFlightRequests("credentials rejected", UNAUTHORIZED_FAILURE);
+                }
                 // Try again on the next stdin message rather than spinning.
             }
         })();
@@ -1119,6 +1285,7 @@ export async function runBridge(
             const purge = (msg: RpcMessage): void => {
                 if (msg.id == null) return; // notification — nothing to reply to
                 pendingListIds.delete(msg.id);
+                pendingHealthIds.delete(msg.id);
                 if (msg.method === "initialize") {
                     return;
                 }
@@ -1174,6 +1341,15 @@ export async function runBridge(
         releaseLogoutPark?.();
         releaseLogoutPark = null;
         logoutPark = null;
+
+        // Queue the confirmation only once the session is actually live, so
+        // the banner cannot claim an authenticated connection before there is
+        // one. It rides out on the next `tools/call` result.
+        notePendingLoginSuccess({
+            accountId: creds.accountId,
+            delegateAddress: creds.delegateAddress,
+            credentialsPath: credsPath(),
+        });
     }
 
     /**
@@ -1291,6 +1467,16 @@ export async function runBridge(
                         inFlight.delete(value.id);
                         continue;
                     }
+                    // Which request this reply answers. Captured BEFORE the
+                    // `inFlight.delete` below drops the entry, so the sign-in
+                    // banner can tell a `tools/call` result from a `tools/list`
+                    // or a `ping` and avoid being consumed by a response the
+                    // user never reads.
+                    const answeredMethod =
+                        value && value.id !== undefined && value.id !== null
+                            ? inFlight.get(value.id)?.msg.method
+                            : undefined;
+
                     // Clear in-flight tracking once the response lands.
                     if (
                         value &&
@@ -1323,6 +1509,31 @@ export async function runBridge(
                             );
                             result.tools = [...upstream, ...LOCAL_TOOL_DEFINITIONS];
                         }
+                    }
+                    if (
+                        value &&
+                        value.id !== undefined &&
+                        value.id !== null &&
+                        pendingHealthIds.has(value.id) &&
+                        value.result &&
+                        typeof value.result === "object"
+                    ) {
+                        const dialled = pendingHealthIds.get(value.id);
+                        pendingHealthIds.delete(value.id);
+                        if (dialled !== undefined) {
+                            annotateHealthResult(
+                                value.result as { content?: unknown; isError?: unknown },
+                                dialled,
+                            );
+                        }
+                    }
+                    // Health annotation runs BEFORE the sign-in banner. Both
+                    // rewrite the same first text block, and annotateHealthResult
+                    // replaces the first `relayer=` it finds — so a banner
+                    // prefixed first would be the thing it rewrote if that text
+                    // ever names a relayer.
+                    if (answeredMethod === "tools/call") {
+                        applyPendingLoginSuccess(value);
                     }
                     writeStdoutMessage(value);
                 }
@@ -1374,11 +1585,12 @@ export async function runBridge(
                         id: msg.id,
                         result: buildLocalInitializeResult(msg.params),
                     });
-                    // Signed out: the local reply is the whole answer. We will
-                    // not forward upstream, so do not arm a suppression that no
-                    // reply can ever consume — a leaked arm would swallow the
-                    // real reply if the client later reuses this id.
-                    if (loggedOut) return;
+                    // Signed out, or the key was rejected: the local reply is the
+                    // whole answer. Both refuse further down instead of
+                    // forwarding, so do not arm a suppression that no reply can
+                    // ever consume — a leaked arm would swallow the real reply
+                    // if the client later reuses this id.
+                    if (loggedOut || credentialsRejected) return;
                     // Expect exactly one upstream reply to drop for this forward.
                     expectSuppressedReply(msg.id);
                     // Fall through: forward/buffer the initialize upstream too.
@@ -1463,6 +1675,17 @@ export async function runBridge(
                     return;
                 }
 
+                // Credentials rejected: same reasoning as `loggedOut` above.
+                // `memwal_login` returned locally already, so refusing here
+                // still leaves the user a way back in. Falling through would
+                // park the request in `pendingForward` behind a connect loop
+                // that keeps 401ing, and the client would learn nothing until
+                // the orphan sweeper's deadline — the WALM-602 symptom.
+                if (credentialsRejected) {
+                    failRequest(msg, "credentials rejected", UNAUTHORIZED_FAILURE);
+                    return;
+                }
+
                 // Fill in the configured default namespace for memory tool
                 // calls that didn't pass one. Mutates msg in place so the
                 // forwarded — and any replayed-on-reconnect — copy carries it.
@@ -1472,6 +1695,16 @@ export async function runBridge(
                 // our local tools into the upstream response.
                 if (msg.method === "tools/list" && msg.id != null) {
                     pendingListIds.add(msg.id);
+                }
+
+                // Same idea for `memwal_health`: record the relayer this
+                // session is bound to so the pump can name it on the reply.
+                if (
+                    msg.method === "tools/call" &&
+                    msg.id != null &&
+                    (msg.params as { name?: string } | undefined)?.name === "memwal_health"
+                ) {
+                    pendingHealthIds.set(msg.id, creds?.relayerUrl ?? config.relayerUrl);
                 }
 
                 // Track requests (have both method and id) so we can replay
@@ -1682,9 +1915,12 @@ export async function runBridge(
         }
     }
 
-    function failPendingForward(reason: string): void {
+    function failPendingForward(
+        reason: string,
+        opts: { toolText?: string; errorMessage?: string } = {},
+    ): void {
         const queued = pendingForward.splice(0, pendingForward.length);
-        for (const msg of queued) failRequest(msg, reason);
+        for (const msg of queued) failRequest(msg, reason, opts);
     }
 
     /** Close out requests that reached `inFlight` but were never delivered a
@@ -1692,8 +1928,11 @@ export async function runBridge(
      * closes mid-flush: items already shifted out of `pendingForward` and posted
      * to a torn-down session would otherwise hang, since no upstream reply is
      * coming. Idempotent w.r.t. ids already closed out (delete-then-skip). */
-    function failInFlightRequests(reason: string): void {
-        for (const entry of Array.from(inFlight.values())) failRequest(entry.msg, reason);
+    function failInFlightRequests(
+        reason: string,
+        opts: { toolText?: string; errorMessage?: string } = {},
+    ): void {
+        for (const entry of Array.from(inFlight.values())) failRequest(entry.msg, reason, opts);
     }
 
     /** Close out requests whose deadline has passed. Without this a reply lost
@@ -1780,6 +2019,10 @@ export async function runBridge(
                 sessionEpoch += 1;
                 sse = candidate;
                 firstConnectDone = true;
+                // A key that was rejected earlier is evidently accepted now
+                // (re-registered, or the 401 was a transient WAF/rate-limit
+                // false positive), so stop failing requests fast.
+                credentialsRejected = false;
                 note(`Connected. Bridging stdio MCP ↔ ${creds.relayerUrl}`);
                 log.info("bridge.connected", { relayer: creds.relayerUrl });
                 signalFirstConnect();
@@ -1789,6 +2032,42 @@ export async function runBridge(
                 const reason = err instanceof Error ? err.message : String(err);
                 attempt += 1;
                 log.error("bridge.initial_connect_failed", { err: reason, attempt });
+                // A rejected key will not start working on the next attempt, so
+                // answer everything queued instead of leaving it to the orphan
+                // sweeper. Keep looping: `memwal_login` re-registers a key on
+                // this same relayer, and whichever path publishes the next
+                // session clears the flag and resumes normal buffering.
+                //
+                // Do NOT signal `firstConnect` here. It means "a session
+                // exists", and none does — the pump would fall straight through
+                // its `break; // stdin closed before we ever connected`, win the
+                // shutdown race in `runBridge`, and `markStdinClosed()` would
+                // disable the very `reconnect()` the error text tells the user
+                // to reach via `memwal_login`. `failPendingForward` writes to
+                // stdout directly and needs no pump.
+                //
+                // Same staleness test as the publish path above: a 401 for the
+                // key a login already replaced says nothing about the new one,
+                // and latching the flag on it would refuse every request against
+                // a session that is live and fine.
+                if (
+                    err instanceof RelayerUnauthorizedError &&
+                    !sse &&
+                    openingGeneration === credentialGeneration
+                ) {
+                    credentialsRejected = true;
+                    // Everything still queued never left the process, so no
+                    // upstream initialize reply will arrive to consume its arm.
+                    // `failRequest` keeps initialize arms for replies that CAN
+                    // still arrive; a leaked one here would swallow the reply to
+                    // a reused id after `memwal_login`.
+                    for (const msg of pendingForward) {
+                        if (msg.method === "initialize" && msg.id != null) {
+                            suppressUpstreamReplies.delete(msg.id);
+                        }
+                    }
+                    failPendingForward("credentials rejected", UNAUTHORIZED_FAILURE);
+                }
                 if (stdinClosed) break;
                 const backoff = Math.min(15_000, 500 * Math.pow(2, attempt - 1));
                 await new Promise<void>((resolve) => {

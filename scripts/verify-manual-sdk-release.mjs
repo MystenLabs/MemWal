@@ -5,13 +5,13 @@ import { readFileSync } from "node:fs";
 const releases = [
     {
         name: "TypeScript SDK",
-        version: "0.1.6",
+        version: "0.1.7",
         manifests: [["packages/sdk/package.json", "version"]],
         changelogs: ["packages/sdk/CHANGELOG.md", "docs/sdk/changelog.mdx"],
     },
     {
         name: "Python SDK",
-        version: "0.1.9",
+        version: "0.1.10",
         manifests: [
             ["packages/python-sdk-memwal/pyproject.toml", "toml-version"],
             ["packages/python-sdk-memwal/memwal/__init__.py", "python-version"],
@@ -23,7 +23,7 @@ const releases = [
     },
     {
         name: "MCP package",
-        version: "0.0.12",
+        version: "0.0.13",
         manifests: [
             ["packages/mcp/package.json", "version"],
             [".claude-plugin/marketplace.json", "plugin-version"],

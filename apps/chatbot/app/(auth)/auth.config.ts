@@ -1,6 +1,8 @@
 import type { NextAuthConfig } from "next-auth";
 
 export const authConfig = {
+  // Railway / Docker set HOSTNAME=0.0.0.0; trust the incoming Host header.
+  trustHost: true,
   pages: {
     signIn: "/login",
     newUser: "/",

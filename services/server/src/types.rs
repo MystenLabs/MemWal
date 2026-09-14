@@ -233,8 +233,8 @@ pub struct AppState {
     /// when the request body sets `scoring_weights`; default weights
     /// preserve the pgvector cosine order exactly.
     pub ranker: Arc<dyn Ranker>,
-    /// Redis multiplexed connection for rate limiting
-    pub redis: redis::aio::MultiplexedConnection,
+    /// Redis connection manager for rate limiting (reconnects after a drop)
+    pub redis: redis::aio::ConnectionManager,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
     /// Bounds concurrent AccountRegistry fallback scans (auth Strategy 3).
@@ -1826,6 +1826,11 @@ pub struct RestoreRequest {
 pub struct RestoreResponse {
     pub restored: usize,
     pub skipped: usize,
+    /// Permanent decrypt/UTF-8 failures on this on-chain page: negative-cache
+    /// hits plus any new permanent failures this call. Transient download,
+    /// decrypt, or embed errors are not counted here. Additive JSON field
+    /// (COMG-719 / WALM-480).
+    pub failed: usize,
     pub total: usize,
     pub namespace: String,
     pub owner: String,
@@ -1837,7 +1842,8 @@ pub struct RestoreResponse {
     /// namespaces can starve this one. Once the sidecar cap is saturated
     /// (`limit >= 20`), truncation follows this call's missing-blob page,
     /// not on-chain `total`, so a fully restored namespace does not loop
-    /// (WALM-431 / GH #762).
+    /// (WALM-431 / GH #762). Also true when an inspected page produced only
+    /// transients (download/decrypt/embed) so the caller retries (WALM-480).
     pub truncated: bool,
 }
 
@@ -1901,9 +1907,13 @@ pub struct HealthResponse {
     /// at from git history. Both fields are always populated — there is
     /// no "version unknown" state for a running server.
     pub prompt_versions: PromptVersions,
-    /// Whether the encryption sidecar process answered its own `/health`.
-    /// This is sidecar liveness, not a guarantee that remember/analyze will
-    /// succeed. `status` stays `"ok"` while the relayer process is up.
+    /// Whether the encryption sidecar answered `/health` AND Postgres can
+    /// accept writes (Neon `neon.max_cluster_size` cap). Prefer
+    /// `public.pg_cluster_size()`; if that function is missing, fall back
+    /// to `sum(pg_database_size)` against the same GUC. Self-hosted
+    /// Postgres without the GUC is sidecar-only. Probe errors and timeouts
+    /// fail open so CI `wait-for-relayer` does not hang. `status` stays
+    /// `"ok"` while the relayer process is up.
     pub write_ready: bool,
     /// Write-path admission: `"ok"` or `"paused"`. `"paused"` when
     /// `WRITES_PAUSED` is set; write routes then return HTTP 503.

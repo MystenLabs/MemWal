@@ -449,6 +449,12 @@ export interface ListNamespacesOptions {
 export interface RestoreResult {
     restored: number;
     skipped: number;
+    /**
+     * Permanent decrypt/UTF-8 failures on this on-chain page: negative-cache
+     * hits plus any new permanent failures this call. Relayers older than
+     * COMG-719 omit this field; the SDK defaults it to `0`.
+     */
+    failed: number;
     total: number;
     namespace: string;
     owner: string;
@@ -459,7 +465,8 @@ export interface RestoreResult {
      * `limit` can still expand that fetch (`limit < 20`). Once the cap is
      * saturated, truncation follows this call's missing-blob page, not
      * on-chain `total`, so a fully restored namespace does not loop
-     * (WALM-431 / GH #762).
+     * (WALM-431 / GH #762). Also true when an inspected page produced only
+     * transients (download/decrypt/embed) so the caller retries (WALM-480).
      *
      * `truncated=false` is not proof the sidecar saw every on-chain blob.
      * Blobs beyond the owner-wide sidecar candidate cap can still be

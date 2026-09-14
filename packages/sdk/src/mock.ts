@@ -377,6 +377,7 @@ export class MemWalMock {
         return {
             restored: 0,
             skipped: 0,
+            failed: 0,
             total: 0,
             namespace,
             owner: this.owner,
