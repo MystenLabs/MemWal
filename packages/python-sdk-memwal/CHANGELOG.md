@@ -4,6 +4,8 @@
 
 ### Added
 
+- `MemWalRememberJobTimeout` carries `idempotency_key` and `namespace` alongside `job_id`. A poll timeout is an unknown outcome, because the relayer accepted the write and it might still complete, so a caller can settle it with `wait_for_remember_job(err.job_id)`, or replay `remember_and_wait(..., idempotency_key=err.idempotency_key)` from another process and get the original job back instead of a second paid blob. Previously the generated key never left the client instance (WALM-595, GH #658).
+- `RememberAcceptedResult.idempotency_key` echoes the key a write was submitted under, matching the TypeScript SDK, so a split-API caller (`remember` then `wait_for_remember_job`) can persist it next to `job_id`.
 - `restore()` results include `failed` (default `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ## 0.1.9

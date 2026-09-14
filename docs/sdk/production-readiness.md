@@ -37,30 +37,78 @@ Several of these are patterns you implement around the client today. Where a cap
 
 ## Make writes idempotent
 
-The relayer does not deduplicate writes. A `remember` call that retries after a network blip, or fired twice by an at-least-once job queue, stores the same text twice and pollutes later recall. Until content-based deduplication is available natively, gate writes on a key your agent controls so a repeat is a no-op.
+Every write carries an idempotency key. Pass your own through `idempotencyKey` and
+a repeat submission returns the original job instead of minting a second blob,
+which you would also pay for. Omit it and the SDK generates one per call, which
+still covers its own internal retries but gives you nothing to replay with later.
 
 ```ts
 import { createHash } from "crypto";
 
-const written = new Set<string>(); // back this with Redis or a DB in production
+function writeKey(text: string, namespace = "default") {
+  return createHash("sha256").update(`${namespace}:${text}`).digest("hex");
+}
 
 async function rememberOnce(memwal: MemWal, text: string, namespace?: string) {
-  const id = createHash("sha256").update(`${namespace ?? "default"}:${text}`).digest("hex");
-  if (written.has(id)) return; // already stored this exact memory
+  return memwal.rememberAndWait(text, namespace, {
+    idempotencyKey: writeKey(text, namespace),
+  });
+}
 
-  const job = await memwal.remember(text, namespace);
-  await memwal.waitForRememberJob(job.job_id);
-  written.add(id);
+// job.idempotency_key echoes the key back, so a fire-and-forget caller can
+// persist it alongside job.job_id.
+const job = await memwal.remember(text, namespace, { idempotencyKey: writeKey(text, namespace) });
+```
+
+Derive the key from the content, as above. It is then stable across processes, so
+a replay after a restart lands on the original job. Reusing one key for
+*different* content is rejected with a `409`.
+
+<Note>
+Persist the key outside the process (Redis, a database row, a Sui object), not in
+memory. An in-memory map resets on restart, which is exactly when a retry storm
+is most likely.
+</Note>
+
+## Recover an unknown outcome
+
+When `rememberAndWait()` exhausts its poll budget, the write is **unknown, not
+failed**. The relayer accepted the job before the budget expired and usually
+finishes it seconds later. Retrying that call blindly is what stores the memory
+twice.
+
+`isRememberJobTimeoutError()` separates the two cases, and the error carries both
+handles you need to settle the write:
+
+```ts
+import { isRememberJobTimeoutError } from "@mysten-incubation/memwal";
+
+try {
+  await memwal.rememberAndWait(text, namespace);
+} catch (err) {
+  if (!isRememberJobTimeoutError(err)) throw err; // a real failure
+
+  // Option A: settle the job that already exists. No second write.
+  const settled = await memwal.waitForRememberJob(err.jobId, { timeoutMs: 120_000 });
+  console.log(settled.blob_id);
+
+  // Option B: hand err.jobId and err.idempotencyKey to a durable queue and
+  // resume later, even from another process:
+  //   await memwal.rememberAndWait(text, err.namespace, {
+  //     idempotencyKey: err.idempotencyKey,
+  //   });
 }
 ```
 
-<Note>
-Persist the idempotency set outside the process (Redis, a database row, a Sui object), not in memory. An in-memory set resets on restart, which is exactly when a retry storm is most likely.
-</Note>
+Prefer option A while the process is still up: it is a read. Option B is for a
+worker that picks the write back up after a restart. The replay collapses onto
+the original job, so it settles the same blob rather than paying for a new one.
 
 ## Retry with backoff, but only retryable failures
 
-The client does not retry for you. Wrap calls in exponential backoff, and be careful to retry only failures that a retry can fix. A transient network error or relayer timeout is worth retrying. A `401 AUTH_REJECTED` is a configuration problem that fails identically on every attempt, so retrying it just delays the real fix.
+The client does not retry for you. Wrap calls in exponential backoff, and be careful to retry only failures that a retry can fix. A transient network error is worth retrying. A `401 AUTH_REJECTED` is a configuration problem that fails identically on every attempt, so retrying it just delays the real fix.
+
+A write that timed out while polling is the case to be careful with. It is not a failure, so re-running the write is not a retry: it is a second write. Treat `isRememberJobTimeoutError(err)` the way you treat a 4xx and stop, then recover through the job id or the key as shown above.
 
 ```ts
 async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
@@ -69,6 +117,9 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
     try {
       return await fn();
     } catch (err) {
+      // A poll timeout is an unknown outcome, not a failure. Retrying the
+      // write here is what stores the memory twice.
+      if (isRememberJobTimeoutError(err)) throw err;
       const status = (err as { status?: number }).status;
       // Do not retry auth or client errors; they will not succeed on a retry.
       if (status === 401 || (status && status >= 400 && status < 500)) throw err;
@@ -82,7 +133,7 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
 await withRetry(() => rememberOnce(memwal, "Observed: deploy at 14:03 UTC."));
 ```
 
-Pairing retry with the idempotency guard above is deliberate: a retry that fires after the write actually succeeded server-side stays safe, because `rememberOnce` short-circuits on the key.
+Pairing retry with the idempotency key above is deliberate: a retry that fires after the write actually succeeded server-side stays safe, because the relayer returns the original job for that key instead of minting a second blob.
 
 <Note>
 Built-in retry and backoff inside the client is on the roadmap. When it ships, you can drop the wrapper for the calls it covers and keep only the idempotency guard.

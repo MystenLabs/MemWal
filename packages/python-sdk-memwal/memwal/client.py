@@ -395,6 +395,7 @@ class MemWal:
         return RememberAcceptedResult(
             job_id=data["job_id"],
             status=data.get("status", "pending"),
+            idempotency_key=resolved_key,
         )
 
     # Alias for parity with TS SDK ``rememberAsync``.
@@ -489,11 +490,24 @@ class MemWal:
             self._pending_remember_keys[request_identity] = resolved_key
 
         accepted = await self.remember(text, resolved_namespace, resolved_key)
-        result = await self.wait_for_remember_job(
-            accepted.job_id,
-            poll_interval_ms=poll_interval_ms,
-            timeout_ms=timeout_ms,
-        )
+        try:
+            result = await self.wait_for_remember_job(
+                accepted.job_id,
+                poll_interval_ms=poll_interval_ms,
+                timeout_ms=timeout_ms,
+            )
+        except MemWalRememberJobTimeout as timeout:
+            # The in-memory key map only helps a caller retrying in this same
+            # process. Re-raise with the key so a service that restarts can
+            # replay this exact write, and so the key is in ``str(err)`` and not
+            # only in a field: after a restart the log line may be all that is
+            # left (WALM-595).
+            raise MemWalRememberJobTimeout(
+                job_id=timeout.job_id,
+                timeout_ms=timeout.timeout_ms,
+                idempotency_key=resolved_key,
+                namespace=resolved_namespace,
+            ) from timeout
         if generated_key:
             self._pending_remember_keys.pop(request_identity, None)
         return result
@@ -1431,15 +1445,41 @@ class MemWalRememberJobFailed(MemWalError):
 
 
 class MemWalRememberJobTimeout(MemWalError):
-    """Polling loop exceeded the configured timeout."""
+    """Polling gave up while the job was still running.
 
-    def __init__(self, job_id: str, timeout_ms: int) -> None:
+    An UNKNOWN outcome, not a failure: the relayer accepted the write and it
+    usually completes seconds later (WALM-595 / GH #658). Both handles needed to
+    settle it without paying for a second write are on the exception:
+
+    - ``job_id`` -> :meth:`MemWal.wait_for_remember_job` polls the same job.
+    - ``idempotency_key`` -> replaying ``remember_and_wait(..., idempotency_key=)``
+      returns the original job instead of minting a second blob. This is the one
+      that survives a process restart, which the in-memory key map does not. It
+      is ``None`` when :meth:`MemWal.wait_for_remember_job` was called directly,
+      since that path never saw a key.
+    """
+
+    def __init__(
+        self,
+        job_id: str,
+        timeout_ms: int,
+        idempotency_key: Optional[str] = None,
+        namespace: Optional[str] = None,
+    ) -> None:
+        detail = f"job_id={job_id}"
+        if idempotency_key:
+            detail += f", idempotency_key={idempotency_key}"
         super().__init__(
-            f"remember job timed out after {timeout_ms}ms (job_id={job_id})"
+            f"remember job timed out after {timeout_ms}ms ({detail}). The write may "
+            f"still complete: poll wait_for_remember_job({job_id!r}) to settle it, or "
+            f"replay with the same idempotency_key. Do not retry without one - that "
+            f"mints a second blob."
         )
         self.status = 504
         self.job_id = job_id
         self.timeout_ms = timeout_ms
+        self.idempotency_key = idempotency_key
+        self.namespace = namespace
 
 
 async def _discard_http_client(memwal: MemWal) -> None:

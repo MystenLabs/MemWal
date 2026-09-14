@@ -326,6 +326,11 @@ class RememberAcceptedResult:
 
     job_id: str
     status: str
+    #: The idempotency key this write was submitted under. Replaying the same
+    #: write with it returns this job instead of minting a second blob, so it is
+    #: the handle to persist alongside ``job_id`` (WALM-595). Mirrors TS
+    #: ``RememberAcceptedResult.idempotency_key``.
+    idempotency_key: Optional[str] = None
 
 
 @dataclass

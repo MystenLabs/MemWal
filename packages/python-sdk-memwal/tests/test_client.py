@@ -22,6 +22,7 @@ from memwal.client import (
     MemWalClockDriftError,
     MemWalCompatibilityError,
     MemWalError,
+    MemWalRememberJobTimeout,
     MemWalSync,
 )
 from memwal.types import (
@@ -348,6 +349,141 @@ class TestRemember:
 # ============================================================
 # remember_bulk_async() tests
 # ============================================================
+
+
+class TestRememberTimeoutRecovery:
+    """WALM-595 / GH #658.
+
+    A poll timeout is an UNKNOWN outcome: the relayer accepted the write and it
+    may still complete. The exception must carry the handles that settle it, or
+    the obvious retry mints and pays for a second blob.
+    """
+
+    @respx.mock
+    async def test_timeout_carries_the_recovery_handles(
+        self, memwal_client: MemWal
+    ) -> None:
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/remember").mock(
+            return_value=httpx.Response(
+                202, json={"job_id": "job-stuck", "status": "pending"}
+            )
+        )
+        respx.get(f"{_TEST_SERVER}/api/remember/job-stuck").mock(
+            return_value=httpx.Response(
+                200, json={"job_id": "job-stuck", "status": "running"}
+            )
+        )
+
+        with pytest.raises(MemWalRememberJobTimeout) as excinfo:
+            await memwal_client.remember_and_wait(
+                "wallet drop #42", "drops", poll_interval_ms=0, timeout_ms=1
+            )
+
+        err = excinfo.value
+        assert err.status == 504
+        assert err.job_id == "job-stuck"
+        assert err.namespace == "drops"
+        assert err.idempotency_key
+        assert "mints a second blob" in str(err)
+        # The key belongs in the message too, matching TS: after a restart the
+        # log line may be all a caller still has.
+        assert err.idempotency_key in str(err)
+
+    @respx.mock
+    async def test_replay_under_the_returned_key_reuses_the_job(
+        self, memwal_client: MemWal
+    ) -> None:
+        mock_seal_session_prereqs()
+        post = respx.post(f"{_TEST_SERVER}/api/remember").mock(
+            return_value=httpx.Response(
+                202, json={"job_id": "job-stuck", "status": "pending"}
+            )
+        )
+        polls = {"n": 0}
+
+        def _status(request: httpx.Request) -> httpx.Response:
+            polls["n"] += 1
+            if polls["n"] <= 1:
+                return httpx.Response(
+                    200, json={"job_id": "job-stuck", "status": "running"}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "job-stuck",
+                    "status": "done",
+                    "blob_id": "blob-xyz",
+                    "owner": "0xowner",
+                    "namespace": "drops",
+                },
+            )
+
+        respx.get(f"{_TEST_SERVER}/api/remember/job-stuck").mock(side_effect=_status)
+
+        with pytest.raises(MemWalRememberJobTimeout) as excinfo:
+            await memwal_client.remember_and_wait(
+                "wallet drop #42", "drops", poll_interval_ms=0, timeout_ms=1
+            )
+        err = excinfo.value
+
+        # A different client stands in for the restarted process: its in-memory
+        # key map is empty, so only the key read off the exception keeps the
+        # replay idempotent.
+        fresh = MemWal.create(
+            key=_TEST_KEY_HEX, account_id=_TEST_ACCOUNT_ID, server_url=_TEST_SERVER
+        )
+        replayed = await fresh.remember_and_wait(
+            "wallet drop #42",
+            err.namespace,
+            poll_interval_ms=0,
+            timeout_ms=5_000,
+            idempotency_key=err.idempotency_key,
+        )
+
+        assert replayed.blob_id == "blob-xyz"
+        keys = {
+            json.loads(call.request.content)["idempotency_key"] for call in post.calls
+        }
+        assert keys == {err.idempotency_key}
+
+    @respx.mock
+    async def test_remember_echoes_the_key_it_submitted_under(
+        self, memwal_client: MemWal
+    ) -> None:
+        """A split-API caller (remember + wait) needs the key too."""
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/remember").mock(
+            return_value=httpx.Response(
+                202, json={"job_id": "job-1", "status": "pending"}
+            )
+        )
+
+        generated = await memwal_client.remember("wallet drop #42")
+        assert generated.idempotency_key
+
+        explicit = await memwal_client.remember(
+            "wallet drop #43", idempotency_key="caller-owned-key"
+        )
+        assert explicit.idempotency_key == "caller-owned-key"
+
+    @respx.mock
+    async def test_direct_wait_reports_no_key_it_never_saw(
+        self, memwal_client: MemWal
+    ) -> None:
+        mock_seal_session_prereqs()
+        respx.get(f"{_TEST_SERVER}/api/remember/job-stuck").mock(
+            return_value=httpx.Response(
+                200, json={"job_id": "job-stuck", "status": "running"}
+            )
+        )
+
+        with pytest.raises(MemWalRememberJobTimeout) as excinfo:
+            await memwal_client.wait_for_remember_job(
+                "job-stuck", poll_interval_ms=0, timeout_ms=1
+            )
+
+        assert excinfo.value.idempotency_key is None
 
 
 class TestRememberBulkAsync:

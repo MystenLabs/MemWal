@@ -29,7 +29,7 @@ questions:
   - What changes were made in memwal 0.1.4?
   - Where can I find the release history for the Walrus Memory Python SDK?
 answer: >-
-  The latest Python SDK release is 0.1.10. `restore()` results include `failed` (default `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. 0.1.9 reports HTTP 503 as a retryable upstream outage instead of a credential failure, rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`, aligns restore `truncated` docs with WALM-431 retryable semantics, and warns when `server_url` uses plaintext HTTP on a non-localhost host without logging URL credentials.
+  The latest Python SDK release is 0.1.10. `MemWalRememberJobTimeout` carries `idempotency_key` and `namespace`, so a poll timeout can be settled or replayed instead of retried into a duplicate write. `restore()` results include `failed` (default `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. 0.1.9 reports HTTP 503 as a retryable upstream outage instead of a credential failure, rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`, aligns restore `truncated` docs with WALM-431 retryable semantics, and warns when `server_url` uses plaintext HTTP on a non-localhost host without logging URL credentials.
 ---
 
 Track what's new, changed, and fixed in `memwal` (Python).
@@ -38,10 +38,12 @@ For the latest version, see the [PyPI project page](https://pypi.org/project/mem
 
 ## 0.1.10
 
-This release adds `failed` on `restore()` results for permanent decrypt and UTF-8 failures.
+This release makes a remember poll timeout a recoverable unknown outcome and adds `failed` on `restore()` results for permanent decrypt and UTF-8 failures.
 
 ### Added
 
+- `MemWalRememberJobTimeout` carries `idempotency_key` and `namespace` alongside `job_id`. A poll timeout is an unknown outcome, because the relayer accepted the write and it might still complete, so a caller can settle it with `wait_for_remember_job(err.job_id)`, or replay `remember_and_wait(..., idempotency_key=err.idempotency_key)` from another process and get the original job back instead of a second paid blob. Previously the generated key never left the client instance (WALM-595, GH #658).
+- `RememberAcceptedResult.idempotency_key` echoes the key a write was submitted under, matching the TypeScript SDK, so a split-API caller (`remember` then `wait_for_remember_job`) can persist it next to `job_id`.
 - `restore()` results include `failed` (default `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ## 0.1.9

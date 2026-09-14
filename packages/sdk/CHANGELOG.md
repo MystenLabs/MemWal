@@ -4,6 +4,9 @@
 
 ### Added
 
+- `isRememberJobTimeoutError(err)` and the `RememberJobTimeoutError` type. A `rememberAndWait()` / `waitForRememberJob()` poll timeout is an unknown outcome, because the relayer accepted the job and it might still complete, so it is now distinguishable from a genuine failure without duck-typing (WALM-595, GH #658).
+- The timeout carries `jobId`, `idempotencyKey` and `namespace`. Poll `waitForRememberJob(err.jobId)` to settle the write without submitting another, or replay `rememberAndWait(text, err.namespace, { idempotencyKey: err.idempotencyKey })` from any process, and the relayer returns the original job instead of minting a second blob. Previously the generated key never left the SDK instance, so a restarted service had no way to avoid the duplicate.
+- `RememberAcceptedResult.idempotency_key` echoes the key a write was submitted under, so callers of `remember()` / `rememberAsync()` can persist it next to `job_id`.
 - `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ### Fixed

@@ -28,15 +28,18 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.7. Request bodies are hashed with `@noble/hashes` rather than WebCrypto-or-`node:crypto`, so the SDK no longer imports a Node builtin that Vite silently externalises into a runtime crash in the browser, and it declares a Node 20 floor. `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. Empty-body 401s use the AUTH_REJECTED troubleshooting message instead of telling callers to run `memwal_login`. Account and manual PTBs use typed `tx.pure` helpers so they work with modern `@mysten/sui`. 0.1.6 added optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`, and reports HTTP 503 as a retryable upstream outage instead of a sign-in failure.
+  The latest TypeScript SDK release is 0.1.7. A `rememberAndWait()` poll timeout now throws a typed `RememberJobTimeoutError` carrying `jobId` and `idempotencyKey`, so an unknown outcome can be settled or replayed instead of retried into a duplicate write. Request bodies are hashed with `@noble/hashes` rather than WebCrypto-or-`node:crypto`, so the SDK no longer imports a Node builtin that Vite silently externalises into a runtime crash in the browser, and it declares a Node 20 floor. `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. Empty-body 401s use the AUTH_REJECTED troubleshooting message instead of telling callers to run `memwal_login`. Account and manual PTBs use typed `tx.pure` helpers so they work with modern `@mysten/sui`. 0.1.6 added optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`, and reports HTTP 503 as a retryable upstream outage instead of a sign-in failure.
 ---
 
 ## 0.1.7
 
-This release removes the Node `crypto` import that crashed bundled browser builds at runtime, adds `failed` on `restore()` results, declares a Node 20 floor, stops telling headless SDK clients to call `memwal_login` on empty-body 401s, and switches account and manual PTBs to typed `tx.pure` helpers.
+This release makes a remember poll timeout a recoverable unknown outcome, removes the Node `crypto` import that crashed bundled browser builds at runtime, adds `failed` on `restore()` results, declares a Node 20 floor, stops telling headless SDK clients to call `memwal_login` on empty-body 401s, and switches account and manual PTBs to typed `tx.pure` helpers.
 
 ### Added
 
+- `isRememberJobTimeoutError(err)` and the `RememberJobTimeoutError` type. A `rememberAndWait()` / `waitForRememberJob()` poll timeout is an unknown outcome, because the relayer accepted the job and it might still complete, so it is now distinguishable from a genuine failure without duck-typing (WALM-595, GH #658).
+- The timeout carries `jobId`, `idempotencyKey` and `namespace`. Poll `waitForRememberJob(err.jobId)` to settle the write without submitting another, or replay `rememberAndWait(text, err.namespace, { idempotencyKey: err.idempotencyKey })` from any process, and the relayer returns the original job instead of minting a second blob. Previously the generated key never left the SDK instance, so a restarted service had no way to avoid the duplicate.
+- `RememberAcceptedResult.idempotency_key` echoes the key a write was submitted under, so callers of `remember()` / `rememberAsync()` can persist it next to `job_id`.
 - `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ### Fixed

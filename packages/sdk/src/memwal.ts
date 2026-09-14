@@ -66,6 +66,8 @@ import {
     normalizeServerUrl,
     sanitizeServerError,
     redactInternalUrls,
+    rememberJobTimeoutError,
+    isRememberJobTimeoutError,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
 } from "./utils.js";
@@ -278,7 +280,9 @@ export class MemWal {
             [200, 202],
         );
         if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
-        return accepted;
+        // The relayer echoes only job_id + status. Return the key as well: it is
+        // the handle that survives a restart and makes a replay idempotent.
+        return { ...accepted, idempotency_key: idempotencyKey };
     }
 
     /**
@@ -366,10 +370,10 @@ export class MemWal {
             }
         }
 
-        throw Object.assign(
-            new Error(`remember job timed out after ${timeoutMs}ms (job_id=${jobId})`),
-            { status: 504, jobId },
-        );
+        // Unknown outcome, not a failure: the relayer accepted this job and it
+        // may still finish. The error carries the handles needed to settle it
+        // without paying for a second write (WALM-595).
+        throw rememberJobTimeoutError(jobId, timeoutMs);
     }
 
     /**
@@ -389,7 +393,23 @@ export class MemWal {
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
         const accepted = await this.rememberAsync(text, resolvedNamespace, { idempotencyKey });
-        const completed = await this.waitForRememberJob(accepted.job_id, opts);
+
+        let completed: RememberResult;
+        try {
+            completed = await this.waitForRememberJob(accepted.job_id, opts);
+        } catch (err) {
+            // The in-memory key map below only helps a caller that retries in
+            // this same process. Rebuild the timeout with the key, so a service
+            // that restarts can replay this exact write instead of minting a
+            // duplicate — and so the key is in the message, not just a field.
+            if (isRememberJobTimeoutError(err)) {
+                throw rememberJobTimeoutError(err.jobId, err.timeoutMs, {
+                    idempotencyKey,
+                    namespace: resolvedNamespace,
+                });
+            }
+            throw err;
+        }
         // Clear only after terminal success. A polling timeout/transport failure
         // keeps the key so retrying the high-level operation reuses the same job.
         if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);

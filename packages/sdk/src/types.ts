@@ -27,10 +27,41 @@ export interface MemWalConfig {
 // API Types
 // ============================================================
 
+/**
+ * Shape of the error thrown by `waitForRememberJob()` / `rememberAndWait()`
+ * when polling gives up before the job reaches a terminal state.
+ *
+ * The job keeps running server-side after the client stops waiting, so this is
+ * an UNKNOWN outcome, not a failure. Detect it with `isRememberJobTimeoutError`
+ * and recover instead of retrying the write (WALM-595 / GH #658).
+ */
+export interface RememberJobTimeoutError extends Error {
+    /** Always 504 for a polling timeout. */
+    status: number;
+    /** The job that was being polled. Always set. */
+    jobId: string;
+    /** Budget that was exceeded, in milliseconds. */
+    timeoutMs: number;
+    /**
+     * The key this write was submitted under. Present whenever the SDK owns the
+     * submission (`rememberAndWait`); absent when polling a job id directly via
+     * `waitForRememberJob`, which never saw one.
+     */
+    idempotencyKey?: string;
+    /** Namespace the write targeted, for replaying it verbatim. */
+    namespace?: string;
+}
+
 /** Result from remember() / rememberAsync() */
 export interface RememberAcceptedResult {
     job_id: string;
     status: string;
+    /**
+     * The idempotency key this write was submitted under. Replaying the same
+     * write with it returns this job instead of minting a second blob, so it is
+     * the handle to persist alongside `job_id` (WALM-595).
+     */
+    idempotency_key?: string;
 }
 
 /** Status returned for an async remember job */
