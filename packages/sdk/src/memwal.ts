@@ -74,6 +74,7 @@ import {
     compatibilityErrorFromStatus,
 } from "./compatibility.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { resolveJsonRpcSuiClientConstructor } from "./sui-jsonrpc-client.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -1179,21 +1180,7 @@ export class MemWal {
         // gRPC outage from breaking every relayer-mode request while the
         // advertised JSON-RPC endpoint remains healthy.
         if (cfg.suiRpcUrl) {
-            let SuiClient: any = undefined;
-            try {
-                const mod = (await import("@mysten/sui/client")) as any;
-                SuiClient = mod.SuiClient;
-            } catch {
-                /* not present on this version */
-            }
-            if (typeof SuiClient !== "function") {
-                try {
-                    const mod = (await import("@mysten/sui/jsonRpc")) as any;
-                    SuiClient = mod.SuiJsonRpcClient ?? mod.SuiClient;
-                } catch {
-                    /* not present on this version either */
-                }
-            }
+            const SuiClient = await resolveJsonRpcSuiClientConstructor();
             if (typeof SuiClient === "function") {
                 clientCandidates.push({
                     name: "SuiClient",

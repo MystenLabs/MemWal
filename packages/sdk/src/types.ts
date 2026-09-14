@@ -515,8 +515,8 @@ export interface MemWalManualConfig {
     walletSigner?: WalletSigner;
     /**
      * Pre-configured Sui client instance (e.g. from dapp-kit's useSuiClient()).
-     * If omitted, the SDK will try to create one internally.
-     * Recommended for browser environments where @mysten/sui v2.x removed SuiClient.
+     * If omitted, the SDK creates a JSON-RPC client internally (`SuiClient` on
+     * `@mysten/sui` 2.5, `SuiJsonRpcClient` on 2.6+).
      */
     suiClient?: any;
     /** OpenAI/OpenRouter API key for embeddings (required for client-side embedding) */
@@ -626,7 +626,8 @@ interface AccountTxOpts {
     walletSigner?: WalletSigner;
     /**
      * Pre-configured Sui client instance.
-     * If omitted, the SDK will create one internally.
+     * If omitted, the SDK creates a JSON-RPC client internally (`SuiClient` on
+     * `@mysten/sui` 2.5, `SuiJsonRpcClient` on 2.6+).
      */
     suiClient?: any;
     /** Sui network (default: mainnet) */

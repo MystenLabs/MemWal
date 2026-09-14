@@ -77,7 +77,7 @@ Sui signer fields:
 | --- | --- | --- |
 | `suiPrivateKey` | one of two | Use for local signing |
 | `walletSigner` | one of two | Use a connected browser wallet instead |
-| `suiClient` | no | Optional pre-configured Sui client |
+| `suiClient` | no | Optional pre-configured Sui client. If omitted, the SDK creates a JSON-RPC client (`SuiClient` on `@mysten/sui` 2.5, `SuiJsonRpcClient` on 2.6+) |
 
 Walrus and network fields:
 

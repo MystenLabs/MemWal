@@ -42,6 +42,7 @@ import type {
     RemoveDelegateKeyOpts,
 } from "./types.js";
 import { bytesToHex, hexToBytes } from "./utils.js";
+import { createJsonRpcSuiClient, jsonRpcUrlForNetwork } from "./sui-jsonrpc-client.js";
 
 // ============================================================
 // SUI Clock object (shared, always 0x6)
@@ -78,25 +79,8 @@ async function buildTxContext(opts: {
 
     const { Transaction } = await import("@mysten/sui/transactions");
 
-    // Build Sui client
-    let suiClient: any;
-    if (opts.suiClient) {
-        suiClient = opts.suiClient;
-    } else {
-        const mod = await import("@mysten/sui/client");
-        const SuiClient = (mod as any).SuiClient;
-        if (typeof SuiClient !== "function") {
-            throw new Error(
-                "SuiClient not found. For @mysten/sui v2.6.0+, pass suiClient in opts."
-            );
-        }
-        const network = opts.suiNetwork ?? "mainnet";
-        const urls: Record<string, string> = {
-            testnet: "https://fullnode.testnet.sui.io:443",
-            mainnet: "https://fullnode.mainnet.sui.io:443",
-        };
-        suiClient = new SuiClient({ url: urls[network] ?? urls.mainnet });
-    }
+    const suiClient = opts.suiClient
+        ?? await createJsonRpcSuiClient(jsonRpcUrlForNetwork(opts.suiNetwork ?? "mainnet"));
 
     // Build signer
     if (opts.walletSigner) {
