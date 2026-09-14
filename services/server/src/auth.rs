@@ -122,6 +122,52 @@ fn cache_reverify_action(result: Result<String, OnchainVerifyError>) -> CacheRev
     }
 }
 
+/// What a Postgres `delegate_key_cache` hit resolves to, once the on-chain
+/// re-verify window is taken into account (WALM-606).
+///
+/// "Authenticated without any RPC" is a separate variant from "verified
+/// on-chain just now" so that only `VerifiedOnchain` can open a window — an
+/// `RpcError` opening one would be a fail-open.
+#[derive(Debug)]
+enum CacheHitOutcome {
+    /// Re-verify window still open — authenticate from the last good verify.
+    /// No `GetObject` was issued.
+    AuthenticatedFromWindow { owner: String },
+    /// Window closed/absent, and the on-chain verify just succeeded. The
+    /// caller must record it so the next request can skip its RPC.
+    VerifiedOnchain { owner: String },
+    /// Sui could not be consulted → 503, keep the Postgres row (WALM-429).
+    UnavailableKeepCache { reason: String },
+    /// Definitive miss (revoked key, deactivated / wrong-type account) →
+    /// evict the Postgres row and forget any window for this key.
+    Evict { reason: String },
+}
+
+/// Decide what a `delegate_key_cache` hit means, issuing the on-chain
+/// `GetObject` only when the re-verify window is closed.
+///
+/// `verify` is a closure rather than an already-awaited `Result` precisely so
+/// that "inside the window we do not touch the chain" is expressed in the
+/// type: with `window_owner = Some(..)` the closure is never invoked. The
+/// regression tests assert exactly that.
+async fn cache_hit_outcome<F, Fut>(window_owner: Option<String>, verify: F) -> CacheHitOutcome
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String, OnchainVerifyError>>,
+{
+    if let Some(owner) = window_owner {
+        return CacheHitOutcome::AuthenticatedFromWindow { owner };
+    }
+
+    match cache_reverify_action(verify().await) {
+        CacheReverifyAction::Authenticate { owner } => CacheHitOutcome::VerifiedOnchain { owner },
+        CacheReverifyAction::UnavailableKeepCache { reason } => {
+            CacheHitOutcome::UnavailableKeepCache { reason }
+        }
+        CacheReverifyAction::Evict { reason } => CacheHitOutcome::Evict { reason },
+    }
+}
+
 /// Outcome of resolving a signed delegate key to a MemWal account.
 enum AccountResolveError {
     /// Identity could not be established. Maps to a timing-normalized 401.
@@ -441,11 +487,19 @@ async fn resolve_account(
     if let Ok(Some((cached_account_id, _cached_owner))) =
         state.db.get_cached_account(public_key_hex).await
     {
-        // Re-verify the cached mapping on-chain when Sui is reachable.
-        // A transient RPC failure is *not* a revoke: keep the row, but
-        // fail closed with 503 so a revoked key cannot ride a 24h cache
-        // through a Sui outage. Definitive misses evict.
-        match cache_reverify_action(
+        // Skip the per-request `GetObject` when this exact (key, account)
+        // pair verified on-chain inside the re-verify window, authenticating
+        // as the owner *that verify* returned rather than the mutable
+        // Postgres row. Outside the window, behaviour is unchanged.
+        let window_owner = crate::storage::sui::recent_verified_owner(
+            &state.verified_delegate_cache,
+            public_key_hex,
+            &cached_account_id,
+            state.config.auth_reverify_interval(),
+        )
+        .await;
+
+        let outcome = cache_hit_outcome(window_owner, || {
             verify_delegate_key_onchain(
                 &state.http_client,
                 &state.config.sui_rpc_url,
@@ -454,13 +508,29 @@ async fn resolve_account(
                 pk_bytes,
                 &state.config.package_id,
             )
-            .await,
-        ) {
-            CacheReverifyAction::Authenticate { owner } => {
+        })
+        .await;
+
+        match outcome {
+            CacheHitOutcome::AuthenticatedFromWindow { owner } => {
+                tracing::debug!(
+                    "account resolved from cache within the on-chain re-verify window: {}",
+                    cached_account_id
+                );
+                return Ok((cached_account_id, owner));
+            }
+            CacheHitOutcome::VerifiedOnchain { owner } => {
+                crate::storage::sui::record_verified_delegate(
+                    &state.verified_delegate_cache,
+                    public_key_hex,
+                    &cached_account_id,
+                    &owner,
+                )
+                .await;
                 tracing::debug!("account resolved from cache: {}", cached_account_id);
                 return Ok((cached_account_id, owner));
             }
-            CacheReverifyAction::UnavailableKeepCache { reason } => {
+            CacheHitOutcome::UnavailableKeepCache { reason } => {
                 tracing::warn!(
                     "on-chain re-verify unavailable for key {} on account {} ({}); keeping cached mapping, not authenticating from it",
                     public_key_hex,
@@ -472,13 +542,21 @@ async fn resolve_account(
                     cached_account_id, reason
                 )));
             }
-            CacheReverifyAction::Evict { reason } => {
+            CacheHitOutcome::Evict { reason } => {
                 tracing::warn!(
                     "cached delegate key {} is stale for account {} ({}); evicting from cache",
                     public_key_hex,
                     cached_account_id,
                     reason
                 );
+                // Drop the re-verify window alongside the Postgres row, so a
+                // revocation cannot keep authenticating from a window that
+                // has not aged out yet.
+                crate::storage::sui::forget_verified_delegate(
+                    &state.verified_delegate_cache,
+                    public_key_hex,
+                )
+                .await;
                 let _ = state.db.delete_cached_key(public_key_hex).await;
             }
         }
@@ -509,6 +587,17 @@ async fn resolve_account(
                     .db
                     .cache_delegate_key(public_key_hex, exact_account_id, &owner)
                     .await;
+                // WALM-606: this verify just succeeded on-chain, so open the
+                // re-verify window here too — otherwise the very next request
+                // would hit Strategy 1 with no window and burn a second
+                // `GetObject` before the window ever opened.
+                crate::storage::sui::record_verified_delegate(
+                    &state.verified_delegate_cache,
+                    public_key_hex,
+                    exact_account_id,
+                    &owner,
+                )
+                .await;
 
                 tracing::debug!(
                     "account resolved from exact account id: {}",
@@ -578,6 +667,16 @@ async fn resolve_account(
                 .db
                 .cache_delegate_key(public_key_hex, &account_id, &owner)
                 .await;
+            // The scan found this key inside that account's on-chain
+            // `delegate_keys`, which is the same fact `verify_delegate_key_onchain`
+            // establishes — so it may open the WALM-606 window too.
+            crate::storage::sui::record_verified_delegate(
+                &state.verified_delegate_cache,
+                public_key_hex,
+                &account_id,
+                &owner,
+            )
+            .await;
             return Ok((account_id, owner));
         }
         Err(e) if e.is_unavailable() => {
@@ -1021,6 +1120,159 @@ mod tests {
             CacheReverifyAction::Authenticate { owner } => assert_eq!(owner, "0xowner"),
             other => panic!("expected authenticate, got {other:?}"),
         }
+    }
+
+    // ── WALM-606: the per-key on-chain re-verify window ──────────────────
+    //
+    // `resolve_account` needs a live `AppState` (Postgres, Redis, a Sui
+    // client), and this crate has no HTTP/gRPC mock harness, so these tests
+    // target `cache_hit_outcome` — the decision the Strategy 1 cache-hit
+    // branch delegates to. The counter proves the load-bearing property:
+    // inside the window the on-chain verify closure is never invoked, so no
+    // `GetObject` leaves the process.
+
+    /// A verify closure that records whether it ran. `resolve_account` passes
+    /// the real `verify_delegate_key_onchain` here.
+    fn counting_verify(
+        calls: &std::cell::Cell<usize>,
+        result: Result<String, OnchainVerifyError>,
+    ) -> impl FnOnce() -> std::future::Ready<Result<String, OnchainVerifyError>> + '_ {
+        move || {
+            calls.set(calls.get() + 1);
+            std::future::ready(result)
+        }
+    }
+
+    #[tokio::test]
+    async fn window_hit_authenticates_without_any_onchain_call() {
+        // Acceptance criterion: signed auth does not call GetObject on every
+        // request for a recently verified key.
+        let calls = std::cell::Cell::new(0);
+        let outcome = cache_hit_outcome(
+            Some("0xowner".to_string()),
+            counting_verify(&calls, Ok("0xshould-not-be-used".into())),
+        )
+        .await;
+
+        assert_eq!(calls.get(), 0, "an open window must not issue a GetObject");
+        match outcome {
+            CacheHitOutcome::AuthenticatedFromWindow { owner } => {
+                // The owner comes from the verify that opened the window, not
+                // from the (mutable) Postgres cache row.
+                assert_eq!(owner, "0xowner");
+            }
+            other => panic!("expected AuthenticatedFromWindow, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn window_hit_survives_a_sui_429_without_evicting_or_failing() {
+        // Acceptance criterion: a 429 during the window does not evict the
+        // row and does not 401/503 the caller. With the window open the RPC
+        // is never attempted at all, so a 429 storm is simply invisible here
+        // — that is the amplification WALM-606 removes.
+        let calls = std::cell::Cell::new(0);
+        let outcome = cache_hit_outcome(
+            Some("0xowner".to_string()),
+            counting_verify(
+                &calls,
+                Err(OnchainVerifyError::RpcError(
+                    "gRPC GetObject failed: 429 Too Many Requests".into(),
+                )),
+            ),
+        )
+        .await;
+
+        assert_eq!(calls.get(), 0);
+        assert!(
+            matches!(outcome, CacheHitOutcome::AuthenticatedFromWindow { .. }),
+            "a 429 inside the window must neither 503 (UnavailableKeepCache) \
+             nor evict, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_window_still_503s_on_rpc_error_and_keeps_the_row() {
+        // Outside the window, behaviour is exactly as before WALM-606:
+        // fail closed with 503, keep the Postgres row (WALM-429 / #811).
+        let calls = std::cell::Cell::new(0);
+        let outcome = cache_hit_outcome(
+            None,
+            counting_verify(
+                &calls,
+                Err(OnchainVerifyError::RpcError("429 Too Many Requests".into())),
+            ),
+        )
+        .await;
+
+        assert_eq!(calls.get(), 1, "a closed window must re-verify on-chain");
+        assert!(
+            matches!(outcome, CacheHitOutcome::UnavailableKeepCache { .. }),
+            "got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_window_observes_a_revocation_and_evicts() {
+        // Acceptance criterion: a genuine revocation is observed within the
+        // window. Once it expires the next request re-verifies, gets
+        // KeyNotFound, and evicts — the pre-existing definitive-miss path.
+        let calls = std::cell::Cell::new(0);
+        let outcome = cache_hit_outcome(
+            None,
+            counting_verify(
+                &calls,
+                Err(OnchainVerifyError::KeyNotFound("revoked".into())),
+            ),
+        )
+        .await;
+
+        assert_eq!(calls.get(), 1);
+        assert!(
+            matches!(outcome, CacheHitOutcome::Evict { .. }),
+            "got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_window_success_asks_the_caller_to_open_a_window() {
+        // Only this variant carries the "record the verify" instruction, so
+        // an RpcError can never open a window and let an unverifiable key
+        // authenticate.
+        let calls = std::cell::Cell::new(0);
+        let outcome = cache_hit_outcome(None, counting_verify(&calls, Ok("0xowner".into()))).await;
+
+        assert_eq!(calls.get(), 1);
+        match outcome {
+            CacheHitOutcome::VerifiedOnchain { owner } => assert_eq!(owner, "0xowner"),
+            other => panic!("expected VerifiedOnchain, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deactivated_account_inside_window_is_bounded_by_the_interval() {
+        // An account deactivated on-chain is a definitive miss, but only once
+        // the window closes — this documents the tradeoff the interval buys.
+        let calls = std::cell::Cell::new(0);
+        let deactivated = || {
+            Err::<String, _>(OnchainVerifyError::AccountDeactivated(
+                "account deactivated".into(),
+            ))
+        };
+
+        assert!(matches!(
+            cache_hit_outcome(
+                Some("0xowner".to_string()),
+                counting_verify(&calls, deactivated()),
+            )
+            .await,
+            CacheHitOutcome::AuthenticatedFromWindow { .. }
+        ));
+        assert!(matches!(
+            cache_hit_outcome(None, counting_verify(&calls, deactivated())).await,
+            CacheHitOutcome::Evict { .. }
+        ));
+        assert_eq!(calls.get(), 1, "only the closed-window call hits the chain");
     }
 
     #[test]

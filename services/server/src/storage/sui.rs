@@ -251,6 +251,165 @@ pub async fn list_delegate_keys_cached(
     Ok(keys)
 }
 
+// ============================================================
+// Verified delegate keys — per-request auth re-verify window (WALM-606)
+// ============================================================
+//
+// Memoizes a *successful* `verify_delegate_key_onchain` so repeat requests
+// from the same delegate key authenticate without a per-request `GetObject`.
+// It is the only one of the three auth-path caches that may skip that RPC
+// (`delegate_key_cache` in Postgres skips the registry scan; `DelegateKeysCache`
+// above serves `/agents` and is not on the auth path).
+//
+// Invariants, all load-bearing:
+//
+//   * Keyed on the (public_key, account_id) PAIR, so a rewritten Postgres row
+//     pointing the same key at another account cannot ride a window opened
+//     against the old one.
+//   * Stores the `owner` the verify itself returned, so a live window
+//     authenticates as the verified identity, not a mutable DB row.
+//   * Only `Ok(..)` may insert. An `RpcError` must never open a window, or an
+//     unverifiable key would authenticate because Sui was unreachable.
+//   * Staleness is bounded by `types::MAX_AUTH_REVERIFY_INTERVAL_SECS`:
+//     outside the window every request re-verifies.
+
+/// Staleness threshold for the periodic `VerifiedDelegateCache` sweep run
+/// from `main.rs`, mirroring `DELEGATE_KEYS_CACHE_MAX_AGE` above and for the
+/// same reason: the re-verify interval only gates whether a hit is *trusted*
+/// on read, so without a sweep every (key, account) pair ever authenticated
+/// would stay resident for the life of the process.
+///
+/// 10 minutes is ≥10x the 60s ceiling on the re-verify interval, so a sweep
+/// can never evict an entry whose window is still open — the worst case is a
+/// single extra `GetObject` on the next request from a key that has been
+/// idle for ten minutes.
+pub const VERIFIED_DELEGATE_CACHE_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(600);
+
+/// The result of one successful on-chain delegate-key verification.
+#[derive(Clone, Debug)]
+pub struct VerifiedDelegate {
+    /// Owner address returned by the verify that opened this window.
+    pub owner: String,
+    /// When that verify succeeded. Only ever set from a successful verify.
+    pub verified_at: std::time::Instant,
+}
+
+/// Borrowed view of a `(public_key_hex, account_object_id)` key.
+///
+/// `HashMap<(String, String), _>` cannot be probed with `(&str, &str)`, and
+/// this lookup runs on every signed request, so the map is keyed through this
+/// trait object instead of allocating two `String`s per hit. `(String, String)`
+/// and `(&str, &str)` hash identically — tuples hash element-wise, and `String`
+/// hashes as its `str` — so the borrowed probe finds the owned key.
+/// `Send + Sync` because the probe is held across the cache's `.await`, and a
+/// non-`Sync` referent there would make every signed-request future non-`Send`.
+pub trait DelegatePairKey: Send + Sync {
+    fn pair(&self) -> (&str, &str);
+}
+
+impl DelegatePairKey for (String, String) {
+    fn pair(&self) -> (&str, &str) {
+        (self.0.as_str(), self.1.as_str())
+    }
+}
+
+impl DelegatePairKey for (&str, &str) {
+    fn pair(&self) -> (&str, &str) {
+        (self.0, self.1)
+    }
+}
+
+impl std::hash::Hash for dyn DelegatePairKey + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.pair().hash(state);
+    }
+}
+
+impl PartialEq for dyn DelegatePairKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.pair() == other.pair()
+    }
+}
+
+impl Eq for dyn DelegatePairKey + '_ {}
+
+impl<'a> std::borrow::Borrow<dyn DelegatePairKey + 'a> for (String, String) {
+    fn borrow(&self) -> &(dyn DelegatePairKey + 'a) {
+        self
+    }
+}
+
+/// Keyed by `(public_key_hex, account_object_id)` — the pair that was
+/// actually verified. `AppState` owns one `Arc` of this (see `types.rs`),
+/// shared across every signed request the same way `DelegateKeysCache` is.
+pub type VerifiedDelegateCache = std::sync::Arc<
+    tokio::sync::RwLock<std::collections::HashMap<(String, String), VerifiedDelegate>>,
+>;
+
+pub fn new_verified_delegate_cache() -> VerifiedDelegateCache {
+    std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Pure: is the last successful on-chain verify still inside the re-verify
+/// window? `None` — never verified, or swept — is always `false`, so the
+/// only way to skip a `GetObject` is to have previously completed one
+/// successfully.
+pub fn verify_window_open(
+    verified_at: Option<std::time::Instant>,
+    interval: std::time::Duration,
+) -> bool {
+    matches!(verified_at, Some(at) if at.elapsed() < interval)
+}
+
+/// Owner recorded by the last successful verify of this exact
+/// (key, account) pair, if that verify is still inside `interval`.
+/// `None` means the caller must re-verify on-chain.
+pub async fn recent_verified_owner(
+    cache: &VerifiedDelegateCache,
+    public_key_hex: &str,
+    account_object_id: &str,
+    interval: std::time::Duration,
+) -> Option<String> {
+    let probe: &dyn DelegatePairKey = &(public_key_hex, account_object_id);
+    let guard = cache.read().await;
+    let entry = guard.get(probe)?;
+    if verify_window_open(Some(entry.verified_at), interval) {
+        Some(entry.owner.clone())
+    } else {
+        None
+    }
+}
+
+/// Open (or refresh) the window for a pair that just verified on-chain.
+/// Call this ONLY on `Ok(..)` from `verify_delegate_key_onchain`.
+pub async fn record_verified_delegate(
+    cache: &VerifiedDelegateCache,
+    public_key_hex: &str,
+    account_object_id: &str,
+    owner: &str,
+) {
+    cache.write().await.insert(
+        (public_key_hex.to_string(), account_object_id.to_string()),
+        VerifiedDelegate {
+            owner: owner.to_string(),
+            verified_at: std::time::Instant::now(),
+        },
+    );
+}
+
+/// Drop every window entry for this public key, whatever account it was
+/// verified against. Called alongside `db::delete_cached_key` when a
+/// re-verify returns a *definitive* miss (revoked key, deactivated or
+/// wrong-type account), so a revocation cannot keep authenticating from a
+/// window that has not expired yet.
+pub async fn forget_verified_delegate(cache: &VerifiedDelegateCache, public_key_hex: &str) {
+    cache
+        .write()
+        .await
+        .retain(|(cached_public_key, _), _| cached_public_key != public_key_hex);
+}
+
 /// Parse the `delegate_keys` array out of a MemWalAccount's `fields` map.
 /// Pure function — no I/O — so it's unit-testable without a live chain.
 pub fn parse_delegate_keys(
@@ -1643,6 +1802,261 @@ mod tests {
         assert!(
             remaining.contains_key("0xfresh"),
             "entry younger than DELEGATE_KEYS_CACHE_MAX_AGE must survive the sweep"
+        );
+    }
+
+    // ── VerifiedDelegateCache — the WALM-606 re-verify window ───────────
+    //
+    // Same no-network technique as the TTL tests above: build the cache
+    // directly and backdate `verified_at`, so the window's open/closed
+    // branches are exercised without a live chain.
+
+    const TEST_REVERIFY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(45);
+
+    async fn record_at(
+        cache: &VerifiedDelegateCache,
+        public_key_hex: &str,
+        account_object_id: &str,
+        owner: &str,
+        verified_at: std::time::Instant,
+    ) {
+        cache.write().await.insert(
+            (public_key_hex.to_string(), account_object_id.to_string()),
+            VerifiedDelegate {
+                owner: owner.to_string(),
+                verified_at,
+            },
+        );
+    }
+
+    #[test]
+    fn verify_window_open_requires_a_previous_successful_verify() {
+        // A key that has never verified (or whose entry was swept) can never
+        // skip the GetObject — this is what stops an RpcError from opening a
+        // window and fail-opening auth during a Sui outage.
+        assert!(!verify_window_open(None, TEST_REVERIFY_INTERVAL));
+    }
+
+    #[test]
+    fn verify_window_open_inside_and_outside_the_interval() {
+        let now = std::time::Instant::now();
+        assert!(verify_window_open(Some(now), TEST_REVERIFY_INTERVAL));
+        assert!(
+            !verify_window_open(
+                Some(now - TEST_REVERIFY_INTERVAL - std::time::Duration::from_secs(1)),
+                TEST_REVERIFY_INTERVAL,
+            ),
+            "a verify older than the interval must force a fresh on-chain check"
+        );
+        assert!(
+            !verify_window_open(Some(now - TEST_REVERIFY_INTERVAL), TEST_REVERIFY_INTERVAL),
+            "the interval is exclusive: at exactly the boundary we re-verify"
+        );
+    }
+
+    #[test]
+    fn verify_window_never_opens_when_the_interval_is_zero() {
+        // MEMWAL_AUTH_REVERIFY_INTERVAL_SECS=0 is the operational kill
+        // switch: every signed request must re-verify, as before WALM-606.
+        assert!(!verify_window_open(
+            Some(std::time::Instant::now()),
+            std::time::Duration::ZERO
+        ));
+    }
+
+    #[tokio::test]
+    async fn recent_verified_owner_serves_the_verified_owner_inside_the_window() {
+        let cache = new_verified_delegate_cache();
+        record_at(
+            &cache,
+            "0xpubkey",
+            "0xaccount",
+            "0xowner",
+            std::time::Instant::now(),
+        )
+        .await;
+
+        assert_eq!(
+            recent_verified_owner(&cache, "0xpubkey", "0xaccount", TEST_REVERIFY_INTERVAL).await,
+            Some("0xowner".to_string()),
+            "a fresh verify must authenticate without a new GetObject"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_verified_owner_expires_so_revocation_is_observed() {
+        // Acceptance criterion: a genuine revocation is observed within the
+        // window. Once the entry ages past the interval the window closes and
+        // `resolve_account` falls back to the unchanged verify → evict path.
+        let cache = new_verified_delegate_cache();
+        record_at(
+            &cache,
+            "0xpubkey",
+            "0xaccount",
+            "0xowner",
+            std::time::Instant::now() - TEST_REVERIFY_INTERVAL - std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(
+            recent_verified_owner(&cache, "0xpubkey", "0xaccount", TEST_REVERIFY_INTERVAL).await,
+            None,
+            "an expired window must force a fresh on-chain verify"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_verified_owner_is_scoped_to_the_verified_account() {
+        // The window keys on the (public key, account) PAIR. A Postgres cache
+        // row rewritten to point the same key at a different account must not
+        // be able to ride the window opened against the original account.
+        let cache = new_verified_delegate_cache();
+        record_at(
+            &cache,
+            "0xpubkey",
+            "0xaccount-a",
+            "0xowner-a",
+            std::time::Instant::now(),
+        )
+        .await;
+
+        assert_eq!(
+            recent_verified_owner(&cache, "0xpubkey", "0xaccount-b", TEST_REVERIFY_INTERVAL).await,
+            None,
+            "a window opened against account A must not authorize account B"
+        );
+        assert_eq!(
+            recent_verified_owner(
+                &cache,
+                "0xother-pubkey",
+                "0xaccount-a",
+                TEST_REVERIFY_INTERVAL
+            )
+            .await,
+            None,
+            "a window opened for one key must not authorize a different key"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_verified_delegate_refreshes_an_existing_window() {
+        let cache = new_verified_delegate_cache();
+        record_at(
+            &cache,
+            "0xpubkey",
+            "0xaccount",
+            "0xstale-owner",
+            std::time::Instant::now() - TEST_REVERIFY_INTERVAL - std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        record_verified_delegate(&cache, "0xpubkey", "0xaccount", "0xfresh-owner").await;
+
+        assert_eq!(
+            recent_verified_owner(&cache, "0xpubkey", "0xaccount", TEST_REVERIFY_INTERVAL).await,
+            Some("0xfresh-owner".to_string()),
+            "a successful re-verify must refresh both the owner and the timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn forget_verified_delegate_drops_every_account_for_that_key() {
+        // Called next to `db::delete_cached_key` on a definitive miss, so a
+        // revoked key cannot keep authenticating from a not-yet-expired
+        // window against any account.
+        let cache = new_verified_delegate_cache();
+        let now = std::time::Instant::now();
+        record_at(&cache, "0xrevoked", "0xaccount-a", "0xowner", now).await;
+        record_at(&cache, "0xrevoked", "0xaccount-b", "0xowner", now).await;
+        record_at(&cache, "0xlive", "0xaccount-a", "0xowner", now).await;
+
+        forget_verified_delegate(&cache, "0xrevoked").await;
+
+        assert_eq!(
+            recent_verified_owner(&cache, "0xrevoked", "0xaccount-a", TEST_REVERIFY_INTERVAL).await,
+            None
+        );
+        assert_eq!(
+            recent_verified_owner(&cache, "0xrevoked", "0xaccount-b", TEST_REVERIFY_INTERVAL).await,
+            None
+        );
+        assert_eq!(
+            recent_verified_owner(&cache, "0xlive", "0xaccount-a", TEST_REVERIFY_INTERVAL).await,
+            Some("0xowner".to_string()),
+            "forgetting one key must not disturb another key's window"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_delegate_cache_sweep_predicate_evicts_only_stale_entries() {
+        // Same unbounded-growth lesson as `DELEGATE_KEYS_CACHE_MAX_AGE`: the
+        // re-verify interval only gates trust on read, so the map needs the
+        // periodic `retain` in main.rs to stay bounded.
+        let cache = new_verified_delegate_cache();
+        let now = std::time::Instant::now();
+        record_at(
+            &cache,
+            "0xstale",
+            "0xaccount",
+            "0xowner",
+            now - VERIFIED_DELEGATE_CACHE_MAX_AGE - std::time::Duration::from_secs(1),
+        )
+        .await;
+        record_at(&cache, "0xfresh", "0xaccount", "0xowner", now).await;
+
+        // Mirrors main.rs's sweep task body verbatim.
+        cache
+            .write()
+            .await
+            .retain(|_, v| v.verified_at.elapsed() < VERIFIED_DELEGATE_CACHE_MAX_AGE);
+
+        let remaining = cache.read().await;
+        assert!(
+            !remaining.contains_key(&("0xstale".to_string(), "0xaccount".to_string())),
+            "entry older than VERIFIED_DELEGATE_CACHE_MAX_AGE must be evicted"
+        );
+        assert!(
+            remaining.contains_key(&("0xfresh".to_string(), "0xaccount".to_string())),
+            "entry younger than VERIFIED_DELEGATE_CACHE_MAX_AGE must survive the sweep"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_delegate_cache_sweep_never_closes_an_open_window() {
+        // The sweep's MAX_AGE must stay well above the interval ceiling,
+        // otherwise it would silently start evicting live windows.
+        assert!(
+            VERIFIED_DELEGATE_CACHE_MAX_AGE
+                > std::time::Duration::from_secs(crate::types::MAX_AUTH_REVERIFY_INTERVAL_SECS)
+        );
+
+        let cache = new_verified_delegate_cache();
+        record_at(
+            &cache,
+            "0xpubkey",
+            "0xaccount",
+            "0xowner",
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(crate::types::MAX_AUTH_REVERIFY_INTERVAL_SECS)
+                + std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        cache
+            .write()
+            .await
+            .retain(|_, v| v.verified_at.elapsed() < VERIFIED_DELEGATE_CACHE_MAX_AGE);
+
+        assert_eq!(
+            recent_verified_owner(
+                &cache,
+                "0xpubkey",
+                "0xaccount",
+                std::time::Duration::from_secs(crate::types::MAX_AUTH_REVERIFY_INTERVAL_SECS),
+            )
+            .await,
+            Some("0xowner".to_string()),
+            "a window at the configured ceiling must survive a sweep"
         );
     }
 

@@ -160,6 +160,47 @@ pub(crate) fn configured_auth_clock_drift_secs() -> i64 {
     }
 }
 
+/// Default re-verify window for signed auth (WALM-606): after a delegate key
+/// verifies on-chain for a given account, later signed requests from that same
+/// (key, account) pair skip their per-request Sui `GetObject` for this long.
+///
+/// The tradeoff is revocation visibility: a key removed on-chain keeps working
+/// for at most one window. 45s sits mid-band and keeps that worst case inside
+/// a minute.
+pub const DEFAULT_AUTH_REVERIFY_INTERVAL_SECS: u64 = 45;
+
+/// Hard ceiling on the configurable re-verify window. This is the
+/// revocation-visibility bound: a revoked delegate key can never keep
+/// authenticating for longer than this after the revocation lands on-chain.
+/// Operators may tune the window down (or to `0`, which restores the
+/// verify-every-request behaviour) but never past this ceiling; values above
+/// it warn and fall back to the default.
+pub const MAX_AUTH_REVERIFY_INTERVAL_SECS: u64 = 60;
+
+/// Re-verify window from `MEMWAL_AUTH_REVERIFY_INTERVAL_SECS`, bounded to
+/// `0..=MAX_AUTH_REVERIFY_INTERVAL_SECS`. `0` disables the window entirely, so
+/// every signed request re-verifies on-chain exactly as it did before
+/// WALM-606 — an operational kill switch, not a recommended setting.
+pub(crate) fn configured_auth_reverify_interval_secs() -> u64 {
+    match std::env::var("MEMWAL_AUTH_REVERIFY_INTERVAL_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+    {
+        Some(secs) if secs <= MAX_AUTH_REVERIFY_INTERVAL_SECS => secs,
+        Some(secs) => {
+            tracing::warn!(
+                "MEMWAL_AUTH_REVERIFY_INTERVAL_SECS={} exceeds the {}s revocation-visibility \
+                 ceiling; using default {}",
+                secs,
+                MAX_AUTH_REVERIFY_INTERVAL_SECS,
+                DEFAULT_AUTH_REVERIFY_INTERVAL_SECS,
+            );
+            DEFAULT_AUTH_REVERIFY_INTERVAL_SECS
+        }
+        None => DEFAULT_AUTH_REVERIFY_INTERVAL_SECS,
+    }
+}
+
 // ============================================================
 // App State (shared across routes + middleware)
 // ============================================================
@@ -211,6 +252,15 @@ pub struct AppState {
     /// id. Backs `GET /v1/owners/{owner}/agents` so repeated calls within
     /// the TTL window don't re-hit the chain.
     pub delegate_keys_cache: crate::storage::sui::DelegateKeysCache,
+    /// WALM-606 re-verify window: records that a given
+    /// `(delegate public key, account object id)` pair passed an on-chain
+    /// verify, so signed requests within
+    /// `Config::auth_reverify_interval` authenticate without re-issuing the
+    /// per-request Sui `GetObject`. Distinct from both `delegate_keys_cache`
+    /// (the `/agents` list, not on the auth path) and the 24h Postgres
+    /// `delegate_key_cache` (which only skips the registry scan) — see
+    /// `storage::sui`'s module notes for the full three-way boundary.
+    pub verified_delegate_cache: crate::storage::sui::VerifiedDelegateCache,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
     pub alerts: Arc<AlertManager>,
@@ -495,9 +545,22 @@ pub struct Config {
     /// Default 300; tunable via `AUTH_MAX_CLOCK_DRIFT_SECS`, capped at
     /// `MAX_AUTH_CLOCK_DRIFT_SECS`. Independent of nonce replay protection.
     pub auth_max_clock_drift_secs: i64,
+    /// How long a signed request may authenticate from a previous successful
+    /// on-chain delegate-key verify before the relayer re-issues the Sui
+    /// `GetObject` (WALM-606). Default 45s; tunable via
+    /// `MEMWAL_AUTH_REVERIFY_INTERVAL_SECS`, capped at
+    /// `MAX_AUTH_REVERIFY_INTERVAL_SECS`; `0` re-verifies every request.
+    /// This is the revocation-visibility bound for delegate keys.
+    pub auth_reverify_interval_secs: u64,
 }
 
 impl Config {
+    /// The WALM-606 re-verify window as a `Duration`, for
+    /// `storage::sui::recent_verified_owner`.
+    pub fn auth_reverify_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.auth_reverify_interval_secs)
+    }
+
     pub fn from_env() -> Self {
         let network = std::env::var("SUI_NETWORK")
             .unwrap_or_else(|_| "mainnet".to_string())
@@ -683,6 +746,7 @@ impl Config {
             ),
             mcp_oauth: crate::oauth::McpOAuthConfig::from_env(),
             auth_max_clock_drift_secs: configured_auth_clock_drift_secs(),
+            auth_reverify_interval_secs: configured_auth_reverify_interval_secs(),
         }
     }
 }
@@ -2353,6 +2417,7 @@ mod tests {
             sponsor_balance_low_threshold_sui: 5_000_000_000,
             mcp_oauth: None,
             auth_max_clock_drift_secs: DEFAULT_AUTH_CLOCK_DRIFT_SECS,
+            auth_reverify_interval_secs: DEFAULT_AUTH_REVERIFY_INTERVAL_SECS,
         }
     }
 
@@ -2998,6 +3063,97 @@ mod tests {
                 DEFAULT_AUTH_CLOCK_DRIFT_SECS
             );
         });
+    }
+
+    // ── configured_auth_reverify_interval_secs — WALM-606 window ─────────
+
+    static AUTH_REVERIFY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_auth_reverify_env<R>(value: Option<&str>, test: impl FnOnce() -> R) -> R {
+        let _guard = AUTH_REVERIFY_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("MEMWAL_AUTH_REVERIFY_INTERVAL_SECS").ok();
+
+        match value {
+            Some(value) => std::env::set_var("MEMWAL_AUTH_REVERIFY_INTERVAL_SECS", value),
+            None => std::env::remove_var("MEMWAL_AUTH_REVERIFY_INTERVAL_SECS"),
+        }
+
+        let result = test();
+
+        match previous {
+            Some(value) => std::env::set_var("MEMWAL_AUTH_REVERIFY_INTERVAL_SECS", value),
+            None => std::env::remove_var("MEMWAL_AUTH_REVERIFY_INTERVAL_SECS"),
+        }
+
+        result
+    }
+
+    #[test]
+    fn auth_reverify_interval_default_is_inside_the_reviewed_band() {
+        // The ticket's reviewed range is 30–60s: short enough that a revoked
+        // delegate key stops working inside a minute, long enough to absorb a
+        // fullnode 429 burst.
+        assert!(
+            (30..=MAX_AUTH_REVERIFY_INTERVAL_SECS).contains(&DEFAULT_AUTH_REVERIFY_INTERVAL_SECS)
+        );
+        assert_eq!(MAX_AUTH_REVERIFY_INTERVAL_SECS, 60);
+        with_auth_reverify_env(None, || {
+            assert_eq!(
+                configured_auth_reverify_interval_secs(),
+                DEFAULT_AUTH_REVERIFY_INTERVAL_SECS
+            );
+        });
+    }
+
+    #[test]
+    fn auth_reverify_interval_honors_valid_env() {
+        with_auth_reverify_env(Some("30"), || {
+            assert_eq!(configured_auth_reverify_interval_secs(), 30);
+        });
+        with_auth_reverify_env(Some("60"), || {
+            assert_eq!(
+                configured_auth_reverify_interval_secs(),
+                MAX_AUTH_REVERIFY_INTERVAL_SECS
+            );
+        });
+    }
+
+    #[test]
+    fn auth_reverify_interval_zero_restores_verify_every_request() {
+        with_auth_reverify_env(Some("0"), || {
+            assert_eq!(configured_auth_reverify_interval_secs(), 0);
+        });
+    }
+
+    #[test]
+    fn auth_reverify_interval_cannot_exceed_the_revocation_ceiling() {
+        // The ceiling is the revocation-visibility bound, so an operator must
+        // not be able to widen it past 60s by setting the env var.
+        with_auth_reverify_env(Some("61"), || {
+            assert_eq!(
+                configured_auth_reverify_interval_secs(),
+                DEFAULT_AUTH_REVERIFY_INTERVAL_SECS
+            );
+        });
+        with_auth_reverify_env(Some("86400"), || {
+            assert_eq!(
+                configured_auth_reverify_interval_secs(),
+                DEFAULT_AUTH_REVERIFY_INTERVAL_SECS
+            );
+        });
+    }
+
+    #[test]
+    fn auth_reverify_interval_falls_back_on_negative_or_garbage() {
+        for raw in ["-5", "not-a-number", ""] {
+            with_auth_reverify_env(Some(raw), || {
+                assert_eq!(
+                    configured_auth_reverify_interval_secs(),
+                    DEFAULT_AUTH_REVERIFY_INTERVAL_SECS,
+                    "MEMWAL_AUTH_REVERIFY_INTERVAL_SECS={raw:?} must fall back to the default"
+                );
+            });
+        }
     }
 
     // ── require_owner_token_secret_len — empty disables, short panics ────
