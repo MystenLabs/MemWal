@@ -518,7 +518,15 @@ pub async fn verify_delegate_key_cached(
     {
         Ok(owner) => {
             let key = (account_object_id.to_string(), public_key_bytes.to_vec());
-            reject_cache.write().await.remove(probe);
+            // The unconditional `reject_cache.remove` that used to stand here
+            // is deleted rather than made conditional. Any entry present for
+            // this pair at this point was either stamped before this read —
+            // in which case the lookup above already stepped past it, so it
+            // was expired and inert — or stamped *during* it, which means a
+            // concurrent request saw the chain refuse this pair. Removing the
+            // second kind is how a revoke ended up recorded in neither map:
+            // no positive entry (correct, the generation check below declines
+            // it) and no rejection either (wrong).
             let mut entries = cache.entries.write().await;
             if may_store_verification(
                 generation_before,
@@ -540,32 +548,45 @@ pub async fn verify_delegate_key_cached(
         }
         Err(err) => {
             if verify_cache_miss_action(&err) == VerifyCacheMissAction::Evict {
-                {
-                    // Remove and bump under one guard. A concurrent success
-                    // takes this same lock to insert and reads the generation
-                    // while holding it, so it either runs before this removal
-                    // (and gets deleted by it) or sees the bumped value and
-                    // declines to store. Bumping after the guard dropped left
-                    // a window where it could do neither, which is the race
-                    // `evictions` exists to close.
-                    let mut entries = cache.entries.write().await;
-                    entries.remove(probe);
-                    cache
-                        .evictions
-                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                }
+                // One guard across the removal, the bump and the rejection
+                // record. A concurrent success takes this same `entries` lock
+                // to insert and reads the generation while holding it, so it
+                // either runs before this block (and its entry is deleted by
+                // the remove) or after it (and sees the bumped generation and
+                // declines). Bumping after the guard dropped left a window
+                // where it could do neither, which is the race `evictions`
+                // exists to close.
+                let mut entries = cache.entries.write().await;
+                entries.remove(probe);
+                cache
+                    .evictions
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 // Remember the refusal so a client looping on a key that can
                 // never be accepted stops costing one fullnode read per retry.
-                // At the cap we simply do not record it — the next attempt
-                // reads the chain exactly as it does today.
                 let mut rejects = reject_cache.write().await;
                 let present = rejects.contains_key(probe);
+                // Expire before consulting the cap. The TTL is 10s and the
+                // sweeper runs every 300s, so the raw length counts up to
+                // thirty generations of entries that can no longer be served
+                // by anyone. Without this, a few thousand distinct made-up
+                // pairs hold every slot for five minutes, during which no
+                // genuine rejection is recorded at all and every looping
+                // client is back to one fullnode read per retry — the exact
+                // amplifier this cache was added to remove. Same policy as
+                // the refusal-log sampler in `observability`.
+                if !present && rejects.len() >= DELEGATE_REJECT_CACHE_MAX_ENTRIES {
+                    rejects.retain(|_, rejected_at| reject_entry_is_fresh(*rejected_at));
+                }
+                // At the cap we still simply do not record — the next attempt
+                // reads the chain exactly as it does today.
                 if should_record_rejection(rejects.len(), present) {
                     rejects.insert(
                         (account_object_id.to_string(), public_key_bytes.to_vec()),
                         std::time::Instant::now(),
                     );
                 }
+                drop(rejects);
+                drop(entries);
                 return Err(err);
             }
             // Unavailable: the chain proved nothing about this key, so a
@@ -2354,6 +2375,49 @@ mod tests {
         assert!(
             should_record_rejection(DELEGATE_REJECT_CACHE_MAX_ENTRIES, true),
             "refreshing an existing entry does not grow the map"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_rejections_do_not_hold_the_cap_against_a_genuine_one() {
+        // The cap is consulted with the map's raw length, but the TTL is 10s
+        // and the sweeper runs every 300s — so without expiring first, up to
+        // thirty generations of entries nobody can be served from still hold
+        // every slot. A few thousand made-up pairs then block every genuine
+        // rejection for five minutes, and each looping client goes back to
+        // one fullnode read per retry.
+        //
+        // This pins the policy, not the call site: the retain is inline in
+        // `verify_delegate_key_cached`'s Evict arm, which needs a chain that
+        // answers definitively and so cannot run offline. Keep the two in
+        // step by hand.
+        let rejects = new_delegate_reject_cache();
+        {
+            let mut map = rejects.write().await;
+            let dead = std::time::Instant::now() - (DELEGATE_REJECT_CACHE_TTL
+                + std::time::Duration::from_secs(1));
+            for i in 0..DELEGATE_REJECT_CACHE_MAX_ENTRIES {
+                map.insert((format!("0xspam-{i}"), sample_pk()), dead);
+            }
+        }
+
+        assert!(
+            !should_record_rejection(rejects.read().await.len(), false),
+            "precondition: the cap is full, so a new pair would be turned away"
+        );
+
+        rejects
+            .write()
+            .await
+            .retain(|_, rejected_at| reject_entry_is_fresh(*rejected_at));
+
+        assert!(
+            rejects.read().await.is_empty(),
+            "every seeded entry is past the TTL, so none may be kept"
+        );
+        assert!(
+            should_record_rejection(rejects.read().await.len(), false),
+            "after expiring, a genuine rejection has room again"
         );
     }
 
