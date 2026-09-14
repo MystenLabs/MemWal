@@ -404,6 +404,12 @@ export interface RecallManualHit {
     distance: number;
 }
 
+/** Relayer `MemWal.recallManual()` — blob_id + distance, never decrypted text. */
+export interface RecallManualHitResult {
+    results: RecallManualHit[];
+    total: number;
+}
+
 /** One namespace in a `listNamespaces()` page. Mirrors the relayer wire shape. */
 export interface NamespaceSummary {
     id: string;
@@ -600,11 +606,18 @@ export interface RecallManualMemory {
     distance: number;
 }
 
-/** Result from recallManual() — full client-side variant with decrypted text */
-export interface RecallManualResult {
-    results: (RecallManualHit | RecallManualMemory)[];
+/** Client `MemWalManual.recallManual()` — always decrypted, always has text. */
+export interface RecallManualMemoryResult {
+    results: RecallManualMemory[];
     total: number;
 }
+
+/**
+ * @deprecated Use `RecallManualHitResult` (`MemWal.recallManual`) or
+ * `RecallManualMemoryResult` (`MemWalManual.recallManual`). The mixed
+ * hit | memory item array did not match either call site.
+ */
+export type RecallManualResult = RecallManualHitResult | RecallManualMemoryResult;
 
 // ============================================================
 // Account Management Types
