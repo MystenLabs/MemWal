@@ -154,48 +154,99 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
     })
 }
 
-const WRITE_READY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
-const WRITE_READY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long a probe result is trusted before `/health` re-probes.
+const WRITE_READY_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Hard cap on the outbound sidecar probe. `/health` is a connectivity check,
+/// so the handler body must stay bounded well under any client's request
+/// budget (WALM-598 / GH #438).
+const SIDECAR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Cap on the Postgres write-readiness probe, unchanged from WALM-612. The
+/// two probes run concurrently, so this is what bounds `/health`; a slower
+/// query fails open at `warn` rather than reporting a false negative.
+const POSTGRES_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Neon refuses `smgrextend` once cluster size is at the cap; treat less
 /// than 1MB remaining as not writable so `/health` trips before the next
 /// page allocation fails.
 const POSTGRES_EXTEND_HEADROOM_BYTES: i64 = 1024 * 1024;
 
-/// Sidecar liveness AND Postgres can accept writes. Cached together so
-/// unsigned `/health` probes do not fan out on every load-balancer tick.
-async fn write_ready(state: &std::sync::Arc<AppState>) -> bool {
-    {
-        let cache = WRITE_READY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, ready)) = *cache {
-            if at.elapsed() < WRITE_READY_CACHE_TTL {
-                return ready;
-            }
+/// Memoized `write_ready` value plus the instant it was observed.
+///
+/// `tokio::sync::RwLock`, not `std::sync::Mutex`, for two reasons:
+///
+/// 1. The write guard now spans the probe (single-flight), and a
+///    `std::sync::Mutex` must not be held across an `.await`.
+/// 2. `std::sync::Mutex` poisons. The read side recovered with
+///    `unwrap_or_else(|e| e.into_inner())` but the write side was a bare
+///    `if let Ok(..)`, so a single panic while the lock was held froze the
+///    cached timestamp forever: `elapsed()` stayed past the TTL and *every*
+///    subsequent `/health` fanned out to the sidecar for the life of the
+///    process. Tokio's locks have no poison flag, so an unwind through the
+///    critical section just drops the guard.
+type WriteReadyCache = tokio::sync::RwLock<Option<(std::time::Instant, bool)>>;
+
+static WRITE_READY_CACHE: WriteReadyCache = tokio::sync::RwLock::const_new(None);
+
+/// Cache + single-flight wrapper around a write-readiness probe.
+///
+/// The TTL used to be *checked* under the lock but not *held* across the
+/// probe, so every request that arrived while a probe was in flight started
+/// its own — a stampede at each TTL boundary, which CI's added `/health`
+/// polling made routine. The write guard is now held for the probe, so
+/// concurrent callers either read the fresh value or wait for the single
+/// in-flight probe (bounded by the probe's own timeout).
+///
+/// Generic over the probe so the cache semantics are testable without a live
+/// `AppState` or sidecar.
+async fn write_ready_cached<F, Fut>(
+    cache: &WriteReadyCache,
+    ttl: std::time::Duration,
+    probe: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    // Fast path: a fresh value is readable in parallel by every caller.
+    if let Some((at, ready)) = *cache.read().await {
+        if at.elapsed() < ttl {
+            return ready;
         }
     }
 
-    let (sidecar, postgres) = tokio::join!(sidecar_write_ready(state), postgres_write_ready(state));
-    let ready = sidecar && postgres;
-    if let Ok(mut cache) = WRITE_READY_CACHE.lock() {
-        *cache = Some((std::time::Instant::now(), ready));
+    let mut guard = cache.write().await;
+    // Re-check: a racing caller may have refreshed while we waited for the
+    // write lock. This is what collapses the stampede onto one probe.
+    if let Some((at, ready)) = *guard {
+        if at.elapsed() < ttl {
+            return ready;
+        }
     }
+
+    let ready = probe().await;
+    *guard = Some((std::time::Instant::now(), ready));
     ready
 }
 
-async fn sidecar_write_ready(state: &std::sync::Arc<AppState>) -> bool {
-    let url = format!("{}/health", state.config.sidecar_url.trim_end_matches('/'));
-    match state
-        .http_client
-        .get(&url)
-        .timeout(WRITE_READY_PROBE_TIMEOUT)
-        .send()
-        .await
-    {
-        Ok(resp) => resp.status().is_success(),
-        Err(err) => {
-            tracing::debug!(error = %err, "sidecar health probe failed");
-            false
-        }
-    }
+/// Sidecar liveness AND Postgres can accept writes. Cached together so
+/// unsigned `/health` probes do not fan out on every load-balancer tick.
+async fn write_ready(state: &std::sync::Arc<AppState>) -> bool {
+    write_ready_cached(&WRITE_READY_CACHE, WRITE_READY_TTL, || {
+        probe_write_ready(state)
+    })
+    .await
+}
+
+/// Both halves of write-readiness, run concurrently so `/health` costs one
+/// probe window rather than two.
+async fn probe_write_ready(state: &std::sync::Arc<AppState>) -> bool {
+    let (sidecar, postgres) = tokio::join!(
+        probe_sidecar_write_ready(state),
+        postgres_write_ready(state)
+    );
+    sidecar && postgres
 }
 
 /// Self-hosted Postgres without `neon.max_cluster_size` stays ready (sidecar
@@ -204,7 +255,7 @@ async fn sidecar_write_ready(state: &std::sync::Arc<AppState>) -> bool {
 /// timeouts fail open at `warn` so CI `wait-for-relayer` is not blocked.
 async fn postgres_write_ready(state: &std::sync::Arc<AppState>) -> bool {
     match tokio::time::timeout(
-        WRITE_READY_PROBE_TIMEOUT,
+        POSTGRES_PROBE_TIMEOUT,
         probe_postgres_write_ready(state.db.pool()),
     )
     .await
@@ -313,8 +364,49 @@ fn postgres_can_accept_writes(used_bytes: i64, max_bytes: i64) -> bool {
     used_bytes.saturating_add(POSTGRES_EXTEND_HEADROOM_BYTES) < max_bytes
 }
 
-static WRITE_READY_CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
-    std::sync::Mutex::new(None);
+/// One outbound `GET {sidecar}/health`, instrumented like every other sidecar
+/// call in this codebase (`storage/walrus.rs`, `storage/seal.rs`) so the
+/// probe's latency and failure rate are measurable.
+async fn probe_sidecar_write_ready(state: &std::sync::Arc<AppState>) -> bool {
+    let url = format!("{}/health", state.config.sidecar_url.trim_end_matches('/'));
+    let started = std::time::Instant::now();
+    match state
+        .http_client
+        .get(&url)
+        .timeout(SIDECAR_PROBE_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            crate::observability::observe_external(
+                "sidecar",
+                "health_probe",
+                status.as_u16().to_string().as_str(),
+                started.elapsed(),
+            );
+            if !status.is_success() {
+                crate::observability::record_sidecar_failure("health_probe", "http_error");
+                tracing::warn!(
+                    status = %status,
+                    "sidecar health probe returned non-success; reporting write_ready=false"
+                );
+            }
+            status.is_success()
+        }
+        Err(err) => {
+            crate::observability::observe_external(
+                "sidecar",
+                "health_probe",
+                "transport_error",
+                started.elapsed(),
+            );
+            crate::observability::record_sidecar_failure("health_probe", "transport_error");
+            tracing::warn!(error = %err, "sidecar health probe failed");
+            false
+        }
+    }
+}
 
 /// GET /version
 pub async fn version() -> Json<crate::compatibility::VersionResponse> {
@@ -1323,7 +1415,7 @@ mod tests {
     #[test]
     fn postgres_write_ready_probe_timeout_is_one_second() {
         assert_eq!(
-            super::WRITE_READY_PROBE_TIMEOUT,
+            super::POSTGRES_PROBE_TIMEOUT,
             std::time::Duration::from_secs(1)
         );
     }
@@ -1639,5 +1731,116 @@ mod tests {
             !non_empty.is_empty(),
             "non-empty namespace must pass the validation predicate"
         );
+    }
+
+    // ── /health write-readiness cache (WALM-598) ─────────────────
+
+    mod write_ready_cache {
+        use super::super::{write_ready_cached, WriteReadyCache};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        const TTL: Duration = Duration::from_secs(2);
+
+        #[tokio::test]
+        async fn fresh_value_is_served_without_reprobing() {
+            let cache: WriteReadyCache = tokio::sync::RwLock::new(None);
+            let probes = AtomicUsize::new(0);
+            let probe = || async {
+                probes.fetch_add(1, Ordering::SeqCst);
+                true
+            };
+
+            assert!(write_ready_cached(&cache, TTL, probe).await);
+            assert!(write_ready_cached(&cache, TTL, probe).await);
+            assert_eq!(
+                probes.load(Ordering::SeqCst),
+                1,
+                "second call must hit cache"
+            );
+        }
+
+        #[tokio::test]
+        async fn expired_value_reprobes() {
+            let cache: WriteReadyCache = tokio::sync::RwLock::new(None);
+            let probes = AtomicUsize::new(0);
+            let probe = || async {
+                probes.fetch_add(1, Ordering::SeqCst);
+                true
+            };
+
+            // A zero TTL makes every stored value instantly stale.
+            assert!(write_ready_cached(&cache, Duration::ZERO, probe).await);
+            assert!(write_ready_cached(&cache, Duration::ZERO, probe).await);
+            assert_eq!(probes.load(Ordering::SeqCst), 2);
+        }
+
+        /// The stampede this replaced: the old code checked the TTL under the
+        /// lock but released it before probing, so N concurrent `/health`
+        /// requests arriving at a TTL boundary each fired their own outbound
+        /// probe. Holding the write guard across the probe collapses them.
+        #[tokio::test]
+        async fn concurrent_callers_share_one_probe() {
+            let cache: Arc<WriteReadyCache> = Arc::new(tokio::sync::RwLock::new(None));
+            let probes = Arc::new(AtomicUsize::new(0));
+
+            let mut handles = Vec::new();
+            for _ in 0..16 {
+                let cache = Arc::clone(&cache);
+                let probes = Arc::clone(&probes);
+                handles.push(tokio::spawn(async move {
+                    write_ready_cached(&cache, TTL, || async move {
+                        probes.fetch_add(1, Ordering::SeqCst);
+                        // Yield across an await point so the other tasks are
+                        // genuinely in flight while this probe runs.
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        true
+                    })
+                    .await
+                }));
+            }
+
+            for handle in handles {
+                assert!(handle.await.unwrap());
+            }
+            assert_eq!(
+                probes.load(Ordering::SeqCst),
+                1,
+                "concurrent /health requests must not stampede the sidecar"
+            );
+        }
+
+        /// Regression for the poisoned-mutex bug: with `std::sync::Mutex` a
+        /// panic inside the critical section poisoned the lock, the bare
+        /// `if let Ok(mut cache)` write silently stopped refreshing, and the
+        /// frozen timestamp made every later request bypass the cache
+        /// forever. Tokio locks do not poison, so the cache must keep working.
+        #[tokio::test]
+        async fn panicking_probe_does_not_disable_the_cache() {
+            static PANIC_CACHE: WriteReadyCache = tokio::sync::RwLock::const_new(None);
+
+            let panicked = tokio::spawn(async {
+                write_ready_cached(&PANIC_CACHE, TTL, || async {
+                    panic!("probe blew up while holding the cache lock");
+                })
+                .await
+            })
+            .await;
+            assert!(panicked.is_err(), "probe was expected to panic");
+
+            let probes = AtomicUsize::new(0);
+            let probe = || async {
+                probes.fetch_add(1, Ordering::SeqCst);
+                true
+            };
+            assert!(write_ready_cached(&PANIC_CACHE, TTL, probe).await);
+            assert!(write_ready_cached(&PANIC_CACHE, TTL, probe).await);
+            assert_eq!(
+                probes.load(Ordering::SeqCst),
+                1,
+                "cache must still memoize after a panicking probe"
+            );
+        }
     }
 }

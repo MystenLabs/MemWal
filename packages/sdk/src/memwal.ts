@@ -68,6 +68,9 @@ import {
     redactInternalUrls,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
+    fetchWithDeadline,
+    DEFAULT_PREFLIGHT_TIMEOUT_MS,
+    DEFAULT_RECALL_TIMEOUT_MS,
 } from "./utils.js";
 import {
     assertCompatibleRelayer,
@@ -114,6 +117,21 @@ const SEAL_SESSION_TTL_MIN = 5;
 // the client thinks the session is valid but a just-received request hits
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
+
+/** Per-call knobs for `MemWal.signedRequest`. */
+interface SignedRequestOptions {
+    /** ENG-1696: omit the SEAL credential on Manual-mode routes. */
+    includeDelegateKey?: boolean;
+    /** Caller-owned cancellation, honoured alongside `timeoutMs`. */
+    signal?: AbortSignal;
+    /**
+     * Deadline for the signed request itself. The clock starts after the
+     * preflights resolve, so this is never charged for a slow `/version`,
+     * `/health` or `/config`. Omit (or pass 0) for no deadline — which is what
+     * every route other than recall does today (WALM-598).
+     */
+    timeoutMs?: number;
+}
 
 type RememberStatusResponse = RememberJobStatus | { error?: string };
 
@@ -185,6 +203,13 @@ export class MemWal {
     private serverUrl: string;
     private namespace: string;
     private accountId: string;
+    /**
+     * Recall's abort budget, and the independent per-round-trip budget for the
+     * unauthenticated preflights that precede it. Separate so a slow
+     * `/version`, `/health` or `/config` is never charged against recall.
+     */
+    private recallTimeoutMs: number;
+    private preflightTimeoutMs: number;
 
     // ENG-1697 state — all internal, never surfaced to user code.
     // The public API (`MemWal.create({ key, accountId })`) is unchanged.
@@ -219,6 +244,8 @@ export class MemWal {
         // non-localhost host.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
         this.namespace = config.namespace ?? "default";
+        this.recallTimeoutMs = config.recallTimeoutMs ?? DEFAULT_RECALL_TIMEOUT_MS;
+        this.preflightTimeoutMs = config.preflightTimeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS;
     }
 
     /**
@@ -666,59 +693,56 @@ export class MemWal {
         const limit = options.topK ?? options.limit ?? 10;
         const resolvedNamespace = options.namespace ?? this.namespace;
 
-        const ac = new AbortController();
-        const tid = setTimeout(() => ac.abort(), 15000);
-        try {
-            const result = await this.signedRequest<RecallResult>("POST", "/api/recall", {
-                query,
-                limit,
-                namespace: resolvedNamespace,
-                // `undefined` when no weights were supplied, which
-                // JSON.stringify drops — so a default-weighted recall stays
-                // byte-identical on the wire and the relayer keeps
-                // short-circuiting to the plain pgvector cosine order.
-                scoring_weights: scoringWeightsToWire(options.scoringWeights),
-                // Same `undefined`-is-dropped trick: an unset sort leaves the
-                // request byte-identical and the relayer applies its own
-                // "relevance" default.
-                sort: options.sort,
-            }, { signal: ac.signal });
+        // The clock starts on the `/api/recall` fetch itself, after the
+        // preflights resolve on their own deadlines.
+        const timeoutMs = options.timeoutMs ?? this.recallTimeoutMs;
+        const result = await this.signedRequest<RecallResult>("POST", "/api/recall", {
+            query,
+            limit,
+            namespace: resolvedNamespace,
+            // `undefined` when no weights were supplied, which
+            // JSON.stringify drops — so a default-weighted recall stays
+            // byte-identical on the wire and the relayer keeps
+            // short-circuiting to the plain pgvector cosine order.
+            scoring_weights: scoringWeightsToWire(options.scoringWeights),
+            // Same `undefined`-is-dropped trick: an unset sort leaves the
+            // request byte-identical and the relayer applies its own
+            // "relevance" default.
+            sort: options.sort,
+        }, { timeoutMs });
 
-            let processed = result;
-            if (typeof options.maxDistance === "number") {
-                const filtered = result.results.filter(
-                    (memory) => memory.distance < options.maxDistance!,
-                );
-                processed = {
-                    ...processed,
-                    results: filtered,
-                    total: filtered.length,
-                };
-            }
-
-            // Client-side token budgeting: trim the (already distance-sorted)
-            // payload to fit maxTokens per the chosen strategy, and attach the
-            // token estimate + truncated flag. Omitting maxTokens leaves the
-            // result byte-identical to the pre-budget behavior (no meta).
-            if (typeof options.maxTokens === "number") {
-                const { results: budgeted, meta } = applyTokenBudget(
-                    processed.results,
-                    options.maxTokens,
-                    options.truncationStrategy,
-                    options.countTokens,
-                );
-                processed = {
-                    ...processed,
-                    results: budgeted,
-                    total: budgeted.length,
-                    meta,
-                };
-            }
-
-            return processed;
-        } finally {
-            clearTimeout(tid);
+        let processed = result;
+        if (typeof options.maxDistance === "number") {
+            const filtered = result.results.filter(
+                (memory) => memory.distance < options.maxDistance!,
+            );
+            processed = {
+                ...processed,
+                results: filtered,
+                total: filtered.length,
+            };
         }
+
+        // Client-side token budgeting: trim the (already distance-sorted)
+        // payload to fit maxTokens per the chosen strategy, and attach the
+        // token estimate + truncated flag. Omitting maxTokens leaves the
+        // result byte-identical to the pre-budget behavior (no meta).
+        if (typeof options.maxTokens === "number") {
+            const { results: budgeted, meta } = applyTokenBudget(
+                processed.results,
+                options.maxTokens,
+                options.truncationStrategy,
+                options.countTokens,
+            );
+            processed = {
+                ...processed,
+                results: budgeted,
+                total: budgeted.length,
+                meta,
+            };
+        }
+
+        return processed;
     }
 
     // ============================================================
@@ -1015,7 +1039,12 @@ export class MemWal {
      * Check server health. The endpoint is public and does not require request signing.
      */
     async health(): Promise<HealthResult> {
-        const res = await fetch(`${this.serverUrl}/health`);
+        const res = await fetchWithDeadline(
+            `${this.serverUrl}/health`,
+            {},
+            this.preflightTimeoutMs,
+            "GET /health",
+        );
         if (!res.ok) {
             throw new Error(`Health check failed: ${res.status}`);
         }
@@ -1060,13 +1089,25 @@ export class MemWal {
     }
 
     private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
-        const versionRes = await fetch(`${this.serverUrl}/version`, { method: "GET" });
+        // Both round-trips run inside whatever signed request triggered the
+        // probe, so each needs its own budget rather than that caller's.
+        const versionRes = await fetchWithDeadline(
+            `${this.serverUrl}/version`,
+            { method: "GET" },
+            this.preflightTimeoutMs,
+            "preflight GET /version",
+        );
         let body: Partial<RelayerVersionMetadata>;
 
         if (versionRes.ok) {
             body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
         } else if (versionRes.status === 404 || versionRes.status === 405) {
-            const healthRes = await fetch(`${this.serverUrl}/health`, { method: "GET" });
+            const healthRes = await fetchWithDeadline(
+                `${this.serverUrl}/health`,
+                { method: "GET" },
+                this.preflightTimeoutMs,
+                "preflight GET /health",
+            );
             if (!healthRes.ok) {
                 throw new Error(
                     `Walrus Memory compatibility check failed: GET /version returned ` +
@@ -1109,7 +1150,13 @@ export class MemWal {
 
     private async fetchServerConfig(): Promise<ServerConfig> {
         if (this.serverConfig) return this.serverConfig;
-        const res = await fetch(`${this.serverUrl}/config`, { method: "GET" });
+        // Awaited inside `buildSealSession`, itself inside a caller's budget.
+        const res = await fetchWithDeadline(
+            `${this.serverUrl}/config`,
+            { method: "GET" },
+            this.preflightTimeoutMs,
+            "preflight GET /config",
+        );
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
         }
@@ -1326,8 +1373,8 @@ export class MemWal {
         method: string,
         path: string,
         body: object,
-        acceptedStatusesOrOptions: number[] | { includeDelegateKey?: boolean; signal?: AbortSignal } = [200],
-        requestOptions: { includeDelegateKey?: boolean; signal?: AbortSignal } = {},
+        acceptedStatusesOrOptions: number[] | SignedRequestOptions = [200],
+        requestOptions: SignedRequestOptions = {},
     ): Promise<T> {
         const acceptedStatuses = Array.isArray(acceptedStatusesOrOptions)
             ? acceptedStatusesOrOptions
@@ -1374,12 +1421,19 @@ export class MemWal {
         if (options.includeDelegateKey !== false) {
             headers["x-seal-session"] = await this.buildSealSession();
         }
-        const res = await fetch(url, {
-            method,
-            headers,
-            body: method === "GET" ? undefined : bodyStr,
-            signal: options.signal,
-        });
+        // The caller's deadline starts HERE, not at the top of the call:
+        // everything above is preflight work on its own deadline (WALM-598).
+        const res = await fetchWithDeadline(
+            url,
+            {
+                method,
+                headers,
+                body: method === "GET" ? undefined : bodyStr,
+            },
+            options.timeoutMs ?? 0,
+            `${method} ${path}`,
+            options.signal,
+        );
 
         if (!acceptedStatuses.includes(res.status)) {
             // LOW-26: sanitize server error bodies before surfacing to callers.

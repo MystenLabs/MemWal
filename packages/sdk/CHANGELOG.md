@@ -4,12 +4,17 @@
 
 ### Added
 
+- `MemWalConfig.recallTimeoutMs` and `RecallOptions.timeoutMs` make recall's abort budget configurable (default: 15000, unchanged). `MemWalConfig.preflightTimeoutMs` / `MemWalManualConfig.preflightTimeoutMs` bound each preflight round-trip (default: 5000).
+- `isTimeoutError()` and the `TimeoutError` type are exported. A blown budget now throws a `TimeoutError` whose `phase` names the round-trip that stalled (`"preflight GET /version"`, `"POST /api/recall"`) instead of an unlabeled `AbortError`.
 - `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ### Fixed
 
 - Hash request bodies with `@noble/hashes` instead of WebCrypto-or-`node:crypto`, so the package no longer imports a Node builtin on a browser-reachable path. Vite externalises such an import without warning: the app builds clean and the browser crashes the first time the path runs. The fallback could never have helped a browser anyway — `crypto.subtle` is absent precisely when the page is not a secure context, where `node:crypto` is absent too — so it only served Node <19 while being the sole source of the exposure. `sha256hex` sits on the signed-request path, so every remember and recall reached it. (#322, WALM-136)
 - Declare `engines.node >= 20.0.0`, matching `memwal-mcp` and `openclaw-memory-memwal`. The SDK was the only published package without a floor. (WALM-599)
+- `recall()`'s timeout budget covers only the recall request. It previously started before `ensureCompatibleRelayer()` (`GET /version`, falling back to `GET /health`) and `buildSealSession()` (`GET /config` + Sui RPC), so a slow relayer preflight silently consumed the budget and recall raised an `AbortError` even when recall itself was healthy.
+- `GET /version`, `GET /health` and `GET /config` carry an `AbortSignal` and a deadline. They previously ran with neither and could hang indefinitely.
+- A request's deadline now covers the response body, not just its headers. `fetch()` resolves when headers arrive, so a server that then trickled the body could outlive the budget the caller named.
 - Empty-body 401s now use the same AUTH_REJECTED troubleshooting message as credential 401s instead of telling callers to run `memwal_login`. Headless SDK clients do not have that MCP tool.
 - `account.ts` and `manual.ts` PTBs use typed `tx.pure` helpers instead of the legacy untyped moveCall argument syntax that fails under modern `@mysten/sui`.
 
