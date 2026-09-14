@@ -368,6 +368,14 @@ interface RpcMessage {
 interface InFlightEntry {
     msg: RpcMessage;
     startedAt: number;
+    /** Set once a POST has been issued for this request.
+     *
+     * This is what separates "cannot have executed" from "might have
+     * executed", and it has to live on the entry: `pendingForward` only holds
+     * requests buffered before the first successful connect, so in a
+     * mid-session outage — the ordinary case — a request that never left the
+     * process was indistinguishable from one already sent. */
+    sent?: boolean;
 }
 
 interface SseHandshakeResult {
@@ -985,6 +993,14 @@ export async function runBridge(
         postCreds: MemWalCredentials,
     ): Promise<number> {
         if (epoch !== sessionEpoch) return Promise.resolve(0);
+        // Marked before the await, not after. Once the POST is issued we can
+        // no longer prove the call did not run, so it must keep the full call
+        // timeout even if the socket then fails — failing it early is what
+        // invites a duplicate `remember`.
+        if (msg.id !== undefined && msg.id !== null) {
+            const tracked = inFlight.get(msg.id);
+            if (tracked) tracked.sent = true;
+        }
         return postMessage(postUrl, msg, postCreds, extraHeaders);
     }
     let credentialGeneration = 0;
@@ -1965,8 +1981,8 @@ export async function runBridge(
 
     /** How a request that just hit its deadline should be explained.
      *
-     * Three cases, where the old wording only described one. A request still
-     * sitting in `pendingForward` never left this process: no session ever
+     * Three cases, where the old wording only described one. A request for
+     * which no POST was ever issued never left this process: no session ever
      * carried it. Telling the user the connection "dropped before the result
      * came back" points them at the relayer, or at a half-written memory, when
      * the truth is that nothing was attempted (WALM-618 — the bridge retried
@@ -1979,16 +1995,14 @@ export async function runBridge(
      * the buffer, which it must, or a later flush would run the call we just
      * said never ran. */
     function expiredRequestReport(
-        msg: RpcMessage,
+        neverSent: boolean,
         now: number,
     ): {
-        neverSent: boolean;
         reason: string;
         opts: { toolText: string; errorMessage: string };
     } {
-        if (!pendingForward.includes(msg)) {
+        if (!neverSent) {
             return {
-                neverSent: false,
                 reason: "no response",
                 opts: {
                     toolText:
@@ -2007,7 +2021,6 @@ export async function runBridge(
             // unsent at the deadline. Nothing ran, but nothing is failing
             // either — do not invent an outage.
             return {
-                neverSent: true,
                 reason: "never left the queue",
                 opts: {
                     toolText:
@@ -2023,7 +2036,6 @@ export async function runBridge(
         const waited = `for ${Math.round(stalledForMs / 1000)}s`;
         const detail = lastHandshakeError ? ` Last handshake error: ${lastHandshakeError}` : "";
         return {
-            neverSent: true,
             reason: "never reached the relayer",
             opts: {
                 toolText:
@@ -2050,7 +2062,10 @@ export async function runBridge(
         const handshakeStalledMs = handshakeStalledForMs(now);
         for (const [id, entry] of Array.from(inFlight.entries())) {
             const elapsedMs = now - entry.startedAt;
-            const { neverSent, reason, opts } = expiredRequestReport(entry.msg, now);
+            // Never sent = no POST was ever issued for it. Read from the entry
+            // rather than from `pendingForward` membership, which only ever
+            // covered the cold-start window.
+            const neverSent = entry.sent !== true;
             // A call we can prove never left this process, while no working
             // connection has existed for `stalledHandshakeMs`, does not need
             // the full `callTimeoutMs`: it cannot have executed, so answering
@@ -2063,6 +2078,10 @@ export async function runBridge(
             const deadlineMs =
                 neverSent && handshakeIsStalled ? stalledHandshakeMs : callTimeoutMs;
             if (elapsedMs <= deadlineMs) continue;
+            // Built only for what actually expired: this walks `pendingForward`
+            // and interpolates two user-facing strings, and the branch it
+            // serves fires roughly never.
+            const { reason, opts } = expiredRequestReport(neverSent, now);
             // Drop it from the buffer before answering: a later successful
             // connect would otherwise flush and actually run the call we are
             // about to report as never having run.
@@ -2073,7 +2092,10 @@ export async function runBridge(
             // reply. Removing it would silently cost that negotiation on the
             // first connect after a long outage.
             if (neverSent && entry.msg.method !== "initialize") {
-                pendingForward.splice(pendingForward.indexOf(entry.msg), 1);
+                // Only buffered requests are in there at all now, so the miss
+                // is ordinary — `splice(-1, 1)` would drop the last entry.
+                const queuedAt = pendingForward.indexOf(entry.msg);
+                if (queuedAt >= 0) pendingForward.splice(queuedAt, 1);
             }
             log.warn("bridge.call_orphaned", {
                 id,
