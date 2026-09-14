@@ -549,6 +549,22 @@ test("a call issued after the session dies is answered on the stalled deadline",
     // Now the relayer goes away mid-session and refuses every reconnect.
     mock.killSession();
 
+    // Wait until the bridge has actually noticed. Sending the call the instant
+    // the session dies is a race the bridge wins about as often as not: if
+    // `sse` is still set when `handleClientLine` runs, the call takes the POST
+    // path, `postIfCurrent` marks it `sent`, and it correctly keeps the full
+    // call timeout — testing the opposite of what this is here to pin. A
+    // second SSE GET reaching the mock means the reconnect ran and was
+    // refused, so `sse` is null and the handshake is on record as failing.
+    const noticedBy = Date.now() + 15_000;
+    while (mock.getSseGetCount() < 2 && Date.now() < noticedBy) {
+        await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(
+        mock.getSseGetCount() >= 2,
+        "the bridge must have tried and failed to reconnect before the call is sent",
+    );
+
     const sentAt = Date.now();
     send({
         jsonrpc: "2.0",
@@ -581,6 +597,5 @@ test("a call issued after the session dies is answered on the stalled deadline",
         /nothing was\\?\s*stored/i,
         `the answer must say the call never ran, got ${text}`,
     );
-    assert.ok(mock.getSseGetCount() >= 2, "the bridge must have tried to reconnect");
     assert.equal(child.exitCode, null, "bridge should still be running, not exited");
 });
