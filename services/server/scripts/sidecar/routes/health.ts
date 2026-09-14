@@ -2,8 +2,9 @@
  * Unauthenticated observability endpoints.
  *
  * All are registered BEFORE the shared-secret middleware (see app.ts):
- * /health is local liveness, /ready validates upload execution identity, and
- * /metrics/wallet exposes aggregate metrics to unauthenticated scrapers.
+ * /health is local liveness, /ready validates upload execution identity,
+ * /metrics/uploads serves the upload-queue counters, and /metrics/wallet
+ * exposes aggregate metrics to unauthenticated scrapers.
  * Per-wallet addresses and balances are served separately behind sidecar auth.
  */
 
@@ -135,6 +136,27 @@ export function registerHealthRoute(app: Express, requireProvenance = true): voi
             sidecarLog("error", "readiness_identity_failed", { error: errorMessage(error) });
             res.status(503).json({ status: "error", error: "Upload execution identity unavailable" });
         }
+    });
+}
+
+// Upload-queue metrics for the relayer's saturation monitor (main.rs).
+//
+// In-memory counters only, deliberately: /ready carries the same numbers but
+// waits on Sui and Walrus, and upload backlogs arrive together with Sui RPC
+// pressure — a probe that waits on the chain goes blind exactly when the
+// alert matters.
+export function registerUploadMetricsRoute(app: Express): void {
+    app.get("/metrics/uploads", (_req: Request, res: ExpressResponse) => {
+        const uploads = getUploadCounts();
+        res.json({
+            activeWalrusUploads: uploads.active,
+            queuedWalrusUploads: uploads.queued,
+            walrusUploadLimits: {
+                globalCapacity: WALRUS_UPLOAD_MAX_CONCURRENCY,
+                perWalletCapacity: WALRUS_UPLOAD_PER_WALLET_CONCURRENCY,
+                acquireTimeoutMs: WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS,
+            },
+        });
     });
 }
 
