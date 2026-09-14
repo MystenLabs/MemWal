@@ -2493,26 +2493,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegate_verify_cache_sweep_drops_everything_past_its_ttl() {
+    async fn delegate_verify_cache_sweep_keeps_what_the_outage_path_can_serve() {
         let cache = new_delegate_verify_cache();
+        seed_verify_cache(&cache, "0xfresh", &sample_pk(), std::time::Duration::ZERO).await;
+        // Past the TTL, so `is_fresh` is already false and the ordinary lookup
+        // will not serve it — but inside the grace, which is precisely what
+        // the unavailable branch falls back to.
         seed_verify_cache(
             &cache,
-            "0xstale",
+            "0xin-grace",
             &sample_pk(),
             DELEGATE_VERIFY_CACHE_TTL + std::time::Duration::from_secs(1),
         )
         .await;
-        seed_verify_cache(&cache, "0xfresh", &sample_pk(), std::time::Duration::ZERO).await;
+        seed_verify_cache(
+            &cache,
+            "0xpast-grace",
+            &sample_pk(),
+            DELEGATE_VERIFY_CACHE_TTL
+                + DELEGATE_VERIFY_STALE_GRACE
+                + std::time::Duration::from_secs(1),
+        )
+        .await;
 
-        // Mirrors main.rs's sweep task body verbatim. The sweep threshold is
-        // the TTL itself, not a second longer one: an entry past the TTL can
-        // never be served again (`is_fresh` is the same predicate the lookup
-        // uses), so holding it would cost memory for nothing.
-        cache.entries.write().await.retain(|_, v| v.is_fresh());
+        // The predicate `main.rs`'s sweep task uses. Sweeping on `is_fresh`
+        // instead would evict `0xin-grace` 30s after it was verified — the
+        // entry the stale-serve path exists to use — so the sweep bound has
+        // to be the grace, not the TTL.
+        cache
+            .entries
+            .write()
+            .await
+            .retain(|_, v| v.is_servable_while_unavailable());
 
         let remaining = cache.entries.read().await;
-        assert!(!remaining.contains_key(&("0xstale".to_string(), sample_pk())));
         assert!(remaining.contains_key(&("0xfresh".to_string(), sample_pk())));
+        assert!(
+            remaining.contains_key(&("0xin-grace".to_string(), sample_pk())),
+            "sweeping on the TTL would delete exactly what the unavailable branch serves"
+        );
+        assert!(!remaining.contains_key(&("0xpast-grace".to_string(), sample_pk())));
     }
 
     #[tokio::test]
