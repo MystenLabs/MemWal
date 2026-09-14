@@ -12,7 +12,7 @@
 - Declare `engines.node >= 20.0.0`, matching `memwal-mcp` and `openclaw-memory-memwal`. The SDK was the only published package without a floor. (WALM-599)
 - Empty-body 401s now use the same AUTH_REJECTED troubleshooting message as credential 401s instead of telling callers to run `memwal_login`. Headless SDK clients do not have that MCP tool.
 - `account.ts` and `manual.ts` PTBs use typed `tx.pure` helpers instead of the legacy untyped moveCall argument syntax that fails under modern `@mysten/sui`.
-- Grow `waitForRememberJob` / `waitForRememberJobs` poll delay 1.5× from the caller interval (floor 100ms) toward a 3s cap, with an immediate first poll, instead of exponential backoff that climbed to 10s. Callers that pass `pollIntervalMs` above 3s keep that interval. (WALM-623)
+- Grow `waitForRememberJob` / `waitForRememberJobs` poll delay 1.5× from the caller interval (floor 100ms) toward a 3s cap, with an immediate first poll. Callers that pass `pollIntervalMs` above 3s keep that interval. (WALM-623)
 
 ## 0.1.6
 

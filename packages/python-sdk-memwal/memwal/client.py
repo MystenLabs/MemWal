@@ -168,11 +168,7 @@ async def _sleep_ms(ms: int) -> None:
 
 
 def _polling_delay_ms(base_ms: int, attempt: int) -> int:
-    """Jittered poll delay matching TS ``pollingDelayMs``.
-
-    Attempt 0 is immediate. Later polls grow 1.5x from ``base_ms`` (floor
-    100ms) to 3s, or stay at ``base_ms`` if the caller set it higher.
-    """
+    """Same formula as TS ``pollingDelayMs``."""
 
     if attempt == 0:
         return 0
@@ -423,9 +419,7 @@ class MemWal:
           ``status`` field (404 / ``status == "not_found"`` raises).
         - Transient HTTP errors (429, 5xx, network drop) are retried until
           the timeout, not surfaced as polling failures.
-        - First poll is immediate; later polls grow 1.5x from the caller
-          interval (floor 100ms) to 3s, or stay at the caller interval if
-          it is higher.
+        - First poll is immediate; later polls grow 1.5x toward 3s.
         """
 
         deadline_ms = _now_ms() + timeout_ms
