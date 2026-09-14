@@ -27,5 +27,7 @@ export type {
     MemWalManualRecallOptions,
     RecallManualResult,
     RecallManualHit,
+    RecallManualHitResult,
     RecallManualMemory,
+    RecallManualMemoryResult,
 } from "./types.js";

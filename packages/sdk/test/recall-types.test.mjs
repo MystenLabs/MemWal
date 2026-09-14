@@ -46,3 +46,32 @@ test("created_at is optional — older relayers omit it", () => {
     // relayer starts lying to itself about a field that isn't there.
     assert.match(declaredInterface("RecallMemory"), /created_at\?:/);
 });
+
+test("MemWal.recallManual is hits-only — no text on the result items", () => {
+    const body = declaredInterface("RecallManualHitResult");
+    assert.match(body, /results: RecallManualHit\[\];/);
+    assert.doesNotMatch(body, /\btext\b/);
+    const memwalDts = readFileSync(
+        fileURLToPath(new URL("../dist/memwal.d.ts", import.meta.url)),
+        "utf8",
+    );
+    assert.match(
+        memwalDts,
+        /recallManual\(opts: RecallManualOptions\): Promise<RecallManualHitResult>/,
+    );
+});
+
+test("MemWalManual.recallManual is decrypted memories — items have text", () => {
+    const body = declaredInterface("RecallManualMemoryResult");
+    assert.match(body, /results: RecallManualMemory\[\];/);
+    assert.match(declaredInterface("RecallManualMemory"), /\btext: string;/);
+    const manualDts = readFileSync(
+        fileURLToPath(new URL("../dist/manual.d.ts", import.meta.url)),
+        "utf8",
+    );
+    assert.match(manualDts, /Promise<RecallManualMemoryResult>/);
+    assert.doesNotMatch(
+        dts,
+        /results: \(RecallManualHit \| RecallManualMemory\)\[\]/,
+    );
+});

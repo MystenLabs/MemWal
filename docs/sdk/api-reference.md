@@ -345,7 +345,7 @@ See [MemWalManual usage](/sdk/usage/memwal-manual) for the full setup and flow d
 
 Embed locally, SEAL encrypt locally, send encrypted payload + vector to relayer for Walrus upload and vector registration.
 
-### `recallManual(query, limit?, namespace?): Promise<RecallManualResult>`
+### `recallManual(query, limit?, namespace?): Promise<RecallManualMemoryResult>`
 
 Embed locally, search via relayer, download from Walrus, SEAL decrypt locally. Returns decrypted text results.
 

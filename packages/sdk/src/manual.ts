@@ -32,7 +32,7 @@ import type {
     MemWalManualConfig,
     WalletSigner,
     RememberManualResult,
-    RecallManualResult,
+    RecallManualMemoryResult,
     RecallManualMemory,
     MemWalManualRecallOptions,
     RestoreResult,
@@ -379,13 +379,13 @@ export class MemWalManual {
      * 3. Download blobs from Walrus
      * 4. SEAL decrypt each blob
      */
-    async recallManual(query: string, limit?: number, namespace?: string): Promise<RecallManualResult>;
-    async recallManual(query: string, options?: MemWalManualRecallOptions): Promise<RecallManualResult>;
+    async recallManual(query: string, limit?: number, namespace?: string): Promise<RecallManualMemoryResult>;
+    async recallManual(query: string, options?: MemWalManualRecallOptions): Promise<RecallManualMemoryResult>;
     async recallManual(
         query: string,
         limitOrOptions: number | MemWalManualRecallOptions = 10,
         namespace?: string
-    ): Promise<RecallManualResult> {
+    ): Promise<RecallManualMemoryResult> {
         if (!query.trim()) throw new Error("Query cannot be empty");
 
         const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions, namespace } : limitOrOptions;
