@@ -50,7 +50,7 @@ pub struct WalrusSealEngine {
     http_client: reqwest::Client,
     key_pool: Arc<KeyPool>,
     config: Arc<Config>,
-    redis: redis::aio::MultiplexedConnection,
+    redis: redis::aio::ConnectionManager,
     /// Blob ciphertext cache TTL. Zero disables write-back.
     blob_cache_ttl: Duration,
     /// Max ciphertext size kept in the Redis cache. Reads ignore
@@ -66,7 +66,7 @@ impl WalrusSealEngine {
         http_client: reqwest::Client,
         key_pool: Arc<KeyPool>,
         config: Arc<Config>,
-        redis: redis::aio::MultiplexedConnection,
+        redis: redis::aio::ConnectionManager,
         blob_cache_ttl: Duration,
         blob_cache_max_bytes: usize,
     ) -> Self {

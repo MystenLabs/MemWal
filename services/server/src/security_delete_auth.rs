@@ -8,7 +8,7 @@ use axum::Json;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use redis::aio::MultiplexedConnection;
+use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sui_crypto::{simple::SimpleVerifier, SuiVerifier};
@@ -168,11 +168,11 @@ pub trait NonceStore: Send + Sync {
 }
 
 pub struct RedisNonceStore {
-    connection: MultiplexedConnection,
+    connection: ConnectionManager,
 }
 
 impl RedisNonceStore {
-    pub fn new(connection: MultiplexedConnection) -> Self {
+    pub fn new(connection: ConnectionManager) -> Self {
         Self { connection }
     }
 }
@@ -405,7 +405,7 @@ mod tests {
             return;
         };
         let client = redis::Client::open(url).unwrap();
-        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let connection = redis::aio::ConnectionManager::new(client).await.unwrap();
         let store = RedisNonceStore::new(connection);
         let id = Uuid::new_v4().to_string();
         store.issue(&id, r#"{"ok":true}"#, 30).await.unwrap();

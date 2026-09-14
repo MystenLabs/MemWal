@@ -21,8 +21,9 @@
  * MCP spec 2025-06 — see ENG-1750. The two paths cover different surfaces
  * and coexist.
  */
-import { loadCreds, type MemWalCredentials } from "./auth.js";
+import { credsPath, loadCreds, type MemWalCredentials } from "./auth.js";
 import { rememberInitializeClientInfo } from "./client-info.js";
+import { loginFailureNotice, loginPrompt, loginSuccessNotification } from "./messages.js";
 import { log } from "./logger.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
@@ -203,24 +204,6 @@ const LOGIN_INSTRUCTION = [
  * already returned the URL by then, so this is the only place left to say so. */
 let lastLoginFailure: string | null = null;
 
-/** Prefix explaining that a sign-in was attempted and did not complete. */
-function loginFailureNotice(): string {
-    if (!lastLoginFailure) return "";
-    return [
-        "⚠️ A sign-in was started but never completed, so there are still no credentials.",
-        "",
-        `Reason: ${lastLoginFailure}`,
-        "",
-        "The unused key from this attempt may already be registered on your account. Remove it",
-        "from the dashboard if you are not using it. Sign in again and open the new link",
-        "straight away. A retry only helps once the MCP client is left running through the",
-        "wallet prompt.",
-        "",
-        "---",
-        "",
-    ].join("\n");
-}
-
 function writeStdoutMessage(msg: RpcMessage): void {
     process.stdout.write(JSON.stringify(msg) + "\n");
 }
@@ -306,6 +289,18 @@ async function handleLoginToolCall(
                 accountId: creds.accountId,
                 delegateAddress: creds.delegateAddress,
             });
+            // Symmetric with the failure branch below: the tool call returned
+            // the URL immediately, so nothing is left to carry the outcome
+            // except this notification and the banner the bridge prefixes onto
+            // the next tool result.
+            sendLogMessage(
+                "info",
+                loginSuccessNotification({
+                    accountId: creds.accountId,
+                    delegateAddress: creds.delegateAddress,
+                    credentialsPath: credsPath(),
+                }),
+            );
         },
         (err) => {
             const msg = err instanceof Error ? err.message : String(err);
@@ -344,34 +339,17 @@ async function handleLoginToolCall(
     }
 
     log.info("memwal_login.tool.url_ready", { url });
-    // The URL is included MULTIPLE times in different formats so agents
-    // that try to summarize the result can't strip all of them. Some MCP
-    // clients (Claude Code) paraphrase tool output aggressively — by
-    // repeating the URL in plain, code-block, and markdown-link form, at
-    // least one survives the agent's response template.
     return {
         isError: false,
-        text: [
-            `## ⚠️ ACTION REQUIRED: User must click this URL to sign in`,
-            ``,
-            `**URL:** ${url}`,
-            ``,
-            `\`\`\``,
+        // Read from disk rather than assuming the stub only runs signed out: a
+        // completed callback writes credentials before the hand-off, so a
+        // second `memwal_login` in that window really would replace a stored
+        // key and must say so.
+        text: loginPrompt({
             url,
-            `\`\`\``,
-            ``,
-            `[Click here to open Walrus Memory sign-in](${url})`,
-            ``,
-            `**IMPORTANT for the assistant**: do NOT summarize or omit the URL above.`,
-            `The user CANNOT proceed without seeing the exact URL. Surface it verbatim`,
-            `in your reply, then explain the steps:`,
-            ``,
-            `1. Open the URL in any browser (it may have already opened automatically)`,
-            `2. Click **Connect Sui Wallet** and approve the on-chain \`add_delegate_key\` transaction`,
-            `3. Once "Connected" appears in the browser, the assistant should retry the original request — the other memwal_* tools will then have credentials at \`~/.memwal/credentials.json\``,
-            ``,
-            `_The login link stays valid for 5 minutes. If it expires, call \`memwal_login\` again to get a fresh URL._`,
-        ].join("\n"),
+            credentialsPath: credsPath(),
+            signedIn: loadCreds() !== null,
+        }),
     };
 }
 
@@ -495,7 +473,7 @@ function handleAuthLine(
             id,
             result: {
                 content: [
-                    { type: "text", text: `${loginFailureNotice()}${LOGIN_INSTRUCTION}` },
+                    { type: "text", text: `${loginFailureNotice(lastLoginFailure)}${LOGIN_INSTRUCTION}` },
                 ],
                 isError: true,
             },
