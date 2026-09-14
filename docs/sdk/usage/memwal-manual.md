@@ -127,9 +127,8 @@ const manual = MemWalManual.create({
   compatible upgrade, set `sealPolicyPackageId` to the current policy package
 - `sealServerConfigs` lets the client configure independent or committee SEAL servers; committee entries require `aggregatorUrl`
 - `sealKeyServers` remains supported as a legacy independent key server object ID override
-- Walrus publisher, aggregator, and upload relay defaults follow `suiNetwork`
+- Walrus aggregator defaults follow `suiNetwork`
 - `embeddingModel` defaults to `text-embedding-3-small` (or `openai/text-embedding-3-small` for OpenRouter)
-- `walrusEpochs` defaults to `50` (storage duration)
 - All `@mysten/*` peer dependencies are loaded dynamically, so users who only use the default `MemWal` client do not need them installed
 
 ## Agent state: holding your own keys

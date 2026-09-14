@@ -2,7 +2,7 @@
  * @mysten-incubation/memwal/manual
  *
  * Manual (client-side) mode entry point.
- * Requires: @mysten/seal, @mysten/walrus, @mysten/sui
+ * Requires: @mysten/seal, @mysten/sui
  *
  * Usage:
  *   import { MemWalManual } from "@mysten-incubation/memwal/manual";

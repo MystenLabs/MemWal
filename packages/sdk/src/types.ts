@@ -552,12 +552,8 @@ export interface MemWalManualConfig {
      * Default: 2, capped to the total configured SEAL server weight.
      */
     sealThreshold?: number;
-    /** Walrus storage epochs (default: 50) */
-    walrusEpochs?: number;
     /** Walrus aggregator URL for direct blob downloads (default: mainnet aggregator) */
     walrusAggregatorUrl?: string;
-    /** Walrus publisher URL for direct blob uploads (default: mainnet publisher) */
-    walrusPublisherUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
 }

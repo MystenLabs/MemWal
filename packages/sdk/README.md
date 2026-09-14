@@ -17,20 +17,19 @@ pnpm add @mysten-incubation/memwal
 Peer dependencies (install as needed):
 
 ```bash
-pnpm add @mysten/sui @mysten/seal @mysten/walrus ai zod
+pnpm add @mysten/sui @mysten/seal ai zod
 ```
+
+`/manual` needs `@mysten/seal` and `@mysten/sui` only. `ai` / `zod` are for `withMemWal`.
 
 ### Version compatibility
 
-`@mysten/seal` and `@mysten/walrus` must both resolve to versions that accept the same `@mysten/sui` major. Known-good matrix:
+`@mysten/seal` requires `@mysten/sui` ^2.x. Known-good matrix:
 
 | Package | Version |
 | --- | --- |
 | `@mysten/sui` | `^2.16.2` |
 | `@mysten/seal` | `^1.1.3` |
-| `@mysten/walrus` | `^1.1.7` |
-
-`@mysten/walrus@0.x` bundles `@mysten/sui@1.x` and cannot coexist with `@mysten/seal@1.x`, which requires `@mysten/sui@^2.x`. If `npm install` fails with `ERESOLVE` mentioning `@mysten/sui@^1.x`, upgrade `@mysten/walrus` to `^1.1.7`, refresh your lockfile, and run `npm why @mysten/sui` to find any remaining dependency that pins sui v1.
 
 ## Quick Start
 

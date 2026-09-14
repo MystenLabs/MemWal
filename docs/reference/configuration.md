@@ -87,9 +87,7 @@ Walrus and network fields:
 | `sealServerConfigs` | no | Full SEAL configs for independent or committee servers. Committee entries require `aggregatorUrl` |
 | `sealKeyServers` | no | Legacy override for independent SEAL key server object IDs |
 | `sealThreshold` | no | Default: `2`, capped to total configured server weight |
-| `walrusEpochs` | no | Default: `50` |
 | `walrusAggregatorUrl` | no | Walrus download endpoint. Defaults follow `suiNetwork` |
-| `walrusPublisherUrl` | no | Walrus upload endpoint. Defaults follow `suiNetwork` |
 
 ## `WithMemWalOptions`
 

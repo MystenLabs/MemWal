@@ -64,7 +64,7 @@ pnpm add @mysten-incubation/memwal
 pnpm add ai zod
 
 # Optional: for manual client (client-side SEAL encryption)
-pnpm add @mysten/sui @mysten/seal @mysten/walrus
+pnpm add @mysten/sui @mysten/seal
 ```
 
 ---
@@ -574,7 +574,7 @@ Lifecycle hooks run automatically:
 | `recall()` returns unrelated filler | Recall is top-K without a default relevance threshold; filter by `distance`, for example `distance < 0.7` |
 | `401 Unauthorized` | Usually wrong `MEMWAL_PRIVATE_KEY`, key not registered on the account, account ID mismatch, or staging/mainnet mismatch. Check `.env.local` and dashboard credentials |
 | SDK import errors | Run `pnpm add @mysten-incubation/memwal` — check Node.js ≥ 18 |
-| Manual client errors | Install peer deps: `@mysten/sui @mysten/seal @mysten/walrus` |
+| Manual client errors | Install peer deps: `@mysten/sui @mysten/seal` |
 | Direct Sui reads fail or examples look stale | Prefer `SuiGrpcClient` from `@mysten/sui/grpc`; JSON-RPC snippets using `SuiClient` / `getFullnodeUrl` may be stale |
 | `forget` expectations are unclear | Current relayer `POST /api/forget` removes vector index rows so memories are unrecallable; Walrus blobs persist until epoch expiry |
 

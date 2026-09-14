@@ -57,26 +57,26 @@ yarn add @mysten-incubation/memwal
 
 </CodeGroup>
 
-For `MemWalManual`, you also need the optional peer dependencies:
+For `MemWalManual`, you also need `@mysten/seal` and `@mysten/sui`:
 
 <CodeGroup>
 
 ```bash npm
-npm install @mysten/sui @mysten/seal @mysten/walrus
+npm install @mysten/sui @mysten/seal
 ```
 
 ```bash pnpm
-pnpm add @mysten/sui @mysten/seal @mysten/walrus
+pnpm add @mysten/sui @mysten/seal
 ```
 
 ```bash yarn
-yarn add @mysten/sui @mysten/seal @mysten/walrus
+yarn add @mysten/sui @mysten/seal
 ```
 
 </CodeGroup>
 
 <Note>
-**Version compatibility:** `@mysten/seal` and `@mysten/walrus` must both accept the same `@mysten/sui` major. Known-good versions: `@mysten/sui@^2.16.2`, `@mysten/seal@^1.1.3`, `@mysten/walrus@^1.1.7`. Avoid `@mysten/walrus@0.x` — it bundles `@mysten/sui@1.x` and conflicts with `@mysten/seal@1.x`. If installation fails with `ERESOLVE` on `@mysten/sui`, upgrade `@mysten/walrus` and run `npm why @mysten/sui` to find which dependency still pins sui v1.
+**Version compatibility:** `@mysten/seal` requires `@mysten/sui` ^2.x. Known-good versions: `@mysten/sui@^2.16.2`, `@mysten/seal@^1.1.3`.
 </Note>
 
 For `withMemWal`, you also need:

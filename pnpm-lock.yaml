@@ -1131,9 +1131,6 @@ importers:
       '@mysten/sui':
         specifier: '>=2.5.0'
         version: 2.8.0(typescript@5.9.3)
-      '@mysten/walrus':
-        specifier: '>=1.0.3'
-        version: 1.0.4(@mysten/sui@2.8.0(typescript@5.9.3))
       '@noble/ed25519':
         specifier: ^2.3.0
         version: 2.3.0

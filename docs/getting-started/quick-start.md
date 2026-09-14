@@ -101,22 +101,22 @@ The fastest way to get Walrus Memory running is through the TypeScript SDK.
     <Tabs>
       <Tab title="pnpm">
         ```bash
-        pnpm add @mysten/sui @mysten/seal @mysten/walrus
+        pnpm add @mysten/sui @mysten/seal
         ```
       </Tab>
       <Tab title="npm">
         ```bash
-        npm install @mysten/sui @mysten/seal @mysten/walrus
+        npm install @mysten/sui @mysten/seal
         ```
       </Tab>
       <Tab title="yarn">
         ```bash
-        yarn add @mysten/sui @mysten/seal @mysten/walrus
+        yarn add @mysten/sui @mysten/seal
         ```
       </Tab>
       <Tab title="bun">
         ```bash
-        bun add @mysten/sui @mysten/seal @mysten/walrus
+        bun add @mysten/sui @mysten/seal
         ```
       </Tab>
     </Tabs>

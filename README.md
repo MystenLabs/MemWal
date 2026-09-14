@@ -23,7 +23,7 @@ pnpm add @mysten-incubation/memwal
 Peer dependencies (install as needed):
 
 ```bash
-pnpm add @mysten/sui @mysten/seal @mysten/walrus ai zod
+pnpm add @mysten/sui @mysten/seal ai zod
 ```
 
 ## Quick Start
