@@ -2056,6 +2056,16 @@ export async function runBridge(
                     openingGeneration === credentialGeneration
                 ) {
                     credentialsRejected = true;
+                    // Everything still queued never left the process, so no
+                    // upstream initialize reply will arrive to consume its arm.
+                    // `failRequest` keeps initialize arms for replies that CAN
+                    // still arrive; a leaked one here would swallow the reply to
+                    // a reused id after `memwal_login`.
+                    for (const msg of pendingForward) {
+                        if (msg.method === "initialize" && msg.id != null) {
+                            suppressUpstreamReplies.delete(msg.id);
+                        }
+                    }
                     failPendingForward("credentials rejected", UNAUTHORIZED_FAILURE);
                 }
                 if (stdinClosed) break;

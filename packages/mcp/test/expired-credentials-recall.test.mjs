@@ -320,11 +320,20 @@ test("recall on an empty namespace reports empty results, not an auth error", as
  * what a revoked key looks like once `memwal_login` has registered a fresh one.
  * Sessions that DO open answer `tools/call` with an ordinary empty result, so
  * "recovered" is distinguishable from "still refusing".
+ *
+ * `holdRejections` parks each 401 until `releaseRejections()`, so a test can
+ * queue requests before the bridge learns the key is rejected.
  */
-function startRevokedKeyRelayer(revokedBearer) {
+function startRevokedKeyRelayer(revokedBearer, { holdRejections = false } = {}) {
     let sseRes = null;
     let rejections = 0;
     let accepted = 0;
+    let held = [];
+    const reject = (res) => {
+        rejections += 1;
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "delegate key is not registered" }));
+    };
     const server = http.createServer((req, res) => {
         const url = new URL(req.url, "http://127.0.0.1");
         if (req.method === "GET" && url.pathname === "/version") {
@@ -334,9 +343,8 @@ function startRevokedKeyRelayer(revokedBearer) {
         if (req.method === "GET" && url.pathname === "/api/mcp/sse") {
             const bearer = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
             if (bearer === revokedBearer) {
-                rejections += 1;
-                res.writeHead(401, { "content-type": "application/json" });
-                res.end(JSON.stringify({ error: "delegate key is not registered" }));
+                if (holdRejections) held.push(res);
+                else reject(res);
                 return;
             }
             res.writeHead(200, {
@@ -394,6 +402,10 @@ function startRevokedKeyRelayer(revokedBearer) {
                 base: `http://127.0.0.1:${port}`,
                 rejections: () => rejections,
                 accepted: () => accepted,
+                releaseRejections: () => {
+                    holdRejections = false;
+                    for (const res of held.splice(0)) reject(res);
+                },
             });
         });
     });
@@ -540,6 +552,73 @@ test("a rejected key keeps failing fast, and memwal_login restores service", asy
     // The saved key really was refused throughout, rather than the relayer
     // having quietly accepted it at some point.
     assert.ok(relayer.rejections() > 0, "the revoked key must have been 401'd");
+});
+
+test("an initialize queued before the 401 does not swallow a reused id after memwal_login", async (t) => {
+    const relayer = await startRevokedKeyRelayer(BEARER, { holdRejections: true });
+    const { server, base } = relayer;
+    const bridge = startBridge(base);
+    t.after(() => {
+        bridge.cleanup();
+        server.close();
+    });
+
+    // The bridge answers initialize locally and arms a suppression for the
+    // upstream reply it expects once the initialize is forwarded. With the 401
+    // held, both requests are still queued when the key is rejected, so neither
+    // is ever forwarded and no upstream reply comes to consume that arm.
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "test", version: "0" },
+        },
+    });
+    await bridge.waitFor((m) => m.id === 1 && m.result, 15000);
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "memwal_recall", arguments: { query: "anything", limit: 5 } },
+    });
+    relayer.releaseRejections();
+    const refused = await bridge.waitFor((m) => m.id === 2 && (m.result || m.error), 20000);
+    assert.ok(refused.result?.isError || refused.error, "queued recall must be an auth error");
+
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "memwal_login", arguments: {} },
+    });
+    const loginReply = await bridge.waitFor((m) => m.id === 3 && m.result, 20000);
+    const connectUrl = /\*\*URL:\*\* (\S+)/.exec(textOf(loginReply))?.[1];
+    assert.ok(connectUrl, `memwal_login must return the browser URL, got: ${textOf(loginReply)}`);
+    await completeLogin(connectUrl, ACCOUNT);
+    await waitUntil(() => relayer.accepted() > 0);
+
+    // JSON-RPC lets a client reuse an id once its request is answered. A
+    // leftover arm drops this genuine reply and untracks the id, so not even
+    // the orphan sweeper answers it: the call hangs.
+    bridge.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "memwal_recall", arguments: { query: "anything", limit: 5 } },
+    });
+    const reply = await bridge.waitFor(
+        (m) => m.id === 1 && Array.isArray(m.result?.content),
+        20000,
+    );
+    assert.notEqual(
+        reply.result.isError,
+        true,
+        `reused id must get the relayer's reply, got: ${JSON.stringify(reply)}`,
+    );
+    assert.match(textOf(reply), /no matching memories/i);
 });
 
 /**
