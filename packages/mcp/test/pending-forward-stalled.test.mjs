@@ -567,7 +567,6 @@ test("a call issued after the session dies is answered on the stalled deadline",
     );
 
     // 4. only now is the call issued — it must take the never-sent path.
-    const postsBefore = mock.getPostCount();
     const sentAt = Date.now();
     send({
         jsonrpc: "2.0",
@@ -583,10 +582,15 @@ test("a call issued after the session dies is answered on the stalled deadline",
     );
     const waitedMs = Date.now() - sentAt;
 
-    assert.equal(
-        mock.getPostCount(),
-        postsBefore,
-        dump("the call must never have been POSTed — that is what earns the short deadline"),
+    // `sse` is NOT cleared on server-pump EOF — it keeps pointing at the dead
+    // session until a reconnect succeeds — so the call does take the POST
+    // path and is 404'd by the relayer. That 404 is what returns it to
+    // never-sent: the session did not exist, so the message was discarded
+    // rather than routed, and it provably did not run.
+    assert.match(
+        stderrBuf,
+        /"event":"bridge\.session_stale"/,
+        dump("expected the stale-session 404 that returns the call to never-sent"),
     );
     assert.ok(
         waitedMs < CALL_TIMEOUT_MS,

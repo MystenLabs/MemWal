@@ -1010,7 +1010,24 @@ export async function runBridge(
             const tracked = inFlight.get(msg.id);
             if (tracked) tracked.sent = true;
         }
-        return postMessage(postUrl, msg, postCreds, extraHeaders);
+        return postMessage(postUrl, msg, postCreds, extraHeaders).then((status) => {
+            // 404 is the relayer saying that session does not exist, so the
+            // message was discarded rather than routed: it provably did not
+            // run, and the request goes back to being never-sent.
+            //
+            // This is not a corner case. `sse` is not cleared when the server
+            // pump hits EOF — it keeps pointing at the dead session until a
+            // reconnect succeeds — so a call arriving during a mid-session
+            // outage takes the POST path, posts to the stale URL, and gets
+            // exactly this. Without the reset it would be marked sent and
+            // wait out the full call timeout, which is the WALM-618 symptom
+            // the stalled deadline exists to remove.
+            if (status === 404 && msg.id !== undefined && msg.id !== null) {
+                const tracked = inFlight.get(msg.id);
+                if (tracked) tracked.sent = false;
+            }
+            return status;
+        });
     }
     let credentialGeneration = 0;
     let activeCredentialGeneration = 0;
