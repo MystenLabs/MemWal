@@ -848,6 +848,14 @@ async fn main() {
     } else {
         None
     };
+    if legacy_db.is_some() {
+        // The legacy migrations that just ran are what create
+        // `delete_blobs_tracking`, and they run *after* `VectorDb::new()`
+        // probed for it. Re-probe now so the first boot that enables
+        // security deletion already hides claimed-for-deletion memories from
+        // recall, instead of waiting for the next restart (WALM-592).
+        db.refresh_pending_delete_filter().await;
+    }
 
     let apalis_startup_timeout_secs = parse_env_u64(
         "APALIS_STARTUP_TIMEOUT_SECS",
