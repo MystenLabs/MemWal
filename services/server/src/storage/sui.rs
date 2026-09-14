@@ -540,10 +540,20 @@ pub async fn verify_delegate_key_cached(
         }
         Err(err) => {
             if verify_cache_miss_action(&err) == VerifyCacheMissAction::Evict {
-                cache.entries.write().await.remove(probe);
-                cache
-                    .evictions
-                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                {
+                    // Remove and bump under one guard. A concurrent success
+                    // takes this same lock to insert and reads the generation
+                    // while holding it, so it either runs before this removal
+                    // (and gets deleted by it) or sees the bumped value and
+                    // declines to store. Bumping after the guard dropped left
+                    // a window where it could do neither, which is the race
+                    // `evictions` exists to close.
+                    let mut entries = cache.entries.write().await;
+                    entries.remove(probe);
+                    cache
+                        .evictions
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                }
                 // Remember the refusal so a client looping on a key that can
                 // never be accepted stops costing one fullnode read per retry.
                 // At the cap we simply do not record it — the next attempt
