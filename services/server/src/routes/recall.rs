@@ -162,8 +162,9 @@ pub async fn recall(
     // Validate scoring_weights up front — fail fast on malformed input
     // (NaN, out-of-range, sub-floor half-life) BEFORE we spend an embed +
     // vector search + Walrus + SEAL round-trip just to 400 at the end.
-    let weights = body.scoring_weights.clone().unwrap_or_default();
-    weights.validate()?;
+    // An explicit `sort` suppresses them; see `resolve_scoring_weights`.
+    let weights = super::resolve_scoring_weights(body.sort, body.scoring_weights.clone())?;
+    let sort = body.sort.unwrap_or_default();
 
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
@@ -173,6 +174,11 @@ pub async fn recall(
         owner = %owner,
         namespace = %namespace,
         ranker_active = weights.is_ranker_active(),
+        scoring_weights_ignored = body.sort.is_some()
+            && body
+                .scoring_weights
+                .as_ref()
+                .is_some_and(ScoringWeights::is_ranker_active),
         "recall request"
     );
 
@@ -187,7 +193,7 @@ pub async fn recall(
     // row is frequently a mediocre semantic match and would otherwise fall
     // outside the cosine top-`limit` entirely. `Relevance` fetches exactly
     // `limit`, so the default path issues the identical query it always has.
-    let candidate_limit = body.sort.candidate_limit(limit);
+    let candidate_limit = sort.candidate_limit(limit);
     let t1 = std::time::Instant::now();
     let hits = state
         .db
@@ -199,7 +205,7 @@ pub async fn recall(
     // only distance + created_at, both already on the row, so the over-fetch
     // costs one wider SQL query instead of 5x the Walrus downloads and SEAL
     // decrypts.
-    let hits = super::select_hits_for_sort(hits, body.sort, limit);
+    let hits = super::select_hits_for_sort(hits, sort, limit);
     let hit_count = hits.len();
 
     if hits.is_empty() {

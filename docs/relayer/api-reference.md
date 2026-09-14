@@ -269,6 +269,8 @@ Search for memories matching a natural language query. Returns decrypted plainte
 
 `limit` defaults to `10`; the server caps it at `100`. `namespace` defaults to `"default"`. `scoring_weights` takes an optional object; omit it to keep the plain cosine-distance order.
 
+`sort` is optional: `"relevance"` (the cosine order, and the behaviour when omitted) or `"recent"` (the newest among the semantic matches). An explicit `sort`, `"relevance"` included, is the order, and the relayer ignores `scoring_weights` for that request.
+
 #### Scoring weights
 
 The optional `scoring_weights` object turns on composite ranking. The same object works on `/api/recall`, `/api/recall/manual`, and `/api/ask`.
@@ -297,7 +299,7 @@ The optional `scoring_weights` object turns on composite ranking. The same objec
 }
 ```
 
-`score` only appears when `scoring_weights` sets a nonzero `recency` or `importance` weight. A request that sets only the `semantic` weight keeps the plain cosine order, and the relayer omits `score`. `dropped_count` only appears when at least one match dropped out because its blob download or decryption failed; the relayer omits those matches from `results`.
+`score` only appears when `scoring_weights` sets a nonzero `recency` or `importance` weight and `sort` is omitted. A request that sets only the `semantic` weight keeps the plain cosine order, and the relayer omits `score`. `dropped_count` only appears when at least one match dropped out because its blob download or decryption failed; the relayer omits those matches from `results`.
 
 ### `POST /api/remember/manual`
 
