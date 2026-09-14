@@ -574,7 +574,16 @@ pub async fn sse_proxy(
         let lname = name.as_str().to_ascii_lowercase();
         if matches!(
             lname.as_str(),
-            "content-type" | "cache-control" | "www-authenticate" | "connection"
+            // `retry-after` is load-bearing: the sidecar sets it on an
+            // `ip_burst_cap` 429 and the bridge honours it (WALM-386).
+            // Dropping it here left the client with no ETA and the wrong
+            // remediation, since it could not tell a timed cap from a
+            // concurrency one.
+            "content-type"
+                | "cache-control"
+                | "www-authenticate"
+                | "connection"
+                | "retry-after"
         ) {
             if let (Ok(n), Ok(v)) = (
                 HeaderName::from_bytes(name.as_str().as_bytes()),
@@ -825,6 +834,7 @@ pub async fn streamable_proxy(
                 | "connection"
                 | "mcp-session-id"
                 | "mcp-protocol-version"
+                | "retry-after"
         ) {
             if let (Ok(n), Ok(v)) = (
                 HeaderName::from_bytes(name.as_str().as_bytes()),
