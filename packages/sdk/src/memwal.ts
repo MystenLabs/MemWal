@@ -68,6 +68,11 @@ import {
     redactInternalUrls,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
+    sealSessionCacheState,
+    isSealSessionExpiredResponse,
+    sealSessionBuildError,
+    sealSessionExpiredError,
+    SEAL_SESSION_REFRESH_AHEAD_MS,
 } from "./utils.js";
 import {
     assertCompatibleRelayer,
@@ -114,6 +119,13 @@ const SEAL_SESSION_TTL_MIN = 5;
 // the client thinks the session is valid but a just-received request hits
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
+// WALM-162: the margin above is a staleness guard, not proactive refresh —
+// it only moves the cliff earlier. The rebuild was still lazy, so roughly
+// every 4m30s one unlucky user-facing request paid for `GET /config`, two
+// dynamic imports, `SessionKey.create()` and a personal-message signature
+// inline. `buildSealSession()` now serves the cached bytes and rebuilds out
+// of band once the session enters the last `SEAL_SESSION_REFRESH_AHEAD_MS`
+// of its usable life. See `sealSessionCacheState` in `utils.ts`.
 
 type RememberStatusResponse = RememberJobStatus | { error?: string };
 
@@ -193,6 +205,12 @@ export class MemWal {
     private relayerVersionMetadata: RelayerVersionMetadata | null = null;
     /** Single-flight guard so concurrent requests share one SessionKey build. */
     private sessionBuildPromise: Promise<string> | null = null;
+    /**
+     * Set by `destroy()`. WALM-162: a background session refresh is the one
+     * piece of work that can outlive the call that started it, so it must not
+     * repopulate `sessionCache` after the instance has been wiped.
+     */
+    private destroyed = false;
     /** Single-flight guard so concurrent requests share one compatibility probe. */
     private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
     /** Resolved owner address for this account. See `resolveOwner()`. */
@@ -244,6 +262,11 @@ export class MemWal {
         }
         // ENG-1697: drop cached session material too — once destroyed the
         // instance must not leak authorization tokens either.
+        // WALM-162: set the tombstone *before* clearing, so a background
+        // refresh that is still in flight cannot write fresh session bytes
+        // back into the cache we are wiping here.
+        this.destroyed = true;
+        this.sessionBuildPromise = null;
         this.sessionCache = null;
         this.serverConfig = null;
         this.relayerVersionMetadata = null;
@@ -1209,6 +1232,17 @@ export class MemWal {
             );
         }
 
+        // A present-but-too-old @mysten/seal resolves, so the import above does
+        // not throw; `SessionKey` is just undefined and the failure would
+        // surface as a TypeError from `.create()` and be retried as transient.
+        // Name it here so it classifies as permanent alongside Ed25519Keypair.
+        if (typeof SessionKey !== "function") {
+            throw new Error(
+                "Required SessionKey export not found in @mysten/seal. " +
+                "Ensure @mysten/sui >=2.5.0 and @mysten/seal >=1.1.0 are installed."
+            );
+        }
+
         const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
 
         // SessionKey accepts either transport through the shared core client
@@ -1261,33 +1295,103 @@ export class MemWal {
             personalMessageSignature: exported.personalMessageSignature,
             sessionKey: exported.sessionKey,
         });
-        const bytes =
-            typeof btoa === "function"
-                ? btoa(jsonStr)
-                : Buffer.from(jsonStr, "utf8").toString("base64");
+        // The caller (`startSealSessionBuild`) owns the cache write so the
+        // freshness bookkeeping stays in one place next to the refresh policy.
+        return typeof btoa === "function"
+            ? btoa(jsonStr)
+            : Buffer.from(jsonStr, "utf8").toString("base64");
+    }
 
-        this.sessionCache = {
-            bytes,
-            expiresAt:
-                Date.now() +
-                SEAL_SESSION_TTL_MIN * 60_000 -
-                SEAL_SESSION_SAFETY_MARGIN_MS,
-        };
-        return bytes;
+    /**
+     * Start (or join) a SessionKey build and publish the result to the cache.
+     *
+     * Keeps the pre-existing single-flight guarantee: concurrent callers — a
+     * blocking one that has no usable session and a background refresh-ahead
+     * one — share a single in-flight build.
+     */
+    private startSealSessionBuild(): Promise<string> {
+        if (this.sessionBuildPromise) return this.sessionBuildPromise;
+
+        const build = this.buildSealSessionInner()
+            .then((bytes) => {
+                // Never re-arm the cache of a destroyed client.
+                if (!this.destroyed) {
+                    this.sessionCache = {
+                        bytes,
+                        expiresAt:
+                            Date.now() +
+                            SEAL_SESSION_TTL_MIN * 60_000 -
+                            SEAL_SESSION_SAFETY_MARGIN_MS,
+                    };
+                }
+                return bytes;
+            })
+            .catch((err) => {
+                // A raw throw here never reaches `fetch`, so it would escape
+                // without a `.status` and be misclassified by the documented
+                // retry helpers. Tag it before it leaves the SDK.
+                throw sealSessionBuildError(err);
+            })
+            .finally(() => {
+                // Only clear the slot if it still points at this build; a
+                // newer one may already have replaced it.
+                if (this.sessionBuildPromise === build) this.sessionBuildPromise = null;
+            });
+
+        this.sessionBuildPromise = build;
+        return build;
+    }
+
+    /**
+     * Kick off a refresh without blocking the caller (WALM-162).
+     *
+     * Deliberately timer-free. A `setInterval`/`setTimeout` refresher would
+     * hold a Node event-loop handle for the lifetime of the client — keeping
+     * short-lived processes alive and leaking if the client is dropped without
+     * an explicit disposal call — for a benefit that refresh-ahead-on-use
+     * already delivers: the only moment a fresh session matters is when a
+     * request is about to be made.
+     *
+     * The rejection is swallowed here on purpose. The cached session is still
+     * valid, so a failed background refresh must not surface to the caller nor
+     * raise an unhandled rejection; the next call re-attempts, and once the
+     * cache truly expires the failure is surfaced synchronously instead.
+     */
+    private refreshSealSessionInBackground(): void {
+        if (this.destroyed) return;
+        this.startSealSessionBuild().catch(() => {
+            /* still serving a valid cached session — retried on next use */
+        });
     }
 
     private async buildSealSession(): Promise<string> {
-        // Fast path: cached session still fresh.
-        if (this.sessionCache && Date.now() < this.sessionCache.expiresAt) {
-            return this.sessionCache.bytes;
+        const cached = this.sessionCache;
+        if (cached) {
+            const state = sealSessionCacheState(
+                cached.expiresAt,
+                Date.now(),
+                SEAL_SESSION_REFRESH_AHEAD_MS,
+            );
+            if (state !== "expired") {
+                // Proactive half: still valid, but close enough to the
+                // deadline that the *next* call would likely block. Hand back
+                // the current bytes now and rebuild out of band.
+                if (state === "refresh-ahead") this.refreshSealSessionInBackground();
+                return cached.bytes;
+            }
         }
-        // Single-flight: concurrent requests share one build.
-        if (this.sessionBuildPromise) return this.sessionBuildPromise;
+        return this.startSealSessionBuild();
+    }
 
-        this.sessionBuildPromise = this.buildSealSessionInner().finally(() => {
-            this.sessionBuildPromise = null;
-        });
-        return this.sessionBuildPromise;
+    /**
+     * Drop a cached SessionKey the server has rejected as expired.
+     *
+     * Scoped to the exact bytes that were rejected so a refresh that landed
+     * concurrently with the failing request is not thrown away.
+     */
+    private invalidateSealSession(rejectedBytes: string | undefined): void {
+        if (!rejectedBytes) return;
+        if (this.sessionCache?.bytes === rejectedBytes) this.sessionCache = null;
     }
 
     /**
@@ -1338,52 +1442,82 @@ export class MemWal {
         await this.ensureCompatibleRelayer();
         const ed = await getEd();
 
-        const timestamp = Math.floor(Date.now() / 1000).toString();
         // Canonical body used for both: (a) the HTTP wire body and
         // (b) the SHA-256 digest inside the signed message. GET requests
         // carry no body, so the server will hash an EMPTY byte string —
         // we must sign the same empty string for the signature to verify.
         const bodyStr = method === "GET" ? "" : JSON.stringify(body);
         const bodySha256 = await sha256hex(bodyStr);
-
-        // MED-1 fix: Generate per-request nonce (UUID v4) for replay protection
-        const nonce = crypto.randomUUID();
-
-        // LOW-23: Build message to sign — now includes nonce AND account id
-        const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
-        const msgBytes = new TextEncoder().encode(message);
-
-        // Sign with Ed25519
-        const signature = await ed.signAsync(msgBytes, this.privateKey);
         const publicKey = await this.getPublicKey();
-
-        // Make HTTP request
         const url = `${this.serverUrl}${path}`;
-        const headers: Record<string, string> = {
-            "Content-Type": "application/json",
-            "x-public-key": bytesToHex(publicKey),
-            "x-signature": bytesToHex(signature),
-            "x-timestamp": timestamp,
-            "x-nonce": nonce,           // MED-1: replay protection
-            "x-account-id": this.accountId,
-        };
-        // ENG-1696 / ENG-1697: attach a SEAL credential only on Relayer-
-        // mode routes where the server needs it for server-side SEAL
-        // decrypt. Manual-mode methods (rememberManual, recallManual) opt
-        // out and transmit no decrypt credential at all.
-        if (options.includeDelegateKey !== false) {
-            headers["x-seal-session"] = await this.buildSealSession();
-        }
-        const res = await fetch(url, {
-            method,
-            headers,
-            body: method === "GET" ? undefined : bodyStr,
-            signal: options.signal,
-        });
+        const carriesSealSession = options.includeDelegateKey !== false;
 
-        if (!acceptedStatuses.includes(res.status)) {
+        // WALM-162: a request that carries a SEAL session gets exactly one
+        // rebuild-and-retry if the server rejects that session as expired.
+        // Bounded at two attempts so a persistently-rejected session (a badly
+        // skewed clock, say) fails fast instead of looping.
+        const maxAttempts = carriesSealSession ? 2 : 1;
+
+        for (let attempt = 1; ; attempt += 1) {
+            // Everything below is re-derived per attempt: the timestamp must
+            // stay inside the relayer's clock-drift window and the nonce must
+            // be fresh, because MED-1 replay protection rejects a reused one.
+            const timestamp = Math.floor(Date.now() / 1000).toString();
+
+            // MED-1 fix: Generate per-request nonce (UUID v4) for replay protection
+            const nonce = crypto.randomUUID();
+
+            // LOW-23: Build message to sign — now includes nonce AND account id
+            const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
+            const msgBytes = new TextEncoder().encode(message);
+
+            // Sign with Ed25519
+            const signature = await ed.signAsync(msgBytes, this.privateKey);
+
+            // Make HTTP request
+            const headers: Record<string, string> = {
+                "Content-Type": "application/json",
+                "x-public-key": bytesToHex(publicKey),
+                "x-signature": bytesToHex(signature),
+                "x-timestamp": timestamp,
+                "x-nonce": nonce,           // MED-1: replay protection
+                "x-account-id": this.accountId,
+            };
+            // ENG-1696 / ENG-1697: attach a SEAL credential only on Relayer-
+            // mode routes where the server needs it for server-side SEAL
+            // decrypt. Manual-mode methods (rememberManual, recallManual) opt
+            // out and transmit no decrypt credential at all.
+            let sentSealSession: string | undefined;
+            if (carriesSealSession) {
+                sentSealSession = await this.buildSealSession();
+                headers["x-seal-session"] = sentSealSession;
+            }
+            const res = await fetch(url, {
+                method,
+                headers,
+                body: method === "GET" ? undefined : bodyStr,
+                signal: options.signal,
+            });
+
+            if (acceptedStatuses.includes(res.status)) {
+                return res.json() as Promise<T>;
+            }
+
             // LOW-26: sanitize server error bodies before surfacing to callers.
             const raw = await res.text();
+
+            // WALM-162: the server says the SessionKey we just sent is
+            // expired. Left alone this is the ticket's "opaque SEAL error":
+            // the client keeps a cache it still believes is fresh and every
+            // subsequent request fails the same way. Drop the rejected entry
+            // and rebuild once; if the rebuilt session is rejected too, stop
+            // and say so plainly.
+            if (carriesSealSession && isSealSessionExpiredResponse(res.status, raw)) {
+                this.invalidateSealSession(sentSealSession);
+                if (attempt < maxAttempts) continue;
+                throw sealSessionExpiredError(res.status, raw);
+            }
+
             const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
             if (compatibilityError) throw compatibilityError;
 
@@ -1393,12 +1527,12 @@ export class MemWal {
             const clockDriftError = clockDriftErrorFromResponse(res);
             if (clockDriftError) throw clockDriftError;
 
-            const { message, serverCode } = sanitizeServerError(
+            const { message: sanitized, serverCode } = sanitizeServerError(
                 res.status,
                 raw,
                 res.headers.get("x-auth-error"),
             );
-            const err = new Error(message) as Error & {
+            const err = new Error(sanitized) as Error & {
                 status?: number;
                 serverCode?: string;
                 retryAfterSeconds?: number;
@@ -1414,7 +1548,5 @@ export class MemWal {
             err.cause = raw;
             throw err;
         }
-
-        return res.json() as Promise<T>;
     }
 }

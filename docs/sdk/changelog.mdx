@@ -28,12 +28,12 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.7. Request bodies are hashed with `@noble/hashes` rather than WebCrypto-or-`node:crypto`, so the SDK no longer imports a Node builtin that Vite silently externalises into a runtime crash in the browser, and it declares a Node 20 floor. `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. Empty-body 401s use the AUTH_REJECTED troubleshooting message instead of telling callers to run `memwal_login`. Account and manual PTBs use typed `tx.pure` helpers so they work with modern `@mysten/sui`. 0.1.6 added optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`, and reports HTTP 503 as a retryable upstream outage instead of a sign-in failure.
+  The latest TypeScript SDK release is 0.1.7. The SEAL `SessionKey` is refreshed proactively before it expires, so long-running batches no longer stall, and SEAL session failures carry a `status` that tells a retryable outage apart from a missing peer dependency. Request bodies are hashed with `@noble/hashes` rather than WebCrypto-or-`node:crypto`, so the SDK no longer imports a Node builtin that Vite silently externalises into a runtime crash in the browser, and it declares a Node 20 floor. `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. Empty-body 401s use the AUTH_REJECTED troubleshooting message instead of telling callers to run `memwal_login`. Account and manual PTBs use typed `tx.pure` helpers so they work with modern `@mysten/sui`. 0.1.6 added optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`, and reports HTTP 503 as a retryable upstream outage instead of a sign-in failure.
 ---
 
 ## 0.1.7
 
-This release removes the Node `crypto` import that crashed bundled browser builds at runtime, adds `failed` on `restore()` results, declares a Node 20 floor, stops telling headless SDK clients to call `memwal_login` on empty-body 401s, and switches account and manual PTBs to typed `tx.pure` helpers.
+This release refreshes the SEAL `SessionKey` before it expires, removes the Node `crypto` import that crashed bundled browser builds at runtime, adds `failed` on `restore()` results, declares a Node 20 floor, stops telling headless SDK clients to call `memwal_login` on empty-body 401s, and switches account and manual PTBs to typed `tx.pure` helpers.
 
 ### Added
 
@@ -43,6 +43,8 @@ This release removes the Node `crypto` import that crashed bundled browser build
 
 - Hash request bodies with `@noble/hashes` instead of WebCrypto-or-`node:crypto`, so the package no longer imports a Node builtin on a browser-reachable path. Vite externalises such an import without warning: the app builds clean and the browser crashes the first time the path runs. The fallback could never have helped a browser anyway — `crypto.subtle` is absent precisely when the page is not a secure context, where `node:crypto` is absent too — so it only served Node <19 while being the sole source of the exposure. `sha256hex` sits on the signed-request path, so every remember and recall reached it. (#322, WALM-136)
 - Declare `engines.node >= 20.0.0`, matching `memwal-mcp` and `openclaw-memory-memwal`. The SDK was the only published package without a floor. (WALM-599)
+- The SEAL `SessionKey` is refreshed proactively. Once a cached session enters the last minute of its usable life, a request still gets the cached credential immediately and the rebuild happens out of band instead of inline. Long-running batches no longer stall roughly every 4m30s. The 5-minute TTL is unchanged.
+- SEAL session failures carry a legible message and a `status` the documented `withRetry` helper can classify: `503` for transient build failures, `400` for a missing or too-old `@mysten/sui` / `@mysten/seal`, and `400` when a rebuilt session is still rejected. Previously these threw before any `fetch` and reached callers with no `status` at all.
 - Empty-body 401s now use the same AUTH_REJECTED troubleshooting message as credential 401s instead of telling callers to run `memwal_login`. Headless SDK clients do not have that MCP tool.
 - `account.ts` and `manual.ts` PTBs use typed `tx.pure` helpers instead of the legacy untyped moveCall argument syntax that fails under modern `@mysten/sui`.
 

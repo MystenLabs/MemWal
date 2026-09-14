@@ -1,5 +1,9 @@
 # Dependencies
 node_modules/
+# Also ignore a non-directory `node_modules` (e.g. a local symlink into another
+# checkout): the trailing-slash pattern above matches directories only, so a
+# symlink is not ignored and can be committed by accident.
+node_modules
 .pnp
 .pnp.js
 
