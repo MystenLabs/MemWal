@@ -118,6 +118,174 @@ fn out_set(
 // needs zero changes. See `oauth.rs` for the crypto/DB side.
 // ---------------------------------------------------------------------
 
+/// Client-supplied handshake identity. None of it is trusted for any
+/// decision — it exists so a refused handshake can be attributed to a person
+/// and a client build instead of appearing as an anonymous status code.
+const CONNECT_ID_HEADER: &str = "x-memwal-connect-id";
+const CLIENT_NAME_HEADER: &str = "x-memwal-client";
+const CLIENT_VERSION_HEADER: &str = "x-memwal-client-version";
+const BRIDGE_VERSION_HEADER: &str = "x-memwal-bridge-version";
+
+/// Which `/api/mcp/*` entry point a handshake outcome came from.
+///
+/// A label rather than three metrics, so the SSE refusal ratio can be
+/// queried on its own. `classify_and_resolve` runs on every JSON-RPC
+/// envelope as well as on the handshake, so without this the `ok` bucket
+/// counts a live session's POSTs and the ratio WALM-618 was diagnosed from
+/// reads far healthier than it is.
+const ROUTE_SSE: &str = "sse";
+const ROUTE_MESSAGES: &str = "messages";
+const ROUTE_STREAMABLE: &str = "streamable";
+
+/// Why a handshake was refused. Stable, low-cardinality strings: they are a
+/// Prometheus label and a log field, and they never carry a token, a key, or
+/// anything else caller-supplied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandshakeRejection {
+    /// No `Authorization: Bearer`, or an empty one.
+    NoBearer,
+    /// A delegate-shaped bearer with no `X-MemWal-Account-Id` to check it against.
+    NoAccountHeader,
+    /// 64 hex characters that are not a usable ed25519 secret.
+    MalformedDelegateKey,
+    /// Well-formed key, real account, but the key is not registered on it.
+    NotRegistered,
+    /// Not a delegate key, and this deployment has no OAuth configured.
+    OauthNotConfigured,
+    /// Not a delegate key and not an OAuth token either.
+    NotOauthToken,
+    /// An OAuth token that is expired, revoked, or otherwise refused.
+    OauthRejected,
+}
+
+impl HandshakeRejection {
+    fn code(self) -> &'static str {
+        match self {
+            Self::NoBearer => "no_bearer",
+            Self::NoAccountHeader => "no_account_header",
+            Self::MalformedDelegateKey => "malformed_delegate_key",
+            Self::NotRegistered => "not_registered",
+            Self::OauthNotConfigured => "oauth_not_configured",
+            Self::NotOauthToken => "not_oauth_token",
+            Self::OauthRejected => "oauth_rejected",
+        }
+    }
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+/// Client identity is logged, so cap it and keep it printable — it is
+/// caller-supplied and must not be able to inject newlines into the log or
+/// blow up a line.
+fn sanitized_client(headers: &HeaderMap, name: &str) -> String {
+    header_str(headers, name)
+        .map(|v| {
+            v.chars()
+                .filter(|c| c.is_ascii_graphic() || *c == ' ')
+                .take(64)
+                .collect::<String>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// Log and count one refused handshake, then produce the outcome.
+///
+/// Every refusal goes through here. Before this, four of the five ways to be
+/// refused logged nothing at all and none of them touched a metric, so 401 —
+/// 70% of this route's traffic — was invisible in both logs and dashboards.
+fn refuse(
+    reason: HandshakeRejection,
+    route: &str,
+    headers: &HeaderMap,
+    oauth_err: Option<crate::oauth::OAuthBearerError>,
+) -> McpAuthOutcome {
+    // Counter first and unconditionally — it is the signal a dashboard reads,
+    // and it must not depend on whether this particular refusal was sampled.
+    crate::observability::record_mcp_handshake(route, "unauthorized", reason.code());
+    crate::observability::record_app_error("mcp_unauthorized");
+    // The line carries what the counter cannot, but this route has no rate
+    // limit in front of it and a stuck client retries forever, so it is
+    // sampled per account rather than written per request.
+    let account_id = account_id_header(headers).unwrap_or("-");
+    if crate::observability::should_log_refusal(account_id) {
+        tracing::warn!(
+            reason = reason.code(),
+            account_id = %account_id,
+            connect_id = header_str(headers, CONNECT_ID_HEADER).unwrap_or("-"),
+            client = %sanitized_client(headers, CLIENT_NAME_HEADER),
+            client_version = %sanitized_client(headers, CLIENT_VERSION_HEADER),
+            bridge_version = %sanitized_client(headers, BRIDGE_VERSION_HEADER),
+            "mcp handshake refused (sampled; see memwal_mcp_handshake_total for the rate)"
+        );
+    }
+    McpAuthOutcome::Unauthorized(oauth_err)
+}
+
+/// Start timing this client's connect episode, if it named one.
+///
+/// Called on every attempt; only the first one for an id records anything, so
+/// the measured span runs from the client's first try to the one that works —
+/// which is the interval a user perceives, and the one no per-request metric
+/// can see, because each individual request here is fast.
+async fn note_connect_attempt(state: &AppState, headers: &HeaderMap) {
+    let Some(id) = header_str(headers, CONNECT_ID_HEADER) else {
+        return;
+    };
+    let mut episodes = state.mcp_connect_episodes.write().await;
+    if episodes.contains_key(id) {
+        return;
+    }
+    // Expire before consulting the cap, as the rejection cache and the log
+    // samplers do. This runs before authentication on a route with no rate
+    // limit, keyed on a header the caller chooses, so without it a few
+    // thousand made-up connect ids hold every slot until the 300s sweep —
+    // and while they do, no legitimate client is timed at all, which blinds
+    // `time_to_session` during exactly the incident it exists to measure.
+    //
+    // It self-heals once the spam stops; it does not stop a caller who keeps
+    // it up. Bounding that needs an authenticated key, or the measurement
+    // moved to the bridge, which already knows its own elapsed time.
+    if episodes.len() >= crate::observability::MCP_CONNECT_EPISODE_MAX {
+        episodes.retain(|_, started| crate::observability::connect_episode_is_fresh(*started));
+    }
+    if episodes.len() >= crate::observability::MCP_CONNECT_EPISODE_MAX {
+        return;
+    }
+    episodes.insert(id.to_string(), std::time::Instant::now());
+}
+
+/// Close the episode and record how long the client waited in total.
+async fn finish_connect_episode(state: &AppState, headers: &HeaderMap) {
+    let Some(id) = header_str(headers, CONNECT_ID_HEADER) else {
+        return;
+    };
+    let started = state.mcp_connect_episodes.write().await.remove(id);
+    let Some(started) = started.filter(|s| crate::observability::connect_episode_is_fresh(*s)) else {
+        return;
+    };
+    let waited = started.elapsed();
+    // Anything past a couple of seconds means the client was retrying, which
+    // is the WALM-618 shape. Say so at `info` with the id, so one grep gives
+    // the whole episode including the refusals that led here.
+    if waited > std::time::Duration::from_secs(2) {
+        tracing::info!(
+            connect_id = %id,
+            account_id = account_id_header(headers).unwrap_or("-"),
+            waited_ms = waited.as_millis(),
+            client = %sanitized_client(headers, CLIENT_NAME_HEADER),
+            "mcp session opened after retries"
+        );
+    }
+    crate::observability::record_mcp_time_to_session(waited);
+}
+
 enum McpAuthOutcome {
     /// The bearer is the legacy 64-hex delegate key — forward exactly as
     /// today, byte for byte (OAuth tokens are never valid here).
@@ -168,14 +336,19 @@ async fn legacy_delegate_registered(
     state: &AppState,
     headers: &HeaderMap,
     token: &str,
+    route: &str,
 ) -> McpAuthOutcome {
     let Some(account_id) = account_id_header(headers) else {
-        return McpAuthOutcome::Unauthorized(None);
+        return refuse(HandshakeRejection::NoAccountHeader, route, headers, None);
     };
     let Some(pk) = public_key_from_delegate_hex(token) else {
-        return McpAuthOutcome::Unauthorized(None);
+        return refuse(HandshakeRejection::MalformedDelegateKey, route, headers, None);
     };
-    match crate::storage::sui::verify_delegate_key_onchain(
+    // Cached: this runs on the SSE handshake and on every JSON-RPC envelope,
+    // so an uncached read here is one fullnode call per envelope.
+    match crate::storage::sui::verify_delegate_key_cached(
+        &state.delegate_verify_cache,
+        &state.delegate_reject_cache,
         &state.http_client,
         &state.config.sui_rpc_url,
         state.sui_grpc_client.as_ref(),
@@ -185,37 +358,57 @@ async fn legacy_delegate_registered(
     )
     .await
     {
-        Ok(_) => McpAuthOutcome::Passthrough,
+        Ok(_) => {
+            crate::observability::record_mcp_handshake(route, "ok", "none");
+            McpAuthOutcome::Passthrough
+        }
         Err(err) if err.is_unavailable() => {
-            tracing::warn!(error = %err, "mcp delegate on-chain verify unavailable");
+            tracing::warn!(
+                account_id = %account_id,
+                connect_id = header_str(headers, CONNECT_ID_HEADER).unwrap_or("-"),
+                client = %sanitized_client(headers, CLIENT_NAME_HEADER),
+                error = %err,
+                "mcp delegate on-chain verify unavailable"
+            );
+            crate::observability::record_mcp_handshake(route, "unavailable", "sui_unavailable");
+            crate::observability::record_app_error("mcp_upstream_unavailable");
             McpAuthOutcome::Unavailable
         }
         Err(err) => {
-            tracing::debug!("mcp delegate rejected: {err}");
-            McpAuthOutcome::Unauthorized(None)
+            tracing::debug!(error = %err, "mcp delegate rejected on chain");
+            refuse(HandshakeRejection::NotRegistered, route, headers, None)
         }
     }
 }
 
-async fn classify_and_resolve(state: &AppState, headers: &HeaderMap) -> McpAuthOutcome {
+async fn classify_and_resolve(
+    state: &AppState,
+    headers: &HeaderMap,
+    route: &str,
+) -> McpAuthOutcome {
     let Some(token) = bearer_token(headers) else {
-        return McpAuthOutcome::Unauthorized(None);
+        return refuse(HandshakeRejection::NoBearer, route, headers, None);
     };
 
     if is_legacy_delegate_bearer(token) {
-        return legacy_delegate_registered(state, headers, token).await;
+        return legacy_delegate_registered(state, headers, token, route).await;
     }
 
     if state.config.mcp_oauth.is_none() {
-        return McpAuthOutcome::Unauthorized(None);
+        return refuse(HandshakeRejection::OauthNotConfigured, route, headers, None);
     }
 
     match crate::oauth::resolve_oauth_bearer(state, token).await {
-        Ok(identity) => McpAuthOutcome::Oauth(Box::new(identity)),
-        Err(crate::oauth::OAuthBearerError::NotOAuthToken) => McpAuthOutcome::Unauthorized(None),
+        Ok(identity) => {
+            crate::observability::record_mcp_handshake(route, "ok", "none");
+            McpAuthOutcome::Oauth(Box::new(identity))
+        }
+        Err(crate::oauth::OAuthBearerError::NotOAuthToken) => {
+            refuse(HandshakeRejection::NotOauthToken, route, headers, None)
+        }
         Err(err) => {
-            tracing::debug!("mcp_proxy oauth bearer rejected: {:?}", err);
-            McpAuthOutcome::Unauthorized(Some(err))
+            tracing::debug!("mcp_proxy oauth bearer detail: {:?}", err);
+            refuse(HandshakeRejection::OauthRejected, route, headers, Some(err))
         }
     }
 }
@@ -346,9 +539,16 @@ pub async fn sse_proxy(
         peer,
         state.config.trusted_proxy_hops,
     );
-    let identity = match classify_and_resolve(&state, &headers).await {
-        McpAuthOutcome::Passthrough => None,
-        McpAuthOutcome::Oauth(identity) => Some(identity),
+    note_connect_attempt(&state, &headers).await;
+    let identity = match classify_and_resolve(&state, &headers, ROUTE_SSE).await {
+        McpAuthOutcome::Passthrough => {
+            finish_connect_episode(&state, &headers).await;
+            None
+        }
+        McpAuthOutcome::Oauth(identity) => {
+            finish_connect_episode(&state, &headers).await;
+            Some(identity)
+        }
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
         }
@@ -390,7 +590,16 @@ pub async fn sse_proxy(
         let lname = name.as_str().to_ascii_lowercase();
         if matches!(
             lname.as_str(),
-            "content-type" | "cache-control" | "www-authenticate" | "connection"
+            // `retry-after` is load-bearing: the sidecar sets it on an
+            // `ip_burst_cap` 429 and the bridge honours it (WALM-386).
+            // Dropping it here left the client with no ETA and the wrong
+            // remediation, since it could not tell a timed cap from a
+            // concurrency one.
+            "content-type"
+                | "cache-control"
+                | "www-authenticate"
+                | "connection"
+                | "retry-after"
         ) {
             if let (Ok(n), Ok(v)) = (
                 HeaderName::from_bytes(name.as_str().as_bytes()),
@@ -457,9 +666,16 @@ pub async fn messages_proxy(
         peer,
         state.config.trusted_proxy_hops,
     );
-    let identity = match classify_and_resolve(&state, &headers).await {
-        McpAuthOutcome::Passthrough => None,
-        McpAuthOutcome::Oauth(identity) => Some(identity),
+    note_connect_attempt(&state, &headers).await;
+    let identity = match classify_and_resolve(&state, &headers, ROUTE_MESSAGES).await {
+        McpAuthOutcome::Passthrough => {
+            finish_connect_episode(&state, &headers).await;
+            None
+        }
+        McpAuthOutcome::Oauth(identity) => {
+            finish_connect_episode(&state, &headers).await;
+            Some(identity)
+        }
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
         }
@@ -500,18 +716,30 @@ pub async fn messages_proxy(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
+    // Same reason as the SSE and streamable allowlists: the sidecar rate
+    // limits this route too, and dropping `retry-after` leaves the client
+    // unable to tell a cap that clears on a timer from one that clears when
+    // somebody else disconnects (WALM-386). Captured before `bytes()`
+    // consumes the response.
+    let retry_after = upstream
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| HeaderValue::from_str(v).ok());
 
     match upstream.bytes().await {
-        Ok(bytes) => (
-            status,
-            [(
+        Ok(bytes) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(
                 axum::http::header::CONTENT_TYPE,
                 HeaderValue::from_str(&content_type)
                     .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
-            )],
-            bytes,
-        )
-            .into_response(),
+            );
+            if let Some(value) = retry_after {
+                headers.insert(axum::http::header::RETRY_AFTER, value);
+            }
+            (status, headers, bytes).into_response()
+        }
         Err(err) => (
             StatusCode::BAD_GATEWAY,
             format!("MCP sidecar read failed: {}", err),
@@ -575,9 +803,16 @@ pub async fn streamable_proxy(
         peer,
         state.config.trusted_proxy_hops,
     );
-    let identity = match classify_and_resolve(&state, &headers).await {
-        McpAuthOutcome::Passthrough => None,
-        McpAuthOutcome::Oauth(identity) => Some(identity),
+    note_connect_attempt(&state, &headers).await;
+    let identity = match classify_and_resolve(&state, &headers, ROUTE_STREAMABLE).await {
+        McpAuthOutcome::Passthrough => {
+            finish_connect_episode(&state, &headers).await;
+            None
+        }
+        McpAuthOutcome::Oauth(identity) => {
+            finish_connect_episode(&state, &headers).await;
+            Some(identity)
+        }
         McpAuthOutcome::Unauthorized(err) => {
             return oauth_unauthorized_response(&state, err.as_ref())
         }
@@ -627,6 +862,7 @@ pub async fn streamable_proxy(
                 | "connection"
                 | "mcp-session-id"
                 | "mcp-protocol-version"
+                | "retry-after"
         ) {
             if let (Ok(n), Ok(v)) = (
                 HeaderName::from_bytes(name.as_str().as_bytes()),
@@ -676,6 +912,113 @@ mod tests {
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string())
+    }
+
+    #[test]
+    fn every_rejection_reason_has_a_distinct_stable_code() {
+        // These are Prometheus label values and log fields. A duplicate would
+        // silently merge two causes into one series; a rename breaks every
+        // saved query. Both are worth a test.
+        use HandshakeRejection::*;
+        let all = [
+            NoBearer,
+            NoAccountHeader,
+            MalformedDelegateKey,
+            NotRegistered,
+            OauthNotConfigured,
+            NotOauthToken,
+            OauthRejected,
+        ];
+        let codes: Vec<&str> = all.iter().map(|r| r.code()).collect();
+        let mut unique = codes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), codes.len(), "reason codes must be distinct");
+        assert_eq!(
+            codes,
+            vec![
+                "no_bearer",
+                "no_account_header",
+                "malformed_delegate_key",
+                "not_registered",
+                "oauth_not_configured",
+                "not_oauth_token",
+                "oauth_rejected",
+            ]
+        );
+        assert!(
+            codes.iter().all(|c| c
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch == '_')),
+            "low-cardinality snake_case only — never a token or an account"
+        );
+    }
+
+    #[test]
+    fn client_identity_is_sanitized_before_it_reaches_a_log_line() {
+        // Caller-supplied and logged, so it must not be able to forge a second
+        // log line or run away with the line length.
+        let h = axum_headers(&[("x-memwal-client", "claude-code")]);
+        assert_eq!(sanitized_client(&h, "x-memwal-client"), "claude-code");
+
+        let missing = axum_headers(&[]);
+        assert_eq!(
+            sanitized_client(&missing, "x-memwal-client"),
+            "-",
+            "absent must read as absent, not as an empty field"
+        );
+
+        let long = "a".repeat(500);
+        let h = axum_headers(&[("x-memwal-client", &long)]);
+        assert_eq!(sanitized_client(&h, "x-memwal-client").len(), 64);
+    }
+
+    #[test]
+    fn expired_episodes_do_not_hold_the_cap_against_a_real_client() {
+        // `note_connect_attempt` runs BEFORE authentication, on a route with
+        // no rate limit, keyed on a header the caller picks. Without expiring
+        // at the cap, a few thousand made-up connect ids hold every slot for
+        // the full 300s sweep interval — and while they do, no legitimate
+        // client is ever recorded, so `time_to_session` observes nothing
+        // during exactly the incident it was added to measure.
+        //
+        // This pins the policy; the retain itself is inline in
+        // `note_connect_attempt`, which needs an `AppState`. Keep them in step.
+        let mut episodes: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        let abandoned = std::time::Instant::now()
+            - (crate::observability::MCP_CONNECT_EPISODE_TTL + std::time::Duration::from_secs(1));
+        for i in 0..crate::observability::MCP_CONNECT_EPISODE_MAX {
+            episodes.insert(format!("spam-{i}"), abandoned);
+        }
+        assert!(
+            episodes.len() >= crate::observability::MCP_CONNECT_EPISODE_MAX,
+            "precondition: the cap is full, so a real client would be turned away"
+        );
+
+        episodes.retain(|_, started| crate::observability::connect_episode_is_fresh(*started));
+
+        assert!(
+            episodes.is_empty(),
+            "every seeded episode is past the TTL, so none may be kept"
+        );
+        assert!(
+            episodes.len() < crate::observability::MCP_CONNECT_EPISODE_MAX,
+            "after expiring, a real client can be timed again"
+        );
+    }
+
+    #[test]
+    fn a_connect_episode_expires_so_an_abandoned_one_cannot_hold_a_slot() {
+        let fresh = std::time::Instant::now();
+        assert!(crate::observability::connect_episode_is_fresh(fresh));
+
+        let abandoned = std::time::Instant::now()
+            - (crate::observability::MCP_CONNECT_EPISODE_TTL + std::time::Duration::from_secs(1));
+        assert!(
+            !crate::observability::connect_episode_is_fresh(abandoned),
+            "past the TTL it is swept, and never reported as a time_to_session"
+        );
     }
 
     #[test]

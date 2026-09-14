@@ -1167,6 +1167,9 @@ async fn main() {
         http_client,
         sui_grpc_client,
         delegate_keys_cache: crate::storage::sui::new_delegate_keys_cache(),
+        delegate_verify_cache: crate::storage::sui::new_delegate_verify_cache(),
+        delegate_reject_cache: crate::storage::sui::new_delegate_reject_cache(),
+        mcp_connect_episodes: crate::observability::new_mcp_connect_episodes(),
         key_pool,
         alerts,
         engine,
@@ -1440,6 +1443,78 @@ async fn main() {
                     evicted,
                     before - evicted
                 );
+            }
+
+            // Same reasoning for the verify-result cache (WALM-618): its
+            // TTL only gates trust-on-hit, so the map itself needs sweeping
+            // or it grows one entry per (account, delegate key) pair ever
+            // seen. It sweeps on TTL + `DELEGATE_VERIFY_STALE_GRACE`, not on
+            // the TTL alone: an entry past the TTL is still servable while
+            // the chain is unreachable, and sweeping it at 30s would delete
+            // exactly the entries that outage path exists to serve.
+            let mut verify_cache = delegate_cache_sweep_state
+                .delegate_verify_cache
+                .entries
+                .write()
+                .await;
+            let before = verify_cache.len();
+            verify_cache.retain(|_, v| v.is_servable_while_unavailable());
+            let evicted = before - verify_cache.len();
+            drop(verify_cache);
+            if evicted > 0 {
+                tracing::debug!(
+                    "delegate_verify_cache sweep: evicted {} stale entries ({} remaining)",
+                    evicted,
+                    before - evicted
+                );
+            }
+
+            // The rejection cache is keyed by what callers send rather than
+            // by what exists on chain, so sweeping it is what keeps its cap
+            // from being reached by ordinary churn instead of by abuse.
+            let mut reject_cache = delegate_cache_sweep_state
+                .delegate_reject_cache
+                .write()
+                .await;
+            let before = reject_cache.len();
+            reject_cache
+                .retain(|_, rejected_at| storage::sui::reject_entry_is_fresh(*rejected_at));
+            let evicted = before - reject_cache.len();
+            drop(reject_cache);
+            if evicted > 0 {
+                tracing::debug!(
+                    "delegate_reject_cache sweep: evicted {} expired entries ({} remaining)",
+                    evicted,
+                    before - evicted
+                );
+            }
+
+            // Connect episodes whose client gave up (or was killed) never see
+            // the success that would remove them. Sweeping is what keeps an
+            // abandoned episode from holding a slot against the cap.
+            let mut episodes = delegate_cache_sweep_state
+                .mcp_connect_episodes
+                .write()
+                .await;
+            let before = episodes.len();
+            episodes.retain(|_, started| observability::connect_episode_is_fresh(*started));
+            let evicted = before - episodes.len();
+            drop(episodes);
+            if evicted > 0 {
+                tracing::debug!(
+                    "mcp_connect_episodes sweep: evicted {} abandoned episodes ({} remaining)",
+                    evicted,
+                    before - evicted
+                );
+            }
+
+            // The two log samplers are the last per-account state that was
+            // not swept here. They expire on insert, but only at the cap, so
+            // an account that went quiet an hour ago holds its slot until
+            // some unrelated overflow reclaims it.
+            let evicted = observability::sweep_log_samplers();
+            if evicted > 0 {
+                tracing::debug!("log sampler sweep: evicted {} idle accounts", evicted);
             }
         }
     });

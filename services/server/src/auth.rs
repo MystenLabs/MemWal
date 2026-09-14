@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::owner_token_auth;
 use crate::storage::sui::{
-    find_account_by_delegate_key, verify_delegate_key_onchain, OnchainVerifyError,
+    find_account_by_delegate_key, verify_delegate_key_cached, OnchainVerifyError,
 };
 use crate::types::{AppState, AuthInfo};
 
@@ -441,12 +441,20 @@ async fn resolve_account(
     if let Ok(Some((cached_account_id, _cached_owner))) =
         state.db.get_cached_account(public_key_hex).await
     {
-        // Re-verify the cached mapping on-chain when Sui is reachable.
-        // A transient RPC failure is *not* a revoke: keep the row, but
-        // fail closed with 503 so a revoked key cannot ride a 24h cache
-        // through a Sui outage. Definitive misses evict.
+        // Re-verify the cached mapping, through the in-memory verify cache.
+        // A hit inside `DELEGATE_VERIFY_CACHE_TTL` answers without touching
+        // Sui at all — including during an outage — so the fail-closed rule
+        // below now applies to a live read, not to every request. That 30s
+        // window is the stated revocation bound.
+        //
+        // On a live miss: a transient RPC failure is *not* a revoke, so keep
+        // the Postgres row and fail closed with 503 rather than let a revoked
+        // key ride the 24h cache through an outage. A definitive miss evicts
+        // both caches.
         match cache_reverify_action(
-            verify_delegate_key_onchain(
+            verify_delegate_key_cached(
+                &state.delegate_verify_cache,
+                &state.delegate_reject_cache,
                 &state.http_client,
                 &state.config.sui_rpc_url,
                 state.sui_grpc_client.as_ref(),
@@ -494,7 +502,9 @@ async fn resolve_account(
         .as_deref()
         .or(state.config.memwal_account_id.as_deref())
     {
-        match verify_delegate_key_onchain(
+        match verify_delegate_key_cached(
+            &state.delegate_verify_cache,
+            &state.delegate_reject_cache,
             &state.http_client,
             &state.config.sui_rpc_url,
             state.sui_grpc_client.as_ref(),
