@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Cap `wait_for_remember_job` / `wait_for_remember_jobs` poll delay at ~1.5s with an immediate first poll, instead of exponential backoff that climbed to 10s. `poll_interval_ms: 0` still means no wait. (WALM-623)
+- Grow `wait_for_remember_job` / `wait_for_remember_jobs` poll delay 1.5× from the caller interval (floor 100ms) toward a 3s cap, with an immediate first poll, instead of exponential backoff that climbed to 10s. Callers that pass `poll_interval_ms` above 3s keep that interval. (WALM-623)
 
 ## 0.1.9
 

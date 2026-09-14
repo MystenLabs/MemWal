@@ -170,15 +170,15 @@ async def _sleep_ms(ms: int) -> None:
 def _polling_delay_ms(base_ms: int, attempt: int) -> int:
     """Jittered poll delay matching TS ``pollingDelayMs``.
 
-    ``base_ms <= 0`` means no wait (``poll_interval_ms: 0``). Attempt 0 is
-    immediate so the first GET is not delayed.
+    Attempt 0 is immediate. Later polls grow 1.5x from ``base_ms`` (floor
+    100ms) to 3s, or stay at ``base_ms`` if the caller set it higher.
     """
 
-    if base_ms <= 0:
-        return 0
     if attempt == 0:
         return 0
-    capped = min(1500, max(100, base_ms))
+    base = max(100, base_ms)
+    ceiling = max(3000, base)
+    capped = min(ceiling, base * (1.5 ** min(attempt - 1, 6)))
     jitter = 0.75 + random.random() * 0.5
     return int(capped * jitter)
 
@@ -423,7 +423,9 @@ class MemWal:
           ``status`` field (404 / ``status == "not_found"`` raises).
         - Transient HTTP errors (429, 5xx, network drop) are retried until
           the timeout, not surfaced as polling failures.
-        - First poll is immediate; later polls cap at 1.5s with ±25% jitter.
+        - First poll is immediate; later polls grow 1.5x from the caller
+          interval (floor 100ms) to 3s, or stay at the caller interval if
+          it is higher.
         """
 
         deadline_ms = _now_ms() + timeout_ms

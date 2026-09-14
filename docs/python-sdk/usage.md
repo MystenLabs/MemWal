@@ -100,4 +100,4 @@ print(done.blob_id)
 done = await memwal.wait_for_remember_job(accepted.job_id)
 ```
 
-Bulk (up to 20 items per call) follows the same pattern with `remember_bulk_async`, `wait_for_remember_jobs`, and `remember_bulk_and_wait`. Polling starts immediately, then repeats at most ~1.5s with ±25% jitter; `poll_interval_ms: 0` means no wait.
+Bulk (up to 20 items per call) follows the same pattern with `remember_bulk_async`, `wait_for_remember_jobs`, and `remember_bulk_and_wait`. Polling starts immediately, then grows 1.5× from the caller interval (floor 100ms) toward a 3s cap, with ±25% jitter.
