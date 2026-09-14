@@ -23,6 +23,7 @@
 ### Fixed
 
 - HTTP 503 with `x-auth-error: AUTH_UPSTREAM_UNAVAILABLE` is reported as a retryable credential-verification outage, not a sign-in failure. Other 503s keep the generic sanitized body. Empty-body 401s still point at `memwal_login`.
+- Positional `recall(query, namespace)` now throws `TypeError` instead of silently ignoring the namespace.
 
 ## 0.1.5
 

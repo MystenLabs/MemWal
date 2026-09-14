@@ -58,6 +58,7 @@ This release adds write-time on recall results, lets callers sort by recency or 
 ### Fixed
 
 - HTTP 503 from the relayer is reported as a retryable upstream outage, not a sign-in failure. Empty-body 401s still point at `memwal_login`.
+- Positional `recall(query, namespace)` now throws `TypeError` instead of silently ignoring the namespace.
 
 ## 0.1.5
 
