@@ -33,21 +33,6 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(SCRIPT_DIR);
 
 function resolveMcpVersion() {
-    let dir = SCRIPT_DIR;
-    while (true) {
-        const manifestPath = join(dir, "package.json");
-        if (existsSync(manifestPath)) {
-            try {
-                const pkg = JSON.parse(readFileSync(manifestPath, "utf8"));
-                if (pkg.name === "@mysten-incubation/memwal-mcp" && pkg.version) {
-                    return pkg.version;
-                }
-            } catch {}
-        }
-        const parent = dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
-    }
     return JSON.parse(readFileSync(join(PLUGIN_ROOT, "plugin.json"), "utf8")).version;
 }
 
