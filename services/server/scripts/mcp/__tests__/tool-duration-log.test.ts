@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { MemWalSession } from "../auth.js";
 
-const SLOW_THRESHOLD_MS = 40;
+const SLOW_THRESHOLD_MS = 150;
 process.env.MCP_TOOL_SLOW_WARN_MS = String(SLOW_THRESHOLD_MS);
 const { wrapTool } = await import("../tools/util.js");
 
@@ -79,7 +79,7 @@ test("a completed tool call reports how long it took", async () => {
 
 test("a call slower than the threshold is warned about, not filed as normal", async () => {
     const slow = async () => {
-        await new Promise((r) => setTimeout(r, SLOW_THRESHOLD_MS + 20));
+        await new Promise((r) => setTimeout(r, SLOW_THRESHOLD_MS * 2));
         return ok();
     };
 
@@ -95,8 +95,54 @@ test("a call slower than the threshold is warned about, not filed as normal", as
         (warned.durationMs as number) >= SLOW_THRESHOLD_MS,
         `durationMs ${warned.durationMs} is under the threshold that triggered it`
     );
-    // A slow call is reported once, as slow — not also as a healthy one.
+    // A slow call is reported as slow — never also as a healthy one.
     assert.equal(lines.filter((l) => l.event === "tool.done").length, 0);
+});
+
+test("a call still running past the threshold is reported BEFORE it settles", async () => {
+    // The whole point. The incident that motivated this left a tool call
+    // outstanding for 61s; a log that only fires on settle says nothing for the
+    // entire minute an operator is staring at the service.
+    let release;
+    const hang = () =>
+        new Promise((resolve) => {
+            release = () => resolve(ok());
+        });
+
+    const written = [];
+    const original = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: unknown }).write = (chunk: unknown) => {
+        written.push(String(chunk));
+        return true;
+    };
+
+    let lines;
+    try {
+        const call = wrapTool(SESSION, "memwal_health", hang as never)({});
+        // Wait past the threshold while the call is deliberately still pending.
+        await new Promise((r) => setTimeout(r, SLOW_THRESHOLD_MS * 2));
+        lines = parse(written);
+
+        const inflight = lines.find((l) => l.event === "tool.slow");
+        assert.ok(
+            inflight,
+            `nothing was reported while the call was still running:\n${JSON.stringify(lines, null, 2)}`
+        );
+        assert.equal(inflight.level, "warn");
+        assert.equal(inflight.settled, false, "the in-flight line must say it has not settled");
+        assert.equal(inflight.tool, "memwal_health");
+
+        release();
+        await call;
+    } finally {
+        (process.stderr as unknown as { write: unknown }).write = original;
+    }
+
+    // And when it finally lands, the settle line marks that it was already
+    // reported, so an operator counting warns does not double-count one call.
+    const settled = parse(written).filter((l) => l.event === "tool.slow" && l.settled === true);
+    assert.equal(settled.length, 1);
+    assert.equal(settled[0].alreadyWarned, true);
 });
 
 test("a failing tool call still reports its duration", async () => {
@@ -113,6 +159,10 @@ test("a failing tool call still reports its duration", async () => {
     assert.equal(failed.level, "warn");
     assert.equal(failed.tool, "memwal_recall");
     assert.equal(typeof failed.durationMs, "number");
+    // The structured line has to name the failure, or an operator reading logs
+    // learns only that something failed and must go hunting for the reason.
+    assert.equal(failed.errMessage, "relayer unreachable");
+    assert.equal(failed.errName, "Error");
     // The existing error envelope is untouched.
     assert.equal(result.isError, true);
     assert.ok(result.content[0].text.includes("relayer unreachable"));

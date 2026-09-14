@@ -94,74 +94,109 @@ fn relayer_cors(origins: Vec<HeaderValue>) -> CorsLayer {
         ])
 }
 
-/// Where the managed sidecar dials this relayer, and which public origin — if
-/// any — it may name as the network a session is bound to.
+/// Where the managed sidecar dials this relayer, and which public origin it names.
 ///
-/// These are two different questions and they used to share one operator
-/// input. `memwal_health` can only name a network when the Rust parent
-/// forwards a public origin, and the only way to make it forward one was to
-/// set `MEMWAL_RELAYER_URL` — which is also the address the sidecar dials. A
-/// deployment that wanted the network named therefore pointed every MCP tool
-/// call at its own public hostname: each `memwal_health`, `memwal_recall` and
-/// `memwal_remember` then left the container, crossed the public edge, and
-/// came back to the process it started from.
+/// These are two different questions and they used to share one answer:
+/// `MEMWAL_RELAYER_URL` was both. That variable cannot simply be unset to break
+/// the tie — it is also the MCP OAuth issuer (`oauth.rs:161`, where a missing
+/// value makes `McpOAuthConfig::from_env` return `None` and every OAuth
+/// handshake refuse with `OauthNotConfigured`), so every deployment must keep
+/// it set. The consequence was that every deployment also dialled its own
+/// public hostname for every MCP tool call: each `memwal_health`,
+/// `memwal_recall` and `memwal_remember` left the container, crossed the public
+/// edge, and came back to the process it started from.
 ///
-/// `MEMWAL_PUBLIC_RELAYER_URL` is now an input of its own, so naming the
-/// network costs nothing. An operator-supplied `MEMWAL_RELAYER_URL` still
-/// doubles as the public origin when no explicit one is given, so existing
-/// deployments keep the behaviour they were configured for.
+/// So the dial address is the half that moves. It is now loopback unless an
+/// operator explicitly overrides it with `MEMWAL_SIDECAR_RELAYER_URL`, which
+/// almost nobody should: the managed sidecar is a child of this process and the
+/// relayer it needs is this one. `MEMWAL_RELAYER_URL` keeps its meaning as the
+/// deployment's public identity, so OAuth and `memwal_health` are untouched and
+/// no deployment has to change an environment variable to stop paying the round
+/// trip.
 #[derive(Debug, PartialEq, Eq)]
 struct SidecarRelayerUrls {
-    /// Address the sidecar dials for every MCP tool call.
+    /// Address the sidecar dials for every MCP tool call. Loopback unless
+    /// explicitly overridden.
     dial: String,
     /// Public origin `memwal_health` may report. Never the loopback default:
     /// an address that names no network is how a client bound to the wrong
     /// relayer reads as correctly configured.
     public: Option<String>,
-    /// Startup lines to log at `warn`. Non-empty when the dial address leaves
-    /// this host, which is a latency cost paid on every single tool call.
+    /// Startup lines to log at `warn`. Non-empty only when an operator has
+    /// explicitly pointed the dial off this host, which costs a public round
+    /// trip on every single tool call.
     warnings: Vec<String>,
 }
 
 /// True when `url`'s host is this machine, so dialling it stays in-process.
+///
+/// Handles the spellings this system actually produces: a bare `localhost`
+/// (with or without the trailing dot a resolver may hand back), dotted IPv4
+/// anywhere in `127.0.0.0/8`, `[::1]`, and the IPv4-mapped `[::ffff:127.0.0.1]`
+/// form that a dual-stack listener reports for an IPv4 peer.
 fn is_loopback_relayer_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
     match parsed.host() {
-        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Domain(host)) => {
+            let host = host.strip_suffix('.').unwrap_or(host);
+            host.eq_ignore_ascii_case("localhost")
+        }
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
         None => false,
     }
 }
 
+/// Strip any `user:password@` before a URL is logged. The dial address is
+/// echoed in startup warnings and in every per-call sidecar log line, and an
+/// operator is free to have put a credential in it.
+fn redact_url_userinfo(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut parsed) if !parsed.username().is_empty() || parsed.password().is_some() => {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.to_string()
+        }
+        _ => url.to_string(),
+    }
+}
+
 fn resolve_sidecar_relayer_urls(
-    dial_env: Option<String>,
+    dial_override_env: Option<String>,
     public_env: Option<String>,
+    relayer_url_env: Option<String>,
     port: u16,
 ) -> SidecarRelayerUrls {
-    let dial = dial_env
-        .clone()
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}", port));
+    // Loopback unless an operator explicitly asked for something else. This is
+    // the behaviour change: `MEMWAL_RELAYER_URL` no longer steers the dial.
+    let dial =
+        dial_override_env
+            .clone()
+            .unwrap_or_else(|| format!("http://127.0.0.1:{}", port));
 
-    // An explicit public origin wins. Falling back to `dial_env` keeps every
-    // deployment that set only `MEMWAL_RELAYER_URL` reporting what it reports
-    // today; the loopback default is never reported.
-    let public = public_env.or(dial_env);
+    // An explicit public origin wins; `MEMWAL_RELAYER_URL` remains the fallback
+    // so `memwal_health` names exactly what it names today on every deployment.
+    // The loopback default is never reported.
+    let public = public_env.or(relayer_url_env);
 
     let mut warnings = Vec::new();
     if !is_loopback_relayer_url(&dial) {
+        let shown = redact_url_userinfo(&dial);
         warnings.push(format!(
-            "⚠️  MEMWAL_RELAYER_URL={dial} is not loopback — the sidecar dials it for EVERY MCP tool call."
+            "⚠️  MEMWAL_SIDECAR_RELAYER_URL={shown} is not loopback — the sidecar dials it for EVERY MCP tool call."
         ));
         warnings.push(
             "⚠️  Each memwal_* call then leaves this container and returns through the public edge."
                 .to_string(),
         );
-        warnings.push(format!(
-            "⚠️  To name the network without paying that, unset MEMWAL_RELAYER_URL and set MEMWAL_PUBLIC_RELAYER_URL={dial} instead."
-        ));
+        warnings.push(
+            "⚠️  Unset it unless this sidecar genuinely serves a relayer in another process."
+                .to_string(),
+        );
     }
 
     SidecarRelayerUrls {
@@ -175,9 +210,24 @@ fn resolve_sidecar_relayer_urls(
 mod sidecar_relayer_url_tests {
     use super::*;
 
+    const PUBLIC: &str = "https://relayer.dev.memwal.ai";
+
     #[test]
-    fn unset_dials_loopback_and_names_no_network() {
-        let urls = resolve_sidecar_relayer_urls(None, None, 8000);
+    fn the_deployed_shape_now_dials_loopback_while_naming_the_same_network() {
+        // Every deployed environment sets MEMWAL_RELAYER_URL to its own public
+        // hostname and nothing else. Before this change that address was also
+        // the dial target, so every tool call took a public round trip.
+        let urls = resolve_sidecar_relayer_urls(None, None, Some(PUBLIC.to_string()), 3001);
+        assert_eq!(urls.dial, "http://127.0.0.1:3001");
+        // Unchanged: health still names exactly what it named before, and the
+        // OAuth issuer that reads the same variable is untouched.
+        assert_eq!(urls.public.as_deref(), Some(PUBLIC));
+        assert!(urls.warnings.is_empty());
+    }
+
+    #[test]
+    fn nothing_set_dials_loopback_and_names_no_network() {
+        let urls = resolve_sidecar_relayer_urls(None, None, None, 8000);
         assert_eq!(urls.dial, "http://127.0.0.1:8000");
         // Reporting loopback as the network is how a client bound to the wrong
         // relayer reads as correctly configured.
@@ -186,81 +236,76 @@ mod sidecar_relayer_url_tests {
     }
 
     #[test]
-    fn a_public_origin_alone_never_moves_the_dial_off_loopback() {
-        // The whole point of the split: naming the network must not redirect
-        // tool calls through the public edge.
+    fn an_explicit_public_origin_wins_over_the_relayer_url() {
         let urls = resolve_sidecar_relayer_urls(
             None,
-            Some("https://relayer.dev.memwal.ai".to_string()),
+            Some("https://memory.example".to_string()),
+            Some(PUBLIC.to_string()),
             8000,
         );
+        assert_eq!(urls.public.as_deref(), Some("https://memory.example"));
         assert_eq!(urls.dial, "http://127.0.0.1:8000");
-        assert_eq!(
-            urls.public.as_deref(),
-            Some("https://relayer.dev.memwal.ai")
-        );
-        assert!(urls.warnings.is_empty());
     }
 
     #[test]
-    fn a_dial_url_still_doubles_as_the_public_origin() {
-        // Back-compat: deployments that set only MEMWAL_RELAYER_URL keep
-        // reporting exactly what they report today.
+    fn only_the_dedicated_override_can_move_the_dial_off_this_host() {
         let urls = resolve_sidecar_relayer_urls(
-            Some("https://relayer.dev.memwal.ai".to_string()),
+            Some("https://relayer.elsewhere.test".to_string()),
             None,
+            Some(PUBLIC.to_string()),
             8000,
         );
-        assert_eq!(urls.dial, "https://relayer.dev.memwal.ai");
-        assert_eq!(
-            urls.public.as_deref(),
-            Some("https://relayer.dev.memwal.ai")
-        );
-    }
-
-    #[test]
-    fn dialling_a_public_origin_is_warned_about() {
-        let urls = resolve_sidecar_relayer_urls(
-            Some("https://relayer.dev.memwal.ai".to_string()),
-            None,
-            8000,
-        );
+        assert_eq!(urls.dial, "https://relayer.elsewhere.test");
+        // And it says so, because it costs a round trip per tool call.
         assert_eq!(urls.warnings.len(), 3);
         assert!(urls.warnings[0].contains("EVERY MCP tool call"));
         assert!(urls
             .warnings
             .iter()
-            .any(|w| w.contains("MEMWAL_PUBLIC_RELAYER_URL")));
+            .any(|w| w.contains("MEMWAL_SIDECAR_RELAYER_URL")));
     }
 
     #[test]
-    fn an_explicit_public_origin_wins_over_the_dial_url() {
+    fn an_explicit_loopback_override_is_not_warned_about() {
+        let urls =
+            resolve_sidecar_relayer_urls(Some("http://localhost:9000".to_string()), None, None, 8000);
+        assert_eq!(urls.dial, "http://localhost:9000");
+        assert!(urls.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_credential_in_the_dial_url_is_never_logged() {
         let urls = resolve_sidecar_relayer_urls(
-            Some("http://127.0.0.1:8000".to_string()),
-            Some("https://relayer.dev.memwal.ai".to_string()),
+            Some("https://ops:hunter2@relayer.elsewhere.test".to_string()),
+            None,
+            None,
             8000,
         );
-        assert_eq!(urls.dial, "http://127.0.0.1:8000");
-        assert_eq!(
-            urls.public.as_deref(),
-            Some("https://relayer.dev.memwal.ai")
-        );
-        assert!(urls.warnings.is_empty());
+        // The sidecar still dials the real thing...
+        assert!(urls.dial.contains("hunter2"));
+        // ...but nothing that reaches a log carries the secret.
+        for line in &urls.warnings {
+            assert!(!line.contains("hunter2"), "warning leaked userinfo: {line}");
+        }
     }
 
     #[test]
     fn every_loopback_spelling_is_recognised_as_in_process() {
         for url in [
             "http://127.0.0.1:8000",
+            "http://127.0.0.2:8000",
             "http://localhost:3001",
             "http://LOCALHOST:3001",
+            "http://localhost.:3001",
             "http://[::1]:8000",
+            "http://[::ffff:127.0.0.1]:8000",
         ] {
             assert!(is_loopback_relayer_url(url), "{url} should be loopback");
         }
         for url in [
             "https://relayer.dev.memwal.ai",
             "http://relayer.railway.internal:8000",
+            "http://100.64.0.1:8000",
             "not a url",
         ] {
             assert!(!is_loopback_relayer_url(url), "{url} should not be loopback");
@@ -880,20 +925,24 @@ async fn main() {
     let scripts_dir = std::env::var("SIDECAR_SCRIPTS_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"));
-    // Two different things, now separable. `MEMWAL_RELAYER_URL` is the address
-    // the sidecar DIALS; `MEMWAL_PUBLIC_RELAYER_URL` is the origin
-    // `memwal_health` may NAME. They used to be one input, so the only way to
-    // get the network named was to point the dial at the public edge — which
-    // sends every MCP tool call out of the container and back in.
+    // `MEMWAL_RELAYER_URL` is this deployment's public identity — the OAuth
+    // issuer and the network `memwal_health` names — and stays that. What the
+    // sidecar DIALS is now loopback unless `MEMWAL_SIDECAR_RELAYER_URL` says
+    // otherwise, so no deployment pays a public round trip per tool call and
+    // none has to change an env var to stop.
     let relayer_urls = resolve_sidecar_relayer_urls(
-        std::env::var("MEMWAL_RELAYER_URL").ok(),
+        std::env::var("MEMWAL_SIDECAR_RELAYER_URL").ok(),
         std::env::var("MEMWAL_PUBLIC_RELAYER_URL").ok(),
+        std::env::var("MEMWAL_RELAYER_URL").ok(),
         config.port,
     );
     for line in &relayer_urls.warnings {
         tracing::warn!("{}", line);
     }
-    tracing::info!("  sidecar: dialling relayer at {}", relayer_urls.dial);
+    tracing::info!(
+        "  sidecar: dialling relayer at {}",
+        redact_url_userinfo(&relayer_urls.dial)
+    );
     let mut sidecar_command = tokio::process::Command::new("npx");
     sidecar_command
         .args(["tsx", "sidecar-server.ts"])
