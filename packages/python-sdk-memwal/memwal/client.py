@@ -905,9 +905,15 @@ class MemWal:
 
         * ``restored`` — blobs that completed the full
           download → decrypt → embed → DB insert pipeline this call.
-        * ``skipped`` — on-chain blobs already present in the local index
-          (no work needed). Decrypt / embed failures are dropped silently and
-          do **not** count as either restored or skipped.
+        * ``skipped`` — on-chain blobs already present in the local success
+          index (no work needed). Does not include permanent decrypt/UTF-8
+          failures.
+        * ``failed`` — permanent decrypt/UTF-8 failures on this on-chain page:
+          negative-cache hits plus any new permanent failures this call.
+          Transient download/decrypt/embed errors are not counted here; when
+          a page yields only those, ``truncated`` is true so the caller
+          retries. Defaults to ``0`` when talking to a relayer older than
+          COMG-719 that omits the field.
         * ``total`` — count of on-chain blobs the relayer saw for
           ``(owner, namespace)`` before the limit was applied.
         * ``truncated`` — True when this restore is known-incomplete (limit
@@ -952,6 +958,8 @@ class MemWal:
             # treat "not present" as "not known to be truncated" rather
             # than require every relayer version to send it.
             truncated=data.get("truncated", False),
+            # Relayers older than COMG-719 omit `failed`; default to 0.
+            failed=data.get("failed", 0),
         )
 
     async def health(self) -> HealthResult:

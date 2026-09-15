@@ -1,43 +1,22 @@
 import { NextResponse } from "next/server";
 import { signIn } from "@/app/(auth)/auth";
+import { isSafeRedirectUrl, publicRequestUrl } from "@/lib/public-request-url";
 import { getSessionToken } from "@/lib/session-token";
-
-/**
- * Validate a redirect target before forwarding to auth.
- * Allows only:
- *   - Relative paths beginning with "/" (but not "//", which is protocol-relative)
- *   - Absolute URLs whose origin matches the request origin (same-origin)
- * Anything else (external hosts, javascript:, data:, //evil.com) falls back to "/".
- */
-function isSafeRedirectUrl(redirectUrl: string, requestUrl: string): boolean {
-  // Relative path — safe as long as it isn't protocol-relative ("//host/...")
-  if (redirectUrl.startsWith("/") && !redirectUrl.startsWith("//")) {
-    return true;
-  }
-  // Absolute URL — must share the same origin as the request
-  try {
-    const redirectOrigin = new URL(redirectUrl).origin;
-    const requestOrigin = new URL(requestUrl).origin;
-    return redirectOrigin === requestOrigin;
-  } catch {
-    // Unparseable URL (e.g. "javascript:alert(1)") — reject
-    return false;
-  }
-}
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const rawRedirectUrl = searchParams.get("redirectUrl") || "/";
+  const publicUrl = publicRequestUrl(request);
 
-  // Reject cross-origin or protocol-relative redirect targets
-  const redirectUrl = isSafeRedirectUrl(rawRedirectUrl, request.url)
+  // Reject cross-origin, bind-address, or protocol-relative redirect targets
+  const redirectUrl = isSafeRedirectUrl(rawRedirectUrl, request)
     ? rawRedirectUrl
     : "/";
 
   const token = await getSessionToken(request);
 
   if (token) {
-    return NextResponse.redirect(new URL("/", request.url));
+    return NextResponse.redirect(new URL("/", publicUrl));
   }
 
   return signIn("guest", { redirect: true, redirectTo: redirectUrl });

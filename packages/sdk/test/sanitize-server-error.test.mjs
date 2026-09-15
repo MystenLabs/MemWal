@@ -3,30 +3,31 @@ import test from "node:test";
 
 import { sanitizeServerError } from "../dist/utils.js";
 
-const LOGIN =
-    "Walrus Memory isn't signed in. Call the memwal_login tool, then retry.";
+const AUTH_REJECTED =
+    "401 from relayer: typically wrong private key, key not registered on this account, " +
+    "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+    "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors";
 
-test("empty-body 401 points at memwal_login instead of <no message>", () => {
+test("empty-body 401 uses AUTH_REJECTED troubleshooting instead of memwal_login", () => {
     const { message, serverCode } = sanitizeServerError(401, "");
     assert.equal(serverCode, "AUTH_REJECTED");
-    assert.equal(message, LOGIN);
+    assert.equal(message, AUTH_REJECTED);
     assert.doesNotMatch(message, /<no message>/);
+    assert.doesNotMatch(message, /memwal_login/);
 });
 
-test("string status \"401\" with an empty body uses the login hint", () => {
+test("string status \"401\" with an empty body uses AUTH_REJECTED troubleshooting", () => {
     const { message, serverCode } = sanitizeServerError("401", "   ");
     assert.equal(serverCode, "AUTH_REJECTED");
-    assert.equal(message, LOGIN);
+    assert.equal(message, AUTH_REJECTED);
     assert.doesNotMatch(message, /<no message>/);
+    assert.doesNotMatch(message, /memwal_login/);
 });
 
 test("non-empty 401 keeps the AUTH_REJECTED troubleshooting URL", () => {
     const { message, serverCode } = sanitizeServerError(401, "auth rejected");
     assert.equal(serverCode, "AUTH_REJECTED");
-    assert.match(
-        message,
-        /docs\.wal\.app\/walrus-memory\/troubleshooting\/overview/,
-    );
+    assert.equal(message, AUTH_REJECTED);
     assert.doesNotMatch(message, /memwal_login/);
 });
 

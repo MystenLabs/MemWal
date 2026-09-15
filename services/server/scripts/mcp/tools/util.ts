@@ -46,6 +46,57 @@ export function explorerFooter(): string {
     return `Explorer: ${walruscanBlobUrl("<blob_id>")} for any blob_id above.`;
 }
 
+const DEFAULT_SLOW_TOOL_WARN_MS = 5000;
+
+/**
+ * Above this, a tool call is reported at `warn` rather than `info`.
+ * Tuned to sit above a healthy `memwal_health` (single unsigned GET to the
+ * relayer, tens of milliseconds) and below a healthy `memwal_remember`
+ * (embed + SEAL + Walrus), so the threshold catches a slow hop to the
+ * relayer without crying about work that is slow by nature.
+ *
+ * Read once, because it cannot change mid-process — but validated, because a
+ * typo'd value must not silently disable the only signal this file adds.
+ * `Number.parseInt` alone accepts "5s" as 5 and yields NaN for "" or "abc",
+ * and every NaN comparison is false, so an unvalidated parse turns the warning
+ * off without saying anything.
+ */
+const SLOW_TOOL_WARN_MS = (() => {
+    const raw = process.env.MCP_TOOL_SLOW_WARN_MS;
+    if (raw === undefined || raw.trim() === "") return DEFAULT_SLOW_TOOL_WARN_MS;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        log.warn("tool.slow_threshold_invalid", {
+            value: raw,
+            usingMs: DEFAULT_SLOW_TOOL_WARN_MS,
+        });
+        return DEFAULT_SLOW_TOOL_WARN_MS;
+    }
+    return parsed;
+})();
+
+/**
+ * Strip any `user:password@` before a URL reaches a log line.
+ *
+ * The dial address is echoed on every `tool.done` / `tool.slow` / `tool.failed`
+ * line, and an operator is free to have put a credential in
+ * `MEMWAL_SIDECAR_RELAYER_URL`. Mirrors `redact_url_userinfo` in main.rs, which
+ * only covers the Rust-side startup lines. An unparseable value is dropped
+ * rather than echoed: it cannot be redacted, so it cannot be shown.
+ */
+export function redactUrlUserinfo(url: string | undefined | null): string | null {
+    if (!url) return null;
+    try {
+        const parsed = new URL(url);
+        if (!parsed.username && !parsed.password) return url;
+        parsed.username = "";
+        parsed.password = "";
+        return parsed.toString();
+    } catch {
+        return null;
+    }
+}
+
 export function wrapTool<Args>(
     session: MemWalSession,
     tool: string,
@@ -58,9 +109,68 @@ export function wrapTool<Args>(
             clientName: session.clientName ?? null,
             accountId: session.accountId ?? null,
         });
+        // How long the call takes is the only number that shows a slow hop to
+        // the relayer. Per-request latency on the relayer side cannot: it
+        // measures the request once it lands, so a minute spent reaching it
+        // reads as a healthy few milliseconds there and as silence here.
+        const startedAt = Date.now();
+        const durationMs = () => Date.now() - startedAt;
+        const outcomeFields = () => ({
+            tool,
+            durationMs: durationMs(),
+            relayerUrl: redactUrlUserinfo(session.relayerUrl),
+            agentClient: session.agentClient ?? null,
+            accountId: session.accountId ?? null,
+        });
+
+        // Fire WHILE the call is still running, not when it settles. A hang is
+        // precisely the case that never settles: the incident this timing was
+        // written for left a tool call outstanding for 61s and the process
+        // emitted nothing until it finally returned. A settle-only log would
+        // have stayed silent for the whole minute an operator was looking.
+        // `unref` so a pending timer can never hold the sidecar open.
+        // Set by the timer itself. `Timeout.hasRef()` cannot stand in for it:
+        // that reports false from the moment `unref()` is called, while the
+        // timer is still pending, so reading it would mark every settled call
+        // as already-warned.
+        let warnedInFlight = false;
+        const watchdog = setTimeout(() => {
+            warnedInFlight = true;
+            log.warn("tool.slow", {
+                ...outcomeFields(),
+                thresholdMs: SLOW_TOOL_WARN_MS,
+                settled: false,
+            });
+        }, SLOW_TOOL_WARN_MS);
+        watchdog.unref?.();
+        const stopWatchdog = () => clearTimeout(watchdog);
+
         try {
-            return await handler(args);
+            const result = await handler(args);
+            stopWatchdog();
+            const elapsed = durationMs();
+            if (elapsed >= SLOW_TOOL_WARN_MS) {
+                log.warn("tool.slow", {
+                    ...outcomeFields(),
+                    thresholdMs: SLOW_TOOL_WARN_MS,
+                    settled: true,
+                    alreadyWarned: warnedInFlight,
+                });
+            } else {
+                log.info("tool.done", outcomeFields());
+            }
+            return result;
         } catch (err: any) {
+            stopWatchdog();
+            // Name the failure in the structured line too. Without this the log
+            // says a call failed and the operator still has to go find the
+            // separate console.error below to learn how.
+            log.warn("tool.failed", {
+                ...outcomeFields(),
+                errName: err?.constructor?.name ?? "Error",
+                errMessage: err?.message ?? String(err),
+                causeCode: err?.cause?.code ?? null,
+            });
             const name = err?.constructor?.name ?? "Error";
             const msg = err?.message ?? String(err);
             const cause = err?.cause;

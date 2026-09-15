@@ -10,15 +10,15 @@
  * documentation patterns transfer cleanly.
  */
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { join, dirname, basename } from "node:path";
 import {
     mkdirSync,
     readFileSync,
     writeFileSync,
-    chmodSync,
+    renameSync,
     unlinkSync,
     existsSync,
-    copyFileSync,
 } from "node:fs";
 
 export interface MemWalCredentials {
@@ -142,16 +142,133 @@ export function loadCreds(): MemWalCredentials | null {
 export function saveCreds(creds: MemWalCredentials): SaveCredsResult {
     const path = credsPath();
     const replaced = backupIfReplacingAnotherAccount(path, creds.accountId);
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(path, JSON.stringify(creds, null, 2), { encoding: "utf8", mode: 0o600 });
-    // writeFileSync's `mode` argument is only honored on file creation; ensure
-    // the permission on an existing file matches.
-    try {
-        chmodSync(path, 0o600);
-    } catch {
-        /* Windows etc. — best effort */
-    }
+    writeSecretFile(path, JSON.stringify(creds, null, 2));
     return { path, ...replaced };
+}
+
+/**
+ * Write a file whose bytes are only ever reachable through an inode this call
+ * created at `0600`.
+ *
+ * The obvious version — write to the final path, then `chmod` it — does not
+ * hold that property. `writeFileSync`'s `mode` follows POSIX `open()`: the
+ * kernel applies it when it creates the inode and ignores it for one that
+ * already exists. So a credentials file that anything outside this code left
+ * world-readable (a manual `chmod`, a restored backup, another tool) would
+ * receive the plaintext delegate key under the *old* mode, with a second,
+ * separate syscall to tighten it afterwards. Anyone reading the path in
+ * between gets the key.
+ *
+ * Writing a fresh file and renaming removes that window instead of shortening
+ * it. `rename(2)` repoints the name atomically, so a reader sees either the
+ * whole old file or the whole new one, never a permissive inode holding a new
+ * secret. `wx` (`O_EXCL`) makes a temp path that already exists — an
+ * interrupted earlier run, or a file planted by someone else — a hard failure
+ * rather than a write through a file this code did not create.
+ */
+function writeSecretFile(path: string, contents: string): void {
+    const dir = dirname(path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Named off the target and randomised, so concurrent saves cannot collide
+    // on it and no one can guess it ahead of time. Dot-prefixed to keep a
+    // crashed run's leftovers out of the way of directory listings.
+    const tmp = join(dir, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+    try {
+        writeFileSync(tmp, contents, { encoding: "utf8", mode: 0o600, flag: "wx" });
+        replaceWithTemp(tmp, path, contents);
+    } catch (err) {
+        // Never leave a temp file holding the secret behind on a failed write.
+        try {
+            unlinkSync(tmp);
+        } catch {
+            /* already gone, or never created */
+        }
+        throw err;
+    }
+}
+
+/** Windows errors for "someone else holds the destination open". */
+const WIN32_LOCKED_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+const WIN32_RENAME_ATTEMPTS = 5;
+const WIN32_RENAME_BACKOFF_MS = 20;
+
+/** Block the calling thread. `saveCreds` is synchronous all the way up. */
+function sleepSync(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Move `tmp` onto `path`, atomically where the platform can.
+ *
+ * POSIX `rename(2)` replaces a destination regardless of who has it open, so
+ * there is nothing to handle there and any error is a real one. Windows
+ * implements the same call as `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`, which
+ * refuses with EPERM / EACCES / EBUSY while another handle holds the
+ * destination — an antivirus scan or a backup agent touching
+ * `credentials.json` is enough. Before this file wrote through a temp inode,
+ * `writeFileSync` to the final path survived that; `login.ts` turns a thrown
+ * `saveCreds` into an HTTP 500, so a lock that lasts a few milliseconds would
+ * otherwise become a failed sign-in.
+ *
+ * So on Windows: retry briefly, then write in place rather than fail. That
+ * fallback gives up the atomic swap, but not the property this function exists
+ * for — Windows does not enforce POSIX mode bits at all, so `0600` was never
+ * doing the work there; NTFS ACLs are, and they are inherited from the
+ * directory either way. On POSIX, where the mode IS the protection, there is no
+ * fallback and no retry.
+ *
+ * `deps` is a seam for tests. CI has no Windows runner, and the fallback is the
+ * one branch here that can leave a second plaintext copy of the delegate key on
+ * disk, so it must be exercisable off Windows.
+ */
+export function replaceWithTemp(
+    tmp: string,
+    path: string,
+    contents: string,
+    deps: {
+        platform?: string;
+        rename?: (from: string, to: string) => void;
+        sleep?: (ms: number) => void;
+    } = {},
+): void {
+    const platform = deps.platform ?? process.platform;
+    const rename = deps.rename ?? renameSync;
+    const sleep = deps.sleep ?? sleepSync;
+
+    if (platform !== "win32") {
+        rename(tmp, path);
+        return;
+    }
+    for (let attempt = 1; ; attempt++) {
+        try {
+            rename(tmp, path);
+            return;
+        } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code ?? "";
+            if (!WIN32_LOCKED_CODES.has(code)) throw err;
+            if (attempt < WIN32_RENAME_ATTEMPTS) {
+                sleep(WIN32_RENAME_BACKOFF_MS * attempt);
+                continue;
+            }
+            // Still locked. Write through the existing handle's inode rather
+            // than failing the sign-in.
+            writeFileSync(path, contents, { encoding: "utf8", mode: 0o600 });
+            // This returns SUCCESSFULLY, so `writeSecretFile`'s catch never
+            // runs and nothing else will remove `tmp` — which still holds the
+            // plaintext delegate key. Every locked save would otherwise leave
+            // another copy of it beside the credentials file, which is the
+            // opposite of what this whole helper is for.
+            //
+            // Best-effort: a temp that cannot be unlinked must not fail a save
+            // that has already landed.
+            try {
+                unlinkSync(tmp);
+            } catch {
+                /* nothing more to do; the destination write already succeeded */
+            }
+            return;
+        }
+    }
 }
 
 /** What `saveCreds` did, so the caller can tell the user precisely — naming
@@ -223,8 +340,10 @@ function backupIfReplacingAnotherAccount(
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backup = join(dirname(path), `credentials.backup-${stamp}.json`);
     try {
-        copyFileSync(path, backup);
-        chmodSync(backup, 0o600);
+        // Through the same writer as the credentials file itself: the backup is
+        // a second copy of the same plaintext delegate key, and `copyFileSync`
+        // would create it under the process umask before any tightening.
+        writeSecretFile(backup, readFileSync(path, "utf8"));
         return { replacedAccountId: current.accountId, backedUpTo: backup };
     } catch {
         // Never block sign-in on a failed backup — but still report the

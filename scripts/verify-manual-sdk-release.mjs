@@ -5,13 +5,13 @@ import { readFileSync } from "node:fs";
 const releases = [
     {
         name: "TypeScript SDK",
-        version: "0.1.6",
+        version: "0.1.7",
         manifests: [["packages/sdk/package.json", "version"]],
         changelogs: ["packages/sdk/CHANGELOG.md", "docs/sdk/changelog.mdx"],
     },
     {
         name: "Python SDK",
-        version: "0.1.9",
+        version: "0.1.10",
         manifests: [
             ["packages/python-sdk-memwal/pyproject.toml", "toml-version"],
             ["packages/python-sdk-memwal/memwal/__init__.py", "python-version"],
@@ -23,7 +23,7 @@ const releases = [
     },
     {
         name: "MCP package",
-        version: "0.0.12",
+        version: "0.0.13",
         manifests: [
             ["packages/mcp/package.json", "version"],
             [".claude-plugin/marketplace.json", "plugin-version"],
@@ -62,6 +62,38 @@ for (const release of releases) {
     }
     console.log(`${release.name} ${release.version}: manifests and changelogs synchronized`);
 }
+
+const mcpVersion = JSON.parse(readFileSync("packages/mcp/package.json", "utf8")).version;
+const expectedPluginArgs = ["-y", `@mysten-incubation/memwal-mcp@${mcpVersion}`];
+for (const pluginPath of [
+    "packages/mcp/plugin/.mcp.json",
+    "packages/mcp/plugin/.cursor-mcp.json",
+    "packages/mcp/plugin/.codex-mcp.json",
+]) {
+    const actual = JSON.parse(readFileSync(pluginPath, "utf8")).mcpServers.memwal.args;
+    if (JSON.stringify(actual) !== JSON.stringify(expectedPluginArgs)) {
+        throw new Error(
+            `${pluginPath}: expected ${JSON.stringify(expectedPluginArgs)}, received ${JSON.stringify(actual)}`,
+        );
+    }
+}
+const installerPath = "packages/mcp/plugin/scripts/install_codex_hooks.mjs";
+const installer = readFileSync(installerPath, "utf8");
+const expectedPin = expectedPluginArgs[1];
+if (installer.includes('["-y", "@mysten-incubation/memwal-mcp"]')) {
+    throw new Error(
+        `${installerPath}: expected ${JSON.stringify(expectedPluginArgs)}, received ${JSON.stringify(["-y", "@mysten-incubation/memwal-mcp"])}`,
+    );
+}
+if (
+    !installer.includes(expectedPin) &&
+    !installer.includes("@mysten-incubation/memwal-mcp@${")
+) {
+    throw new Error(
+        `${installerPath}: expected ${JSON.stringify(expectedPluginArgs)}, received missing version pin`,
+    );
+}
+console.log(`MCP package ${mcpVersion}: plugin npx args pin ${expectedPin}`);
 
 function readVersion(content, kind) {
     if (kind === "version") return JSON.parse(content).version;

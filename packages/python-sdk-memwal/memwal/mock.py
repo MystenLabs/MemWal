@@ -341,6 +341,7 @@ class MemWalMock:
             namespace=namespace,
             owner=self._owner,
             truncated=False,
+            failed=0,
         )
 
     async def health(self) -> HealthResult:

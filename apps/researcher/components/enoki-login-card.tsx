@@ -7,15 +7,20 @@ import {
   useCurrentAccount,
   useSignPersonalMessage,
   useSignTransaction,
-  useSuiClient,
 } from "@mysten/dapp-kit";
 import { isEnokiWallet } from "@mysten/enoki";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Transaction } from "@mysten/sui/transactions";
 import { createSponsorAuthorization } from "@mysten-incubation/memwal";
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { enokiConfig } from "@/lib/enoki/config";
+import { getSuiGrpcClient } from "@/lib/sui/grpc-client";
+import {
+  fetchAccountIdForOwner,
+  findCreatedObjectByType,
+} from "@/lib/sui/account-lookup";
 
 type Step =
   | "idle"
@@ -57,14 +62,14 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
 async function sponsoredSignAndExecute(
   transaction: Transaction,
   sender: string,
-  suiClient: ReturnType<typeof useSuiClient>,
+  suiClient: SuiGrpcClient,
   signTransaction: (args: {
-    transaction: Transaction;
+    transaction: Transaction | string;
   }) => Promise<{ signature: string }>,
   signPersonalMessage: (message: Uint8Array) => Promise<{ signature: string }>,
 ): Promise<{ digest: string }> {
   const kindBytes = await transaction.build({
-    client: suiClient as any,
+    client: suiClient,
     onlyTransactionKind: true,
   });
   const authorization = await createSponsorAuthorization(
@@ -93,7 +98,16 @@ async function sponsoredSignAndExecute(
 
   const sponsored = await sponsorRes.json();
   const sponsoredTx = Transaction.from(sponsored.bytes);
-  const { signature } = await signTransaction({ transaction: sponsoredTx });
+  // dapp-kit's useSignTransaction resolves move-call ABIs via the ambient
+  // client from SuiClientProvider, which is JSON-RPC (deprecated, no longer
+  // CORS-enabled for browser origins) — that resolution is what fails as
+  // `getNormalizedMoveFunction: Failed to fetch`. Pre-serializing with our
+  // gRPC client and handing off the resulting string short-circuits it:
+  // dapp-kit passes a string through as-is.
+  const sponsoredTxJson = await sponsoredTx.toJSON({ client: suiClient });
+  const { signature } = await signTransaction({
+    transaction: sponsoredTxJson,
+  });
 
   const execRes = await fetch(
     `${enokiConfig.memwalServerUrl}/sponsor/execute`,
@@ -127,7 +141,7 @@ export function EnokiLoginCard() {
   const wallets = useWallets();
   const { mutateAsync: connect } = useConnectWallet();
   const currentAccount = useCurrentAccount();
-  const suiClient = useSuiClient();
+  const suiClient = getSuiGrpcClient();
   const { mutateAsync: signTransaction } = useSignTransaction();
   const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
 
@@ -222,37 +236,18 @@ export function EnokiLoginCard() {
 
         // Check if a Walrus Memory account already exists for this address
         try {
-          const registryObj = await suiClient.getObject({
-            id: enokiConfig.memwalRegistryId,
-            options: { showContent: true },
-          });
-          if (
-            registryObj?.data?.content &&
-            "fields" in registryObj.data.content
-          ) {
-            const fields = registryObj.data.content.fields as any;
-            const tableId = fields?.accounts?.fields?.id?.id;
-            if (tableId) {
-              const dynField = await suiClient.getDynamicFieldObject({
-                parentId: tableId,
-                name: { type: "address", value: address },
-              });
-              if (
-                dynField?.data?.content &&
-                "fields" in dynField.data.content
-              ) {
-                knownAccountId = (dynField.data.content.fields as any)
-                  .value as string;
-              }
-            }
-          }
+          knownAccountId = await fetchAccountIdForOwner(
+            suiClient,
+            enokiConfig.memwalRegistryId,
+            address,
+          );
         } catch {
           // Dynamic field not found → no account yet
         }
 
         const pubKeyBytes = Array.from(publicKeyRaw);
 
-        const sign = (args: { transaction: Transaction }) =>
+        const sign = (args: { transaction: Transaction | string }) =>
           signTransaction(args);
 
         if (knownAccountId) {
@@ -298,19 +293,11 @@ export function EnokiLoginCard() {
           });
 
           // Find the created account object
-          const txDetails = await suiClient.getTransactionBlock({
-            digest: createResult.digest,
-            options: { showObjectChanges: true },
-          });
-          const createdObj = txDetails.objectChanges?.find(
-            (c) =>
-              c.type === "created" &&
-              "objectType" in c &&
-              c.objectType.includes("MemWalAccount"),
+          knownAccountId = await findCreatedObjectByType(
+            suiClient,
+            createResult.digest,
+            "MemWalAccount",
           );
-          if (createdObj && "objectId" in createdObj) {
-            knownAccountId = createdObj.objectId;
-          }
 
           if (!knownAccountId) {
             throw new Error(

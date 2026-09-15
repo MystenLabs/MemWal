@@ -184,7 +184,7 @@ function makeCreds(relayerUrl) {
     };
 }
 
-test("a call whose reply never arrives is closed out with a retryable error", async (t) => {
+test("a sent write whose reply never arrives is closed out without inviting a duplicate", async (t) => {
     const mock = await startMockRelayer();
     const home = mkdtempSync(join(tmpdir(), "memwal-orphan-test-"));
     const credsPath = join(home, ".memwal", "credentials.json");
@@ -272,13 +272,33 @@ test("a call whose reply never arrives is closed out with a retryable error", as
     // Before the fix this never resolved.
     const orphaned = await waitFor((m) => m.id === 2, 10_000);
     assert.equal(orphaned.result?.isError, true, "expected a tool-result error envelope");
+    const orphanedText = JSON.stringify(orphaned.result);
+
+    // `memwal_remember` is a write, and this one WAS sent — the relayer
+    // accepted it and answered 202 before finishing in a durable queue, so the
+    // lost reply says nothing about whether it landed. The message must not
+    // invite a blind repeat: `/api/remember/bulk` carries no idempotency key,
+    // so repeating a batch that already landed buys a second paid blob.
     assert.match(
-        JSON.stringify(orphaned.result),
-        /retry/i,
-        "the message should tell the caller it is safe to retry",
+        orphanedText,
+        /may have completed|does not cancel it/i,
+        "a sent write must say it may already have landed",
+    );
+    assert.match(
+        orphanedText,
+        /memwal_recall/,
+        "a sent write must point at recall as the way to check before re-saving",
+    );
+    // Careful with the negative: the message deliberately says it "does not
+    // mean nothing was stored", which is the opposite of claiming it. What must
+    // never appear is the instruction to repeat the call.
+    assert.doesNotMatch(
+        orphanedText,
+        /please retry/i,
+        "a sent write must not invite a blind retry",
     );
     assert.doesNotMatch(
-        JSON.stringify(orphaned.result),
+        orphanedText,
         /relayer unavailable/i,
         "the relayer was healthy — saying otherwise sends debugging the wrong way",
     );

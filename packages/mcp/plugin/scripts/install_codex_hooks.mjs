@@ -32,6 +32,10 @@ import { fileURLToPath } from "node:url";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(SCRIPT_DIR);
 
+function resolveMcpVersion() {
+    return JSON.parse(readFileSync(join(PLUGIN_ROOT, "plugin.json"), "utf8")).version;
+}
+
 const CODEX_DIR = join(homedir(), ".codex");
 const HOOKS_FILE = join(CODEX_DIR, "hooks.json");
 const CONFIG_FILE = join(CODEX_DIR, "config.toml");
@@ -98,10 +102,11 @@ function ensureMcpRegistered() {
     mkdirSync(CODEX_DIR, { recursive: true });
     let content = existsSync(CONFIG_FILE) ? readFileSync(CONFIG_FILE, "utf8") : "";
     if (content.includes("[mcp_servers.memwal]")) return false;
+    const spec = `@mysten-incubation/memwal-mcp@${resolveMcpVersion()}`;
     const block =
         "\n[mcp_servers.memwal]\n" +
         'command = "npx"\n' +
-        'args = ["-y", "@mysten-incubation/memwal-mcp"]\n';
+        `args = ["-y", "${spec}"]\n`;
     writeFileSync(CONFIG_FILE, (content.trimEnd() + "\n" + block).trimStart());
     return true;
 }

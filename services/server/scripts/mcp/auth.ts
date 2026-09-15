@@ -24,6 +24,16 @@ export interface MemWalSession {
     delegatePubKeyHex: string;
     namespace?: string;
     memwal: MemWal;
+    /** Relayer base URL the SDK dials. Loopback unless the deployment
+     *  overrides it, so it is NOT a network identity — see
+     *  `publicRelayerUrl`. MemWal keeps its own copy private, so we carry
+     *  one alongside. */
+    relayerUrl: string;
+    /** The relayer's public origin, when the deployment states one.
+     *  `memwal_health` reports it so a client pointed at the wrong network
+     *  sees that, rather than discovering it via missing memories. Unset
+     *  when the sidecar only knows the loopback address it dials. */
+    publicRelayerUrl?: string;
     authMethod: "delegate-key";
     oauthScope?: string;
     /** Stable coding-agent id (`claude-code`, `codex`, `other`, …). */
@@ -106,7 +116,8 @@ function bytesToHex(b: Uint8Array): string {
  */
 export async function resolveAuth(
     headers: Headers,
-    serverUrl: string
+    serverUrl: string,
+    publicRelayerUrl?: string
 ): Promise<AuthResolution> {
     // Runs before anything else reads the request: `x-memwal-internal-*`
     // headers carry decisions the relayer already made, so a caller that
@@ -156,6 +167,8 @@ export async function resolveAuth(
         delegatePubKeyHex,
         namespace,
         memwal,
+        relayerUrl: serverUrl,
+        publicRelayerUrl,
         authMethod: "delegate-key",
         oauthScope,
     };

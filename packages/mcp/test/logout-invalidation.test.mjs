@@ -473,11 +473,43 @@ test("signing back in after logout restores memory tools without a client restar
         params: { name: "memwal_login", arguments: {} },
     });
     const login = await waitFor((m) => m.id === 5, 10_000);
-    const connectUrl = login.result?.content?.[0]?.text?.match(/\*\*URL:\*\* (http[^\n]+)/)?.[1];
+    const prompt = login.result?.content?.[0]?.text ?? "";
+    const connectUrl = prompt.match(/\*\*URL:\*\* (http[^\n]+)/)?.[1];
     assert.ok(connectUrl, "memwal_login should return the browser URL");
+
+    // The bridge used to hardcode `signedIn: true` on the assumption that it
+    // only ever runs with credentials. Logout deletes them, and login is
+    // intercepted before the signed-out guard, so the prompt claimed the user
+    // was still signed in and that a stored key would be replaced — which
+    // reads as though the logout they just performed did not take.
+    assert.doesNotMatch(
+        prompt,
+        /already signed in/i,
+        "the credentials were just deleted; this prompt must not claim otherwise",
+    );
+    assert.doesNotMatch(
+        prompt,
+        /replaces the stored delegate key/i,
+        "there is no stored key left to replace after logout",
+    );
 
     await completeLogin(connectUrl, ACCOUNT_B);
     await waitUntil(() => mock.getHandshakes().some((h) => h.accountId === ACCOUNT_B));
+
+    // Signing back in is a completed sign-in like any other, so it is announced
+    // on both surfaces. Without this the notification could be dropped from the
+    // re-login path and every assertion below would still pass.
+    const announced = await waitFor(
+        (m) =>
+            m.method === "notifications/message" &&
+            String(m.params?.data).includes("sign-in complete"),
+        10_000,
+    );
+    // Shortened for readability by `shortId`, so match the head, not the whole id.
+    assert.ok(
+        String(announced.params.data).includes(ACCOUNT_B.slice(0, 10)),
+        `should name the new account, got: ${announced.params.data}`,
+    );
 
     // The real assertion: a memory tool works again, end to end, on the new
     // session. Without a resumable pump this reply never reaches stdout and the
@@ -492,6 +524,26 @@ test("signing back in after logout restores memory tools without a client restar
     assert.notEqual(after.result?.isError, true, "memory tools should work again after re-login");
     assert.match(JSON.stringify(after.result), /RECALL_OK/);
     assert.equal(mock.getRecallCount(), 2, "the post-login recall should reach the relayer");
+
+    // Prefixed onto the real result rather than replacing it. This assertion is
+    // what would catch `adoptCredentials` dropping its banner queue: RECALL_OK
+    // above passes with or without the confirmation.
+    const afterText = after.result?.content?.[0]?.text ?? "";
+    assert.match(afterText, /Signed in to Walrus Memory/, "the re-login should be confirmed");
+    assert.match(afterText, /RECALL_OK/);
+
+    send({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: { name: "memwal_recall", arguments: { query: "one banner only" } },
+    });
+    const second = await waitFor((m) => m.id === 7, 10_000);
+    assert.doesNotMatch(
+        second.result?.content?.[0]?.text ?? "",
+        /Signed in to Walrus Memory/,
+        "the banner is a one-shot — it must not repeat on later calls",
+    );
 });
 
 /**

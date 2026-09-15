@@ -56,7 +56,16 @@ export function createSidecarApp(mode: "full" | "writer" = SIDECAR_ROUTE_MODE): 
     // enough to claim relayer-issued privileges (GH #685).
     if (mode === "full") {
         mountMcpRoutes(app, {
-            relayerUrl: process.env.MEMWAL_RELAYER_URL ?? "http://localhost:3001",
+            // `127.0.0.1`, not `localhost`: the managed sidecar always gets an
+            // explicit value from the Rust parent, so this default only covers
+            // a standalone run — and there a dual-stack `localhost` can resolve
+            // to an address nothing answers on, turning every tool call into a
+            // connect timeout.
+            relayerUrl: process.env.MEMWAL_RELAYER_URL ?? "http://127.0.0.1:3001",
+            // The origin `memwal_health` may name. Independent of the address
+            // above, so naming the network never redirects tool calls through
+            // the public edge. Absent means this deployment names no network.
+            publicRelayerUrl: process.env.MEMWAL_PUBLIC_RELAYER_URL,
         });
     }
 

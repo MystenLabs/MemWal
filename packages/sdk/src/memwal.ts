@@ -877,8 +877,12 @@ export class MemWal {
      * **Response semantics**:
      * - `restored` — blobs that completed the full
      *   download → decrypt → embed → DB insert pipeline this call.
-     * - `skipped` — on-chain blobs already in the local index (no work needed).
-     *   Decrypt / embed failures are dropped silently and count as neither.
+     * - `skipped` — on-chain blobs already in the local success index
+     *   (no work needed). Does not include permanent decrypt/UTF-8 failures.
+     * - `failed` — permanent decrypt/UTF-8 failures on this on-chain page:
+     *   negative-cache hits plus any new permanent failures this call.
+     *   Transient download/decrypt/embed errors are not counted here; when
+     *   a page yields only those, `truncated` is true so the caller retries.
      * - `total` — on-chain blobs the relayer saw for `(owner, namespace)`
      *   before the limit was applied.
      *
@@ -899,12 +903,12 @@ export class MemWal {
      *
      * @param namespace - Namespace to restore (exact match; no prefix/hierarchy)
      * @param limit - Max blobs to inspect this call (default: 10)
-     * @returns RestoreResult with restored / skipped / total counts
+     * @returns RestoreResult with restored / skipped / failed / total counts
      *
      * @example
      * ```typescript
      * const result = await memwal.restore("my-app");
-     * console.log(`restored=${result.restored} skipped=${result.skipped} total=${result.total}`);
+     * console.log(`restored=${result.restored} skipped=${result.skipped} failed=${result.failed} total=${result.total}`);
      * ```
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
@@ -915,7 +919,12 @@ export class MemWal {
         // Relayers older than WALM-319 omit `truncated` entirely — treat
         // "not present" as "not known to be truncated" rather than drop
         // the field or require every relayer version to send it.
-        return { ...result, truncated: result.truncated ?? false };
+        // Relayers older than COMG-719 omit `failed`; default to 0.
+        return {
+            ...result,
+            truncated: result.truncated ?? false,
+            failed: result.failed ?? 0,
+        };
     }
 
     /**
