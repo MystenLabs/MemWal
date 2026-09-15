@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MemWal } from "../dist/memwal.js";
+import { MemWal, RememberJobTimeoutError } from "../dist/index.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -51,7 +51,12 @@ test("rememberAndWait reuses its generated key and job after polling timeout", a
 
     await assert.rejects(
         client.rememberAndWait("same memory", undefined, { pollIntervalMs: 0, timeoutMs: 1 }),
-        /timed out/,
+        (err) => {
+            assert.equal(err instanceof RememberJobTimeoutError, true);
+            assert.equal(err.status, 504);
+            assert.equal(err.jobId, "stable-job");
+            return true;
+        },
     );
     const result = await client.rememberAndWait("same memory", undefined, {
         pollIntervalMs: 0,

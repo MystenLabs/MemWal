@@ -394,8 +394,9 @@ class RememberBulkOptions:
     """Polling options for remember_bulk_and_wait() / wait_for_remember_jobs().
 
     ``poll_interval_ms`` is the base poll cadence (default 1500ms).
-    ``timeout_ms`` is the total wait budget before raising TimeoutError
-    (default 120_000ms).
+    ``timeout_ms`` is the total wait budget (default 120_000ms). Jobs still
+    pending become ``status="timeout"``; ``wait_for_remember_jobs`` does not
+    raise.
     """
 
     poll_interval_ms: int = 1500

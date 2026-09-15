@@ -422,6 +422,10 @@ class MemWal:
           the timeout, not surfaced as polling failures.
         - Backoff is jittered exponential (1.5x cap 10s, ±25%) to avoid
           thundering-herd at scale.
+        - Default ``timeout_ms`` is 60s. Missing the deadline raises
+          :class:`MemWalRememberJobTimeout` (``status`` 504).
+          ``wait_for_remember_jobs`` returns ``status="timeout"`` for the
+          same condition instead of raising.
         """
 
         deadline_ms = _now_ms() + timeout_ms
@@ -588,9 +592,9 @@ class MemWal:
         - Each item settles to ``"done"``, ``"failed"``, or ``"timeout"``.
         - Same transient-retry + jitter strategy as the single-job poll.
         - Result list preserves the order of the input ``job_ids``.
-
-        Default ``timeout_ms`` is 120s — bulk pipelines run longer than
-        single remember.
+        - Default ``timeout_ms`` is 120s. Jobs still pending become
+          ``status="timeout"``; this method does not raise
+          :class:`MemWalRememberJobTimeout`.
         """
 
         opts = opts or RememberBulkOptions()

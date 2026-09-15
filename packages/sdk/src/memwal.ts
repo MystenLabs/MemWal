@@ -58,6 +58,7 @@ import type {
     RememberBulkItemResult,
     RelayerVersionMetadata,
 } from "./types.js";
+import { RememberJobTimeoutError } from "./types.js";
 import {
     sha256hex,
     hexToBytes,
@@ -310,7 +311,13 @@ export class MemWal {
     }
 
     /**
-     * Poll an accepted remember job until it reaches a terminal state.
+     * Poll an accepted remember job until it reaches `done`.
+     *
+     * Default `timeoutMs` is 60_000. Failed or missing jobs throw. If the job
+     * is still non-terminal at the deadline, this throws
+     * {@link RememberJobTimeoutError} (`status` 504). `waitForRememberJobs`
+     * does not throw for that condition: leftover items resolve with
+     * `status: "timeout"`.
      */
     async waitForRememberJob(
         jobId: string,
@@ -366,14 +373,15 @@ export class MemWal {
             }
         }
 
-        throw Object.assign(
-            new Error(`remember job timed out after ${timeoutMs}ms (job_id=${jobId})`),
-            { status: 504, jobId },
-        );
+        throw new RememberJobTimeoutError(jobId, timeoutMs);
     }
 
     /**
      * Remember something and wait for the background job to complete.
+     *
+     * Throws {@link RememberJobTimeoutError} if polling misses `timeoutMs`
+     * (default 60_000). The generated idempotency key is kept on that throw
+     * so a retry reuses the same job.
      */
     async rememberAndWait(
         text: string,
@@ -468,6 +476,13 @@ export class MemWal {
         );
     }
 
+    /**
+     * Poll accepted remember jobs until each is terminal or the deadline hits.
+     *
+     * Default `timeoutMs` is 120_000. Jobs still pending at the deadline are
+     * returned with `status: "timeout"`; this method does not throw for that
+     * case. `waitForRememberJob` throws {@link RememberJobTimeoutError} instead.
+     */
     async waitForRememberJobs(
         jobIds: string[],
         namespaces: string[] = [],

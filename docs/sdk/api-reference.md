@@ -72,6 +72,8 @@ Submit one memory through the relayer. The method returns after the relayer crea
 
 Submit one memory and poll until the background job completes.
 
+Default `timeoutMs` is 60_000. Poll timeout throws `RememberJobTimeoutError`, the same error as `waitForRememberJob`.
+
 **Returns:**
 
 ```ts
@@ -86,7 +88,17 @@ Submit one memory and poll until the background job completes.
 
 ### `waitForRememberJob(jobId, opts?): Promise<RememberResult>`
 
-Poll a previously accepted remember job until it reaches `done` or `failed`.
+Poll a previously accepted remember job until it reaches `done`. Failed or missing jobs throw.
+
+Default `timeoutMs` is 60_000. If the job is still non-terminal at the deadline, this throws `RememberJobTimeoutError` (`status` 504).
+
+`waitForRememberJobs` uses a different timeout contract: leftover items resolve with `status: "timeout"` instead of throwing.
+
+### `waitForRememberJobs(jobIds, namespaces?, opts?): Promise<RememberBulkResult>`
+
+Poll a batch until every job is terminal or the deadline hits.
+
+Default `timeoutMs` is 120_000. Jobs still pending become `status: "timeout"`; this method does not throw for that case.
 
 ### `rememberBulk(items): Promise<RememberBulkAcceptedResult>`
 

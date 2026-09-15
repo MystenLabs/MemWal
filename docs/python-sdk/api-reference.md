@@ -86,7 +86,7 @@ RememberResult(id: str, blob_id: str, owner: str, namespace: str)
 
 ### `wait_for_remember_job(job_id, poll_interval_ms=1500, timeout_ms=60_000) -> RememberResult`
 
-Poll a previously accepted job until `done` or `failed`. Raises `MemWalRememberJobNotFound` / `MemWalRememberJobFailed` / `MemWalRememberJobTimeout`.
+Poll a previously accepted job until `done` or `failed`. Raises `MemWalRememberJobNotFound` / `MemWalRememberJobFailed` / `MemWalRememberJobTimeout`. `wait_for_remember_jobs` does not raise for poll timeout.
 
 ### `remember_bulk_async(items) -> RememberBulkAcceptedResult`
 
@@ -102,7 +102,7 @@ One `RememberBulkStatusItem(job_id, status, blob_id?, error?)` per requested job
 
 ### `wait_for_remember_jobs(job_ids, opts=None) -> RememberBulkResult`
 
-Poll a batch until every job is terminal. `opts` is a `RememberBulkOptions(poll_interval_ms=1500, timeout_ms=120_000)`.
+Poll a batch until every job is terminal. `opts` is a `RememberBulkOptions(poll_interval_ms=1500, timeout_ms=120_000)`. Jobs still pending become `status="timeout"`; this method does not raise `MemWalRememberJobTimeout`.
 
 ```python
 RememberBulkResult(

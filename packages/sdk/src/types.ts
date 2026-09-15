@@ -54,6 +54,24 @@ export interface RememberResult {
     namespace: string;
 }
 
+/**
+ * Thrown by `waitForRememberJob` / `rememberAndWait` when polling misses the
+ * deadline. `waitForRememberJobs` does not throw for that case; leftover items
+ * resolve with `status: "timeout"`.
+ */
+export class RememberJobTimeoutError extends Error {
+    readonly status = 504 as const;
+    readonly jobId: string;
+    readonly timeoutMs: number;
+
+    constructor(jobId: string, timeoutMs: number) {
+        super(`remember job timed out after ${timeoutMs}ms (job_id=${jobId})`);
+        this.name = "RememberJobTimeoutError";
+        this.jobId = jobId;
+        this.timeoutMs = timeoutMs;
+    }
+}
+
 /** A single recalled memory */
 export interface RecallMemory {
     blob_id: string;
@@ -233,7 +251,10 @@ export interface RememberBulkItem {
 export interface RememberBulkOptions {
     /** How often to poll each job_id (default: 1500ms) */
     pollIntervalMs?: number;
-    /** Max total wait time before throwing (default: 120_000ms) */
+    /**
+     * Max total wait (default: 120_000ms). Jobs still pending become
+     * `status: "timeout"`; `waitForRememberJobs` does not throw.
+     */
     timeoutMs?: number;
 }
 

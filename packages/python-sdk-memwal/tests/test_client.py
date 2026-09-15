@@ -22,6 +22,7 @@ from memwal.client import (
     MemWalClockDriftError,
     MemWalCompatibilityError,
     MemWalError,
+    MemWalRememberJobTimeout,
     MemWalSync,
 )
 from memwal.types import (
@@ -29,6 +30,7 @@ from memwal.types import (
     RecallParams,
     RememberBulkAcceptedResult,
     RememberBulkItem,
+    RememberBulkOptions,
     RememberManualOptions,
     ScoringWeights,
 )
@@ -618,6 +620,43 @@ class TestRecall:
 
 
 class TestErrorHandling:
+    @respx.mock
+    async def test_wait_for_remember_timeout_contract(
+        self, memwal_client: MemWal
+    ) -> None:
+        """Single wait raises MemWalRememberJobTimeout; bulk returns status timeout."""
+        mock_seal_session_prereqs()
+        respx.get(f"{_TEST_SERVER}/api/remember/slow-job").mock(
+            return_value=httpx.Response(
+                200,
+                json={"job_id": "slow-job", "status": "pending"},
+            )
+        )
+        respx.post(f"{_TEST_SERVER}/api/remember/bulk/status").mock(
+            return_value=httpx.Response(
+                200,
+                json={"results": [{"job_id": "slow-job", "status": "pending"}]},
+            )
+        )
+
+        with pytest.raises(MemWalRememberJobTimeout) as exc:
+            await memwal_client.wait_for_remember_job(
+                "slow-job",
+                poll_interval_ms=0,
+                timeout_ms=1,
+            )
+        assert exc.value.status == 504
+        assert exc.value.job_id == "slow-job"
+        assert exc.value.timeout_ms == 1
+        assert str(exc.value) == "remember job timed out after 1ms (job_id=slow-job)"
+
+        bulk = await memwal_client.wait_for_remember_jobs(
+            ["slow-job"],
+            opts=RememberBulkOptions(poll_interval_ms=0, timeout_ms=1),
+        )
+        assert bulk.results[0].status == "timeout"
+        assert bulk.timed_out == 1
+
     @respx.mock
     async def test_non_200_raises_memwal_error(self, memwal_client: MemWal) -> None:
         """Non-200 responses should raise MemWalError with status and body."""
