@@ -121,11 +121,54 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Ceiling on the gap between two status checks.
+ *
+ * This is pure *observation* cost: a job that finished is not reported until
+ * the next poll lands, so the cap is the worst-case dead time bolted onto
+ * every wait, and half of it is the average. At the 10s ceiling checks landed
+ * ~1.5/3.75/7.1/12.2/19.8/29.8s apart, so a write that truly completed at
+ * 20.5s was not seen until 29.8s — and writes finish in the 15–35s band
+ * (Walrus sliver upload plus three sequential Sui transactions), exactly where
+ * those gaps were widest.
+ *
+ * 2s holds average dead time near 1s. The extra requests are cheap — polling
+ * is one indexed row read on `remember_jobs` — but they are not free against
+ * the relayer's per-delegate-key rate limit, which is why callers on a long
+ * budget (`services/server/scripts/mcp/tools/remember-wait.ts`) pass a larger
+ * base rather than relying on this floor. */
+const POLL_MAX_DELAY_MS = 2_000;
+
 function pollingDelayMs(baseMs: number, attempt: number): number {
     const base = Math.max(100, baseMs);
-    const capped = Math.min(10_000, base * 1.5 ** Math.min(attempt, 6));
+    const capped = Math.min(POLL_MAX_DELAY_MS, base * 1.5 ** Math.min(attempt, 6));
     const jitter = 0.75 + Math.random() * 0.5;
     return Math.floor(capped * jitter);
+}
+
+/** Window over which the same (namespace, text) resolves to the same
+ * idempotency key.
+ *
+ * `pendingRememberKeys` only dedupes retries that reuse one client instance.
+ * The MCP sidecar builds a fresh `MemWal` per transport session, so when the
+ * bridge reconnects a dropped stream and the agent re-issues the same
+ * `memwal_remember`, that map is empty. A random key then reads as a brand-new
+ * write and the relayer mints a SECOND paid Walrus blob for a write already in
+ * flight — doubling queue load exactly when the queue is already slow enough
+ * to have caused the drop.
+ *
+ * Deriving the key from the content makes that replay land on the existing
+ * job. The bucket bounds how long the collapse lasts: `remember_jobs` rows are
+ * never pruned, so an unbucketed key would dedupe against a job from any point
+ * in history and re-saving a fact the user had since deleted would return the
+ * old row's blob id instead of storing it again. Retries happen seconds after
+ * the original, so 30 minutes covers them with ~0.1% chance of a replay
+ * straddling the boundary — and straddling only costs the old behaviour (a
+ * duplicate job), never a wrong result. */
+const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
+
+async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
+    const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
+    return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
 }
 
 function isTransientPollingStatus(status: number): boolean {
@@ -268,7 +311,7 @@ export class MemWal {
         const generatedKey = options.idempotencyKey === undefined;
         const idempotencyKey = options.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
-            ?? crypto.randomUUID();
+            ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
         const accepted = await this.signedRequest<RememberAcceptedResult>(
@@ -316,12 +359,17 @@ export class MemWal {
         jobId: string,
         opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
     ): Promise<RememberResult> {
-        const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
+        const { pollIntervalMs = 600, timeoutMs = 60_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
 
         while (Date.now() < deadline) {
-            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
+            // Check first, sleep second. An idempotent replay — the same key
+            // for a write that already finished — is `done` on the server
+            // before we ask, so the old sleep-first order billed it a full
+            // poll delay for a result that was ready on arrival.
+            if (attempt > 0) await sleep(pollingDelayMs(pollIntervalMs, attempt - 1));
+            attempt++;
 
             let status: RememberStatusResponse;
 
@@ -385,7 +433,7 @@ export class MemWal {
         const generatedKey = opts.idempotencyKey === undefined;
         const idempotencyKey = opts.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
-            ?? crypto.randomUUID();
+            ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
         const accepted = await this.rememberAsync(text, resolvedNamespace, { idempotencyKey });
@@ -473,7 +521,7 @@ export class MemWal {
         namespaces: string[] = [],
         opts: RememberBulkOptions = {},
     ): Promise<RememberBulkResult> {
-        const { pollIntervalMs = 1500, timeoutMs = 120_000 } = opts;
+        const { pollIntervalMs = 600, timeoutMs = 120_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         const results: RememberBulkItemResult[] = jobIds.map((jobId, idx) => ({
             id: jobId,
@@ -486,7 +534,9 @@ export class MemWal {
         let attempt = 0;
 
         while (pending.size > 0 && Date.now() < deadline) {
-            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
+            // Check first, sleep second — see `waitForRememberJob`.
+            if (attempt > 0) await sleep(pollingDelayMs(pollIntervalMs, attempt - 1));
+            attempt++;
 
             const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
             if (pendingIds.length === 0) {
