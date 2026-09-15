@@ -2198,23 +2198,69 @@ export async function runBridge(
      * Pure: the caller is responsible for dropping a `neverSent` message from
      * the buffer, which it must, or a later flush would run the call we just
      * said never ran. */
+    /** Tools whose call, once POSTed, may have written to Walrus.
+     *
+     * The relayer answers these with HTTP 202 and finishes the work in a
+     * durable queue, so a client-side deadline cancels nothing: the write can
+     * still land minutes after we have given up waiting for the reply. And
+     * `/api/remember/bulk` carries no idempotency key — unlike the single
+     * path — so a blind retry mints a second paid blob that `recall` will then
+     * hide behind the first. Telling the user to "please retry" here is how a
+     * lost reply turns into duplicate paid storage. */
+    const MUTATING_TOOLS = new Set([
+        "memwal_remember",
+        "memwal_remember_bulk",
+        "memwal_analyze",
+    ]);
+
+    /** Name of the tool a tracked request was calling, when it was one. */
+    function toolNameOf(msg: RpcMessage): string | null {
+        if (msg.method !== "tools/call") return null;
+        const params = msg.params as { name?: unknown } | undefined;
+        return typeof params?.name === "string" ? params.name : null;
+    }
+
     function expiredRequestReport(
         neverSent: boolean,
         now: number,
+        tool: string | null,
     ): {
         reason: string;
         opts: { toolText: string; errorMessage: string };
     } {
         if (!neverSent) {
+            // The request reached the relayer. What is missing is the reply,
+            // and for a write that distinction is the whole message: the work
+            // may have completed, may still be running, and cannot be assumed
+            // undone. "Please retry" is only safe advice for a read.
+            if (tool !== null && MUTATING_TOOLS.has(tool)) {
+                return {
+                    reason: "no response to a sent write",
+                    opts: {
+                        toolText:
+                            `⚠️ Walrus Memory accepted this ${tool} call but did not return a ` +
+                            "result in time. The write was sent, so it may have completed or may " +
+                            "still be finishing in the background — a timeout here does not cancel " +
+                            "it and does not mean nothing was stored. Do NOT simply repeat the " +
+                            "call: run `memwal_recall` for this content first, and only re-save " +
+                            "what is genuinely missing. Repeating a bulk save that already " +
+                            "landed stores a second paid copy.",
+                        errorMessage:
+                            `Walrus Memory ${tool} was sent but its reply never arrived. The write ` +
+                            "may have completed; verify with recall before retrying.",
+                    },
+                };
+            }
             return {
                 reason: "no response",
                 opts: {
                     toolText:
-                        "❌ Walrus Memory did not answer this call. The connection to " +
-                        "the relayer dropped before the result came back. Please retry.",
+                        "❌ Walrus Memory did not answer this call. The request reached the " +
+                        "relayer but the reply never came back. This call only reads, so it is " +
+                        "safe to retry.",
                     errorMessage:
                         "Walrus Memory call was orphaned by a reconnect and never " +
-                        "received a response. Please retry.",
+                        "received a response. Safe to retry: this call only reads.",
                 },
             };
         }
@@ -2285,7 +2331,11 @@ export async function runBridge(
             // Built only for what actually expired: this walks `pendingForward`
             // and interpolates two user-facing strings, and the branch it
             // serves fires roughly never.
-            const { reason, opts } = expiredRequestReport(neverSent, now);
+            const { reason, opts } = expiredRequestReport(
+                neverSent,
+                now,
+                toolNameOf(entry.msg),
+            );
             // Drop it from the buffer before answering: a later successful
             // connect would otherwise flush and actually run the call we are
             // about to report as never having run.

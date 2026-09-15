@@ -550,7 +550,12 @@ async function handleStreamableHttp(
 }
 
 export interface MountMcpOptions {
-    /** Relayer base URL that tool calls hit. Default: `http://localhost:3001`. */
+    /**
+     * Relayer base URL that tool calls hit. Default: `http://127.0.0.1:3001`
+     * — loopback, because that is where the relayer this sidecar belongs to
+     * listens. Pointing it at a public origin sends every tool call out of
+     * the process and back through the edge.
+     */
     relayerUrl?: string;
     /**
      * The relayer's public origin, when the deployment states one. Reported by
@@ -577,7 +582,7 @@ export function mountMcpRoutes(
     app: Router,
     options: MountMcpOptions = {}
 ): void {
-    const relayerUrl = options.relayerUrl ?? "http://localhost:3001";
+    const relayerUrl = options.relayerUrl ?? "http://127.0.0.1:3001";
     const publicRelayerUrl = options.publicRelayerUrl;
 
     app.get("/mcp/sse", async (req, res) => {
