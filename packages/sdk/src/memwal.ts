@@ -115,6 +115,15 @@ const SEAL_SESSION_TTL_MIN = 5;
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
 
+/** Per-call knobs for `signedRequest`. `timeoutMs` overrides the client-wide
+ * deadline for one endpoint; `signal` is the caller's own cancellation and is
+ * honoured alongside it, never replaced by it. */
+interface SignedRequestOptions {
+    includeDelegateKey?: boolean;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+}
+
 type RememberStatusResponse = RememberJobStatus | { error?: string };
 
 function sleep(ms: number): Promise<void> {
@@ -169,6 +178,89 @@ const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
 async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
     const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
     return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
+}
+
+/**
+ * Deadline for a single relayer request when the call site names no other.
+ *
+ * `fetch` imposes no timeout, so before this every request here could hang for
+ * as long as the socket stayed open. That is not a theoretical gap: a poll loop
+ * checks its budget at the top of each iteration, which bounds when the next
+ * request STARTS, not how long one takes — so one stalled read blew straight
+ * past a documented 90s cap and left an MCP tool running past 120s.
+ *
+ * 30s mirrors the relayer's own outbound HTTP client, so any call that depends
+ * on the relayer talking to the sidecar, Walrus, or OpenAI has already failed
+ * upstream by the time this fires.
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/** `POST /api/restore` bounds itself at 55s server-side and answers with an
+ * error rather than going quiet, so the client must outlast that or it would
+ * abandon a response already on its way. */
+const RESTORE_REQUEST_TIMEOUT_MS = 60_000;
+
+/** `POST /api/analyze` runs the extractor LLM inline before it accepts, so it
+ * is the one write that legitimately outruns the default. */
+const ANALYZE_REQUEST_TIMEOUT_MS = 60_000;
+
+/** `POST /api/recall` has carried its own 15s deadline since before the rest
+ * had any; keeping it named makes that a decision rather than an accident. */
+const RECALL_REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * Abort signal that fires after `ms`, or when `caller` aborts — whichever is
+ * first. Built by hand rather than with `AbortSignal.any`, which lands too
+ * recently to rely on across Node, browsers and Workers alike.
+ *
+ * Returns the signal plus a `dispose` the caller must run in a `finally`, so a
+ * pending timer never outlives its request.
+ */
+function deadlineSignal(
+    ms: number,
+    caller?: AbortSignal,
+): { signal: AbortSignal; timedOut: () => boolean; dispose: () => void } {
+    const controller = new AbortController();
+    let expired = false;
+
+    const onCallerAbort = () => controller.abort(caller?.reason);
+    if (caller) {
+        if (caller.aborted) controller.abort(caller.reason);
+        else caller.addEventListener("abort", onCallerAbort, { once: true });
+    }
+
+    const timer = setTimeout(() => {
+        expired = true;
+        controller.abort();
+    }, ms);
+    // Never hold a process open for a deadline nobody is waiting on.
+    (timer as unknown as { unref?: () => void }).unref?.();
+
+    return {
+        signal: controller.signal,
+        timedOut: () => expired,
+        dispose: () => {
+            clearTimeout(timer);
+            caller?.removeEventListener("abort", onCallerAbort);
+        },
+    };
+}
+
+/**
+ * The error a request deadline produces.
+ *
+ * `status: 504` is load-bearing, not decoration: `isTransientPollingStatus`
+ * treats it as retryable, so one stalled poll inside a wait loop is abandoned
+ * and retried against the remaining budget instead of failing the whole wait.
+ */
+function requestTimeoutError(method: string, path: string, ms: number): Error {
+    const err = new Error(
+        `Walrus Memory request timed out after ${ms}ms (${method} ${path}). The relayer ` +
+            `accepted the connection but did not answer in time.`,
+    );
+    err.name = "MemWalRequestTimeout";
+    (err as Error & { status?: number }).status = 504;
+    return err;
 }
 
 function isTransientPollingStatus(status: number): boolean {
@@ -228,6 +320,8 @@ export class MemWal {
     private serverUrl: string;
     private namespace: string;
     private accountId: string;
+    /** Deadline applied to any request that does not name its own. */
+    private requestTimeoutMs: number;
 
     // ENG-1697 state — all internal, never surfaced to user code.
     // The public API (`MemWal.create({ key, accountId })`) is unchanged.
@@ -262,6 +356,12 @@ export class MemWal {
         // non-localhost host.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
         this.namespace = config.namespace ?? "default";
+        // A non-positive or non-finite override would disable the backstop
+        // entirely, which is the bug this exists to prevent.
+        this.requestTimeoutMs =
+            Number.isFinite(config.requestTimeoutMs) && (config.requestTimeoutMs as number) > 0
+                ? (config.requestTimeoutMs as number)
+                : DEFAULT_REQUEST_TIMEOUT_MS;
     }
 
     /**
@@ -379,6 +479,17 @@ export class MemWal {
                     `/api/remember/${jobId}`,
                     {},
                     [200, 404],
+                    // Bound each poll by the client deadline, and never past
+                    // what is left of the budget. Without this the loop only
+                    // checks the deadline between polls, so one stalled read
+                    // runs past `timeoutMs` however small it was — the whole
+                    // reason a 90s wait was seen still going at 120s. Taking
+                    // the min of the two matters in both directions: the
+                    // remaining budget keeps a poll from outliving the wait,
+                    // and the client deadline keeps ONE stalled poll from
+                    // swallowing the entire budget, so the loop still gets to
+                    // retry. An expired poll surfaces as a transient 504.
+                    { timeoutMs: this.pollDeadlineMs(deadline) },
                 );
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
@@ -508,11 +619,16 @@ export class MemWal {
         return accepted;
     }
 
-    async getRememberBulkStatus(jobIds: string[]): Promise<RememberBulkStatusResult> {
+    async getRememberBulkStatus(
+        jobIds: string[],
+        opts: { timeoutMs?: number } = {},
+    ): Promise<RememberBulkStatusResult> {
         return this.signedRequest<RememberBulkStatusResult>(
             "POST",
             "/api/remember/bulk/status",
             { job_ids: jobIds },
+            [200],
+            { timeoutMs: opts.timeoutMs },
         );
     }
 
@@ -546,7 +662,10 @@ export class MemWal {
             let batchStatus: RememberBulkStatusResult;
 
             try {
-                batchStatus = await this.getRememberBulkStatus(pendingIds);
+                // Bounded the same way as the single-job poll.
+                batchStatus = await this.getRememberBulkStatus(pendingIds, {
+                    timeoutMs: this.pollDeadlineMs(deadline),
+                });
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
@@ -716,9 +835,7 @@ export class MemWal {
         const limit = options.topK ?? options.limit ?? 10;
         const resolvedNamespace = options.namespace ?? this.namespace;
 
-        const ac = new AbortController();
-        const tid = setTimeout(() => ac.abort(), 15000);
-        try {
+        {
             const result = await this.signedRequest<RecallResult>("POST", "/api/recall", {
                 query,
                 limit,
@@ -732,7 +849,7 @@ export class MemWal {
                 // request byte-identical and the relayer applies its own
                 // "relevance" default.
                 sort: options.sort,
-            }, { signal: ac.signal });
+            }, { timeoutMs: RECALL_REQUEST_TIMEOUT_MS });
 
             let processed = result;
             if (typeof options.maxDistance === "number") {
@@ -766,8 +883,6 @@ export class MemWal {
             }
 
             return processed;
-        } finally {
-            clearTimeout(tid);
         }
     }
 
@@ -893,7 +1008,9 @@ export class MemWal {
         };
         const wireOccurredAt = occurredAtToWire(options.occurredAt);
         if (wireOccurredAt !== undefined) body.occurred_at = wireOccurredAt;
-        return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", body, [200, 202]);
+        return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", body, [200, 202], {
+            timeoutMs: ANALYZE_REQUEST_TIMEOUT_MS,
+        });
     }
 
     /**
@@ -962,10 +1079,13 @@ export class MemWal {
      * ```
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
-        const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
-            namespace,
-            limit,
-        });
+        const result = await this.signedRequest<RestoreResult>(
+            "POST",
+            "/api/restore",
+            { namespace, limit },
+            [200],
+            { timeoutMs: RESTORE_REQUEST_TIMEOUT_MS },
+        );
         // Relayers older than WALM-319 omit `truncated` entirely — treat
         // "not present" as "not known to be truncated" rather than drop
         // the field or require every relayer version to send it.
@@ -1065,7 +1185,7 @@ export class MemWal {
      * Check server health. The endpoint is public and does not require request signing.
      */
     async health(): Promise<HealthResult> {
-        const res = await fetch(`${this.serverUrl}/health`);
+        const res = await this.fetchWithDeadline(`${this.serverUrl}/health`);
         if (!res.ok) {
             throw new Error(`Health check failed: ${res.status}`);
         }
@@ -1110,13 +1230,13 @@ export class MemWal {
     }
 
     private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
-        const versionRes = await fetch(`${this.serverUrl}/version`, { method: "GET" });
+        const versionRes = await this.fetchWithDeadline(`${this.serverUrl}/version`, { method: "GET" });
         let body: Partial<RelayerVersionMetadata>;
 
         if (versionRes.ok) {
             body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
         } else if (versionRes.status === 404 || versionRes.status === 405) {
-            const healthRes = await fetch(`${this.serverUrl}/health`, { method: "GET" });
+            const healthRes = await this.fetchWithDeadline(`${this.serverUrl}/health`, { method: "GET" });
             if (!healthRes.ok) {
                 throw new Error(
                     `Walrus Memory compatibility check failed: GET /version returned ` +
@@ -1159,7 +1279,7 @@ export class MemWal {
 
     private async fetchServerConfig(): Promise<ServerConfig> {
         if (this.serverConfig) return this.serverConfig;
-        const res = await fetch(`${this.serverUrl}/config`, { method: "GET" });
+        const res = await this.fetchWithDeadline(`${this.serverUrl}/config`, { method: "GET" });
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
         }
@@ -1372,12 +1492,45 @@ export class MemWal {
      * @param acceptedStatuses - HTTP status codes to treat as success (default [200]).
      *   Pass [200, 202] for endpoints that return 202 Accepted.
      */
+    /**
+     * `fetch` with this client's deadline applied.
+     *
+     * For the handshake endpoints that skip request signing — `/health`,
+     * `/version`, `/config`. They are the worst place to leave unbounded: the
+     * compatibility probe and config fetch run before the first real call, so
+     * one stalled socket there hangs every method on the client, not just one.
+     */
+    /** Deadline for one status poll: the client deadline, clamped so it can
+     * never outlive the wait budget it belongs to. */
+    private pollDeadlineMs(deadline: number): number {
+        return Math.max(1, Math.min(this.requestTimeoutMs, deadline - Date.now()));
+    }
+
+    private async fetchWithDeadline(
+        url: string,
+        init: RequestInit = {},
+        timeoutMs?: number,
+    ): Promise<Response> {
+        const ms = timeoutMs ?? this.requestTimeoutMs;
+        const deadline = deadlineSignal(ms);
+        try {
+            return await fetch(url, { ...init, signal: deadline.signal });
+        } catch (err) {
+            if (deadline.timedOut()) {
+                throw requestTimeoutError(init.method ?? "GET", url, ms);
+            }
+            throw err;
+        } finally {
+            deadline.dispose();
+        }
+    }
+
     private async signedRequest<T>(
         method: string,
         path: string,
         body: object,
-        acceptedStatusesOrOptions: number[] | { includeDelegateKey?: boolean; signal?: AbortSignal } = [200],
-        requestOptions: { includeDelegateKey?: boolean; signal?: AbortSignal } = {},
+        acceptedStatusesOrOptions: number[] | SignedRequestOptions = [200],
+        requestOptions: SignedRequestOptions = {},
     ): Promise<T> {
         const acceptedStatuses = Array.isArray(acceptedStatusesOrOptions)
             ? acceptedStatusesOrOptions
@@ -1424,12 +1577,27 @@ export class MemWal {
         if (options.includeDelegateKey !== false) {
             headers["x-seal-session"] = await this.buildSealSession();
         }
-        const res = await fetch(url, {
-            method,
-            headers,
-            body: method === "GET" ? undefined : bodyStr,
-            signal: options.signal,
-        });
+        // Bound the request. `fetch` never times out on its own, so this is the
+        // only thing standing between a stalled socket and a call that hangs
+        // for as long as the connection stays open.
+        const deadlineMs = options.timeoutMs ?? this.requestTimeoutMs;
+        const deadline = deadlineSignal(deadlineMs, options.signal);
+        let res: Response;
+        try {
+            res = await fetch(url, {
+                method,
+                headers,
+                body: method === "GET" ? undefined : bodyStr,
+                signal: deadline.signal,
+            });
+        } catch (err) {
+            // Translate our own expiry into something a caller can classify.
+            // An abort the CALLER asked for is theirs and propagates untouched.
+            if (deadline.timedOut()) throw requestTimeoutError(method, path, deadlineMs);
+            throw err;
+        } finally {
+            deadline.dispose();
+        }
 
         if (!acceptedStatuses.includes(res.status)) {
             // LOW-26: sanitize server error bodies before surfacing to callers.

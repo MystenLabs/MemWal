@@ -196,6 +196,11 @@ export function pendingBulkMessage(
  *
  * 15s matches the only deadline the SDK sets for itself. A healthy accept is
  * ~1.1s, so this fires only when something is genuinely wrong.
+ *
+ * The SDK grows its own 30s per-request backstop in the release after the
+ * pinned 0.1.7, which does not make this redundant: that one is a floor for
+ * every consumer, this is the tighter bound an interactive agent needs, and
+ * whichever is smaller fires first.
  */
 const DEFAULT_ACCEPT_DEADLINE_MS = 15_000;
 

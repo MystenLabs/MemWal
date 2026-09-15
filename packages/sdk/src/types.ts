@@ -21,6 +21,18 @@ export interface MemWalConfig {
     serverUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
+    /**
+     * Deadline for a single relayer request, in milliseconds (default: 30000).
+     *
+     * `fetch` has no timeout of its own, so without this a stalled connection
+     * keeps a call pending for as long as the socket stays open — which is how
+     * a `remember` whose poll budget was 90s could still be running after two
+     * minutes. Endpoints that are legitimately slower (`restore`, `analyze`)
+     * carry their own larger deadline and ignore this.
+     *
+     * Raise it only for a genuinely slow link; it is a backstop, not a budget.
+     */
+    requestTimeoutMs?: number;
 }
 
 // ============================================================
