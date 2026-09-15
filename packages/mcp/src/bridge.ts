@@ -270,6 +270,57 @@ const DEFAULT_CALL_TIMEOUT_MS = SLOWEST_SERVER_TOOL_MS + 60_000;
 /** An override below this is a mistake, not an intent. */
 const MIN_CALL_TIMEOUT_MS = 1_000;
 
+/** Longest a given tool can legitimately take server-side, keyed by tool name.
+ *
+ * `DEFAULT_CALL_TIMEOUT_MS` is sized for `memwal_analyze`, the slowest tool
+ * there is. Applying that one number to every call means a request whose reply
+ * is lost — the relayer answered, the stream dropped before it arrived — keeps
+ * the agent blocked for 240s even when the tool could not still be working.
+ * Users read that as a hang and reload the client.
+ *
+ * Each entry is the ceiling the matching tool enforces on itself in
+ * `services/server/scripts/mcp/tools/`: `MAX_REMEMBER_WAIT_MS` for
+ * `memwal_remember` (its default wait is 0 — it returns at accept — but an
+ * operator can raise `MEMWAL_MCP_REMEMBER_WAIT_MS` up to that cap),
+ * `MAX_STATUS_WAIT_MS` for `memwal_remember_status`, and the fixed `timeoutMs`
+ * the bulk and analyze tools pass to the SDK. Keep them in lockstep: a value
+ * below a tool's real ceiling abandons healthy work. Unlisted tools keep the
+ * default. */
+const TOOL_DEADLINE_MS: Readonly<Record<string, number>> = {
+    memwal_remember: 90_000,
+    memwal_remember_status: 60_000,
+    memwal_remember_bulk: 120_000,
+    memwal_analyze: SLOWEST_SERVER_TOOL_MS,
+};
+
+/** Absorbs relayer + transport overhead on top of a tool's own ceiling. The
+ * sidecar answers at its deadline with a result or an error envelope rather
+ * than going quiet, so the reply is one network hop behind it; 30s is many
+ * times that. Cutting a merely-late reply off early is the expensive mistake —
+ * the agent would retry a write that actually landed. */
+const ORPHAN_HEADROOM_MS = 30_000;
+
+/** Tool name for a `tools/call`, or null for any other JSON-RPC method. */
+function toolNameOf(msg: RpcMessage): string | null {
+    if (msg.method !== "tools/call") return null;
+    const params = msg.params;
+    if (params == null || typeof params !== "object") return null;
+    const name = (params as { name?: unknown }).name;
+    return typeof name === "string" ? name : null;
+}
+
+/** Deadline for one tracked request. A tool with a known ceiling gets that
+ * plus headroom; everything else keeps the global default. An explicit
+ * `MEMWAL_MCP_CALL_TIMEOUT_MS` pins every call, so tests still drive expiry
+ * from one knob. */
+function resolveDeadlineMs(msg: RpcMessage): number {
+    const fallback = resolveCallTimeoutMs();
+    if (process.env.MEMWAL_MCP_CALL_TIMEOUT_MS) return fallback;
+    const tool = toolNameOf(msg);
+    const ceiling = tool === null ? undefined : TOOL_DEADLINE_MS[tool];
+    return ceiling === undefined ? fallback : ceiling + ORPHAN_HEADROOM_MS;
+}
+
 /** Without a cap, a long deadline drifts by a third of itself. */
 const MAX_ORPHAN_SWEEP_MS = 5_000;
 
@@ -407,6 +458,10 @@ interface InFlightEntry {
      * mid-session outage — the ordinary case — a request that never left the
      * process was indistinguishable from one already sent. */
     sent?: boolean;
+    /** How long this call may go unanswered before the sweeper declares its
+     * reply lost. Fixed when the request is first tracked, so a reconnect
+     * replay keeps the original budget. */
+    deadlineMs: number;
 }
 
 /** The relayer rejected the saved delegate key (HTTP 401 on the handshake).
@@ -1987,7 +2042,11 @@ export async function runBridge(
                     msg.id !== undefined &&
                     msg.id !== null
                 ) {
-                    inFlight.set(msg.id, { msg, startedAt: Date.now() });
+                    inFlight.set(msg.id, {
+                        msg,
+                        startedAt: Date.now(),
+                        deadlineMs: resolveDeadlineMs(msg),
+                    });
                 }
                 // Relayer session not up yet, OR the post-connect flush is still
                 // draining — buffer so this request stays behind everything that
@@ -2243,13 +2302,6 @@ export async function runBridge(
         "memwal_analyze",
     ]);
 
-    /** Name of the tool a tracked request was calling, when it was one. */
-    function toolNameOf(msg: RpcMessage): string | null {
-        if (msg.method !== "tools/call") return null;
-        const params = msg.params as { name?: unknown } | undefined;
-        return typeof params?.name === "string" ? params.name : null;
-    }
-
     function expiredRequestReport(
         neverSent: boolean,
         now: number,
@@ -2355,8 +2407,15 @@ export async function runBridge(
             // invites a duplicate write.
             const handshakeIsStalled =
                 handshakeStalledMs !== null && handshakeStalledMs > stalledHandshakeMs;
+            // `entry.deadlineMs` is this tool's own ceiling plus headroom, not
+            // the global one sized for the slowest tool — so a `memwal_remember`
+            // whose reply is lost is answered at 120s instead of 240s. The
+            // stalled-handshake shortcut still wins when it is tighter, but can
+            // never extend a tool past its own deadline.
             const deadlineMs =
-                neverSent && handshakeIsStalled ? stalledHandshakeMs : callTimeoutMs;
+                neverSent && handshakeIsStalled
+                    ? Math.min(stalledHandshakeMs, entry.deadlineMs)
+                    : entry.deadlineMs;
             if (elapsedMs <= deadlineMs) continue;
             // Built only for what actually expired: this walks `pendingForward`
             // and interpolates two user-facing strings, and the branch it
