@@ -3,9 +3,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, walruscanBlobUrl } from "./util.js";
-import { createLogger } from "../logger.js";
-
-const log = createLogger("mcp");
+import {
+    REMEMBER_WAIT_MS,
+    REMEMBER_POLL_INTERVAL_MS,
+    isStillRunning,
+    nameJobError,
+    pendingMessage,
+} from "./remember-wait.js";
 
 const REMEMBER_INPUT = {
     text: z
@@ -23,58 +27,13 @@ const REMEMBER_INPUT = {
 } as const;
 
 /**
- * How long `memwal_remember` waits for the write to finish before handing the
- * agent a job id instead.
- *
- * The write itself is a background job (`pending` → `running` → `uploaded` →
- * `done`). Blocking to `done` used to be the whole tool, which made a healthy
- * save cost as much as the slowest step in that pipeline — measured at 30-75s
- * against production, dominated by the Walrus upload phase. Almost none of
- * that time tells the agent anything it can act on: the job is already durably
- * accepted a second or so in.
- *
- * So this is a deadline for the *answer*, not for the write. The job keeps
- * running past it either way; the only question is whether the tool stays
- * parked. `memwal_remember_status` resolves the ones that run long.
- *
- * Set to `0` to always return as soon as the job is accepted. Set it to the
- * old `90000` to restore the previous always-block behaviour.
- */
-const DEFAULT_REMEMBER_WAIT_MS = 10_000;
-
-/** `waitForRememberJob` rejects with this HTTP status when the deadline passes
- * without the job settling. The job itself is still running; only the wait
- * ended. A genuinely failed job rejects with 500 instead. */
-const JOB_STILL_RUNNING_STATUS = 504;
-
-/** Hard ceiling — the relayer's own remember deadline. Waiting past it cannot
- * observe anything the job has not already settled. */
-const MAX_REMEMBER_WAIT_MS = 90_000;
-
-const REMEMBER_WAIT_MS = (() => {
-    const raw = process.env.MEMWAL_MCP_REMEMBER_WAIT_MS;
-    if (raw === undefined || raw.trim() === "") return DEFAULT_REMEMBER_WAIT_MS;
-    const parsed = Number(raw);
-    // Zero is meaningful here (return at accept), so it is allowed while every
-    // other unusable value falls back rather than silently disabling the wait.
-    if (!Number.isFinite(parsed) || parsed < 0) {
-        log.warn("remember.wait_ms_invalid", {
-            value: raw,
-            usingMs: DEFAULT_REMEMBER_WAIT_MS,
-        });
-        return DEFAULT_REMEMBER_WAIT_MS;
-    }
-    return Math.min(parsed, MAX_REMEMBER_WAIT_MS);
-})();
-
-/**
  * memwal_remember — persist a durable fact to MemWal.
  *
- * Returns once the write is durably accepted by the relayer, waiting up to
- * `MEMWAL_MCP_REMEMBER_WAIT_MS` for it to finish so the common fast case still
- * comes back with a `blob_id`. A job that outlives that window is reported as
- * still writing, with its `job_id`, and is resolved by
- * `memwal_remember_status` — the job is NOT abandoned.
+ * Returns as soon as the blob is written end-to-end (embed → SEAL encrypt →
+ * Walrus upload → on-chain) when that happens inside `REMEMBER_WAIT_MS`.
+ * Otherwise it returns the job_id and says plainly that the fact is not saved
+ * yet — see `remember-wait.ts` for why the old always-block behaviour cost
+ * 30–75s per call.
  *
  * Call this PROACTIVELY whenever the user reveals a durable fact about
  * themselves or the project (preference, decision, constraint, correction,
@@ -91,41 +50,34 @@ export function registerRememberTool(
         {
             ...TOOL_METADATA.memwal_remember,
             description:
-                "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. If the result says the write is still in flight, it carries a job_id — confirm it later with memwal_remember_status rather than telling the user it is saved.",
+                "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. Walrus writes queue, so this may return a job_id with the fact NOT yet saved — in that case say so rather than claiming it is stored, and resolve it with memwal_remember_status.",
             inputSchema: REMEMBER_INPUT,
         },
         wrapTool<{ text: string; namespace?: string }>(session, "memwal_remember", async ({ text, namespace }) => {
+            // Two steps rather than `rememberAndWait`, because the accept and
+            // the wait need separate budgets: acceptance is the part that
+            // must succeed, the wait is a courtesy we cut short.
             const accepted = await session.memwal.rememberAsync(text, namespace);
 
-            const stillWriting = () => {
-                log.info("remember.returned_in_flight", {
-                    jobId: accepted.job_id,
-                    waitedMs: REMEMBER_WAIT_MS,
-                    accountId: session.accountId ?? null,
-                });
-                return {
-                    content: [
-                        {
-                            type: "text" as const,
-                            text:
-                                `Accepted by Walrus Memory and still writing. job_id=${accepted.job_id}` +
-                                `${namespace ? ` namespace=${namespace}` : ""}\n` +
-                                (REMEMBER_WAIT_MS === 0
-                                    ? "The tool did not wait for the write, so there is no blob_id yet. "
-                                    : `The write did not finish within ${Math.round(REMEMBER_WAIT_MS / 1000)}s, so there is no blob_id yet. `) +
-                                `Do not tell the user it is saved — confirm with memwal_remember_status(job_id="${accepted.job_id}").`,
-                        },
-                    ],
-                };
-            };
+            const pending = (waitedMs: number) => ({
+                content: [
+                    {
+                        type: "text" as const,
+                        text: pendingMessage(accepted.job_id, waitedMs),
+                    },
+                ],
+            });
 
-            if (REMEMBER_WAIT_MS === 0) return stillWriting();
+            // A zero budget is the documented fire-and-accept mode. Skip the
+            // wait entirely instead of entering a loop that cannot poll.
+            if (REMEMBER_WAIT_MS === 0) return pending(0);
 
+            const startedAt = Date.now();
             try {
-                const result = await session.memwal.waitForRememberJob(
-                    accepted.job_id,
-                    { timeoutMs: REMEMBER_WAIT_MS }
-                );
+                const result = await session.memwal.waitForRememberJob(accepted.job_id, {
+                    timeoutMs: REMEMBER_WAIT_MS,
+                    pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
+                });
                 return {
                     content: [
                         {
@@ -134,17 +86,11 @@ export function registerRememberTool(
                         },
                     ],
                 };
-            } catch (err: any) {
-                // Only our own wait expiring is a non-failure. The SDK signals
-                // that as a plain Error carrying `status: 504` (a failed job
-                // carries 500) — it has no dedicated error class, in either the
-                // pinned 0.0.x or the current 0.1.x line, so matching on a
-                // constructor name would never fire and every slow write would
-                // surface as an error.
-                if (err?.status === JOB_STILL_RUNNING_STATUS) {
-                    return stillWriting();
-                }
-                throw err;
+            } catch (err) {
+                // Still running at the deadline is the expected path, not a
+                // failure — the job is durably accepted and keeps going.
+                if (isStillRunning(err)) return pending(Date.now() - startedAt);
+                throw nameJobError(err);
             }
         })
     );

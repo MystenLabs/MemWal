@@ -11,13 +11,14 @@ export const TOOL_METADATA = {
         title: "Remember a Fact",
         annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    memwal_remember_status: {
-        title: "Check a Remember Job",
-        annotations: { readOnlyHint: true, destructiveHint: false },
-    },
     memwal_remember_bulk: {
         title: "Remember Multiple Facts",
         annotations: { readOnlyHint: false, destructiveHint: false },
+    },
+    memwal_remember_status: {
+        title: "Check a Remember Job",
+        // Reads the state of a write already in flight; starts no new work.
+        annotations: { readOnlyHint: true, destructiveHint: false },
     },
     memwal_analyze: {
         title: "Analyze and Remember",

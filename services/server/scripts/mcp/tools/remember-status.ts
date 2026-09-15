@@ -3,54 +3,47 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, walruscanBlobUrl } from "./util.js";
+import {
+    REMEMBER_POLL_INTERVAL_MS,
+    isStillRunning,
+    nameJobError,
+} from "./remember-wait.js";
 
-/** `waitForRememberJob` rejects with 504 when its deadline passes with the job
- * still running, and 500 when the job itself failed. Neither is a distinct
- * error class in any shipped SDK line, so the status code is the only stable
- * discriminator. */
-const JOB_STILL_RUNNING_STATUS = 504;
-const JOB_FAILED_STATUS = 500;
+/**
+ * Ceiling on a single status wait. Past this an MCP client is more likely to
+ * time out the call than the job is to finish, and the caller can simply ask
+ * again — the job_id stays valid.
+ */
+const MAX_STATUS_WAIT_MS = 60_000;
 
-/** Default settle window. Short: this tool answers "did it land yet", and an
- * agent that wants to keep waiting can just call it again. */
-const DEFAULT_WAIT_SECONDS = 2;
-const MAX_WAIT_SECONDS = 30;
-
-const REMEMBER_STATUS_INPUT = {
+const STATUS_INPUT = {
     job_id: z
         .string()
         .min(1)
-        .describe(
-            "The job_id returned by memwal_remember when the write was still in flight."
-        ),
-    wait_seconds: z
+        .describe("The job_id returned by memwal_remember when the write had not landed yet."),
+    waitMs: z
         .number()
         .int()
         .min(0)
-        .max(MAX_WAIT_SECONDS)
+        .max(MAX_STATUS_WAIT_MS)
         .optional()
         .describe(
-            `How long to wait for the job to settle before answering (default ${DEFAULT_WAIT_SECONDS}s, max ${MAX_WAIT_SECONDS}s). Use 0 for an immediate answer.`
+            "How long to wait for the job to finish, in milliseconds (0-60000, default 10000). Pass 0 to read the current state without waiting."
         ),
 } as const;
 
+/** Wait applied when the caller does not choose one. */
+const DEFAULT_STATUS_WAIT_MS = 10_000;
+
 /**
- * memwal_remember_status — resolve a `memwal_remember` job that had not
- * finished when the tool returned.
+ * memwal_remember_status — resolve a remember job that `memwal_remember`
+ * handed back as still in flight.
  *
- * This is the other half of the fast-return path in `remember.ts`. That tool
- * stops waiting once the write is durably accepted, which means a job can
- * still fail afterwards — a Walrus upload or SEAL encrypt outage lands the job
- * in `failed`, long after the agent was told it was accepted. Without a way to
- * ask after the fact, returning early would turn a slow write into a silently
- * lost one.
- *
- * `waitForRememberJob` already encodes the outcomes an agent has to tell apart,
- * so this tool leans on it rather than re-deriving them: it resolves at `done`,
- * and otherwise rejects with a plain Error carrying a `status` — 500 when the
- * job failed, 504 when only our wait ran out and the job is still going. The
- * SDK ships no dedicated error classes for these, so `status` is what we match
- * on; a constructor-name check silently never fires.
+ * This is the other half of the bounded wait: `memwal_remember` refuses to
+ * claim a fact is saved when it isn't, so something has to be able to say
+ * whether it landed. Three outcomes, kept distinct because an agent acts
+ * differently on each — saved (blob_id), still running (ask again), failed
+ * (the fact is NOT stored and must be re-sent).
  */
 export function registerRememberStatusTool(
     server: McpServer,
@@ -61,62 +54,86 @@ export function registerRememberStatusTool(
         {
             ...TOOL_METADATA.memwal_remember_status,
             description:
-                "Check whether an in-flight memwal_remember job finished. Call this with the job_id from a memwal_remember result that came back still writing, when you need to confirm the fact was actually stored. Returns the blob_id once stored, an error if the write failed, or tells you it is still running.",
-            inputSchema: REMEMBER_STATUS_INPUT,
+                "Check whether an in-flight memwal_remember write has landed. Call this with the job_id memwal_remember returned when it reported the fact was NOT saved yet. Returns the blob_id once stored, reports that it is still uploading (call again), or reports that it failed — in which case the fact was never stored and you should send it again with memwal_remember.",
+            inputSchema: STATUS_INPUT,
         },
-        wrapTool<{ job_id: string; wait_seconds?: number }>(
+        wrapTool<{ job_id: string; waitMs?: number }>(
             session,
             "memwal_remember_status",
-            async ({ job_id, wait_seconds }) => {
-                const waitSeconds = Math.min(
-                    wait_seconds ?? DEFAULT_WAIT_SECONDS,
-                    MAX_WAIT_SECONDS
-                );
+            async ({ job_id, waitMs }) => {
+                const budget = waitMs ?? DEFAULT_STATUS_WAIT_MS;
+
+                // A zero budget means "read the current state", which is a
+                // single GET. waitForRememberJob cannot express that: it
+                // sleeps before its first poll, so a 0ms deadline would
+                // return "still running" without ever asking the relayer.
+                if (budget === 0) {
+                    const status = await session.memwal.getRememberStatus(job_id);
+                    if (status.status === "done") {
+                        return saved(status.blob_id ?? "", status.namespace);
+                    }
+                    if (status.status === "failed") {
+                        throw nameJobError(
+                            Object.assign(
+                                new Error(
+                                    `remember job failed: ${status.error ?? "unknown error"}`
+                                ),
+                                { status: 500, jobId: job_id }
+                            )
+                        );
+                    }
+                    if (status.status === "not_found") {
+                        throw nameJobError(
+                            Object.assign(
+                                new Error(`remember job not found: ${job_id}`),
+                                { status: 404, jobId: job_id }
+                            )
+                        );
+                    }
+                    return stillRunning(job_id, status.status);
+                }
+
                 try {
-                    const result = await session.memwal.waitForRememberJob(
-                        job_id,
-                        // Floor at one poll: a zero deadline would expire
-                        // before the first status read and report "still
-                        // running" without ever having asked.
-                        { timeoutMs: Math.max(250, waitSeconds * 1000) }
-                    );
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Stored. job_id=${job_id} blob_id=${result.blob_id} namespace=${result.namespace}\nExplorer: ${walruscanBlobUrl(result.blob_id)}`,
-                            },
-                        ],
-                    };
-                } catch (err: any) {
-                    // Still running is the expected answer here, not a failure.
-                    if (err?.status === JOB_STILL_RUNNING_STATUS) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: `Still writing after ${waitSeconds}s. job_id=${job_id}. Check again shortly; do not tell the user it is saved yet.`,
-                                },
-                            ],
-                        };
-                    }
-                    // A terminal failure is the case this tool exists for, so
-                    // it is named plainly rather than left to the generic
-                    // "Tool error" prefix: the fact was NOT stored.
-                    if (err?.status === JOB_FAILED_STATUS) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: `Walrus Memory job failed: job_id=${job_id} was not stored — ${err?.message ?? "unknown error"}. The fact is NOT in memory; save it again.`,
-                                },
-                            ],
-                            isError: true,
-                        };
-                    }
-                    throw err;
+                    const result = await session.memwal.waitForRememberJob(job_id, {
+                        timeoutMs: budget,
+                        pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
+                    });
+                    return saved(result.blob_id, result.namespace);
+                } catch (err) {
+                    if (isStillRunning(err)) return stillRunning(job_id);
+                    throw nameJobError(err);
                 }
             }
         )
     );
+}
+
+function saved(blobId: string, namespace?: string) {
+    return {
+        content: [
+            {
+                type: "text" as const,
+                text:
+                    `Saved to Walrus Memory. blob_id=${blobId}` +
+                    (namespace ? ` namespace=${namespace}` : "") +
+                    `\nExplorer: ${walruscanBlobUrl(blobId)}`,
+            },
+        ],
+    };
+}
+
+function stillRunning(jobId: string, state?: string) {
+    return {
+        content: [
+            {
+                type: "text" as const,
+                text:
+                    `STILL UPLOADING — not saved yet${state ? ` (state: ${state})` : ""}.\n` +
+                    `job_id=${jobId}\n` +
+                    `The job is still queued or uploading. Call memwal_remember_status again ` +
+                    `with this job_id. Do not re-send the fact with memwal_remember — that ` +
+                    `queues a duplicate behind this one.`,
+            },
+        ],
+    };
 }

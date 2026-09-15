@@ -41,7 +41,7 @@ interface RpcMessage {
 const SIGNED_OUT_REMEMBER =
     "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.";
 const SIGNED_IN_REMEMBER =
-    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.";
+    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. Walrus writes queue, so this may return a job_id with the fact NOT yet saved — in that case say so rather than claiming it is stored, and resolve it with memwal_remember_status.";
 const SIGNED_OUT_RECALL =
     "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.";
 const SIGNED_IN_RECALL =
@@ -85,6 +85,22 @@ function buildToolDefinitions(proactive: boolean) {
                 namespace: { type: "string" },
             },
             required: ["facts"],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: "memwal_remember_status",
+        title: "Check a Remember Job",
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        description:
+            "Check whether an in-flight memwal_remember write has landed. Call this with the job_id memwal_remember returned when it reported the fact was NOT saved yet. Returns the blob_id once stored, reports that it is still uploading (call again), or reports that it failed \u2014 in which case the fact was never stored and you should send it again with memwal_remember.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                job_id: { type: "string", minLength: 1 },
+                waitMs: { type: "integer", minimum: 0, maximum: 60000, default: 10000 },
+            },
+            required: ["job_id"],
             additionalProperties: false,
         },
     },

@@ -33,6 +33,7 @@ import {
     loginSuccessNotification,
     type LoginSuccessInfo,
 } from "./messages.js";
+import { openStreamableSession, resolveTransport } from "./streamable.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
 /** Bridge mode runtime config — the URLs / label resolved at boot from
@@ -423,6 +424,12 @@ class RelayerUnauthorizedError extends Error {
 interface SseHandshakeResult {
     /** Absolute URL the client must POST to for outbound JSON-RPC messages. */
     postUrl: string;
+    /**
+     * Forward one message, resolving with the HTTP status. Same shape as the
+     * Streamable transport's `send`, so the forwarding path does not have to
+     * know which transport is underneath.
+     */
+    send: (msg: RpcMessage, creds: MemWalCredentials, extra: Record<string, string>) => Promise<number>;
     /** Per-line iterator for incoming SSE messages (already-parsed JSON-RPC). */
     iter: AsyncIterator<RpcMessage>;
     /** Abort + close the SSE stream. */
@@ -438,6 +445,28 @@ function mcpAuthHeaders(
         "x-memwal-account-id": creds.accountId,
         ...extra,
     };
+}
+
+/**
+ * Open a relayer session on the configured transport.
+ *
+ * `MEMWAL_MCP_TRANSPORT=http` dials the Streamable HTTP endpoint, which
+ * answers a call on the same request instead of splitting POST from reply.
+ * Default stays SSE until the new path has production mileage.
+ */
+async function openRelaySession(
+    relayerUrl: string,
+    creds: MemWalCredentials,
+    extraHeaders: Record<string, string> = {},
+): Promise<SseHandshakeResult> {
+    if (resolveTransport(process.env.MEMWAL_MCP_TRANSPORT) === "http") {
+        // `postUrl` is logging-only on this path; the session owns its
+        // endpoint. A plain cast, not `as unknown as` — the two shapes must
+        // stay structurally compatible, and a widening cast would hide it if
+        // they ever stopped being.
+        return (await openStreamableSession(relayerUrl, creds, extraHeaders)) as SseHandshakeResult;
+    }
+    return openSseStream(relayerUrl, creds, extraHeaders);
 }
 
 async function openSseStream(
@@ -712,6 +741,7 @@ async function openSseStream(
 
     return {
         postUrl,
+        send: (msg, sendCreds, extra) => postMessage(postUrl, msg, sendCreds, extra),
         iter,
         abort: () => {
             controller.abort();
@@ -1092,7 +1122,7 @@ export async function runBridge(
     }
     function postIfCurrent(
         epoch: number,
-        postUrl: string,
+        send: SseHandshakeResult["send"],
         msg: RpcMessage,
         postCreds: MemWalCredentials,
     ): Promise<number> {
@@ -1105,7 +1135,7 @@ export async function runBridge(
             const tracked = inFlight.get(msg.id);
             if (tracked) tracked.sent = true;
         }
-        return postMessage(postUrl, msg, postCreds, extraHeaders).then((status) => {
+        return send(msg, postCreds, extraHeaders).then((status) => {
             // 404 is the relayer saying that session does not exist, so the
             // message was discarded rather than routed: it provably did not
             // run, and the request goes back to being never-sent.
@@ -1334,7 +1364,7 @@ export async function runBridge(
                     // gone, so there is nothing to authorize a new session
                     // with. Belt-and-braces against `loggedOut` alone.
                     if (!openingCreds) break;
-                    const candidate = await openSseStream(
+                    const candidate = await openRelaySession(
                         openingCreds.relayerUrl,
                         openingCreds,
                         connectHeaders(),
@@ -1425,9 +1455,9 @@ export async function runBridge(
                                 expectSuppressedReply(msg.id);
                             }
                             const epoch = sessionEpoch;
-                            const postUrl = sse.postUrl;
+                            const send = sse.send;
                             const status = await enqueuePost(() =>
-                                postIfCurrent(epoch, postUrl, msg, openingCreds),
+                                postIfCurrent(epoch, send, msg, openingCreds),
                             );
                             log.info("bridge.replayed", { id, status });
                         } catch (err) {
@@ -1997,10 +2027,10 @@ export async function runBridge(
                     return;
                 }
                 const epoch = sessionEpoch;
-                const postUrl = sse.postUrl;
+                const send = sse.send;
                 const postCreds = creds;
                 const status = await enqueuePost(() =>
-                    postIfCurrent(epoch, postUrl, msg, postCreds),
+                    postIfCurrent(epoch, send, msg, postCreds),
                 );
                 if (status === 404) {
                     log.warn("bridge.session_stale", { sessionUrl: sse.postUrl });
@@ -2038,10 +2068,10 @@ export async function runBridge(
                 const msg = pendingForward.shift()!;
                 try {
                     const epoch = sessionEpoch;
-                    const postUrl = sse.postUrl;
+                    const send = sse.send;
                     const postCreds = creds;
                     const status = await enqueuePost(() =>
-                        postIfCurrent(epoch, postUrl, msg, postCreds),
+                        postIfCurrent(epoch, send, msg, postCreds),
                     );
                     if (status === 404) {
                         // Stale session right after connect. EVERY id-bearing
@@ -2403,7 +2433,7 @@ export async function runBridge(
             }
             const openingGeneration = credentialGeneration;
             try {
-                const candidate = await openSseStream(creds.relayerUrl, creds, connectHeaders());
+                const candidate = await openRelaySession(creds.relayerUrl, creds, connectHeaders());
                 if (stdinClosed) {
                     candidate.abort();
                     break;
