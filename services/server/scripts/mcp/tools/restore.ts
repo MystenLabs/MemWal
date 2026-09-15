@@ -43,19 +43,43 @@ export function formatRestoreResult(
 ): string {
     const truncated = result.truncated === true;
     const failed = result.failed ?? 0;
+    // Nothing was discovered for this namespace at all. `truncated` can still
+    // be true here, because the sidecar's candidate cap is owner-wide: blobs
+    // in OTHER namespaces can saturate it and `restore_is_truncated` then
+    // reports truncation while this namespace's page is empty
+    // (services/server/src/routes/admin.rs, the `limit < 20` arm).
+    //
+    // This must not claim blobs remain. Nothing has been seen that says so,
+    // and the namespace may simply be empty. Observed on 0.0.13-dev.6 as
+    // `total=0 restored=0 skipped=0 failed=0 truncated=true` followed by
+    // "More blobs remain to restore", which sends an agent looping on a
+    // namespace that has nothing in it.
+    const emptyPage = result.total === 0;
     // WALM-480: truncated + no success + uncounted blobs → transients
     // (download/embed blip). Raising limit does not fix that; retry does.
+    // Guarded on a non-empty page: with `total === 0` the comparison
+    // `skipped + failed < total` is `0 < 0`, so an empty page could never
+    // reach this branch and fell through to the "raise limit" one instead.
     const transientPage =
         truncated &&
+        !emptyPage &&
         result.restored === 0 &&
         result.skipped + failed < result.total;
     const hint = !truncated
-        ? "\n  truncated=false is not proof the sidecar saw every blob."
-        : transientPage
-          ? "\n  ⚠️ This page did not restore (download/embed blip) — retry the same limit."
-          : limit < SIDECAR_CAP_SATURATES_AT_LIMIT
-            ? "\n  ⚠️ More blobs remain to restore — increase limit and call again."
-            : "\n  ⚠️ Sidecar cap is saturated — truncation follows this call's missing-blob page; truncated is not completeness (WALM-451 sourceCapped).";
+        ? emptyPage
+            ? "\n  Nothing to restore — no blobs found on chain for this namespace."
+            : "\n  truncated=false is not proof the sidecar saw every blob."
+        : emptyPage
+          ? "\n  ⚠️ No blobs found for this namespace, but the sidecar's candidate cap " +
+            "(shared across all your namespaces) was reached, so it may not have looked here. " +
+            (limit < SIDECAR_CAP_SATURATES_AT_LIMIT
+                ? "Raise limit to widen the search. If it stays 0, the namespace is empty — check the spelling."
+                : "limit is already at the cap, so this namespace is almost certainly empty — check the spelling.")
+          : transientPage
+            ? "\n  ⚠️ This page did not restore (download/embed blip) — retry the same limit."
+            : limit < SIDECAR_CAP_SATURATES_AT_LIMIT
+              ? "\n  ⚠️ More blobs remain to restore — increase limit and call again."
+              : "\n  ⚠️ Sidecar cap is saturated — truncation follows this call's missing-blob page; truncated is not completeness (WALM-451 sourceCapped).";
     return (
         `${truncated ? "Restore partially complete" : "Restore page finished"} for namespace "${result.namespace}":\n` +
         `  total=${result.total}  restored=${result.restored}  skipped=${result.skipped}  failed=${failed}  truncated=${truncated}` +

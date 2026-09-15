@@ -549,6 +549,41 @@ fn should_reset_prepared_register(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Which phase of the durable upload one `/walrus/upload-step-v3` call performs.
+///
+/// Derived from the step being resumed FROM, plus whether a prepared register
+/// transaction is being carried, because those two together decide what the
+/// sidecar does on this hop. Used only as a metric label, so it must stay a
+/// small closed set — an unknown shape reports `other` rather than minting a
+/// new time series per input.
+///
+/// This exists because the durable path was the one write path with no
+/// `observe_external` at all: `walrus_upload` in this file only fires for the
+/// legacy route, and a tracked job always takes the durable one, so a
+/// `memwal_remember` spent its entire on-chain time in a hop nothing measured.
+/// Locating that cost took a wall clock and a log scrape.
+fn durable_upload_phase(
+    resume_step: Option<&serde_json::Value>,
+    register_transaction: Option<&PreparedRegisterTransaction>,
+) -> &'static str {
+    let step = resume_step
+        .and_then(|v| v.get("step"))
+        .and_then(|v| v.as_str());
+    match step {
+        None => "encode",
+        Some("encoded") => {
+            if register_transaction.is_some() {
+                "register_execute"
+            } else {
+                "register_prepare"
+            }
+        }
+        Some("registered") => "upload",
+        Some("uploaded") => "certify",
+        Some(_) => "other",
+    }
+}
+
 pub async fn advance_durable_upload(
     client: &reqwest::Client,
     sidecar_url: &str,
@@ -582,12 +617,44 @@ pub async fn advance_durable_upload(
     if let Some(secret) = sidecar_secret {
         req = req.header("authorization", format!("Bearer {}", secret));
     }
+    // One time series per hop. A `memwal_remember` makes five of these calls
+    // back to back and they are the bulk of its latency, so an aggregate over
+    // all of them would hide which hop is slow — which is the only question
+    // worth asking here.
+    let phase = durable_upload_phase(
+        journal.resume_step.as_ref(),
+        journal.register_transaction.as_ref(),
+    );
+    let operation = match phase {
+        "encode" => "walrus_upload_step_encode",
+        "register_prepare" => "walrus_upload_step_register_prepare",
+        "register_execute" => "walrus_upload_step_register_execute",
+        "upload" => "walrus_upload_step_upload",
+        "certify" => "walrus_upload_step_certify",
+        _ => "walrus_upload_step_other",
+    };
+    let started = std::time::Instant::now();
     let response = crate::observability::apply_request_id_header(req)
         .timeout(SIDECAR_WALRUS_TIMEOUT)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("durable Walrus upload request failed: {}", e)))?;
+        .map_err(|e| {
+            crate::observability::observe_external(
+                "sidecar",
+                operation,
+                "transport_error",
+                started.elapsed(),
+            );
+            crate::observability::record_sidecar_failure(operation, "transport_error");
+            AppError::Internal(format!("durable Walrus upload request failed: {}", e))
+        })?;
     let status = response.status();
+    crate::observability::observe_external(
+        "sidecar",
+        operation,
+        &status.as_u16().to_string(),
+        started.elapsed(),
+    );
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
         let error_code = serde_json::from_str::<DurableUploadErrorResponse>(&body)
@@ -1239,9 +1306,9 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_download_errors, is_valid_blob_id, register_transaction_for_resume,
-        should_reset_prepared_register, PreparedRegisterTransaction, QueryBlobsResponse,
-        WalrusUploadErrorResponse,
+        aggregate_download_errors, durable_upload_phase, is_valid_blob_id,
+        register_transaction_for_resume, should_reset_prepared_register,
+        PreparedRegisterTransaction, QueryBlobsResponse, WalrusUploadErrorResponse,
     };
     use crate::types::AppError;
 
@@ -1566,5 +1633,72 @@ mod tests {
             out.is_err(),
             "5xx must be Err (fail closed), never Ok(None)"
         );
+    }
+
+    /// The five hops of one `memwal_remember` must land in five distinct time
+    /// series, or the metric answers "the upload was slow" — which is what we
+    /// already knew — instead of "which hop".
+    #[test]
+    fn each_durable_upload_hop_is_labelled_separately() {
+        let encoded = serde_json::json!({ "step": "encoded" });
+        let registered = serde_json::json!({ "step": "registered" });
+        let uploaded = serde_json::json!({ "step": "uploaded" });
+
+        assert_eq!(durable_upload_phase(None, None), "encode");
+        assert_eq!(
+            durable_upload_phase(Some(&encoded), None),
+            "register_prepare"
+        );
+        assert_eq!(durable_upload_phase(Some(&registered), None), "upload");
+        assert_eq!(durable_upload_phase(Some(&uploaded), None), "certify");
+
+        let labels = [
+            durable_upload_phase(None, None),
+            durable_upload_phase(Some(&encoded), None),
+            durable_upload_phase(Some(&registered), None),
+            durable_upload_phase(Some(&uploaded), None),
+        ];
+        let unique: std::collections::HashSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "hops must not share a label");
+    }
+
+    /// `encoded` covers two different hops — preparing the register transaction
+    /// and executing it — and they cost different amounts. The carried prepared
+    /// transaction is what separates them.
+    #[test]
+    fn a_carried_register_transaction_separates_prepare_from_execute() {
+        let encoded = serde_json::json!({ "step": "encoded" });
+        let prepared = PreparedRegisterTransaction {
+            transaction_bytes: "AA".into(),
+            signature: "BB".into(),
+            digest: "CC".into(),
+            sponsor_digest: None,
+        };
+        assert_eq!(
+            durable_upload_phase(Some(&encoded), None),
+            "register_prepare"
+        );
+        assert_eq!(
+            durable_upload_phase(Some(&encoded), Some(&prepared)),
+            "register_execute"
+        );
+    }
+
+    /// A label is a metric dimension. An unrecognised or malformed step must
+    /// collapse to one bucket rather than mint a new time series per input.
+    #[test]
+    fn an_unknown_step_shape_cannot_grow_the_label_set() {
+        for value in [
+            serde_json::json!({ "step": "something_new" }),
+            serde_json::json!({ "step": 7 }),
+            serde_json::json!({ "notstep": "encoded" }),
+            serde_json::json!("encoded"),
+        ] {
+            let label = durable_upload_phase(Some(&value), None);
+            assert!(
+                label == "other" || label == "encode",
+                "unexpected label {label} for {value}"
+            );
+        }
     }
 }

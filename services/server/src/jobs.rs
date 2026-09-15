@@ -856,7 +856,15 @@ async fn insert_vector_and_mark_remember_done(
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    if let Err(e) = state
+    // The last leg of a `memwal_remember`, and the one that decides when the
+    // memory becomes findable: the `done` UPDATE below runs only after this
+    // insert commits, so until it does, `recall` cannot see the blob even
+    // though Walrus already holds it. A log scrape put ~8.5s between
+    // `certified` and `done`, of which `walrus_set_metadata_batch` accounts for
+    // ~3s; the rest was unmeasured. Time it so the remainder stops being a gap
+    // someone has to reconstruct from timestamps.
+    let insert_started = std::time::Instant::now();
+    let insert_result = state
         .db
         .insert_vector(
             &vector_id,
@@ -870,8 +878,13 @@ async fn insert_vector_and_mark_remember_done(
             package_id,
             end_epoch,
         )
-        .await
-    {
+        .await;
+    crate::observability::observe_db(
+        "insert_vector",
+        if insert_result.is_ok() { "ok" } else { "error" },
+        insert_started.elapsed(),
+    );
+    if let Err(e) = insert_result {
         let msg = format!("insert_vector failed: {}", e);
         let classified = WalletJobError::classify_sidecar_error(&msg);
         update_remember_job_after_wallet_error(state.db.pool(), remember_job_id, &classified, &msg)
