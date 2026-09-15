@@ -824,13 +824,15 @@ async function handleLocalLogin(
                 params: {
                     level: "warning",
                     logger: "memwal-mcp",
-                    // The last clause is only true because of the write-ahead
+                    // The reclaim is only possible because of the write-ahead
                     // record (WALM-332): a key the browser already paid to
-                    // register is no longer lost with the process.
+                    // register is no longer lost with the process. A retry
+                    // cannot help that key, since it reuses it and the
+                    // dashboard cannot register it twice.
                     data:
                         `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are ` +
-                        `unchanged; call memwal_login again to retry. If a delegate key was already ` +
-                        `registered on-chain, the next start reclaims it.`,
+                        `unchanged. If you approved the wallet step, the next start reclaims that ` +
+                        `key; otherwise call memwal_login again to retry.`,
                 },
             });
         },

@@ -326,7 +326,7 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
         const timer = setTimeout(() => {
             if (!creds) {
                 error = new Error(
-                    `Login timed out after ${cfg.timeoutMs}ms. If you already approved the wallet transaction, that delegate key is on disk and still usable: run login again and it is reused, or restart and it is reclaimed automatically. Only remove it from the dashboard if you mean to abandon it.`,
+                    `Login timed out after ${cfg.timeoutMs}ms. If you already approved the wallet transaction, that delegate key is saved on disk: the next start reclaims it, and running login again cannot register it a second time. Only remove it from the dashboard if you mean to abandon it.`,
                 );
                 server.close();
                 resolve();

@@ -194,8 +194,8 @@ export async function recoverPendingLogin(): Promise<RecoveryResult> {
     if (res.status !== 200 || !isWhoami(res.body)) {
         // `rejected` is reserved for the relayer actually denying this
         // identity, because that is the only outcome whose advice — sign in
-        // again, which reuses this key rather than minting over it; revoke it
-        // only to abandon it — is worth giving. During a transient upstream
+        // again, after removing the key from the dashboard if it was already
+        // registered — is worth giving. During a transient upstream
         // failure that advice is worse than silence: the key is still good, and
         // `unavailable` correctly says the next start retries it with no action
         // from the user.
@@ -248,9 +248,11 @@ export async function recoverPendingLogin(): Promise<RecoveryResult> {
 /**
  * The line to show the user when a stranded key could not be reclaimed.
  *
- * Names the key so the user can identify the registration they paid for:
- * signing in again reuses it, and revoking it from the dashboard is only for a
- * key they mean to abandon. A user told only "login failed" can do neither.
+ * Names the key so the user can find the registration they paid for in the
+ * dashboard. Signing in again reuses this key, and the dashboard's
+ * `add_delegate_key` aborts on one that is already registered, so a key the
+ * user approved has to be removed there before a new sign-in can finish. A
+ * user told only "login failed" can do neither.
  */
 export function formatStrandedLoginNotice(result: RecoveryResult): string | null {
     if (!result.strandedPublicKey) return null;
@@ -276,9 +278,11 @@ export function formatStrandedLoginNotice(result: RecoveryResult): string | null
         );
     } else {
         lines.push(
-            `The relayer did not accept it. Run \`memwal_login\` to sign in again; the`,
-            `same key is reused, so a registration you already paid for is not thrown`,
-            `away. Revoke it from the dashboard only if you don't recognise it.`,
+            `The relayer did not accept it. If you never approved the wallet step, run`,
+            `\`memwal_login\`: it reuses this key. If you did, remove the key above from`,
+            `the dashboard first and then run \`memwal_login\`, because the wallet step`,
+            `cannot register a key that is already there. This is expected on Testnet,`,
+            `where the relayer cannot confirm a registered key at start.`,
         );
     }
     return lines.join("\n");

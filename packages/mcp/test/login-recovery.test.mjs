@@ -168,6 +168,14 @@ test("a rejected key is reported but never deleted", async (t) => {
 
     const notice = formatStrandedLoginNotice(result);
     assert.match(notice, /22{10}/, "the notice names the key so it can be revoked");
+    // Signing in again reuses this key, and the dashboard's add_delegate_key
+    // aborts on one already registered, so that alone cannot recover an
+    // approved key.
+    assert.match(
+        notice,
+        /cannot\s+register a key that is already there/,
+        "must not promise that signing in again recovers a key the user approved",
+    );
 });
 
 test("an unreachable relayer keeps the record for a later attempt", async (t) => {
