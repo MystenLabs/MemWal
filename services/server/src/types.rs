@@ -211,6 +211,16 @@ pub struct AppState {
     /// id. Backs `GET /v1/owners/{owner}/agents` so repeated calls within
     /// the TTL window don't re-hit the chain.
     pub delegate_keys_cache: crate::storage::sui::DelegateKeysCache,
+    /// Short-TTL (`storage::sui::DELEGATE_VERIFY_CACHE_TTL`) in-memory
+    /// cache of successful delegate-key verifications, keyed by
+    /// `(account object id, public key)`. Shared by the signed-request
+    /// auth middleware and the MCP proxy so a burst of requests carrying
+    /// the same credentials costs one `GetObject` instead of one each
+    /// (WALM-618).
+    pub delegate_verify_cache: crate::storage::sui::DelegateVerifyCache,
+    pub delegate_reject_cache: crate::storage::sui::DelegateRejectCache,
+    /// In-flight MCP connect episodes, for `time_to_session`.
+    pub mcp_connect_episodes: crate::observability::McpConnectEpisodes,
     /// Alert dispatchers for operational notifications. Individual alert
     /// paths decide when failures are terminal enough to notify.
     pub alerts: Arc<AlertManager>,
