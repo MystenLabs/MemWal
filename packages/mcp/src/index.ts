@@ -230,7 +230,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
                 relayerUrl,
                 webUrl,
             });
-            await runStdioServer({ relayerUrl, webUrl, label, namespace });
+            await runStdioServer({
+                relayerUrl,
+                webUrl,
+                label,
+                namespace,
+                relayerOverride: args.relayerUrl,
+            });
             return;
         }
         // TTY = manual invocation. Block on the browser flow as before.
@@ -266,7 +272,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         return;
     }
 
-    await runStdioServer({ relayerUrl, webUrl, label, namespace });
+    await runStdioServer({
+        relayerUrl,
+        webUrl,
+        label,
+        namespace,
+        relayerOverride: args.relayerUrl,
+    });
 }
 
 function printHelp(): void {

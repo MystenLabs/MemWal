@@ -5,7 +5,7 @@
  * and logout dropping the in-process client (GH #616).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -30,7 +30,7 @@ function makeCreds(relayerUrl) {
     };
 }
 
-function startSession({ credsDir, createClient, namespace } = {}) {
+function startSession({ credsDir, createClient, namespace, relayerOverride } = {}) {
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     stdout.setEncoding("utf8");
@@ -93,6 +93,7 @@ function startSession({ credsDir, createClient, namespace } = {}) {
             webUrl: "http://127.0.0.1:9",
             label: "Test",
             namespace,
+            relayerOverride,
         },
         { stdin, stdout },
     );
@@ -289,6 +290,47 @@ test("logout drops the in-process client so a later recall never reaches the SDK
         assert.equal(after.result.isError, true);
         assert.equal(after.result.content[0].text, SIGNED_OUT_TEXT);
         assert.equal(stub.calls.filter((c) => c[0] === "recall").length, 1);
+    } finally {
+        await session.close();
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("--relayer override is used for this process and not written to the file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "memwal-sdk-override-"));
+    const saved = "https://relayer.memory.walrus.xyz";
+    const override = "http://127.0.0.1:8000";
+    writeFileSync(join(dir, "credentials.json"), JSON.stringify(makeCreds(saved)));
+    const seen = [];
+    const stub = stubClient();
+    const session = startSession({
+        credsDir: dir,
+        relayerOverride: override,
+        createClient: (creds) => {
+            seen.push(creds.relayerUrl);
+            return stub;
+        },
+    });
+    try {
+        session.send({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: { protocolVersion: "2024-11-05", capabilities: {} },
+        });
+        await session.waitId(1);
+        session.send({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "tools/call",
+            params: { name: "memwal_health", arguments: {} },
+        });
+        const health = await session.waitId(2);
+        assert.equal(health.result.isError, false);
+        assert.deepEqual(seen, [override]);
+        assert.match(health.result.content[0].text, new RegExp(`relayer=${override}`));
+        const onDisk = JSON.parse(readFileSync(join(dir, "credentials.json"), "utf8"));
+        assert.equal(onDisk.relayerUrl, saved);
     } finally {
         await session.close();
         rmSync(dir, { recursive: true, force: true });

@@ -45,6 +45,8 @@ export interface ServerConfig {
     webUrl: string;
     label: string;
     namespace?: string;
+    /** CLI `--relayer` / network preset. In-memory only; never persisted. */
+    relayerOverride?: string;
 }
 
 export interface ServerIo {
@@ -342,7 +344,7 @@ function handleLine(
             return;
         }
 
-        const client = getClient();
+        const client = getClient(config.relayerOverride);
         if (!client) {
             const body = signedOutLocally
                 ? SIGNED_OUT_TEXT
@@ -351,7 +353,8 @@ function handleLine(
             return;
         }
 
-        const relayerUrl = loadCreds()?.relayerUrl ?? config.relayerUrl;
+        const relayerUrl =
+            config.relayerOverride ?? loadCreds()?.relayerUrl ?? config.relayerUrl;
         void runMemoryTool(toolName, args, config.namespace, client, relayerUrl).then((result) => {
             toolResult(stdout, id, applyPendingLoginSuccess(result.text), result.isError);
         });

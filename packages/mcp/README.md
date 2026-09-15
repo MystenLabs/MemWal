@@ -115,8 +115,8 @@ the monorepo). To verify manually:
    (e.g. `other`) — it should **not** return the fact, proving the per-call
    value overrode the default.
 
-The injection itself is the pure, exported `applyDefaultNamespace(msg, ns)`
-function in `src/bridge.ts` if you want to assert it directly.
+The injection itself is the pure, exported `applyDefaultNamespace` in
+`src/namespace.ts` if you want to assert it directly.
 
 ## Environment Presets
 

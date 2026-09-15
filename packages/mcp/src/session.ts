@@ -101,17 +101,25 @@ export function dropClient(): void {
  * Return a live SDK client for the credentials currently on disk, or null
  * when the file is missing. Recreates the client when the file's key,
  * account, or relayer URL changes.
+ *
+ * `relayerOverride` is the CLI `--relayer` / `--dev` / `--local` URL. It
+ * applies to THIS process only and is never written back to the file
+ * (a flag in a pasted config must not retarget the saved seed).
  */
-export function getClient(): MemoryClient | null {
+export function getClient(relayerOverride?: string): MemoryClient | null {
     const creds = loadCreds();
     if (!creds) {
         dropClient();
         return null;
     }
-    if (cached && sameCreds(cached.creds, creds)) return cached.client;
+    const effective =
+        relayerOverride && relayerOverride !== creds.relayerUrl
+            ? { ...creds, relayerUrl: relayerOverride }
+            : creds;
+    if (cached && sameCreds(cached.creds, effective)) return cached.client;
     dropClient();
-    const client = factory(creds);
-    cached = { creds, client };
+    const client = factory(effective);
+    cached = { creds: effective, client };
     return client;
 }
 
