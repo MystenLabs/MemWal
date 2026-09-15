@@ -84,18 +84,10 @@ async fn generate_recall_embedding_cached(
 /// `text` (the ranker never reads text; manual recall never decrypts).
 ///
 /// The ranked output is mapped back to the original `SearchHit`s **by
-/// original index, not by `blob_id`**. `blob_id` is not unique
-/// (`vector_entries` has no UNIQUE constraint on it and `search_similar`
-/// does not `SELECT DISTINCT`, so `restore` can produce — and a query can
-/// return — multiple hits with the same blob_id). Keying the round-trip on
-/// blob_id would collapse those duplicates, silently dropping hits and
-/// reordering them — re-introducing the very manual-vs-non-manual
-/// divergence this fix removes (the non-manual paths keep duplicates 1:1).
-/// So we stash each hit's input index in the throwaway `HydratedMemory`'s
-/// `blob_id` slot — the ranker treats that field as opaque carry-through
-/// (it scores only distance/recency/importance) — and reorder the original
-/// `Vec<SearchHit>` by the ranked index sequence. Indices are unique, so no
-/// hit is dropped and `results.len() == hits.len()` always.
+/// original index, not by `blob_id`**. The ranker treats `blob_id` as
+/// opaque carry-through (it scores only distance/recency/importance), so
+/// we stash each hit's input index in that slot. Indices are unique, so a
+/// blob_id-keyed round-trip cannot drop hits and `results.len() == hits.len()`.
 ///
 /// At default weights `rank()` short-circuits, so the input (cosine) order
 /// is returned unchanged.
@@ -106,7 +98,7 @@ fn rank_search_hits(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<SearchHit> {
     // Carry the original index through the ranker via the (opaque-to-ranker)
-    // blob_id field, so we can reorder duplicate-blob_id hits unambiguously.
+    // blob_id field so reorder is unambiguous even if two hits share a blob_id.
     let hydrated: Vec<crate::engine::HydratedMemory> = hits
         .iter()
         .enumerate()
@@ -535,13 +527,8 @@ mod tests {
         assert_eq!(ranked[0].created_at, t_now() - chrono::Duration::days(7));
     }
 
-    /// Regression guard (deep-review blocker): `blob_id` is NOT
-    /// unique — `search_similar` can return multiple hits with the same
-    /// blob_id. A blob_id-keyed round-trip would collapse them, silently
-    /// dropping hits and reordering — re-introducing the manual-vs-non-manual
-    /// divergence this fix removes (the non-manual paths keep duplicates 1:1).
-    /// The index-based reorder must keep every hit. Tested at BOTH default
-    /// (short-circuit) and active weights.
+    /// Remap is by input index, not blob_id, so two hits sharing a blob_id
+    /// are both kept. Tested at default (short-circuit) and active weights.
     #[test]
     fn manual_ranking_keeps_duplicate_blob_ids() {
         use crate::services::extractor::{IMPORTANCE_TRIVIAL, IMPORTANCE_VITAL};
