@@ -168,11 +168,18 @@ Submit text as an encrypted memory job. The relayer returns after creating a bac
 ```json
 {
   "text": "User prefers dark mode",
-  "namespace": "demo"
+  "namespace": "demo",
+  "dedupe": true
 }
 ```
 
 `namespace` defaults to `"default"` if omitted and is limited to 255 UTF-8 bytes.
+
+`dedupe` is optional and defaults to `false`. Set it to `true` to skip a write you have already paid for: the relayer derives a key from `(owner, namespace, text)`, so remembering identical text a second time returns the original job instead of minting a second Walrus blob and a second embedding. Poll the returned `job_id` to get that job's `blob_id`. Dedupe is scoped to one owner and one namespace, and the same text in a different namespace is still a separate memory. If the original memory has since been deleted — by `POST /api/forget`, a security delete, or Walrus expiry — the write goes through as normal rather than silently succeeding against a memory that no longer exists.
+
+`idempotency_key` is optional and collapses retries of *one* request: reuse it and you get the original job back, but reuse it with different text and the relayer returns `409`. It is per-request de-duplication, where `dedupe` is per-content. When both are set, `dedupe` wins and the supplied key is ignored — the first-party SDKs generate a fresh key on every call, so honouring it would make the flag unreachable from them.
+
+Dedupe saves the Walrus write, the on-chain transfer, and the embedding call. It does not refund rate limit budget, which is charged before the handler runs.
 
 **Response:** `202 Accepted`
 

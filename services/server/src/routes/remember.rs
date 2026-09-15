@@ -774,15 +774,28 @@ pub async fn remember(
     let namespace_owned = namespace.clone();
     let text = body.text;
 
+    // `dedupe: true` derives the key from the content itself, so a second
+    // remember of identical text collapses onto the first job — and its blob —
+    // instead of paying for another Walrus write plus embedding call. Absent
+    // the flag this is just the caller's key, so default behaviour is unchanged.
+    let effective_key = effective_idempotency_key(
+        body.dedupe,
+        body.idempotency_key.as_deref(),
+        owner,
+        namespace,
+        &text,
+    );
+
     // Idempotent retry: if this owner already has a job under the same key,
     // return it instead of minting a new (paid) write. Insert-then-check under
     // the partial unique index (owner, idempotency_key) so two concurrent
     // requests with the same key can't both create a job — the loser's insert
     // conflicts and it reads back the winner's row.
     let fingerprint = request_fingerprint(&text, namespace);
-    if let Some(ref key) = body.idempotency_key {
+    if let Some(ref key) = effective_key {
         if let Some((existing_id, existing_status, existing_blob_id, existing_fingerprint)) =
-            find_remember_job_by_key(state.db.pool(), owner, key).await?
+            find_collapsible_remember_job(state.db.pool(), owner, namespace, key, body.dedupe)
+                .await?
         {
             // Same key, different content → the caller reused an idempotency key
             // for a different write. Reject rather than silently collapsing onto
@@ -910,8 +923,8 @@ pub async fn remember(
     .bind(&job_id)
     .bind(owner)
     .bind(namespace)
-    .bind(body.idempotency_key.as_deref())
-    .bind(body.idempotency_key.as_ref().map(|_| fingerprint.as_str()))
+    .bind(effective_key.as_deref())
+    .bind(effective_key.as_ref().map(|_| fingerprint.as_str()))
     .execute(state.db.pool())
     .await
     {
@@ -930,7 +943,7 @@ pub async fn remember(
     // Lost the race against a concurrent same-key request — return the winner's
     // job rather than spawning a duplicate write.
     if inserted.rows_affected() == 0 {
-        if let Some(key) = body.idempotency_key.as_deref() {
+        if let Some(key) = effective_key.as_deref() {
             if let Some((existing_id, existing_status, _blob_id, existing_fingerprint)) =
                 find_remember_job_by_key(state.db.pool(), owner, key).await?
             {
@@ -1181,6 +1194,124 @@ fn request_fingerprint(text: &str, namespace: &str) -> String {
     hasher.update([0u8]);
     hasher.update(namespace.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Stable content-derived idempotency key for an opt-in `dedupe` write, so a
+/// second `remember` of identical text collapses onto the first job instead of
+/// minting a second Walrus blob. Mirrors `/api/analyze`'s per-fact key.
+///
+/// The `dedupe:` prefix keeps derived keys in their own space: one can never be
+/// confused with an `analyze:` fact key over the same text, and a caller-
+/// supplied key would have to be hand-crafted to collide (which the fingerprint
+/// check below still catches as a 409, within that caller's own owner scope).
+/// `forget` NULLs this key, so a re-remember after delete is a fresh write
+/// rather than a silent no-op.
+fn content_dedupe_key(owner: &str, namespace: &str, text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{owner}\n{namespace}\n{text}").as_bytes());
+    format!("dedupe:{}", hex::encode(digest))
+}
+
+/// Which key this write is stored under. `dedupe` deliberately OVERRIDES a
+/// caller-supplied `idempotency_key`: both first-party SDKs mint a fresh random
+/// key on every call, so honouring the supplied key would leave the flag
+/// unreachable from every first-party client.
+fn effective_idempotency_key(
+    dedupe: bool,
+    supplied: Option<&str>,
+    owner: &str,
+    namespace: &str,
+    text: &str,
+) -> Option<String> {
+    if dedupe {
+        Some(content_dedupe_key(owner, namespace, text))
+    } else {
+        supplied.map(str::to_owned)
+    }
+}
+
+/// Whether a `dedupe` hit may only collapse once its memory is confirmed live.
+/// A completed job that minted a blob is the sole case: everything else is
+/// either still in flight or paid-but-not-indexed, where writing again would
+/// discard a blob the owner already paid for.
+fn dedupe_hit_needs_live_memory(status: &str, blob_id: Option<&str>) -> bool {
+    status == "done" && blob_id.is_some()
+}
+
+/// Is the memory a completed remember job produced still indexed? The vector
+/// row is keyed by the job id (see `insert_vector_and_mark_remember_done`).
+async fn remember_memory_is_live(
+    pool: &sqlx::PgPool,
+    job_id: &str,
+    owner: &str,
+    namespace: &str,
+) -> Result<bool, AppError> {
+    let row: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM vector_entries WHERE id = $1 AND owner = $2 AND namespace = $3",
+    )
+    .bind(job_id)
+    .bind(owner)
+    .bind(namespace)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to look up dedupe memory: {}", e)))?;
+    Ok(row.is_some())
+}
+
+/// Free a job's idempotency key so a fresh write can claim it. Mirrors the
+/// rewrite path in `/api/analyze`.
+async fn release_remember_idempotency_key(
+    pool: &sqlx::PgPool,
+    job_id: &str,
+    owner: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE remember_jobs SET idempotency_key = NULL, updated_at = NOW() WHERE id = $1 AND owner = $2",
+    )
+    .bind(job_id)
+    .bind(owner)
+    .execute(pool)
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to release dedupe key: {}", e)))?;
+    Ok(())
+}
+
+/// The job a keyed write should collapse onto, if any.
+///
+/// A `dedupe` write additionally requires a completed job to still HAVE its
+/// memory. `delete_by_blob_id` (reactive Walrus-expiry cleanup) and the
+/// security-delete path drop the vector row without clearing the job's
+/// idempotency key, so collapsing blindly would answer 202 for a memory that no
+/// longer exists and silently lose the write. Free the stale key instead and
+/// let the caller write fresh — the rule `/api/analyze` calls
+/// `RewriteForgotten`. Caller-supplied keys keep their existing semantics: a
+/// retry of the same request, live memory or not.
+async fn find_collapsible_remember_job(
+    pool: &sqlx::PgPool,
+    owner: &str,
+    namespace: &str,
+    key: &str,
+    dedupe: bool,
+) -> Result<Option<(String, String, Option<String>, Option<String>)>, AppError> {
+    let Some((job_id, status, blob_id, fingerprint)) =
+        find_remember_job_by_key(pool, owner, key).await?
+    else {
+        return Ok(None);
+    };
+    if dedupe
+        && dedupe_hit_needs_live_memory(&status, blob_id.as_deref())
+        && !remember_memory_is_live(pool, &job_id, owner, namespace).await?
+    {
+        release_remember_idempotency_key(pool, &job_id, owner).await?;
+        tracing::info!(
+            "remember dedupe rewrite (memory forgotten): job_id={} owner={} ns={}",
+            job_id,
+            owner,
+            namespace,
+        );
+        return Ok(None);
+    }
+    Ok(Some((job_id, status, blob_id, fingerprint)))
 }
 
 /// Look up an existing remember job for `(owner, idempotency_key)`. Returns
@@ -1539,16 +1670,18 @@ pub async fn remember_manual(
 mod tests {
     use super::{
         batch_summary_inputs, build_bulk_status_results, claim_remember_preparation,
-        find_remember_job_by_key, paid_recovery_operation, redact_hex_addresses,
-        request_fingerprint, sanitize_job_error_for_client, should_spawn_after_reset,
-        split_text_chunks, summarize_for_embedding, validate_idempotency_key,
-        INFRA_JOB_ERROR_MESSAGE, INFRA_JOB_RETRYING_MESSAGE, MAX_IDEMPOTENCY_KEY_BYTES,
-        MAX_REMEMBER_TEXT_BYTES, SUMMARIZE_BATCH_INPUT_BYTES, SUMMARIZE_CHUNK_BYTES,
+        content_dedupe_key, dedupe_hit_needs_live_memory, effective_idempotency_key,
+        find_collapsible_remember_job, find_remember_job_by_key, paid_recovery_operation,
+        redact_hex_addresses, remember_memory_is_live, request_fingerprint,
+        sanitize_job_error_for_client, should_spawn_after_reset, split_text_chunks,
+        summarize_for_embedding, validate_idempotency_key, INFRA_JOB_ERROR_MESSAGE,
+        INFRA_JOB_RETRYING_MESSAGE, MAX_IDEMPOTENCY_KEY_BYTES, MAX_REMEMBER_TEXT_BYTES,
+        SUMMARIZE_BATCH_INPUT_BYTES, SUMMARIZE_CHUNK_BYTES,
     };
     use crate::jobs::WalletOperation;
     use crate::types::AppError;
     use sqlx::postgres::PgPoolOptions;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
 
     // ── Idempotency key (GH #477) ────────────────────────────────
@@ -1876,6 +2009,322 @@ mod tests {
             .bind(&owner)
             .execute(&pool)
             .await;
+    }
+
+    // ── Opt-in content dedupe (WALM-412) ─────────────────────────
+
+    #[test]
+    fn content_dedupe_key_is_stable_and_owner_namespace_scoped() {
+        let a = content_dedupe_key("0xowner", "work", "likes rust");
+        let b = content_dedupe_key("0xowner", "work", "likes rust");
+        let other_text = content_dedupe_key("0xowner", "work", "likes go");
+        let other_owner = content_dedupe_key("0xother", "work", "likes rust");
+        let other_ns = content_dedupe_key("0xowner", "home", "likes rust");
+        assert_eq!(a, b, "identical content must derive the same key");
+        assert_ne!(a, other_text);
+        assert_ne!(a, other_owner, "dedupe must not cross owners");
+        assert_ne!(a, other_ns, "dedupe must not cross namespaces");
+    }
+
+    // Derived remember keys share the (owner, idempotency_key) index with
+    // /api/analyze's per-fact keys, so the prefix has to keep them apart: the
+    // same text stored via both routes must never collapse onto one job.
+    #[test]
+    fn content_dedupe_key_is_prefixed_out_of_the_analyze_key_space() {
+        let key = content_dedupe_key("0xowner", "work", "likes rust");
+        assert!(key.starts_with("dedupe:"));
+        assert!(!key.starts_with("analyze:"));
+        assert!(key.len() <= MAX_IDEMPOTENCY_KEY_BYTES);
+    }
+
+    // Precedence: `dedupe` wins over a supplied key. Both first-party SDKs mint
+    // a random idempotency key on every call, so any other rule would leave the
+    // flag unreachable from them.
+    #[test]
+    fn dedupe_overrides_a_supplied_idempotency_key() {
+        let derived = content_dedupe_key("0xowner", "ns", "text");
+        assert_eq!(
+            effective_idempotency_key(true, Some("client-key"), "0xowner", "ns", "text"),
+            Some(derived.clone())
+        );
+        assert_eq!(
+            effective_idempotency_key(true, None, "0xowner", "ns", "text"),
+            Some(derived)
+        );
+    }
+
+    // Default behaviour is byte-identical: without the flag the key is exactly
+    // what the caller sent (including nothing at all).
+    #[test]
+    fn without_dedupe_the_supplied_key_passes_through_untouched() {
+        assert_eq!(
+            effective_idempotency_key(false, Some("client-key"), "0xowner", "ns", "text"),
+            Some("client-key".to_string())
+        );
+        assert_eq!(
+            effective_idempotency_key(false, None, "0xowner", "ns", "text"),
+            None
+        );
+    }
+
+    // Only a completed, blob-minting job needs its memory checked. A paid-but-
+    // not-indexed row (`failed`/`uploaded` + blob) must collapse instead, or the
+    // rewrite would discard a blob the owner already paid for.
+    #[test]
+    fn only_a_done_job_with_a_blob_needs_a_liveness_check() {
+        assert!(dedupe_hit_needs_live_memory("done", Some("blob")));
+        assert!(!dedupe_hit_needs_live_memory("done", None));
+        assert!(!dedupe_hit_needs_live_memory("pending", None));
+        assert!(!dedupe_hit_needs_live_memory("uploaded", Some("blob")));
+        assert!(!dedupe_hit_needs_live_memory("failed", Some("blob")));
+        assert!(!dedupe_hit_needs_live_memory("failed", None));
+    }
+
+    // Serialises `CREATE EXTENSION IF NOT EXISTS vector` (001_init.sql) across
+    // the test threads in this module — Postgres does not make that statement
+    // safe under concurrency despite IF NOT EXISTS (two sessions can both pass
+    // the existence check before either commits, then collide on the unique
+    // index on pg_extension). Same pattern as `memory_read.rs`, `jobs.rs`, and
+    // `storage/db.rs`.
+    static DEDUPE_DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    /// `idem_test_pool` plus the `vector_entries` schema — the dedupe liveness
+    /// guard reads both tables.
+    async fn dedupe_test_pool() -> sqlx::PgPool {
+        let pool = idem_test_pool().await;
+        let _guard = DEDUPE_DB_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        for migration in [
+            include_str!("../../migrations/001_init.sql"),
+            include_str!("../../migrations/002_add_namespace.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    /// The vector row a finished remember job leaves behind. Its id is the job
+    /// id (see `insert_vector_and_mark_remember_done`), which is what the
+    /// liveness guard looks up.
+    async fn seed_live_memory(pool: &sqlx::PgPool, job_id: &str, owner: &str, namespace: &str) {
+        sqlx::query(
+            "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(job_id)
+        .bind(owner)
+        .bind(namespace)
+        .bind(format!("blob-{job_id}"))
+        .bind(pgvector::Vector::from(vec![0.0_f32; 1536]))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn cleanup_dedupe_owner(pool: &sqlx::PgPool, owner: &str) {
+        let _ = sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(owner)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
+            .bind(owner)
+            .execute(pool)
+            .await;
+    }
+
+    // The point of the flag: a second remember of identical text finds the
+    // first job — and therefore its blob_id — instead of minting a second one.
+    #[tokio::test]
+    async fn dedupe_collapses_identical_text_onto_the_live_job() {
+        let pool = dedupe_test_pool().await;
+        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        let text = "user prefers dark mode";
+        let key = content_dedupe_key(&owner, "ns", text);
+
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, blob_id, request_fingerprint) VALUES ($1, $2, 'ns', 'done', $3, 'blob-1', $4)",
+        )
+        .bind(&job_id)
+        .bind(&owner)
+        .bind(&key)
+        .bind(request_fingerprint(text, "ns"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_live_memory(&pool, &job_id, &owner, "ns").await;
+
+        // The second request derives the same key and collapses onto the job.
+        assert_eq!(
+            effective_idempotency_key(true, None, &owner, "ns", text),
+            Some(key.clone())
+        );
+        let collapsed = find_collapsible_remember_job(&pool, &owner, "ns", &key, true)
+            .await
+            .unwrap()
+            .expect("a live dedupe hit collapses onto the original job");
+        assert_eq!(collapsed.0, job_id);
+        assert_eq!(collapsed.1, "done");
+        assert_eq!(collapsed.2.as_deref(), Some("blob-1"));
+
+        // ...and the insert the non-collapsing path would run is a no-op, so no
+        // second Walrus write can be spawned behind our back.
+        let dup = sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key) VALUES ($1, $2, 'ns', 'pending', $3)
+             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+        )
+        .bind(format!("remember-job-{}", uuid::Uuid::new_v4()))
+        .bind(&owner)
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(dup.rows_affected(), 0, "dedupe must not mint a second blob");
+
+        cleanup_dedupe_owner(&pool, &owner).await;
+    }
+
+    // Walrus-expiry cleanup (`delete_by_blob_id`) and security delete drop the
+    // vector row without clearing the job's key. Collapsing onto such a row
+    // would report success for a memory that no longer exists, so the guard
+    // frees the key and the write starts over.
+    #[tokio::test]
+    async fn dedupe_rewrites_when_the_memory_was_forgotten() {
+        let pool = dedupe_test_pool().await;
+        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        let text = "user prefers dark mode";
+        let key = content_dedupe_key(&owner, "ns", text);
+
+        // done + blob, but the vector row is gone.
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, blob_id, request_fingerprint) VALUES ($1, $2, 'ns', 'done', $3, 'blob-1', $4)",
+        )
+        .bind(&job_id)
+        .bind(&owner)
+        .bind(&key)
+        .bind(request_fingerprint(text, "ns"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            find_collapsible_remember_job(&pool, &owner, "ns", &key, true)
+                .await
+                .unwrap()
+                .is_none(),
+            "a forgotten memory must not swallow the write"
+        );
+
+        // The stale key was released, so the fresh write claims it cleanly.
+        let stale_key: Option<String> =
+            sqlx::query_scalar("SELECT idempotency_key FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stale_key, None);
+        let rewritten = sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key) VALUES ($1, $2, 'ns', 'pending', $3)
+             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+        )
+        .bind(format!("remember-job-{}", uuid::Uuid::new_v4()))
+        .bind(&owner)
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rewritten.rows_affected(), 1, "the rewrite must land");
+
+        cleanup_dedupe_owner(&pool, &owner).await;
+    }
+
+    // A caller-supplied key is a retry of the same request, not a dedupe
+    // request: it keeps collapsing whether or not the memory is still live.
+    #[tokio::test]
+    async fn a_supplied_key_still_collapses_onto_a_forgotten_job() {
+        let pool = dedupe_test_pool().await;
+        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        let key = "client-key-1";
+
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, blob_id) VALUES ($1, $2, 'ns', 'done', $3, 'blob-1')",
+        )
+        .bind(&job_id)
+        .bind(&owner)
+        .bind(key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let collapsed = find_collapsible_remember_job(&pool, &owner, "ns", key, false)
+            .await
+            .unwrap()
+            .expect("supplied-key retries keep their existing semantics");
+        assert_eq!(collapsed.0, job_id);
+
+        cleanup_dedupe_owner(&pool, &owner).await;
+    }
+
+    // Default behaviour unchanged: with the flag off, the same text twice is
+    // still two independent (paid) writes.
+    #[tokio::test]
+    async fn identical_text_without_dedupe_still_writes_twice() {
+        let pool = idem_test_pool().await;
+        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
+        for _ in 0..2 {
+            let key = effective_idempotency_key(false, None, &owner, "ns", "same text");
+            assert!(key.is_none(), "no flag, no key — writes stay independent");
+            sqlx::query(
+                "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key) VALUES ($1, $2, 'ns', 'pending', $3)
+                 ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+            )
+            .bind(format!("remember-job-{}", uuid::Uuid::new_v4()))
+            .bind(&owner)
+            .bind(key.as_deref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let n: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM remember_jobs WHERE owner = $1")
+            .bind(&owner)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n.0, 2, "dedupe must stay strictly opt-in");
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    // The guard is scoped like every other memory read: another owner's or
+    // another namespace's row must never count as "still live".
+    #[tokio::test]
+    async fn remember_memory_is_live_is_owner_and_namespace_scoped() {
+        let pool = dedupe_test_pool().await;
+        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
+        let other_owner = format!("0xother-{}", uuid::Uuid::new_v4());
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        seed_live_memory(&pool, &job_id, &owner, "ns").await;
+
+        assert!(remember_memory_is_live(&pool, &job_id, &owner, "ns")
+            .await
+            .unwrap());
+        assert!(!remember_memory_is_live(&pool, &job_id, &other_owner, "ns")
+            .await
+            .unwrap());
+        assert!(!remember_memory_is_live(&pool, &job_id, &owner, "other-ns")
+            .await
+            .unwrap());
+        assert!(!remember_memory_is_live(&pool, "no-such-job", &owner, "ns")
+            .await
+            .unwrap());
+
+        cleanup_dedupe_owner(&pool, &owner).await;
     }
 
     // GH #477 RC-5: a same-key retry of a FAILED job restarts it in place rather
