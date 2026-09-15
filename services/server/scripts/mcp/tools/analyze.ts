@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
+import { REMEMBER_POLL_INTERVAL_MS } from "./remember-wait.js";
 
 const ANALYZE_INPUT = {
     text: z
@@ -39,6 +40,11 @@ export function registerAnalyzeTool(
         wrapTool<{ text: string; namespace?: string }>(session, "memwal_analyze", async ({ text, namespace }) => {
             const result = await session.memwal.analyzeAndWait(text, namespace, {
                 timeoutMs: 180_000,
+                // Same reasoning as `memwal_remember_bulk`: this tool blocks to
+                // terminal, so the SDK's 10s backoff ceiling is dead time added
+                // to every extraction. The budget here is the longest of the
+                // three, which is exactly where that ceiling hurts most.
+                pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
             });
             const lines = result.results.map(
                 (r, i) =>

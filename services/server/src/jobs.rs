@@ -521,6 +521,13 @@ pub(crate) async fn execute_wallet_job(
                     .into_apalis_error());
                 }
             };
+            // Mark this wallet busy for the rest of the attempt, so a
+            // concurrently-enqueued job picks an idle wallet instead of
+            // queueing behind this upload. Held by guard rather than paired
+            // calls because every return below — and there are many — has to
+            // release it.
+            let _wallet_slot = state.key_pool.begin_attempt(wallet_index);
+
             if wallet_index != enqueued_wallet_index || attempt_info.current > 1 {
                 tracing::info!(
                     "[wallet-job:upload] selected wallet for attempt: enqueued={} executing={} attempt={}/{}",
