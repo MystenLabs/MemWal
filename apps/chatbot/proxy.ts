@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { guestRegex } from "./lib/constants";
+import { guestReturnPath, publicRequestUrl } from "./lib/public-request-url";
 import { getSessionToken } from "./lib/session-token";
 
 export async function proxy(request: NextRequest) {
@@ -20,17 +21,20 @@ export async function proxy(request: NextRequest) {
   const token = await getSessionToken(request);
 
   if (!token) {
-    const redirectUrl = encodeURIComponent(request.url);
+    const redirectUrl = encodeURIComponent(guestReturnPath(request));
 
     return NextResponse.redirect(
-      new URL(`/api/auth/guest?redirectUrl=${redirectUrl}`, request.url)
+      new URL(
+        `/api/auth/guest?redirectUrl=${redirectUrl}`,
+        publicRequestUrl(request)
+      )
     );
   }
 
   const isGuest = guestRegex.test(token?.email ?? "");
 
   if (token && !isGuest && ["/login", "/register"].includes(pathname)) {
-    return NextResponse.redirect(new URL("/", request.url));
+    return NextResponse.redirect(new URL("/", publicRequestUrl(request)));
   }
 
   return NextResponse.next();

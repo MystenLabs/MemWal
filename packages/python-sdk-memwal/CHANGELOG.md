@@ -1,5 +1,11 @@
 # memwal
 
+## 0.1.10
+
+### Added
+
+- `restore()` results include `failed` (default `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
+
 ## 0.1.9
 
 ### Fixed

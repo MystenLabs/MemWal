@@ -115,6 +115,29 @@ static ERRORS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("register memwal_errors_total")
 });
 
+static MCP_HANDSHAKE_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "memwal_mcp_handshake_total",
+        "MCP handshake attempts by route and outcome and, when refused, why.",
+        &["route", "outcome", "reason"]
+    )
+    .expect("register memwal_mcp_handshake_total")
+});
+
+static MCP_TIME_TO_SESSION_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    prometheus::register_histogram!(HistogramOpts::new(
+        "memwal_mcp_time_to_session_seconds",
+        "Wall-clock from a client's first handshake attempt to the one that \
+         succeeded, keyed by its connect-episode id. This is the number a user \
+         experiences as \"nothing is happening\": no single request is slow, so \
+         the per-request latency histogram cannot show it."
+    )
+    .buckets(vec![
+        0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0
+    ]))
+    .expect("register memwal_mcp_time_to_session_seconds")
+});
+
 static RATE_LIMIT_DENIALS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     prometheus::register_int_counter_vec!(
         "memwal_rate_limit_denials_total",
@@ -588,6 +611,148 @@ pub fn record_app_error(kind: &'static str) {
     ERRORS_TOTAL.with_label_values(&[kind, &route]).inc();
 }
 
+// ── Refusal log sampling ────────────────────────────────────────────
+//
+// `/api/mcp/*` has no rate limit ahead of it and a stuck client retries
+// forever, so one log line per refusal is one log line per retry — the
+// 784,627 × 401 this PR measures would have become 784,627 warn lines.
+// The counter is the always-on signal; the line is a sample carrying the
+// detail a counter cannot (which account, which client, which reason).
+
+/// At most one refusal line per account per window.
+pub const MCP_REFUSAL_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Bounded for the usual reason: the key is a caller-supplied header. At the
+/// cap we stop tracking new accounts and simply do not log them — the metric
+/// still counts every refusal, so nothing is lost that a dashboard needs.
+pub const MCP_REFUSAL_LOG_MAX_ACCOUNTS: usize = 4_096;
+
+static MCP_REFUSAL_LOG_SEEN: LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Whether this refusal should be written out, given what was logged before.
+/// Pure given the map, so the policy is unit-testable.
+pub fn should_log_refusal_at(
+    seen: &mut std::collections::HashMap<String, std::time::Instant>,
+    account: &str,
+    now: std::time::Instant,
+) -> bool {
+    match seen.get(account) {
+        Some(last) if now.duration_since(*last) < MCP_REFUSAL_LOG_INTERVAL => false,
+        Some(_) => {
+            seen.insert(account.to_string(), now);
+            true
+        }
+        None => {
+            // Expire on insert: this map is only written on the sampled path,
+            // so it is cheap, and it keeps an idle account from holding a slot.
+            if seen.len() >= MCP_REFUSAL_LOG_MAX_ACCOUNTS {
+                seen.retain(|_, last| now.duration_since(*last) < MCP_REFUSAL_LOG_INTERVAL);
+            }
+            if seen.len() >= MCP_REFUSAL_LOG_MAX_ACCOUNTS {
+                return false;
+            }
+            seen.insert(account.to_string(), now);
+            true
+        }
+    }
+}
+
+pub fn should_log_refusal(account: &str) -> bool {
+    let Ok(mut seen) = MCP_REFUSAL_LOG_SEEN.lock() else {
+        return false;
+    };
+    should_log_refusal_at(&mut seen, account, std::time::Instant::now())
+}
+
+static MCP_STALE_SERVE_LOG_SEEN: LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Whether this stale-grace serve should be written out.
+///
+/// Same policy and same window as the refusal line, and for the same reason:
+/// it fires on the hot path (every signed request and every MCP envelope) and
+/// fires *hardest* during a Sui outage, when many requests fall past the TTL
+/// at once — the 155,874 x 503 shape this PR measures. One line per request
+/// there is the same unbounded repetition the refusal sampler was added to
+/// stop.
+///
+/// Its own map, though. An account being refused must not suppress the very
+/// different fact that it is being authenticated from a stale verification,
+/// and vice versa — sharing one map would let either hide the other.
+pub fn should_log_stale_serve(account: &str) -> bool {
+    let Ok(mut seen) = MCP_STALE_SERVE_LOG_SEEN.lock() else {
+        return false;
+    };
+    should_log_refusal_at(&mut seen, account, std::time::Instant::now())
+}
+
+/// Drop sampler entries that have aged out of their window.
+///
+/// Both maps already expire on insert, but only once they reach the cap, so
+/// an account that was noisy an hour ago holds its slot until some unrelated
+/// overflow reclaims it. Every other per-account map this service keeps is
+/// swept periodically; this makes these two consistent with them. Returns how
+/// many entries were dropped, for the sweep log.
+pub fn sweep_log_samplers() -> usize {
+    let now = std::time::Instant::now();
+    let mut evicted = 0;
+    for map in [&*MCP_REFUSAL_LOG_SEEN, &*MCP_STALE_SERVE_LOG_SEEN] {
+        let Ok(mut seen) = map.lock() else { continue };
+        let before = seen.len();
+        seen.retain(|_, last| now.duration_since(*last) < MCP_REFUSAL_LOG_INTERVAL);
+        evicted += before - seen.len();
+    }
+    evicted
+}
+
+// ── MCP connect episodes ────────────────────────────────────────────
+//
+// State for `time_to_session`. Lives here rather than in `mcp_proxy`
+// because `AppState` is in the library crate and `mcp_proxy` is not.
+
+/// Longest an unfinished connect episode is remembered. A client that gives
+/// up, or is killed, leaves an entry behind; past this it is swept. Also the
+/// ceiling on any single `time_to_session` observation.
+pub const MCP_CONNECT_EPISODE_TTL: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// Hard ceiling on tracked episodes, for the same reason the rejection cache
+/// has one: the key comes from the caller. At the cap new episodes are simply
+/// not timed — the metric loses samples, nothing else degrades.
+pub const MCP_CONNECT_EPISODE_MAX: usize = 4_096;
+
+pub type McpConnectEpisodes =
+    std::sync::Arc<tokio::sync::RwLock<HashMap<String, std::time::Instant>>>;
+
+pub fn new_mcp_connect_episodes() -> McpConnectEpisodes {
+    std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new()))
+}
+
+pub fn connect_episode_is_fresh(started: std::time::Instant) -> bool {
+    started.elapsed() < MCP_CONNECT_EPISODE_TTL
+}
+
+/// Count one MCP handshake. `reason` is `"none"` on success — Prometheus
+/// label sets must be uniform, and an empty string reads as missing data.
+///
+/// `route` names the `/api/mcp/*` entry point. Without it the SSE refusal
+/// ratio cannot be read at all: `classify_and_resolve` runs on the handshake
+/// *and* on every JSON-RPC envelope, so one live session's POSTs outnumber
+/// the GET this metric exists to measure.
+pub fn record_mcp_handshake(route: &str, outcome: &str, reason: &str) {
+    MCP_HANDSHAKE_TOTAL
+        .with_label_values(&[route, outcome, reason])
+        .inc();
+}
+
+/// Record how long a client spent getting a session. Only called on the
+/// attempt that succeeded, so the histogram counts episodes, not requests.
+pub fn record_mcp_time_to_session(elapsed: std::time::Duration) {
+    MCP_TIME_TO_SESSION_SECONDS.observe(elapsed.as_secs_f64());
+}
+
 pub fn record_rate_limit_denial(bucket: &str) {
     let route = current_route();
     RATE_LIMIT_DENIALS_TOTAL
@@ -781,6 +946,105 @@ mod tests {
                 "/v1/logs",
             ),
             "http://openobserve:5080/api/default/v1/logs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod refusal_log_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_refusal_and_a_stale_serve_do_not_share_a_sampling_slot() {
+        // Same policy, same window, deliberately different maps. They report
+        // unrelated things — "this key was refused" versus "this key is being
+        // authenticated from a verification we could not refresh" — and an
+        // account in trouble tends to produce both. One map would let
+        // whichever fired first silence the other for the whole window, which
+        // is exactly the attribution problem this PR set out to fix.
+        let account = "0xsampler-independence-probe";
+        assert!(
+            should_log_refusal(account),
+            "first refusal for this account must be written"
+        );
+        assert!(
+            should_log_stale_serve(account),
+            "the stale-serve line must not be suppressed by the refusal that just fired"
+        );
+        assert!(
+            !should_log_stale_serve(account),
+            "but it is still sampled within its own window"
+        );
+        // Fresh entries are never swept, so this is deterministic regardless
+        // of what else ran before it.
+        assert_eq!(
+            sweep_log_samplers(),
+            0,
+            "entries inside the window must survive the periodic sweep"
+        );
+    }
+
+    #[test]
+    fn one_account_is_logged_once_per_window_however_hard_it_retries() {
+        // The reason this exists: `/api/mcp/*` has no rate limit in front of
+        // it and a stuck client retries forever, so an unsampled line is one
+        // line per retry — 784,627 of them in the window this PR measures.
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+        assert!(should_log_refusal_at(&mut seen, "0xacct", t0));
+        for i in 1..100 {
+            assert!(
+                !should_log_refusal_at(&mut seen, "0xacct", t0 + Duration::from_millis(i * 500)),
+                "retry {i} must not produce a second line inside the window"
+            );
+        }
+        assert!(should_log_refusal_at(
+            &mut seen,
+            "0xacct",
+            t0 + MCP_REFUSAL_LOG_INTERVAL + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn accounts_are_sampled_independently() {
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+        assert!(should_log_refusal_at(&mut seen, "0xdio", t0));
+        assert!(
+            should_log_refusal_at(&mut seen, "0xteo", t0),
+            "one noisy account must not silence everyone else"
+        );
+    }
+
+    #[test]
+    fn the_sampling_map_cannot_be_grown_without_bound() {
+        // Keyed by an unauthenticated header, so the cap matters. Past it we
+        // stop logging new accounts; the counter still counts every refusal.
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+        for i in 0..MCP_REFUSAL_LOG_MAX_ACCOUNTS {
+            assert!(should_log_refusal_at(&mut seen, &format!("0x{i}"), t0));
+        }
+        assert!(
+            !should_log_refusal_at(&mut seen, "0xoverflow", t0),
+            "at the cap a new account is counted but not logged"
+        );
+        assert_eq!(seen.len(), MCP_REFUSAL_LOG_MAX_ACCOUNTS);
+    }
+
+    #[test]
+    fn expired_accounts_free_their_slot_for_a_new_one() {
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+        for i in 0..MCP_REFUSAL_LOG_MAX_ACCOUNTS {
+            assert!(should_log_refusal_at(&mut seen, &format!("0x{i}"), t0));
+        }
+        let later = t0 + MCP_REFUSAL_LOG_INTERVAL + Duration::from_secs(1);
+        assert!(
+            should_log_refusal_at(&mut seen, "0xoverflow", later),
+            "once the old entries age out the cap must not stay wedged"
         );
     }
 }

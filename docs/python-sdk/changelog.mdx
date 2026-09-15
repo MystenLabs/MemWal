@@ -29,12 +29,20 @@ questions:
   - What changes were made in memwal 0.1.4?
   - Where can I find the release history for the Walrus Memory Python SDK?
 answer: >-
-  The latest Python SDK release is 0.1.9. It reports HTTP 503 as a retryable upstream outage instead of a credential failure, rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`, aligns restore `truncated` docs with WALM-431 retryable semantics, and warns when `server_url` uses plaintext HTTP on a non-localhost host without logging URL credentials. 0.1.8 added `dropped_count` on recall results, `write_ready` on health, `MemWalClockDriftError` for clock-drift 401s, and the `dev` relayer preset.
+  The latest Python SDK release is 0.1.10. `restore()` results include `failed` (default `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. 0.1.9 reports HTTP 503 as a retryable upstream outage instead of a credential failure, rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`, aligns restore `truncated` docs with WALM-431 retryable semantics, and warns when `server_url` uses plaintext HTTP on a non-localhost host without logging URL credentials.
 ---
 
 Track what's new, changed, and fixed in `memwal` (Python).
 
 For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
+
+## 0.1.10
+
+This release adds `failed` on `restore()` results for permanent decrypt and UTF-8 failures.
+
+### Added
+
+- `restore()` results include `failed` (default `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ## 0.1.9
 

@@ -34,6 +34,8 @@ jobs:
             script: scripts/check-docs-freshness.mjs
           - name: SEAL cross-account synthetic parser
             script: scripts/synthetic-seal-cross-account.test.mjs
+          - name: Migration / Completion artifact
+            script: scripts/write-migration-completion-artifact.mjs --self-test
 
     steps:
       - uses: actions/checkout@v4

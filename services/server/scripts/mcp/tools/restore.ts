@@ -36,19 +36,29 @@ export function formatRestoreResult(
         total: number;
         restored: number;
         skipped: number;
+        failed?: number;
         truncated?: boolean;
     },
     limit = 10,
 ): string {
     const truncated = result.truncated === true;
+    const failed = result.failed ?? 0;
+    // WALM-480: truncated + no success + uncounted blobs → transients
+    // (download/embed blip). Raising limit does not fix that; retry does.
+    const transientPage =
+        truncated &&
+        result.restored === 0 &&
+        result.skipped + failed < result.total;
     const hint = !truncated
         ? "\n  truncated=false is not proof the sidecar saw every blob."
-        : limit < SIDECAR_CAP_SATURATES_AT_LIMIT
-          ? "\n  ⚠️ More blobs remain to restore — increase limit and call again."
-          : "\n  ⚠️ Sidecar cap is saturated — truncation follows this call's missing-blob page; truncated is not completeness (WALM-451 sourceCapped).";
+        : transientPage
+          ? "\n  ⚠️ This page did not restore (download/embed blip) — retry the same limit."
+          : limit < SIDECAR_CAP_SATURATES_AT_LIMIT
+            ? "\n  ⚠️ More blobs remain to restore — increase limit and call again."
+            : "\n  ⚠️ Sidecar cap is saturated — truncation follows this call's missing-blob page; truncated is not completeness (WALM-451 sourceCapped).";
     return (
         `${truncated ? "Restore partially complete" : "Restore page finished"} for namespace "${result.namespace}":\n` +
-        `  total=${result.total}  restored=${result.restored}  skipped=${result.skipped}  truncated=${truncated}` +
+        `  total=${result.total}  restored=${result.restored}  skipped=${result.skipped}  failed=${failed}  truncated=${truncated}` +
         hint
     );
 }
@@ -62,7 +72,7 @@ export function registerRestoreTool(
         {
             ...TOOL_METADATA.memwal_restore,
             description:
-                "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns counts plus truncated status — does not return memory texts. truncated=true is known-retryable-incomplete: raising limit expands the sidecar cap only while limit < 20; after the cap saturates, truncation follows this call's missing-blob page. truncated=false is not completeness; WALM-451 will add sourceCapped. Call memwal_recall afterwards to query the rebuilt index.",
+                "Recovery tool. Re-index a namespace from Walrus blobs back into the relayer's search index — use when memwal_recall unexpectedly returns nothing even though facts were saved before (e.g. on a new machine, a fresh relayer, or after switching servers). Returns restored/skipped/failed/total plus truncated — does not return memory texts. truncated=true is known-retryable-incomplete: retry the same limit on a download/embed blip; raising limit expands the sidecar cap only while limit < 20; after the cap saturates, truncation follows this call's missing-blob page. truncated=false is not completeness; WALM-451 will add sourceCapped. Call memwal_recall afterwards to query the rebuilt index.",
             inputSchema: RESTORE_INPUT,
         },
         wrapTool<{ namespace: string; limit: number }>(session, "memwal_restore", async ({ namespace, limit }) => {
