@@ -1139,6 +1139,25 @@ async fn main() {
         tracing::warn!("  Walrus upload: no Sui private keys configured, uploads will fail");
     }
 
+    // Resolved once and shared by the Apalis worker count and the advisory-lock
+    // pool below, so the two cannot disagree. Logged because the effective value
+    // is otherwise invisible: it comes either from the env or from the wallet
+    // count, and operators need to see which.
+    let wallet_job_concurrency = types::wallet_job_concurrency_from_env(pool_size);
+    tracing::info!(
+        "  Wallet jobs: concurrency {} ({} upload wallet(s))",
+        wallet_job_concurrency,
+        pool_size,
+    );
+    if pool_size > 0 && wallet_job_concurrency > pool_size {
+        tracing::warn!(
+            "  Wallet jobs: concurrency {} exceeds the {} upload wallet(s); the sidecar \
+             allows one upload per wallet, so the extra jobs only queue on its semaphore",
+            wallet_job_concurrency,
+            pool_size,
+        );
+    }
+
     // Build wallet key holder.
     // `Arc` so the MemoryEngine impl's store_blob draws from the same pool.
     // clone so handlers + the engine share one holder.
@@ -1366,12 +1385,9 @@ async fn main() {
     // Shared application state
     // Dedicated pool for per-job upload advisory locks (see AppState docs). Sized
     // to the wallet-job concurrency (+1 headroom) so every concurrent upload can
-    // hold its own lock connection without touching the request-serving pool. Read
-    // WALLET_JOB_CONCURRENCY here independently of the worker registration below.
-    let wallet_lock_pool_size = std::env::var("WALLET_JOB_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(8)
+    // hold its own lock connection without touching the request-serving pool.
+    let wallet_lock_pool_size = u32::try_from(wallet_job_concurrency)
+        .unwrap_or(u32::MAX)
         .saturating_add(1)
         .max(2);
     let wallet_lock_pool = sqlx::postgres::PgPoolOptions::new()
@@ -1587,13 +1603,10 @@ async fn main() {
 
     // Worker 4: WalletJob — single worker, single queue.
     //
-    // Concurrency = WALLET_JOB_CONCURRENCY (default 8). Multiple jobs can be
-    // dispatched simultaneously against the same wallet; transient Sui/RPC
-    // conflicts are classified by `WalletJobError` and retried by Apalis.
-    let wallet_concurrency: usize = std::env::var("WALLET_JOB_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8);
+    // Concurrency = `wallet_job_concurrency`, resolved once above. Multiple jobs
+    // can be dispatched simultaneously against the same wallet; transient
+    // Sui/RPC conflicts are classified by `WalletJobError` and retried by Apalis.
+    let wallet_concurrency = wallet_job_concurrency;
     {
         let worker_state = state.clone();
         let storage = wallet_storage.clone();
