@@ -7,6 +7,8 @@ import {
     REMEMBER_POLL_INTERVAL_MS,
     isStillRunning,
     nameJobError,
+    withAcceptDeadline,
+    withWaitDeadline,
 } from "./remember-wait.js";
 
 /**
@@ -96,7 +98,10 @@ export function registerRememberStatusTool(
                 // sleeps before its first poll, so a 0ms deadline would
                 // return "still running" without ever asking the relayer.
                 if (budget === 0) {
-                    const status = await session.memwal.getRememberStatus(job_id);
+                    const status = await withAcceptDeadline(
+                        session.memwal.getRememberStatus(job_id),
+                        "status read",
+                    );
                     if (status.status === "done") {
                         return saved(status.blob_id ?? "", status.namespace);
                     }
@@ -122,10 +127,13 @@ export function registerRememberStatusTool(
                 }
 
                 try {
-                    const result = await session.memwal.waitForRememberJob(job_id, {
-                        timeoutMs: budget,
-                        pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
-                    });
+                    const result = await withWaitDeadline(
+                        session.memwal.waitForRememberJob(job_id, {
+                            timeoutMs: budget,
+                            pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
+                        }),
+                        budget,
+                    );
                     return saved(result.blob_id, result.namespace);
                 } catch (err) {
                     if (isStillRunning(err)) return stillRunning(job_id);
@@ -154,17 +162,25 @@ async function settleBatch(
     // deadline would report everything as still running without ever asking.
     const rows =
         budgetMs === 0
-            ? (await session.memwal.getRememberBulkStatus(jobIds)).results.map((r) => ({
+            ? (
+                  await withAcceptDeadline(
+                      session.memwal.getRememberBulkStatus(jobIds),
+                      "batch status read",
+                  )
+              ).results.map((r) => ({
                   id: r.job_id,
                   status: r.status,
                   blob_id: r.blob_id ?? "",
                   error: r.error,
               }))
             : (
-                  await session.memwal.waitForRememberJobs(jobIds, [], {
-                      timeoutMs: budgetMs,
-                      pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
-                  })
+                  await withWaitDeadline(
+                      session.memwal.waitForRememberJobs(jobIds, [], {
+                          timeoutMs: budgetMs,
+                          pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
+                      }),
+                      budgetMs,
+                  )
               ).results.map((r) => ({
                   id: r.id,
                   status: r.status,

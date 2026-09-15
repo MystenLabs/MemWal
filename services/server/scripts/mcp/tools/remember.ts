@@ -9,6 +9,8 @@ import {
     isStillRunning,
     nameJobError,
     pendingMessage,
+    withAcceptDeadline,
+    withWaitDeadline,
 } from "./remember-wait.js";
 
 const REMEMBER_INPUT = {
@@ -57,7 +59,10 @@ export function registerRememberTool(
             // Two steps rather than `rememberAndWait`, because the accept and
             // the wait need separate budgets: acceptance is the part that
             // must succeed, the wait is a courtesy we cut short.
-            const accepted = await session.memwal.rememberAsync(text, namespace);
+            const accepted = await withAcceptDeadline(
+                session.memwal.rememberAsync(text, namespace),
+                "memwal_remember write",
+            );
 
             const pending = (waitedMs: number) => ({
                 content: [
@@ -74,10 +79,13 @@ export function registerRememberTool(
 
             const startedAt = Date.now();
             try {
-                const result = await session.memwal.waitForRememberJob(accepted.job_id, {
-                    timeoutMs: REMEMBER_WAIT_MS,
-                    pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
-                });
+                const result = await withWaitDeadline(
+                    session.memwal.waitForRememberJob(accepted.job_id, {
+                        timeoutMs: REMEMBER_WAIT_MS,
+                        pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
+                    }),
+                    REMEMBER_WAIT_MS,
+                );
                 return {
                     content: [
                         {

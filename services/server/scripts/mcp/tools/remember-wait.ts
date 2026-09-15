@@ -180,3 +180,110 @@ export function pendingBulkMessage(
         `memwal_remember_bulk — that queues a second copy behind them.`
     );
 }
+
+/**
+ * Longest we let the relayer take to ACCEPT a write before giving up on it.
+ *
+ * The SDK's `signedRequest` only aborts a request when the caller hands it a
+ * signal, and of the memory methods only `recall()` does (15s). `rememberAsync`
+ * and every job-status poll call it with no signal at all, so the underlying
+ * `fetch` has no deadline of its own. That makes `timeoutMs` a loop-entry
+ * check rather than a bound: `waitForRememberJob` tests `Date.now() < deadline`
+ * at the top of each iteration, so one stalled HTTP request runs as long as the
+ * socket stays open and a tool documented as capping at 90s is observed past
+ * 120s. Returning at accept does not fix that on its own — the accept POST is
+ * exactly one of the unbounded calls.
+ *
+ * 15s matches the only deadline the SDK sets for itself. A healthy accept is
+ * ~1.1s, so this fires only when something is genuinely wrong.
+ */
+const DEFAULT_ACCEPT_DEADLINE_MS = 15_000;
+
+/**
+ * Read once, validated the same way as the wait budget: a typo must not
+ * silently pick a deadline nobody asked for. Exposed as an env knob because an
+ * operator on a slow link is the one person who can tell a hung relayer from a
+ * merely distant one.
+ */
+export const ACCEPT_DEADLINE_MS = (() => {
+    const raw = process.env.MEMWAL_MCP_ACCEPT_DEADLINE_MS;
+    if (raw === undefined || raw.trim() === "") return DEFAULT_ACCEPT_DEADLINE_MS;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        log.warn("remember.accept_deadline_invalid", {
+            value: raw,
+            usingMs: DEFAULT_ACCEPT_DEADLINE_MS,
+        });
+        return DEFAULT_ACCEPT_DEADLINE_MS;
+    }
+    return Math.floor(parsed);
+})();
+
+/**
+ * Grace added to a wait budget before we stop believing the SDK will return.
+ *
+ * The budget bounds when the SDK starts its last poll, not when that poll
+ * finishes, so a stalled request can overshoot by an unbounded amount. This
+ * caps the overshoot instead.
+ */
+const WAIT_OVERSHOOT_GRACE_MS = 10_000;
+
+class DeadlineExceededError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "MemWalRelayerUnresponsive";
+    }
+}
+
+/**
+ * Bound an SDK call that has no deadline of its own.
+ *
+ * The underlying request is NOT cancelled — the SDK gives us no way to pass a
+ * signal, so `fetch` keeps running until it settles or the socket dies. What
+ * this bounds is how long the agent waits on it, which is the part the user
+ * experiences as a hang. The orphaned request costs one socket and resolves
+ * into a promise nobody reads.
+ */
+export async function withDeadline<T>(
+    work: Promise<T>,
+    ms: number,
+    message: string,
+): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+        return await Promise.race([
+            work,
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new DeadlineExceededError(message)), ms);
+                // Never hold the process open for a deadline nobody is waiting on.
+                timer.unref?.();
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+/** Bound the accept leg of a write. */
+export function withAcceptDeadline<T>(work: Promise<T>, what: string): Promise<T> {
+    return withDeadline(
+        work,
+        ACCEPT_DEADLINE_MS,
+        `Walrus Memory did not accept the ${what} within ${ACCEPT_DEADLINE_MS / 1000}s — the ` +
+            `relayer is unreachable or not responding. The write may or may not have been ` +
+            `queued, so do NOT tell the user it was saved. Retrying ${what} in this session ` +
+            `is safe: the SDK reuses the same idempotency key until an accept succeeds, so a ` +
+            `retry attaches to the existing job instead of queueing a second paid copy.`,
+    );
+}
+
+/** Bound a status wait at its own budget plus the overshoot grace. */
+export function withWaitDeadline<T>(work: Promise<T>, budgetMs: number): Promise<T> {
+    return withDeadline(
+        work,
+        budgetMs + WAIT_OVERSHOOT_GRACE_MS,
+        `Walrus Memory stopped responding while waiting for the write to land. The job is ` +
+            `still queued relayer-side — do NOT tell the user it was saved, and do NOT re-send ` +
+            `the fact. Call memwal_remember_status with the job_id to settle it.`,
+    );
+}

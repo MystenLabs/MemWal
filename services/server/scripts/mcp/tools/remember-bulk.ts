@@ -7,6 +7,8 @@ import {
     REMEMBER_POLL_INTERVAL_MS,
     REMEMBER_WAIT_MS,
     pendingBulkMessage,
+    withAcceptDeadline,
+    withWaitDeadline,
 } from "./remember-wait.js";
 
 const REMEMBER_BULK_INPUT = {
@@ -58,7 +60,10 @@ export function registerRememberBulkTool(
             // Two steps rather than `rememberBulkAndWait`, for the same reason
             // `memwal_remember` splits them: acceptance is the part that must
             // succeed, the wait is a courtesy we cut short.
-            const accepted = await session.memwal.rememberBulkAsync(items);
+            const accepted = await withAcceptDeadline(
+                session.memwal.rememberBulkAsync(items),
+                "memwal_remember_bulk batch",
+            );
 
             // Pair each job with its fact up front. Every later branch needs
             // it, and the relayer returns job_ids in input order.
@@ -85,13 +90,12 @@ export function registerRememberBulkTool(
             // Unlike `waitForRememberJob`, this never throws on expiry — it
             // reports the stragglers as `timeout` per item, so a batch can come
             // back part landed and part still in flight.
-            const result = await session.memwal.waitForRememberJobs(
-                accepted.job_ids,
-                namespaces,
-                {
+            const result = await withWaitDeadline(
+                session.memwal.waitForRememberJobs(accepted.job_ids, namespaces, {
                     timeoutMs: REMEMBER_WAIT_MS,
                     pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
-                }
+                }),
+                REMEMBER_WAIT_MS,
             );
             const waitedMs = Date.now() - startedAt;
 
