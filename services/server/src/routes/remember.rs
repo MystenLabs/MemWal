@@ -226,7 +226,7 @@ fn spawn_prepare_remember_job(
                 )
                 .await?;
 
-                let wallet_index = state.key_pool.next_index().ok_or_else(|| {
+                let wallet_index = state.key_pool.least_loaded_index().ok_or_else(|| {
                     AppError::Internal(
                         "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
                             .into(),
@@ -410,7 +410,7 @@ fn spawn_prepare_bulk_remember_job(
                 for (job_id, namespace, vector, encrypted) in prepared {
                     let wallet_index = state
                         .key_pool
-                        .next_index()
+                        .least_loaded_index()
                         .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
                     let encrypted_b64 =
                         base64::engine::general_purpose::STANDARD.encode(&encrypted);
