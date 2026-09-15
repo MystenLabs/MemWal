@@ -33,7 +33,11 @@ answer: >-
 
 ## 0.0.13
 
-This release stops a write whose reply was lost from being reported as safe to retry — repeating one can store a second paid copy — answers tool calls with an auth error pointing at `memwal_login` when the relayer rejects the saved delegate key, writes the credentials file through a fresh `0600` file that it renames into place, confirms a completed sign-in and keeps the bridge reading stdin afterwards, warns on unrecognised command-line options instead of ignoring them, documents the network presets in `--help`, names the relayer in `memwal_health`, reports restore `failed` counts when truncation is a transient download or embed blip, and pins plugin launch configs (`.mcp.json`, Cursor/Codex copies, and the Codex fallback installer) so npx cannot keep a cached 0.0.5.
+This release cuts the local stdio MCP server off the SSE bridge: memory tools call the Walrus Memory SDK (signed REST) instead of `GET /api/mcp/sse`. It also stops a write whose reply was lost from being reported as safe to retry — repeating one can store a second paid copy — answers tool calls with an auth error pointing at `memwal_login` when the relayer rejects the saved delegate key, writes the credentials file through a fresh `0600` file that it renames into place, confirms a completed sign-in, warns on unrecognised command-line options instead of ignoring them, documents the network presets in `--help`, names the relayer in `memwal_health`, reports restore `failed` counts when truncation is a transient download or embed blip, and pins plugin launch configs (`.mcp.json`, Cursor/Codex copies, and the Codex fallback installer) so npx cannot keep a cached 0.0.5.
+
+### Changed
+
+- The stdio server implements memory tools itself through the Walrus Memory SDK (`MemWal.create` → signed REST). It no longer opens `GET /api/mcp/sse` or `POST /api/mcp/messages`, so this path no longer takes a relayer occupancy slot. `memwal_login` / `memwal_logout` stay local; logout still drops the in-process client. A relayer 401 is a retryable error and does not wipe `credentials.json`. The Claude.ai Streamable HTTP `/api/mcp` connector is unchanged. The package now depends on `@mysten/sui` and `@mysten/seal` so `npx` can build the SDK's SEAL session on remember/recall.
 
 ### Fixed
 

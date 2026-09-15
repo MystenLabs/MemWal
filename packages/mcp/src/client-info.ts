@@ -1,6 +1,6 @@
 /**
- * Capture MCP `initialize` `clientInfo` so the stdio bridge can tell the
- * relayer/sidecar which coding agent opened the session.
+ * Capture MCP `initialize` `clientInfo` so stderr logs can name the coding
+ * agent that opened the session.
  *
  * Header names must stay under the `x-memwal-` prefix: the relayer proxy
  * forwards that family and drops everything else.
@@ -44,8 +44,7 @@ export function clientInfoHeaders(info: {
     return headers;
 }
 
-/** Last `initialize.clientInfo` seen on this process. Survives the
- * auth-required → bridge handoff, which does not replay `initialize`. */
+/** Last `initialize.clientInfo` seen on this process. */
 let lastClientInfo: { name: string; version: string | null } | null = null;
 
 export function rememberInitializeClientInfo(
