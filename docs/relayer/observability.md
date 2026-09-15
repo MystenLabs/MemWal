@@ -75,11 +75,14 @@ The Rust relayer exposes Prometheus metrics at:
 GET /metrics
 ```
 
-The TypeScript sidecar also exposes wallet-specific counters at:
+The TypeScript sidecar also exposes wallet-specific counters and upload-queue counters at:
 
 ```text
 GET <SIDECAR_URL>/metrics/wallet
+GET <SIDECAR_URL>/metrics/uploads
 ```
+
+`/metrics/uploads` returns `activeWalrusUploads`, `queuedWalrusUploads`, and `walrusUploadLimits` from in-memory counters, with no Sui or Walrus calls.
 
 Core relayer metrics:
 
@@ -133,6 +136,7 @@ Create panels for:
 | DB saturation | PostgreSQL pool open connections near configured max, or idle connections stay at 0 |
 | Wallet lock canary | Sidecar `walletLockErrorsTotal` is greater than 0 |
 | Permanent wallet failures | Sidecar `walletPermanentFailuresTotal` increases |
+| Upload queue saturation | Built in: the relayer polls sidecar `/metrics/uploads` and alerts Slack when `queuedWalrusUploads` stays above `SIDECAR_QUEUE_SATURATION_THRESHOLD` (default 20) for `SIDECAR_QUEUE_SATURATION_CONSECUTIVE` checks (default 4) polled every `SIDECAR_QUEUE_SATURATION_INTERVAL_SECS` (default 30) |
 
 ## APM Integration
 
