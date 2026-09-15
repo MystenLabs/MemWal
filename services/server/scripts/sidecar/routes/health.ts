@@ -139,12 +139,7 @@ export function registerHealthRoute(app: Express, requireProvenance = true): voi
     });
 }
 
-// Upload-queue metrics for the relayer's saturation monitor (main.rs).
-//
-// In-memory counters only, deliberately: /ready carries the same numbers but
-// waits on Sui and Walrus, and upload backlogs arrive together with Sui RPC
-// pressure — a probe that waits on the chain goes blind exactly when the
-// alert matters.
+// In-memory upload limiter counters for the relayer's saturation probe; no I/O.
 export function registerUploadMetricsRoute(app: Express): void {
     app.get("/metrics/uploads", (_req: Request, res: ExpressResponse) => {
         const uploads = getUploadCounts();

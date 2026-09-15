@@ -2,10 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 
-// The relayer's upload-queue saturation monitor polls this endpoint every
-// 30s. It must report the live limiter counters without the sidecar token and
-// without touching Sui: the backlogs it exists to catch arrive together with
-// Sui RPC pressure, so a probe that waits on the chain goes blind exactly then.
 const { Ed25519Keypair } = await import("@mysten/sui/keypairs/ed25519");
 process.env.SERVER_SUI_PRIVATE_KEYS = new Ed25519Keypair().getSecretKey();
 process.env.SIDECAR_AUTH_TOKEN = "upload-metrics-test-token";

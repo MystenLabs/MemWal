@@ -6,8 +6,7 @@
 use serde_json::Value;
 
 /// Sidecar route serving the upload-queue counters (`registerUploadMetricsRoute`
-/// in `scripts/sidecar/routes/health.ts`). Not `/health`, which is bare
-/// liveness, and not `/ready`, which waits on Sui.
+/// in `scripts/sidecar/routes/health.ts`).
 pub const UPLOAD_METRICS_PATH: &str = "/metrics/uploads";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,9 +16,9 @@ pub struct UploadQueueSample {
     pub global_capacity: u64,
 }
 
-/// Reads the counters from a `/metrics/uploads` body. The error names the
-/// first missing or non-integer field; reading it as 0 instead is how this
-/// alert went blind (WALM-608).
+/// Reads the counters from a `/metrics/uploads` body. A missing or
+/// non-integer field is `Err` with that field's JSON pointer; it must never be
+/// read as 0.
 pub fn parse_upload_metrics(body: &Value) -> Result<UploadQueueSample, &'static str> {
     let field =
         |pointer: &'static str| body.pointer(pointer).and_then(Value::as_u64).ok_or(pointer);
@@ -99,8 +98,6 @@ mod tests {
         );
     }
 
-    // WALM-608: the monitor polled /health, whose body has none of these
-    // fields, and read every one as 0.
     #[test]
     fn a_liveness_body_is_an_error_not_an_empty_queue() {
         let body = json!({ "status": "ok", "uptimeMs": 86_400_000 });
