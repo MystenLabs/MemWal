@@ -4,6 +4,13 @@ import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, walruscanBlobUrl } from "./util.js";
 
+/** `waitForRememberJob` rejects with 504 when its deadline passes with the job
+ * still running, and 500 when the job itself failed. Neither is a distinct
+ * error class in any shipped SDK line, so the status code is the only stable
+ * discriminator. */
+const JOB_STILL_RUNNING_STATUS = 504;
+const JOB_FAILED_STATUS = 500;
+
 /** Default settle window. Short: this tool answers "did it land yet", and an
  * agent that wants to keep waiting can just call it again. */
 const DEFAULT_WAIT_SECONDS = 2;
@@ -38,12 +45,12 @@ const REMEMBER_STATUS_INPUT = {
  * ask after the fact, returning early would turn a slow write into a silently
  * lost one.
  *
- * `waitForRememberJob` already encodes the three outcomes an agent has to tell
- * apart, so this tool leans on it rather than re-deriving them: it resolves at
- * `done`, throws `MemWalRememberJobFailed` / `MemWalRememberJobNotFound` for
- * the terminal bad cases (mapped to an error envelope by `wrapTool`), and
- * throws `MemWalRememberJobTimeout` while the job is simply still running —
- * the one case that is not an error here.
+ * `waitForRememberJob` already encodes the outcomes an agent has to tell apart,
+ * so this tool leans on it rather than re-deriving them: it resolves at `done`,
+ * and otherwise rejects with a plain Error carrying a `status` — 500 when the
+ * job failed, 504 when only our wait ran out and the job is still going. The
+ * SDK ships no dedicated error classes for these, so `status` is what we match
+ * on; a constructor-name check silently never fires.
  */
 export function registerRememberStatusTool(
     server: McpServer,
@@ -82,11 +89,8 @@ export function registerRememberStatusTool(
                         ],
                     };
                 } catch (err: any) {
-                    // Still running is the expected answer, not a failure.
-                    // Everything else — failed, not_found, transport — is a
-                    // real error and propagates to wrapTool's mapping, which
-                    // already names those classes for the agent.
-                    if (err?.constructor?.name === "MemWalRememberJobTimeout") {
+                    // Still running is the expected answer here, not a failure.
+                    if (err?.status === JOB_STILL_RUNNING_STATUS) {
                         return {
                             content: [
                                 {
@@ -94,6 +98,20 @@ export function registerRememberStatusTool(
                                     text: `Still writing after ${waitSeconds}s. job_id=${job_id}. Check again shortly; do not tell the user it is saved yet.`,
                                 },
                             ],
+                        };
+                    }
+                    // A terminal failure is the case this tool exists for, so
+                    // it is named plainly rather than left to the generic
+                    // "Tool error" prefix: the fact was NOT stored.
+                    if (err?.status === JOB_FAILED_STATUS) {
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: `Walrus Memory job failed: job_id=${job_id} was not stored — ${err?.message ?? "unknown error"}. The fact is NOT in memory; save it again.`,
+                                },
+                            ],
+                            isError: true,
                         };
                     }
                     throw err;

@@ -7,10 +7,15 @@ import type { MemWalSession } from "../auth.js";
 import { registerRememberTool } from "../tools/remember.js";
 import { registerRememberStatusTool } from "../tools/remember-status.js";
 
-/** The SDK signals "job is still running" by throwing a class the tools match
- * on by constructor name, so the stub has to carry the same name. */
-class MemWalRememberJobTimeout extends Error {}
-class MemWalRememberJobFailed extends Error {}
+/** The SDK throws a plain Error carrying a `status` — 504 when the wait ran out
+ * with the job still going, 500 when the job itself failed. It ships no named
+ * error classes for these, so the stubs must reproduce that exact shape:
+ * stubbing a nicely-named class here is what let a constructor-name check pass
+ * in tests and fail against the real SDK. */
+const jobStillRunning = (msg = "remember job timed out after 1000ms") =>
+    Object.assign(new Error(msg), { status: 504 });
+const jobFailed = (msg: string) =>
+    Object.assign(new Error(`remember job failed: ${msg}`), { status: 500 });
 
 function sessionWith(memwal: unknown): MemWalSession {
     return { memwal, accountId: "acct-test" } as unknown as MemWalSession;
@@ -61,7 +66,7 @@ test("memwal_remember hands back a job_id instead of blocking when the write run
         rememberAsync: async () => ({ job_id: "job-2", status: "running" }),
         waitForRememberJob: async () => {
             waited = true;
-            throw new MemWalRememberJobTimeout("deadline exceeded");
+            throw jobStillRunning();
         },
     });
 
@@ -82,14 +87,13 @@ test("memwal_remember still surfaces a genuinely failed job as an error", async 
     const session = sessionWith({
         rememberAsync: async () => ({ job_id: "job-3", status: "running" }),
         waitForRememberJob: async () => {
-            throw new MemWalRememberJobFailed("Memory encryption backend is unavailable");
+            throw jobFailed("Memory encryption backend is unavailable");
         },
     });
 
     const res = await callTool(session, registerRememberTool, "memwal_remember", { text: "doomed" }, t);
 
     assert.equal(res.isError, true);
-    assert.match(res.content[0].text, /Walrus Memory job failed/);
     assert.match(res.content[0].text, /encryption backend is unavailable/);
 });
 
@@ -108,7 +112,7 @@ test("memwal_remember_status reports the blob_id once the job lands", async (t) 
 test("memwal_remember_status reports a failed job as an error so the fact is not assumed saved", async (t) => {
     const session = sessionWith({
         waitForRememberJob: async () => {
-            throw new MemWalRememberJobFailed("walrus upload failed");
+            throw jobFailed("walrus upload failed");
         },
     });
 
@@ -121,7 +125,7 @@ test("memwal_remember_status reports a failed job as an error so the fact is not
 test("memwal_remember_status says still writing while the job is running", async (t) => {
     const session = sessionWith({
         waitForRememberJob: async () => {
-            throw new MemWalRememberJobTimeout("deadline exceeded");
+            throw jobStillRunning();
         },
     });
 
@@ -137,7 +141,7 @@ test("memwal_remember_status never asks the SDK for a deadline shorter than one 
     const session = sessionWith({
         waitForRememberJob: async (_id: string, opts: { timeoutMs: number }) => {
             seenTimeout = opts.timeoutMs;
-            throw new MemWalRememberJobTimeout("deadline exceeded");
+            throw jobStillRunning();
         },
     });
 

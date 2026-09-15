@@ -42,6 +42,11 @@ const REMEMBER_INPUT = {
  */
 const DEFAULT_REMEMBER_WAIT_MS = 10_000;
 
+/** `waitForRememberJob` rejects with this HTTP status when the deadline passes
+ * without the job settling. The job itself is still running; only the wait
+ * ended. A genuinely failed job rejects with 500 instead. */
+const JOB_STILL_RUNNING_STATUS = 504;
+
 /** Hard ceiling — the relayer's own remember deadline. Waiting past it cannot
  * observe anything the job has not already settled. */
 const MAX_REMEMBER_WAIT_MS = 90_000;
@@ -105,7 +110,9 @@ export function registerRememberTool(
                             text:
                                 `Accepted by Walrus Memory and still writing. job_id=${accepted.job_id}` +
                                 `${namespace ? ` namespace=${namespace}` : ""}\n` +
-                                `The write did not finish within ${Math.round(REMEMBER_WAIT_MS / 1000)}s, so there is no blob_id yet. ` +
+                                (REMEMBER_WAIT_MS === 0
+                                    ? "The tool did not wait for the write, so there is no blob_id yet. "
+                                    : `The write did not finish within ${Math.round(REMEMBER_WAIT_MS / 1000)}s, so there is no blob_id yet. `) +
                                 `Do not tell the user it is saved — confirm with memwal_remember_status(job_id="${accepted.job_id}").`,
                         },
                     ],
@@ -128,10 +135,13 @@ export function registerRememberTool(
                     ],
                 };
             } catch (err: any) {
-                // Only our own wait expiring is a non-failure. A job that
-                // actually failed still has to reach the agent as an error, so
-                // everything else propagates to `wrapTool`'s mapping.
-                if (err?.constructor?.name === "MemWalRememberJobTimeout") {
+                // Only our own wait expiring is a non-failure. The SDK signals
+                // that as a plain Error carrying `status: 504` (a failed job
+                // carries 500) — it has no dedicated error class, in either the
+                // pinned 0.0.x or the current 0.1.x line, so matching on a
+                // constructor name would never fire and every slow write would
+                // surface as an error.
+                if (err?.status === JOB_STILL_RUNNING_STATUS) {
                     return stillWriting();
                 }
                 throw err;
