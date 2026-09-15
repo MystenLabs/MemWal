@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
+import { REMEMBER_POLL_INTERVAL_MS } from "./remember-wait.js";
 
 const REMEMBER_BULK_INPUT = {
     facts: z
@@ -43,6 +44,15 @@ export function registerRememberBulkTool(
             const items = facts.map((text) => ({ text, namespace }));
             const result = await session.memwal.rememberBulkAndWait(items, {
                 timeoutMs: 120_000,
+                // This tool still blocks to terminal, so unlike `memwal_remember`
+                // the poll cadence IS the wait: at the SDK's 1500ms default the
+                // backoff tops out at its 10s ceiling and checks land ~1.5, 3.75,
+                // 7.1, 12.2, 19.8, 29.8s apart — a batch that finished at 20.5s is
+                // not reported until 29.8s. One poll covers every pending job in
+                // the batch (`/api/remember/bulk/status` takes all the ids), so
+                // the rate-limit budget behind this number is the same as a
+                // single remember's.
+                pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
             });
             const lines = result.results.map((r, i) => {
                 // Label each result with its source fact by index. The SDK
