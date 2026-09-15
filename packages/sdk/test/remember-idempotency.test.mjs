@@ -11,7 +11,7 @@ test.afterEach(() => {
 
 test("rememberAndWait reuses its generated key and job after polling timeout", async () => {
     const posted = [];
-    let jobPolls = 0;
+    let rememberPosts = 0;
     globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
         if (path === "/version") {
@@ -26,11 +26,15 @@ test("rememberAndWait reuses its generated key and job after polling timeout", a
         }
         if (path === "/api/remember" && init.method === "POST") {
             posted.push(JSON.parse(init.body));
+            rememberPosts += 1;
             return Response.json({ job_id: "stable-job", status: "pending" }, { status: 202 });
         }
         if (path === "/api/remember/stable-job") {
-            jobPolls += 1;
-            if (jobPolls < 2) return Response.json({ job_id: "stable-job", status: "pending" });
+            // Stay pending for the first rememberAndWait so timeoutMs: 1 still
+            // times out when pollIntervalMs: 0 polls immediately.
+            if (rememberPosts < 2) {
+                return Response.json({ job_id: "stable-job", status: "pending" });
+            }
             return Response.json({
                 job_id: "stable-job",
                 status: "done",

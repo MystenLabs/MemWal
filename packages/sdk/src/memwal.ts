@@ -74,6 +74,7 @@ import {
     compatibilityErrorFromStatus,
 } from "./compatibility.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { pollingDelayMs } from "./polling-delay.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -119,13 +120,6 @@ type RememberStatusResponse = RememberJobStatus | { error?: string };
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function pollingDelayMs(baseMs: number, attempt: number): number {
-    const base = Math.max(100, baseMs);
-    const capped = Math.min(10_000, base * 1.5 ** Math.min(attempt, 6));
-    const jitter = 0.75 + Math.random() * 0.5;
-    return Math.floor(capped * jitter);
 }
 
 function isTransientPollingStatus(status: number): boolean {

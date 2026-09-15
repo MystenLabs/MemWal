@@ -168,14 +168,13 @@ async def _sleep_ms(ms: int) -> None:
 
 
 def _polling_delay_ms(base_ms: int, attempt: int) -> int:
-    """Jittered exponential backoff matching TS ``pollingDelayMs``.
+    """Same formula as TS ``pollingDelayMs``."""
 
-    base * 1.5^min(attempt, 6), capped at 10s, with ±25% jitter so
-    concurrent clients don't synchronise.
-    """
-
+    if attempt == 0:
+        return 0
     base = max(100, base_ms)
-    capped = min(10_000, base * (1.5 ** min(attempt, 6)))
+    ceiling = max(3000, base)
+    capped = min(ceiling, base * (1.5 ** min(attempt - 1, 6)))
     jitter = 0.75 + random.random() * 0.5
     return int(capped * jitter)
 
@@ -420,8 +419,7 @@ class MemWal:
           ``status`` field (404 / ``status == "not_found"`` raises).
         - Transient HTTP errors (429, 5xx, network drop) are retried until
           the timeout, not surfaced as polling failures.
-        - Backoff is jittered exponential (1.5x cap 10s, ±25%) to avoid
-          thundering-herd at scale.
+        - First poll is immediate; later polls grow 1.5x toward 3s.
         """
 
         deadline_ms = _now_ms() + timeout_ms
