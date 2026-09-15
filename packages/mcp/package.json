@@ -1,7 +1,7 @@
 {
     "name": "@mysten-incubation/memwal-mcp",
     "version": "0.0.13",
-    "description": "Walrus Memory MCP client — single-binary stdio MCP server that bridges Cursor / Claude Desktop / Antigravity / Claude Code to the Walrus Memory relayer. Handles browser-based wallet login on first run.",
+    "description": "Walrus Memory MCP client — stdio MCP server for Cursor / Claude Desktop / Antigravity / Claude Code. Local wallet login, then memory tools via the Walrus Memory SDK.",
     "type": "module",
     "engines": {
         "node": ">=20.0.0"
@@ -18,14 +18,16 @@
         }
     },
     "scripts": {
-        "build": "tsc",
+        "build": "pnpm --filter @mysten-incubation/memwal build && tsc",
         "dev": "tsc --watch",
-        "typecheck": "tsc --noEmit",
-        "test": "tsc && node --test \"test/**/*.test.mjs\"",
+        "typecheck": "pnpm --filter @mysten-incubation/memwal build && tsc --noEmit",
+        "test": "pnpm --filter @mysten-incubation/memwal build && tsc && node --test \"test/**/*.test.mjs\"",
         "start": "node ./dist/bin/memwal-mcp.js"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "1.29.0",
+        "@mysten-incubation/memwal": "workspace:*",
+        "@mysten/seal": "^1.1.0",
+        "@mysten/sui": "^2.20.3",
         "@noble/ed25519": "2.3.0",
         "@noble/hashes": "2.0.0",
         "open": "10.1.0"

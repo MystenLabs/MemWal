@@ -2,6 +2,10 @@
 
 ## 0.0.13
 
+### Changed
+
+- The stdio server implements memory tools itself through the Walrus Memory SDK (`MemWal.create` → signed REST). It no longer opens `GET /api/mcp/sse` or `POST /api/mcp/messages`, so this path no longer takes a relayer occupancy slot. `memwal_login` / `memwal_logout` stay local; logout still drops the in-process client. A relayer 401 is a retryable error and does not wipe `credentials.json`. The Claude.ai Streamable HTTP `/api/mcp` connector is unchanged. The package now depends on `@mysten/sui` and `@mysten/seal` so `npx` can build the SDK's SEAL session on remember/recall.
+
 ### Fixed
 
 - Stop telling the user to retry a write whose reply was lost. A `memwal_remember`, `memwal_remember_bulk` or `memwal_analyze` that was POSTed and then timed out came back as "the connection to the relayer dropped before the result came back. Please retry." — but the relayer answers those with HTTP 202 and finishes the work in a durable queue, so a client-side deadline cancels nothing and the write may already have landed. `/api/remember/bulk` carries no idempotency key, unlike the single path, so following that advice stores a second paid copy that `recall` then hides behind the first. A sent write now says it may have completed, that the timeout did not undo it, and to check with `memwal_recall` before re-saving. A sent read still says plainly that retrying is safe. (WALM-618 follow-up)

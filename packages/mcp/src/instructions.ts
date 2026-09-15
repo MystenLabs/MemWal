@@ -8,19 +8,13 @@
  * live only in tool descriptions, and clients stopped putting those in context
  * until a tool was explicitly loaded.
  *
- * Both local responders need their own copy because the bridge answers
- * `initialize` itself and SUPPRESSES the relayer's reply (see
- * `buildLocalInitializeResult` in bridge.ts). Without this, the relayer's
- * instructions are correct but unreachable for every stdio client.
- *
  * The relayer keeps a separate copy in
- * services/server/scripts/mcp/server.ts, which serves the direct HTTP/OAuth
- * connector path. It cannot share this module: that file belongs to the
- * standalone `memwal-server-scripts` npm package with no workspace link here.
+ * services/server/scripts/mcp/server.ts, which serves the Claude.ai
+ * Streamable HTTP / OAuth connector path. It cannot share this module.
  * Keep the two in sync.
  */
 
-/** Signed-in path (bridge mode). Full proactive contract. */
+/** Signed-in path. Full proactive contract. */
 export const PROACTIVE_INSTRUCTIONS = [
     "Walrus Memory is this user's persistent memory system, exposed through the memwal_* tools.",
     "It survives across sessions, clients, and machines.",
@@ -50,8 +44,8 @@ export const PROACTIVE_INSTRUCTIONS = [
  * Signed-out path (auth-required mode). Deliberately NOT the proactive text:
  * without credentials every memory tool fails, so telling the model to save
  * proactively here would only manufacture errors. Signed-out tools/list uses
- * conservative remember/recall descriptions. The signed-in cold-start list
- * (bridge) uses the sidecar's proactive wording.
+ * conservative remember/recall descriptions. The signed-in list uses the
+ * sidecar's proactive wording.
  */
 export const AUTH_REQUIRED_INSTRUCTIONS = [
     "Walrus Memory is this user's persistent memory system, exposed through the memwal_* tools,",

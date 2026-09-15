@@ -1,10 +1,8 @@
 /**
  * User-facing copy for the sign-in lifecycle.
  *
- * The same events are reported from two places — the auth-required stub
- * (signed out) and the bridge (signed in) — and the wording had already
- * drifted between them. Keeping the strings here means one voice regardless
- * of which mode the user happens to be in.
+ * Shared copy for the sign-in lifecycle, whether the process started signed
+ * out or already had credentials on disk.
  */
 
 /** What a completed sign-in produced, as the user needs it described. */

@@ -1,90 +1,17 @@
 /**
  * A background `memwal_login` that never completes must not stay silent.
- *
- * The tool call returns the sign-in URL immediately, so by the time the flow
- * fails there is no pending response left to turn into an error. The next
- * memory tool call is the first chance to say so, and this asserts it takes it.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import http from "node:http";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BIN = resolve(__dirname, "../dist/bin/memwal-mcp.js");
-
-/** Answers the /version probe only — the sign-in is meant to time out. */
-function startMockRelayer() {
-    const server = http.createServer((req, res) => {
-        if (new URL(req.url, "http://127.0.0.1").pathname === "/version") {
-            res.writeHead(200, { "content-type": "application/json" });
-            res.end(
-                JSON.stringify({
-                    apiVersion: "1.0.0",
-                    relayerVersion: "1.0.0",
-                    minSupportedSdk: { mcp: "0.0.1" },
-                }),
-            );
-            return;
-        }
-        res.writeHead(404);
-        res.end();
-    });
-    return new Promise((res) => {
-        server.listen(0, "127.0.0.1", () => {
-            res({ server, base: `http://127.0.0.1:${server.address().port}` });
-        });
-    });
-}
-
-/** Version probe plus SSE so a signed-in process can boot the bridge. */
-function startBridgeRelayer() {
-    let sseRes = null;
-    const server = http.createServer((req, res) => {
-        const url = new URL(req.url, "http://127.0.0.1");
-        if (req.method === "GET" && url.pathname === "/version") {
-            res.writeHead(200, { "content-type": "application/json" });
-            res.end(
-                JSON.stringify({
-                    apiVersion: "1.0.0",
-                    relayerVersion: "1.0.0",
-                    minSupportedSdk: { mcp: "0.0.1" },
-                }),
-            );
-            return;
-        }
-        if (req.method === "GET" && url.pathname === "/api/mcp/sse") {
-            res.writeHead(200, {
-                "content-type": "text/event-stream",
-                "cache-control": "no-cache",
-                connection: "keep-alive",
-            });
-            res.write("event: endpoint\ndata: /api/mcp/messages?sessionId=test\n\n");
-            sseRes = res;
-            return;
-        }
-        if (req.method === "POST" && url.pathname === "/api/mcp/messages") {
-            res.writeHead(202);
-            res.end();
-            return;
-        }
-        res.writeHead(404);
-        res.end();
-    });
-    return new Promise((res) => {
-        server.listen(0, "127.0.0.1", () => {
-            res({
-                server,
-                base: `http://127.0.0.1:${server.address().port}`,
-                closeSse: () => sseRes?.end(),
-            });
-        });
-    });
-}
+const WEB = "http://127.0.0.1:9";
 
 function makeCreds(relayerUrl) {
     return {
@@ -145,15 +72,14 @@ function attachStdio(child) {
 }
 
 test("a sign-in that never completes is reported on the next tool call", async (t) => {
-    const { server, base } = await startMockRelayer();
     const home = mkdtempSync(join(tmpdir(), "memwal-test-"));
 
-    const child = spawn(process.execPath, [BIN, "--relayer", base, "--web-url", base], {
+    const child = spawn(process.execPath, [BIN, "--relayer", WEB, "--web-url", WEB], {
         env: {
             ...process.env,
             HOME: home,
             USERPROFILE: home,
-            // Nobody opens the URL, so the listener closes almost at once.
+            MEMWAL_CREDS_DIR: home,
             MEMWAL_MCP_LOGIN_TIMEOUT_MS: "600",
         },
         stdio: ["pipe", "pipe", "pipe"],
@@ -162,14 +88,12 @@ test("a sign-in that never completes is reported on the next tool call", async (
 
     t.after(() => {
         child.kill("SIGKILL");
-        server.close();
         rmSync(home, { recursive: true, force: true });
     });
 
     send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" } });
     await waitFor((m) => m.id === 1 && m.result);
 
-    // Baseline: before any sign-in attempt the error carries no failure notice.
     send({
         jsonrpc: "2.0",
         id: 2,
@@ -186,7 +110,6 @@ test("a sign-in that never completes is reported on the next tool call", async (
     send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "memwal_login" } });
     await waitFor((m) => m.id === 3 && m.result);
 
-    // The flow now times out in the background with nobody listening for it.
     const warned = await waitFor(
         (m) =>
             m.method === "notifications/message" &&
@@ -209,22 +132,19 @@ test("a sign-in that never completes is reported on the next tool call", async (
     assert.match(text, /left running through the/);
     assert.doesNotMatch(text, /usually works/);
     assert.match(text, /already be registered on your account/);
-    // Still tells them how to sign in, rather than replacing the instruction.
     assert.match(text, /memwal_login/);
 });
 
-test("a signed-in memwal_login timeout warns through the bridge", async (t) => {
-    const { server, base, closeSse } = await startBridgeRelayer();
+test("a signed-in memwal_login timeout still warns", async (t) => {
     const home = mkdtempSync(join(tmpdir(), "memwal-test-"));
-    const credsPath = join(home, ".memwal", "credentials.json");
-    mkdirSync(dirname(credsPath), { recursive: true });
-    writeFileSync(credsPath, JSON.stringify(makeCreds(base)), { mode: 0o600 });
+    writeFileSync(join(home, "credentials.json"), JSON.stringify(makeCreds(WEB)), { mode: 0o600 });
 
-    const child = spawn(process.execPath, [BIN, "--relayer", base, "--web-url", base], {
+    const child = spawn(process.execPath, [BIN, "--relayer", WEB, "--web-url", WEB], {
         env: {
             ...process.env,
             HOME: home,
             USERPROFILE: home,
+            MEMWAL_CREDS_DIR: home,
             MEMWAL_MCP_LOGIN_TIMEOUT_MS: "600",
         },
         stdio: ["pipe", "pipe", "pipe"],
@@ -233,8 +153,6 @@ test("a signed-in memwal_login timeout warns through the bridge", async (t) => {
 
     t.after(() => {
         child.kill("SIGKILL");
-        closeSse();
-        server.close();
         rmSync(home, { recursive: true, force: true });
     });
 

@@ -21,11 +21,10 @@
  *      lives in services/server/scripts, so a published npm package alone
  *      changes nothing for a signed-in user. Testing before the deploy lands
  *      measures the old server and looks like the fix failed.
- *   2. Cold start vs post-connect drift. The bridge answers the first
- *      `tools/list` locally from TOOL_DEFINITIONS, then emits
- *      `notifications/tools/list_changed` and the client re-lists against the
- *      relayer. The two lists disagreed in exactly the fields under test, so
- *      the answer depended on when you looked.
+ *   2. Cold start vs post-connect drift. The stdio server answers
+ *      `tools/list` locally from TOOL_DEFINITIONS. There is no second
+ *      upstream list. A signed-in session and a signed-out session differ
+ *      only in wording and whether `memwal_logout` is advertised.
  *   3. Reading the chat UI instead of the wire. A tool card cannot tell
  *      "never called" from "called and failed".
  *
@@ -84,11 +83,10 @@ function connect() {
                     send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
                 } else if (m.id === 2 && m.result) {
                     out.cold = m.result.tools;
-                } else if (m.method === "notifications/tools/list_changed") {
-                    out.changed = true;
-                    send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
-                } else if (m.id === 3 && m.result) {
+                    // stdio serves the full tool list locally. There is no
+                    // second "upstream" list from an SSE session.
                     out.upstream = m.result.tools;
+                    out.changed = false;
                     clearTimeout(timer);
                     finish();
                 }
@@ -115,8 +113,8 @@ const up = byName(r.upstream);
 // Distinguish the two ways `upstream` can be missing. Conflating them sends a
 // tester to re-login when the real problem is a relayer that is down or
 // redeploying — which is exactly what a mid-deploy 502 looks like here.
-const hasCredentials = (r.init?.instructions || "").length > 500;
-const signedIn = Boolean(r.upstream);
+const signedIn = /RECALL: before answering/i.test(r.init?.instructions || "");
+const hasCredentials = signedIn;
 
 // --- 1. initialize carries instructions -------------------------------------
 const instructions = r.init?.instructions || "";
@@ -144,14 +142,14 @@ if (signedIn) {
     );
 }
 
-// --- 2. the client reached the relayer --------------------------------------
+// --- 2. signed-in clients get the proactive list locally --------------------
 check(
-    "relayer connected and client re-listed",
+    "signed-in tools/list is local (no SSE re-list)",
     signedIn,
     signedIn
-        ? "tools/list_changed received"
+        ? "stdio served the signed-in tool list"
         : hasCredentials
-          ? "credentials FOUND but relayer never connected — relayer down or redeploying?"
+          ? "credentials FOUND but initialize did not look signed-in"
           : "no credentials — sign in, then re-run"
 );
 

@@ -34,7 +34,7 @@ export interface MemWalCredentials {
     accountId: string;
     /** 0x-prefixed Walrus Memory package id the account lives in. */
     packageId: string;
-    /** Relayer base URL the bridge should connect to. */
+    /** Relayer base URL the SDK should dial. */
     relayerUrl: string;
     /** Human-readable label, e.g. "Cursor MCP" — surfaced in dashboard. */
     label?: string;

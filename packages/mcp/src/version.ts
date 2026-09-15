@@ -10,7 +10,8 @@
  * NOT the same value as `MEMWAL_MCP_COMPATIBILITY_VERSION` in compatibility.ts.
  * That one is a deliberately pinned relayer-contract baseline, checked against
  * the Rust `MIN_MCP_PACKAGE_VERSION` by scripts/check-compatibility-contract.mjs,
- * and must NOT track the release version.
+ * and must NOT track the release version. The SDK, not this process, probes
+ * the relayer's `/version` on the first signed request.
  *
  * `../package.json` resolves correctly from any emitted module because tsc maps
  * rootDir `src/` onto outDir `dist/`, and npm always includes package.json in

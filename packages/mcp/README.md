@@ -1,6 +1,6 @@
 # Walrus Memory MCP
 
-Walrus Memory MCP is a stdio Model Context Protocol server for Walrus Memory. It lets MCP clients such as Cursor, Claude Desktop, Antigravity, and Claude Code connect to the Walrus Memory relayer without manually configuring remote headers or auth tokens.
+Walrus Memory MCP is a stdio Model Context Protocol server for Walrus Memory. It lets MCP clients such as Cursor, Claude Desktop, Antigravity, and Claude Code sign in locally and then call the public Walrus Memory SDK (signed REST) — no remote MCP session, no SSE bridge.
 
 On first use, the package advertises a `memwal_login` tool to the MCP client. The agent can call it inline — no separate CLI command needed. The tool opens a browser-based wallet login flow and stores local credentials at `~/.memwal/credentials.json`. A matching `memwal_logout` tool clears the saved credentials.
 
@@ -115,8 +115,8 @@ the monorepo). To verify manually:
    (e.g. `other`) — it should **not** return the fact, proving the per-call
    value overrode the default.
 
-The injection itself is the pure, exported `applyDefaultNamespace(msg, ns)`
-function in `src/bridge.ts` if you want to assert it directly.
+The injection itself is the pure, exported `applyDefaultNamespace` in
+`src/namespace.ts` if you want to assert it directly.
 
 ## Environment Presets
 

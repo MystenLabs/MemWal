@@ -4,16 +4,16 @@
  * Boot sequence:
  *   1. If `--logout` flag → wipe credentials.json and exit.
  *   2. Load credentials from `~/.memwal/credentials.json`.
- *   3. If missing → run `loginFlow()` (browser-based wallet sign-in).
- *   4. Bridge stdio MCP ↔ remote SSE relayer using the loaded credentials.
- *   5. On 401 (revoked key), the bridge wipes credentials before throwing
- *      — the next process spawn will re-trigger login.
+ *   3. If missing on a TTY → run `loginFlow()` (browser-based wallet sign-in).
+ *   4. If spawned by an MCP client (stdin is not a TTY) → run the stdio
+ *      server. Login/logout stay local. Memory tools call the SDK
+ *      (`MemWal.create` → signed REST). There is no SSE session.
+ *   5. A relayer 401 is a retryable error. It does NOT wipe the file.
  */
 import { clearCreds, credsPath, loadCreds } from "./auth.js";
-import { runAuthRequiredServer } from "./auth-required.js";
-import { notePendingLoginSuccess, runBridge } from "./bridge.js";
 import { loginFlow } from "./login.js";
 import { log, note } from "./logger.js";
+import { runStdioServer } from "./server.js";
 
 /**
  * Parsed CLI flags. All optional — env vars cover the same surface.
@@ -176,7 +176,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // fallback here: if neither is set, the namespace argument is left off
     // the forwarded call and the relayer applies its own "default" namespace.
     // An explicit per-call `namespace` from the agent always wins (see
-    // applyDefaultNamespace in bridge.ts).
+    // applyDefaultNamespace in namespace.ts).
     const namespace = args.namespace ?? process.env.MEMWAL_NAMESPACE;
 
     // Explicit `login` is a human command. When stdin is not a TTY the
@@ -221,53 +221,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     const wasLoggedIn = !!creds;
     if (!creds) {
         if (!process.stdin.isTTY) {
-            // Spawned by an MCP client (Cursor / Claude Desktop / etc.).
-            // Instead of exiting — which makes the client UI show "Failed to
-            // start" with no actionable next step — boot a minimal stdio MCP
-            // server that responds to `initialize` and `tools/list` but
-            // returns an `isError: true` envelope on every `tools/call` with
-            // a friendly login instruction. The user sees the message
-            // INLINE in their chat, not buried in stderr logs.
-            //
-            // Phase B.5 (see plans/memwal-mcp-package-with-login.md) will
-            // replace this with the MCP OAuth flow so the client's host
-            // drives the browser dance and retries the tool call
-            // automatically — no client restart required.
+            // Spawned by an MCP client without credentials. Serve the stdio
+            // server anyway: initialize/tools/list succeed, memory tools
+            // return a login instruction, and `memwal_login` writes the file
+            // mid-session so the next call uses the SDK — no client restart.
             log.warn("creds.missing_at_spawn.serving_auth_required", {
                 credsPath: credsPath(),
                 relayerUrl,
                 webUrl,
             });
-            // Pass the resolved URLs through so `memwal_login` (called as a
-            // tool from the MCP client) opens the correct dashboard. Before
-            // this fix `--dev` was silently dropped here and the flow always
-            // routed to prod (https://memory.walrus.xyz).
-            const handoff = await runAuthRequiredServer({ relayerUrl, webUrl, label, namespace });
-            if (handoff) {
-                // The user completed `memwal_login` in this SAME session: the
-                // auth-required server detected the freshly-written credentials
-                // and handed off here without a client restart. Pick up the
-                // bridge and replay the request(s) it already read off stdin.
-                // This is what removes the historical "second reboot".
-                log.info("creds.hot_handoff_to_bridge", {
-                    accountId: handoff.creds.accountId,
-                });
-                // Reaching here IS a completed sign-in: the auth-required
-                // server only hands off once `memwal_login` has written
-                // credentials mid-session. `adoptCredentials` covers the
-                // re-login case; this covers signing in from signed-out, where
-                // the bridge does not yet exist when the callback lands.
-                notePendingLoginSuccess({
-                    accountId: handoff.creds.accountId,
-                    delegateAddress: handoff.creds.delegateAddress,
-                    credentialsPath: credsPath(),
-                });
-                await runBridge(
-                    handoff.creds,
-                    { relayerUrl, webUrl, label, namespace },
-                    handoff.pendingLines,
-                );
-            }
+            await runStdioServer({
+                relayerUrl,
+                webUrl,
+                label,
+                namespace,
+                relayerOverride: args.relayerUrl,
+            });
             return;
         }
         // TTY = manual invocation. Block on the browser flow as before.
@@ -286,10 +255,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     }
 
     // Manual invocation from a real terminal: print status and exit.
-    // Bridge mode only makes sense when an MCP client is attached on the
-    // other end of stdin (Cursor / Claude Desktop / ...). A TTY means the
-    // user is the one looking at stdout — there's no MCP client to bridge
-    // with, so hanging the process is the wrong default.
+    // The stdio server only makes sense when an MCP client is attached on
+    // the other end of stdin. A TTY means the user is looking at stdout.
     if (process.stdin.isTTY) {
         note(``);
         if (wasLoggedIn) {
@@ -305,7 +272,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         return;
     }
 
-    await runBridge(creds, { relayerUrl, webUrl, label, namespace });
+    await runStdioServer({
+        relayerUrl,
+        webUrl,
+        label,
+        namespace,
+        relayerOverride: args.relayerUrl,
+    });
 }
 
 function printHelp(): void {
@@ -411,5 +384,5 @@ export function helpText(): string {
 // Re-exports — handy if someone wants to embed this in another tool.
 export { loadCreds, saveCreds, clearCreds, credsPath } from "./auth.js";
 export { loginFlow } from "./login.js";
-export { runBridge } from "./bridge.js";
+export { runStdioServer } from "./server.js";
 export type { MemWalCredentials } from "./auth.js";
