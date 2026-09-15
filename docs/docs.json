@@ -135,6 +135,7 @@
               "sdk/example-map",
               "sdk/examples",
               "sdk/research-app-example",
+              "sdk/verify-a-memory",
               "sdk/api-reference",
               "sdk/changelog"
             ]
