@@ -87,8 +87,13 @@ test("a call slower than the threshold is warned about, not filed as normal", as
         wrapTool(SESSION, "memwal_health", slow)({})
     );
 
-    const warned = lines.find((l) => l.event === "tool.slow");
-    assert.ok(warned, `no tool.slow line:\n${JSON.stringify(lines, null, 2)}`);
+    // Assert on the SETTLED line specifically. The in-flight line is emitted by
+    // the timer at the threshold itself, so its own durationMs sits within a
+    // millisecond or two of the threshold and can land just under it — that is
+    // timer resolution, not a defect, and asserting on it made this flaky in CI
+    // (`durationMs 149 is under the threshold` at a 150ms threshold).
+    const warned = lines.find((l) => l.event === "tool.slow" && l.settled === true);
+    assert.ok(warned, `no settled tool.slow line:\n${JSON.stringify(lines, null, 2)}`);
     assert.equal(warned.level, "warn");
     assert.equal(warned.thresholdMs, SLOW_THRESHOLD_MS);
     assert.ok(
@@ -166,4 +171,34 @@ test("a failing tool call still reports its duration", async () => {
     // The existing error envelope is untouched.
     assert.equal(result.isError, true);
     assert.ok(result.content[0].text.includes("relayer unreachable"));
+});
+
+test("a credential in the dialled URL never reaches a log line", async () => {
+    // `session.relayerUrl` is whatever MEMWAL_SIDECAR_RELAYER_URL was set to,
+    // and it is echoed on every outcome line. The Rust side redacts its own
+    // startup lines; this is the per-call path, which is far noisier.
+    const withSecret = {
+        ...SESSION,
+        relayerUrl: "https://ops:hunter2@relayer.internal:8000",
+    } as unknown as MemWalSession;
+
+    const { lines } = await capturingLogs(() =>
+        wrapTool(withSecret, "memwal_health", ok)({})
+    );
+
+    const done = lines.find((l) => l.event === "tool.done");
+    assert.ok(done, "no tool.done line");
+    assert.ok(
+        !JSON.stringify(lines).includes("hunter2"),
+        `a credential reached the log:\n${JSON.stringify(lines, null, 2)}`
+    );
+    // Still useful: the host an operator has to change is preserved.
+    assert.match(String(done.relayerUrl), /relayer\.internal:8000/);
+});
+
+test("an unparseable dial URL is dropped rather than echoed", async () => {
+    const bad = { ...SESSION, relayerUrl: "not a url" } as unknown as MemWalSession;
+    const { lines } = await capturingLogs(() => wrapTool(bad, "memwal_health", ok)({}));
+    const done = lines.find((l) => l.event === "tool.done");
+    assert.equal(done?.relayerUrl, null);
 });

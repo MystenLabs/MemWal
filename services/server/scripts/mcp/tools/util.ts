@@ -75,6 +75,28 @@ const SLOW_TOOL_WARN_MS = (() => {
     return parsed;
 })();
 
+/**
+ * Strip any `user:password@` before a URL reaches a log line.
+ *
+ * The dial address is echoed on every `tool.done` / `tool.slow` / `tool.failed`
+ * line, and an operator is free to have put a credential in
+ * `MEMWAL_SIDECAR_RELAYER_URL`. Mirrors `redact_url_userinfo` in main.rs, which
+ * only covers the Rust-side startup lines. An unparseable value is dropped
+ * rather than echoed: it cannot be redacted, so it cannot be shown.
+ */
+export function redactUrlUserinfo(url: string | undefined | null): string | null {
+    if (!url) return null;
+    try {
+        const parsed = new URL(url);
+        if (!parsed.username && !parsed.password) return url;
+        parsed.username = "";
+        parsed.password = "";
+        return parsed.toString();
+    } catch {
+        return null;
+    }
+}
+
 export function wrapTool<Args>(
     session: MemWalSession,
     tool: string,
@@ -96,7 +118,7 @@ export function wrapTool<Args>(
         const outcomeFields = () => ({
             tool,
             durationMs: durationMs(),
-            relayerUrl: session.relayerUrl ?? null,
+            relayerUrl: redactUrlUserinfo(session.relayerUrl),
             agentClient: session.agentClient ?? null,
             accountId: session.accountId ?? null,
         });
@@ -107,7 +129,13 @@ export function wrapTool<Args>(
         // emitted nothing until it finally returned. A settle-only log would
         // have stayed silent for the whole minute an operator was looking.
         // `unref` so a pending timer can never hold the sidecar open.
+        // Set by the timer itself. `Timeout.hasRef()` cannot stand in for it:
+        // that reports false from the moment `unref()` is called, while the
+        // timer is still pending, so reading it would mark every settled call
+        // as already-warned.
+        let warnedInFlight = false;
         const watchdog = setTimeout(() => {
+            warnedInFlight = true;
             log.warn("tool.slow", {
                 ...outcomeFields(),
                 thresholdMs: SLOW_TOOL_WARN_MS,
@@ -115,14 +143,7 @@ export function wrapTool<Args>(
             });
         }, SLOW_TOOL_WARN_MS);
         watchdog.unref?.();
-        let warnedInFlight = false;
-        const stopWatchdog = () => {
-            // `hasRef()` is false once the timer has fired, which is how the
-            // settle-time line knows whether the in-flight one already went out
-            // and can avoid reporting the same call twice.
-            warnedInFlight = watchdog.hasRef ? !watchdog.hasRef() : false;
-            clearTimeout(watchdog);
-        };
+        const stopWatchdog = () => clearTimeout(watchdog);
 
         try {
             const result = await handler(args);

@@ -154,7 +154,7 @@ These are not all enforced at boot, but most real deployments need them.
 | `MCP_MAX_TOTAL_SESSIONS` | `1000` | Maximum active MCP sessions across SSE and Streamable HTTP transports |
 | `MCP_MAX_SESSIONS_PER_IP` | `16` | Maximum active MCP sessions from one source IP |
 | `MCP_MAX_NEW_SESSIONS_PER_IP_PER_MIN` | `30` | Maximum new MCP sessions opened by one source IP per minute |
-| `MCP_TOOL_SLOW_WARN_MS` | `5000` | A completed MCP tool call at or above this duration is logged as `tool.slow` at `warn` instead of `tool.done` at `info` |
+| `MCP_TOOL_SLOW_WARN_MS` | `5000` | An MCP tool call still running at this duration is logged as `tool.slow` (`settled: false`) at `warn` — which is what makes a hang visible, since a hang never settles. A call that finishes at or above it is logged as `tool.slow` (`settled: true`) instead of `tool.done` |
 | `TRUSTED_PROXY_HOPS` | `0` | Number of trusted reverse-proxy hops to walk from the right of `X-Forwarded-For`; `0` ignores XFF and uses the TCP peer |
 | `WRITES_PAUSED` | `false` | When `1` / `true` / `yes` / `on`, write routes (`POST /api/remember`, `/api/remember/manual`, `/api/remember/bulk`, `/api/analyze`) return HTTP 503 `{"error":"writes are paused"}`. `GET /health` stays HTTP 200 with `status: "ok"` and `writes: "paused"`. Reads (`recall`, `restore`, health) stay available |
 
@@ -179,7 +179,7 @@ These are not all enforced at boot, but most real deployments need them.
 - The sidecar `POST /walrus/upload` route defaults Walrus storage epochs by network: `50` on `testnet` (about 50 days) and `2` on `mainnet` (about 4 weeks), unless the request explicitly passes `epochs`.
 - `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` are server env vars. Do not replace them with `VITE_*` app env vars.
 - For network-specific `MEMWAL_PACKAGE_ID` and `MEMWAL_REGISTRY_ID` values, see [Contract Overview](/contract/overview).
-- `MEMWAL_RELAYER_URL` is only needed when the sidecar should call a different relayer URL than the Rust server's local port. The Rust server sets it automatically to `http://127.0.0.1:$PORT` for the managed sidecar when it starts.
+- `MEMWAL_SIDECAR_RELAYER_URL` is the only variable that changes where the sidecar connects, and it is only needed when the sidecar must reach a relayer in another process. Leave it unset: the managed sidecar is a child of the Rust server, which points it at `http://127.0.0.1:$PORT`. Do not reach for `MEMWAL_RELAYER_URL` to redirect it — that variable is the deployment's public identity and the OAuth issuer, and unsetting it takes `McpOAuthConfig::from_env` to `None`, which refuses every OAuth handshake with `OauthNotConfigured`.
 - `MEMWAL_RELAYER_URL` names the deployment; it does not route anything. It is the OAuth issuer (see `McpOAuthConfig::from_env`) and the origin `memwal_health` reports, and MCP OAuth stops working if it is unset — so leave it set, and do not reach for it to change where the sidecar connects. Only `MEMWAL_SIDECAR_RELAYER_URL` moves the dial, and it should stay unset: the managed sidecar runs as a child of the relayer process, so loopback is the relayer it needs. Pointing it at a public hostname makes every `memwal_*` tool call leave the container and return through the edge.
 - `memwal_health` reports only a stated public origin, never the loopback dial address, because an address that names no network would make a client bound to the wrong relayer read as correctly configured. Clients run through the `memwal-mcp` stdio package always see the relayer that package dialled, whether or not this is set.
 
