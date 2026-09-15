@@ -136,3 +136,47 @@ export function pendingMessage(jobId: string, waitedMs: number): string {
         `the same fact with memwal_remember — that queues a second copy behind this one.`
     );
 }
+
+/** Longest fact echoed back in a pending listing. The line exists so the
+ * agent can tell which job_id belongs to which fact, not to reproduce the
+ * fact — and 20 of them at full length would crowd out the instructions
+ * underneath. */
+const PENDING_FACT_PREVIEW_CHARS = 80;
+
+function previewFact(text: string): string {
+    const flat = text.replace(/\s+/g, " ").trim();
+    return flat.length > PENDING_FACT_PREVIEW_CHARS
+        ? `${flat.slice(0, PENDING_FACT_PREVIEW_CHARS - 1)}…`
+        : flat;
+}
+
+/**
+ * The bulk counterpart of `pendingMessage`. Same contract — an agent must not
+ * read it as success — with the one addition bulk needs: each job_id is paired
+ * with the fact it carries, because "one of these five failed" is only
+ * actionable if the agent can tell which.
+ */
+export function pendingBulkMessage(
+    entries: Array<{ jobId: string; text: string }>,
+    waitedMs: number,
+): string {
+    const n = entries.length;
+    const opening =
+        waitedMs === 0
+            ? `ACCEPTED, NOT YET SAVED — the relayer has durably queued ${n} write(s).`
+            : `NOT SAVED YET — ${n} write(s) were accepted but had not finished after ${(waitedMs / 1000).toFixed(1)}s.`;
+
+    const lines = entries
+        .map((e, i) => `${i + 1}. job_id=${e.jobId} — ${previewFact(e.text)}`)
+        .join("\n");
+
+    return (
+        `${opening}\n${lines}\n` +
+        `Walrus uploads queue and are written one at a time per wallet, so a batch takes ` +
+        `longer than a single fact. Do NOT tell the user these facts are stored — say they ` +
+        `are being saved. Call memwal_remember_status with job_ids=[...] to get the blob_ids ` +
+        `once they land, or to learn that one failed; a job CAN fail after acceptance, and ` +
+        `this is the only way to find out. Do not re-send these facts with ` +
+        `memwal_remember_bulk — that queues a second copy behind them.`
+    );
+}

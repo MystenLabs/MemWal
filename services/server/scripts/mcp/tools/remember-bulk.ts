@@ -3,7 +3,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
-import { REMEMBER_POLL_INTERVAL_MS } from "./remember-wait.js";
+import {
+    REMEMBER_POLL_INTERVAL_MS,
+    REMEMBER_WAIT_MS,
+    pendingBulkMessage,
+} from "./remember-wait.js";
 
 const REMEMBER_BULK_INPUT = {
     facts: z
@@ -22,11 +26,20 @@ const REMEMBER_BULK_INPUT = {
 } as const;
 
 /**
- * memwal_remember_bulk — persist several durable facts in one batched request
- * and return only once every job reaches a terminal state. Wraps the SDK's
- * `rememberBulkAndWait` (embed + SEAL-encrypt all items concurrently, upload
- * N blobs in parallel). Prefer this over N separate `memwal_remember` calls
- * when you learned multiple distinct facts at once.
+ * memwal_remember_bulk — persist several durable facts in one batched request.
+ *
+ * Mirrors `memwal_remember`: returns once every job reaches a terminal state
+ * if that happens inside `REMEMBER_WAIT_MS`, and otherwise hands back the
+ * job_ids saying plainly that the facts are not saved yet.
+ *
+ * Blocking here was worse than blocking on a single fact, not better. The
+ * server instructions steer an agent to this tool whenever it learned more
+ * than one thing, so it is the common path — and a batch is N separate Walrus
+ * writes contending for the same upload slots
+ * (`WALRUS_UPLOAD_PER_WALLET_CONCURRENCY` defaults to 1), so they land one
+ * after another rather than together. Against a 30–75s single-write spread a
+ * five-fact batch could exhaust the old fixed 120s budget outright and return
+ * nothing but timeouts, having blocked the agent for two minutes first.
  */
 export function registerRememberBulkTool(
     server: McpServer,
@@ -37,23 +50,58 @@ export function registerRememberBulkTool(
         {
             ...TOOL_METADATA.memwal_remember_bulk,
             description:
-                "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
+                "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. Walrus writes queue, so this normally returns job_ids with the facts NOT yet saved — in that case say they are being saved rather than claiming they are stored, and resolve them with memwal_remember_status.",
             inputSchema: REMEMBER_BULK_INPUT,
         },
         wrapTool<{ facts: string[]; namespace?: string }>(session, "memwal_remember_bulk", async ({ facts, namespace }) => {
             const items = facts.map((text) => ({ text, namespace }));
-            const result = await session.memwal.rememberBulkAndWait(items, {
-                timeoutMs: 120_000,
-                // This tool still blocks to terminal, so unlike `memwal_remember`
-                // the poll cadence IS the wait: at the SDK's 1500ms default the
-                // backoff tops out at its 10s ceiling and checks land ~1.5, 3.75,
-                // 7.1, 12.2, 19.8, 29.8s apart — a batch that finished at 20.5s is
-                // not reported until 29.8s. One poll covers every pending job in
-                // the batch (`/api/remember/bulk/status` takes all the ids), so
-                // the rate-limit budget behind this number is the same as a
-                // single remember's.
-                pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
+            // Two steps rather than `rememberBulkAndWait`, for the same reason
+            // `memwal_remember` splits them: acceptance is the part that must
+            // succeed, the wait is a courtesy we cut short.
+            const accepted = await session.memwal.rememberBulkAsync(items);
+
+            // Pair each job with its fact up front. Every later branch needs
+            // it, and the relayer returns job_ids in input order.
+            const entries = accepted.job_ids.map((jobId, i) => ({
+                jobId,
+                text: facts[i] ?? "",
+            }));
+
+            const pending = (waitedMs: number) => ({
+                content: [
+                    {
+                        type: "text" as const,
+                        text: pendingBulkMessage(entries, waitedMs),
+                    },
+                ],
             });
+
+            if (REMEMBER_WAIT_MS === 0) return pending(0);
+
+            const startedAt = Date.now();
+            const namespaces = items.map(
+                (item) => item.namespace ?? session.namespace ?? "default"
+            );
+            // Unlike `waitForRememberJob`, this never throws on expiry — it
+            // reports the stragglers as `timeout` per item, so a batch can come
+            // back part landed and part still in flight.
+            const result = await session.memwal.waitForRememberJobs(
+                accepted.job_ids,
+                namespaces,
+                {
+                    timeoutMs: REMEMBER_WAIT_MS,
+                    pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
+                }
+            );
+            const waitedMs = Date.now() - startedAt;
+
+            const unfinished = result.results.flatMap((r, i) =>
+                r.status === "timeout" ? [{ jobId: r.id, text: facts[i] ?? "" }] : []
+            );
+            // Nothing landed inside the budget — the ordinary outcome when the
+            // queue is busy. Say so once rather than printing N timeout rows.
+            if (unfinished.length === result.results.length) return pending(waitedMs);
+
             const lines = result.results.map((r, i) => {
                 // Label each result with its source fact by index. The SDK
                 // returns results in input order, but guard against a length /
@@ -61,18 +109,27 @@ export function registerRememberBulkTool(
                 const text = facts[i] ?? "";
                 const blob = r.blob_id ? ` blob_id=${r.blob_id}` : "";
                 const err = r.error ? ` error=${r.error}` : "";
-                return `${i + 1}. [${r.status}]${blob}${err}${text ? ` — ${text}` : ""}`;
+                // `timeout` is not a failure — the write is still running and
+                // its job_id is how the caller settles it later.
+                const state = r.status === "timeout" ? `still uploading, job_id=${r.id}` : r.status;
+                return `${i + 1}. [${state}]${blob}${err}${text ? ` — ${text}` : ""}`;
             });
             const summary = `Saved ${result.succeeded}/${result.total} fact(s) to Walrus Memory (failed=${result.failed}).`;
             const footer = result.succeeded > 0 ? `\n\n${explorerFooter()}` : "";
+            const tail = unfinished.length
+                ? `\n\n${unfinished.length} write(s) are STILL UPLOADING and are NOT saved yet. ` +
+                  `Do not claim those facts are stored; resolve them with memwal_remember_status ` +
+                  `using job_ids=[${unfinished.map((u) => u.jobId).join(", ")}]. Do not re-send ` +
+                  `them — that queues duplicates behind the originals.`
+                : "";
             return {
                 content: [
                     {
                         type: "text",
                         text:
-                            lines.length > 0
+                            (lines.length > 0
                                 ? `${summary}\n\n${lines.join("\n")}${footer}`
-                                : `${summary}${footer}`,
+                                : `${summary}${footer}`) + tail,
                     },
                 ],
             };
