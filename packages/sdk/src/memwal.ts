@@ -311,6 +311,22 @@ export class MemWal {
 
     /**
      * Poll an accepted remember job until it reaches a terminal state.
+     *
+     * Non-terminal states (`pending`, `running`, `uploaded`) keep polling — the
+     * job is still progressing server-side. Every observation is retained so a
+     * timeout can report where the job had got to instead of discarding it:
+     * `uploaded` already carries the Walrus `blob_id`, and losing that on
+     * timeout is what made a timed-out job look indistinguishable from one that
+     * never started.
+     *
+     * @throws A {@link RememberJobTimeoutError} (`status: 504`) carrying
+     * `jobId`, plus `lastStatus` / `lastBlobId` when the job was observed at
+     * least once. The job is *not* cancelled — it keeps running server-side, so
+     * callers can resume with `getRememberStatus(err.jobId)`.
+     * @throws `status: 404` when the job id is unknown to the server.
+     * @throws `status: 500` when the server reports the job as failed.
+     * @throws `status: 502` when the server reports `done` without a `blob_id`
+     * — a contract violation that used to resolve as a silent empty string.
      */
     async waitForRememberJob(
         jobId: string,
@@ -319,9 +335,15 @@ export class MemWal {
         const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
+        let lastStatus: RememberJobStatus["status"] | undefined;
+        let lastBlobId: string | undefined;
 
         while (Date.now() < deadline) {
-            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
+            // Poll immediately on the first pass — an already-finished job
+            // should not pay a full backoff interval of latency — then back off
+            // before each subsequent poll.
+            if (attempt > 0) await sleep(pollingDelayMs(pollIntervalMs, attempt - 1));
+            attempt++;
 
             let status: RememberStatusResponse;
 
@@ -341,17 +363,34 @@ export class MemWal {
             }
 
             if (!("status" in status) || status.status === "not_found") {
+                // Job cleanup can retire a row an earlier poll already saw
+                // `uploaded`. Carry that observation out, same as 502/504.
                 throw Object.assign(new Error(`remember job not found: ${jobId}`), {
                     status: 404,
                     jobId,
+                    lastStatus,
+                    lastBlobId,
                 });
             }
 
+            if (status.blob_id) lastBlobId = status.blob_id;
+
             if (status.status === "done") {
+                if (!status.blob_id) {
+                    // Reject `done` without a blob id rather than resolving
+                    // with blob_id: "". `lastBlobId` carries anything an
+                    // earlier poll saw, so a caller can still recover.
+                    throw Object.assign(
+                        new Error(
+                            `remember job reported done without a blob_id (job_id=${jobId})`,
+                        ),
+                        { status: 502, jobId, lastStatus, lastBlobId },
+                    );
+                }
                 return {
                     id: status.job_id,
                     job_id: status.job_id,
-                    blob_id: status.blob_id ?? "",
+                    blob_id: status.blob_id,
                     owner: status.owner ?? "",
                     namespace: status.namespace ?? this.namespace,
                 };
@@ -361,14 +400,26 @@ export class MemWal {
                     new Error(
                         `remember job failed: ${redactInternalUrls(status.error ?? "unknown error")}`,
                     ),
-                    { status: 500, jobId },
+                    { status: 500, jobId, lastStatus, lastBlobId },
                 );
             }
+
+            // Non-terminal (pending | running | uploaded). Record it only here,
+            // so `lastStatus` means "how far the job got", the same as the bulk
+            // path's `last_status`. Assigning before the branches made a 500
+            // report "failed" and a 502 report "done" — the terminal poll, not
+            // the progress a caller needs to decide whether to recover.
+            lastStatus = status.status;
         }
 
+        const observed = [
+            `job_id=${jobId}`,
+            ...(lastStatus ? [`last_status=${lastStatus}`] : []),
+            ...(lastBlobId ? [`last_blob_id=${lastBlobId}`] : []),
+        ].join(", ");
         throw Object.assign(
-            new Error(`remember job timed out after ${timeoutMs}ms (job_id=${jobId})`),
-            { status: 504, jobId },
+            new Error(`remember job timed out after ${timeoutMs}ms (${observed})`),
+            { status: 504, jobId, lastStatus, lastBlobId },
         );
     }
 
@@ -468,6 +519,15 @@ export class MemWal {
         );
     }
 
+    /**
+     * Poll a batch of accepted remember jobs until each reaches a terminal state.
+     *
+     * Unlike {@link waitForRememberJob} this never throws on timeout: every job
+     * gets a result entry, pre-seeded as `status: "timeout"` and overwritten
+     * once the job settles. Entries still non-terminal at the deadline keep the
+     * last `blob_id` and `last_status` observed while polling, so an `uploaded`
+     * job that outlived `timeoutMs` reports its blob id instead of `""`.
+     */
     async waitForRememberJobs(
         jobIds: string[],
         namespaces: string[] = [],
@@ -482,16 +542,21 @@ export class MemWal {
             namespace: namespaces[idx] ?? this.namespace,
             error: `polling timed out after ${timeoutMs}ms`,
         }));
-        const pending = new Set(jobIds);
+        // Track pending work per *occurrence*, not per id: the same job id may
+        // legitimately appear twice in `jobIds`, and each slot needs its own
+        // result.
+        let pendingSlots = jobIds.map((jobId, idx) => ({ jobId, idx }));
         let attempt = 0;
 
-        while (pending.size > 0 && Date.now() < deadline) {
-            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
+        while (pendingSlots.length > 0 && Date.now() < deadline) {
+            // Poll immediately on the first pass, then back off before each
+            // subsequent poll — see waitForRememberJob.
+            if (attempt > 0) await sleep(pollingDelayMs(pollIntervalMs, attempt - 1));
+            attempt++;
 
-            const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
-            if (pendingIds.length === 0) {
-                break;
-            }
+            // One id per pending occurrence, so a duplicated job id asks for —
+            // and consumes — one status response per slot it occupies.
+            const pendingIds = pendingSlots.map((slot) => slot.jobId);
 
             let batchStatus: RememberBulkStatusResult;
 
@@ -515,44 +580,85 @@ export class MemWal {
                 }
             }
 
-            for (const jobId of pendingIds) {
-                const status = statusById.get(jobId)?.shift();
+            const stillPending: typeof pendingSlots = [];
+            for (const slot of pendingSlots) {
+                const status = statusById.get(slot.jobId)?.shift();
                 if (!status) {
+                    stillPending.push(slot);
                     continue;
                 }
 
-                const idx = jobIds.indexOf(jobId);
+                const namespace = namespaces[slot.idx] ?? this.namespace;
+
                 if (status.status === "done") {
-                    results[idx] = {
-                        id: jobId,
-                        blob_id: status.blob_id ?? "",
+                    // Same contract violation waitForRememberJob rejects on: a
+                    // "done" job must carry its blob_id. Report it as failed
+                    // rather than a "done" whose blob_id is "" — this path
+                    // returns per-item results instead of throwing.
+                    if (!status.blob_id) {
+                        results[slot.idx] = {
+                            ...results[slot.idx],
+                            id: slot.jobId,
+                            status: "failed",
+                            namespace,
+                            error: "job reported done without a blob_id",
+                        };
+                        continue;
+                    }
+                    results[slot.idx] = {
+                        id: slot.jobId,
+                        blob_id: status.blob_id,
                         status: "done",
-                        namespace: namespaces[idx] ?? this.namespace,
+                        namespace,
                     };
-                    pending.delete(jobId);
-                } else if (status.status === "failed" || status.status === "not_found") {
-                    results[idx] = {
-                        id: jobId,
-                        blob_id: "",
+                    continue;
+                }
+                if (status.status === "failed" || status.status === "not_found") {
+                    // Spread first: a blob id an earlier `uploaded` poll folded
+                    // in is the caller's only handle on a write that may have
+                    // landed. Do not reset it to "". `mark_remember_job_failed`
+                    // leaves `blob_id` in place, so the failing poll itself can
+                    // also be the first one to carry it.
+                    results[slot.idx] = {
+                        ...results[slot.idx],
+                        id: slot.jobId,
+                        blob_id: status.blob_id || results[slot.idx].blob_id,
                         status: "failed",
-                        namespace: namespaces[idx] ?? this.namespace,
+                        namespace,
                         error:
                             status.status === "not_found"
                                 ? "job not found"
                                 : redactInternalUrls(status.error ?? "unknown error"),
                     };
-                    pending.delete(jobId);
+                    continue;
                 }
+
+                // Non-terminal (pending | running | uploaded): keep polling, but
+                // fold the observation into the pre-seeded timeout entry so we
+                // still have it if the deadline arrives first.
+                results[slot.idx] = {
+                    ...results[slot.idx],
+                    blob_id: status.blob_id || results[slot.idx].blob_id,
+                    last_status: status.status,
+                };
+                stillPending.push(slot);
             }
+            pendingSlots = stillPending;
         }
 
         const succeeded = results.filter((r) => r.status === "done").length;
+        // A timeout is an unknown outcome, not a known failure: the job may
+        // still complete server-side. Callers who need "did every write land"
+        // must check `failed + timedOut`, not `failed`.
+        const failed = results.filter((r) => r.status === "failed").length;
+        const timedOut = results.filter((r) => r.status === "timeout").length;
 
         return {
             results,
             total: results.length,
             succeeded,
-            failed: results.length - succeeded,
+            failed,
+            timedOut,
         };
     }
 

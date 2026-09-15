@@ -54,6 +54,43 @@ export interface RememberResult {
     namespace: string;
 }
 
+/**
+ * Shape of the error thrown by `waitForRememberJob()` / `rememberAndWait()`
+ * when polling gives up before the job reaches a terminal state.
+ *
+ * The job keeps running server-side after the client stops waiting, so the
+ * error carries everything needed to resume or reconcile later instead of
+ * discarding the observation:
+ *
+ * ```typescript
+ * try {
+ *     await memwal.rememberAndWait(text)
+ * } catch (err) {
+ *     const timeout = err as RememberJobTimeoutError
+ *     if (timeout.status === 504) {
+ *         // Job id is always present; lastBlobId is set once the relayer has
+ *         // reported "uploaded", i.e. the blob exists even though indexing
+ *         // had not finished when we stopped polling.
+ *         await memwal.getRememberStatus(timeout.jobId)
+ *     }
+ * }
+ * ```
+ */
+export interface RememberJobTimeoutError extends Error {
+    /** Always 504 for a polling timeout. */
+    status: number;
+    /** The job that was being polled. Always set. */
+    jobId: string;
+    /**
+     * Last non-terminal status observed, if the job was seen at all. This is
+     * how far the job got, not the poll that ended the wait, so it matches the
+     * bulk path's `last_status`.
+     */
+    lastStatus?: RememberJobStatus["status"];
+    /** Last blob_id observed (set from "uploaded" onwards), if any. */
+    lastBlobId?: string;
+}
+
 /** A single recalled memory */
 export interface RecallMemory {
     blob_id: string;
@@ -241,7 +278,15 @@ export interface RememberBulkOptions {
 export interface RememberBulkItemResult {
     /** job_id returned by the server */
     id: string;
-    /** Walrus blob_id once the job completes ("" if failed) */
+    /**
+     * Walrus blob_id once the job completes.
+     *
+     * On any non-`done` item this carries the last blob_id observed while
+     * polling, so `failed` and `timeout` items keep it too. Empty means the job
+     * was never seen at `uploaded`, NOT that the status is `failed`: a
+     * non-empty value on a failed item is the handle for recovering a blob that
+     * was minted before indexing gave up.
+     */
     blob_id: string;
     /** Final status reported by the server: "done" | "failed" | "timeout" */
     status: "done" | "failed" | "timeout";
@@ -249,6 +294,12 @@ export interface RememberBulkItemResult {
     namespace: string;
     /** Error message if status !== "done" */
     error?: string;
+    /**
+     * Last non-terminal job status observed while polling, on any non-`done`
+     * item. Unset means the job was never observed, which is how callers tell
+     * that apart from "was still uploading when we gave up".
+     */
+    last_status?: RememberJobStatus["status"];
 }
 
 /** Result from rememberBulkAndWait() / waitForRememberJobs() */
@@ -259,8 +310,15 @@ export interface RememberBulkResult {
     total: number;
     /** Count of items that reached status=done */
     succeeded: number;
-    /** Count of items that failed or timed out */
+    /**
+     * Count of items the server reported as failed.
+     *
+     * Items that merely outlived `timeoutMs` are counted in `timedOut`, not
+     * here — a timeout is an unknown outcome, not a known failure.
+     */
     failed: number;
+    /** Count of items still non-terminal when polling gave up (status=timeout) */
+    timedOut: number;
 }
 
 /** Result from embed() */

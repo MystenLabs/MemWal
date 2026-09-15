@@ -28,21 +28,31 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.7. Request bodies are hashed with `@noble/hashes` rather than WebCrypto-or-`node:crypto`, so the SDK no longer imports a Node builtin that Vite silently externalises into a runtime crash in the browser, and it declares a Node 20 floor. `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. Empty-body 401s use the AUTH_REJECTED troubleshooting message instead of telling callers to run `memwal_login`. Account and manual PTBs use typed `tx.pure` helpers so they work with modern `@mysten/sui`. 0.1.6 added optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`, and reports HTTP 503 as a retryable upstream outage instead of a sign-in failure.
+  The latest TypeScript SDK release is 0.1.7. A `waitForRememberJob` poll timeout throws a typed `RememberJobTimeoutError` that keeps the job id and last observed blob id, `RememberBulkResult` splits `timedOut` out of `failed`, and a job reporting `done` with no `blob_id` is an error instead of an empty handle. Request bodies are hashed with `@noble/hashes` rather than WebCrypto-or-`node:crypto`, so the SDK no longer imports a Node builtin that Vite silently externalises into a runtime crash in the browser, and it declares a Node 20 floor. `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. Empty-body 401s use the AUTH_REJECTED troubleshooting message instead of telling callers to run `memwal_login`. Account and manual PTBs use typed `tx.pure` helpers so they work with modern `@mysten/sui`. 0.1.6 added optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`, and reports HTTP 503 as a retryable upstream outage instead of a sign-in failure.
 ---
 
 ## 0.1.7
 
-This release removes the Node `crypto` import that crashed bundled browser builds at runtime, adds `failed` on `restore()` results, declares a Node 20 floor, stops telling headless SDK clients to call `memwal_login` on empty-body 401s, and switches account and manual PTBs to typed `tx.pure` helpers.
+This release stops a remember poll timeout from discarding the job state a caller needs to recover, splits `timedOut` out of `failed` on bulk results, removes the Node `crypto` import that crashed bundled browser builds at runtime, adds `failed` on `restore()` results, declares a Node 20 floor, stops telling headless SDK clients to call `memwal_login` on empty-body 401s, and switches account and manual PTBs to typed `tx.pure` helpers.
 
 ### Added
 
+- `RememberBulkResult.timedOut` counts jobs that were still running when the poll deadline expired, separately from `failed`.
+- `RememberJobTimeoutError` types the `waitForRememberJob` poll timeout (`status` 504) and carries `jobId` plus the last observed `lastStatus` / `lastBlobId`.
 - `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
+
+### Changed
+
+- **`RememberBulkResult.failed` now counts only relayer-reported failures.** Jobs still running when the poll deadline expired are counted in the new `timedOut`. Gate a durability check on `failed + timedOut`, or on `results.some((r) => r.status !== "done")`.
+- **A job reporting `done` without a `blob_id` is now an error, not a result.** `waitForRememberJob` throws `502` instead of resolving with `blob_id: ""`.
 
 ### Fixed
 
 - Hash request bodies with `@noble/hashes` instead of WebCrypto-or-`node:crypto`, so the package no longer imports a Node builtin on a browser-reachable path. Vite externalises such an import without warning: the app builds clean and the browser crashes the first time the path runs. The fallback could never have helped a browser anyway — `crypto.subtle` is absent precisely when the page is not a secure context, where `node:crypto` is absent too — so it only served Node <19 while being the sole source of the exposure. `sha256hex` sits on the signed-request path, so every remember and recall reached it. (#322, WALM-136)
 - Declare `engines.node >= 20.0.0`, matching `memwal-mcp` and `openclaw-memory-memwal`. The SDK was the only published package without a floor. (WALM-599)
+- A `waitForRememberJob` timeout keeps the job id and the last observed `status` / `blob_id` instead of throwing them away, so a caller can poll the job again rather than reissuing a paid write. The 404 and 500 throws carry the same fields.
+- `waitForRememberJobs` no longer resets a `blob_id` an earlier `uploaded` poll observed when a later poll reports `failed`, `not_found`, or `done` without a blob id.
+- A job id repeated in one `waitForRememberJobs` call resolves each occurrence instead of writing every status into the first slot.
 - Empty-body 401s now use the same AUTH_REJECTED troubleshooting message as credential 401s instead of telling callers to run `memwal_login`. Headless SDK clients do not have that MCP tool.
 - `account.ts` and `manual.ts` PTBs use typed `tx.pure` helpers instead of the legacy untyped moveCall argument syntax that fails under modern `@mysten/sui`.
 

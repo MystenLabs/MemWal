@@ -5,6 +5,13 @@
 ### Added
 
 - `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
+- `RememberBulkResult.timedOut` counts jobs that were still running when the poll deadline expired, separately from `failed`.
+- `RememberJobTimeoutError` types the `waitForRememberJob` poll timeout (`status` 504) and carries `jobId` plus the last observed `lastStatus` / `lastBlobId`.
+
+### Changed
+
+- **`RememberBulkResult.failed` now counts only relayer-reported failures.** Jobs still running when the poll deadline expired are counted in the new `timedOut` instead of being folded into `failed`. A timeout is an unknown outcome, not a lost write, so `if (settled.failed > 0)` is no longer a complete "did every write persist" check. Gate on `failed + timedOut`, or on `results.some((r) => r.status !== "done")`. `docs/sdk/production-readiness.md` is updated to match.
+- **A job reporting `done` without a `blob_id` is now an error, not a result.** `waitForRememberJob` throws `502` instead of resolving with `blob_id: ""`, which a caller could store as a valid handle to a memory that was never written. The bulk path reports the same case as `failed`.
 
 ### Fixed
 
@@ -12,6 +19,9 @@
 - Declare `engines.node >= 20.0.0`, matching `memwal-mcp` and `openclaw-memory-memwal`. The SDK was the only published package without a floor. (WALM-599)
 - Empty-body 401s now use the same AUTH_REJECTED troubleshooting message as credential 401s instead of telling callers to run `memwal_login`. Headless SDK clients do not have that MCP tool.
 - `account.ts` and `manual.ts` PTBs use typed `tx.pure` helpers instead of the legacy untyped moveCall argument syntax that fails under modern `@mysten/sui`.
+- A `waitForRememberJob` timeout keeps the job id and the last observed `status` / `blob_id` instead of throwing them away, so a caller can poll the job again rather than reissuing a paid write. The 404 (job cleaned up) and 500 (job failed) throws carry the same fields.
+- `waitForRememberJobs` no longer resets a `blob_id` an earlier `uploaded` poll observed when a later poll reports `failed`, `not_found`, or `done` without a blob id.
+- A job id repeated in one `waitForRememberJobs` call resolves each occurrence instead of writing every status into the first slot.
 
 ## 0.1.6
 
