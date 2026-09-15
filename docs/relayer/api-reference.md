@@ -159,6 +159,26 @@ Proxy to the sidecar's `/sponsor/execute` endpoint. `sender` must match the shor
 
 Every route below requires the signed headers described in [Authentication](#authentication).
 
+### `GET /api/whoami`
+
+Return the account identity the caller's delegate key resolves to. Takes no request body.
+
+Authentication already resolves the account before any handler runs, so this route just hands back what the middleware computed. Returning `account_id` is safe here precisely because the route is authenticated. The caller has proven it holds a delegate key registered against this account, so it only ever learns about itself. The public `GET /api/accounts/:owner/exists` route deliberately withholds it.
+
+The motivating use is rebuilding local credentials: a client that holds a working delegate key but has lost the surrounding metadata (an interrupted sign-in, a wiped config file) needs `account_id`, `owner`, and `package_id` to write a usable credentials file, and the key alone proves entitlement to all three.
+
+**Response:**
+
+```json
+{
+  "account_id": "0x...",
+  "owner": "0x...",
+  "package_id": "0x..."
+}
+```
+
+**Mainnet only, when the caller cannot send `x-account-id`.** Recovering a lost account id is the one case where the client has no id to send, so authentication has to find it by scanning the `AccountRegistry` for the delegate key. That scan runs over Sui JSON-RPC, which Testnet no longer serves, so Testnet requires the `x-account-id` hint for delegate-key authentication and rejects the request with `401` when it is absent, including this one. A caller that already knows its account id can use this route on either network; a caller recovering one cannot use it on Testnet.
+
 ### `POST /api/remember`
 
 Submit text as an encrypted memory job. The relayer returns after creating a background job; embedding, Seal encryption, Walrus upload, and vector indexing continue asynchronously.

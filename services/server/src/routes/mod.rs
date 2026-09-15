@@ -38,7 +38,7 @@ mod sponsor;
 
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
 // without having to know which submodule each handler lives in.
-pub use accounts::account_exists;
+pub use accounts::{account_exists, whoami};
 pub use admin::{ask, embed, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
 pub use memory_read::{list_owner_agents, list_owner_memories, list_owner_namespaces};

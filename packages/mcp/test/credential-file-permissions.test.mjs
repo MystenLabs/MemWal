@@ -172,6 +172,36 @@ test("the backup of a displaced account is written at 0600", async (t) => {
     assert.equal(JSON.parse(readFileSync(saved.backedUpTo, "utf8")).delegatePrivateKey, OLD_KEY);
 });
 
+// The login write-ahead record (WALM-332) holds the same plaintext key before
+// the browser ever sees its public half, so it needs the same property.
+test("savePendingLogin never writes the key through a pre-existing permissive file", POSIX_ONLY, async (t) => {
+    const { auth } = await sandbox(t);
+    const path = auth.pendingLoginPath();
+    const makePending = (delegatePrivateKey) => ({
+        delegatePrivateKey,
+        delegatePublicKeyHex: "d".repeat(64),
+        delegateAddress: "0x" + "e".repeat(64),
+        relayerUrl: "https://relayer.example",
+        label: "Test",
+        createdAt: new Date().toISOString(),
+        version: 1,
+    });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, JSON.stringify(makePending(OLD_KEY)), { mode: 0o644 });
+
+    const attackerFd = openSync(path, "r");
+    t.after(() => closeSync(attackerFd));
+
+    auth.savePendingLogin(makePending(NEW_KEY));
+
+    assert.ok(
+        !readThroughOpenFd(attackerFd).includes(NEW_KEY),
+        "the pending private key must never be readable through the pre-existing 0644 inode",
+    );
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).delegatePrivateKey, NEW_KEY);
+    assert.equal(modeOf(path), 0o600);
+});
+
 test("saveCreds leaves no temporary file behind", async (t) => {
     const { auth, home } = await sandbox(t, { existingFileMode: 0o644 });
 
