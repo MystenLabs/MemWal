@@ -97,7 +97,7 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
 | MemWal MCP (memory tools) | ✓ | ✓ |
 | Lifecycle hooks (automatic recall/save) | ✓ | ✗ |
 
-MCP-only still saves and recalls on its own because the tools are proactive. The plugin adds hooks that reinforce the behavior and make the agent **prefer Walrus Memory over Claude Code's built-in memory**.
+MCP-only still saves and recalls on its own because the tools are proactive. The plugin adds hooks that reinforce the behavior and make the agent **prefer Walrus Memory over Claude Code's built-in memory**. The plugin pins the MCP server version, so `npx` cannot keep a cached older package.
 
 ## Available tools
 
