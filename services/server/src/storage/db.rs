@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::alerts::AlertManager;
 use crate::types::{AppError, SearchHit};
@@ -10,6 +10,25 @@ use crate::types::{AppError, SearchHit};
 /// Tombstone retention for both the read-API `must_resync` clock and the
 /// background sweep. Keep a single constant so the two cannot drift.
 pub const TOMBSTONE_RETENTION: chrono::Duration = chrono::Duration::days(30);
+
+/// One `vector_entries` row queued for an all-or-nothing batch insert.
+///
+/// Mirrors the argument list of [`VectorDb::insert_vector`]; see that method
+/// for the meaning of each field. Used by [`VectorDb::insert_vectors_atomic`]
+/// so callers that persist a whole batch (namespace restore) can hand over
+/// every row up front instead of issuing one autocommitted INSERT per row.
+pub struct VectorInsert<'a> {
+    pub id: &'a str,
+    pub owner: &'a str,
+    pub namespace: &'a str,
+    pub blob_id: &'a str,
+    pub vector: &'a [f32],
+    pub blob_size_bytes: i64,
+    pub importance: f32,
+    pub agent_id: Option<&'a str>,
+    pub package_id: Option<&'a str>,
+    pub end_epoch: Option<i32>,
+}
 
 pub struct VectorDb {
     pool: PgPool,
@@ -49,7 +68,7 @@ mod tests {
 
     use sqlx::postgres::PgPoolOptions;
 
-    use super::{oauth_rows, VectorDb};
+    use super::{oauth_rows, VectorDb, VectorInsert};
 
     static VECTOR_SCHEMA_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -927,6 +946,211 @@ mod tests {
             .unwrap();
     }
 
+    // ── Restore persists its batch atomically (GH #566 / WALM-591) ──
+
+    /// Build one restore-shaped batch row. Passing a `vector` of the wrong
+    /// length plants a row the `vector(1536)` column will reject, which is how
+    /// the rollback test forces a failure partway through the batch.
+    fn restore_row<'a>(
+        id: &'a str,
+        owner: &'a str,
+        namespace: &'a str,
+        blob_id: &'a str,
+        vector: &'a [f32],
+    ) -> VectorInsert<'a> {
+        VectorInsert {
+            id,
+            owner,
+            namespace,
+            blob_id,
+            vector,
+            blob_size_bytes: 1,
+            importance: 0.5,
+            agent_id: None,
+            package_id: None,
+            end_epoch: None,
+        }
+    }
+
+    async fn rows_for_owner(db: &VectorDb, owner: &str, namespace: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM vector_entries WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+    }
+
+    async fn delete_rows_for_owner(db: &VectorDb, owner: &str) {
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    /// A row that fails partway through must not leave earlier rows committed.
+    #[tokio::test]
+    async fn restore_batch_insert_rolls_back_every_row_when_one_fails() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrestore-rollback-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let ids: Vec<String> = (0..3)
+            .map(|i| format!("restore-rollback-{i}-{suffix}"))
+            .collect();
+        let blob_ids: Vec<String> = (0..3)
+            .map(|i| format!("blob-rollback-{i}-{suffix}"))
+            .collect();
+        let good = vec![0.1_f32; 1536];
+        // The middle row's embedding has the wrong dimension, so Postgres
+        // rejects it *after* the first row has already been written inside the
+        // transaction. Before the fix that first row stayed committed.
+        let bad = vec![0.1_f32; 8];
+
+        let batch = vec![
+            restore_row(&ids[0], &owner, &namespace, &blob_ids[0], &good),
+            restore_row(&ids[1], &owner, &namespace, &blob_ids[1], &bad),
+            restore_row(&ids[2], &owner, &namespace, &blob_ids[2], &good),
+        ];
+
+        let result = db.insert_vectors_atomic(&batch).await;
+        assert!(
+            result.is_err(),
+            "a batch containing an invalid row must report an explicit error"
+        );
+
+        let landed = rows_for_owner(&db, &owner, &namespace).await;
+        delete_rows_for_owner(&db, &owner).await;
+        assert_eq!(
+            landed, 0,
+            "a failed restore batch must leave zero rows, not a partial index"
+        );
+    }
+
+    /// The success path still has to commit the whole batch — the rollback fix
+    /// must not turn restore into a no-op.
+    #[tokio::test]
+    async fn restore_batch_insert_commits_every_row_on_success() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrestore-commit-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let ids: Vec<String> = (0..3)
+            .map(|i| format!("restore-commit-{i}-{suffix}"))
+            .collect();
+        let blob_ids: Vec<String> = (0..3)
+            .map(|i| format!("blob-commit-{i}-{suffix}"))
+            .collect();
+        let vector = vec![0.1_f32; 1536];
+
+        let batch: Vec<VectorInsert<'_>> = ids
+            .iter()
+            .zip(blob_ids.iter())
+            .map(|(id, blob_id)| restore_row(id, &owner, &namespace, blob_id, &vector))
+            .collect();
+
+        db.insert_vectors_atomic(&batch)
+            .await
+            .expect("a valid restore batch must commit");
+
+        let landed = rows_for_owner(&db, &owner, &namespace).await;
+        delete_rows_for_owner(&db, &owner).await;
+        assert_eq!(landed, 3, "every row in a successful batch must be visible");
+    }
+
+    /// The original bug's actual trigger: `POST /api/restore` wraps the restore
+    /// future in `tokio::time::timeout(55s, ..)`, so a slow batch had its future
+    /// DROPPED mid-loop and left every already-inserted row committed.
+    ///
+    /// With one transaction, dropping the future rolls it back — SQLx queues a
+    /// ROLLBACK when the dropped transaction hands its connection back to the
+    /// pool. To make sure the cancellation really lands *mid-batch* (a 1ms
+    /// deadline would just abort before the first row and pass trivially), the
+    /// test first times an uncancelled batch of the same shape and then cancels
+    /// the second one at half that duration.
+    ///
+    /// The assertion is "none or all", not "always none": if the batch wins the
+    /// race and commits before the deadline that is a correct outcome too. What
+    /// must never happen — and did before the fix — is a partial count.
+    #[tokio::test]
+    async fn restore_batch_insert_is_all_or_nothing_when_the_future_is_cancelled() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let namespace = format!("ns-{suffix}");
+        let batch_size: i64 = 40;
+        let vector = vec![0.1_f32; 1536];
+
+        let build = |owner: &str, tag: &str| {
+            let ids: Vec<String> = (0..batch_size)
+                .map(|i| format!("restore-{tag}-{i}-{suffix}"))
+                .collect();
+            let blob_ids: Vec<String> = (0..batch_size)
+                .map(|i| format!("blob-{tag}-{i}-{suffix}"))
+                .collect();
+            (owner.to_string(), ids, blob_ids)
+        };
+
+        // Warm-up run: how long does a full batch of this shape take?
+        let (timed_owner, timed_ids, timed_blob_ids) = build(&format!("0xtimed-{suffix}"), "timed");
+        let timed_batch: Vec<VectorInsert<'_>> = timed_ids
+            .iter()
+            .zip(timed_blob_ids.iter())
+            .map(|(id, blob_id)| restore_row(id, &timed_owner, &namespace, blob_id, &vector))
+            .collect();
+        let started = std::time::Instant::now();
+        db.insert_vectors_atomic(&timed_batch)
+            .await
+            .expect("warm-up batch must commit");
+        let full_batch_time = started.elapsed();
+        delete_rows_for_owner(&db, &timed_owner).await;
+
+        // Cancel the real run halfway through that measured duration, so the
+        // drop lands while rows are still being written.
+        let (owner, ids, blob_ids) = build(&format!("0xcancel-{suffix}"), "cancel");
+        let batch: Vec<VectorInsert<'_>> = ids
+            .iter()
+            .zip(blob_ids.iter())
+            .map(|(id, blob_id)| restore_row(id, &owner, &namespace, blob_id, &vector))
+            .collect();
+        // Floored at 5ms: on a fast pool half a sub-millisecond warm-up
+        // cancels before `BEGIN` is even sent, and `landed == 0` would then
+        // pass without the rollback ever being exercised. If the floor lets the
+        // batch finish instead, the `Ok(Ok(()))` arm asserts a full commit — a
+        // real check either way.
+        let deadline = (full_batch_time / 2).max(Duration::from_millis(5));
+        let cancelled = tokio::time::timeout(deadline, db.insert_vectors_atomic(&batch)).await;
+
+        let landed = rows_for_owner(&db, &owner, &namespace).await;
+        delete_rows_for_owner(&db, &owner).await;
+
+        match cancelled {
+            // Timed out: the future was dropped. Postgres may still have
+            // committed if the drop landed after COMMIT was flushed, so accept
+            // the full batch — but never a partial one.
+            Err(_) => assert!(
+                landed == 0 || landed == batch_size,
+                "a cancelled restore batch must be all-or-nothing, saw {landed} of {batch_size} rows"
+            ),
+            Ok(Ok(())) => assert_eq!(
+                landed, batch_size,
+                "a batch that finished before the deadline must be fully committed"
+            ),
+            Ok(Err(error)) => panic!("restore batch failed unexpectedly: {error:?}"),
+        }
+    }
+
     async fn remember_jobs_test_db() -> Option<VectorDb> {
         let db = test_db().await?;
         for migration in [
@@ -1551,14 +1775,81 @@ impl VectorDb {
         package_id: Option<&str>,
         end_epoch: Option<i32>,
     ) -> Result<(), AppError> {
-        let embedding = Vector::from(vector.to_vec());
-
-        let started = std::time::Instant::now();
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| AppError::Internal(format!("Failed to begin insert tx: {}", e)))?;
+        self.insert_vector_in_tx(
+            &mut tx,
+            &VectorInsert {
+                id,
+                owner,
+                namespace,
+                blob_id,
+                vector,
+                blob_size_bytes,
+                importance,
+                agent_id,
+                package_id,
+                end_epoch,
+            },
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to commit insert tx: {}", e)))?;
+        Ok(())
+    }
+
+    /// Persist a whole batch of vector rows in ONE transaction: either every
+    /// row lands or none of them do.
+    ///
+    /// One transaction, so neither a mid-batch `?` nor a dropped future can
+    /// commit a prefix: restore runs under `tokio::time::timeout(55s, ..)`, and
+    /// a prefix is a half-written index (GH #566 / WALM-591). SQLx queues a
+    /// `ROLLBACK` when a dropped `Transaction` returns its connection to the
+    /// pool — the property `jobs::JobUploadLock` also relies on — so a drop
+    /// before Postgres has processed `COMMIT` leaves zero rows. A drop after
+    /// that lands the whole batch; either way it is never partial.
+    ///
+    /// Callers must keep the batch bounded. Restore clamps its page to 100 rows
+    /// (`clamp_restore_limit`), so this stays short-lived.
+    pub async fn insert_vectors_atomic(&self, rows: &[VectorInsert<'_>]) -> Result<(), AppError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut tx =
+            self.pool.begin().await.map_err(|e| {
+                AppError::Internal(format!("Failed to begin batch insert tx: {}", e))
+            })?;
+        for row in rows {
+            // Deliberately no explicit `tx.rollback()` here: `?` drops `tx`,
+            // and SQLx's Drop impl rolls the transaction back before the
+            // connection is reused. That is also what makes a dropped future
+            // (the restore timeout) safe.
+            self.insert_vector_in_tx(&mut tx, row).await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to commit batch insert tx: {}", e)))?;
+
+        tracing::debug!("inserted {} vector rows atomically", rows.len());
+        Ok(())
+    }
+
+    /// Shared statement pair behind [`Self::insert_vector`] and
+    /// [`Self::insert_vectors_atomic`]: upsert the row, then clear any
+    /// tombstone for the same memory id. Runs on the caller's transaction so a
+    /// batch can span many rows without an intermediate commit.
+    async fn insert_vector_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        row: &VectorInsert<'_>,
+    ) -> Result<(), AppError> {
+        let embedding = Vector::from(row.vector.to_vec());
+
+        let started = std::time::Instant::now();
         let result = sqlx::query(
             "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance, agent_id, package_id, end_epoch)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -1574,44 +1865,40 @@ impl VectorDb {
                 end_epoch = EXCLUDED.end_epoch,
                 updated_at = NOW()",
         )
-        .bind(id)
-        .bind(owner)
-        .bind(namespace)
-        .bind(blob_id)
+        .bind(row.id)
+        .bind(row.owner)
+        .bind(row.namespace)
+        .bind(row.blob_id)
         .bind(embedding)
-        .bind(blob_size_bytes)
-        .bind(importance)
-        .bind(agent_id)
-        .bind(package_id)
-        .bind(end_epoch)
-        .execute(&mut *tx)
+        .bind(row.blob_size_bytes)
+        .bind(row.importance)
+        .bind(row.agent_id)
+        .bind(row.package_id)
+        .bind(row.end_epoch)
+        .execute(&mut **tx)
         .await;
-        if let Err(e) = result {
-            drop(tx);
-            self.maybe_alert_storage_exhausted(&e).await;
-            crate::observability::observe_db("vector.insert", "error", started.elapsed());
-            return Err(AppError::Internal(format!(
-                "Failed to insert vector: {}",
-                e
-            )));
+        // A Postgres storage-exhaustion failure is a write outage, not a user
+        // error, so it pages before it is mapped to a generic 500 (WALM-612).
+        // Reached from the batch path too, unlike the pre-batch code.
+        if let Err(e) = &result {
+            self.maybe_alert_storage_exhausted(e).await;
         }
-        crate::observability::observe_db("vector.insert", "ok", started.elapsed());
+        let result = result.map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
+        crate::observability::observe_db("vector.insert", db_status(&result), started.elapsed());
+        result?;
         sqlx::query("DELETE FROM memory_tombstones WHERE memory_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
+            .bind(row.id)
+            .execute(&mut **tx)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to clear tombstone: {}", e)))?;
-        tx.commit()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to commit insert tx: {}", e)))?;
 
         tracing::debug!(
             "inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
-            id,
-            blob_id,
-            owner,
-            namespace,
-            blob_size_bytes
+            row.id,
+            row.blob_id,
+            row.owner,
+            row.namespace,
+            row.blob_size_bytes
         );
         Ok(())
     }

@@ -15,6 +15,7 @@ use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 
 use crate::services::llm_chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
+use crate::storage::db::VectorInsert;
 use crate::storage::{seal, walrus};
 use crate::types::*;
 
@@ -1161,55 +1162,70 @@ async fn restore_unbounded(
         .flatten()
         .collect();
 
-    // Step 6: Insert only new entries (no delete!)
+    // Step 6: Insert only new entries (no delete!), all-or-nothing via
+    // `insert_vectors_atomic` — restore runs under a 55s timeout, and a
+    // partially committed batch is a half-written index (GH #566 / WALM-591).
+    // `limit` is clamped to 100 (`clamp_restore_limit`), so the batch is small.
     transient_unresolved += decrypted_texts.len().saturating_sub(results.len());
     let restored = results.len();
     let truncated =
         restore_truncated_after_page(truncated, restored, newly_failed, transient_unresolved);
-    for (blob_id, vector) in &results {
-        let id = uuid::Uuid::new_v4().to_string();
-        let blob_size = blob_sizes.get(blob_id).copied().unwrap_or_else(|| {
-            tracing::warn!(
-                "restore: missing blob size for {}, defaulting to 0 for quota tracking",
-                blob_id
-            );
-            0
-        });
-        let (agent_id, package_id) = blob_provenance
-            .get(blob_id)
-            .cloned()
-            .unwrap_or((None, String::new()));
-        // The sidecar sends "agentId" as a present-but-empty string when no
-        // delegate key was recorded (the common case) — #[serde(default)]
-        // only fires on a MISSING key, so an empty string deserializes to
-        // Some(""), not None. Normalize both provenance fields the same way
-        // so a blob with no known agent gets a real SQL NULL, not "".
-        let agent_id = agent_id.filter(|s| !s.is_empty());
-        state
-            .db
-            .insert_vector(
-                &id,
+    // Owned per-row values first: `VectorInsert` borrows them, so they must
+    // outlive the batch slice built below.
+    let row_values: Vec<(String, i64, Option<String>, String)> = results
+        .iter()
+        .map(|(blob_id, _)| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let blob_size = blob_sizes.get(blob_id).copied().unwrap_or_else(|| {
+                tracing::warn!(
+                    "restore: missing blob size for {}, defaulting to 0 for quota tracking",
+                    blob_id
+                );
+                0
+            });
+            let (agent_id, package_id) = blob_provenance
+                .get(blob_id)
+                .cloned()
+                .unwrap_or((None, String::new()));
+            // The sidecar sends "agentId" as a present-but-empty string when no
+            // delegate key was recorded (the common case) — #[serde(default)]
+            // only fires on a MISSING key, so an empty string deserializes to
+            // Some(""), not None. Normalize both provenance fields the same way
+            // so a blob with no known agent gets a real SQL NULL, not "".
+            let agent_id = agent_id.filter(|s| !s.is_empty());
+            (id, blob_size, agent_id, package_id)
+        })
+        .collect();
+
+    let batch: Vec<VectorInsert<'_>> = results
+        .iter()
+        .zip(row_values.iter())
+        .map(
+            |((blob_id, vector), (id, blob_size, agent_id, package_id))| VectorInsert {
+                id,
                 owner,
                 namespace,
                 blob_id,
                 vector,
-                blob_size,
+                blob_size_bytes: *blob_size,
                 // restore flow re-indexes existing Walrus blobs after
                 // they fell out of pgvector. The original importance value is
                 // not preserved in the blob (it's a row-level signal). Use the
                 // neutral "standard" bucket so restored memories rank as
                 // average — neither boosted nor penalized.
-                crate::services::extractor::IMPORTANCE_STANDARD,
-                agent_id.as_deref(),
-                if package_id.is_empty() {
+                importance: crate::services::extractor::IMPORTANCE_STANDARD,
+                agent_id: agent_id.as_deref(),
+                package_id: if package_id.is_empty() {
                     None
                 } else {
                     Some(package_id.as_str())
                 },
-                None,
-            )
-            .await?;
-    }
+                end_epoch: None,
+            },
+        )
+        .collect();
+
+    state.db.insert_vectors_atomic(&batch).await?;
 
     tracing::info!(
         "restore complete: restored={} skipped={} failed={} total={} owner={} ns={}",
