@@ -32,9 +32,8 @@ pub const EMBEDDING_DIMS: usize = 1536;
 /// provider key is set. The key-less fallback hashes locally with no limit.
 pub(crate) const MAX_EMBED_INPUT_BYTES: usize = 16384;
 
-/// Whether a provider 400 complains about input length. Any other 400 (an
-/// unknown model, a malformed request) is a server-side problem and must not
-/// reach the caller as their input being too long.
+/// Whether a provider 400 complains about input length; any other 400 is a
+/// server-side problem, not the caller's.
 fn is_context_length_error(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     [
@@ -106,8 +105,6 @@ async fn embed_text(
 ) -> Result<Vec<f32>, AppError> {
     match api_key {
         Some(api_key) => {
-            // The limit is the model's context window, so it guards only the
-            // branch that reaches a model (WALM-470).
             reject_oversized_embed_input(text)?;
             // Real embedding via OpenRouter/OpenAI-compatible API
             let url = format!("{}/embeddings", api_base);
@@ -289,7 +286,7 @@ mod tests {
         );
     }
 
-    // ── WALM-470: size limit placement and upstream 400 mapping ──────
+    // ── embed_text: size limit and upstream 400 mapping ──────────────
 
     /// Stand-in embeddings provider answering every `POST /embeddings` with
     /// `status` and `body`. Returns its base URL and a call counter.
@@ -316,8 +313,6 @@ mod tests {
         (format!("http://{addr}"), calls)
     }
 
-    // The key-less branch hashes locally and has no context window, so the
-    // model's byte limit must not apply to it.
     #[tokio::test]
     async fn without_a_key_input_over_the_model_limit_still_embeds() {
         let text = "a".repeat(100 * 1024);
@@ -362,8 +357,6 @@ mod tests {
         }
     }
 
-    // A 400 that isn't about the input is our misconfiguration: reporting it
-    // as "input too long" blames the caller and skips 5xx alerting.
     #[tokio::test]
     async fn any_other_provider_400_is_an_internal_error() {
         for body in [

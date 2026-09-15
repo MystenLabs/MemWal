@@ -1415,9 +1415,8 @@ pub struct RecallRequest {
     /// How to order results. Omitted → [`RecallSort::Relevance`], today's
     /// behaviour. See [`RecallSort`].
     ///
-    /// `Option` rather than a defaulted enum because omitted and explicit
-    /// differ: an explicit `sort`, `relevance` included, suppresses
-    /// `scoring_weights` (WALM-470).
+    /// `Option` because an explicit `sort`, `relevance` included, suppresses
+    /// `scoring_weights`, so omitted and explicit must stay distinct.
     #[serde(default)]
     pub sort: Option<RecallSort>,
 }
@@ -3184,8 +3183,6 @@ mod tests {
 
     // ── RecallRequest.sort — omitted vs explicit ─────────────────────────
 
-    // WALM-470: an explicit `sort` suppresses `scoring_weights`, so the
-    // request must keep "omitted" apart from an explicit "relevance".
     #[test]
     fn recall_sort_keeps_omitted_apart_from_explicit_relevance() {
         let parse = |body: &str| serde_json::from_str::<RecallRequest>(body).unwrap().sort;

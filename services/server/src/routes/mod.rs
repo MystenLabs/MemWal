@@ -249,16 +249,9 @@ pub(super) fn select_hits_for_sort(
     hits
 }
 
-/// The scoring weights `/api/recall` hands to the ranker.
-///
-/// An explicit `sort` is the order, so it suppresses the caller's weights;
-/// they re-rank only when `sort` is omitted (WALM-470). Otherwise the ranker
-/// would reorder what `select_hits_for_sort` just ordered, and `sort=recent`
-/// would stop meaning newest-first. Suppressing to the default weights keeps
-/// one code path: the ranker short-circuits and returns its input unchanged.
-///
-/// The request is validated either way: `sort` does not excuse malformed
-/// weights.
+/// The scoring weights `/api/recall` hands to the ranker. An explicit `sort`
+/// must not be re-ranked, so it yields the default (no-op) weights; malformed
+/// weights are rejected either way.
 pub(super) fn resolve_scoring_weights(
     sort: Option<crate::types::RecallSort>,
     requested: Option<crate::types::ScoringWeights>,
@@ -483,10 +476,8 @@ mod recall_sort_tests {
     }
 }
 
-/// WALM-470: an explicit `sort` is the order, and `scoring_weights` apply only
-/// when `sort` is omitted (decided 2026-09-03 on WALM-460). Each test replays
-/// the recall handler's ordering — `select_hits_for_sort`, then the ranker
-/// with the resolved weights — over hand-scored rows.
+/// Each test replays the recall handler's ordering (`select_hits_for_sort`,
+/// then the ranker with the resolved weights) over hand-scored rows.
 #[cfg(test)]
 mod recall_sort_precedence_tests {
     use crate::engine::HydratedMemory;
