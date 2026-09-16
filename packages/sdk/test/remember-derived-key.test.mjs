@@ -1,3 +1,11 @@
+/**
+ * Idempotency keys for `remember`, derived from content rather than random.
+ *
+ * Poll cadence is deliberately NOT tested here — WALM-623 (#902) owns the
+ * backoff, including the immediate first attempt, and pins it in
+ * test/polling-delay.test.mjs. Asserting it from two places would leave one
+ * copy silently wrong the next time the cap moves.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -53,46 +61,6 @@ const DONE = {
     owner: "0x1",
     namespace: "default",
 };
-
-test("a job that is already done resolves without paying a poll delay first", async () => {
-    stubRelayer({ onStatus: () => DONE });
-
-    const started = Date.now();
-    const result = await newClient().rememberAndWait("already finished");
-    const elapsed = Date.now() - started;
-
-    assert.equal(result.blob_id, "blob-1");
-    // Sleep-first polling billed this a full base interval (~600ms, and ~1.5s
-    // before the interval was lowered) for a result the server had ready.
-    assert.ok(elapsed < 250, `expected an immediate first poll, took ${elapsed}ms`);
-});
-
-test("poll gaps stay bounded so a finished write is observed promptly", async () => {
-    const seenAt = [];
-    // Never terminal: let the loop run its full backoff ramp against the clock.
-    stubRelayer({
-        onStatus: () => {
-            seenAt.push(Date.now());
-            return { job_id: "job-1", status: "running" };
-        },
-    });
-
-    await assert.rejects(
-        newClient().rememberAndWait("slow write", undefined, { timeoutMs: 9_000 }),
-        /timed out/,
-    );
-
-    const gaps = seenAt.slice(1).map((t, i) => t - seenAt[i]);
-    const worst = Math.max(...gaps);
-    // The cap is 2s; jitter can stretch one gap to 2.5s. The old 10s cap put
-    // checks at 1.5/3.75/7.1/12.2/19.8/29.8s — a write finishing at 20.5s was
-    // not seen until 29.8s, which is most of what a user experienced as a slow
-    // remember.
-    assert.ok(worst < 2_600, `worst poll gap ${worst}ms exceeds the 2s cap + jitter`);
-    // And it must actually be polling, not spinning.
-    assert.ok(gaps.length >= 4, `expected a real ramp, saw ${gaps.length} gaps`);
-    assert.ok(Math.min(...gaps) > 50, "polling should not busy-loop");
-});
 
 test("the same fact reuses one idempotency key across client instances", async () => {
     const posted = [];

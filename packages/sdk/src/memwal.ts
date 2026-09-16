@@ -130,26 +130,9 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Ceiling on the gap between two status checks.
- *
- * This is pure *observation* cost: a job that finished is not reported until
- * the next poll lands, so the cap is the worst-case dead time bolted onto
- * every wait, and half of it is the average. At the 10s ceiling checks landed
- * ~1.5/3.75/7.1/12.2/19.8/29.8s apart, so a write that truly completed at
- * 20.5s was not seen until 29.8s — and writes finish in the 15–35s band
- * (Walrus sliver upload plus three sequential Sui transactions), exactly where
- * those gaps were widest.
- *
- * 2s holds average dead time near 1s. The extra requests are cheap — polling
- * is one indexed row read on `remember_jobs` — but they are not free against
- * the relayer's per-delegate-key rate limit, which is why callers on a long
- * budget (`services/server/scripts/mcp/tools/remember-wait.ts`) pass a larger
- * base rather than relying on this floor. */
-const POLL_MAX_DELAY_MS = 2_000;
-
 function pollingDelayMs(baseMs: number, attempt: number): number {
     const base = Math.max(100, baseMs);
-    const capped = Math.min(POLL_MAX_DELAY_MS, base * 1.5 ** Math.min(attempt, 6));
+    const capped = Math.min(10_000, base * 1.5 ** Math.min(attempt, 6));
     const jitter = 0.75 + Math.random() * 0.5;
     return Math.floor(capped * jitter);
 }
@@ -462,17 +445,12 @@ export class MemWal {
         jobId: string,
         opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
     ): Promise<RememberResult> {
-        const { pollIntervalMs = 600, timeoutMs = 60_000 } = opts;
+        const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
 
         while (Date.now() < deadline) {
-            // Check first, sleep second. An idempotent replay — the same key
-            // for a write that already finished — is `done` on the server
-            // before we ask, so the old sleep-first order billed it a full
-            // poll delay for a result that was ready on arrival.
-            if (attempt > 0) await sleep(pollingDelayMs(pollIntervalMs, attempt - 1));
-            attempt++;
+            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
 
             let status: RememberStatusResponse;
 
@@ -640,7 +618,7 @@ export class MemWal {
         namespaces: string[] = [],
         opts: RememberBulkOptions = {},
     ): Promise<RememberBulkResult> {
-        const { pollIntervalMs = 600, timeoutMs = 120_000 } = opts;
+        const { pollIntervalMs = 1500, timeoutMs = 120_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         const results: RememberBulkItemResult[] = jobIds.map((jobId, idx) => ({
             id: jobId,
@@ -653,9 +631,7 @@ export class MemWal {
         let attempt = 0;
 
         while (pending.size > 0 && Date.now() < deadline) {
-            // Check first, sleep second — see `waitForRememberJob`.
-            if (attempt > 0) await sleep(pollingDelayMs(pollIntervalMs, attempt - 1));
-            attempt++;
+            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
 
             const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
             if (pendingIds.length === 0) {
