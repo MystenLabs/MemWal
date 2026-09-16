@@ -211,6 +211,9 @@ test("a sign-in that never completes is reported on the next tool call", async (
     assertKeepsTheStrandedKey(text);
     // Still tells them how to sign in, rather than replacing the instruction.
     assert.match(text, /memwal_login/);
+    // ...but not by promising the opposite of the notice above it: an approved
+    // key is reclaimed by a restart, so the blob cannot also sell "no restart".
+    assert.doesNotMatch(text, /no client restart/i);
 });
 
 /**
