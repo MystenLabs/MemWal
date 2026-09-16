@@ -675,3 +675,57 @@ test("a non-tool request after logout is answered locally instead of hanging", a
         "nothing after logout should have reached the relayer",
     );
 });
+
+/**
+ * The tool half of the same fix the CLI gets in login-write-ahead: an explicit
+ * `memwal_logout` must discard `login-pending.json` too. Left behind, the next
+ * start's `recoverPendingLogin` rebuilds credentials from it and signs the user
+ * back in — a logout that undoes itself.
+ */
+test("memwal_logout discards a stranded pending login as well as the credentials", async (t) => {
+    const mock = await startMockRelayer();
+    const home = mkdtempSync(join(tmpdir(), "memwal-logout-pending-"));
+    const credsPath = join(home, ".memwal", "credentials.json");
+    const pendingPath = join(home, ".memwal", "login-pending.json");
+    mkdirSync(dirname(credsPath), { recursive: true });
+    writeFileSync(credsPath, JSON.stringify(makeCreds(mock.base)), { mode: 0o600 });
+    writeFileSync(
+        pendingPath,
+        JSON.stringify({
+            delegatePrivateKey: "11".repeat(32),
+            delegatePublicKeyHex: "22".repeat(32),
+            delegateAddress: `0x${"3".repeat(64)}`,
+            relayerUrl: mock.base,
+            label: "Interrupted re-login",
+            createdAt: new Date().toISOString(),
+            version: 1,
+        }),
+        { mode: 0o600 },
+    );
+
+    t.after(() => {
+        mock.server.close();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    const { send, waitFor } = startBridge(t, mock, home);
+
+    send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    await waitFor((m) => m.id === 1 && m.result, 10_000);
+
+    send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "memwal_logout", arguments: {} },
+    });
+    const out = await waitFor((m) => m.id === 2, 10_000);
+    assert.notEqual(out.result?.isError, true, "logout should succeed");
+
+    assert.equal(existsSync(credsPath), false, "credentials should be gone");
+    assert.equal(
+        existsSync(pendingPath),
+        false,
+        "the pending record must go too, or the next start signs the user back in",
+    );
+});

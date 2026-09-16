@@ -200,6 +200,18 @@ const LOGIN_INSTRUCTION = [
     "`add_delegate_key` transaction. Credentials land at `~/.memwal/credentials.json`.",
 ].join("\n");
 
+/** Replaces {@link LOGIN_INSTRUCTION} after a failed attempt, which
+ * {@link loginFailureNotice} has just described. The generic copy promises "no
+ * client restart" and leads with `memwal_login`; for a key the user already
+ * approved, a restart is the only thing that recovers it and signing in again
+ * cannot register it twice. So the retry is offered only for the case it
+ * actually fixes. */
+const LOGIN_RETRY_INSTRUCTION = [
+    "If you did not approve the wallet step, start a new sign-in: call the `memwal_login`",
+    "tool from this client, or run `npx -y @mysten-incubation/memwal-mcp login`. Open the",
+    "new link straight away and leave this client running through the wallet prompt.",
+].join("\n");
+
 /** Set when a background `memwal_login` ends without credentials. The tool call
  * already returned the URL by then, so this is the only place left to say so. */
 let lastLoginFailure: string | null = null;
@@ -473,7 +485,12 @@ function handleAuthLine(
             id,
             result: {
                 content: [
-                    { type: "text", text: `${loginFailureNotice(lastLoginFailure)}${LOGIN_INSTRUCTION}` },
+                    {
+                        type: "text",
+                        text: lastLoginFailure
+                            ? `${loginFailureNotice(lastLoginFailure)}${LOGIN_RETRY_INSTRUCTION}`
+                            : LOGIN_INSTRUCTION,
+                    },
                 ],
                 isError: true,
             },

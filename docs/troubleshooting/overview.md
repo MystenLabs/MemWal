@@ -88,13 +88,17 @@ This section covers problems that appear before the memory tools work.
 
 **Symptom:** The sign-in page confirms that your delegate key was registered, but says it could not hand the credentials back to your computer. The agent stays logged out and `~/.memwal/credentials.json` does not appear.
 
-**Cause:** Signing in has two halves. Your browser registers a delegate key onchain, then sends that key back to a short-lived listener the MCP package runs on `127.0.0.1`. The unused key from this attempt is already on your account and should be revoked. Signing in again is a full new attempt, including the wallet step. The usual reasons:
+**Cause:** Signing in has two halves. Your browser registers a delegate key onchain, then sends that key back to a short-lived listener the MCP package runs on `127.0.0.1`. The key from this attempt is already on your account, and the MCP package saved its private half before it opened the sign-in page, so you can still use it. The usual reasons the hand-off fails:
 
 - The MCP client restarted, or the login command was cancelled, while the browser tab was still open.
 - This tab is leftover from a sign-in that already finished, or the hand-off did not match what the app expected.
 - Local software such as a firewall, a VPN client, or a browser extension blocks requests from a website to `127.0.0.1`.
 
-**Fix:** Call `memwal_login` again and open the new URL promptly. A retry only helps once the MCP client is left running through the wallet prompt. Remove the unused key from the Delegate keys panel in the dashboard; it is already on your account.
+**Fix:** Restart your MCP client within 24 hours. On start, the MCP package finds the saved key, confirms it with the relayer, and signs you in with it, with no second wallet step. Do not call `memwal_login` first. It reuses the same key, and the wallet step fails because that key is already registered. Do not remove the key from the dashboard either, unless you mean to abandon it.
+
+On Testnet the relayer cannot confirm the key at start, so the MCP package prints a notice instead of signing you in. Remove the key it names from the Delegate keys panel in the dashboard, then call `memwal_login` and open the new URL promptly.
+
+MCP package versions before 0.0.13 do not save the key before the browser step. On those versions, remove the unused key from the dashboard and call `memwal_login` again.
 
 If it keeps failing, confirm that nothing blocks localhost traffic, then run `npx -y @mysten-incubation/memwal-mcp login --prod` directly in a terminal. A terminal sign-in prints the failure reason instead of leaving it in the MCP client's logs.
 
