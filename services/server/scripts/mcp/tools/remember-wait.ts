@@ -135,7 +135,13 @@ export const REMEMBER_POLL_INTERVAL_MS = 400;
  * caller gets a job_id to resolve later.
  */
 export function isStillRunning(err: unknown): boolean {
-    return (err as { status?: number } | null)?.status === 504;
+    // 504: `waitForRememberJob` hit its own budget — the job is still going.
+    if ((err as { status?: number } | null)?.status === 504) return true;
+    // Our deadline firing means the RELAYER stopped answering us, not that the
+    // job stopped. It was accepted, it is a row in `remember_jobs`, and the
+    // caller needs the job_id to settle it. Treating this as a plain error
+    // threw that id away — the one thing the pending result exists to return.
+    return (err as { name?: string } | null)?.name === "MemWalRelayerUnresponsive";
 }
 
 /**
@@ -330,16 +336,17 @@ export async function withDeadline<T>(
 export function withAcceptDeadline<T>(
     work: Promise<T>,
     what: string,
-    opts: { idempotent: boolean },
+    opts: { idempotent: boolean; deadlineMs?: number },
 ): Promise<T> {
+    const ms = opts.deadlineMs ?? ACCEPT_DEADLINE_MS;
     const shared =
-        `Walrus Memory did not accept the ${what} within ${ACCEPT_DEADLINE_MS / 1000}s — the ` +
+        `Walrus Memory did not accept the ${what} within ${ms / 1000}s — the ` +
         `relayer is unreachable or not responding. The write may or may not have been queued, ` +
         `so do NOT tell the user it was saved.`;
 
     return withDeadline(
         work,
-        ACCEPT_DEADLINE_MS,
+        ms,
         opts.idempotent
             ? `${shared} Retrying is safe: this write carries a content-derived idempotency ` +
               `key, so a retry attaches to the job already in flight instead of queueing a ` +

@@ -317,3 +317,39 @@ test("the absorb budget fits inside the accept deadline", () => {
         `absorb ${MAX_ABSORBED_COOLDOWN_MS}ms must stay under the ${DEFAULT_ACCEPT_DEADLINE_MS}ms accept deadline`,
     );
 });
+
+test("a relayer that goes quiet mid-wait still hands back the job_id", async (t) => {
+    // The job was accepted and is a row in remember_jobs. Our wait deadline
+    // firing means the relayer stopped answering US, not that the write
+    // stopped — so the caller must still get the id needed to settle it.
+    // Before this, the deadline error fell through to `throw` and the id was
+    // lost, which is the one thing the pending result exists to carry.
+    const session = {
+        oauthScope: "memwal:read memwal:write",
+        namespace: "default",
+        memwal: {
+            async rememberAsync() {
+                return { job_id: "job-live", status: "pending" };
+            },
+            // Accepted fine, then the relayer stops answering the poll.
+            waitForRememberJob: () => new Promise(() => {}),
+        },
+    } as unknown as MemWalSession;
+
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer(session);
+    const client = new Client({ name: "quiet-relayer", version: "1.0.0" });
+    t.after(async () => { await client.close(); await server.close(); });
+    await server.connect(st);
+    await client.connect(ct);
+
+    const res = await client.callTool({
+        name: "memwal_remember",
+        arguments: { text: "a durable fact" },
+    });
+    const text = textOf(res);
+
+    assert.match(text, /job_id=job-live/, `job_id was dropped: ${text}`);
+    assert.match(text, /NOT YET SAVED|NOT SAVED/i);
+    assert.doesNotMatch(text, /^Saved to Walrus Memory/m);
+});

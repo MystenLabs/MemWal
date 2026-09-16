@@ -70,7 +70,12 @@ export function registerAnalyzeTool(
                     "analyze this text",
                 ),
                 "memwal_analyze extraction",
-                { idempotent: false },
+                // Not an accept. `/api/analyze` runs the extractor LLM inline
+                // before it answers — which is why the SDK allows this call 60s
+                // where it allows a remember 30s. The 15s accept ceiling would
+                // have cut off healthy extraction on any transcript long enough
+                // to be worth extracting from.
+                { idempotent: false, deadlineMs: 60_000 },
             );
 
             const facts = accepted.facts ?? [];
