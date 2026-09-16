@@ -1515,6 +1515,17 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration 020: {}", e)))?;
 
+        // 021 adds `remember_jobs.failure_reported_at`, which
+        // `recent_failed_remember_jobs` writes on every recall and
+        // `claim_remember_preparation` clears on re-claim. Both are plain
+        // queries against a column that only exists if this runs, so a
+        // deploy that skips it fails those statements with 42703.
+        let migration_021 = include_str!("../../migrations/021_failed_write_report_ack.sql");
+        sqlx::raw_sql(migration_021)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 021: {}", e)))?;
+
         tracing::info!("database connected and migrations applied");
 
         Ok(Self {
@@ -1856,16 +1867,17 @@ impl VectorDb {
     /// failure mode this whole path exists to remove.
     /// Accepted-then-failed writes this owner has not been told about yet.
     ///
-    /// Reporting is one-shot by construction. The rows are stamped in the same
-    /// statement that returns them, so the next recall sees them acknowledged
-    /// and stays quiet. Without that the same failures rode along on every
-    /// recall for the full window while the message told the agent to send the
-    /// facts again — so a compliant agent re-sent, the original row stayed
-    /// `failed` and in-window, and the next recall asked for the same thing.
-    /// Every pass was another paid Walrus write.
+    /// Read-only. Reporting is still one-shot, but the stamp is taken by
+    /// `claim_failed_write_reports` at the moment the response is built, not
+    /// here — this runs concurrently with the embed/search/decrypt that
+    /// follow, and any of those can fail or be abandoned. Stamping here meant
+    /// a recall that 500d on the embedding provider, or that the SDK aborted
+    /// at its hard 15s, still marked the rows reported: the user was never
+    /// told, on that recall or any later one, that their write had failed.
     ///
-    /// `FOR UPDATE SKIP LOCKED` keeps two concurrent recalls from claiming the
-    /// same row and both reporting it.
+    /// One-shot is preserved because the claim is a single conditional UPDATE
+    /// over these ids — a concurrent recall that got there first claims them
+    /// and this one is handed back nothing to report.
     pub async fn recent_failed_remember_jobs(
         &self,
         owner: &str,
@@ -1882,23 +1894,13 @@ impl VectorDb {
                 chrono::DateTime<chrono::Utc>,
             ),
         >(
-            // Claim-and-return in one statement: the UPDATE stamps the rows
-            // it is about to hand back, so a second recall — or a concurrent
-            // one in another session — cannot report the same failure again.
-            // Doing it as two statements would leave a window where both see
-            // the row unreported and both tell the agent to re-send it.
-            "UPDATE remember_jobs SET failure_reported_at = NOW()
-             WHERE id IN (
-                 SELECT id FROM remember_jobs
-                 WHERE owner = $1
-                   AND status = 'failed'
-                   AND failure_reported_at IS NULL
-                   AND updated_at >= $2
-                 ORDER BY updated_at DESC
-                 LIMIT $3
-                 FOR UPDATE SKIP LOCKED
-             )
-             RETURNING id, namespace, error_msg, updated_at",
+            "SELECT id, namespace, error_msg, updated_at FROM remember_jobs
+             WHERE owner = $1
+               AND status = 'failed'
+               AND failure_reported_at IS NULL
+               AND updated_at >= $2
+             ORDER BY updated_at DESC
+             LIMIT $3",
         )
         .bind(owner)
         .bind(chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default())
@@ -1937,6 +1939,58 @@ impl VectorDb {
                 },
             )
             .collect())
+    }
+
+    /// Stamp `failure_reported_at` on the subset of `ids` not already
+    /// reported, and return the ids actually claimed.
+    ///
+    /// The conditional `failure_reported_at IS NULL` is what keeps the report
+    /// one-shot: two recalls that both read the same unreported row race here
+    /// and exactly one UPDATE matches, so only that one reports it. The other
+    /// gets an empty set and stays quiet — which matters because the report
+    /// text asks the agent to send the fact again, and a double report is a
+    /// duplicate paid Walrus write.
+    ///
+    /// Called at response construction, so a recall that never reaches the
+    /// client does not consume the report.
+    pub async fn claim_failed_write_reports(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let started = std::time::Instant::now();
+        let rows = sqlx::query_scalar::<_, String>(
+            "UPDATE remember_jobs SET failure_reported_at = NOW()
+             WHERE id = ANY($1) AND failure_reported_at IS NULL
+             RETURNING id",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await;
+
+        match rows {
+            Ok(rows) => {
+                crate::observability::observe_db(
+                    "remember_jobs.claim_failure_report",
+                    "ok",
+                    started.elapsed(),
+                );
+                Ok(rows)
+            }
+            Err(e) => {
+                crate::observability::observe_db(
+                    "remember_jobs.claim_failure_report",
+                    "error",
+                    started.elapsed(),
+                );
+                Err(AppError::Internal(format!(
+                    "Failed to claim failed-write reports: {}",
+                    e
+                )))
+            }
+        }
     }
 
     /// Hard-delete all vector index rows for a given owner + namespace.
