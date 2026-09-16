@@ -79,6 +79,27 @@ export const MAX_REMEMBER_WAIT_MS = 90_000;
  * The pending branch is still reachable and still correct — a write slower
  * than the ceiling returns a job_id and says plainly it is not saved yet —
  * it is simply no longer the default path.
+ *
+ * KNOWN CONSTRAINT, not yet acted on. The MCP TypeScript SDK defaults a
+ * tools/call to `DEFAULT_REQUEST_TIMEOUT_MSEC = 60_000`
+ * (@modelcontextprotocol/sdk, shared/protocol.js:8, applied at :712 as
+ * `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC`). A host that sets no
+ * timeout of its own therefore aborts at 60s, and the pending branch — whose
+ * entire purpose is to hand back a job_id — lands 30s after it has already
+ * given up. docs/troubleshooting/overview.md records the symptom already
+ * ("can exceed the MCP host's tool-call timeout"), including that a retry
+ * duplicates the memory. Hosts differ: Claude Code sets its own, far larger
+ * ceiling, so this does not bite there.
+ *
+ * The arithmetic for anyone changing this: the legs are sequential, so the
+ * ceiling is ACCEPT_DEADLINE_MS (15_000) + this budget +
+ * WAIT_OVERSHOOT_GRACE_MS (10_000). Fitting under 60_000 needs a budget of
+ * 35_000 or less — against a measured 26.7-47.9s time-to-saved, which is the
+ * D1 trade, not a free win.
+ *
+ * This constant cannot fix `memwal_analyze` either way: its extraction leg is
+ * a 60_000ms deadline (analyze.ts) that fully precedes the wait, so analyze
+ * exceeds 60s for ANY value here, including 0. That needs its own decision.
  */
 const DEFAULT_REMEMBER_WAIT_MS = MAX_REMEMBER_WAIT_MS;
 
