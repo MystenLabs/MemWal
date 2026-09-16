@@ -203,6 +203,9 @@ Two limits worth knowing:
 Omitting `sort` leaves the request byte-identical to a plain cosine recall, so
 existing callers see no change.
 
+An explicit `sort`, `"relevance"` included, is the order: the relayer ignores
+`scoringWeights` for that request. Weights re-rank only when `sort` is omitted.
+
 #### `scoringWeights`
 
 `scoringWeights` blends recency and importance into the relayer's ranking:

@@ -1414,8 +1414,11 @@ pub struct RecallRequest {
     pub scoring_weights: Option<ScoringWeights>,
     /// How to order results. Omitted → [`RecallSort::Relevance`], today's
     /// behaviour. See [`RecallSort`].
+    ///
+    /// `Option` because an explicit `sort`, `relevance` included, suppresses
+    /// `scoring_weights`, so omitted and explicit must stay distinct.
     #[serde(default)]
-    pub sort: RecallSort,
+    pub sort: Option<RecallSort>,
 }
 
 /// Result ordering mode for `/api/recall`.
@@ -3176,6 +3179,22 @@ mod tests {
         w(1.0, 0.5, ScoringWeights::MIN_HALF_LIFE_DAYS)
             .validate()
             .unwrap();
+    }
+
+    // ── RecallRequest.sort — omitted vs explicit ─────────────────────────
+
+    #[test]
+    fn recall_sort_keeps_omitted_apart_from_explicit_relevance() {
+        let parse = |body: &str| serde_json::from_str::<RecallRequest>(body).unwrap().sort;
+        assert_eq!(parse(r#"{"query":"q"}"#), None);
+        assert_eq!(
+            parse(r#"{"query":"q","sort":"relevance"}"#),
+            Some(RecallSort::Relevance)
+        );
+        assert_eq!(
+            parse(r#"{"query":"q","sort":"recent"}"#),
+            Some(RecallSort::Recent)
+        );
     }
 
     // ── ScoringWeights::is_ranker_active() — opt-in predicate ────────────

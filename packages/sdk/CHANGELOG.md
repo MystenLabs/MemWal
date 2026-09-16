@@ -12,6 +12,7 @@
 - Declare `engines.node >= 20.0.0`, matching `memwal-mcp` and `openclaw-memory-memwal`. The SDK was the only published package without a floor. (WALM-599)
 - Empty-body 401s now use the same AUTH_REJECTED troubleshooting message as credential 401s instead of telling callers to run `memwal_login`. Headless SDK clients do not have that MCP tool.
 - `account.ts` and `manual.ts` PTBs use typed `tx.pure` helpers instead of the legacy untyped moveCall argument syntax that fails under modern `@mysten/sui`.
+- An explicit `sort` on `recall()`, `"relevance"` included, is now the order: the relayer ignores `scoringWeights` for that request, and weights re-rank only when `sort` is omitted. Setting both used to return neither order, so `sort: "recent"` stopped meaning newest-first once `scoringWeights` carried a recency weight. (WALM-470)
 
 ## 0.1.6
 
