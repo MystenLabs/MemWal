@@ -1,7 +1,7 @@
 {
     "name": "@mysten-incubation/memwal",
-    "version": "0.1.7",
-    "description": "Walrus Memory — Privacy-first AI memory SDK with Ed25519 delegate key auth",
+    "version": "0.1.8",
+    "description": "Walrus Memory \u2014 Privacy-first AI memory SDK with Ed25519 delegate key auth",
     "type": "module",
     "engines": {
         "node": ">=20.0.0"

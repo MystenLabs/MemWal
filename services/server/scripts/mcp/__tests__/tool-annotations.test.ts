@@ -36,6 +36,10 @@ test("tools/list publishes safe titles and behavior annotations for every remote
                 title: "Remember Multiple Facts",
                 annotations: { readOnlyHint: false, destructiveHint: false },
             },
+            memwal_remember_status: {
+                title: "Check a Remember Job",
+                annotations: { readOnlyHint: true, destructiveHint: false },
+            },
             memwal_analyze: {
                 title: "Analyze and Remember",
                 annotations: { readOnlyHint: false, destructiveHint: true },

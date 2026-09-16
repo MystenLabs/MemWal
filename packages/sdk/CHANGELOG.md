@@ -1,5 +1,12 @@
 # @mysten-incubation/memwal
 
+## 0.1.8
+
+### Fixed
+
+- Every relayer request now carries a deadline. `fetch` has none of its own and the SDK passed an abort signal on exactly one method (`recall`, 15s), so the accept POST, every job-status read, and the `/version` and `/config` handshake calls could stay pending for as long as the socket stayed open. A poll loop checks its budget at the *top* of each iteration, which bounds when the next request starts rather than how long one takes — so a single stalled read ran straight past `timeoutMs`, and a `memwal_remember` documented as capping at 90s was observed by an MCP client still running after 120s. Requests default to 30s, matching the relayer's own outbound client; set it with `requestTimeoutMs` on `MemWal.create`, where a non-positive or non-finite value falls back to the default rather than disabling the bound. `restore` (60s) and `analyze` (60s) carry their own, since the route self-bounds at 55s and the extractor LLM runs inline respectively. Inside the wait loops each poll is bounded by the client deadline clamped to the remaining budget, so one stalled poll can neither outlive the wait nor swallow it. An expired request raises `MemWalRequestTimeout` with `status: 504`, which the existing transient-poll handling already retries; a caller's own abort and every other transport error propagate unchanged.
+- Generated idempotency keys are derived from the content (a 30-minute bucket plus namespace and text) instead of `crypto.randomUUID()`. The per-instance key map only ever deduped retries that reused one client, and callers such as the MCP sidecar build a fresh client per session — so a replay after a reconnect read as a brand-new write and the relayer minted a second paid Walrus blob for one already in flight. The bucket bounds the collapse, since `remember_jobs` rows are never pruned. Callers passing an explicit `idempotencyKey` are unaffected, and distinct text or namespaces still derive distinct keys.
+
 ## 0.1.7
 
 ### Added

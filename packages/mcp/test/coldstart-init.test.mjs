@@ -44,6 +44,7 @@ const SSE_DELAY_MS = 3_000;
 const UPSTREAM_TOOL_NAMES = [
     "memwal_remember",
     "memwal_remember_bulk",
+    "memwal_remember_status",
     "memwal_recall",
     "memwal_analyze",
     "memwal_restore",

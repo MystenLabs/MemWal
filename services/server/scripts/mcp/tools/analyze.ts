@@ -3,6 +3,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
+import {
+    REMEMBER_POLL_INTERVAL_MS,
+    REMEMBER_WAIT_MS,
+    pendingBulkMessage,
+    withAcceptDeadline,
+    withRelayerRetry,
+    withWaitDeadline,
+} from "./remember-wait.js";
 
 const ANALYZE_INPUT = {
     text: z
@@ -20,9 +28,22 @@ const ANALYZE_INPUT = {
 } as const;
 
 /**
- * memwal_analyze — let Walrus Memory's LLM extract distinct facts from a piece of
- * text and persist each as its own memory. Resolves only after all extracted
- * facts have been written end-to-end (or the call times out).
+ * memwal_analyze — let Walrus Memory's LLM extract distinct facts from a piece
+ * of text and persist each as its own memory.
+ *
+ * Returns once the relayer has extracted the facts and durably queued a write
+ * for each, the same contract as `memwal_remember_bulk`.
+ *
+ * Blocking to terminal was left in place while the two remember tools moved to
+ * a bounded wait, which made this the slowest tool in the set by a wide
+ * margin: measured at 37.0s against dev after `memwal_remember` had dropped to
+ * 0.2s there. The shape of the wait is the same as bulk's — N Walrus writes,
+ * one upload per wallet — so there was no reason for the answer to be shaped
+ * differently.
+ *
+ * Extraction itself is worth waiting for, and this still does: `analyze()`
+ * resolves after the LLM has run, so the facts it found are in the reply.
+ * Only the upload of those facts is handed back as job_ids.
  */
 export function registerAnalyzeTool(
     server: McpServer,
@@ -33,29 +54,106 @@ export function registerAnalyzeTool(
         {
             ...TOOL_METADATA.memwal_analyze,
             description:
-                "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead.",
+                "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead. The extracted facts come back immediately; if the result says the writes are still in flight it carries job_ids — confirm them with memwal_remember_status rather than telling the user they are saved.",
             inputSchema: ANALYZE_INPUT,
         },
         wrapTool<{ text: string; namespace?: string }>(session, "memwal_analyze", async ({ text, namespace }) => {
-            const result = await session.memwal.analyzeAndWait(text, namespace, {
-                timeoutMs: 180_000,
+            // `analyze` (not `analyzeAndWait`) returns once extraction is done
+            // and every fact has a queued job, which is the point this tool can
+            // usefully answer at.
+            const accepted = await withAcceptDeadline(
+                // Same reasoning as bulk: the retry only fires on rejections
+                // that never reached the handler, so no job row can exist yet
+                // to duplicate.
+                withRelayerRetry(
+                    () => session.memwal.analyze(text, namespace),
+                    "analyze this text",
+                ),
+                "memwal_analyze extraction",
+                // Not an accept. `/api/analyze` runs the extractor LLM inline
+                // before it answers — which is why the SDK allows this call 60s
+                // where it allows a remember 30s. The 15s accept ceiling would
+                // have cut off healthy extraction on any transcript long enough
+                // to be worth extracting from.
+                { idempotent: false, deadlineMs: 60_000 },
+            );
+
+            const facts = accepted.facts ?? [];
+            // Nothing to wait on, and nothing to confirm later. Say so plainly
+            // rather than handing back an empty job list.
+            if (accepted.job_ids.length === 0) {
+                return {
+                    content: [
+                        {
+                            type: "text" as const,
+                            text: `Extracted 0 facts from that text — nothing was saved.`,
+                        },
+                    ],
+                };
+            }
+
+            const entries = accepted.job_ids.map((jobId, i) => ({
+                jobId,
+                text: facts[i]?.text ?? "",
+            }));
+
+            // The extraction result is the part of this call an agent can act
+            // on immediately, so it leads — the write status follows it.
+            const extracted = `Extracted ${facts.length} fact(s):\n${entries
+                .map((e, i) => `${i + 1}. ${e.text || "(unknown fact)"}`)
+                .join("\n")}`;
+
+            const pending = (waitedMs: number) => ({
+                content: [
+                    {
+                        type: "text" as const,
+                        text: `${extracted}\n\n${pendingBulkMessage(entries, waitedMs)}`,
+                    },
+                ],
             });
+
+            if (REMEMBER_WAIT_MS === 0) return pending(0);
+
+            const startedAt = Date.now();
+            const namespaces = entries.map(
+                () => namespace ?? session.namespace ?? "default"
+            );
+            const result = await withWaitDeadline(
+                session.memwal.waitForRememberJobs(accepted.job_ids, namespaces, {
+                    timeoutMs: REMEMBER_WAIT_MS,
+                    pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
+                }),
+                REMEMBER_WAIT_MS,
+            );
+            const waitedMs = Date.now() - startedAt;
+
+            const unfinished = result.results.filter((r) => r.status === "timeout");
+            if (unfinished.length === result.results.length) return pending(waitedMs);
+
             const lines = result.results.map(
                 (r, i) =>
                     `${i + 1}. [${r.status}]${r.blob_id ? ` blob_id=${r.blob_id}` : ""} ${
-                        result.facts[i]?.text ?? "(unknown fact)"
+                        entries[i]?.text || "(unknown fact)"
                     }`
             );
-            const summary = `Extracted ${result.facts.length} fact(s) — succeeded=${result.succeeded} failed=${result.failed}`;
+            const summary = `Extracted ${facts.length} fact(s) — succeeded=${result.succeeded} failed=${result.failed}`;
+            const stragglers =
+                unfinished.length > 0
+                    ? `\n\n${pendingBulkMessage(
+                          result.results.flatMap((r, i) =>
+                              r.status === "timeout"
+                                  ? [{ jobId: r.id, text: entries[i]?.text ?? "" }]
+                                  : [],
+                          ),
+                          waitedMs,
+                      )}`
+                    : "";
             const footer = result.succeeded > 0 ? `\n\n${explorerFooter()}` : "";
             return {
                 content: [
                     {
-                        type: "text",
-                        text:
-                            lines.length > 0
-                                ? `${summary}\n\n${lines.join("\n")}${footer}`
-                                : `${summary}${footer}`,
+                        type: "text" as const,
+                        text: `${summary}\n\n${lines.join("\n")}${stragglers}${footer}`,
                     },
                 ],
             };

@@ -8,6 +8,7 @@ import { createMcpServer } from "../server.js";
 const WRITE_TOOLS = [
     "memwal_remember",
     "memwal_remember_bulk",
+    "memwal_remember_status",
     "memwal_analyze",
     "memwal_restore",
 ];
