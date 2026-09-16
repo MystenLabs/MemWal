@@ -16,6 +16,19 @@ pub struct VectorDb {
     storage_alerts: Option<(Arc<AlertManager>, String)>,
 }
 
+/// Serialises `VectorDb::new()` across the test binary.
+///
+/// The migration chain is idempotent per statement but NOT safe to run
+/// concurrently: `CREATE TABLE IF NOT EXISTS` is not atomic in Postgres, so two
+/// tests that build a db at the same moment race inside migration 011 and one
+/// loses with `duplicate key value violates unique constraint
+/// "pg_type_typname_nsp_index"` on `mcp_oauth_clients`. Tests then fail on an
+/// unreachable database rather than on anything they assert. `jobs::tests`
+/// already guards its pool this way; these modules did not, which left the race
+/// latent until a test was added.
+#[cfg(test)]
+static DB_SETUP_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
 impl VectorDb {
     pub fn with_storage_alerts(self, alerts: Arc<AlertManager>, sui_network: String) -> Self {
         Self {
@@ -3429,6 +3442,10 @@ mod quota_admission_tests {
     }
 
     async fn test_db() -> VectorDb {
+        let _guard = super::DB_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         VectorDb::new(&test_database_url())
             .await
             .expect("test database must be reachable with pgvector installed")
@@ -3923,6 +3940,10 @@ mod stale_sweep_tests {
     }
 
     async fn test_db() -> VectorDb {
+        let _guard = super::DB_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         VectorDb::new(&test_database_url())
             .await
             .expect("test database must be reachable with pgvector installed")
