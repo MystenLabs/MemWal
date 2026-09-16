@@ -3818,6 +3818,13 @@ mod stale_sweep_tests {
     }
 
     /// Insert one remember job, aged by `age_secs`, optionally already prepared.
+    ///
+    /// `prepare_claimed_at` is stamped only alongside a claim token, because
+    /// that is the only way a row can reach the database: the single-write
+    /// path claims and stamps together, while `/api/remember/bulk` and
+    /// `/api/analyze` insert neither. Stamping it unconditionally would hand
+    /// every seeded row the one column the orphan sweep keys on, so a helper
+    /// detail — not the sweep — would decide what the tests below prove.
     async fn seed_job(
         db: &VectorDb,
         owner: &str,
@@ -3832,7 +3839,8 @@ mod stale_sweep_tests {
                  (id, owner, namespace, status, preparation_encrypted_b64,
                   prepare_claim_token, prepare_claimed_at, created_at, updated_at)
              VALUES ($1, $2, 'default', $3, $4, $5,
-                     NOW() - ($6 * INTERVAL '1 second'),
+                     CASE WHEN $5::text IS NULL THEN NULL
+                          ELSE NOW() - ($6 * INTERVAL '1 second') END,
                      NOW() - ($6 * INTERVAL '1 second'),
                      NOW() - ($6 * INTERVAL '1 second'))",
         )
