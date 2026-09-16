@@ -72,7 +72,7 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Remember Multiple Facts",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
+            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. Walrus writes queue, so this normally returns job_ids with the facts NOT yet saved — in that case say they are being saved rather than claiming they are stored, and resolve them with memwal_remember_status.",
         inputSchema: {
             type: "object",
             properties: {
@@ -93,14 +93,27 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Check a Remember Job",
         annotations: { readOnlyHint: true, destructiveHint: false },
         description:
-            "Check whether an in-flight memwal_remember write has landed. Call this with the job_id memwal_remember returned when it reported the fact was NOT saved yet. Returns the blob_id once stored, reports that it is still uploading (call again), or reports that it failed \u2014 in which case the fact was never stored and you should send it again with memwal_remember.",
+            "Check whether in-flight Walrus Memory writes have landed. Call this with the job_id memwal_remember returned, or job_ids from memwal_remember_bulk, when the write was reported NOT saved yet. Returns the blob_id once stored, reports that it is still uploading (call again with the ids still listed), or reports that it failed \u2014 in which case the fact was never stored and you should send it again. A batch can come back mixed, so read every line before telling the user anything is saved.",
         inputSchema: {
             type: "object",
             properties: {
                 job_id: { type: "string", minLength: 1 },
+                // The sidecar takes either one id or a whole batch, and the
+                // pending body `memwal_remember_bulk` returns tells the agent
+                // to come back with `job_ids`. Advertising only `job_id` —
+                // required, under `additionalProperties: false` — made that
+                // instruction unfollowable for the whole cold-start window.
+                job_ids: {
+                    type: "array",
+                    items: { type: "string", minLength: 1 },
+                    minItems: 1,
+                    maxItems: 20,
+                },
                 waitMs: { type: "integer", minimum: 0, maximum: 60000, default: 10000 },
             },
-            required: ["job_id"],
+            // Neither is required on its own; the sidecar rejects passing both
+            // and rejects passing neither, which JSON Schema cannot express
+            // here without a `oneOf` that some clients mishandle.
             additionalProperties: false,
         },
     },
