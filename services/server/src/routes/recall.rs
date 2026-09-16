@@ -69,6 +69,42 @@ async fn failed_writes_for(state: &AppState, owner: &str) -> Vec<FailedWrite> {
     }
 }
 
+/// Claim the prefetched report at the point of delivery, and return only the
+/// rows this recall actually won.
+///
+/// `failed_writes_for` runs concurrently with the embed, search and decrypt,
+/// any of which can fail with `?` or be abandoned when the SDK hits its hard
+/// 15s abort. A `tokio::spawn`ed task is not cancelled when its handle drops,
+/// so stamping inside that task committed the acknowledgement for recalls that
+/// never returned a report — and the failure, whose whole point is that the
+/// user does not otherwise know about it, was then never surfaced again.
+///
+/// A claim error reports nothing rather than reporting unstamped rows: an
+/// unstamped report repeats on every recall for the full window, and its text
+/// asks the agent to re-send the fact, so each repeat is another paid write.
+async fn claim_for_delivery(state: &AppState, found: Vec<FailedWrite>) -> Vec<FailedWrite> {
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let ids: Vec<String> = found.iter().map(|w| w.job_id.clone()).collect();
+    match state.db.claim_failed_write_reports(&ids).await {
+        Ok(claimed) => {
+            let claimed: std::collections::HashSet<String> = claimed.into_iter().collect();
+            found
+                .into_iter()
+                .filter(|w| claimed.contains(&w.job_id))
+                .collect()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "recall: failed-write report could not be claimed, staying quiet: {}",
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
 // ============================================================
 // Recall query-embedding cache (Redis) — wraps the Embedder service
 // ============================================================
@@ -285,7 +321,8 @@ pub async fn recall(
             dropped_count: 0,
             // Reported even with no hits: an empty recall is exactly when a
             // caller is most likely to be looking for the fact that failed.
-            failed_writes: failed_writes.await.unwrap_or_default(),
+            failed_writes: claim_for_delivery(&state, failed_writes.await.unwrap_or_default())
+                .await,
         }));
     }
 
@@ -374,7 +411,7 @@ pub async fn recall(
         dropped_count,
         // A panic in the report task must not take the recall with it; the
         // caller loses a warning, not their memories.
-        failed_writes: failed_writes.await.unwrap_or_default(),
+        failed_writes: claim_for_delivery(&state, failed_writes.await.unwrap_or_default()).await,
     }))
 }
 
