@@ -9,6 +9,7 @@ import {
     pendingBulkMessage,
     withAcceptDeadline,
     withWaitDeadline,
+    withRelayerRetry,
 } from "./remember-wait.js";
 
 const REMEMBER_BULK_INPUT = {
@@ -61,7 +62,13 @@ export function registerRememberBulkTool(
             // `memwal_remember` splits them: acceptance is the part that must
             // succeed, the wait is a courtesy we cut short.
             const accepted = await withAcceptDeadline(
-                session.memwal.rememberBulkAsync(items),
+                // Safe to wrap despite bulk having no idempotency key: the
+                // retry only fires on rejections that never reached the
+                // handler, so no job row can exist to duplicate.
+                withRelayerRetry(
+                    () => session.memwal.rememberBulkAsync(items),
+                    "save these facts",
+                ),
                 "memwal_remember_bulk batch",
                 { idempotent: false },
             );

@@ -11,6 +11,7 @@ import {
     pendingMessage,
     withAcceptDeadline,
     withWaitDeadline,
+    withRelayerRetry,
 } from "./remember-wait.js";
 
 const REMEMBER_INPUT = {
@@ -60,7 +61,10 @@ export function registerRememberTool(
             // the wait need separate budgets: acceptance is the part that
             // must succeed, the wait is a courtesy we cut short.
             const accepted = await withAcceptDeadline(
-                session.memwal.rememberAsync(text, namespace),
+                withRelayerRetry(
+                    () => session.memwal.rememberAsync(text, namespace),
+                    "save this fact",
+                ),
                 "memwal_remember write",
                 { idempotent: true },
             );

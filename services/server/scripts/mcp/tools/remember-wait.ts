@@ -202,7 +202,7 @@ export function pendingBulkMessage(
  * every consumer, this is the tighter bound an interactive agent needs, and
  * whichever is smaller fires first.
  */
-const DEFAULT_ACCEPT_DEADLINE_MS = 15_000;
+export const DEFAULT_ACCEPT_DEADLINE_MS = 15_000;
 
 /**
  * Read once, validated the same way as the wait budget: a typo must not
@@ -315,4 +315,95 @@ export function withWaitDeadline<T>(work: Promise<T>, budgetMs: number): Promise
             `still queued relayer-side — do NOT tell the user it was saved, and do NOT re-send ` +
             `the fact. Call memwal_remember_status with the job_id to settle it.`,
     );
+}
+
+/**
+ * Longest we will sit on a relayer-advised cooldown before handing the problem
+ * back to the agent.
+ *
+ * The relayer answers a spent rate-limit budget with `retry_after_seconds: 60`.
+ * Sleeping that out inside a tool call is not a fix — it is the 60s hang this
+ * whole change set exists to remove, and the MCP client would time out first.
+ * So a short cooldown is absorbed and a long one is reported, with the wait
+ * named so the agent can come back rather than guess.
+ */
+export const MAX_ABSORBED_COOLDOWN_MS = 8_000;
+
+/** Attempts, including the first. Two retries is enough for a transient blip;
+ * more just delays an answer the agent could act on. */
+const RELAYER_RETRY_ATTEMPTS = 3;
+
+/**
+ * Errors where the request provably did NOT reach the handler, so re-sending
+ * cannot duplicate work.
+ *
+ * This matters most for `/api/remember/bulk`, which carries no idempotency key
+ * — a blind retry there would store every fact twice. Both cases below are
+ * rejections BEFORE any job row exists: 429 comes from the rate limiter, and
+ * AUTH_UPSTREAM_UNAVAILABLE from the delegate-key lookup failing open. Any
+ * other 5xx could have been thrown after a write started, so it is not retried.
+ */
+function isSafelyRetryable(err: unknown): boolean {
+    const e = err as { status?: number; serverCode?: string } | null;
+    if (e?.status === 429) return true;
+    return e?.status === 503 && e?.serverCode === "AUTH_UPSTREAM_UNAVAILABLE";
+}
+
+function advisedCooldownMs(err: unknown): number {
+    const secs = (err as { retryAfterSeconds?: number } | null)?.retryAfterSeconds;
+    return typeof secs === "number" && secs > 0 ? secs * 1000 : 1_000;
+}
+
+/**
+ * Honour the relayer's own `retry_after` instead of surfacing a raw 429.
+ *
+ * Observed against production: once the per-delegate-key budget (60 weighted
+ * requests/minute) is spent, `memwal_remember` fails with
+ * `Tool error: ... 429 ... retry_after_seconds: 60` and the fact is simply
+ * never written. Nothing retried, and nothing told the user their memory had
+ * been dropped — the worst failure this system has, because it is silent.
+ *
+ * Fast-return makes it likelier, not rarer: settling a batch adds requests on
+ * top of the write itself, so an agent saving several facts in one turn spends
+ * the budget faster than one that blocked.
+ */
+export async function withRelayerRetry<T>(work: () => Promise<T>, what: string): Promise<T> {
+    let last: unknown;
+    for (let attempt = 1; attempt <= RELAYER_RETRY_ATTEMPTS; attempt++) {
+        try {
+            return await work();
+        } catch (err) {
+            last = err;
+            if (!isSafelyRetryable(err)) throw err;
+
+            const cooldown = advisedCooldownMs(err);
+            if (attempt === RELAYER_RETRY_ATTEMPTS || cooldown > MAX_ABSORBED_COOLDOWN_MS) {
+                const secs = Math.ceil(cooldown / 1000);
+                const limited = (err as { status?: number }).status === 429;
+                const e = new Error(
+                    limited
+                        ? `Walrus Memory rate limit reached while trying to ${what}. THE FACT WAS NOT ` +
+                          `SAVED — tell the user it could not be stored rather than that it is being ` +
+                          `saved. The limit is per delegate key and resets in about ${secs}s; retry ` +
+                          `after that. To spend less of the budget, save several facts with one ` +
+                          `memwal_remember_bulk call instead of repeated memwal_remember calls, and ` +
+                          `settle a batch with a single memwal_remember_status(job_ids=[...]).`
+                        : `Walrus Memory could not ${what}: the relayer's credential check is ` +
+                          `temporarily unavailable. THE FACT WAS NOT SAVED. Retry in about ${secs}s.`,
+                );
+                e.name = "MemWalRelayerUnavailable";
+                (e as Error & { status?: number }).status = (err as { status?: number }).status;
+                throw e;
+            }
+
+            log.warn("remember.relayer_retry", {
+                what,
+                attempt,
+                status: (err as { status?: number }).status,
+                cooldownMs: cooldown,
+            });
+            await new Promise((r) => setTimeout(r, cooldown));
+        }
+    }
+    throw last;
 }

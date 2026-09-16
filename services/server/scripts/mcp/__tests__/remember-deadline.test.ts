@@ -12,7 +12,8 @@ import type { MemWalSession } from "../auth.js";
 // above, so the module would read the real 15s default before the line that
 // shortens it ever runs — and each tool test would then take 15 seconds.
 const { createMcpServer } = await import("../server.js");
-const { ACCEPT_DEADLINE_MS, withDeadline } = await import("../tools/remember-wait.js");
+const { ACCEPT_DEADLINE_MS, withDeadline, MAX_ABSORBED_COOLDOWN_MS, DEFAULT_ACCEPT_DEADLINE_MS } =
+    await import("../tools/remember-wait.js");
 
 /**
  * The SDK's `signedRequest` aborts a request only when the caller passes a
@@ -214,5 +215,102 @@ test("the status wait ceiling stays under the MCP client's own deadline", async 
     assert.ok(
         DEFAULT_REQUEST_TIMEOUT_MSEC - max >= 10_000,
         `only ${DEFAULT_REQUEST_TIMEOUT_MSEC - max}ms of headroom before the client gives up`,
+    );
+});
+
+/**
+ * Rate limiting is the quietest way this system loses a memory: the relayer
+ * answers 429 with `retry_after_seconds`, and before this the tool surfaced it
+ * as a bare `Tool error` while the fact was simply never written. Observed
+ * live against production during benchmarking, four calls in a row.
+ */
+
+function rejectsWith(status, serverCode, retryAfterSeconds, thenValue) {
+    let n = 0;
+    return async () => {
+        if (n++ === 0) {
+            const e = new Error(`stub ${status}`);
+            Object.assign(e, { status, serverCode, retryAfterSeconds });
+            throw e;
+        }
+        return thenValue;
+    };
+}
+
+function sessionRejecting(fn) {
+    return {
+        oauthScope: "memwal:read memwal:write",
+        namespace: "default",
+        memwal: { rememberAsync: fn, rememberBulkAsync: fn },
+    } as unknown as MemWalSession;
+}
+
+test("a short cooldown is absorbed and the write still lands", async (t) => {
+    // 503 AUTH_UPSTREAM_UNAVAILABLE advises ~5s; inside the absorb budget, so
+    // the agent should never see it.
+    //
+    // A sub-second cooldown here only because this file shortens
+    // ACCEPT_DEADLINE_MS to 150ms: the retry sleeps INSIDE the accept deadline,
+    // so the wait has to fit within it. In production that is 8s of absorb
+    // inside a 15s deadline — see the invariant pinned below.
+    const client = await clientFor(
+        sessionRejecting(rejectsWith(503, "AUTH_UPSTREAM_UNAVAILABLE", 0.05, { job_id: "job-1", status: "pending" })),
+        t,
+    );
+    const res = await client.callTool({ name: "memwal_remember", arguments: { text: "a fact" } });
+    assert.notEqual((res as { isError?: boolean }).isError, true);
+    assert.match(textOf(res), /job_id=job-1/);
+});
+
+test("a 60s rate-limit cooldown is reported, not slept through", async (t) => {
+    // Sleeping 60s inside a tool call is the hang this work exists to remove,
+    // and the MCP client would time out first.
+    const client = await clientFor(
+        sessionRejecting(rejectsWith(429, "Rate limit exceeded", 60, { job_id: "nope", status: "pending" })),
+        t,
+    );
+    const started = Date.now();
+    const res = await client.callTool({ name: "memwal_remember", arguments: { text: "a fact" } });
+    assert.ok(Date.now() - started < 5_000, "must not sit on a 60s cooldown");
+    assert.equal((res as { isError?: boolean }).isError, true);
+    const text = textOf(res);
+    // The agent must not tell the user this is being saved.
+    assert.match(text, /NOT\s+SAVED/i);
+    assert.match(text, /60s|about 60/);
+    // And it should say how to stop burning the budget.
+    assert.match(text, /memwal_remember_bulk/);
+});
+
+test("a rate-limited batch says the facts were not saved", async (t) => {
+    const client = await clientFor(
+        sessionRejecting(rejectsWith(429, "Rate limit exceeded", 60, { job_ids: [], total: 0, status: "x" })),
+        t,
+    );
+    const res = await client.callTool({ name: "memwal_remember_bulk", arguments: { facts: ["a", "b"] } });
+    assert.equal((res as { isError?: boolean }).isError, true);
+    assert.match(textOf(res), /NOT\s+SAVED/i);
+});
+
+test("a non-retryable error is not retried", async (t) => {
+    // A 500 could have been thrown after a write started; retrying bulk there
+    // would store every fact twice.
+    let calls = 0;
+    const client = await clientFor(
+        sessionRejecting(async () => { calls++; const e = new Error("boom"); Object.assign(e, { status: 500 }); throw e; }),
+        t,
+    );
+    const res = await client.callTool({ name: "memwal_remember_bulk", arguments: { facts: ["a"] } });
+    assert.equal((res as { isError?: boolean }).isError, true);
+    assert.equal(calls, 1, "a 500 must not be retried");
+});
+
+test("the absorb budget fits inside the accept deadline", () => {
+    // withAcceptDeadline wraps withRelayerRetry, so a cooldown we choose to sit
+    // on is spent against the accept deadline. If the absorb budget ever grew
+    // past it, every absorbed retry would be cut off mid-wait and surface as
+    // "did not accept" instead of succeeding.
+    assert.ok(
+        MAX_ABSORBED_COOLDOWN_MS < DEFAULT_ACCEPT_DEADLINE_MS,
+        `absorb ${MAX_ABSORBED_COOLDOWN_MS}ms must stay under the ${DEFAULT_ACCEPT_DEADLINE_MS}ms accept deadline`,
     );
 });
