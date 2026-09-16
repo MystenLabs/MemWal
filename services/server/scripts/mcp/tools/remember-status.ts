@@ -12,11 +12,26 @@ import {
 } from "./remember-wait.js";
 
 /**
- * Ceiling on a single status wait. Past this an MCP client is more likely to
- * time out the call than the job is to finish, and the caller can simply ask
- * again — the job_id stays valid.
+ * Ceiling on a single status wait, held under the MCP client's own deadline.
+ *
+ * `@modelcontextprotocol/sdk` times a request out after
+ * `DEFAULT_REQUEST_TIMEOUT_MSEC` = 60s unless the caller overrides it. A tool
+ * that waits the full 60s therefore loses every race it enters: the client
+ * gives up first and the agent sees `MCP error -32001: Request timed out`
+ * instead of the answer the tool was about to return. Confirmed live against
+ * the production relayer — `waitMs: 60000` on a three-job batch returned
+ * exactly that, with no way for the caller to tell a slow write from a broken
+ * tool.
+ *
+ * 45s leaves room for the round trip and still covers the median write. A job
+ * that outlives it is not lost: the job_id stays valid and the caller asks
+ * again, which is the whole point of this tool being separate from the write.
  */
-const MAX_STATUS_WAIT_MS = 60_000;
+const MAX_STATUS_WAIT_MS = 45_000;
+
+/** Wait applied when the caller does not choose one. Declared above
+ * `STATUS_INPUT` because the tool description interpolates it. */
+const DEFAULT_STATUS_WAIT_MS = 10_000;
 
 /** Matches the bulk write cap, so a whole batch settles in one call. */
 const MAX_STATUS_JOB_IDS = 20;
@@ -42,12 +57,9 @@ const STATUS_INPUT = {
         .max(MAX_STATUS_WAIT_MS)
         .optional()
         .describe(
-            "How long to wait for the job to finish, in milliseconds (0-60000, default 10000). Pass 0 to read the current state without waiting."
+            `How long to wait for the job to finish, in milliseconds (0-${MAX_STATUS_WAIT_MS}, default ${DEFAULT_STATUS_WAIT_MS}). Pass 0 to read the current state without waiting.`
         ),
 } as const;
-
-/** Wait applied when the caller does not choose one. */
-const DEFAULT_STATUS_WAIT_MS = 10_000;
 
 /**
  * memwal_remember_status — resolve a remember job that `memwal_remember`

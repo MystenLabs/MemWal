@@ -147,3 +147,48 @@ test("a stalled batch status read is bounded too", async (t) => {
     assert.equal((result as { isError?: boolean }).isError, true);
     assert.match(textOf(result), /did not accept/);
 });
+
+/**
+ * The status tool must answer before the MCP client gives up on it.
+ *
+ * `@modelcontextprotocol/sdk` times a request out at
+ * `DEFAULT_REQUEST_TIMEOUT_MSEC` (60s) unless the caller overrides it. A tool
+ * whose advertised maximum equals that deadline loses every race it enters:
+ * the client reports `MCP error -32001: Request timed out` and the agent
+ * cannot tell a slow write from a broken tool. Caught live against the
+ * production relayer with `waitMs: 60000` on a three-job batch.
+ */
+test("the status wait ceiling stays under the MCP client's own deadline", async (t: TestContext) => {
+    const { DEFAULT_REQUEST_TIMEOUT_MSEC } = await import(
+        "@modelcontextprotocol/sdk/shared/protocol.js"
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer({
+        oauthScope: "memwal:read memwal:write",
+    } as MemWalSession);
+    const client = new Client({ name: "status-deadline-test", version: "1.0.0" });
+    t.after(async () => {
+        await client.close();
+        await server.close();
+    });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const { tools } = await client.listTools();
+    const status = tools.find((tool) => tool.name === "memwal_remember_status");
+    assert.ok(status, "memwal_remember_status is registered");
+
+    const max = (
+        status.inputSchema as { properties?: { waitMs?: { maximum?: number } } }
+    ).properties?.waitMs?.maximum;
+    assert.equal(typeof max, "number", "waitMs advertises a maximum");
+    assert.ok(
+        max < DEFAULT_REQUEST_TIMEOUT_MSEC,
+        `waitMs max ${max}ms must stay under the client deadline ${DEFAULT_REQUEST_TIMEOUT_MSEC}ms`,
+    );
+    // Headroom for the round trip, not just a strict inequality.
+    assert.ok(
+        DEFAULT_REQUEST_TIMEOUT_MSEC - max >= 10_000,
+        `only ${DEFAULT_REQUEST_TIMEOUT_MSEC - max}ms of headroom before the client gives up`,
+    );
+});

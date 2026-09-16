@@ -204,6 +204,18 @@ pub async fn recall(
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let namespace = &body.namespace;
+
+    // Started here rather than awaited at the end, so it overlaps the embed,
+    // search, Walrus download and SEAL decrypt that follow instead of adding
+    // to them. The published SDK aborts a recall after a hard 15s that no
+    // caller can raise, and recall has been measured landing on exactly that
+    // — so this report has to cost the critical path nothing.
+    let failed_writes = {
+        let state = state.clone();
+        let owner = owner.clone();
+        tokio::spawn(async move { failed_writes_for(&state, &owner).await })
+    };
+
     tracing::info!(
         query_len = body.query.len(),
         owner = %owner,
@@ -249,7 +261,7 @@ pub async fn recall(
             dropped_count: 0,
             // Reported even with no hits: an empty recall is exactly when a
             // caller is most likely to be looking for the fact that failed.
-            failed_writes: failed_writes_for(&state, owner).await,
+            failed_writes: failed_writes.await.unwrap_or_default(),
         }));
     }
 
@@ -336,7 +348,9 @@ pub async fn recall(
         results,
         total,
         dropped_count,
-        failed_writes: failed_writes_for(&state, owner).await,
+        // A panic in the report task must not take the recall with it; the
+        // caller loses a warning, not their memories.
+        failed_writes: failed_writes.await.unwrap_or_default(),
     }))
 }
 
