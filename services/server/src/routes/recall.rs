@@ -464,6 +464,7 @@ mod tests {
             results: vec![],
             total: 0,
             dropped_count: 3,
+            failed_writes: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["dropped_count"], 3);
@@ -475,6 +476,7 @@ mod tests {
             results: vec![],
             total: 0,
             dropped_count: 0,
+            failed_writes: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
         // skip_serializing_if = "is_zero_usize" → field absent

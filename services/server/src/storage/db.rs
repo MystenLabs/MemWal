@@ -2192,10 +2192,27 @@ impl VectorDb {
     /// `pending` cannot be swept wholesale — a job that IS prepared sits at
     /// `pending` until a wallet worker picks it up, which under upload backlog
     /// is legitimately many minutes (`WALRUS_UPLOAD_PER_WALLET_CONCURRENCY`
-    /// defaults to 1). `preparation_encrypted_b64 IS NULL` is what separates
-    /// the two: it is written in the same statement that precedes
-    /// `enqueue_wallet_job`, so its absence means the job never reached the
-    /// queue.
+    /// defaults to 1). Two columns together say "this one is never coming":
+    ///
+    /// * `prepare_claimed_at IS NOT NULL` — the row belongs to the single
+    ///   `remember` path, the only one that claims a preparation slot
+    ///   (`claim_remember_preparation`). This is load-bearing, not decoration:
+    ///   `/api/remember/bulk` and `/api/analyze` insert their rows directly and
+    ///   never claim, so `preparation_encrypted_b64` is ALWAYS NULL for them,
+    ///   healthy or not. Without this clause the sweep fails every bulk and
+    ///   analyze write that waits out the TTL in a normal upload backlog —
+    ///   killing paid work that was about to run and inviting the caller to
+    ///   re-send it.
+    /// * `preparation_encrypted_b64 IS NULL` — that claim was never redeemed.
+    ///   The column is written by the statement immediately before
+    ///   `enqueue_wallet_job`, so its absence means the job never reached the
+    ///   queue.
+    ///
+    /// Orphaned bulk and analyze preparations are therefore still not swept.
+    /// That is the pre-existing behaviour, deliberately left alone rather than
+    /// guessed at: neither path persists anything that distinguishes "stranded"
+    /// from "queued", so sweeping them needs a durable marker they do not yet
+    /// have.
     ///
     /// Failing is the only option, not a choice. The row stores the SEAL
     /// ciphertext, never the plaintext, so a job that died before encrypting
@@ -2251,6 +2268,7 @@ impl VectorDb {
                  prepare_claimed_at = NULL,
                  updated_at = NOW()
              WHERE status = 'pending'
+               AND prepare_claimed_at IS NOT NULL
                AND preparation_encrypted_b64 IS NULL
                AND updated_at < NOW() - ($1 * INTERVAL '1 second')",
         )
@@ -3942,6 +3960,44 @@ mod stale_sweep_tests {
             .expect("sweep");
 
         assert_eq!(status_of(&db, &id).await, "failed");
+    }
+
+    /// `/api/remember/bulk` inserts its rows directly and never claims a
+    /// preparation slot, so `preparation_encrypted_b64` is ALWAYS NULL for a
+    /// bulk job — healthy or not. Keying the sweep on that column alone would
+    /// fail every bulk write that waits out the TTL behind a normal upload
+    /// backlog, destroying paid work that was about to run.
+    #[tokio::test]
+    async fn a_queued_bulk_job_is_never_swept() {
+        let db = test_db().await;
+        let owner = unique_owner("bulk");
+        // Exactly what remember_bulk writes: pending, no claim, no preparation.
+        let id = seed_job(&db, &owner, "pending", false, None, 900).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(
+            status_of(&db, &id).await,
+            "pending",
+            "a bulk job waiting on the upload queue must survive the sweep",
+        );
+    }
+
+    /// `/api/analyze` inserts the same shape (`prepare_claim_token: None`), so
+    /// it needs the same protection.
+    #[tokio::test]
+    async fn a_queued_analyze_job_is_never_swept() {
+        let db = test_db().await;
+        let owner = unique_owner("analyze");
+        let id = seed_job(&db, &owner, "pending", false, None, 3600).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &id).await, "pending");
     }
 
     /// A finished write is terminal and the sweeper must never touch it.
