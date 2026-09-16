@@ -233,8 +233,11 @@ function deadlineSignal(
         expired = true;
         controller.abort();
     }, ms);
-    // Never hold a process open for a deadline nobody is waiting on.
-    (timer as unknown as { unref?: () => void }).unref?.();
+    // Deliberately NOT unref'd. A deadline is the one timer somebody IS
+    // waiting on: unref'd, it stops firing the moment nothing else holds the
+    // loop open, and the stalled request it was meant to bound hangs forever
+    // instead. `dispose()` runs in the caller's `finally`, so the timer cannot
+    // outlive its request either way.
 
     return {
         signal: controller.signal,
