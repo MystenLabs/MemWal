@@ -210,7 +210,13 @@ async function settleBatch(
 
     const lines = rows.map((r, i) => {
         const blob = r.blob_id ? ` blob_id=${r.blob_id}` : "";
-        const err = r.error ? ` error=${r.error}` : "";
+        // `waitForRememberJobs` stamps "polling timed out after Nms" on rows
+        // that simply had not landed when the budget ran out. That is our
+        // clock expiring, not the job failing, so showing it as `error=` next
+        // to "still uploading" reads like the write broke when it is still on
+        // its way. Only a terminal row gets to explain itself.
+        const terminal = r.status === "failed" || r.status === "not_found";
+        const err = terminal && r.error ? ` error=${r.error}` : "";
         const state =
             r.status === "done"
                 ? "saved"

@@ -100,6 +100,17 @@ test("cold-start memwal_remember_status accepts a whole batch", () => {
     }
 });
 
+test("cold-start waitMs bound matches the sidecar's ceiling", () => {
+    // The sidecar validates waitMs with zod and rejects anything above its own
+    // cap. Advertising a larger maximum invites the agent to send a value that
+    // comes straight back as an MCP validation error — observed live at 60000
+    // once the sidecar lowered its ceiling to 45000.
+    for (const list of [TOOL_DEFINITIONS, SIGNED_OUT_TOOL_DEFINITIONS]) {
+        const tool = list.find((t) => t.name === "memwal_remember_status");
+        assert.equal(tool.inputSchema.properties.waitMs.maximum, 45000);
+    }
+});
+
 test("cold-start write tools warn that a result may not be saved yet", () => {
     // Both write tools return at accept now. An agent that was never told a
     // pending result is normal reports it to the user as stored.

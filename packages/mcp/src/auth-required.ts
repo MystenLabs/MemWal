@@ -109,7 +109,7 @@ function buildToolDefinitions(proactive: boolean) {
                     minItems: 1,
                     maxItems: 20,
                 },
-                waitMs: { type: "integer", minimum: 0, maximum: 60000, default: 10000 },
+                waitMs: { type: "integer", minimum: 0, maximum: 45000, default: 10000 },
             },
             // Neither is required on its own; the sidecar rejects passing both
             // and rejects passing neither, which JSON Schema cannot express
