@@ -1,3 +1,7 @@
+    /// Sanitized by `sanitize_job_error_for_client`, as on every other
+    /// client-facing job-status path: an infrastructure-funding failure is
+    /// replaced wholesale (its raw text names the relayer's own wallet and
+    /// balance), and long hex runs are redacted.
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

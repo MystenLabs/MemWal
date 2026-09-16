@@ -2205,59 +2205,22 @@ impl VectorDb {
         Ok(rows)
     }
 
-    /// Mark remember jobs as failed once nothing can still move them.
+    /// Mark remember jobs as failed once nothing can still move them:
+    /// `running`/`uploaded` whose worker stopped updating them, and `pending`
+    /// rows whose preparation never finished.
     ///
-    /// Two shapes of stuck, which need different tests:
+    /// `prepare_claimed_at IS NOT NULL` is load-bearing — only the single
+    /// `remember` path claims a preparation slot, so without it the sweep also
+    /// matches healthy `/api/remember/bulk` and `/api/analyze` rows, which
+    /// never set `preparation_encrypted_b64` at all.
     ///
-    /// * `running` / `uploaded` — a worker claimed the job and stopped
-    ///   updating it.
-    /// * `pending` with no preparation payload — the row was committed by the
-    ///   route, but the spawned preparation (summarize → embed + SEAL encrypt →
-    ///   enqueue) never finished, so nothing was ever queued. Preparation runs
-    ///   in a `tokio::spawn` inside the relayer process, so a restart in that
-    ///   window leaves the row behind with no task to resume it.
+    /// Clearing `prepare_claim_token` fences a slow preparation: its own
+    /// UPDATE is keyed on that token, so it can no longer reach
+    /// `enqueue_wallet_job`. Failing is the only option — the row stores
+    /// ciphertext, never plaintext, so nothing can be retried from.
     ///
-    /// `pending` cannot be swept wholesale — a job that IS prepared sits at
-    /// `pending` until a wallet worker picks it up, which under upload backlog
-    /// is legitimately many minutes (`WALRUS_UPLOAD_PER_WALLET_CONCURRENCY`
-    /// defaults to 1). Two columns together say "this one is never coming":
-    ///
-    /// * `prepare_claimed_at IS NOT NULL` — the row belongs to the single
-    ///   `remember` path, the only one that claims a preparation slot
-    ///   (`claim_remember_preparation`). This is load-bearing, not decoration:
-    ///   `/api/remember/bulk` and `/api/analyze` insert their rows directly and
-    ///   never claim, so `preparation_encrypted_b64` is ALWAYS NULL for them,
-    ///   healthy or not. Without this clause the sweep fails every bulk and
-    ///   analyze write that waits out the TTL in a normal upload backlog —
-    ///   killing paid work that was about to run and inviting the caller to
-    ///   re-send it.
-    /// * `preparation_encrypted_b64 IS NULL` — that claim was never redeemed.
-    ///   The column is written by the statement immediately before
-    ///   `enqueue_wallet_job`, so its absence means the job never reached the
-    ///   queue.
-    ///
-    /// Orphaned bulk and analyze preparations are therefore still not swept.
-    /// That is the pre-existing behaviour, deliberately left alone rather than
-    /// guessed at: neither path persists anything that distinguishes "stranded"
-    /// from "queued", so sweeping them needs a durable marker they do not yet
-    /// have.
-    ///
-    /// Failing is the only option, not a choice. The row stores the SEAL
-    /// ciphertext, never the plaintext, so a job that died before encrypting
-    /// has nothing left to retry from — the fact is gone and the owner has to
-    /// send it again. Saying so is strictly better than the alternative, which
-    /// was a row sitting at `pending` forever while `memwal_remember_status`
-    /// reported it as still uploading.
-    ///
-    /// Clearing `prepare_claim_token` is what makes this safe against a
-    /// preparation that is merely very slow rather than dead: that task's own
-    /// UPDATE is fenced on the token, so it now matches zero rows, logs the
-    /// lost claim and returns *before* `enqueue_wallet_job` — it cannot mint a
-    /// paid blob for a job just declared dead.
-    ///
-    /// Quota needs no special handling here: `main` runs
-    /// `release_reservations_for_terminal_jobs` immediately after this on the
-    /// same tick, which is what reclaims the bytes these rows had reserved.
+    /// Quota is reclaimed by `release_reservations_for_terminal_jobs`, which
+    /// `main` runs immediately after this on the same tick.
     pub async fn fail_stale_remember_jobs(
         &self,
         stale_after: std::time::Duration,

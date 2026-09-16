@@ -405,19 +405,12 @@ function advisedCooldownMs(err: unknown): number {
     return typeof secs === "number" && secs > 0 ? secs * 1000 : 1_000;
 }
 
-/**
- * Honour the relayer's own `retry_after` instead of surfacing a raw 429.
+/** Honour the relayer's `retry_after` instead of surfacing a raw 429.
  *
- * Observed against production: once the per-delegate-key budget (60 weighted
- * requests/minute) is spent, `memwal_remember` fails with
- * `Tool error: ... 429 ... retry_after_seconds: 60` and the fact is simply
- * never written. Nothing retried, and nothing told the user their memory had
- * been dropped — the worst failure this system has, because it is silent.
- *
- * Fast-return makes it likelier, not rarer: settling a batch adds requests on
- * top of the write itself, so an agent saving several facts in one turn spends
- * the budget faster than one that blocked.
- */
+ * Once the per-delegate-key budget is spent the write is simply never made,
+ * and nothing retried — the quietest failure here. A short cooldown is
+ * absorbed; a long one is reported, because sleeping it out inside a tool call
+ * is the hang this file exists to remove. */
 export async function withRelayerRetry<T>(work: () => Promise<T>, what: string): Promise<T> {
     let last: unknown;
     for (let attempt = 1; attempt <= RELAYER_RETRY_ATTEMPTS; attempt++) {

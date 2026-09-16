@@ -137,25 +137,13 @@ function pollingDelayMs(baseMs: number, attempt: number): number {
     return Math.floor(capped * jitter);
 }
 
-/** Window over which the same (namespace, text) resolves to the same
- * idempotency key.
+/** Window over which the same (namespace, text) resolves to one key.
  *
- * `pendingRememberKeys` only dedupes retries that reuse one client instance.
- * The MCP sidecar builds a fresh `MemWal` per transport session, so when the
- * bridge reconnects a dropped stream and the agent re-issues the same
- * `memwal_remember`, that map is empty. A random key then reads as a brand-new
- * write and the relayer mints a SECOND paid Walrus blob for a write already in
- * flight — doubling queue load exactly when the queue is already slow enough
- * to have caused the drop.
- *
- * Deriving the key from the content makes that replay land on the existing
- * job. The bucket bounds how long the collapse lasts: `remember_jobs` rows are
- * never pruned, so an unbucketed key would dedupe against a job from any point
- * in history and re-saving a fact the user had since deleted would return the
- * old row's blob id instead of storing it again. Retries happen seconds after
- * the original, so 30 minutes covers them with ~0.1% chance of a replay
- * straddling the boundary — and straddling only costs the old behaviour (a
- * duplicate job), never a wrong result. */
+ * `pendingRememberKeys` only dedupes retries that reuse one client instance,
+ * and callers such as the MCP sidecar build a fresh client per session — so a
+ * random key let a reconnect replay mint a second paid blob. The bucket bounds
+ * the collapse: `remember_jobs` rows are never pruned, so an unbucketed key
+ * would dedupe against a job from any point in history. */
 const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
 
 async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
@@ -163,19 +151,11 @@ async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
     return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
 }
 
-/**
- * Deadline for a single relayer request when the call site names no other.
+/** Deadline for a request that names no other.
  *
- * `fetch` imposes no timeout, so before this every request here could hang for
- * as long as the socket stayed open. That is not a theoretical gap: a poll loop
- * checks its budget at the top of each iteration, which bounds when the next
- * request STARTS, not how long one takes — so one stalled read blew straight
- * past a documented 90s cap and left an MCP tool running past 120s.
- *
- * 30s mirrors the relayer's own outbound HTTP client, so any call that depends
- * on the relayer talking to the sidecar, Walrus, or OpenAI has already failed
- * upstream by the time this fires.
- */
+ * `fetch` imposes none, and a poll loop checks its budget only between polls —
+ * so one stalled read ran past `timeoutMs` entirely. 30s mirrors the relayer's
+ * own outbound client. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /** `POST /api/restore` bounds itself at 55s server-side and answers with an

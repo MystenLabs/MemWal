@@ -126,7 +126,19 @@ export function registerRememberBulkTool(
                 const state = r.status === "timeout" ? `still uploading, job_id=${r.id}` : r.status;
                 return `${i + 1}. [${state}]${blob}${err}${text ? ` — ${text}` : ""}`;
             });
-            const summary = `Saved ${result.succeeded}/${result.total} fact(s) to Walrus Memory (failed=${result.failed}).`;
+            // `result.failed` is total-minus-succeeded, so it counts a
+            // still-uploading write as failed — while the tail below says that
+            // same job is on its way. An agent reading `failed=` re-sends an
+            // in-flight write, which is the duplicate this branch exists to
+            // avoid. Count only what actually reached a terminal failure.
+            const reallyFailed = result.results.filter(
+                (r) => r.status !== "done" && r.status !== "timeout",
+            ).length;
+            const summary =
+                `Saved ${result.succeeded}/${result.total} fact(s) to Walrus Memory` +
+                (reallyFailed ? ` (failed=${reallyFailed})` : "") +
+                (unfinished.length ? ` (${unfinished.length} still uploading)` : "") +
+                ".";
             const footer = result.succeeded > 0 ? `\n\n${explorerFooter()}` : "";
             const tail = unfinished.length
                 ? `\n\n${unfinished.length} write(s) are STILL UPLOADING and are NOT saved yet. ` +
