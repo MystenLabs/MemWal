@@ -260,8 +260,12 @@ export async function withDeadline<T>(
             work,
             new Promise<never>((_, reject) => {
                 timer = setTimeout(() => reject(new DeadlineExceededError(message)), ms);
-                // Never hold the process open for a deadline nobody is waiting on.
-                timer.unref?.();
+                // Deliberately NOT unref'd — the same correction a4a94e41 made
+                // in the SDK, which this had copied. A deadline is the one
+                // timer somebody IS waiting on: unref'd it stops firing the
+                // moment nothing else holds the loop open, so the stalled
+                // request it exists to bound hangs forever instead. The
+                // `finally` below clears it, so it cannot outlive its work.
             }),
         ]);
     } finally {
