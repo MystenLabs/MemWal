@@ -139,6 +139,46 @@ fn sliding_window_starts(now: f64) -> (f64, f64, f64) {
 ///   2. Strip any trailing slash so `/api/analyze/` == `/api/analyze`.
 ///      Both transforms are applied before the match, so no variant can
 ///      slip through with a cost of 1 instead of its true weight.
+/// True for the two routes a client polls while waiting for a write it already
+/// paid for: `GET /api/remember/{job_id}` and `POST /api/remember/bulk/status`.
+///
+/// Deliberately excludes `/api/remember/bulk` (weight 10) and
+/// `/api/remember/manual` (weight 3), which are writes, not polls.
+fn is_remember_status_poll(path: &str) -> bool {
+    let decoded = percent_decode_str(path).decode_utf8_lossy();
+    let path = decoded.trim_end_matches('/');
+    if path == "/api/remember/bulk/status" {
+        return true;
+    }
+    match path.strip_prefix("/api/remember/") {
+        Some(rest) => !rest.is_empty() && !rest.contains('/') && rest != "bulk" && rest != "manual",
+        None => false,
+    }
+}
+
+/// Weight charged to the per-delegate-key **burst** layer.
+///
+/// Same as `endpoint_weight` except a status poll costs nothing here. How many
+/// polls a client makes is not a choice it gets to make: it is set by how long
+/// the server takes. Measured on dev, one `memwal_remember` takes ~33s and the
+/// SDK's backoff ladder polls about eight times inside it, so a single save
+/// costs 5 for the write plus ~8 for the waiting against a 60/min budget —
+/// four consecutive saves lock the caller out, and take `memwal_recall` down
+/// with them, since both ride the same key. Charging a client for the server
+/// being slow turns a latency problem into an availability one.
+///
+/// The per-account burst and hourly layers still meter polls at their normal
+/// weight, so total volume stays bounded. This only stops the burst layer —
+/// whose job is catching a runaway client — from firing on a client doing
+/// exactly what the protocol tells it to.
+fn delegate_key_weight(path: &str) -> i64 {
+    if is_remember_status_poll(path) {
+        0
+    } else {
+        endpoint_weight(path)
+    }
+}
+
 fn endpoint_weight(path: &str) -> i64 {
     // Step 1 — percent-decode (e.g. "%2F" → "/", "%79" → "y")
     // Use lossy decoding: malformed sequences are replaced with U+FFFD
@@ -454,6 +494,8 @@ pub async fn rate_limit_middleware(
 
     // Determine cost weight based on endpoint; path is normalized inside endpoint_weight.
     let weight = endpoint_weight(request.uri().path());
+    // Only the burst layer discounts status polls; see `delegate_key_weight`.
+    let dk_weight = delegate_key_weight(request.uri().path());
 
     // --- Key definitions for all three rate-limit buckets ---
     let dk_key = format!("rate:dk:{}", auth.public_key);
@@ -475,7 +517,7 @@ pub async fn rate_limit_middleware(
         dk_window_start,
         now,
         config.max_requests_per_delegate_key,
-        weight,
+        dk_weight,
         120, // TTL 2 min
     )
     .await
@@ -2406,5 +2448,62 @@ mod tests {
             SponsorRlResult::MinuteLimitExceeded,
             SponsorRlResult::HourLimitExceeded
         );
+    }
+
+    /// A save costs 5 for the write plus one per poll while it finishes.
+    /// Measured on dev: ~33s per `memwal_remember` with ~8 polls inside it, so
+    /// ~13 of a 60/min budget per save. Four saves and the caller is locked
+    /// out — `memwal_recall` included, because both ride the same key.
+    #[test]
+    fn a_status_poll_costs_nothing_in_the_burst_layer() {
+        let job = "/api/remember/3b661695-98c6-4c01-92d3-19c0201797ae";
+        assert_eq!(endpoint_weight(job), 1, "the other layers still meter it");
+        assert_eq!(delegate_key_weight(job), 0);
+        assert_eq!(delegate_key_weight("/api/remember/bulk/status"), 0);
+    }
+
+    /// The discount must not leak onto the writes under the same prefix, or a
+    /// client could spend nothing on the most expensive routes there are.
+    #[test]
+    fn the_poll_discount_never_covers_a_write() {
+        for (path, weight) in [
+            ("/api/remember", 5),
+            ("/api/remember/bulk", 10),
+            ("/api/remember/manual", 3),
+            ("/api/recall", 1),
+            ("/api/analyze", 5),
+        ] {
+            assert_eq!(
+                delegate_key_weight(path),
+                weight,
+                "{path} must keep its full burst weight"
+            );
+        }
+    }
+
+    /// The path comes off the wire, so the matcher has to survive what a caller
+    /// can actually send: percent-encoding, trailing slashes, and deeper paths
+    /// that merely look like a job id.
+    #[test]
+    fn only_a_real_status_poll_is_discounted() {
+        for path in [
+            "/api/remember/abc123",
+            "/api/remember/abc123/",
+            "/api/remember/bulk/status",
+            "/api/remember/bulk/status/",
+            "/api/remember/%61bc",
+        ] {
+            assert!(is_remember_status_poll(path), "{path} is a poll");
+        }
+        for path in [
+            "/api/remember",
+            "/api/remember/",
+            "/api/remember/bulk",
+            "/api/remember/manual",
+            "/api/remember/abc/def",
+            "/api/recall",
+        ] {
+            assert!(!is_remember_status_poll(path), "{path} is not a poll");
+        }
     }
 }
