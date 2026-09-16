@@ -1804,6 +1804,22 @@ async fn execute_upload_and_transfer_locked(
                     err.kind(),
                     !err.aborts_retries()
                 );
+                // The durable upload has its own exit, so it needs its own
+                // spacing — this is the path a real retry actually took.
+                // Observed on dev: `durable Walrus upload request failed`
+                // classified transient at attempt 1/5, with the next attempt
+                // starting in the same second because only the legacy exit
+                // below had been given a backoff.
+                if let Some(delay) = upload_retry_backoff(&err, attempt_info) {
+                    tracing::info!(
+                        "[wallet-job:upload] job_id={} backing off {:?} before attempt {}/{}",
+                        jid,
+                        delay,
+                        attempt_info.current + 1,
+                        attempt_info.max,
+                    );
+                    tokio::time::sleep(delay).await;
+                }
                 Err(err)
             }
         };
