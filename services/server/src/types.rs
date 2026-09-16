@@ -1593,10 +1593,17 @@ pub struct FailedWrite {
     /// match this against what it was told at the time.
     pub job_id: String,
     pub namespace: String,
-    /// The relayer's own failure message, verbatim. Passed through rather than
-    /// summarised: the distinction between (say) a SEAL outage and an
-    /// exhausted upload budget is what tells a caller whether re-sending the
-    /// fact is likely to work.
+    /// The failure message, after `sanitize_job_error_for_client` — the same
+    /// treatment `GET /api/remember/:job_id` and the bulk status endpoint give
+    /// it, and for the same two reasons. An infrastructure-funding failure is
+    /// replaced wholesale (its raw text names the relayer's own wallet and its
+    /// balance shortfall, which is neither the tenant's business nor safe to
+    /// show them: it reads as "top this address up"). Everything else keeps its
+    /// wording with long hex runs redacted.
+    ///
+    /// What survives is the part a caller can act on: whether this looks
+    /// transient or permanent, and so whether re-sending the fact is likely to
+    /// work.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// When the job reached `failed`, RFC 3339.

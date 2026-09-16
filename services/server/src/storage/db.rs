@@ -1904,6 +1904,10 @@ impl VectorDb {
                 |(job_id, namespace, error, failed_at)| crate::types::FailedWrite {
                     job_id,
                     namespace,
+                    // Raw here on purpose: `routes` is not reachable from the
+                    // lib crate, and this is the storage layer. The caller
+                    // (`routes::recall::failed_writes_for`) sanitizes before
+                    // any of it reaches a client.
                     error,
                     failed_at: failed_at.to_rfc3339(),
                 },

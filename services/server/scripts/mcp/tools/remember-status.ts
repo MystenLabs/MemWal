@@ -113,6 +113,7 @@ export function registerRememberStatusTool(
                     const status = await withAcceptDeadline(
                         session.memwal.getRememberStatus(job_id),
                         "status read",
+                        { idempotent: true },
                     );
                     if (status.status === "done") {
                         return saved(status.blob_id ?? "", status.namespace);
@@ -178,6 +179,7 @@ async function settleBatch(
                   await withAcceptDeadline(
                       session.memwal.getRememberBulkStatus(jobIds),
                       "batch status read",
+                      { idempotent: true },
                   )
               ).results.map((r) => ({
                   id: r.job_id,

@@ -269,16 +269,40 @@ export async function withDeadline<T>(
     }
 }
 
-/** Bound the accept leg of a write. */
-export function withAcceptDeadline<T>(work: Promise<T>, what: string): Promise<T> {
+/** Bound the accept leg of a write.
+ *
+ * `idempotent` is not cosmetic. `POST /api/remember` carries a content-derived
+ * idempotency_key, so a retry collapses onto the job already in flight.
+ * `POST /api/remember/bulk` carries none at all — the handler mints a fresh
+ * uuid per item and inserts with no conflict clause — so a retry there is N
+ * more paid Walrus blobs for the same N facts.
+ *
+ * That distinction decides what we may tell the agent, and the deadline makes
+ * it urgent rather than theoretical: `withDeadline` does not cancel the
+ * underlying request, so when it fires the relayer has usually accepted
+ * already. Inviting a blind retry on the bulk path is close to guaranteeing
+ * the duplicate.
+ */
+export function withAcceptDeadline<T>(
+    work: Promise<T>,
+    what: string,
+    opts: { idempotent: boolean },
+): Promise<T> {
+    const shared =
+        `Walrus Memory did not accept the ${what} within ${ACCEPT_DEADLINE_MS / 1000}s — the ` +
+        `relayer is unreachable or not responding. The write may or may not have been queued, ` +
+        `so do NOT tell the user it was saved.`;
+
     return withDeadline(
         work,
         ACCEPT_DEADLINE_MS,
-        `Walrus Memory did not accept the ${what} within ${ACCEPT_DEADLINE_MS / 1000}s — the ` +
-            `relayer is unreachable or not responding. The write may or may not have been ` +
-            `queued, so do NOT tell the user it was saved. Retrying ${what} in this session ` +
-            `is safe: the SDK reuses the same idempotency key until an accept succeeds, so a ` +
-            `retry attaches to the existing job instead of queueing a second paid copy.`,
+        opts.idempotent
+            ? `${shared} Retrying in this session is safe: the write carries a content-derived ` +
+              `idempotency key until an accept succeeds, so a retry attaches to the existing job ` +
+              `instead of queueing a second paid copy.`
+            : `${shared} Do NOT retry blindly — this endpoint carries no idempotency key, so a ` +
+              `re-send stores every fact a SECOND time at full cost. Check with memwal_recall ` +
+              `first, and only re-send what is genuinely missing.`,
     );
 }
 

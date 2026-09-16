@@ -62,6 +62,7 @@ export function registerRememberTool(
             const accepted = await withAcceptDeadline(
                 session.memwal.rememberAsync(text, namespace),
                 "memwal_remember write",
+                { idempotent: true },
             );
 
             const pending = (waitedMs: number) => ({

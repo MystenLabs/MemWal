@@ -63,6 +63,7 @@ export function registerRememberBulkTool(
             const accepted = await withAcceptDeadline(
                 session.memwal.rememberBulkAsync(items),
                 "memwal_remember_bulk batch",
+                { idempotent: false },
             );
 
             // Pair each job with its fact up front. Every later branch needs

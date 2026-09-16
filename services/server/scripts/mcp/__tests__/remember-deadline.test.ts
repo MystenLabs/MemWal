@@ -121,7 +121,31 @@ test("memwal_remember_bulk cannot hang forever on a stalled accept", async (t) =
     });
 
     assert.equal((result as { isError?: boolean }).isError, true);
-    assert.match(textOf(result), /did not accept/);
+    const text = textOf(result);
+    assert.match(text, /did not accept/);
+    // /api/remember/bulk carries NO idempotency key — the handler mints a
+    // fresh uuid per item — so the single path's "retrying is safe" line is a
+    // lie here, and an expensive one: withDeadline does not cancel the request,
+    // so the relayer has usually accepted by the time this fires.
+    assert.match(text, /Do NOT retry blindly/);
+    assert.match(text, /second time at full cost|SECOND time at full cost/i);
+    assert.doesNotMatch(
+        text,
+        /Retrying in this session is safe/,
+        "bulk must never claim idempotency it does not have",
+    );
+});
+
+test("memwal_remember's accept timeout still says a retry is safe", async (t) => {
+    // The single path DOES carry a content-derived idempotency key, so the
+    // opposite advice is correct there — and worth pinning, because collapsing
+    // both messages into one is exactly how the bulk bug happened.
+    const client = await clientFor(sessionThatHangs(), t);
+    const result = await client.callTool({
+        name: "memwal_remember",
+        arguments: { text: "a durable fact" },
+    });
+    assert.match(textOf(result), /Retrying in this session is safe/);
 });
 
 test("memwal_remember_status cannot hang forever on a stalled read", async (t) => {

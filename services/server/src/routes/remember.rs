@@ -115,7 +115,10 @@ fn redact_hex_addresses(msg: &str) -> String {
 /// current `status`. Infrastructure failures collapse to fixed copy, chosen by
 /// whether the job has stopped retrying. Everything else keeps its text with
 /// addresses redacted. The DB row is untouched.
-fn sanitize_job_error_for_client(status: &str, error_msg: Option<String>) -> Option<String> {
+pub(crate) fn sanitize_job_error_for_client(
+    status: &str,
+    error_msg: Option<String>,
+) -> Option<String> {
     let msg = error_msg?;
     if crate::jobs::WalletJobError::is_infrastructure_funding_error(&msg) {
         return Some(if status == "failed" {

@@ -39,7 +39,25 @@ async fn failed_writes_for(state: &AppState, owner: &str) -> Vec<FailedWrite> {
         .recent_failed_remember_jobs(owner, FAILED_WRITE_REPORT_WINDOW, FAILED_WRITE_REPORT_LIMIT)
         .await
     {
-        Ok(failed) => failed,
+        Ok(failed) => failed
+            .into_iter()
+            .map(|mut w| {
+                // Every other client-facing view of `remember_jobs.error_msg`
+                // runs it through this first — `GET /api/remember/:job_id` and
+                // `POST /api/remember/bulk/status` both do. Reading the column
+                // straight into a recall response skipped both of the
+                // sanitizer's jobs: swapping an infrastructure-funding failure
+                // for INFRA_JOB_ERROR_MESSAGE (whose text exists to stop a user
+                // reading "Insufficient balance ... for owner 0x…" as an
+                // instruction to top that address up), and redacting long hex
+                // runs so the relayer's own wallet never reaches a tenant.
+                //
+                // These rows are `status = 'failed'` by construction — the
+                // query selects on it — so the status argument is fixed.
+                w.error = super::remember::sanitize_job_error_for_client("failed", w.error);
+                w
+            })
+            .collect(),
         Err(e) => {
             tracing::warn!(
                 "recall: failed-write report unavailable for owner={}: {}",
@@ -457,6 +475,33 @@ mod tests {
     }
 
     // ── RecallResponse dropped_count serialization ───────────────
+
+    /// The failure report added for accepted-then-failed writes reads the same
+    /// `remember_jobs.error_msg` the job-status endpoints read, and reaches the
+    /// same untrusted caller — so it has to be sanitized the same way. It was
+    /// not, which put the relayer's own wallet address and balance shortfall
+    /// into every recall response for 24 hours after an infra failure.
+    ///
+    /// `infra_wal_balance_failure_hides_relayer_wallet_address` in
+    /// routes::remember pins this for `GET /api/remember/:job_id`; this pins
+    /// the same guarantee for the recall path.
+    #[test]
+    fn failed_write_report_hides_relayer_wallet_address() {
+        let raw = "walrus upload failed: Insufficient balance of \
+0x356a26eb9e012a68958082340d4c4116e7f55615ef27affcff209cf0ae544f59::wal::WAL for owner \
+0x8d3c1f0a9b2e4d6c7a5f8e1b0d4c9a2f3e6b7d8c1a0f9e2b3c4d5a6f7e8b9c0d. Required: 64367730, \
+Available: 10708877";
+
+        let out = crate::routes::remember::sanitize_job_error_for_client("failed", Some(raw.to_string()))
+            .expect("a failed job keeps an error");
+
+        // The operator's hot wallet and its shortfall are not the tenant's
+        // business, and reading them as "top this address up" is the exact
+        // confusion INFRA_JOB_ERROR_MESSAGE exists to prevent.
+        assert!(!out.contains("0x8d3c1f0a"), "wallet address leaked: {}", out);
+        assert!(!out.contains("Available"), "balance leaked: {}", out);
+        assert!(!out.contains("10708877"), "shortfall leaked: {}", out);
+    }
 
     #[test]
     fn recall_response_includes_dropped_count_when_nonzero() {
