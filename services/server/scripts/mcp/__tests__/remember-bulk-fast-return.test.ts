@@ -1,9 +1,14 @@
+// Same opt-in as remember-fast-return: the wait is the default, this file
+// covers the accept-and-continue path behind the knob.
+process.env.MEMWAL_MCP_REMEMBER_WAIT_MS = "0";
+
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { MemWalSession } from "../auth.js";
-import { createMcpServer } from "../server.js";
+
+const { createMcpServer } = await import("../server.js");
 
 /**
  * `memwal_remember_bulk` used to block until every job in the batch reached a

@@ -1,21 +1,31 @@
+// Opt into accept-and-continue for this file. It is NOT the default — D1 kept
+// the wait, so a plain call blocks and returns a blob_id — but the path stays
+// reachable via this knob, and it is the path these tests cover.
+process.env.MEMWAL_MCP_REMEMBER_WAIT_MS = "0";
+
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { MemWalSession } from "../auth.js";
-import { createMcpServer } from "../server.js";
-import { REMEMBER_WAIT_MS, parseWaitBudget } from "../tools/remember-wait.js";
+
+// Dynamic: static imports hoist above the assignment above, so the module
+// would read the real default before the line that overrides it ever runs.
+const { createMcpServer } = await import("../server.js");
+const { REMEMBER_WAIT_MS, parseWaitBudget, MAX_REMEMBER_WAIT_MS } =
+    await import("../tools/remember-wait.js");
 
 /**
- * `memwal_remember` no longer blocks until a Walrus write reaches `done` —
- * that cost 30–75s per call against production. It returns at accept (~1.1s)
- * and hands back a job_id.
+ * `memwal_remember` blocks to terminal by default, so a result carries a real
+ * blob_id — D1 settled that, and returning at accept is its own product
+ * ticket. What this file covers is the accept-and-continue path an operator
+ * opts into with `MEMWAL_MCP_REMEMBER_WAIT_MS=0`.
  *
- * The risk that buys is an agent reading "accepted" as "saved", so these tests
- * pin what keeps it honest: an accepted result must never read as success or
- * carry a blob_id, and `memwal_remember_status` — now the only thing that can
- * observe a job failing after acceptance — must report that failure as an
- * error rather than as a write still in flight.
+ * The risk that path buys is an agent reading "accepted" as "saved", so these
+ * tests pin what keeps it honest: an accepted result must never read as
+ * success or carry a blob_id, and `memwal_remember_status` — the only thing
+ * that can observe a job failing after acceptance — must report that failure
+ * as an error rather than as a write still in flight.
  */
 
 interface FakeJob {
@@ -94,20 +104,23 @@ function textOf(result: unknown): string {
         .join("\n");
 }
 
-test("the default budget is zero — memwal_remember returns at accept", () => {
-    // A non-zero budget below the real completion time is the worst case:
-    // the caller pays the wait and still gets no guarantee.
-    assert.equal(parseWaitBudget(undefined), 0);
-    assert.equal(parseWaitBudget(""), 0);
+test("the default is the full wait, and zero is opt-in", () => {
+    // D1: a result means the fact landed, so an unset budget blocks to
+    // terminal. The in-between is the setting to avoid — a budget under the
+    // real completion time pays the wait AND still returns pending.
+    assert.equal(parseWaitBudget(undefined), MAX_REMEMBER_WAIT_MS);
+    assert.equal(parseWaitBudget(""), MAX_REMEMBER_WAIT_MS);
+    // ...and this file asked for the opt-in path at the top.
     assert.equal(REMEMBER_WAIT_MS, 0);
+    assert.equal(parseWaitBudget("0"), 0);
 });
 
 test("a typo'd budget falls back to the default instead of picking one nobody asked for", () => {
     // Number("10s") is NaN, and every NaN comparison is false — an unvalidated
     // parse would sail past a range check.
-    assert.equal(parseWaitBudget("10s"), 0);
-    assert.equal(parseWaitBudget("abc"), 0);
-    assert.equal(parseWaitBudget("-1"), 0);
+    assert.equal(parseWaitBudget("10s"), MAX_REMEMBER_WAIT_MS);
+    assert.equal(parseWaitBudget("abc"), MAX_REMEMBER_WAIT_MS);
+    assert.equal(parseWaitBudget("-1"), MAX_REMEMBER_WAIT_MS);
 });
 
 test("a budget past the ceiling is clamped, not honoured", () => {

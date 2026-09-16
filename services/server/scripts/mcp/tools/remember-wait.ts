@@ -13,28 +13,42 @@
  * after acceptance (one observed failure: "Memory encryption backend is
  * unavailable" 31.6s in, from the SEAL sidecar being unreachable).
  */
+import { createHash } from "node:crypto";
+
 import { createLogger } from "../logger.js";
 
 const log = createLogger("mcp");
 
+/** Window over which the same (namespace, text) resolves to one key. */
+const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
+
 /**
- * Default wait before `memwal_remember` hands back a job_id.
+ * Content-derived idempotency key for a single `remember`.
  *
- * Zero — the tool returns at accept (~1.1s measured). A non-zero budget below
- * the real completion time is the worst of both: against the measured 30–75s
- * distribution a 10s wait still lands in the pending branch on nearly every
- * call, so the caller pays the 10s AND gets no guarantee. Either wait long
- * enough to actually mean it (set this to 90000) or don't wait at all.
+ * Computed HERE rather than relied on from the SDK. The sidecar installs the
+ * published `@mysten-incubation/memwal` (0.1.7), whose `rememberAsync` mints a
+ * `crypto.randomUUID()` and caches it per client instance — and the sidecar
+ * builds a fresh client per transport session, so a retry after a reconnect
+ * gets a brand-new key and the relayer stores the fact a second time at full
+ * cost. The accept-timeout message promises the caller a retry is safe, so the
+ * key that makes it safe has to exist in the version actually running, not in
+ * an unreleased source tree.
  *
- * What makes returning at accept safe from disconnects: the job is a row in
- * `remember_jobs` driven by the relayer (`spawn_persisted_remember_preparation`
- * in services/server/src/routes/remember.rs), not work held in this process.
- * Closing the client does not cancel it.
+ * The bucket bounds the collapse: `remember_jobs` rows are never pruned, so an
+ * unbucketed key would dedupe against a job from any point in history and a
+ * deliberate re-save of a since-deleted fact would hand back the old blob id.
+ * Retries happen seconds after the original, so 30 minutes covers them.
  *
- * What it is NOT safe from: a job that fails after acceptance. Nothing here
- * can catch that — only a later `memwal_remember_status` call can.
+ * `/api/remember/bulk` takes no key at all, which is why the bulk tool stays
+ * `idempotent: false` instead of calling this.
  */
-const DEFAULT_REMEMBER_WAIT_MS = 0;
+export function derivedIdempotencyKey(namespace: string | undefined, text: string): string {
+    const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
+    const digest = createHash("sha256")
+        .update(`${bucket}\0${namespace ?? ""}\0${text}`)
+        .digest("hex");
+    return `r1-${digest}`;
+}
 
 /**
  * Hard ceiling on the wait budget. 90s matches the timeout the tool used
@@ -42,7 +56,33 @@ const DEFAULT_REMEMBER_WAIT_MS = 0;
  * always-block behaviour but cannot push the call past what MCP clients
  * are willing to wait for.
  */
-const MAX_REMEMBER_WAIT_MS = 90_000;
+export const MAX_REMEMBER_WAIT_MS = 90_000;
+
+/**
+ * Default wait before `memwal_remember` hands back a job_id.
+ *
+ * Blocks to terminal, so a successful call returns a real `blob_id` and the
+ * agent can say the fact is stored. D1 settled this: returning at accept is a
+ * product change on its own ticket, not a side effect of a latency fix, and
+ * the contract callers have today is "a result means it landed".
+ *
+ * That leaves the poll cadence as the part this file may legitimately shorten,
+ * and the cadence work belongs to #902 — the wait itself stays.
+ *
+ * A budget BETWEEN zero and the real completion time is the one setting to
+ * avoid. Against a measured 30–75s spread a 10s wait pays the 10s and still
+ * lands in the pending branch on nearly every call: the cost of blocking with
+ * none of the guarantee. So this is the full ceiling, and an operator who
+ * genuinely wants accept-and-continue sets `MEMWAL_MCP_REMEMBER_WAIT_MS=0`
+ * knowingly rather than inheriting it.
+ *
+ * The pending branch is still reachable and still correct — a write slower
+ * than the ceiling returns a job_id and says plainly it is not saved yet —
+ * it is simply no longer the default path.
+ */
+const DEFAULT_REMEMBER_WAIT_MS = MAX_REMEMBER_WAIT_MS;
+
+
 
 /**
  * How long `memwal_remember` waits for the write to land before returning a
@@ -301,9 +341,9 @@ export function withAcceptDeadline<T>(
         work,
         ACCEPT_DEADLINE_MS,
         opts.idempotent
-            ? `${shared} Retrying in this session is safe: the write carries a content-derived ` +
-              `idempotency key until an accept succeeds, so a retry attaches to the existing job ` +
-              `instead of queueing a second paid copy.`
+            ? `${shared} Retrying is safe: this write carries a content-derived idempotency ` +
+              `key, so a retry attaches to the job already in flight instead of queueing a ` +
+              `second paid copy.`
             : `${shared} Do NOT retry blindly — this endpoint carries no idempotency key, so a ` +
               `re-send stores every fact a SECOND time at full cost. Check with memwal_recall ` +
               `first, and only re-send what is genuinely missing.`,

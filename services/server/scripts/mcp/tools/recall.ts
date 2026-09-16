@@ -96,7 +96,10 @@ export function formatFailedWrites(result: unknown): string {
         `\n\n⚠ ${n} earlier ${n === 1 ? "write was" : "writes were"} accepted but then FAILED, ` +
         `so ${n === 1 ? "that fact is" : "those facts are"} NOT stored:\n` +
         lines.join("\n") +
-        `\nSend ${n === 1 ? "it" : "them"} again with memwal_remember if still wanted.`
+        `\nThe text is not recoverable — the relayer stores only the SEAL ciphertext, and these `
+        + `writes failed before it was readable. Do not guess at what ${n === 1 ? "it" : "they"} said. `
+        + `If the fact still matters, ask the user to state it again, then save it with `
+        + `memwal_remember.`
     );
 }
 

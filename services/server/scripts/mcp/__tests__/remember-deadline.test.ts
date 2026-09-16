@@ -1,6 +1,9 @@
 // Bound the SDK calls that have no deadline of their own. Set before the
 // module under test is imported — ACCEPT_DEADLINE_MS is read once at load.
 process.env.MEMWAL_MCP_ACCEPT_DEADLINE_MS = "150";
+// This file is about the ACCEPT leg, so skip the terminal wait that is now the
+// default — otherwise every case here would also drive the poll loop.
+process.env.MEMWAL_MCP_REMEMBER_WAIT_MS = "0";
 
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
@@ -146,7 +149,7 @@ test("memwal_remember's accept timeout still says a retry is safe", async (t) =>
         name: "memwal_remember",
         arguments: { text: "a durable fact" },
     });
-    assert.match(textOf(result), /Retrying in this session is safe/);
+    assert.match(textOf(result), /Retrying is safe/);
 });
 
 test("memwal_remember_status cannot hang forever on a stalled read", async (t) => {

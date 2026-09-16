@@ -12,6 +12,7 @@ import {
     withAcceptDeadline,
     withWaitDeadline,
     withRelayerRetry,
+    derivedIdempotencyKey,
 } from "./remember-wait.js";
 
 const REMEMBER_INPUT = {
@@ -62,7 +63,13 @@ export function registerRememberTool(
             // must succeed, the wait is a courtesy we cut short.
             const accepted = await withAcceptDeadline(
                 withRelayerRetry(
-                    () => session.memwal.rememberAsync(text, namespace),
+                    () =>
+                        session.memwal.rememberAsync(text, namespace, {
+                            // Ours, not the SDK's random one — see
+                            // derivedIdempotencyKey. This is what makes the
+                            // accept-timeout message's retry promise true.
+                            idempotencyKey: derivedIdempotencyKey(namespace, text),
+                        }),
                     "save this fact",
                 ),
                 "memwal_remember write",
