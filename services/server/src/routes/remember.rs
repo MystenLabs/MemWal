@@ -1937,6 +1937,17 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        // 021 adds `failure_reported_at`, which `claim_remember_preparation`
+        // clears on re-claim. This helper builds its own minimal schema rather
+        // than going through `VectorDb::new()`, so a migration wired into that
+        // chain does not reach it — every column a test in this module touches
+        // has to be listed here explicitly.
+        sqlx::raw_sql(include_str!(
+            "../../migrations/021_failed_write_report_ack.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         pool
     }
 

@@ -3434,6 +3434,81 @@ mod quota_admission_tests {
             .expect("test database must be reachable with pgvector installed")
     }
 
+    /// The failed-write report must survive a recall that never lands, and
+    /// must still go out only once.
+    ///
+    /// Reading and claiming used to be one statement, stamped inside a task
+    /// spawned before the embed/search/decrypt that can each fail with `?` or
+    /// be abandoned when the SDK hits its hard abort. That burned the
+    /// acknowledgement for recalls that returned no report at all, and the
+    /// failure — which the user has no other way to learn about — was never
+    /// surfaced again. Splitting them is only safe if the read is genuinely
+    /// non-consuming and the claim is genuinely exclusive; both are asserted
+    /// here because nothing else covers either function.
+    #[tokio::test]
+    async fn failed_write_report_reads_freely_but_claims_once() {
+        let db = test_db().await;
+        let owner = unique_owner("failed-write-report");
+        let job_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, error_msg)
+             VALUES ($1, $2, 'ns', 'failed', 'walrus upload rejected')",
+        )
+        .bind(&job_id)
+        .bind(&owner)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let window = std::time::Duration::from_secs(24 * 60 * 60);
+
+        // Read twice. A recall that dies after this point must leave the row
+        // reportable, so neither read may consume it.
+        for attempt in 0..2 {
+            let found = db
+                .recent_failed_remember_jobs(&owner, window, 5)
+                .await
+                .unwrap();
+            assert_eq!(
+                found.len(),
+                1,
+                "read {} consumed the report; an abandoned recall would lose it",
+                attempt,
+            );
+            assert_eq!(found[0].job_id, job_id);
+        }
+
+        // Claiming is what acknowledges it, and only the first claim wins —
+        // the report text asks the agent to re-send the fact, so a second
+        // report is a duplicate paid Walrus write.
+        let first = db
+            .claim_failed_write_reports(&[job_id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(first, vec![job_id.clone()], "the first claim must win");
+
+        let second = db
+            .claim_failed_write_reports(&[job_id.clone()])
+            .await
+            .unwrap();
+        assert!(
+            second.is_empty(),
+            "a second claim must report nothing, got {:?}",
+            second,
+        );
+
+        // And the row is now invisible to the read, so later recalls stay quiet.
+        let after = db
+            .recent_failed_remember_jobs(&owner, window, 5)
+            .await
+            .unwrap();
+        assert!(
+            after.is_empty(),
+            "a claimed failure must not be read again, got {:?}",
+            after,
+        );
+    }
+
     /// Unique per test so concurrent runs cannot see each other's rows, and so
     /// a failed run leaves no state that poisons the next one.
     fn unique_owner(tag: &str) -> String {
