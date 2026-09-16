@@ -1837,6 +1837,80 @@ impl VectorDb {
         Ok(row)
     }
 
+    /// Writes this owner started that ended in `failed` within `window`.
+    ///
+    /// Serves the failure report attached to recall responses. Owner-scoped
+    /// from `AuthInfo`, never from request input, so one account cannot read
+    /// another's failures.
+    ///
+    /// Bounded by both a time window and `limit` because this runs on the
+    /// read path: recall is the hottest authed route, and an account with a
+    /// long tail of old failures must not turn every recall into a large
+    /// scan. `remember_jobs (owner, status, updated_at DESC)` (migration 006)
+    /// covers the predicate and the ordering, so this is an index range scan
+    /// of at most `limit` rows.
+    ///
+    /// Failures repeat across calls until they age out of the window. That is
+    /// deliberate — suppressing a report after one sighting would put the
+    /// notice back on the caller remembering to act on it, which is the
+    /// failure mode this whole path exists to remove.
+    pub async fn recent_failed_remember_jobs(
+        &self,
+        owner: &str,
+        window: std::time::Duration,
+        limit: i64,
+    ) -> Result<Vec<crate::types::FailedWrite>, AppError> {
+        let started = std::time::Instant::now();
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<String>,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(
+            "SELECT id, namespace, error_msg, updated_at
+             FROM remember_jobs
+             WHERE owner = $1 AND status = 'failed' AND updated_at >= $2
+             ORDER BY updated_at DESC
+             LIMIT $3",
+        )
+        .bind(owner)
+        .bind(chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await;
+
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(e) => {
+                crate::observability::observe_db(
+                    "remember_jobs.recent_failed",
+                    "error",
+                    started.elapsed(),
+                );
+                return Err(AppError::Internal(format!(
+                    "Failed to list failed remember jobs: {}",
+                    e
+                )));
+            }
+        };
+        crate::observability::observe_db("remember_jobs.recent_failed", "ok", started.elapsed());
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(job_id, namespace, error, failed_at)| crate::types::FailedWrite {
+                    job_id,
+                    namespace,
+                    error,
+                    failed_at: failed_at.to_rfc3339(),
+                },
+            )
+            .collect())
+    }
+
     /// Hard-delete all vector index rows for a given owner + namespace.
     /// (Walrus blobs themselves persist — Walrus has no delete; this only
     /// removes the local `vector_entries` rows, so the memories stop being

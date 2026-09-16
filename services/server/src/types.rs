@@ -1569,6 +1569,38 @@ pub struct RecallResponse {
     /// failed and were silently omitted from `results`. Zero on the happy path.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub dropped_count: usize,
+    /// Writes this owner started recently that ended in `failed` — facts the
+    /// caller was told were accepted but that were never stored.
+    ///
+    /// Carried on the *read* path on purpose. A write now returns as soon as
+    /// the relayer accepts the job, so a failure after that point has no
+    /// caller left listening: `memwal_remember_status` answers it, but nothing
+    /// obliges an agent to ask, and saving a memory is typically the last
+    /// thing it does in a turn. Recall is the call an agent always makes, so
+    /// attaching the bad news here is what turns a silent loss into a visible
+    /// one.
+    ///
+    /// Empty on the happy path and omitted from the wire, so an older client
+    /// that ignores the field sees exactly today's response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_writes: Vec<FailedWrite>,
+}
+
+/// One write that was accepted and then failed, as reported back on recall.
+#[derive(Debug, Serialize)]
+pub struct FailedWrite {
+    /// The `job_id` the write returned when it was accepted, so a caller can
+    /// match this against what it was told at the time.
+    pub job_id: String,
+    pub namespace: String,
+    /// The relayer's own failure message, verbatim. Passed through rather than
+    /// summarised: the distinction between (say) a SEAL outage and an
+    /// exhausted upload budget is what tells a caller whether re-sending the
+    /// fact is likely to work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// When the job reached `failed`, RFC 3339.
+    pub failed_at: String,
 }
 
 fn is_zero_usize(n: &usize) -> bool {

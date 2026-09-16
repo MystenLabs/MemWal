@@ -15,6 +15,42 @@ use std::sync::Arc;
 
 use crate::types::*;
 
+/// How far back the failure report on a recall response looks.
+///
+/// A day covers the gap between one working session and the next, which is
+/// when an agent would otherwise never learn that yesterday's last write died
+/// after it was accepted.
+const FAILED_WRITE_REPORT_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Most failures reported on one recall. A caller acting on this re-sends the
+/// facts; a wall of them would crowd out the memories it actually asked for.
+const FAILED_WRITE_REPORT_LIMIT: i64 = 5;
+
+/// Recent writes that were accepted and then failed, for `owner`.
+///
+/// Never fails the recall it is attached to. This is a courtesy report on a
+/// read path — losing it costs the caller a warning, while propagating the
+/// error would cost them the memories they actually asked for, so a failed
+/// lookup degrades to "nothing to report" and says so in the log.
+async fn failed_writes_for(state: &AppState, owner: &str) -> Vec<FailedWrite> {
+    match state
+        .db
+        .recent_failed_remember_jobs(owner, FAILED_WRITE_REPORT_WINDOW, FAILED_WRITE_REPORT_LIMIT)
+        .await
+    {
+        Ok(failed) => failed,
+        Err(e) => {
+            tracing::warn!(
+                "recall: failed-write report unavailable for owner={}: {}",
+                owner,
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
 // ============================================================
 // Recall query-embedding cache (Redis) — wraps the Embedder service
 // ============================================================
@@ -211,6 +247,9 @@ pub async fn recall(
             results: vec![],
             total: 0,
             dropped_count: 0,
+            // Reported even with no hits: an empty recall is exactly when a
+            // caller is most likely to be looking for the fact that failed.
+            failed_writes: failed_writes_for(&state, owner).await,
         }));
     }
 
@@ -297,6 +336,7 @@ pub async fn recall(
         results,
         total,
         dropped_count,
+        failed_writes: failed_writes_for(&state, owner).await,
     }))
 }
 

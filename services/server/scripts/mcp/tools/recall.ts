@@ -55,6 +55,51 @@ function dedupeKey(text: string): string {
  * budget on one fact and crowds out everything else it asked for, which is a
  * read-side problem worth fixing on the read side.
  */
+/** One accepted-then-failed write, as the relayer reports it on recall. */
+interface FailedWrite {
+    job_id?: unknown;
+    namespace?: unknown;
+    error?: unknown;
+    failed_at?: unknown;
+}
+
+/**
+ * Render the relayer's report of writes that were accepted and then failed.
+ *
+ * `memwal_remember` returns as soon as the write is accepted, so a job that
+ * dies after that has nobody listening. `memwal_remember_status` can answer
+ * for one, but nothing obliges an agent to ask, and storing a memory is
+ * usually the last thing it does in a turn — so an unasked question is the
+ * same as a silent loss. Recall is the call an agent always makes, which is
+ * why the report rides along here.
+ *
+ * Read defensively off the response rather than through the SDK's typed
+ * result: the field is newer than the pinned SDK's types, and a relayer that
+ * does not send it at all (older deployment) must read as "nothing to
+ * report", not as an error.
+ */
+export function formatFailedWrites(result: unknown): string {
+    const raw = (result as { failed_writes?: unknown } | null)?.failed_writes;
+    if (!Array.isArray(raw) || raw.length === 0) return "";
+
+    const lines = raw.map((entry: FailedWrite) => {
+        const jobId = typeof entry?.job_id === "string" ? entry.job_id : "(unknown job)";
+        const ns = typeof entry?.namespace === "string" ? ` ns=${entry.namespace}` : "";
+        const why = typeof entry?.error === "string" && entry.error.trim() !== ""
+            ? ` — ${entry.error}`
+            : "";
+        return `  job_id=${jobId}${ns}${why}`;
+    });
+
+    const n = raw.length;
+    return (
+        `\n\n⚠ ${n} earlier ${n === 1 ? "write was" : "writes were"} accepted but then FAILED, ` +
+        `so ${n === 1 ? "that fact is" : "those facts are"} NOT stored:\n` +
+        lines.join("\n") +
+        `\nSend ${n === 1 ? "it" : "them"} again with memwal_remember if still wanted.`
+    );
+}
+
 export function collapseDuplicates<T extends { text: string }>(
     results: T[],
 ): { unique: T[]; collapsed: number } {
@@ -171,13 +216,14 @@ export function registerRecallTool(
             const result = await session.memwal.recall(query, limit, namespace);
             const droppedRaw = (result as { dropped_count?: unknown }).dropped_count;
             const dropped = typeof droppedRaw === "number" ? droppedRaw : 0;
+            const failureReport = formatFailedWrites(result);
             const filtered = filterByMaxDistance(result.results, maxDistance);
             if (filtered.length === 0) {
                 return {
                     content: [
                         {
                             type: "text",
-                            text: emptyRecallText(result.results.length, dropped),
+                            text: emptyRecallText(result.results.length, dropped) + failureReport,
                         },
                     ],
                 };
@@ -201,7 +247,7 @@ export function registerRecallTool(
                 content: [
                     {
                         type: "text",
-                        text: lines.join("\n"),
+                        text: lines.join("\n") + failureReport,
                     },
                 ],
             };
