@@ -1854,6 +1854,18 @@ impl VectorDb {
     /// deliberate — suppressing a report after one sighting would put the
     /// notice back on the caller remembering to act on it, which is the
     /// failure mode this whole path exists to remove.
+    /// Accepted-then-failed writes this owner has not been told about yet.
+    ///
+    /// Reporting is one-shot by construction. The rows are stamped in the same
+    /// statement that returns them, so the next recall sees them acknowledged
+    /// and stays quiet. Without that the same failures rode along on every
+    /// recall for the full window while the message told the agent to send the
+    /// facts again — so a compliant agent re-sent, the original row stayed
+    /// `failed` and in-window, and the next recall asked for the same thing.
+    /// Every pass was another paid Walrus write.
+    ///
+    /// `FOR UPDATE SKIP LOCKED` keeps two concurrent recalls from claiming the
+    /// same row and both reporting it.
     pub async fn recent_failed_remember_jobs(
         &self,
         owner: &str,
@@ -1870,11 +1882,23 @@ impl VectorDb {
                 chrono::DateTime<chrono::Utc>,
             ),
         >(
-            "SELECT id, namespace, error_msg, updated_at
-             FROM remember_jobs
-             WHERE owner = $1 AND status = 'failed' AND updated_at >= $2
-             ORDER BY updated_at DESC
-             LIMIT $3",
+            // Claim-and-return in one statement: the UPDATE stamps the rows
+            // it is about to hand back, so a second recall — or a concurrent
+            // one in another session — cannot report the same failure again.
+            // Doing it as two statements would leave a window where both see
+            // the row unreported and both tell the agent to re-send it.
+            "UPDATE remember_jobs SET failure_reported_at = NOW()
+             WHERE id IN (
+                 SELECT id FROM remember_jobs
+                 WHERE owner = $1
+                   AND status = 'failed'
+                   AND failure_reported_at IS NULL
+                   AND updated_at >= $2
+                 ORDER BY updated_at DESC
+                 LIMIT $3
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING id, namespace, error_msg, updated_at",
         )
         .bind(owner)
         .bind(chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default())

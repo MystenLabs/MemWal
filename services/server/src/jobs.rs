@@ -622,6 +622,19 @@ pub(crate) async fn execute_wallet_job(
             policy_package_id,
             end_epoch,
         } => {
+            // Mark the wallet busy for this transaction too. `least_loaded_index`
+            // answers "is this key signing right now", and only the upload arm
+            // was telling it — so a metadata+transfer, which signs on the very
+            // same wallet, read as idle. A concurrently-enqueued upload would
+            // then pick that key precisely because it looked free, and queue
+            // behind the transaction anyway. That is the failure join-shortest-
+            // queue exists to avoid, and it showed up as the pool converging on
+            // whichever key was mid-transfer.
+            //
+            // `enqueued_wallet_index` rather than a fresh pick: this operation
+            // must run on the key that already owns the blob object.
+            let _wallet_slot = state.key_pool.begin_attempt(enqueued_wallet_index);
+
             let result = execute_set_metadata_and_transfer(
                 state,
                 enqueued_wallet_index,
