@@ -1033,9 +1033,11 @@ fn env_bool(name: &str) -> bool {
 }
 
 /// `/health` `writes` wire value: `"paused"` when `WRITES_PAUSED` is set.
-pub(crate) fn writes_health_status(paused: bool) -> String {
+pub(crate) fn writes_health_status(paused: bool, degraded: bool) -> String {
     if paused {
         "paused".to_string()
+    } else if degraded {
+        "degraded".to_string()
     } else {
         "ok".to_string()
     }
@@ -2089,9 +2091,18 @@ pub struct HealthResponse {
     /// fail open so CI `wait-for-relayer` does not hang. `status` stays
     /// `"ok"` while the relayer process is up.
     pub write_ready: bool,
-    /// Write-path admission: `"ok"` or `"paused"`. `"paused"` when
-    /// `WRITES_PAUSED` is set; write routes then return HTTP 503.
-    /// Distinct from `write_ready`. `/health` stays HTTP 200.
+    /// Write-path state: `"ok"`, `"degraded"`, or `"paused"`.
+    ///
+    /// `"paused"` when `WRITES_PAUSED` is set; write routes then return
+    /// HTTP 503. `"degraded"` when recent durable writes have been failing
+    /// and none have landed -- the relayer still accepts and durably
+    /// queues a write, but Walrus is not storing it, so a caller should
+    /// expect the job to fail minutes later rather than queue more.
+    ///
+    /// Deliberately separate from `write_ready`, which stays true through
+    /// a downstream outage: CI's wait-for-relayer gate blocks on
+    /// `write_ready is True`, so folding this into it would make a Walrus
+    /// outage hang every deploy. `/health` stays HTTP 200 throughout.
     pub writes: String,
 }
 
@@ -3566,8 +3577,11 @@ mod tests {
 
     #[tokio::test]
     async fn writes_paused_maps_to_503_with_stable_message() {
-        assert_eq!(writes_health_status(false), "ok");
-        assert_eq!(writes_health_status(true), "paused");
+        assert_eq!(writes_health_status(false, false), "ok");
+        assert_eq!(writes_health_status(false, true), "degraded");
+        assert_eq!(writes_health_status(true, false), "paused");
+        // An operator pause is the stronger statement and wins.
+        assert_eq!(writes_health_status(true, true), "paused");
         assert!(reject_if_writes_paused(false).is_ok());
         let err = reject_if_writes_paused(true).expect_err("paused writes");
         assert_eq!(err.kind(), "writes_paused");

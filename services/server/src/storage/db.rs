@@ -1890,6 +1890,59 @@ impl VectorDb {
     /// One-shot is preserved because the claim is a single conditional UPDATE
     /// over these ids — a concurrent recall that got there first claims them
     /// and this one is handed back nothing to report.
+    /// How durable writes that finished inside `window` turned out,
+    /// across every owner: `(failed, succeeded)`.
+    ///
+    /// `write_ready` is a sidecar probe AND a Postgres size check. Neither
+    /// can see Walrus refusing every upload, so a total Walrus outage left
+    /// `/health` reporting a healthy write path while every remember
+    /// failed minutes after being accepted. This is the missing term.
+    ///
+    /// Counted rather than listed, and read behind a cache measured in
+    /// tens of seconds, because `remember_jobs` is indexed on `owner` and
+    /// on `status` but not on `updated_at` alone.
+    pub async fn recent_write_outcomes(
+        &self,
+        window: std::time::Duration,
+    ) -> Result<(i64, i64), AppError> {
+        let started = std::time::Instant::now();
+        let since =
+            chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default();
+        let outcome = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT
+               count(*) FILTER (WHERE status = 'failed'),
+               count(*) FILTER (WHERE status IN ('done', 'uploaded'))
+             FROM remember_jobs
+             WHERE status IN ('failed', 'done', 'uploaded')
+               AND updated_at >= $1",
+        )
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await;
+
+        match outcome {
+            Ok(counts) => {
+                crate::observability::observe_db(
+                    "remember_jobs.recent_outcomes",
+                    "ok",
+                    started.elapsed(),
+                );
+                Ok(counts)
+            }
+            Err(e) => {
+                crate::observability::observe_db(
+                    "remember_jobs.recent_outcomes",
+                    "error",
+                    started.elapsed(),
+                );
+                Err(AppError::Internal(format!(
+                    "Failed to count recent remember outcomes: {}",
+                    e
+                )))
+            }
+        }
+    }
+
     pub async fn recent_failed_remember_jobs(
         &self,
         owner: &str,
