@@ -152,6 +152,33 @@ Credentials are stored locally in `~/.memwal/credentials.json`. To remove them:
 npx -y @mysten-incubation/memwal-mcp --logout
 ```
 
+### Per-project credentials
+
+A project can keep its own `.memwal/credentials.json` so memory written from it
+goes to a separate account. That file lives inside the repository, where anyone
+who can commit to it — or who can get you to open a clone — could otherwise
+choose the account and relayer your memories go to. So it is **ignored until you
+approve it**, once per machine:
+
+```sh
+cd path/to/project
+npx -y @mysten-incubation/memwal-mcp approve-project
+```
+
+Until then the global credentials are used, and a line on stderr names the file
+that was skipped and the destination it wanted. An approval covers one exact
+project path, account, delegate key and relayer: if any of those change, it has
+to be approved again. The record is kept in `~/.memwal/project-approvals.json`,
+outside the repository, so a repository cannot carry its own approval.
+`revoke-project` withdraws it.
+
+`MEMWAL_CREDS_DIR` points both the credentials and the approval record at a
+directory of your choosing and overrides project resolution entirely — it can
+only come from your own environment, never from a checkout, so it needs no
+approval.
+
+`memwal_health` reports the destination in use as `account=… relayer=…`.
+
 ## License
 
 Apache-2.0

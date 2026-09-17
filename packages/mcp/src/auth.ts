@@ -10,7 +10,7 @@
  * documentation patterns transfer cleanly.
  */
 import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join, dirname, basename } from "node:path";
 import {
     mkdirSync,
@@ -19,6 +19,7 @@ import {
     renameSync,
     unlinkSync,
     existsSync,
+    realpathSync,
 } from "node:fs";
 import { log } from "./logger.js";
 
@@ -93,41 +94,374 @@ function projectCredsPath(): string | null {
     }
 }
 
+/* ------------------------------------------------------------------------- *
+ * Project credentials are opt-IN, per machine (WALM-639).
+ *
+ * Presence alone used to be the opt-in: a `.memwal/credentials.json` anywhere
+ * at or above the working directory simply won. But that file is INSIDE the
+ * repository, so anyone who can commit to a repo — or persuade someone to
+ * clone one — could choose the account and the relayer every memory written
+ * from that directory goes to. Opening a project silently repointed the
+ * destination, and the writes land on immutable storage with no delete path.
+ *
+ * So a project file is now inert until the user approves that exact file,
+ * account, delegate and relayer. The approval record lives beside the GLOBAL
+ * credentials, never in the repository, because a record a repository can
+ * carry is a repository approving itself.
+ * ------------------------------------------------------------------------- */
+
+const APPROVALS_FILE = "project-approvals.json";
+
 /**
- * Which credentials file this process should read and write.
+ * Where records that a repository must not be able to write are kept.
  *
- * The nearest project-local `.memwal/credentials.json` at or above the working
- * directory wins over the global one, the way `.npmrc` and `.git/config`
- * resolve. Signing in from one project otherwise repoints every other project
- * on the machine at a different account and delegate key, silently — memories
- * then land on the wrong account, on immutable storage, with no delete path
- * (GH #628).
- *
- * Presence-based on purpose: creating the local file is the opt-in, so this is
- * purely additive. Resolved per call rather than at module load, because the
- * working directory is not knowable at import time.
- *
- * `MEMWAL_CREDS_DIR` overrides both project and global resolution when set,
- * and is re-read on every call.
+ * `MEMWAL_CREDS_DIR` is the trusted escape hatch — when it is set it decides
+ * the credentials outright and project resolution never runs — so following it
+ * here keeps a sandboxed run (tests, CI) from reaching into the real
+ * `~/.memwal`, exactly as #705 required for the credentials file itself.
  */
-export function credsPath(): string {
-    const override = process.env.MEMWAL_CREDS_DIR;
-    if (override) return join(override, CREDS_FILE);
-    return projectCredsPath() ?? globalCredsPath();
+function trustedStateDir(): string {
+    return process.env.MEMWAL_CREDS_DIR ?? join(homedir(), ".memwal");
 }
 
-/** Load credentials from disk. Returns null if missing or malformed. */
-export function loadCreds(): MemWalCredentials | null {
-    const path = credsPath();
+/** The approval store. Outside every repository, on purpose. */
+export function projectApprovalsPath(): string {
+    return join(trustedStateDir(), APPROVALS_FILE);
+}
+
+/**
+ * What approval is granted against: the destination, not the file's bytes.
+ *
+ * Account, delegate and relayer are the three fields that decide WHERE a
+ * memory ends up and WHO signs for it. Hashing them means a project file may
+ * be re-saved, relabelled or reformatted freely, while any edit that moves the
+ * destination invalidates the approval and has to be approved again. The
+ * delegate private key is deliberately NOT part of it — it must never be read
+ * into a record that gets written back out.
+ */
+export function credentialsFingerprint(creds: {
+    accountId: string;
+    delegateAddress: string;
+    relayerUrl: string;
+}): string {
+    return createHash("sha256")
+        .update(`${creds.accountId}\n${creds.delegateAddress}\n${creds.relayerUrl}`)
+        .digest("hex");
+}
+
+/** One approved project credentials file. Contains no secret. */
+export interface ProjectApproval {
+    /** Canonical path of the approved `.memwal/credentials.json`. */
+    path: string;
+    fingerprint: string;
+    accountId: string;
+    delegateAddress: string;
+    relayerUrl: string;
+    approvedAt: string;
+}
+
+interface ApprovalsFile {
+    version: 1;
+    approvals: ProjectApproval[];
+}
+
+/** Compare paths the way the filesystem does. `process.cwd()` reports a
+ * resolved path and an approval may have been recorded through a symlink (or
+ * on macOS, `/tmp` → `/private/tmp`), so both sides go through this. */
+function canonicalPath(path: string): string {
+    try {
+        return realpathSync(path);
+    } catch {
+        return path;
+    }
+}
+
+function isValidApproval(obj: unknown): obj is ProjectApproval {
+    if (!obj || typeof obj !== "object") return false;
+    const a = obj as Record<string, unknown>;
+    return (
+        typeof a.path === "string" &&
+        typeof a.fingerprint === "string" &&
+        typeof a.accountId === "string" &&
+        typeof a.delegateAddress === "string" &&
+        typeof a.relayerUrl === "string"
+    );
+}
+
+/** Approvals on record. A missing, malformed or unreadable store approves
+ * nothing — the safe direction, since the consequence is falling back to the
+ * user's own global account rather than adopting someone else's. */
+function loadApprovals(): ProjectApproval[] {
+    const path = projectApprovalsPath();
+    if (!existsSync(path)) return [];
+    try {
+        const parsed = JSON.parse(readFileSync(path, "utf8")) as ApprovalsFile;
+        if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.approvals)) return [];
+        return parsed.approvals.filter(isValidApproval);
+    } catch {
+        return [];
+    }
+}
+
+/** Through the same writer as the credentials file: it creates the directory
+ * at `0700` and the file at `0600`. The record holds no secret, but it decides
+ * where memories go, so it should not be writable by anything that could not
+ * already write the credentials beside it. */
+function saveApprovals(approvals: ProjectApproval[]): void {
+    writeSecretFile(
+        projectApprovalsPath(),
+        JSON.stringify({ version: 1, approvals } satisfies ApprovalsFile, null, 2),
+    );
+}
+
+/** Why a project credentials file was, or was not, used. */
+export type ProjectCredsDecision =
+    /** Approved for exactly this account + delegate + relayer: in use. */
+    | "approved"
+    /** Never approved on this machine. Ignored. */
+    | "unapproved"
+    /** Approved once, but the destination has since changed. Ignored. */
+    | "changed"
+    /** Present but not valid credentials, so there is nothing to approve. */
+    | "unreadable";
+
+export interface ProjectCredsInfo {
+    /** The project-local file that was found. */
+    path: string;
+    decision: ProjectCredsDecision;
+    /** Destination it points at. Absent when the file could not be read — and
+     * never the delegate private key, which no caller of this ever needs. */
+    accountId?: string;
+    relayerUrl?: string;
+}
+
+/** Which file won, and what happened to any project-local file that did not. */
+export interface CredsResolution {
+    /** The file this process reads and writes. */
+    path: string;
+    source: "override" | "project" | "global";
+    /** The project-local file found by the walk, if any — present whether or
+     * not it was used, so callers can report one they ignored. */
+    project?: ProjectCredsInfo;
+}
+
+/**
+ * Which credentials file this process should read and write, and why.
+ *
+ * `MEMWAL_CREDS_DIR` wins outright: it is the trusted, explicitly-set escape
+ * hatch and cannot come from a checkout. Otherwise the nearest project-local
+ * `.memwal/credentials.json` at or above the working directory is used IF the
+ * user has approved that exact destination on this machine (WALM-639), and the
+ * global file is used in every other case — including an unapproved, altered
+ * or malformed project file. Falling back rather than failing keeps a machine
+ * that has never seen a project file behaving exactly as it always did.
+ *
+ * Resolved per call rather than at module load, because neither the working
+ * directory nor the approval store is knowable at import time.
+ */
+export function resolveCreds(): CredsResolution {
+    const override = process.env.MEMWAL_CREDS_DIR;
+    if (override) return { path: join(override, CREDS_FILE), source: "override" };
+
+    const global = globalCredsPath();
+    const projectPath = projectCredsPath();
+    if (!projectPath) return { path: global, source: "global" };
+
+    const project = readCredsFile(projectPath);
+    if (!project) {
+        return {
+            path: global,
+            source: "global",
+            project: { path: projectPath, decision: "unreadable" },
+        };
+    }
+
+    const approval = loadApprovals().find((a) => a.path === canonicalPath(projectPath));
+    const decision: ProjectCredsDecision = !approval
+        ? "unapproved"
+        : approval.fingerprint === credentialsFingerprint(project)
+          ? "approved"
+          : "changed";
+    const info: ProjectCredsInfo = {
+        path: projectPath,
+        decision,
+        accountId: project.accountId,
+        relayerUrl: project.relayerUrl,
+    };
+    return decision === "approved"
+        ? { path: projectPath, source: "project", project: info }
+        : { path: global, source: "global", project: info };
+}
+
+/** The credentials file in use. Thin wrapper over {@link resolveCreds} so the
+ * many callers that only need a path are unchanged. */
+export function credsPath(): string {
+    return resolveCreds().path;
+}
+
+/** Read and validate one credentials file. Returns null if missing or
+ * malformed — the caller decides what that means. */
+function readCredsFile(path: string): MemWalCredentials | null {
     if (!existsSync(path)) return null;
     try {
-        const raw = readFileSync(path, "utf8");
-        const parsed = JSON.parse(raw);
+        const parsed = JSON.parse(readFileSync(path, "utf8"));
         if (!isValid(parsed)) return null;
         return parsed as MemWalCredentials;
     } catch {
         return null;
     }
+}
+
+/** Load credentials from disk. Returns null if missing or malformed. */
+export function loadCreds(): MemWalCredentials | null {
+    return readCredsFile(credsPath());
+}
+
+/** What {@link approveProjectCreds} did. */
+export interface ApproveProjectResult {
+    outcome:
+        /** Newly approved. */
+        | "approved"
+        /** Approved again after the destination changed. */
+        | "reapproved"
+        /** Already approved for this exact destination; nothing written. */
+        | "already-approved"
+        /** No project-local credentials file at or above the working directory. */
+        | "none"
+        /** A project file exists but is not valid credentials. */
+        | "unreadable"
+        /** `MEMWAL_CREDS_DIR` is set, so project resolution never runs. */
+        | "overridden";
+    projectPath?: string;
+    accountId?: string;
+    relayerUrl?: string;
+    /** Destination the previous approval covered, when this replaced one. */
+    previousAccountId?: string;
+    previousRelayerUrl?: string;
+    approvalsPath: string;
+}
+
+/**
+ * Approve the project-local credentials found from the working directory.
+ *
+ * Deliberately takes no arguments: it approves what resolution would otherwise
+ * ignore, from the same directory, so "what am I approving" and "what will be
+ * used" cannot drift apart.
+ */
+export function approveProjectCreds(): ApproveProjectResult {
+    const approvalsPath = projectApprovalsPath();
+    if (process.env.MEMWAL_CREDS_DIR) return { outcome: "overridden", approvalsPath };
+
+    const projectPath = projectCredsPath();
+    if (!projectPath) return { outcome: "none", approvalsPath };
+    const creds = readCredsFile(projectPath);
+    if (!creds) return { outcome: "unreadable", projectPath, approvalsPath };
+
+    const key = canonicalPath(projectPath);
+    const fingerprint = credentialsFingerprint(creds);
+    const approvals = loadApprovals();
+    const existing = approvals.find((a) => a.path === key);
+    if (existing?.fingerprint === fingerprint) {
+        return {
+            outcome: "already-approved",
+            projectPath,
+            accountId: creds.accountId,
+            relayerUrl: creds.relayerUrl,
+            approvalsPath,
+        };
+    }
+
+    saveApprovals([
+        ...approvals.filter((a) => a.path !== key),
+        {
+            path: key,
+            fingerprint,
+            accountId: creds.accountId,
+            delegateAddress: creds.delegateAddress,
+            relayerUrl: creds.relayerUrl,
+            approvedAt: new Date().toISOString(),
+        },
+    ]);
+    return {
+        outcome: existing ? "reapproved" : "approved",
+        projectPath,
+        accountId: creds.accountId,
+        relayerUrl: creds.relayerUrl,
+        previousAccountId: existing?.accountId,
+        previousRelayerUrl: existing?.relayerUrl,
+        approvalsPath,
+    };
+}
+
+/** What {@link revokeProjectCredsApproval} did. */
+export interface RevokeProjectResult {
+    outcome: "revoked" | "none";
+    projectPath?: string;
+    approvalsPath: string;
+}
+
+/**
+ * Withdraw the approval for the project-local credentials here.
+ *
+ * Keyed on the path rather than on the file's current contents, so an approval
+ * can be withdrawn even after the file it covered was edited or deleted — a
+ * revoke that only worked while the destination still matched would be
+ * useless exactly when it is wanted.
+ */
+export function revokeProjectCredsApproval(): RevokeProjectResult {
+    const approvalsPath = projectApprovalsPath();
+    const projectPath = projectCredsPath() ?? join(process.cwd(), ".memwal", CREDS_FILE);
+    const key = canonicalPath(projectPath);
+    const approvals = loadApprovals();
+    const remaining = approvals.filter((a) => a.path !== key);
+    if (remaining.length === approvals.length) return { outcome: "none", projectPath, approvalsPath };
+    saveApprovals(remaining);
+    return { outcome: "revoked", projectPath, approvalsPath };
+}
+
+/**
+ * The warning for a project credentials file that was found and NOT used, or
+ * null when there is nothing to report.
+ *
+ * Says which file was ignored, where memory is going instead, and the exact
+ * command that approves it — a silent fallback would be the mirror image of
+ * the silent redirect this gate exists to stop. Never contains a key: the only
+ * fields it reads are the account id and the relayer URL.
+ */
+export function formatProjectCredsNotice(
+    resolution: CredsResolution = resolveCreds(),
+): string | null {
+    const project = resolution.project;
+    if (!project || project.decision === "approved") return null;
+
+    const destination = `account ${project.accountId} on ${project.relayerUrl}`;
+    const head =
+        project.decision === "unreadable"
+            ? [
+                  `Ignored the project credentials at ${project.path}: the file is not a valid`,
+                  `Walrus Memory credentials file, so there is nothing to approve.`,
+              ]
+            : project.decision === "changed"
+              ? [
+                    `Ignored the project credentials at ${project.path}: they changed since you`,
+                    `approved them and now point at ${destination}.`,
+                    `Approving again is required whenever the account, delegate key or relayer moves.`,
+                ]
+              : [
+                    `Ignored the project credentials at ${project.path}, which would send memory to`,
+                    `${destination}.`,
+                    `A file inside a repository can be committed by anyone, so it is not used until`,
+                    `you approve it on this machine.`,
+                ];
+
+    const lines = [...head, `Memory is going to ${resolution.path} instead.`];
+    if (project.decision !== "unreadable") {
+        lines.push(
+            `To use it, run \`memwal-mcp approve-project\` in a terminal from this directory.`,
+            `The approval is recorded in ${projectApprovalsPath()}, outside the repository.`,
+        );
+    }
+    return lines.join("\n");
 }
 
 /**

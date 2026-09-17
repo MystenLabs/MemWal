@@ -75,7 +75,8 @@ const NAMESPACE_TOOLS = new Set([
  *     per-call namespace always wins over the configured default.
  */
 /**
- * Name the relayer this process dialled in a `memwal_health` result.
+ * Name the destination this process is bound to in a `memwal_health` result:
+ * the relayer it dialled, and the account it signs for.
  *
  * The relayer-side text can only report an origin its deployment published, and
  * stays silent on a self-hosted or local one, where the sidecar knows nothing
@@ -87,10 +88,18 @@ const NAMESPACE_TOOLS = new Set([
  * Rewrites an existing `relayer=` field rather than appending a second one: when
  * both sides know the origin they describe the same session, and two
  * conflicting fields would be worse than neither.
+ *
+ * `account=` rides along for the same reason (WALM-639). A project-local
+ * credentials file can point this process at a different account than the one
+ * the user signed in with, and "which account am I writing to" was otherwise
+ * only visible in stderr the MCP host usually hides — so the half of the
+ * destination that decides WHOSE memory this is now shows up beside the half
+ * that decides where it is stored.
  */
 export function annotateHealthResult(
     result: { content?: unknown; isError?: unknown },
     relayerUrl: string,
+    accountId?: string,
 ): void {
     // A failed health call has no session to describe; naming a relayer beside
     // an error reads as though that relayer answered.
@@ -104,6 +113,11 @@ export function annotateHealthResult(
     block.text = existing.test(block.text)
         ? block.text.replace(existing, `relayer=${relayerUrl}`)
         : `${block.text} relayer=${relayerUrl}`;
+    if (!accountId) return;
+    const existingAccount = /\baccount=\S+/;
+    block.text = existingAccount.test(block.text)
+        ? block.text.replace(existingAccount, `account=${accountId}`)
+        : `${block.text} account=${accountId}`;
 }
 
 export function applyDefaultNamespace(msg: RpcMessage, namespace?: string): RpcMessage {
@@ -1348,11 +1362,14 @@ export async function runBridge(
      * client surfaces them in its tool palette. */
     const pendingListIds = new Set<string | number>();
 
-    /** IDs of forwarded `memwal_health` calls, each against the relayer URL the
-     * call went out on. Captured at send time rather than read at reply time so
-     * a reconnect that swapped credentials mid-flight cannot label the answer
-     * with a relayer it did not come from. */
-    const pendingHealthIds = new Map<string | number, string>();
+    /** IDs of forwarded `memwal_health` calls, each against the destination the
+     * call went out on — relayer URL and account. Captured at send time rather
+     * than read at reply time so a reconnect that swapped credentials mid-flight
+     * cannot label the answer with a destination it did not come from. */
+    const pendingHealthIds = new Map<
+        string | number,
+        { relayerUrl: string; accountId?: string }
+    >();
 
     /** Record a 429 and tell the user ONCE that this is a rate limit rather
      * than a broken config — the distinction the MCP host cannot make for
@@ -1872,7 +1889,8 @@ export async function runBridge(
                         if (dialled !== undefined) {
                             annotateHealthResult(
                                 value.result as { content?: unknown; isError?: unknown },
-                                dialled,
+                                dialled.relayerUrl,
+                                dialled.accountId,
                             );
                         }
                     }
@@ -2053,7 +2071,10 @@ export async function runBridge(
                     msg.id != null &&
                     (msg.params as { name?: string } | undefined)?.name === "memwal_health"
                 ) {
-                    pendingHealthIds.set(msg.id, creds?.relayerUrl ?? config.relayerUrl);
+                    pendingHealthIds.set(msg.id, {
+                        relayerUrl: creds?.relayerUrl ?? config.relayerUrl,
+                        accountId: creds?.accountId,
+                    });
                 }
 
                 // Track requests (have both method and id) so we can replay

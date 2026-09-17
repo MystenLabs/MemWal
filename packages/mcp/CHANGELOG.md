@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal-mcp
 
+## Unreleased
+
+### Security
+
+- A project-local `.memwal/credentials.json` no longer decides where memory goes on presence alone. That file lives inside the repository, so anyone who could commit to a repo — or get a clone opened — could silently repoint the account and relayer every memory written from that directory went to, including from a subfolder, with nothing said and no delete path once written. A project file is now inert until the user approves that exact project path, account, delegate key and relayer with `memwal-mcp approve-project`; the approval record is kept in `~/.memwal/project-approvals.json`, outside the repository, so a repository cannot carry its own approval, and any later change to the destination requires approving again. Until approved the global credentials are used — an unapproved, altered or malformed project file is a fallback, never a failure — and one stderr line names the file that was skipped, the destination it wanted, and the command that approves it. `MEMWAL_CREDS_DIR` still overrides both files without approval. `memwal_health` now reports `account=` beside `relayer=`, so the active destination is visible where the user is. (WALM-639)
+
 ## 0.0.14
 
 ### Fixed

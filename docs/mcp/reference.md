@@ -130,12 +130,25 @@ Both session tools (`memwal_login`, `memwal_logout`) are intercepted locally by 
 
 Credentials resolve from two places, in order:
 
-1. `.memwal/credentials.json` in the **working directory or a parent of it**
+1. `.memwal/credentials.json` in the **working directory or a parent of it** — used only once you have [approved it](#approving-a-project-file)
 2. `~/.memwal/credentials.json` (global, per machine)
 
-The search starts in the working directory and walks up, the way `.npmrc` and `.git/config` resolve, so a command run from a subfolder still picks up that project's credentials. The first `.memwal/credentials.json` it finds wins.
+The search starts in the working directory and walks up, the way `.npmrc` and `.git/config` resolve, so a command run from a subfolder still picks up that project's credentials. The first `.memwal/credentials.json` it finds wins, provided you approved it.
 
 The walk stops at your project root (the directory holding `.git`), at your home directory, or at the filesystem root, whichever comes first. That bound keeps one project from picking up a credentials file belonging to a parent folder that holds unrelated checkouts. If nothing is found inside it, the global file is used. Whichever file is chosen is the one read, written, and deleted for that run.
+
+### Approving a project file
+
+A project's `.memwal/credentials.json` lives inside the repository, so anyone who can commit to it — or who can get you to open a clone — could otherwise pick the account and relayer every memory written from that directory goes to. The file is therefore **ignored until you approve it**, once per machine:
+
+```bash
+cd ~/code/my-project
+memwal-mcp approve-project
+```
+
+Until then the global credentials are used and one stderr line names the file that was skipped, the account and relayer it wanted, and this command. An approval covers one exact project path, account, delegate key and relayer: change any of them and it has to be approved again. The record is kept in `~/.memwal/project-approvals.json`, outside the repository, so a repository cannot carry its own approval. `memwal-mcp revoke-project` withdraws it.
+
+`MEMWAL_CREDS_DIR` overrides project resolution entirely and needs no approval — it can only come from your own environment, never from a checkout.
 
 ### Working on several accounts
 
@@ -148,6 +161,7 @@ cd ~/code/my-project
 mkdir -p .memwal
 memwal-mcp login          # writes to the global file the first time
 cp ~/.memwal/credentials.json .memwal/credentials.json
+memwal-mcp approve-project
 ```
 
 From then on, runs started from that directory or anywhere beneath it use the project's credentials, and runs started outside it keep using the global one.
@@ -158,7 +172,9 @@ From then on, runs started from that directory or anywhere beneath it use the pr
 
 ### Migration
 
-Nothing to do. Creating a project-local file is the opt-in, so a machine without one behaves exactly as it did before, and the global file remains the fallback indefinitely.
+Nothing to do for a machine without a project-local file: it behaves exactly as it did before, and the global file remains the fallback indefinitely.
+
+If you already have a project-local file, run `memwal-mcp approve-project` in that project once. Until you do, runs from it fall back to the global credentials and say so on stderr — they do not fail.
 
 ### Replacing an account
 
@@ -195,6 +211,8 @@ The stdio package accepts CLI flags and environment variables. **CLI takes prece
 | `--namespace <name>` (alias `--ns`) | `MEMWAL_NAMESPACE` | Default memory namespace injected into memory tool calls that omit one. See [Default namespace](#default-namespace). |
 | `--login` (or `login` subcommand) | Not applicable | Force a re-login even when credentials exist. The existing file is kept until the new sign-in succeeds. |
 | `--logout` | Not applicable | Delete the credentials file currently in use and exit. |
+| `approve-project` | Not applicable | Approve the project-local `.memwal/credentials.json` found from the current directory, so it is the file used here. Requires an interactive terminal. See [Approving a project file](#approving-a-project-file). |
+| `revoke-project` | Not applicable | Withdraw that approval. Requires an interactive terminal. |
 | `--help`, `-h` | Not applicable | Print usage and exit. |
 
 Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
