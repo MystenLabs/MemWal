@@ -11,6 +11,128 @@ use crate::types::{AppError, SearchHit};
 /// background sweep. Keep a single constant so the two cannot drift.
 pub const TOMBSTONE_RETENTION: chrono::Duration = chrono::Duration::days(30);
 
+/// One migration file, paired with the name the pipeline reports it by.
+type Migration = (&'static str, &'static str);
+
+/// Pairs a migration's file name with its embedded contents so the two
+/// cannot drift apart.
+macro_rules! migration {
+    ($file:literal) => {
+        ($file, include_str!(concat!("../../migrations/", $file)))
+    };
+}
+
+/// The migration pipeline, split at the two points where `VectorDb::new`
+/// has to run Rust in between files.
+///
+/// This stays an explicit, hand-ordered list rather than a
+/// `sqlx::migrate!` directory scan, for three reasons that all still
+/// hold:
+///
+/// 1. `014_storage_reservations.sql` must run *before*
+///    `014_memory_read_api_columns.sql` — the reverse of their
+///    alphabetical order.
+/// 2. Two files share the version number `014`, which `sqlx::migrate!`
+///    rejects outright.
+/// 3. `backfill_updated_at` and `recover_invalid_pagination_index` are
+///    Rust steps that have to land between specific files.
+///
+/// What is no longer manual is *completeness*: every `.sql` file in
+/// `services/server/migrations` must appear in one of these three
+/// slices, and `every_migration_file_is_wired_into_the_pipeline` fails
+/// the test suite if one does not. Migration 021 reached dev unwired
+/// precisely because nothing checked that.
+const MIGRATIONS_BEFORE_BACKFILL: &[Migration] = &[
+    migration!("001_init.sql"),
+    migration!("002_add_namespace.sql"),
+    migration!("003_rate_limiter.sql"),
+    migration!("004_delegate_key_cache_expires.sql"),
+    migration!("005_remember_jobs.sql"),
+    // composite index on (owner, status, updated_at DESC) for bulk poll
+    migration!("006_bulk_remember.sql"),
+    // collapse per-wallet Apalis queues to a single `wallet_jobs` queue.
+    // Equivocation locks are no longer a practical concern on Sui (per
+    // Will Bradley, Mysten, 2026-05-12); concurrent workers on one wallet
+    // + retry handling is sufficient.
+    migration!("007_collapse_wallet_queues.sql"),
+    // nullable `plaintext` column for benchmark-mode storage
+    // (PlaintextEngine). NULL for all production rows — additive.
+    // Renumbered from 007 -> 008 during rebase onto dev to avoid collision
+    // with the wallet-queue collapse migration.
+    migration!("008_benchmark_plaintext.sql"),
+    // importance signal column on vector_entries.
+    migration!("009_importance_signal.sql"),
+    // Permanent restore-failure negative cache (GH #501 / WALM-299).
+    migration!("010_restore_failed_blobs.sql"),
+    // MCP OAuth 2.1 (Claude custom connectors): client registry,
+    // server-custodied delegate keys, and authorization state.
+    migration!("011_mcp_oauth.sql"),
+    // Durable idempotency, preparation, and paid-upload recovery state.
+    migration!("012_remember_write_idempotency.sql"),
+    // Build the owner/key uniqueness constraint without blocking writes.
+    migration!("013_remember_write_idempotency_index.sql"),
+    // per-owner storage quota reservations. Makes quota admission atomic
+    // with the eventual insert (GH #532 / WALM-359).
+    migration!("014_storage_reservations.sql"),
+    // owner-scoped read API: updated_at cursor column + agent_id/package_id.
+    // Split across 014-019 (see each file's header, and
+    // backfill_updated_at's / recover_invalid_pagination_index's doc
+    // comments below) to avoid holding ACCESS EXCLUSIVE across the
+    // full-table backfill or the index build.
+    migration!("014_memory_read_api_columns.sql"),
+];
+
+/// Applied after `backfill_updated_at`: 015 validates NOT NULL and will
+/// error if any `updated_at` row is still NULL.
+const MIGRATIONS_AFTER_BACKFILL: &[Migration] =
+    &[migration!("015_memory_read_api_updated_at_not_null.sql")];
+
+/// Applied after `recover_invalid_pagination_index`, which must precede
+/// 016's `CREATE INDEX CONCURRENTLY IF NOT EXISTS` — that would
+/// otherwise silently no-op forever against a permanently INVALID index
+/// left behind by an interrupted build.
+const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
+    // keyset-pagination index for the memories listing endpoint.
+    // Must stay in its own file/transaction — see 016's header comment.
+    migration!("016_memory_read_api_index.sql"),
+    // per-memory expiry columns.
+    migration!("017_memory_expiry_columns.sql"),
+    // index on expiry_synced_at so the periodic expiry refresh sweep
+    // doesn't full-scan vector_entries every tick. Must stay in its own
+    // file/transaction — see 018's header comment.
+    migration!("018_memory_expiry_synced_at_index.sql"),
+    // Finalizes updated_at NOT NULL cheaply using the validated CHECK
+    // constraint 015 set up — see 019's header.
+    migration!("019_memory_read_api_updated_at_set_not_null.sql"),
+    migration!("020_read_api_followups.sql"),
+    // 021 adds `remember_jobs.failure_reported_at`, which
+    // `recent_failed_remember_jobs` writes on every recall and
+    // `claim_remember_preparation` clears on re-claim. Both are plain
+    // queries against a column that only exists if this runs, so a
+    // deploy that skips it fails those statements with 42703.
+    migration!("021_failed_write_report_ack.sql"),
+];
+
+/// Every migration the pipeline applies, in the order it applies them.
+#[cfg(test)]
+fn all_migrations() -> impl Iterator<Item = &'static Migration> {
+    MIGRATIONS_BEFORE_BACKFILL
+        .iter()
+        .chain(MIGRATIONS_AFTER_BACKFILL)
+        .chain(MIGRATIONS_AFTER_INDEX_RECOVERY)
+}
+
+/// Applies one slice of the pipeline, naming the file that failed.
+async fn run_migrations(pool: &PgPool, migrations: &[Migration]) -> Result<(), AppError> {
+    for (name, sql) in migrations {
+        sqlx::raw_sql(sql)
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration {}: {}", name, e)))?;
+    }
+    Ok(())
+}
+
 pub struct VectorDb {
     pool: PgPool,
     storage_alerts: Option<(Arc<AlertManager>, String)>,
@@ -66,6 +188,65 @@ mod tests {
 
     static VECTOR_SCHEMA_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+    /// Looks a migration up in the pipeline by file name.
+    ///
+    /// Test helpers below build deliberately partial schemas — only the
+    /// tables a given module touches — so they cannot just replay the
+    /// whole pipeline. Going through this lookup still keeps them from
+    /// drifting: a renamed or deleted migration panics here by name
+    /// instead of failing later as a missing column.
+    fn migration_sql(name: &str) -> &'static str {
+        super::all_migrations()
+            .find(|(n, _)| *n == name)
+            .map(|(_, sql)| *sql)
+            .unwrap_or_else(|| panic!("migration {name} is not wired into the pipeline"))
+    }
+
+    /// Every `.sql` file in `services/server/migrations` must be wired
+    /// into the pipeline.
+    ///
+    /// Regression test for migration 021: the file was added and merged
+    /// to dev, but never listed in `VectorDb::new`, so the column it
+    /// creates never existed. Four `routes::remember` tests failed with
+    /// `column "failure_reported_at" does not exist` (42703), and any
+    /// deploy of that build would have failed the same statements in
+    /// production. Needs no database.
+    #[test]
+    fn every_migration_file_is_wired_into_the_pipeline() {
+        use std::collections::BTreeSet;
+
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+        let on_disk: BTreeSet<String> = std::fs::read_dir(dir)
+            .expect("migrations directory should be readable")
+            .map(|entry| {
+                entry
+                    .expect("migrations directory entry should be readable")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.ends_with(".sql"))
+            .collect();
+
+        let wired: BTreeSet<String> = super::all_migrations()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+
+        let unwired: Vec<&String> = on_disk.difference(&wired).collect();
+        assert!(
+            unwired.is_empty(),
+            "migration file(s) exist on disk but are not applied by VectorDb::new: {unwired:?}. \
+             Add them to MIGRATIONS_BEFORE_BACKFILL / _AFTER_BACKFILL / \
+             _AFTER_INDEX_RECOVERY in the position the pipeline needs."
+        );
+
+        let missing: Vec<&String> = wired.difference(&on_disk).collect();
+        assert!(
+            missing.is_empty(),
+            "pipeline references migration file(s) that no longer exist: {missing:?}"
+        );
+    }
+
     fn test_database_url() -> Option<String> {
         std::env::var("DATABASE_URL").ok()
     }
@@ -87,13 +268,13 @@ mod tests {
             .lock()
             .await;
         for migration in [
-            include_str!("../../migrations/001_init.sql"),
-            include_str!("../../migrations/002_add_namespace.sql"),
-            include_str!("../../migrations/003_rate_limiter.sql"),
-            include_str!("../../migrations/008_benchmark_plaintext.sql"),
-            include_str!("../../migrations/009_importance_signal.sql"),
-            include_str!("../../migrations/010_restore_failed_blobs.sql"),
-            include_str!("../../migrations/014_memory_read_api_columns.sql"),
+            migration_sql("001_init.sql"),
+            migration_sql("002_add_namespace.sql"),
+            migration_sql("003_rate_limiter.sql"),
+            migration_sql("008_benchmark_plaintext.sql"),
+            migration_sql("009_importance_signal.sql"),
+            migration_sql("010_restore_failed_blobs.sql"),
+            migration_sql("014_memory_read_api_columns.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -104,23 +285,21 @@ mod tests {
         // CONCURRENTLY IF NOT EXISTS.
         super::backfill_updated_at(&pool).await.unwrap();
 
-        sqlx::raw_sql(include_str!(
-            "../../migrations/015_memory_read_api_updated_at_not_null.sql"
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::raw_sql(migration_sql("015_memory_read_api_updated_at_not_null.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         super::recover_invalid_pagination_index(&pool)
             .await
             .unwrap();
 
         for migration in [
-            include_str!("../../migrations/016_memory_read_api_index.sql"),
-            include_str!("../../migrations/017_memory_expiry_columns.sql"),
-            include_str!("../../migrations/018_memory_expiry_synced_at_index.sql"),
-            include_str!("../../migrations/019_memory_read_api_updated_at_set_not_null.sql"),
-            include_str!("../../migrations/020_read_api_followups.sql"),
+            migration_sql("016_memory_read_api_index.sql"),
+            migration_sql("017_memory_expiry_columns.sql"),
+            migration_sql("018_memory_expiry_synced_at_index.sql"),
+            migration_sql("019_memory_read_api_updated_at_set_not_null.sql"),
+            migration_sql("020_read_api_followups.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -199,7 +378,7 @@ mod tests {
 
     async fn oauth_test_db() -> Option<VectorDb> {
         let db = test_db().await?;
-        sqlx::raw_sql(include_str!("../../migrations/011_mcp_oauth.sql"))
+        sqlx::raw_sql(migration_sql("011_mcp_oauth.sql"))
             .execute(db.pool())
             .await
             .expect("OAuth migration must create tables on a fresh test database");
@@ -943,9 +1122,9 @@ mod tests {
     async fn remember_jobs_test_db() -> Option<VectorDb> {
         let db = test_db().await?;
         for migration in [
-            include_str!("../../migrations/005_remember_jobs.sql"),
-            include_str!("../../migrations/012_remember_write_idempotency.sql"),
-            include_str!("../../migrations/013_remember_write_idempotency_index.sql"),
+            migration_sql("005_remember_jobs.sql"),
+            migration_sql("012_remember_write_idempotency.sql"),
+            migration_sql("013_remember_write_idempotency_index.sql"),
         ] {
             sqlx::raw_sql(migration).execute(db.pool()).await.unwrap();
         }
@@ -1343,201 +1522,21 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to connect to database: {}", e)))?;
 
-        // Run migrations
-        let migration_001 = include_str!("../../migrations/001_init.sql");
-        sqlx::raw_sql(migration_001)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 001: {}", e)))?;
-
-        let migration_002 = include_str!("../../migrations/002_add_namespace.sql");
-        sqlx::raw_sql(migration_002)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 002: {}", e)))?;
-
-        let migration_003 = include_str!("../../migrations/003_rate_limiter.sql");
-        sqlx::raw_sql(migration_003)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 003: {}", e)))?;
-
-        let migration_004 = include_str!("../../migrations/004_delegate_key_cache_expires.sql");
-        sqlx::raw_sql(migration_004)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 004: {}", e)))?;
-
-        let migration_005 = include_str!("../../migrations/005_remember_jobs.sql");
-        sqlx::raw_sql(migration_005)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
-
-        // composite index on (owner, status, updated_at DESC) for bulk poll
-        let migration_006 = include_str!("../../migrations/006_bulk_remember.sql");
-        sqlx::raw_sql(migration_006)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
-
-        // collapse per-wallet Apalis queues to a single `wallet_jobs`
-        // queue. Equivocation locks are no longer a practical concern on Sui
-        // (per Will Bradley, Mysten, 2026-05-12); concurrent workers on one
-        // wallet + retry handling is sufficient.
-        let migration_007 = include_str!("../../migrations/007_collapse_wallet_queues.sql");
-        sqlx::raw_sql(migration_007)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 007: {}", e)))?;
-
-        // nullable `plaintext` column for benchmark-mode storage
-        // (PlaintextEngine). NULL for all production rows — additive.
-        // Renumbered from 007 → 008 during rebase onto dev to avoid collision
-        // with the wallet-queue collapse migration.
-        let migration_008 = include_str!("../../migrations/008_benchmark_plaintext.sql");
-        sqlx::raw_sql(migration_008)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 008: {}", e)))?;
-
-        // importance signal column on vector_entries.
-        let migration_009 = include_str!("../../migrations/009_importance_signal.sql");
-        sqlx::raw_sql(migration_009)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
-
-        // Permanent restore-failure negative cache (GH #501 / WALM-299).
-        let migration_010 = include_str!("../../migrations/010_restore_failed_blobs.sql");
-        sqlx::raw_sql(migration_010)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
-
-        // MCP OAuth 2.1 (Claude custom connectors): client registry,
-        // server-custodied delegate keys, and authorization state.
-        let migration_011 = include_str!("../../migrations/011_mcp_oauth.sql");
-        sqlx::raw_sql(migration_011)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 011: {}", e)))?;
-
-        // Durable idempotency, preparation, and paid-upload recovery state.
-        let migration_012 = include_str!("../../migrations/012_remember_write_idempotency.sql");
-        sqlx::raw_sql(migration_012)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 012: {}", e)))?;
-
-        // Build the owner/key uniqueness constraint without blocking writes.
-        let migration_013 =
-            include_str!("../../migrations/013_remember_write_idempotency_index.sql");
-        sqlx::raw_sql(migration_013)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 013: {}", e)))?;
-
-        // per-owner storage quota reservations. Makes quota admission atomic
-        // with the eventual insert (GH #532 / WALM-359).
-        let migration_014_reservations =
-            include_str!("../../migrations/014_storage_reservations.sql");
-        sqlx::raw_sql(migration_014_reservations)
-            .execute(&pool)
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!(
-                    "Failed to run migration 014 (storage reservations): {}",
-                    e
-                ))
-            })?;
-
-        // owner-scoped read API: updated_at cursor column + agent_id/package_id.
-        // Split across 014-019 (see each file's header, and
-        // backfill_updated_at's / recover_invalid_pagination_index's doc
-        // comments above) to avoid holding ACCESS EXCLUSIVE across the
-        // full-table backfill or index build.
-        let migration_014_read_api =
-            include_str!("../../migrations/014_memory_read_api_columns.sql");
-        sqlx::raw_sql(migration_014_read_api)
-            .execute(&pool)
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!(
-                    "Failed to run migration 014 (read API columns): {}",
-                    e
-                ))
-            })?;
+        // Run migrations. The ordering, and the two Rust steps woven
+        // between these slices, are load-bearing — see
+        // MIGRATIONS_BEFORE_BACKFILL's comment.
+        run_migrations(&pool, MIGRATIONS_BEFORE_BACKFILL).await?;
 
         // Backfill runs as batched Rust code, not a migration file, since
         // Postgres can't COMMIT mid-loop inside a plain migration
         // statement — see backfill_updated_at()'s doc comment.
         backfill_updated_at(&pool).await?;
 
-        // Requires the backfill above to have already completed — this
-        // validates NOT NULL and will error if any updated_at row is
-        // still NULL.
-        let migration_015 =
-            include_str!("../../migrations/015_memory_read_api_updated_at_not_null.sql");
-        sqlx::raw_sql(migration_015)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 015: {}", e)))?;
+        run_migrations(&pool, MIGRATIONS_AFTER_BACKFILL).await?;
 
-        // Must run before migration 016's CREATE INDEX CONCURRENTLY IF NOT
-        // EXISTS, which would otherwise silently no-op forever against a
-        // permanently INVALID index from an interrupted build.
         recover_invalid_pagination_index(&pool).await?;
 
-        // keyset-pagination index for the memories listing endpoint.
-        // Must stay in its own file/transaction — see 016's header comment.
-        let migration_016 = include_str!("../../migrations/016_memory_read_api_index.sql");
-        sqlx::raw_sql(migration_016)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 016: {}", e)))?;
-
-        // per-memory expiry columns.
-        let migration_017 = include_str!("../../migrations/017_memory_expiry_columns.sql");
-        sqlx::raw_sql(migration_017)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 017: {}", e)))?;
-
-        // index on expiry_synced_at so the periodic expiry refresh sweep
-        // doesn't full-scan vector_entries every tick. Must stay
-        // in its own file/transaction — see 018's header comment.
-        let migration_018 = include_str!("../../migrations/018_memory_expiry_synced_at_index.sql");
-        sqlx::raw_sql(migration_018)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 018: {}", e)))?;
-
-        // Finalizes updated_at NOT NULL cheaply using the validated CHECK
-        // constraint 015 set up — see 019's header.
-        let migration_019 =
-            include_str!("../../migrations/019_memory_read_api_updated_at_set_not_null.sql");
-        sqlx::raw_sql(migration_019)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 019: {}", e)))?;
-
-        let migration_020 = include_str!("../../migrations/020_read_api_followups.sql");
-        sqlx::raw_sql(migration_020)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 020: {}", e)))?;
-
-        // 021 adds `remember_jobs.failure_reported_at`, which
-        // `recent_failed_remember_jobs` writes on every recall and
-        // `claim_remember_preparation` clears on re-claim. Both are plain
-        // queries against a column that only exists if this runs, so a
-        // deploy that skips it fails those statements with 42703.
-        let migration_021 = include_str!("../../migrations/021_failed_write_report_ack.sql");
-        sqlx::raw_sql(migration_021)
-            .execute(&pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration 021: {}", e)))?;
+        run_migrations(&pool, MIGRATIONS_AFTER_INDEX_RECOVERY).await?;
 
         tracing::info!("database connected and migrations applied");
 
