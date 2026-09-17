@@ -3,11 +3,12 @@
  * one-line nudge. It must not classify remember vs recall from English
  * keywords — every substantive prompt in a fresh session gets the same text.
  *
- * WALM-642 added the automatic-save opt-in, so "the same text" is now per
- * opt-in state: the tests below pin the ON variant by asking for it
- * explicitly, and `auto-save-optin.test.mjs` pins what the default OFF state
- * injects instead. Every run is pointed at an empty MEMWAL_CREDS_DIR so the
- * developer's own ~/.memwal/settings.json cannot decide the result.
+ * WALM-642 made the save half of that rubric depend on the user's standing
+ * automatic-memory answer, so "the same text" is now per state: the tests below
+ * pin the ON variant by asking for it explicitly, and `auto-save-optin.test.mjs`
+ * pins what an answered-no and an unanswered install inject instead. Every run
+ * is pointed at an empty MEMWAL_CREDS_DIR so the developer's own
+ * ~/.memwal/settings.json cannot decide the result.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -32,9 +33,9 @@ function runHook(prompt, sessionId = `test-${Math.random().toString(16).slice(2)
         env: {
             ...process.env,
             MEMWAL_CREDS_DIR: EMPTY_CREDS_DIR,
-            // These cases are about classification, not consent: ask for the
+            // These cases are about classification, not consent: pin the
             // automatic-save rubric explicitly so they keep testing the thing
-            // they were written for.
+            // they were written for, whatever the resolver would decide.
             MEMWAL_AUTO_SAVE: "1",
         },
     });

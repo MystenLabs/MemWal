@@ -15,9 +15,10 @@
  *      credentials resolve to — `MEMWAL_CREDS_DIR`, else the nearest
  *      project-local `.memwal/credentials.json` at or above the working
  *      directory, else `~/.memwal`.
- *   3. Off.
+ *   3. Unanswered: on for an install that predates the consent prompt, off for
+ *      one created after it (`autoSaveConsent: "pending"`).
  *
- * Any error reads as "off": a hook must never block a session, and an
+ * Any error reads as "not answered": a hook must never block a session, and an
  * unreadable file is not consent.
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -76,26 +77,62 @@ export function parseBooleanSetting(raw) {
     return null;
 }
 
-/** `{ enabled, source }` where source is "env" | "settings" | "default". */
-export function autoSaveStatus() {
-    const fromEnv = parseBooleanSetting(process.env[AUTO_SAVE_ENV]);
-    if (fromEnv !== null) return { enabled: fromEnv, source: "env" };
-
+function readSettings() {
     try {
         const path = settingsPath();
-        if (existsSync(path)) {
-            const parsed = JSON.parse(readFileSync(path, "utf8"));
-            if (parsed && typeof parsed.autoSave === "boolean") {
-                return { enabled: parsed.autoSave, source: "settings" };
-            }
-        }
+        if (!existsSync(path)) return {};
+        const parsed = JSON.parse(readFileSync(path, "utf8"));
+        return parsed && typeof parsed === "object" ? parsed : {};
     } catch {
-        /* unreadable or corrupt — fall through to the default */
+        // Unreadable or corrupt is not an answer.
+        return {};
     }
-    return { enabled: false, source: "default" };
 }
 
-/** True only when the user has turned automatic saving on. */
+/**
+ * `{ enabled, state, source, pendingConsent }`.
+ *
+ * Mirrors `autoSaveStatus()` in src/auto-save.ts, including the two unset
+ * rules: an install that predates the consent prompt (no stamp, credentials on
+ * disk) keeps saving, and one created after it saves nothing until answered.
+ * The two must agree, or the hooks would steer the agent one way while the MCP
+ * server's instructions steered it the other.
+ */
+export function autoSaveStatus() {
+    const settings = readSettings();
+    const answered =
+        typeof settings.autoSave === "boolean" ? settings.autoSave : null;
+    const state = answered === null ? "unset" : answered ? "on" : "off";
+
+    const fromEnv = parseBooleanSetting(process.env[AUTO_SAVE_ENV]);
+    if (fromEnv !== null) {
+        return { enabled: fromEnv, state, source: "env", pendingConsent: false };
+    }
+    if (answered !== null) {
+        return { enabled: answered, state, source: "settings", pendingConsent: false };
+    }
+
+    const stamped = settings.autoSaveConsent === "pending";
+    let preExisting = false;
+    try {
+        preExisting = !stamped && existsSync(credsPath());
+    } catch {
+        /* best effort — an unreadable home directory reads as a new install */
+    }
+    return {
+        enabled: preExisting,
+        state: "unset",
+        source: preExisting ? "legacy" : "unanswered",
+        pendingConsent: true,
+    };
+}
+
+/** True when this session may save without being asked. */
 export function isAutoSaveEnabled() {
     return autoSaveStatus().enabled;
+}
+
+/** True while a human still owes the consent question an answer. */
+export function isConsentPending() {
+    return autoSaveStatus().pendingConsent;
 }

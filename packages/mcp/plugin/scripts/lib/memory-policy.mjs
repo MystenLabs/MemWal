@@ -65,16 +65,18 @@ export const SECRET_EXCLUSION_SUMMARY = [
 ].join(" ");
 
 /**
- * Automatic saving is opt-in, and this is the sentence that says so. A direct
- * request from the user ("remember that ...") is never gated by it — the gate
- * is only on saving something the user did not ask you to save.
+ * Whether to save unprompted is the user's standing choice, and this is the
+ * sentence that says so. A direct request ("remember that ...") is never gated
+ * by it — the gate is only on saving something the user did not ask you to save.
  */
 export const AUTO_SAVE_OPT_IN_RULE = [
-    "Saving something the user did not ask you to save is OFF unless they have turned automatic",
-    "memory on (`memwal-mcp auto-save on`, or MEMWAL_AUTO_SAVE=1). When it is off, save only what",
-    "the user asks you to save in that turn, and do not offer to turn it on more than once.",
+    "Whether to save things the user did not ask you to save is their standing choice, made once",
+    "in a terminal. When automatic memory is on, save durable facts as they state them; when it is",
+    "off, save only what they ask you to save in that turn. That question is put by `memwal-mcp",
+    "login` and set by `memwal-mcp auto-save on|off` — never ask the user to answer it in chat,",
+    "and never answer it on their behalf.",
 ].join(" ");
 
 /** Bumped whenever the text above changes, so a stale copy is identifiable. */
-export const MEMORY_POLICY_VERSION = "2026-09-17.1";
+export const MEMORY_POLICY_VERSION = "2026-09-17.2";
 // ─── memwal:policy-block:end ─────────────────────────────────────────────────

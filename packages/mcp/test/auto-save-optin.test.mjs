@@ -1,10 +1,14 @@
 /**
- * Automatic saving is opt-in, and OFF is the default (WALM-642).
+ * Automatic saving is ON, once a human has been asked (WALM-642).
  *
- * The thing being gated is narrow and worth naming: saving something the user
- * did not ask to have saved. A direct request ("remember that ...") is not
+ * The thing being governed is narrow and worth naming: saving something the
+ * user did not ask to have saved. A direct request ("remember that ...") is not
  * gated, and neither is recall — so these tests check both that the guidance
- * goes quiet when the opt-in is off AND that nothing else goes quiet with it.
+ * goes quiet when the answer is "off" AND that nothing else goes quiet with it.
+ *
+ * Three states, and the two unset ones are the interesting half: an install
+ * that predates the consent prompt keeps saving (that is its status quo, not a
+ * new grant), while one created after it saves nothing until someone answers.
  *
  * Both halves of the opt-in are covered, because they are two separate
  * implementations of the same rule: the TypeScript one the MCP server reads,
@@ -15,6 +19,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { Readable, Writable } from "node:stream";
 import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -23,13 +28,20 @@ import { fileURLToPath } from "node:url";
 import {
     autoSaveStatus,
     isAutoSaveEnabled,
+    markConsentPending,
     parseBooleanSetting,
     setAutoSave,
     settingsPath,
     AUTO_SAVE_ENV,
 } from "../dist/auto-save.js";
+import {
+    askAutoSaveConsent,
+    interpretConsentAnswer,
+    CONSENT_PROMPT,
+} from "../dist/consent.js";
 import * as hookAutoSave from "../plugin/scripts/lib/auto-save.mjs";
 import { parseArgs, helpText } from "../dist/index.js";
+import { TOOL_DEFINITIONS } from "../dist/auth-required.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS = resolve(__dirname, "../plugin/scripts");
@@ -77,29 +89,81 @@ function withEnv(vars, fn) {
 
 // ── the resolver ────────────────────────────────────────────────────────────
 
-test("the default is off", () => {
+test("a new install saves nothing until someone answers", () => {
     const dir = freshCredsDir();
     withEnv({ MEMWAL_CREDS_DIR: dir, [AUTO_SAVE_ENV]: undefined }, () => {
+        markConsentPending();
         assert.equal(isAutoSaveEnabled(), false);
         assert.deepEqual(autoSaveStatus(), {
             enabled: false,
-            source: "default",
+            state: "unset",
+            source: "unanswered",
+            pendingConsent: true,
             path: join(dir, "settings.json"),
         });
     });
     rmSync(dir, { recursive: true, force: true });
 });
 
-test("a persisted choice is read back, either way", () => {
+test("an install that predates the prompt keeps saving, and is still asked", () => {
+    // No settings file at all, credentials on disk: someone who has been
+    // auto-saving since before this setting existed. Switching them off would
+    // be a regression dressed up as caution.
     const dir = freshCredsDir();
     withEnv({ MEMWAL_CREDS_DIR: dir, [AUTO_SAVE_ENV]: undefined }, () => {
+        writeFileSync(join(dir, "credentials.json"), "{}");
+        const status = autoSaveStatus();
+        assert.equal(status.enabled, true);
+        assert.equal(status.state, "unset");
+        assert.equal(status.source, "legacy");
+        // Carried over, not granted — so the question is still owed.
+        assert.equal(status.pendingConsent, true);
+    });
+    rmSync(dir, { recursive: true, force: true });
+});
+
+test("the pending stamp stops a headless sign-in maturing into consent", () => {
+    // Without the stamp, a brand-new install that signs in through the
+    // `memwal_login` tool would be indistinguishable from a long-standing user
+    // the moment credentials appear, and would start saving with nobody ever
+    // having been asked.
+    const dir = freshCredsDir();
+    withEnv({ MEMWAL_CREDS_DIR: dir, [AUTO_SAVE_ENV]: undefined }, () => {
+        markConsentPending();
+        writeFileSync(join(dir, "credentials.json"), "{}");
+        const status = autoSaveStatus();
+        assert.equal(status.enabled, false, "consent by never being asked");
+        assert.equal(status.source, "unanswered");
+        assert.equal(status.pendingConsent, true);
+    });
+    rmSync(dir, { recursive: true, force: true });
+});
+
+test("an answer is read back, either way, and is never asked for again", () => {
+    const dir = freshCredsDir();
+    withEnv({ MEMWAL_CREDS_DIR: dir, [AUTO_SAVE_ENV]: undefined }, () => {
+        markConsentPending();
+
         setAutoSave(true);
         assert.equal(isAutoSaveEnabled(), true);
+        assert.equal(autoSaveStatus().state, "on");
         assert.equal(autoSaveStatus().source, "settings");
+        assert.equal(autoSaveStatus().pendingConsent, false);
 
+        // Declining must cost nothing and must not be nagged at.
         setAutoSave(false);
         assert.equal(isAutoSaveEnabled(), false);
-        assert.equal(autoSaveStatus().source, "settings");
+        assert.equal(autoSaveStatus().state, "off");
+        assert.equal(
+            autoSaveStatus().pendingConsent,
+            false,
+            "a declined answer must not put the question back",
+        );
+        // Even with credentials present — the rule that keeps a pre-existing
+        // install saving must not resurrect a deliberate "no".
+        writeFileSync(join(dir, "credentials.json"), "{}");
+        assert.equal(isAutoSaveEnabled(), false);
+        assert.equal(autoSaveStatus().pendingConsent, false);
     });
     rmSync(dir, { recursive: true, force: true });
 });
@@ -118,13 +182,15 @@ test("the settings file is not world-readable and keeps unrelated keys", () => {
     rmSync(dir, { recursive: true, force: true });
 });
 
-test("the environment overrides the file, in both directions", () => {
+test("the environment overrides every state, in both directions", () => {
     const dir = freshCredsDir();
     withEnv({ MEMWAL_CREDS_DIR: dir, [AUTO_SAVE_ENV]: undefined }, () => {
+        // over an answered "off" / "on"
         setAutoSave(false);
         withEnv({ [AUTO_SAVE_ENV]: "1" }, () => {
             assert.equal(isAutoSaveEnabled(), true);
             assert.equal(autoSaveStatus().source, "env");
+            assert.equal(autoSaveStatus().state, "off", "the stored answer is untouched");
         });
         setAutoSave(true);
         withEnv({ [AUTO_SAVE_ENV]: "0" }, () => {
@@ -133,6 +199,28 @@ test("the environment overrides the file, in both directions", () => {
         });
     });
     rmSync(dir, { recursive: true, force: true });
+
+    // over each unset state, and it settles the question too — someone who set
+    // this deliberately does not also need to be prompted.
+    const unanswered = freshCredsDir();
+    withEnv({ MEMWAL_CREDS_DIR: unanswered, [AUTO_SAVE_ENV]: undefined }, () => {
+        markConsentPending();
+        withEnv({ [AUTO_SAVE_ENV]: "1" }, () => {
+            assert.equal(isAutoSaveEnabled(), true);
+            assert.equal(autoSaveStatus().pendingConsent, false);
+        });
+    });
+    rmSync(unanswered, { recursive: true, force: true });
+
+    const legacy = freshCredsDir();
+    withEnv({ MEMWAL_CREDS_DIR: legacy, [AUTO_SAVE_ENV]: undefined }, () => {
+        writeFileSync(join(legacy, "credentials.json"), "{}");
+        withEnv({ [AUTO_SAVE_ENV]: "off" }, () => {
+            assert.equal(isAutoSaveEnabled(), false);
+            assert.equal(autoSaveStatus().pendingConsent, false);
+        });
+    });
+    rmSync(legacy, { recursive: true, force: true });
 });
 
 test("an unreadable or unparseable value is not consent", () => {
@@ -148,7 +236,8 @@ test("an unreadable or unparseable value is not consent", () => {
     withEnv({ MEMWAL_CREDS_DIR: dir, [AUTO_SAVE_ENV]: undefined }, () => {
         writeFileSync(join(dir, "settings.json"), "{ not json");
         assert.equal(isAutoSaveEnabled(), false);
-        assert.equal(autoSaveStatus().source, "default");
+        assert.equal(autoSaveStatus().state, "unset");
+        assert.equal(autoSaveStatus().pendingConsent, true);
     });
     rmSync(dir, { recursive: true, force: true });
 });
@@ -159,9 +248,15 @@ test("the hook-side resolver answers identically to the compiled one", () => {
         assert.equal(hookAutoSave.isAutoSaveEnabled(), isAutoSaveEnabled());
         assert.equal(hookAutoSave.settingsPath(), settingsPath());
 
+        // ...on every state, not just the answered one.
+        markConsentPending();
+        assert.equal(hookAutoSave.isAutoSaveEnabled(), false);
+        assert.equal(hookAutoSave.autoSaveStatus().source, "unanswered");
+
         setAutoSave(true);
         assert.equal(hookAutoSave.isAutoSaveEnabled(), true);
         assert.equal(hookAutoSave.autoSaveStatus().source, "settings");
+        assert.equal(hookAutoSave.autoSaveStatus().pendingConsent, false);
 
         withEnv({ [AUTO_SAVE_ENV]: "off" }, () => {
             assert.equal(hookAutoSave.isAutoSaveEnabled(), false);
@@ -173,8 +268,9 @@ test("the hook-side resolver answers identically to the compiled one", () => {
 
 // ── the hooks ───────────────────────────────────────────────────────────────
 
-test("SessionStart does not tell the agent to save until the user opts in", () => {
+test("SessionStart goes quiet about saving when the user answered no", () => {
     const dir = freshCredsDir();
+    writeSettings(dir, { autoSave: false });
     const off = runHook("on_session_start.mjs", {}, { MEMWAL_CREDS_DIR: dir });
 
     assert.match(off, /Automatic memory is OFF/);
@@ -198,8 +294,9 @@ test("SessionStart does not tell the agent to save until the user opts in", () =
     rmSync(dir, { recursive: true, force: true });
 });
 
-test("UserPromptSubmit injects a save-nothing rubric while the opt-in is off", () => {
+test("UserPromptSubmit injects a save-nothing rubric when the user answered no", () => {
     const dir = freshCredsDir();
+    writeSettings(dir, { autoSave: false });
     const prompt = "I always use pnpm and my staging canary is coral-fox-77.";
 
     const off = runHook(
@@ -225,8 +322,9 @@ test("UserPromptSubmit injects a save-nothing rubric while the opt-in is off", (
     rmSync(dir, { recursive: true, force: true });
 });
 
-test("PostToolUse stops nudging a save after an error while the opt-in is off", () => {
+test("PostToolUse stops nudging a save after an error when the user answered no", () => {
     const dir = freshCredsDir();
+    writeSettings(dir, { autoSave: false });
     // Must trip `detectError` in lib/signals.mjs (a strong marker) and clear
     // the hook's 50-character minimum, or the hook stays silent for reasons
     // that have nothing to do with the opt-in.
@@ -248,8 +346,9 @@ test("PostToolUse stops nudging a save after an error while the opt-in is off", 
     rmSync(dir, { recursive: true, force: true });
 });
 
-test("a hook with the opt-in off still exits 0 and never blocks the session", () => {
+test("a hook with saving off still exits 0 and never blocks the session", () => {
     const dir = freshCredsDir();
+    writeSettings(dir, { autoSave: false });
     for (const script of ["on_session_start.mjs", "on_user_prompt.mjs", "on_post_tool.mjs"]) {
         const result = spawnSync(process.execPath, [join(SCRIPTS, script)], {
             input: JSON.stringify({ prompt: "a reasonably long prompt about pnpm" }),
@@ -262,6 +361,79 @@ test("a hook with the opt-in off still exits 0 and never blocks the session", ()
 });
 
 // ── the surface a user actually turns it on from ────────────────────────────
+
+// ── the consent question ────────────────────────────────────────────────────
+
+test("the prompt names the consequence, leads with permanence, and hedges the redaction", () => {
+    // These are the three wording rules the change exists for, so they are
+    // asserted rather than left to a reviewer's memory.
+    assert.match(CONSENT_PROMPT, /writes it to your memory without asking each time/);
+    assert.match(CONSENT_PROMPT, /Saved memories are permanent/);
+    assert.match(CONSENT_PROMPT, /immutable/);
+    assert.match(CONSENT_PROMPT, /cannot\s+delete one that is already saved/);
+    assert.match(CONSENT_PROMPT, /safety net, not a\s+guarantee/);
+    // Permanence comes first among the bullets — it is the fact that changes
+    // the answer.
+    const bullets = CONSENT_PROMPT.split("\n").filter((l) => l.trim().startsWith("- "));
+    assert.equal(bullets.length, 3);
+    assert.match(bullets[0], /permanent/);
+    // Both options are offered plainly; declining is not dressed as a warning.
+    assert.match(CONSENT_PROMPT, /\[1\] Save automatically/);
+    assert.match(CONSENT_PROMPT, /\[2\] Only save when I ask/);
+    assert.match(CONSENT_PROMPT, /auto-save on\|off/);
+});
+
+test("Enter takes option 1, and anything unrecognised re-asks rather than assuming", () => {
+    assert.equal(interpretConsentAnswer(""), true);
+    assert.equal(interpretConsentAnswer("  "), true);
+    assert.equal(interpretConsentAnswer("1"), true);
+    assert.equal(interpretConsentAnswer("2"), false);
+    // A typo is not an answer to a question about permanent storage.
+    for (const raw of ["y", "n", "3", "yes", "maybe", "11"]) {
+        assert.equal(interpretConsentAnswer(raw), null, `"${raw}" must re-ask`);
+    }
+});
+
+/** Drive the prompt with scripted lines and collect what it wrote. */
+async function runPrompt(lines, { isTTY = true } = {}) {
+    const written = [];
+    const input = Readable.from(lines.map((l) => `${l}\n`));
+    const output = new Writable({
+        write(chunk, _enc, cb) {
+            written.push(chunk.toString());
+            cb();
+        },
+    });
+    const answer = await askAutoSaveConsent({ input, output, isTTY });
+    return { answer, output: written.join("") };
+}
+
+test("an answer is taken from the terminal, and a bad one is re-asked", async () => {
+    assert.equal((await runPrompt(["1"])).answer, true);
+    assert.equal((await runPrompt([""])).answer, true);
+    assert.equal((await runPrompt(["2"])).answer, false);
+
+    const retried = await runPrompt(["banana", "2"]);
+    assert.equal(retried.answer, false);
+    assert.match(retried.output, /Please answer 1 or 2/);
+    // The question is put again, not assumed away.
+    assert.equal(retried.output.split("Your choice").length - 1, 2);
+});
+
+test("a closed stream is not an answer, and does not hang", async () => {
+    // Ctrl-D, a killed terminal, a closed pipe. Recording a choice here would
+    // be recording one the user never made.
+    const { answer } = await runPrompt([]);
+    assert.equal(answer, null);
+});
+
+test("the prompt refuses to run without a TTY", async () => {
+    // Belt and braces with main()'s own check: a prompt with nobody in front of
+    // it is a hang, and this one would hang an MCP server's startup.
+    const { answer, output } = await runPrompt(["1"], { isTTY: false });
+    assert.equal(answer, null);
+    assert.equal(output, "", "nothing may be written to a non-interactive stream");
+});
 
 test("`auto-save` parses as a subcommand, and a bare one only reports", () => {
     // A bare `auto-save` must not be read as consent to turn it ON — the
@@ -288,13 +460,64 @@ test("a typo'd flag does not swallow the subcommand or its value", () => {
     assert.equal(parsed.autoSave, "on");
 });
 
-test("--help tells the user the setting exists and that it is off by default", () => {
+test("--help tells the user the setting exists and that login asks for it", () => {
     // The plugin install path never shows a terminal, so --help and the
     // post-login summary are where the choice reaches a person.
     const help = helpText();
     assert.match(help, /auto-save on\|off/);
-    assert.match(help, /OFF by default/);
+    assert.match(help, /login` asks/);
+    assert.match(help, /nothing is saved unprompted until you/);
     assert.match(help, /MEMWAL_AUTO_SAVE/);
-    // And that credentials are excluded regardless of which way it is set.
+    // Permanence is stated here too — it is the fact that changes the answer.
+    assert.match(help, /permanent/);
+    // And that credentials are stripped regardless of which way it is set.
     assert.match(help, /Credentials/);
+    assert.match(help, /not a guarantee/);
+});
+
+// ── the non-interactive path ────────────────────────────────────────────────
+
+test("a non-TTY run never prompts, never hangs, and says where things stand", () => {
+    // Every MCP client spawn lands here. The failure this guards against is not
+    // a wrong answer, it is a server that never finishes starting because
+    // something is waiting on a stdin no human is attached to.
+    const dir = freshCredsDir();
+    const result = spawnSync(
+        process.execPath,
+        [resolve(__dirname, "../dist/bin/memwal-mcp.js"), "auto-save"],
+        {
+            // Piped, not inherited: `process.stdin.isTTY` is undefined here,
+            // exactly as it is under an MCP client.
+            input: "",
+            encoding: "utf8",
+            timeout: 10_000,
+            env: { ...process.env, MEMWAL_CREDS_DIR: dir, MEMWAL_AUTO_SAVE: "" },
+        },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.notEqual(result.signal, "SIGTERM", "the process hung waiting on stdin");
+    // Reports, does not ask.
+    assert.doesNotMatch(result.stderr, /Your choice/);
+    assert.doesNotMatch(result.stderr, /Save automatically/);
+    assert.match(result.stderr, /Automatic memory: (ON|OFF)/);
+    rmSync(dir, { recursive: true, force: true });
+});
+
+test("consent is not reachable from anything the model can call", () => {
+    // The single most important constraint in this change: a model answering
+    // on the user's behalf is not consent. The question lives in consent.ts,
+    // is called only from main() behind `process.stdin.isTTY`, and must never
+    // appear in a tool list, a tool description or the instructions.
+    const toolSurfaces = [
+        readFileSync(resolve(__dirname, "../dist/auth-required.js"), "utf8"),
+        readFileSync(resolve(__dirname, "../dist/instructions.js"), "utf8"),
+        readFileSync(resolve(__dirname, "../dist/bridge.js"), "utf8"),
+    ].join("\n");
+    assert.doesNotMatch(toolSurfaces, /askAutoSaveConsent/);
+    assert.doesNotMatch(toolSurfaces, /CONSENT_PROMPT/);
+    assert.doesNotMatch(toolSurfaces, /Your choice \[1\/2\]/);
+
+    // And no tool is named for it.
+    const names = TOOL_DEFINITIONS.map((t) => t.name);
+    assert.ok(!names.some((n) => /consent|auto_?save/i.test(n)), names.join(", "));
 });
