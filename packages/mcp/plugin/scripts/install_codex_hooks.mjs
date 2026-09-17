@@ -17,8 +17,13 @@
  * directory containing $(...), backticks, quotes or backslashes cannot break
  * out of either the JSON document or the generated shell command.
  *
- * Re-running is idempotent: entries this installer owns (identified by our
- * hook script filenames) are removed before fresh entries are added.
+ * Re-running is idempotent: the hooks this installer owns are removed before
+ * fresh ones are added. Ownership is decided per hook, by a marker this
+ * installer writes (or, for installs predating that marker, by an exact match
+ * against the commands it generates for this plugin directory) — never by the
+ * hook script's filename, which another tool may legitimately share. Hooks
+ * belonging to anyone else, including siblings inside the same group, and the
+ * group's own settings are left untouched.
  *
  * Usage:
  *   node install_codex_hooks.mjs              # install or update
@@ -47,14 +52,14 @@ const HOOKS_FILE = join(CODEX_DIR, "hooks.json");
 const CONFIG_FILE = join(CODEX_DIR, "config.toml");
 const TEMPLATE_FILE = join(PLUGIN_ROOT, "hooks", "codex-hooks.json");
 
-// Entries are "ours" when a hook command references one of our scripts.
-const OWNER_MARKERS = [
-    "on_session_start.mjs",
-    "on_user_prompt.mjs",
-    "on_post_tool.mjs",
-];
-
 const PLACEHOLDER = "${PLUGIN_ROOT}";
+
+// Every hook this installer writes carries this marker, so a later run can
+// recognise its own entries outright instead of guessing from a filename.
+// `on_user_prompt.mjs` is a generic name: another tool's hook may well use it,
+// and that hook is not ours to touch.
+const MARKER_KEY = "_memwal";
+const MARKER_VALUE = "memwal-plugin-hooks";
 
 function loadTemplate() {
     // Parse first, substitute second. Substituting into the raw text would let
@@ -77,28 +82,87 @@ function loadExisting() {
     }
 }
 
-function isOwned(entry) {
-    for (const hook of entry.hooks || []) {
-        const cmd = hook.command || "";
-        if (OWNER_MARKERS.some((m) => cmd.includes(m))) return true;
+/**
+ * The exact commands this installer writes for the current PLUGIN_ROOT, plus
+ * the ones it wrote before WALM-641 quoted the path. Installs made by an older
+ * build carry no marker, so they are still recognised — but only when the
+ * command matches ours character for character, which a hook belonging to
+ * another tool never will.
+ */
+function ownedCommands() {
+    const commands = new Set();
+    if (!existsSync(TEMPLATE_FILE)) return commands;
+    let template;
+    try {
+        template = JSON.parse(readFileSync(TEMPLATE_FILE, "utf8"));
+    } catch {
+        return commands;
     }
-    return false;
+    for (const entries of Object.values(template.hooks || {})) {
+        for (const entry of entries || []) {
+            for (const hook of entry.hooks || []) {
+                if (typeof hook.command !== "string") continue;
+                // What this build writes, and what pre-WALM-641 builds wrote.
+                commands.add(
+                    substituteHookPlaceholder(hook, PLACEHOLDER, PLUGIN_ROOT).command
+                );
+                commands.add(hook.command.replaceAll(PLACEHOLDER, PLUGIN_ROOT));
+            }
+        }
+    }
+    return commands;
 }
 
+const OWNED_COMMANDS = ownedCommands();
+
+/** A single hook — not the group around it — that this installer put there. */
+function isOwnedHook(hook) {
+    if (!hook || typeof hook !== "object") return false;
+    if (hook[MARKER_KEY] === MARKER_VALUE) return true;
+    return typeof hook.command === "string" && OWNED_COMMANDS.has(hook.command);
+}
+
+/**
+ * Drop our own hooks and nothing else.
+ *
+ * A group may hold hooks from several tools. Removing the group because one of
+ * its hooks is ours takes the siblings with it (WALM-643), so the group is
+ * rebuilt with its settings intact and only our hooks filtered out. A group is
+ * dropped only once it has no hooks left, and an event only once it has no
+ * groups left.
+ */
 function stripOwned(config) {
     const hooks = config.hooks || {};
     for (const event of Object.keys(hooks)) {
-        hooks[event] = (hooks[event] || []).filter((e) => !isOwned(e));
-        if (hooks[event].length === 0) delete hooks[event];
+        const kept = [];
+        for (const entry of hooks[event] || []) {
+            if (!entry || !Array.isArray(entry.hooks)) {
+                kept.push(entry);
+                continue;
+            }
+            const keptHooks = entry.hooks.filter((hook) => !isOwnedHook(hook));
+            if (keptHooks.length === entry.hooks.length) kept.push(entry);
+            else if (keptHooks.length > 0) kept.push({ ...entry, hooks: keptHooks });
+        }
+        if (kept.length === 0) delete hooks[event];
+        else hooks[event] = kept;
     }
     config.hooks = hooks;
     return config;
 }
 
+/** Tag each hook so the next run recognises it without matching commands. */
+function markOwned(entries) {
+    return entries.map((entry) => ({
+        ...entry,
+        hooks: (entry.hooks || []).map((hook) => ({ ...hook, [MARKER_KEY]: MARKER_VALUE })),
+    }));
+}
+
 function mergeTemplate(config, template) {
     config.hooks = config.hooks || {};
     for (const [event, entries] of Object.entries(template.hooks || {})) {
-        config.hooks[event] = (config.hooks[event] || []).concat(entries);
+        config.hooks[event] = (config.hooks[event] || []).concat(markOwned(entries));
     }
     return config;
 }
