@@ -70,7 +70,11 @@ were removed; the value is never logged, echoed, or returned.
 
 Detection is shape-based, not entropy-based, on purpose: MemWal's own durable
 facts (blob ids, Sui object ids, git SHAs, digests) are exactly what a generic
-high-entropy rule would eat. The trade-off is written out at the top of
+high-entropy rule would eat. Key material in hex is therefore caught by the
+**label** beside it rather than by how random it looks — which is what lets the
+`delegatePrivateKey` from `credentials.json` (64 lowercase hex, the value
+`auth.ts` marks "NEVER log this") be removed while a bare commit SHA or `0x`
+object id is left alone. The trade-off is written out at the top of
 `redaction.ts`.
 
 ## Architecture — three layers

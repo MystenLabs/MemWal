@@ -111,9 +111,12 @@ is never stored, logged, or echoed back.
 
 Detection targets specific credential shapes rather than "looks random", so
 identifiers you *do* want remembered — blob ids, Sui object ids, commit SHAs,
-digests — pass through untouched. The trade-off is that a secret in no
-recognisable shape can still slip past the check, which is why the model-facing
-rules exist alongside it.
+digests — pass through untouched. Where a secret is indistinguishable from an
+identifier, the **label** decides: pasting your `credentials.json` has its
+`delegatePrivateKey` removed, while the same 64 hex characters with nothing
+calling them a key are stored as the digest they look like. The trade-off is
+that a secret in no recognisable shape, and with no label near it, can still
+slip past the check — which is why the model-facing rules exist alongside it.
 
 ## Default Namespace
 

@@ -141,6 +141,73 @@ test("a labelled seed phrase is removed", () => {
     );
 });
 
+test("MemWal's own delegate private key is removed, in every shape it arrives in", () => {
+    // The 64-hex Ed25519 seed from ~/.memwal/credentials.json. auth.ts marks it
+    // "NEVER log this": whoever holds it can read and write the user's memories
+    // until the delegate is revoked. It is pure lowercase hex, so the entropy
+    // rule deliberately does not see it — the LABEL is what catches it.
+    const SEED = "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+
+    // A pasted line from the file, the file itself, prose, and the label after
+    // the value. Each keeps a fact around it so the refusal path is not what is
+    // being measured here.
+    for (const text of [
+        `Notes from setup: delegatePrivateKey ${SEED} was written on this laptop`,
+        `Notes from setup: "delegatePrivateKey": "${SEED}" is in the file`,
+        `Notes from setup: my delegate private key is ${SEED} on this laptop`,
+        `Notes from setup: ${SEED} is my private key for this laptop`,
+        `Notes from setup: secret_key = ${SEED} on this laptop`,
+        `Notes from setup: the signing key 0x${SEED} lives on this laptop`,
+    ]) {
+        const out = sanitizeFact(text);
+        assert.equal(out.refusal, undefined, `unexpectedly refused: ${text}`);
+        assert.ok(!out.text.includes(SEED), `the delegate key survived: ${text}`);
+        assert.ok(out.text.includes("Notes from setup"), `lost the fact: ${text}`);
+    }
+});
+
+test("an UNLABELLED hex run is still left alone — that is what the label gate buys", () => {
+    // The regression this design protects. Same 64 hex characters as the test
+    // above; the only difference is that nothing calls them a key.
+    const HEX = "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+    for (const fact of [
+        `The release digest is ${HEX} and I verified it`,
+        `Pin the deployment to 0x${HEX}`,
+        // "credentials.json" is a phrase MemWal prose uses constantly, and it
+        // sits within a window of the SHA here. It is excluded from the label
+        // list precisely so this sentence keeps its commit id.
+        "My creds live in ~/.memwal/credentials.json and the fix landed in 4f2b8c1e9d7a3f5b6c0e2d4a8b1f3c5e7d9a0b2c",
+        // Documented in auth.ts as "Safe to display" — the public half must not
+        // be swept up with the private one.
+        `My delegatePublicKeyHex is ${HEX}`,
+    ]) {
+        const out = sanitizeFact(fact);
+        assert.equal(out.text, fact, `redacted an unlabelled hex run: ${fact}`);
+        assert.equal(out.changed, false);
+    }
+});
+
+test("a seed phrase is caught however the label is spelled", () => {
+    const WORDS =
+        "abandon ability able about above absent absorb abstract absurd abuse access accident";
+    for (const text of [
+        `Wallet notes: my recovery phrase is ${WORDS} for the mainnet wallet`,
+        `Wallet notes: seed_phrase: ${WORDS} for the mainnet wallet`,
+        `Wallet notes: "mnemonic": "${WORDS}" for the mainnet wallet`,
+        `Wallet notes: seedPhrase=${WORDS} for the mainnet wallet`,
+    ]) {
+        const out = sanitizeFact(text);
+        assert.equal(out.refusal, undefined, `unexpectedly refused: ${text}`);
+        assert.ok(!out.text.includes(WORDS), `the mnemonic survived: ${text}`);
+        assert.ok(out.text.includes("Wallet notes"), `lost the fact: ${text}`);
+    }
+
+    // Still true, and still documented: a bare word run with no label at all is
+    // indistinguishable from a sentence, so it is left to the model rules.
+    const bare = sanitizeFact(`I wrote down ${WORDS} yesterday`);
+    assert.equal(bare.changed, false);
+});
+
 test("a long mixed-case base64 blob is removed", () => {
     const blob =
         "QWxhZGRpbjpvcGVuIHNlc2FtZQBcdefGHIjklMNOpqrSTUvwxYZ0123456789abcDEF0123";
@@ -182,6 +249,7 @@ test("the identifiers MemWal itself stores are not mistaken for secrets", () => 
         "Pin the build to commit 4f2b8c1e9d7a3f5b6c0e2d4a8b1f3c5e7d9a0b2c",
         "The sha256 of the release tarball is e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "My Sui package id is 0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437",
+        "The migration artifact hashes to 9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
     ]) {
         const out = sanitizeFact(fact);
         assert.equal(out.text, fact, `redacted a legitimate identifier: ${fact}`);

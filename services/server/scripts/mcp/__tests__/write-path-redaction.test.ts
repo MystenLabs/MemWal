@@ -186,6 +186,64 @@ test("memwal_analyze strips the passage before the extractor ever sees it", asyn
     assert.match(text, /credential span\(s\) were removed/);
 });
 
+test("the delegate private key never reaches the SDK from any write path", async (t) => {
+    // The one secret that matters most for this product: the Ed25519 seed in
+    // ~/.memwal/credentials.json, which grants read AND write to the user's
+    // memories until the delegate is revoked. It is pure lowercase hex, so it
+    // is invisible to the entropy rule by design — the label beside it is what
+    // catches it. A user pasting their credentials file into chat is the
+    // realistic way this arrives.
+    const SEED = "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+    const pasted =
+        `I set up a second laptop today. From credentials.json: ` +
+        `"delegatePrivateKey": "${SEED}", and I use the work namespace there.`;
+
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+
+    for (const [name, args] of [
+        ["memwal_remember", { text: pasted }],
+        ["memwal_remember_bulk", { facts: [pasted] }],
+        ["memwal_analyze", { text: pasted }],
+    ] as Array<[string, Record<string, unknown>]>) {
+        const result = await client.callTool({ name, arguments: args });
+        assert.ok(
+            !textOf(result).includes(SEED),
+            `${name} echoed the delegate key back in its reply`,
+        );
+    }
+
+    const sent = allForwarded(forwarded);
+    assert.ok(sent.length > 0, "the writes must still happen");
+    assert.ok(!sent.includes(SEED), "the delegate private key reached the SDK");
+    // Redacted, not dropped: the fact around it survives on every path.
+    assert.equal(forwarded.remember.length, 1);
+    assert.equal(forwarded.bulk.length, 1);
+    assert.equal(forwarded.analyze.length, 1);
+    for (const text of [forwarded.remember[0], forwarded.bulk[0][0], forwarded.analyze[0]]) {
+        assert.ok(text.includes("second laptop"), "the fact was lost with the key");
+        assert.ok(text.includes("work namespace"), "the fact was lost with the key");
+    }
+});
+
+test("an unlabelled hex identifier still reaches the SDK unchanged", async (t) => {
+    // The other half of the label gate, asserted at the handler boundary: a
+    // 64-hex string nobody called a key is a digest, an object id or a blob id
+    // — the facts this product exists to remember.
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const fact =
+        "My Sui package id is 0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437 " +
+        "and the release digest is 4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+
+    const result = await client.callTool({
+        name: "memwal_remember",
+        arguments: { text: fact },
+    });
+    assert.deepEqual(forwarded.remember, [fact]);
+    assert.doesNotMatch(textOf(result), /redacted|NOT SAVED/i);
+});
+
 // ── the rules that are not about credentials ────────────────────────────────
 
 test("an explicit do-not-save is honoured on every write path", async (t) => {

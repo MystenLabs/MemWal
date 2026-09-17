@@ -33,6 +33,11 @@
  *   - `password:`-style assignments redact whatever follows the separator, so
  *     "password: ask Marta" loses "ask Marta". Over-redacting a sentence about
  *     a credential is cheap; under-redacting the credential is permanent.
+ *   - Hex key material is caught by the LABEL next to it, never by its shape —
+ *     see `HEX_RUN`. That is what lets MemWal's own 64-hex delegate private key
+ *     be removed while a bare 40-hex commit SHA or a `0x`-prefixed Sui object id
+ *     is left alone. The cost is that a hex secret pasted with no label at all
+ *     still passes; the model-facing rules are what cover that.
  *   - Quoted-content detection only fires on unambiguous pastes (a fenced
  *     block, a multi-line `>` quotation, or a ≥200-char fully quoted passage).
  *     A short quoted sentence is left to the model-facing rules, because an
@@ -50,6 +55,7 @@ export type RedactionKind =
     | "credential-assignment"
     | "auth-header"
     | "seed-phrase"
+    | "labelled-key-material"
     | "high-entropy-secret";
 
 /** Why a text was refused outright instead of redacted. */
@@ -131,9 +137,15 @@ const COOKIE_HEADER =
  * The separator must follow the keyword immediately, which is what keeps
  * ordinary prose out: "my password manager is 1Password" has no separator after
  * "password" and does not match.
+ *
+ * `(?<=[a-z])` alongside `\b` is what makes a camelCase field name match. A
+ * plain `\b` anchors only at a non-word character, so the keyword had to start
+ * the identifier — and MemWal's own worst secret is spelled
+ * `delegatePrivateKey`, where `PrivateKey` sits mid-identifier and was
+ * therefore invisible to this rule.
  */
 const CREDENTIAL_ASSIGNMENT =
-    /\b(passwords?|passwd|pwd|passphrases?|api[_-]?keys?|apikeys?|secret[_-]?keys?|client[_-]?secrets?|secrets?|access[_-]?tokens?|refresh[_-]?tokens?|auth[_-]?tokens?|bearer[_-]?tokens?|tokens?|private[_-]?keys?|credentials?)(\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s,;]+)/gi;
+    /(?:\b|(?<=[a-z]))(passwords?|passwd|pwd|passphrases?|api[_-]?keys?|apikeys?|secret[_-]?keys?|client[_-]?secrets?|secrets?|access[_-]?tokens?|refresh[_-]?tokens?|auth[_-]?tokens?|bearer[_-]?tokens?|tokens?|private[_-]?keys?|credentials?)(\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s,;]+)/gi;
 
 /**
  * Vendor-prefixed keys. Each prefix is issued by exactly one service and never
@@ -172,7 +184,75 @@ const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
  * rules already cover.
  */
 const SEED_PHRASE =
-    /\b((?:seed|recovery|secret|mnemonic)\s+(?:phrase|words)|mnemonic)(\s*(?:is|are|:|=)?\s*)((?:[a-z]{3,8}[ \t]+){11,23}[a-z]{3,8})\b/gi;
+    /(?:\b|(?<=[a-z]))((?:seed|recovery|secret|mnemonic)[\s_-]*(?:phrase|words)|mnemonic)([^A-Za-z0-9]{0,4}(?:is|are)?[^A-Za-z0-9]{0,4})((?:[a-z]{3,8}[ \t]+){11,23}[a-z]{3,8})\b/gi;
+
+/**
+ * Key material in hex, identified by the LABEL beside it rather than by how
+ * random it looks.
+ *
+ * This exists because of one specific secret: `delegatePrivateKey` in
+ * `~/.memwal/credentials.json` is a 64-hex Ed25519 seed, the thing auth.ts
+ * marks "NEVER log this", and whoever holds it can read and write the user's
+ * memories until the delegate is revoked. It is the worst thing this product
+ * can leak — and it is pure lowercase hex, so it is deliberately excluded by
+ * `looksLikeSecretBlob` below and was sailing straight through.
+ *
+ * The exclusion is still right: a bare hex run is a git SHA, a Walrus blob id,
+ * a Sui object or account id, a content digest — the identifiers users most
+ * want remembered. So the discriminator is not entropy, it is the label. A hex
+ * run is removed only when a credential word sits next to it, which catches
+ * every shape the secret actually arrives in:
+ *
+ *     delegatePrivateKey 4f3c...        (prose / a pasted line)
+ *     "delegatePrivateKey": "4f3c..."   (the credentials.json file itself)
+ *     my delegate private key is 4f3c...
+ *     4f3c... is my private key         (label after the value)
+ *
+ * while `Pin the build to commit 4f2b8c1e...` and `my account id is 0x7f3a...`
+ * keep passing through untouched. That asymmetry is the whole design, and it is
+ * pinned from both sides in secret-redaction.test.ts.
+ */
+const HEX_RUN = /\b(?:0x)?[0-9a-fA-F]{32,}\b/g;
+
+/** How far either side of a hex run a label may sit — a few tokens. */
+const HEX_LABEL_WINDOW = 48;
+
+/**
+ * Words that make an adjacent hex run key material.
+ *
+ * Not anchored on a word boundary, so it matches inside a camelCase identifier
+ * (`delegatePrivateKey`). `credential(s)` is deliberately ABSENT: MemWal's own
+ * prose says "credentials.json" constantly, and a sentence naming that file
+ * next to a commit SHA would lose the SHA.
+ */
+const HEX_CREDENTIAL_LABEL =
+    /private[\s_-]*key|secret[\s_-]*key|delegate[\s_-]*key|delegate[\s_-]*private|signing[\s_-]*key|priv[\s_-]*key|api[\s_-]*key|access[\s_-]*key|auth[\s_-]*key|secret|seed|mnemonic|passphrase/i;
+
+/**
+ * The same, for a label that FOLLOWS the value ("4f3c... is my private key").
+ * Tighter than the backward form — it has to march through the small joining
+ * phrase rather than search a window — because a trailing window would sweep
+ * in whatever sentence happens to come next.
+ */
+const HEX_LABEL_AFTER =
+    /^[^A-Za-z0-9]{0,4}(?:is|was)?[^A-Za-z0-9]{0,4}(?:my|the|our|his|her|their)?[^A-Za-z0-9]{0,4}(?:delegate[\s_-]*)?(?:private[\s_-]*key|secret[\s_-]*key|seed|mnemonic|passphrase|api[\s_-]*key)/i;
+
+/** True when a credential word sits within a few tokens of [start, end). */
+function hasAdjacentCredentialLabel(
+    text: string,
+    start: number,
+    end: number,
+): boolean {
+    // Placeholders left by earlier rules carry the words "secret" and "key",
+    // so a run of redactions would otherwise start labelling its own
+    // neighbours — and the neighbour after `private_key=[redacted:...]` is
+    // exactly the kind of bare SHA this rule must not touch.
+    const before = text
+        .slice(Math.max(0, start - HEX_LABEL_WINDOW), start)
+        .replace(/\[redacted:[a-z-]+\]/g, " ");
+    if (HEX_CREDENTIAL_LABEL.test(before)) return true;
+    return HEX_LABEL_AFTER.test(text.slice(end, end + HEX_LABEL_WINDOW));
+}
 
 /**
  * A ≥64-character base64/base64url run carrying lower case, upper case AND a
@@ -298,6 +378,15 @@ export function sanitizeFact(input: string): SanitizedText {
         hit("seed-phrase");
         return `${label}${sep}${placeholder("seed-phrase")}`;
     });
+
+    // Label-gated, and therefore run over the text as it stands now: the
+    // window check reads the characters on either side, so it has to see the
+    // real neighbours rather than a half-rewritten string.
+    text = text.replace(HEX_RUN, (match: string, offset: number, whole: string) =>
+        hasAdjacentCredentialLabel(whole, offset, offset + match.length)
+            ? hit("labelled-key-material")
+            : match,
+    );
 
     text = text.replace(HIGH_ENTROPY_CANDIDATE, (token: string) =>
         looksLikeSecretBlob(token) ? hit("high-entropy-secret") : token,
