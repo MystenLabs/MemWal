@@ -54,7 +54,7 @@ export function registerRememberBulkTool(
         {
             ...TOOL_METADATA.memwal_remember_bulk,
             description:
-                "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. A Walrus write takes 30-60s and this call waits for them, so a success carries blob_ids and means the facts are stored. If they outrun that budget you get job_ids and the facts are NOT yet saved — say they are being saved rather than stored, and resolve them with memwal_remember_status.",
+                "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. By default this returns in ~1s once the relayer has accepted the batch (job_ids) — the Walrus writes are still in flight and the facts are NOT stored yet. Do not claim they are saved. Resolve with memwal_remember_status(job_ids). blob_ids in the same reply mean they landed inside an optional wait budget (MEMWAL_MCP_REMEMBER_WAIT_MS).",
             inputSchema: REMEMBER_BULK_INPUT,
         },
         wrapTool<{ facts: string[]; namespace?: string }>(session, "memwal_remember_bulk", async ({ facts, namespace }) => {

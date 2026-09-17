@@ -28,7 +28,7 @@ questions:
   - What changed in the MemWal MCP changelog?
   - When was the automatic memory plugin added to MemWal MCP?
 answer: >-
-  The latest published MCP package on npm `latest` is 0.0.13. This branch's in-tree plugin launchers pin `@mysten-incubation/memwal-mcp@0.0.14-dev.0` because npm has no `0.0.14` yet — pinning the unpublished version would fail to resolve. 0.0.14 (unreleased) stops cold start from advertising tools an older relayer does not serve, bounds stalled relayer calls, honours `retry_after` on 429, and keeps `memwal_remember` waiting for `done` by default (`MEMWAL_MCP_REMEMBER_WAIT_MS=0` returns at accept). 0.0.13 stopped reporting a timed-out write as safe to retry, answers a rejected delegate key with `memwal_login` instead of a dropped-connection story, backs off on handshake 429, and pinned plugin launchers to `@0.0.13` so npx cannot keep a cached 0.0.5.
+  The latest published MCP package on npm `latest` is 0.0.13. This branch's in-tree plugin launchers pin `@mysten-incubation/memwal-mcp@0.0.14-dev.0` because npm has no `0.0.14` yet — pinning the unpublished version would fail to resolve. 0.0.14 (unreleased) stops cold start from advertising tools an older relayer does not serve, bounds stalled relayer calls, honours `retry_after` on 429, and returns `memwal_remember` at accept by default (`MEMWAL_MCP_REMEMBER_WAIT_MS=0`; set `90000` to wait for `blob_id`). 0.0.13 stopped reporting a timed-out write as safe to retry, answers a rejected delegate key with `memwal_login` instead of a dropped-connection story, backs off on handshake 429, and pinned plugin launchers to `@0.0.13` so npx cannot keep a cached 0.0.5.
 ---
 
 ## 0.0.14
@@ -46,7 +46,7 @@ Unreleased package version. Plugin launchers in this tree pin `@mysten-incubatio
 
 ### Changed
 
-- `memwal_remember` keeps blocking until the write reaches `done`, so a result carries a real `blob_id`. Returning at accept is available behind `MEMWAL_MCP_REMEMBER_WAIT_MS=0` for an operator who wants it, and remains its own product decision rather than a side effect of the latency work here.
+- `memwal_remember` / `memwal_remember_bulk` return at accept by default (`MEMWAL_MCP_REMEMBER_WAIT_MS=0`, ~1s, `job_id`). The Walrus write continues in the background; do not treat that reply as stored. Set `MEMWAL_MCP_REMEMBER_WAIT_MS=90000` to restore wait-for-`blob_id` (90s ceiling). Do not use a value between 0 and the real completion time — that pays the wait and still returns pending. The MCP TypeScript SDK's default tools/call timeout is 60s, so a 90s wait loses on hosts that do not raise it.
 
 ## 0.0.13
 

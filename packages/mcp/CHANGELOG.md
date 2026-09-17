@@ -10,9 +10,10 @@
 - `memwal_remember` sends a content-derived idempotency key, so the retry its own timeout message invites really does attach to the job already in flight instead of storing a second paid copy. The key is computed by the tool rather than relied on from the SDK, whose published build mints a random UUID per client instance.
 - `memwal_remember_status` accepts `job_ids` to settle a whole batch in one call, and reports a mixed batch honestly — a still-uploading row no longer renders the poll timeout as `error=`, which read as a failed write. Settling in one request also matters against the rate limit: 20 ids cost one request, not twenty.
 - The bridge's cold-start tool list no longer disagrees with the sidecar's. `memwal_remember_status` advertised only `job_id`, required, under `additionalProperties: false`, so the batch call the tools themselves instruct was rejected until `tools/list_changed` arrived; the `waitMs` ceiling advertised 60000 after the sidecar lowered it to 45000, which came back as an MCP validation error; and `memwal_remember_bulk` still carried its pre-queue description. Tests now pin the parts an agent acts on.
+
 ### Changed
 
-- `memwal_remember` keeps blocking until the write reaches `done`, so a result carries a real `blob_id`. Returning at accept is available behind `MEMWAL_MCP_REMEMBER_WAIT_MS=0` for an operator who wants it, and remains its own product decision rather than a side effect of the latency work here.
+- `memwal_remember` / `memwal_remember_bulk` return at accept by default (`MEMWAL_MCP_REMEMBER_WAIT_MS=0`, ~1s, `job_id`). The Walrus write continues in the background; do not treat that reply as stored. Set `MEMWAL_MCP_REMEMBER_WAIT_MS=90000` to restore wait-for-`blob_id` (90s ceiling). Do not use a value between 0 and the real completion time — that pays the wait and still returns pending. The MCP TypeScript SDK's default tools/call timeout is 60s, so a 90s wait loses on hosts that do not raise it.
 
 ## 0.0.13
 
