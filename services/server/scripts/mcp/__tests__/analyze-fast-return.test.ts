@@ -14,10 +14,10 @@
  * back paired with the fact it carries, so a later partial failure is
  * actionable.
  */
-// A small non-zero wait so the bounded-wait branch is reachable quickly. The
-// shipped default is the full 90s ceiling (D1 kept the block-to-terminal
-// contract), so leaving it unset would make every assertion below about a
-// partly landed batch wait out that ceiling instead of returning.
+// A small non-zero wait so the bounded-wait branch is reachable at all. The
+// shipped default is now 0 — the tools return at accept — so leaving it unset
+// would skip the wait entirely and every assertion below about a partly landed
+// batch would have nothing to observe.
 // Set before the dynamic import, because the budget is read once at load.
 process.env.MEMWAL_MCP_REMEMBER_WAIT_MS = "500";
 

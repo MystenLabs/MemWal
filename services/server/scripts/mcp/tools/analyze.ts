@@ -4,6 +4,7 @@ import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
 import {
+    ANALYZE_EXTRACTION_DEADLINE_MS,
     REMEMBER_POLL_INTERVAL_MS,
     REMEMBER_WAIT_MS,
     pendingBulkMessage,
@@ -76,7 +77,12 @@ export function registerAnalyzeTool(
                 // where it allows a remember 30s. The 15s accept ceiling would
                 // have cut off healthy extraction on any transcript long enough
                 // to be worth extracting from.
-                { idempotent: false, deadlineMs: 60_000 },
+                //
+                // Budgeted just under the MCP client's own ceiling rather than
+                // level with it: at 60_000 this leg raced the host's abort and
+                // the caller lost the error message, on the one endpoint whose
+                // retry duplicates every extracted fact.
+                { idempotent: false, deadlineMs: ANALYZE_EXTRACTION_DEADLINE_MS },
             );
 
             const facts = accepted.facts ?? [];
