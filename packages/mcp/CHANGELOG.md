@@ -10,8 +10,6 @@
 - `memwal_remember` sends a content-derived idempotency key, so the retry its own timeout message invites really does attach to the job already in flight instead of storing a second paid copy. The key is computed by the tool rather than relied on from the SDK, whose published build mints a random UUID per client instance.
 - `memwal_remember_status` accepts `job_ids` to settle a whole batch in one call, and reports a mixed batch honestly — a still-uploading row no longer renders the poll timeout as `error=`, which read as a failed write. Settling in one request also matters against the rate limit: 20 ids cost one request, not twenty.
 - The bridge's cold-start tool list no longer disagrees with the sidecar's. `memwal_remember_status` advertised only `job_id`, required, under `additionalProperties: false`, so the batch call the tools themselves instruct was rejected until `tools/list_changed` arrived; the `waitMs` ceiling advertised 60000 after the sidecar lowered it to 45000, which came back as an MCP validation error; and `memwal_remember_bulk` still carried its pre-queue description. Tests now pin the parts an agent acts on.
-- The accepted-then-failed report attached to `memwal_recall` no longer tells the agent to re-send text it does not have. The relayer stores only the SEAL ciphertext, so a failed write's wording cannot be recovered — the report now says so and asks the user to restate the fact rather than inviting the agent to guess.
-
 ### Changed
 
 - `memwal_remember` keeps blocking until the write reaches `done`, so a result carries a real `blob_id`. Returning at accept is available behind `MEMWAL_MCP_REMEMBER_WAIT_MS=0` for an operator who wants it, and remains its own product decision rather than a side effect of the latency work here.

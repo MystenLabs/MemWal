@@ -1067,17 +1067,13 @@ fn should_spawn_after_reset(rows_affected: u64) -> bool {
 /// so it matches zero rows and returns before `enqueue_wallet_job`.
 const PREPARE_CLAIM_TTL_SECS: i64 = 60;
 
-/// Re-claiming clears `failure_reported_at` along with `error_msg`: the row is
-/// being reused for a fresh attempt, and the recall report only surfaces a
-/// failure once per row. Left set, a retry that failed AGAIN would never be
-/// reported — silent loss, which is the exact thing that report exists to stop.
 async fn claim_remember_preparation(
     pool: &sqlx::PgPool,
     job_id: &str,
 ) -> Result<Option<String>, AppError> {
     let token = uuid::Uuid::new_v4().to_string();
     let claimed: Option<String> = sqlx::query_scalar(
-        "UPDATE remember_jobs SET prepare_claimed_at = NOW(), prepare_claim_token = $3, status = CASE WHEN status = 'failed' AND blob_id IS NULL THEN 'pending' ELSE status END, error_msg = CASE WHEN blob_id IS NULL THEN NULL ELSE error_msg END, failure_reported_at = CASE WHEN blob_id IS NULL THEN NULL ELSE failure_reported_at END, updated_at = NOW() WHERE id = $1 AND blob_id IS NULL AND status IN ('pending', 'failed') AND (prepare_claimed_at IS NULL OR prepare_claimed_at < NOW() - make_interval(secs => $2) OR status = 'failed') RETURNING prepare_claim_token",
+        "UPDATE remember_jobs SET prepare_claimed_at = NOW(), prepare_claim_token = $3, status = CASE WHEN status = 'failed' AND blob_id IS NULL THEN 'pending' ELSE status END, error_msg = CASE WHEN blob_id IS NULL THEN NULL ELSE error_msg END, updated_at = NOW() WHERE id = $1 AND blob_id IS NULL AND status IN ('pending', 'failed') AND (prepare_claimed_at IS NULL OR prepare_claimed_at < NOW() - make_interval(secs => $2) OR status = 'failed') RETURNING prepare_claim_token",
     )
     .bind(job_id)
     .bind(PREPARE_CLAIM_TTL_SECS)
@@ -1630,47 +1626,6 @@ mod tests {
         assert_eq!(status, "done");
     }
 
-    /// `memwal_remember` tells an agent to send a failed fact again. The
-    /// derived idempotency key collapses that retry onto the failed row, and
-    /// the claim used to be refused for 60s — while the route answered 202
-    /// ACCEPTED regardless, so the caller was told a write was queued when
-    /// nothing was running. A job that has finished failing has no live
-    /// preparation to fence.
-    /// The recall failure report fires once per ROW, and a re-claim reuses the
-    /// row for a fresh attempt. If the flag survived that reset, a retry that
-    /// failed again would never be reported — silent loss, which is precisely
-    /// what the report exists to prevent. Two fixes that are each correct
-    /// alone and wrong together.
-    #[tokio::test]
-    async fn reclaiming_a_reported_failure_lets_it_be_reported_again() {
-        let pool = idem_test_pool().await;
-        let job_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO remember_jobs (id, owner, namespace, status, error_msg, failure_reported_at)
-             VALUES ($1, '0xowner', 'ns', 'failed', 'first failure', NOW())",
-        )
-        .bind(&job_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        claim_remember_preparation(&pool, &job_id)
-            .await
-            .unwrap()
-            .expect("a failed job is re-claimable");
-
-        let reported: Option<chrono::DateTime<chrono::Utc>> =
-            sqlx::query_scalar("SELECT failure_reported_at FROM remember_jobs WHERE id = $1")
-                .bind(&job_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(
-            reported.is_none(),
-            "a re-claimed row must be reportable again if it fails a second time",
-        );
-    }
-
     #[tokio::test]
     async fn a_failed_job_is_reclaimable_immediately() {
         let pool = idem_test_pool().await;
@@ -1933,17 +1888,6 @@ mod tests {
         .unwrap();
         sqlx::raw_sql(include_str!(
             "../../migrations/013_remember_write_idempotency_index.sql"
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
-        // 021 adds `failure_reported_at`, which `claim_remember_preparation`
-        // clears on re-claim. This helper builds its own minimal schema rather
-        // than going through `VectorDb::new()`, so a migration wired into that
-        // chain does not reach it — every column a test in this module touches
-        // has to be listed here explicitly.
-        sqlx::raw_sql(include_str!(
-            "../../migrations/021_failed_write_report_ack.sql"
         ))
         .execute(&pool)
         .await

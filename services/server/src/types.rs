@@ -1578,45 +1578,6 @@ pub struct RecallResponse {
     /// failed and were silently omitted from `results`. Zero on the happy path.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub dropped_count: usize,
-    /// Writes this owner started recently that ended in `failed` — facts the
-    /// caller was told were accepted but that were never stored.
-    ///
-    /// Carried on the *read* path on purpose. A write now returns as soon as
-    /// the relayer accepts the job, so a failure after that point has no
-    /// caller left listening: `memwal_remember_status` answers it, but nothing
-    /// obliges an agent to ask, and saving a memory is typically the last
-    /// thing it does in a turn. Recall is the call an agent always makes, so
-    /// attaching the bad news here is what turns a silent loss into a visible
-    /// one.
-    ///
-    /// Empty on the happy path and omitted from the wire, so an older client
-    /// that ignores the field sees exactly today's response.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub failed_writes: Vec<FailedWrite>,
-}
-
-/// One write that was accepted and then failed, as reported back on recall.
-#[derive(Debug, Serialize)]
-pub struct FailedWrite {
-    /// The `job_id` the write returned when it was accepted, so a caller can
-    /// match this against what it was told at the time.
-    pub job_id: String,
-    pub namespace: String,
-    /// The failure message, after `sanitize_job_error_for_client` — the same
-    /// treatment `GET /api/remember/:job_id` and the bulk status endpoint give
-    /// it, and for the same two reasons. An infrastructure-funding failure is
-    /// replaced wholesale (its raw text names the relayer's own wallet and its
-    /// balance shortfall, which is neither the tenant's business nor safe to
-    /// show them: it reads as "top this address up"). Everything else keeps its
-    /// wording with long hex runs redacted.
-    ///
-    /// What survives is the part a caller can act on: whether this looks
-    /// transient or permanent, and so whether re-sending the fact is likely to
-    /// work.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// When the job reached `failed`, RFC 3339.
-    pub failed_at: String,
 }
 
 fn is_zero_usize(n: &usize) -> bool {

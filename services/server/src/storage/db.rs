@@ -105,12 +105,6 @@ const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
     // constraint 015 set up — see 019's header.
     migration!("019_memory_read_api_updated_at_set_not_null.sql"),
     migration!("020_read_api_followups.sql"),
-    // 021 adds `remember_jobs.failure_reported_at`, which
-    // `recent_failed_remember_jobs` writes on every recall and
-    // `claim_remember_preparation` clears on re-claim. Both are plain
-    // queries against a column that only exists if this runs, so a
-    // deploy that skips it fails those statements with 42703.
-    migration!("021_failed_write_report_ack.sql"),
 ];
 
 /// Every migration the pipeline applies, in the order it applies them.
@@ -204,13 +198,6 @@ mod tests {
 
     /// Every `.sql` file in `services/server/migrations` must be wired
     /// into the pipeline.
-    ///
-    /// Regression test for migration 021: the file was added and merged
-    /// to dev, but never listed in `VectorDb::new`, so the column it
-    /// creates never existed. Four `routes::remember` tests failed with
-    /// `column "failure_reported_at" does not exist` (42703), and any
-    /// deploy of that build would have failed the same statements in
-    /// production. Needs no database.
     #[test]
     fn every_migration_file_is_wired_into_the_pipeline() {
         use std::collections::BTreeSet;
@@ -1860,36 +1847,6 @@ impl VectorDb {
         Ok(row)
     }
 
-    /// Writes this owner started that ended in `failed` within `window`.
-    ///
-    /// Serves the failure report attached to recall responses. Owner-scoped
-    /// from `AuthInfo`, never from request input, so one account cannot read
-    /// another's failures.
-    ///
-    /// Bounded by both a time window and `limit` because this runs on the
-    /// read path: recall is the hottest authed route, and an account with a
-    /// long tail of old failures must not turn every recall into a large
-    /// scan. `remember_jobs (owner, status, updated_at DESC)` (migration 006)
-    /// covers the predicate and the ordering, so this is an index range scan
-    /// of at most `limit` rows.
-    ///
-    /// Failures repeat across calls until they age out of the window. That is
-    /// deliberate — suppressing a report after one sighting would put the
-    /// notice back on the caller remembering to act on it, which is the
-    /// failure mode this whole path exists to remove.
-    /// Accepted-then-failed writes this owner has not been told about yet.
-    ///
-    /// Read-only. Reporting is still one-shot, but the stamp is taken by
-    /// `claim_failed_write_reports` at the moment the response is built, not
-    /// here — this runs concurrently with the embed/search/decrypt that
-    /// follow, and any of those can fail or be abandoned. Stamping here meant
-    /// a recall that 500d on the embedding provider, or that the SDK aborted
-    /// at its hard 15s, still marked the rows reported: the user was never
-    /// told, on that recall or any later one, that their write had failed.
-    ///
-    /// One-shot is preserved because the claim is a single conditional UPDATE
-    /// over these ids — a concurrent recall that got there first claims them
-    /// and this one is handed back nothing to report.
     /// How durable writes that finished inside `window` turned out,
     /// across every owner: `(failed, succeeded)`.
     ///
@@ -1937,121 +1894,6 @@ impl VectorDb {
                 );
                 Err(AppError::Internal(format!(
                     "Failed to count recent remember outcomes: {}",
-                    e
-                )))
-            }
-        }
-    }
-
-    pub async fn recent_failed_remember_jobs(
-        &self,
-        owner: &str,
-        window: std::time::Duration,
-        limit: i64,
-    ) -> Result<Vec<crate::types::FailedWrite>, AppError> {
-        let started = std::time::Instant::now();
-        let rows = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                Option<String>,
-                chrono::DateTime<chrono::Utc>,
-            ),
-        >(
-            "SELECT id, namespace, error_msg, updated_at FROM remember_jobs
-             WHERE owner = $1
-               AND status = 'failed'
-               AND failure_reported_at IS NULL
-               AND updated_at >= $2
-             ORDER BY updated_at DESC
-             LIMIT $3",
-        )
-        .bind(owner)
-        .bind(chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default())
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await;
-
-        let rows = match rows {
-            Ok(rows) => rows,
-            Err(e) => {
-                crate::observability::observe_db(
-                    "remember_jobs.recent_failed",
-                    "error",
-                    started.elapsed(),
-                );
-                return Err(AppError::Internal(format!(
-                    "Failed to list failed remember jobs: {}",
-                    e
-                )));
-            }
-        };
-        crate::observability::observe_db("remember_jobs.recent_failed", "ok", started.elapsed());
-
-        Ok(rows
-            .into_iter()
-            .map(
-                |(job_id, namespace, error, failed_at)| crate::types::FailedWrite {
-                    job_id,
-                    namespace,
-                    // Raw here on purpose: `routes` is not reachable from the
-                    // lib crate, and this is the storage layer. The caller
-                    // (`routes::recall::failed_writes_for`) sanitizes before
-                    // any of it reaches a client.
-                    error,
-                    failed_at: failed_at.to_rfc3339(),
-                },
-            )
-            .collect())
-    }
-
-    /// Stamp `failure_reported_at` on the subset of `ids` not already
-    /// reported, and return the ids actually claimed.
-    ///
-    /// The conditional `failure_reported_at IS NULL` is what keeps the report
-    /// one-shot: two recalls that both read the same unreported row race here
-    /// and exactly one UPDATE matches, so only that one reports it. The other
-    /// gets an empty set and stays quiet — which matters because the report
-    /// text asks the agent to send the fact again, and a double report is a
-    /// duplicate paid Walrus write.
-    ///
-    /// Called at response construction, so a recall that never reaches the
-    /// client does not consume the report.
-    pub async fn claim_failed_write_reports(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<String>, AppError> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let started = std::time::Instant::now();
-        let rows = sqlx::query_scalar::<_, String>(
-            "UPDATE remember_jobs SET failure_reported_at = NOW()
-             WHERE id = ANY($1) AND failure_reported_at IS NULL
-             RETURNING id",
-        )
-        .bind(ids)
-        .fetch_all(&self.pool)
-        .await;
-
-        match rows {
-            Ok(rows) => {
-                crate::observability::observe_db(
-                    "remember_jobs.claim_failure_report",
-                    "ok",
-                    started.elapsed(),
-                );
-                Ok(rows)
-            }
-            Err(e) => {
-                crate::observability::observe_db(
-                    "remember_jobs.claim_failure_report",
-                    "error",
-                    started.elapsed(),
-                );
-                Err(AppError::Internal(format!(
-                    "Failed to claim failed-write reports: {}",
                     e
                 )))
             }
@@ -3501,81 +3343,6 @@ mod quota_admission_tests {
         VectorDb::new(&test_database_url())
             .await
             .expect("test database must be reachable with pgvector installed")
-    }
-
-    /// The failed-write report must survive a recall that never lands, and
-    /// must still go out only once.
-    ///
-    /// Reading and claiming used to be one statement, stamped inside a task
-    /// spawned before the embed/search/decrypt that can each fail with `?` or
-    /// be abandoned when the SDK hits its hard abort. That burned the
-    /// acknowledgement for recalls that returned no report at all, and the
-    /// failure — which the user has no other way to learn about — was never
-    /// surfaced again. Splitting them is only safe if the read is genuinely
-    /// non-consuming and the claim is genuinely exclusive; both are asserted
-    /// here because nothing else covers either function.
-    #[tokio::test]
-    async fn failed_write_report_reads_freely_but_claims_once() {
-        let db = test_db().await;
-        let owner = unique_owner("failed-write-report");
-        let job_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO remember_jobs (id, owner, namespace, status, error_msg)
-             VALUES ($1, $2, 'ns', 'failed', 'walrus upload rejected')",
-        )
-        .bind(&job_id)
-        .bind(&owner)
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        let window = std::time::Duration::from_secs(24 * 60 * 60);
-
-        // Read twice. A recall that dies after this point must leave the row
-        // reportable, so neither read may consume it.
-        for attempt in 0..2 {
-            let found = db
-                .recent_failed_remember_jobs(&owner, window, 5)
-                .await
-                .unwrap();
-            assert_eq!(
-                found.len(),
-                1,
-                "read {} consumed the report; an abandoned recall would lose it",
-                attempt,
-            );
-            assert_eq!(found[0].job_id, job_id);
-        }
-
-        // Claiming is what acknowledges it, and only the first claim wins —
-        // the report text asks the agent to re-send the fact, so a second
-        // report is a duplicate paid Walrus write.
-        let first = db
-            .claim_failed_write_reports(&[job_id.clone()])
-            .await
-            .unwrap();
-        assert_eq!(first, vec![job_id.clone()], "the first claim must win");
-
-        let second = db
-            .claim_failed_write_reports(&[job_id.clone()])
-            .await
-            .unwrap();
-        assert!(
-            second.is_empty(),
-            "a second claim must report nothing, got {:?}",
-            second,
-        );
-
-        // And the row is now invisible to the read, so later recalls stay quiet.
-        let after = db
-            .recent_failed_remember_jobs(&owner, window, 5)
-            .await
-            .unwrap();
-        assert!(
-            after.is_empty(),
-            "a claimed failure must not be read again, got {:?}",
-            after,
-        );
     }
 
     /// Unique per test so concurrent runs cannot see each other's rows, and so
