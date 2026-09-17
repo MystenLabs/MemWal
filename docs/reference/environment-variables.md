@@ -131,6 +131,12 @@ These are not all enforced at boot, but most real deployments need them.
 | `MEMWAL_ACCOUNT_ID` | none | Optional account ID in server config |
 | `WALRUS_PACKAGE_ID` | network default | Override the Walrus on-chain package used by the sidecar |
 | `WALRUS_UPLOAD_RELAY_URL` | network default | Override the Walrus upload relay used by the sidecar |
+| `WALRUS_DIRECT_UPLOAD` | `false` | When `true`, skip the upload relay and write slivers to storage nodes directly. Prefer the relay when one is available; direct is the fallback path |
+| `WALRUS_RELAY_TIMEOUT_MS` | `120000` | Timeout for one upload-relay request. Only read when the relay path is active (`WALRUS_DIRECT_UPLOAD` unset/false and `WALRUS_UPLOAD_RELAY_URL` set) |
+| `WALRUS_STORAGE_NODE_TIMEOUT_MS` | `30000` | Timeout for one storage-node HTTP request on both the direct and relay paths (relay still reads slivers back from nodes). Per-node, not per write — raising it also lengthens how long one unresponsive node can stall a shard. Allowed range `1000`–`180000`; keep under `WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS` |
+| `WALRUS_UPLOAD_MAX_CONCURRENCY` | size of `SERVER_SUI_PRIVATE_KEYS` (min 1) | Sidecar-global cap on concurrent Walrus uploads |
+| `WALRUS_UPLOAD_PER_WALLET_CONCURRENCY` | `1` | Per-uploader-wallet cap on concurrent Walrus uploads |
+| `WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS` | `120000` | How long an upload waits for a free global/wallet slot before failing acquisition |
 | `SEAL_SERVER_CONFIGS` | network default | Optional JSON SEAL server config override for independent or committee servers |
 | `SEAL_KEY_SERVERS` | network default | Legacy comma-separated independent SEAL key server override. Used only when `SEAL_SERVER_CONFIGS` is unset. Deprecated but supported through relayer API `1.x` |
 | `SEAL_THRESHOLD` | `min(2, total configured weight)` | Required configured server weight for SEAL encrypt/decrypt |
