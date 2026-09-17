@@ -2593,6 +2593,40 @@ impl WalletJobError {
         lower.contains("timed out waiting for") && lower.contains("upload slot")
     }
 
+    /// True if `msg` is one of the sidecar's register-transaction journal
+    /// assertions (`validatePreparedRegisterTransaction` and friends in
+    /// scripts/sidecar/routes/walrus-upload-journal.ts).
+    ///
+    /// These describe the SHAPE of a transaction the sidecar already built —
+    /// wrong gas source, missing WAL withdrawal, sender/gas-owner mismatch,
+    /// non-canonical bytes, digest mismatch. Replaying the journal rebuilds
+    /// the same shape, so every retry re-fails identically; the job burns its
+    /// whole retry budget before dying. Classify Permanent so it dies on the
+    /// first attempt and the caller is told to send the fact again.
+    ///
+    /// Anchored on the assertion text rather than the transport's
+    /// `NO_SIDE_EFFECT` code on purpose: that code means only "nothing reached
+    /// the chain" and is also returned for pre-submission infra blips
+    /// (`causeCode: SHARED_SERVICE_UNAVAILABLE` in retry/rpc.ts), which must
+    /// stay retryable.
+    pub fn is_register_transaction_shape_error(msg: &str) -> bool {
+        let lower = msg.to_ascii_lowercase();
+        if !lower.contains("registertransaction") {
+            return false;
+        }
+        lower.contains("must use a validduring address-balance expiration")
+            || lower.contains("must pay gas from the address balance")
+            || lower.contains("has no wal address-balance withdrawal")
+            || lower.contains("resolved wal from an owned coin")
+            || lower.contains("resolved the relay tip from an owned sui coin")
+            || lower.contains("must use a distinct gas owner")
+            || lower.contains("sender does not match")
+            || lower.contains("gas owner does not match")
+            || lower.contains("is not canonical base64")
+            || lower.contains("digest mismatch")
+            || lower.contains("contains invalid transactiondata")
+    }
+
     /// True if `msg` is a pool-wallet WAL shortfall. Deliberately the
     /// substring half of `parse_wal_balance_alert_info` without its
     /// `available < WAL_BALANCE_LOW_THRESHOLD_MIST` gate: that threshold
@@ -2626,6 +2660,13 @@ impl WalletJobError {
         }
         if parse_wal_balance_alert_info(msg).is_some() {
             return WalletJobError::WalrusBalanceLow(msg.to_string());
+        }
+        // Register-transaction shape assertions are deterministic for the same
+        // journal — see is_register_transaction_shape_error. Checked early so a
+        // shape rejection cannot fall through to the Transient catch-all at the
+        // end and spend the job's retry budget re-failing identically.
+        if Self::is_register_transaction_shape_error(msg) {
+            return WalletJobError::Permanent(msg.to_string());
         }
         // Sidecar upload limiter saturated — see UploadSlotCongestion docs.
         if Self::is_upload_slot_congestion_error(msg) {
@@ -2957,7 +2998,72 @@ SequenceNumber(884613305), o#B61aVqEgDskxru255FTdzua2RxbbnhDMFxmQ8SCxvj3n) alrea
 different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82BtHrp3F) \
 { k#80127c70.., k#81626d03.. } with 6842 stake].";
 
+    /// The exact production error string from the dev-relayer write outage of
+    /// 2026-09-17 (job d67d1fc2…, trace 12b3e920…). Every remember on dev failed
+    /// with this shape and, classified Transient, burned its retry budget before
+    /// dying — 0 blobs certified over the whole window.
+    const PROD_REGISTER_SHAPE_ERROR: &str =
+        "durable Walrus upload failed (503 Service Unavailable): \
+{\"error\":\"registerTransaction must use a ValidDuring address-balance expiration\",\
+\"code\":\"NO_SIDE_EFFECT\",\"traceId\":\"12b3e920-b94b-4100-bb35-fc0f0a1804e1\"}";
+
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn register_shape_rejection_is_permanent() {
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(PROD_REGISTER_SHAPE_ERROR),
+            WalletJobError::Permanent(_)
+        ));
+    }
+
+    #[test]
+    fn every_register_shape_assertion_is_permanent() {
+        for msg in [
+            "registerTransaction must pay gas from the address balance",
+            "registerTransaction has no WAL address-balance withdrawal",
+            "registerTransaction resolved WAL from an owned coin",
+            "registerTransaction resolved the relay tip from an owned SUI coin",
+            "sponsored registerTransaction must use a distinct gas owner",
+            "sponsored registerTransaction sender does not match the wallet",
+            "registerTransaction gas owner does not match the journaled wallet",
+            "registerTransaction.transactionBytes is not canonical base64",
+            "registerTransaction digest mismatch: expected abc, got def",
+            "registerTransaction contains invalid TransactionData: bad bytes",
+        ] {
+            assert!(
+                matches!(
+                    WalletJobError::classify_sidecar_error(msg),
+                    WalletJobError::Permanent(_)
+                ),
+                "expected Permanent for {msg}"
+            );
+        }
+    }
+
+    /// `NO_SIDE_EFFECT` alone must stay retryable: retry/rpc.ts returns it for
+    /// any pre-submission failure, including shared-infra blips that the next
+    /// attempt succeeds through.
+    #[test]
+    fn no_side_effect_without_a_shape_assertion_stays_transient() {
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(
+                "durable Walrus upload failed (503 Service Unavailable): \
+{\"error\":\"fetch failed\",\"code\":\"NO_SIDE_EFFECT\",\
+\"causeCode\":\"SHARED_SERVICE_UNAVAILABLE\"}"
+            ),
+            WalletJobError::Transient(_)
+        ));
+    }
+
+    /// The shape check keys on the assertion text, so an unrelated message that
+    /// merely mentions a sender mismatch must not be swallowed by it.
+    #[test]
+    fn unrelated_sender_mismatch_is_not_a_shape_rejection() {
+        assert!(!WalletJobError::is_register_transaction_shape_error(
+            "sponsor failed: sender does not match the wallet"
+        ));
+    }
 
     fn test_database_url() -> String {
         std::env::var("DATABASE_URL")
