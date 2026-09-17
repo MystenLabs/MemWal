@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 const releases = [
     {
@@ -63,37 +63,46 @@ for (const release of releases) {
     console.log(`${release.name} ${release.version}: manifests and changelogs synchronized`);
 }
 
+// The plugin no longer launches the server through `npx <name>@<pin>`: npx resolves
+// the name against the project the MCP client is started in, so a package planted
+// there could answer to the pinned spec (WALM-640). Every launch site must run the
+// plugin's launcher, which installs the pin under ~/.memwal/runtime and runs that
+// absolute entry point. The pin itself is plugin/plugin.json's version, already
+// checked against packages/mcp/package.json above.
 const mcpVersion = JSON.parse(readFileSync("packages/mcp/package.json", "utf8")).version;
-const expectedPluginArgs = ["-y", `@mysten-incubation/memwal-mcp@${mcpVersion}`];
-for (const pluginPath of [
-    "packages/mcp/plugin/.mcp.json",
-    "packages/mcp/plugin/.cursor-mcp.json",
-    "packages/mcp/plugin/.codex-mcp.json",
+const LAUNCHER = "scripts/launch_mcp.mjs";
+for (const [pluginPath, rootPlaceholder] of [
+    ["packages/mcp/plugin/.mcp.json", "${CLAUDE_PLUGIN_ROOT}"],
+    ["packages/mcp/plugin/.cursor-mcp.json", "${CURSOR_PLUGIN_ROOT}"],
+    ["packages/mcp/plugin/.codex-mcp.json", "${PLUGIN_ROOT}"],
 ]) {
-    const actual = JSON.parse(readFileSync(pluginPath, "utf8")).mcpServers.memwal.args;
-    if (JSON.stringify(actual) !== JSON.stringify(expectedPluginArgs)) {
+    const server = JSON.parse(readFileSync(pluginPath, "utf8")).mcpServers.memwal;
+    const expected = { command: "node", args: [`${rootPlaceholder}/${LAUNCHER}`] };
+    if (
+        server.command !== expected.command ||
+        JSON.stringify(server.args) !== JSON.stringify(expected.args)
+    ) {
         throw new Error(
-            `${pluginPath}: expected ${JSON.stringify(expectedPluginArgs)}, received ${JSON.stringify(actual)}`,
+            `${pluginPath}: expected ${JSON.stringify(expected)}, received ${JSON.stringify({ command: server.command, args: server.args })}`,
         );
     }
 }
 const installerPath = "packages/mcp/plugin/scripts/install_codex_hooks.mjs";
 const installer = readFileSync(installerPath, "utf8");
-const expectedPin = expectedPluginArgs[1];
-if (installer.includes('["-y", "@mysten-incubation/memwal-mcp"]')) {
+if (/command\s*=\s*\\?"npx/.test(installer)) {
     throw new Error(
-        `${installerPath}: expected ${JSON.stringify(expectedPluginArgs)}, received ${JSON.stringify(["-y", "@mysten-incubation/memwal-mcp"])}`,
+        `${installerPath}: registers the MCP server through npx; it must register the ` +
+            `absolute path to ${LAUNCHER} (WALM-640)`,
     );
 }
-if (
-    !installer.includes(expectedPin) &&
-    !installer.includes("@mysten-incubation/memwal-mcp@${")
-) {
-    throw new Error(
-        `${installerPath}: expected ${JSON.stringify(expectedPluginArgs)}, received missing version pin`,
-    );
+if (!installer.includes("launch_mcp.mjs")) {
+    throw new Error(`${installerPath}: does not register ${LAUNCHER}`);
 }
-console.log(`MCP package ${mcpVersion}: plugin npx args pin ${expectedPin}`);
+const launcherPath = `packages/mcp/plugin/${LAUNCHER}`;
+if (!existsSync(launcherPath)) {
+    throw new Error(`${launcherPath}: missing, but every launch site points at it`);
+}
+console.log(`MCP package ${mcpVersion}: every launch site runs ${LAUNCHER} by absolute path`);
 
 function readVersion(content, kind) {
     if (kind === "version") return JSON.parse(content).version;

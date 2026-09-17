@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "memwal": {
-      "command": "npx",
-      "args": ["-y", "@mysten-incubation/memwal-mcp@0.0.14"]
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/scripts/launch_mcp.mjs"]
     }
   }
 }

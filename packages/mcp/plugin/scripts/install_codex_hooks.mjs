@@ -32,10 +32,6 @@ import { fileURLToPath } from "node:url";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(SCRIPT_DIR);
 
-function resolveMcpVersion() {
-    return JSON.parse(readFileSync(join(PLUGIN_ROOT, "plugin.json"), "utf8")).version;
-}
-
 const CODEX_DIR = join(homedir(), ".codex");
 const HOOKS_FILE = join(CODEX_DIR, "hooks.json");
 const CONFIG_FILE = join(CODEX_DIR, "config.toml");
@@ -97,16 +93,25 @@ function writeHooks(config) {
     writeFileSync(HOOKS_FILE, JSON.stringify(config, null, 2) + "\n");
 }
 
-/** Append [mcp_servers.memwal] to config.toml if it isn't registered yet. */
+/**
+ * Append [mcp_servers.memwal] to config.toml if it isn't registered yet.
+ *
+ * Registers the plugin's launcher by absolute path rather than
+ * `npx @mysten-incubation/memwal-mcp@<pin>`. npx resolves that name against the
+ * directory Codex is started in, so a package installed in the user's project under
+ * the same name — claiming the pinned version — was run instead of ours (WALM-640).
+ * The launcher installs the pinned version under ~/.memwal/runtime and runs that
+ * absolute entry point, so no project directory takes part in the resolution.
+ */
 function ensureMcpRegistered() {
     mkdirSync(CODEX_DIR, { recursive: true });
     let content = existsSync(CONFIG_FILE) ? readFileSync(CONFIG_FILE, "utf8") : "";
     if (content.includes("[mcp_servers.memwal]")) return false;
-    const spec = `@mysten-incubation/memwal-mcp@${resolveMcpVersion()}`;
+    const launcher = join(SCRIPT_DIR, "launch_mcp.mjs");
     const block =
         "\n[mcp_servers.memwal]\n" +
-        'command = "npx"\n' +
-        `args = ["-y", "${spec}"]\n`;
+        'command = "node"\n' +
+        `args = [${JSON.stringify(launcher)}]\n`;
     writeFileSync(CONFIG_FILE, (content.trimEnd() + "\n" + block).trimStart());
     return true;
 }

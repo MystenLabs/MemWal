@@ -23,6 +23,62 @@ Add Walrus Memory MCP to your MCP client config:
 }
 ```
 
+## How the plugin launches the server
+
+The [MemWal plugin](https://memory.walrus.xyz/mcp/claude-code) does **not** use the
+`npx` form above. `npx` resolves a package *name* against the directory the MCP
+client was started in — your project — so a project that contains an installed
+`@mysten-incubation/memwal-mcp` claiming the pinned version would be run instead of
+the published one. Pinning the version in the `npx` command does not prevent that:
+the planted package simply claims the pinned version.
+
+Instead, every plugin launch config runs the plugin's launcher:
+
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/launch_mcp.mjs"]
+    }
+  }
+}
+```
+
+The launcher installs the pinned version once into a directory it owns and then
+runs that absolute entry point with the current `node` binary:
+
+```
+~/.memwal/runtime/memwal-mcp@<version>/node_modules/@mysten-incubation/memwal-mcp/dist/bin/memwal-mcp.js
+```
+
+It never consults your project's `node_modules`, a `PATH`-relative bin shim, or
+your project's `.npmrc`, and it fails rather than falling back to the package name
+if the pinned version cannot be installed. Everything after the script path is
+forwarded to the server unchanged, so flags such as `--namespace work` or
+`--relayer <url>` work exactly as they do above. Set `MEMWAL_MCP_RUNTIME_DIR` (an
+absolute path) to move the trusted directory elsewhere.
+
+If you configure MemWal without the plugin and want the same property, install the
+version you intend to run into a directory outside any project and point your
+client at its absolute path:
+
+```sh
+mkdir -p ~/.memwal/runtime/memwal-mcp@0.0.14
+npm install --prefix ~/.memwal/runtime/memwal-mcp@0.0.14 @mysten-incubation/memwal-mcp@0.0.14
+```
+
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "command": "node",
+      "args": ["/absolute/path/to/home/.memwal/runtime/memwal-mcp@0.0.14/node_modules/@mysten-incubation/memwal-mcp/dist/bin/memwal-mcp.js"]
+    }
+  }
+}
+```
+
 ## Login
 
 Run the login flow manually:
