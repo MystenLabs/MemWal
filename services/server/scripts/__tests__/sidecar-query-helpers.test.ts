@@ -27,6 +27,7 @@ import {
     WALRUS_PACKAGE_ID,
 } from "../sidecar/config.js";
 import {
+    addressBalanceExpiration,
     assertAddressBalanceRegisterTransaction,
     assertSponsoredRegisterTransactionKind,
     createdBlobObjectIdFromTransaction,
@@ -1059,4 +1060,83 @@ test("a rejected register expiration names the bound that broke the guard", () =
             return true;
         },
     );
+});
+
+
+/** Build a register the way `prepareRegisterTransaction` does: gas from the
+ * address balance, a WAL withdrawal, and the expiration the production path now
+ * applies. Every other register fixture in this file hand-sets `ValidDuring`,
+ * which is exactly why the direct-signed path could reject every write in
+ * production while the suite stayed green. */
+async function directSignedRegister(): Promise<TransactionDataBuilder> {
+    const signer = new Ed25519Keypair();
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.setGasOwner(signer.toSuiAddress());
+    transaction.setGasBudget(1_000n);
+    transaction.setGasPrice(1n);
+    transaction.setGasPayment([]);
+    const walType = `0x${"2".repeat(64)}::wal::WAL`;
+    const withdrawal = transaction.withdrawal({ amount: 1n, type: walType });
+    const wal = transaction.moveCall({
+        target: "0x2::coin::redeem_funds",
+        typeArguments: [walType],
+        arguments: [withdrawal],
+    });
+    transaction.moveCall({
+        target: "0x2::coin::destroy_zero",
+        typeArguments: [walType],
+        arguments: [wal],
+    });
+    transaction.setExpiration(
+        addressBalanceExpiration(7n, await transaction.build({ onlyTransactionKind: true })),
+    );
+    return TransactionDataBuilder.fromBytes(await transaction.build());
+}
+
+test("the expiration prepareRegisterTransaction applies is the one the guard demands", async () => {
+    // The positive half of the dev outage: `flow.register()` hands back a
+    // transaction with no expiration, and the guard one line later requires a
+    // ValidDuring window, so every direct-signed register failed its own
+    // assertion and no blob was certified. A register carrying what
+    // addressBalanceExpiration builds passes, and reports the epoch the journal
+    // then uses as its expiry guard.
+    assert.equal(assertAddressBalanceRegisterTransaction(await directSignedRegister()), 7n);
+});
+
+test("a register whose expiration is not ValidDuring is rejected", async () => {
+    // The `$kind` arm of the guard, which the timestamp case above does not
+    // reach. Built with the real expiration first: a withdrawal cannot be
+    // resolved offline without one, which is its own evidence that the window
+    // is not optional here.
+    const data = await directSignedRegister();
+    data.expiration = { $kind: "Epoch", Epoch: "7" } as typeof data.expiration;
+    assert.throws(
+        () => assertAddressBalanceRegisterTransaction(data),
+        /must use a ValidDuring address-balance expiration/,
+    );
+});
+
+test("the address-balance nonce is derived from the transaction, not drawn at random", () => {
+    const kind = new Uint8Array([1, 2, 3]);
+    const otherKind = new Uint8Array([1, 2, 4]);
+
+    // Re-preparing the same register must rebuild byte-identical, or the
+    // journal stops being idempotent and a replay pays for a second blob.
+    assert.equal(
+        addressBalanceExpiration(9n, kind).ValidDuring.nonce,
+        addressBalanceExpiration(9n, kind).ValidDuring.nonce,
+    );
+    // Two different registers must still reserve under different nonces.
+    assert.notEqual(
+        addressBalanceExpiration(9n, kind).ValidDuring.nonce,
+        addressBalanceExpiration(9n, otherKind).ValidDuring.nonce,
+    );
+
+    const { minEpoch, maxEpoch, minTimestamp, maxTimestamp } =
+        addressBalanceExpiration(9n, kind).ValidDuring;
+    assert.equal(minEpoch, "9");
+    assert.equal(maxEpoch, "9");
+    assert.equal(minTimestamp, null);
+    assert.equal(maxTimestamp, null);
 });
