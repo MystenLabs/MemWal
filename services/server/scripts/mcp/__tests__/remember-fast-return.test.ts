@@ -104,23 +104,26 @@ function textOf(result: unknown): string {
         .join("\n");
 }
 
-test("the default is the full wait, and zero is opt-in", () => {
-    // D1: a result means the fact landed, so an unset budget blocks to
-    // terminal. The in-between is the setting to avoid — a budget under the
-    // real completion time pays the wait AND still returns pending.
-    assert.equal(parseWaitBudget(undefined), MAX_REMEMBER_WAIT_MS);
-    assert.equal(parseWaitBudget(""), MAX_REMEMBER_WAIT_MS);
-    // ...and this file asked for the opt-in path at the top.
+test("the default returns at accept, and blocking is opt-in", () => {
+    // Reverses D1. A full-ceiling call runs ACCEPT_DEADLINE_MS + 90_000 +
+    // WAIT_OVERSHOOT_GRACE_MS = 115s against the MCP SDK's 60s default
+    // tools/call timeout, so it could not honour "a result means it landed"
+    // anyway — it aborted mid-wait and the retry wrote the fact twice. Every
+    // budget that fits under 60s (<=35_000) is the in-between to avoid.
+    assert.equal(parseWaitBudget(undefined), 0);
+    assert.equal(parseWaitBudget(""), 0);
     assert.equal(REMEMBER_WAIT_MS, 0);
     assert.equal(parseWaitBudget("0"), 0);
+    // An operator who wants the old behaviour still has it.
+    assert.equal(parseWaitBudget("90000"), MAX_REMEMBER_WAIT_MS);
 });
 
 test("a typo'd budget falls back to the default instead of picking one nobody asked for", () => {
     // Number("10s") is NaN, and every NaN comparison is false — an unvalidated
     // parse would sail past a range check.
-    assert.equal(parseWaitBudget("10s"), MAX_REMEMBER_WAIT_MS);
-    assert.equal(parseWaitBudget("abc"), MAX_REMEMBER_WAIT_MS);
-    assert.equal(parseWaitBudget("-1"), MAX_REMEMBER_WAIT_MS);
+    assert.equal(parseWaitBudget("10s"), 0);
+    assert.equal(parseWaitBudget("abc"), 0);
+    assert.equal(parseWaitBudget("-1"), 0);
 });
 
 test("a budget past the ceiling is clamped, not honoured", () => {

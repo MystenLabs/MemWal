@@ -61,47 +61,49 @@ export const MAX_REMEMBER_WAIT_MS = 90_000;
 /**
  * Default wait before `memwal_remember` hands back a job_id.
  *
- * Blocks to terminal, so a successful call returns a real `blob_id` and the
- * agent can say the fact is stored. D1 settled this: returning at accept is a
- * product change on its own ticket, not a side effect of a latency fix, and
- * the contract callers have today is "a result means it landed".
+ * Zero — the tool returns at accept (~1.1s measured) and the agent continues
+ * with other work while the write finishes. This REVERSES D1, which had kept
+ * the full ceiling on the grounds that "a result means it landed" is the
+ * contract callers have. Two things decided it the other way:
  *
- * That leaves the poll cadence as the part this file may legitimately shorten,
- * and the cadence work belongs to #902 — the wait itself stays.
+ * 1. The blocking default could not honour that contract anyway. The MCP
+ *    TypeScript SDK defaults a tools/call to
+ *    `DEFAULT_REQUEST_TIMEOUT_MSEC = 60_000` (@modelcontextprotocol/sdk,
+ *    shared/protocol.js:8, applied at :712 as
+ *    `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC`). The legs are
+ *    sequential, so a full-ceiling call reaches ACCEPT_DEADLINE_MS (15_000)
+ *    + 90_000 + WAIT_OVERSHOOT_GRACE_MS (10_000) = 115s against a client that
+ *    gives up at 60. On any host that does not raise its own timeout the call
+ *    aborts mid-wait and the retry writes the fact a second time — see
+ *    docs/troubleshooting/overview.md. Claude Code raises its ceiling and so
+ *    never saw this; other hosts did.
  *
- * A budget BETWEEN zero and the real completion time is the one setting to
- * avoid. Against a measured 30–75s spread a 10s wait pays the 10s and still
- * lands in the pending branch on nearly every call: the cost of blocking with
- * none of the guarantee. So this is the full ceiling, and an operator who
- * genuinely wants accept-and-continue sets `MEMWAL_MCP_REMEMBER_WAIT_MS=0`
- * knowingly rather than inheriting it.
+ * 2. A budget between zero and the real completion time is the worst setting,
+ *    and against a measured 30–75s spread every budget that fits under the
+ *    60s client timeout (≤35_000) is exactly that: it pays the wait and still
+ *    lands in the pending branch on nearly every call. There is no value that
+ *    both blocks meaningfully and fits. So: do not wait at all.
  *
- * The pending branch is still reachable and still correct — a write slower
- * than the ceiling returns a job_id and says plainly it is not saved yet —
- * it is simply no longer the default path.
+ * Returning at accept is safe from disconnects because the job is a row in
+ * `remember_jobs` driven by the relayer
+ * (`spawn_persisted_remember_preparation` in
+ * services/server/src/routes/remember.rs), not work held in this process.
+ * Closing the client does not cancel it.
  *
- * KNOWN CONSTRAINT, not yet acted on. The MCP TypeScript SDK defaults a
- * tools/call to `DEFAULT_REQUEST_TIMEOUT_MSEC = 60_000`
- * (@modelcontextprotocol/sdk, shared/protocol.js:8, applied at :712 as
- * `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC`). A host that sets no
- * timeout of its own therefore aborts at 60s, and the pending branch — whose
- * entire purpose is to hand back a job_id — lands 30s after it has already
- * given up. docs/troubleshooting/overview.md records the symptom already
- * ("can exceed the MCP host's tool-call timeout"), including that a retry
- * duplicates the memory. Hosts differ: Claude Code sets its own, far larger
- * ceiling, so this does not bite there.
+ * It is NOT safe from a job that fails after acceptance — that is real, and
+ * dev proved it on 2026-09-17 when every register transaction was rejected
+ * post-accept. Only a later `memwal_remember_status` call surfaces that, which
+ * is why the pending message points at it and refuses to claim the fact is
+ * stored.
  *
- * The arithmetic for anyone changing this: the legs are sequential, so the
- * ceiling is ACCEPT_DEADLINE_MS (15_000) + this budget +
- * WAIT_OVERSHOOT_GRACE_MS (10_000). Fitting under 60_000 needs a budget of
- * 35_000 or less — against a measured 26.7-47.9s time-to-saved, which is the
- * D1 trade, not a free win.
+ * An operator who wants the old always-block behaviour sets
+ * `MEMWAL_MCP_REMEMBER_WAIT_MS=90000` knowingly.
  *
- * This constant cannot fix `memwal_analyze` either way: its extraction leg is
- * a 60_000ms deadline (analyze.ts) that fully precedes the wait, so analyze
+ * This constant does not fix `memwal_analyze`: its extraction leg is a
+ * 60_000ms deadline (analyze.ts) that fully precedes the wait, so analyze
  * exceeds 60s for ANY value here, including 0. That needs its own decision.
  */
-const DEFAULT_REMEMBER_WAIT_MS = MAX_REMEMBER_WAIT_MS;
+const DEFAULT_REMEMBER_WAIT_MS = 0;
 
 
 
