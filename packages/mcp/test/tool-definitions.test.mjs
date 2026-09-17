@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import {
     TOOL_DEFINITIONS,
     SIGNED_OUT_TOOL_DEFINITIONS,
+    ALL_TOOL_DEFINITIONS,
+    BASELINE_RELAYER_TOOLS,
 } from "../dist/auth-required.js";
 
 function desc(list, name) {
@@ -77,8 +79,11 @@ test("memwal_recall is advertised as a read-only search", () => {
  * instead of in someone's first save of the session.
  */
 
-test("cold-start memwal_remember_status accepts a whole batch", () => {
-    for (const list of [TOOL_DEFINITIONS, SIGNED_OUT_TOOL_DEFINITIONS]) {
+test("memwal_remember_status accepts a whole batch", () => {
+    // Not advertised at cold start (see the baseline tests below) — the shape
+    // is still pinned here, so it stays reviewed while it waits for the prod
+    // release that lets it into the cold-start list.
+    for (const list of [ALL_TOOL_DEFINITIONS]) {
         const tool = list.find((t) => t.name === "memwal_remember_status");
         assert.ok(tool, "missing memwal_remember_status");
 
@@ -100,12 +105,12 @@ test("cold-start memwal_remember_status accepts a whole batch", () => {
     }
 });
 
-test("cold-start waitMs bound matches the sidecar's ceiling", () => {
+test("memwal_remember_status waitMs bound matches the sidecar's ceiling", () => {
     // The sidecar validates waitMs with zod and rejects anything above its own
     // cap. Advertising a larger maximum invites the agent to send a value that
     // comes straight back as an MCP validation error — observed live at 60000
     // once the sidecar lowered its ceiling to 45000.
-    for (const list of [TOOL_DEFINITIONS, SIGNED_OUT_TOOL_DEFINITIONS]) {
+    for (const list of [ALL_TOOL_DEFINITIONS]) {
         const tool = list.find((t) => t.name === "memwal_remember_status");
         assert.equal(tool.inputSchema.properties.waitMs.maximum, 45000);
     }
@@ -117,6 +122,53 @@ test("cold-start write tools warn that a result may not be saved yet", () => {
     for (const name of ["memwal_remember", "memwal_remember_bulk"]) {
         const d = desc(TOOL_DEFINITIONS, name);
         assert.match(d, /NOT yet saved|NOT saved/i, `${name} omits the pending warning`);
-        assert.match(d, /memwal_remember_status/, `${name} does not say how to settle it`);
+        assert.match(d, /settle it|settle them/, `${name} does not say to settle the job`);
+    }
+});
+
+/**
+ * GH #928. The bridge ships on npm and updates itself; a relayer ships per
+ * environment and does not, so 0.0.14-dev.0 dialled prod and staging still on
+ * 0.0.13. Its cold-start list named `memwal_remember_status`, which neither
+ * serves, and the description told the agent to go call it — one live run
+ * spent 90.67s on a tool that does not exist there before erroring.
+ *
+ * The cold-start list is served before any relayer capability is known, so it
+ * has to be a floor: only tools the oldest supported relayer serves, and no
+ * description pointing at anything outside it.
+ */
+
+test("cold-start lists advertise nothing beyond the baseline relayer", () => {
+    for (const list of [TOOL_DEFINITIONS, SIGNED_OUT_TOOL_DEFINITIONS]) {
+        const names = list.map((t) => t.name);
+        const beyond = names.filter(
+            (n) => !BASELINE_RELAYER_TOOLS.has(n) && n !== "memwal_login",
+        );
+        assert.deepEqual(
+            beyond,
+            [],
+            `cold start advertises tools the oldest supported relayer cannot serve: ${beyond}`,
+        );
+        for (const baseline of BASELINE_RELAYER_TOOLS) {
+            assert.ok(names.includes(baseline), `cold start omits ${baseline}`);
+        }
+    }
+});
+
+test("no cold-start description names a tool cold start does not advertise", () => {
+    // The tool list and the prose have to agree. A description is an
+    // instruction the agent follows, so naming an unadvertised tool is the
+    // same defect as listing it — it just fails one step later.
+    for (const list of [TOOL_DEFINITIONS, SIGNED_OUT_TOOL_DEFINITIONS]) {
+        const advertised = new Set(list.map((t) => t.name));
+        for (const tool of list) {
+            const named = tool.description.match(/memwal_[a-z_]+/g) ?? [];
+            const dangling = [...new Set(named)].filter((n) => !advertised.has(n));
+            assert.deepEqual(
+                dangling,
+                [],
+                `${tool.name}'s description sends the agent to unadvertised tools: ${dangling}`,
+            );
+        }
     }
 });

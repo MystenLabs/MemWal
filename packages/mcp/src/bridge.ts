@@ -214,6 +214,18 @@ const SIGNED_OUT_FAILURE = {
 const UNAUTHORIZED_TEXT =
     "❌ Walrus Memory rejected the saved credentials (HTTP 401). The delegate key may have been revoked or is no longer registered on this account. Call `memwal_login` to sign in again — saved credentials were NOT modified.";
 
+/** Reply for a `tools/call` naming a tool the connected relayer does not
+ * serve. Names what IS on offer, because the agent's next move is to pick one
+ * of those — "unknown tool" alone leaves it guessing or retrying. */
+export function unknownToolText(name: string, available: string[]): string {
+    return (
+        `❌ \`${name}\` is not a tool this Walrus Memory server offers. ` +
+        `Available: ${available.join(", ")}. ` +
+        `Your tool list is stale — re-read \`tools/list\` and use one of those instead. ` +
+        `Nothing ran, so nothing was saved or changed.`
+    );
+}
+
 /** `failRequest` options for every credentials-rejected refusal, so one refused
  * at handshake time and one refused on arrival afterwards read identically. */
 const UNAUTHORIZED_FAILURE = {
@@ -1348,6 +1360,12 @@ export async function runBridge(
      * client surfaces them in its tool palette. */
     const pendingListIds = new Set<string | number>();
 
+    /** Tool names the CONNECTED relayer advertised on its last `tools/list`,
+     * minus the ones we serve locally. Empty until the client has listed tools
+     * at least once over a live session — until then we know nothing about the
+     * relayer's capabilities and gate nothing. */
+    const upstreamToolNames = new Set<string>();
+
     /** IDs of forwarded `memwal_health` calls, each against the relayer URL the
      * call went out on. Captured at send time rather than read at reply time so
      * a reconnect that swapped credentials mid-flight cannot label the answer
@@ -1857,6 +1875,16 @@ export async function runBridge(
                                 (t) => !LOCAL_TOOL_NAMES.has(t.name ?? ""),
                             );
                             result.tools = [...upstream, ...LOCAL_TOOL_DEFINITIONS];
+                            // Record what this relayer actually serves. A
+                            // later call for a name absent here is answered
+                            // locally instead of being forwarded into a wait
+                            // no reply will ever end.
+                            upstreamToolNames.clear();
+                            for (const t of upstream) {
+                                if (typeof t.name === "string" && t.name !== "") {
+                                    upstreamToolNames.add(t.name);
+                                }
+                            }
                         }
                     }
                     if (
@@ -2033,6 +2061,33 @@ export async function runBridge(
                 if (credentialsRejected) {
                     failRequest(msg, "credentials rejected", UNAUTHORIZED_FAILURE);
                     return;
+                }
+
+                // Version skew: this bridge ships on npm and updates itself,
+                // while a relayer ships per environment and does not, so the
+                // bridge is routinely newer than the server it dials. A tool it
+                // advertised at cold start can be missing from the session that
+                // actually came up — `memwal_remember_status` against a prod
+                // relayer, which is GH #928. Forwarding that call parks it in
+                // `inFlight` until the orphan sweeper's deadline (60s + 30s
+                // headroom for that tool), and the user reads the 90s as a hang.
+                // A stale tool list is not a transport fault: say so now, while
+                // the agent can still act on it.
+                if (msg.method === "tools/call" && msg.id != null && upstreamToolNames.size > 0) {
+                    const called = (msg.params as { name?: string } | undefined)?.name;
+                    if (
+                        typeof called === "string" &&
+                        !upstreamToolNames.has(called) &&
+                        !LOCAL_TOOL_NAMES.has(called)
+                    ) {
+                        const available = [...upstreamToolNames, ...LOCAL_TOOL_NAMES].sort();
+                        log.warn("bridge.tool_not_served", { tool: called });
+                        failRequest(msg, "tool not served", {
+                            toolText: unknownToolText(called, available),
+                            errorMessage: `${called} is not served by this Walrus Memory relayer`,
+                        });
+                        return;
+                    }
                 }
 
                 // Fill in the configured default namespace for memory tool
