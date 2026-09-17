@@ -3,6 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
+import { SECRET_EXCLUSION_RULES, AUTO_SAVE_OPT_IN_RULE } from "./memory-policy.js";
+import { sanitizeFact, redactionNotice, refusalNotice } from "./redaction.js";
 import {
     REMEMBER_POLL_INTERVAL_MS,
     REMEMBER_WAIT_MS,
@@ -17,7 +19,7 @@ const ANALYZE_INPUT = {
         .string()
         .min(1)
         .describe(
-            "Conversation transcript, note, or arbitrary text from which to extract memorable facts."
+            "Conversation transcript, note, or arbitrary text from which to extract memorable facts. Credential shapes (passwords, API keys, tokens, private keys, seed phrases, auth headers, URLs with an embedded user:password) are stripped from this text before it is sent for extraction, so no secret reaches the extractor or storage."
         ),
     namespace: z
         .string()
@@ -54,10 +56,29 @@ export function registerAnalyzeTool(
         {
             ...TOOL_METADATA.memwal_analyze,
             description:
-                "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead. The extracted facts come back immediately; if the result says the writes are still in flight it carries job_ids — confirm them with memwal_remember_status rather than telling the user they are saved.",
+                "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead. The extracted facts come back immediately; if the result says the writes are still in flight it carries job_ids — confirm them with memwal_remember_status rather than telling the user they are saved. " +
+                AUTO_SAVE_OPT_IN_RULE +
+                " " +
+                SECRET_EXCLUSION_RULES +
+                " This tool forwards a whole passage, so it is the easiest way to leak a credential that happened to sit next to a fact: the passage is stripped of credential shapes before it is sent for extraction, and a passage that is only a secret, or that the user asked not to save, is not sent at all.",
             inputSchema: ANALYZE_INPUT,
         },
         wrapTool<{ text: string; namespace?: string }>(session, "memwal_analyze", async ({ text, namespace }) => {
+            // Runs BEFORE the passage reaches the SDK, and therefore before it
+            // reaches the extractor LLM. Everything this tool stores is derived
+            // from this text, so a credential left in it can be copied into any
+            // number of extracted facts — on append-only storage (WALM-642).
+            const safe = sanitizeFact(text);
+            if (safe.refusal) {
+                return {
+                    content: [
+                        { type: "text" as const, text: refusalNotice(safe.refusal) },
+                    ],
+                };
+            }
+            const notice = redactionNotice(safe.kinds, safe.count);
+            const safeText = safe.text;
+
             // `analyze` (not `analyzeAndWait`) returns once extraction is done
             // and every fact has a queued job, which is the point this tool can
             // usefully answer at.
@@ -66,7 +87,7 @@ export function registerAnalyzeTool(
                 // that never reached the handler, so no job row can exist yet
                 // to duplicate.
                 withRelayerRetry(
-                    () => session.memwal.analyze(text, namespace),
+                    () => session.memwal.analyze(safeText, namespace),
                     "analyze this text",
                 ),
                 "memwal_analyze extraction",
@@ -78,6 +99,9 @@ export function registerAnalyzeTool(
                 { idempotent: false, deadlineMs: 60_000 },
             );
 
+            const withNotice = (body: string) =>
+                notice ? `${body}\n\n${notice}` : body;
+
             const facts = accepted.facts ?? [];
             // Nothing to wait on, and nothing to confirm later. Say so plainly
             // rather than handing back an empty job list.
@@ -86,7 +110,9 @@ export function registerAnalyzeTool(
                     content: [
                         {
                             type: "text" as const,
-                            text: `Extracted 0 facts from that text — nothing was saved.`,
+                            text: withNotice(
+                                `Extracted 0 facts from that text — nothing was saved.`,
+                            ),
                         },
                     ],
                 };
@@ -107,7 +133,9 @@ export function registerAnalyzeTool(
                 content: [
                     {
                         type: "text" as const,
-                        text: `${extracted}\n\n${pendingBulkMessage(entries, waitedMs)}`,
+                        text: withNotice(
+                            `${extracted}\n\n${pendingBulkMessage(entries, waitedMs)}`,
+                        ),
                     },
                 ],
             });
@@ -153,7 +181,9 @@ export function registerAnalyzeTool(
                 content: [
                     {
                         type: "text" as const,
-                        text: `${summary}\n\n${lines.join("\n")}${stragglers}${footer}`,
+                        text: withNotice(
+                            `${summary}\n\n${lines.join("\n")}${stragglers}${footer}`,
+                        ),
                     },
                 ],
             };

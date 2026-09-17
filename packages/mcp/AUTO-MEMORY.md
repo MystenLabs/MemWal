@@ -14,6 +14,65 @@ package. `memwal_remember` literally said *"Call ONLY when the user explicitly
 asks… agents should not call this proactively."* And `rememberBulk` (in the SDK)
 was never exposed as a tool.
 
+## Opt-in and secret filtering (WALM-642)
+
+Automatic saving is **off by default**. What is gated is narrow: telling the
+model to save something the user did **not** ask it to save. A direct request
+("remember that ...") works either way, and recall is never gated.
+
+**Turning it on**
+
+```sh
+memwal-mcp auto-save on      # persists {"autoSave": true} to settings.json
+memwal-mcp auto-save off
+memwal-mcp auto-save         # report the current state and where it came from
+```
+
+`MEMWAL_AUTO_SAVE=1` in an MCP client's `env` block does the same for one
+server process and overrides the file.
+
+**Where the state lives** — `settings.json`, next to `credentials.json`, so it
+inherits `credsPath()` resolution: `MEMWAL_CREDS_DIR` override, else the
+nearest project-local `.memwal/`, else `~/.memwal/`. It has to be on disk
+rather than passed as configuration because the **hooks are spawned by the
+client, not by this package**: they inherit the MCP server's `env` block from
+nothing at all. `src/auto-save.ts` and `plugin/scripts/lib/auto-save.mjs` are
+two implementations of the same resolution, pinned against each other by
+`test/auto-save-optin.test.mjs`.
+
+**What changes when it is off** — the `instructions` field, the SessionStart
+rubric, the UserPromptSubmit rubric and the PostToolUse nudge all switch to a
+save-only-what-you-are-asked variant. Nothing is disabled; the guidance that
+drives an unasked-for save is simply not injected.
+
+**One source for the rules** — the secret-exclusion and do-not-save text lives
+in a single block duplicated byte-for-byte across three files that cannot
+import each other:
+
+| Copy | Feeds |
+|---|---|
+| `packages/mcp/src/memory-policy.ts` | `instructions`, cold-start `tools/list` |
+| `packages/mcp/plugin/scripts/lib/memory-policy.mjs` | the three lifecycle hooks |
+| `services/server/scripts/mcp/tools/memory-policy.ts` | live tool descriptions, sidecar `instructions` |
+
+`test/memory-policy.test.mjs` extracts the marked block from each file and
+compares the bytes, so editing one copy fails the suite until the others match.
+
+**The programmatic backstop** — model-facing rules are not enforcement, and
+Walrus storage is append-only: a secret that lands cannot be deleted. So
+`services/server/scripts/mcp/tools/redaction.ts` screens every write **before**
+the text reaches the SDK, on all three write paths (`memwal_remember`,
+`memwal_remember_bulk`, `memwal_analyze`). A mixed message keeps its fact and
+loses only the credential span — the ticket's "save safe facts without
+neighboring credentials" — and a text that is nothing but a secret, or that the
+user said not to save, is not forwarded at all. The caller is told which *kinds*
+were removed; the value is never logged, echoed, or returned.
+
+Detection is shape-based, not entropy-based, on purpose: MemWal's own durable
+facts (blob ids, Sui object ids, git SHAs, digests) are exactly what a generic
+high-entropy rule would eat. The trade-off is written out at the top of
+`redaction.ts`.
+
 ## Architecture — three layers
 
 1. **Agentic tool descriptions + `memwal_remember_bulk`** — `services/server/scripts/mcp/tools/`.
@@ -30,7 +89,8 @@ was never exposed as a tool.
 
 | Dimension | Before | After |
 |---|---|---|
-| Save trigger | "ONLY when user explicitly asks; don't be proactive" | "Save proactively whenever you learn a durable fact" |
+| Save trigger | "ONLY when user explicitly asks; don't be proactive" | "Save proactively whenever you learn a durable fact" — **opt-in since WALM-642; off by default** |
+| Secret handling | none: a preference next to a password was forwarded whole | shared exclusion rules on all three surfaces + a redactor in front of every write |
 | Bulk save | not exposed | `memwal_remember_bulk` (wraps SDK `rememberBulkAndWait`, ≤20) |
 | Recall trigger | neutral; agent rarely called it unprompted | "Recall proactively at task start / when the user references past work" |
 | Reinforcement | none | UserPromptSubmit + PostToolUse hooks (Claude Code + Codex) |
@@ -51,7 +111,11 @@ was never exposed as a tool.
 
 ## Decisions (chosen)
 
-- **Append-only** — no `forget`/`update` tools (relayer dedups embeddings).
+- **Append-only** — no `forget`/`update` tools (relayer dedups embeddings). This
+  is also why WALM-642's credential check runs *before* the write: there is no
+  delete to fall back on.
+- **Automatic saving is opt-in, default off** (WALM-642) — explicit tool use is
+  never gated, and neither is recall.
 - **Global `default` namespace** — `MEMWAL_NAMESPACE` overrides for per-project scope.
 - **Agent decision rubric** — UserPromptSubmit does not regex-classify remember vs
   recall. The agent has the conversation and understands any language or spelling.
@@ -63,6 +127,9 @@ was never exposed as a tool.
 ## File map
 
 - `services/server/scripts/mcp/tools/{remember,recall,analyze,restore}.ts` — agentic descriptions
+- `services/server/scripts/mcp/tools/redaction.ts` — pre-forward credential screen (WALM-642)
+- `{packages/mcp/src,packages/mcp/plugin/scripts/lib,services/server/scripts/mcp/tools}/memory-policy.*` — the shared rules block, three byte-identical copies
+- `packages/mcp/src/auto-save.ts` + `packages/mcp/plugin/scripts/lib/auto-save.mjs` — the opt-in resolver, server side and hook side
 - `services/server/scripts/mcp/tools/remember-bulk.ts` + `index.ts` — new bulk tool
 - `packages/mcp/plugin/` — plugin manifest, `.mcp.json`, hooks, Node scripts, Codex installer
 - `.claude-plugin/marketplace.json` (repo root) — Claude Code marketplace entry (local source `./packages/mcp/plugin`)

@@ -53,7 +53,9 @@ This is why many first-run sessions show `memwal_login` before the other tools a
 
 ### memwal_remember
 
-Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** when the user states a preference, decision, constraint, correction, identity detail, or recurring workflow, not only when they explicitly ask. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize.
+Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** when the user states a preference, decision, constraint, correction, identity detail, or recurring workflow, not only when they explicitly ask — provided automatic memory is on (`memwal-mcp auto-save on`, or `MEMWAL_AUTO_SAVE=1`; it is off by default). Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize.
+
+Credentials are never stored. Passwords, API keys, access and refresh tokens, private keys, seed phrases, authorization headers, session cookies, and URLs with an embedded `user:password` are stripped from the text before the write, on this tool, `memwal_remember_bulk` and `memwal_analyze` alike. A message that mixes a preference with a credential keeps the preference and loses only the credential; the reply names which kinds were removed.
 
 | **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |

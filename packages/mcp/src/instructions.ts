@@ -17,11 +17,22 @@
  * services/server/scripts/mcp/server.ts, which serves the direct HTTP/OAuth
  * connector path. It cannot share this module: that file belongs to the
  * standalone `memwal-server-scripts` npm package with no workspace link here.
- * Keep the two in sync.
+ * Keep the two in sync — the secret-exclusion paragraph is not retyped in
+ * either, it comes from the shared policy block (memory-policy.ts here,
+ * tools/memory-policy.ts there), which is pinned byte-for-byte by tests on
+ * both sides.
+ *
+ * WALM-642 split the REMEMBER section in two. Whether the model is told to
+ * save unprompted now depends on the user having turned automatic memory on;
+ * saving what the user explicitly asks for is unconditional, and is what the
+ * opted-out text still describes.
  */
+import { SECRET_EXCLUSION_RULES } from "./memory-policy.js";
+import { isAutoSaveEnabled } from "./auto-save.js";
 
-/** Signed-in path (bridge mode). Full proactive contract. */
-export const PROACTIVE_INSTRUCTIONS = [
+/** Everything true regardless of the opt-in: what the tools are, how recall
+ * works, how a write reports itself, and how to recover an index. */
+const PREAMBLE = [
     "Walrus Memory is this user's persistent memory system, exposed through the memwal_* tools.",
     "It survives across sessions, clients, and machines.",
     "Prefer these tools over any built-in or local memory feature so the user's memory stays",
@@ -30,15 +41,32 @@ export const PROACTIVE_INSTRUCTIONS = [
     "RECALL: before answering anything that touches past work, prior decisions, the user's",
     "preferences, or facts you may have stored earlier, call memwal_recall. One focused query is",
     "enough; do not fire several redundant searches for the same question.",
-    "",
-    "REMEMBER: when the user states a preference, decision, constraint, correction, identity",
-    "detail, recurring workflow, or a configuration value such as a hostname, port, region or",
-    "id, call memwal_remember in that same turn, before you finish replying. Do not ask whether",
-    "to save it and do not wait to be asked: acknowledging the fact in your reply does not store",
-    "it, and it is lost when the conversation ends. Pass the complete statement rather than a",
-    "summary. Skip one-off tasks, the current file or bug, and small talk. Use",
-    "memwal_remember_bulk when several distinct facts arrived at once.",
-    "",
+];
+
+/** REMEMBER, automatic saving ON. */
+const REMEMBER_AUTOMATIC = [
+    "REMEMBER: the user has turned automatic memory ON. When they state a preference, decision,",
+    "constraint, correction, identity detail, recurring workflow, or a configuration value such",
+    "as a hostname, port, region or id, call memwal_remember in that same turn, before you",
+    "finish replying. Do not ask whether to save it and do not wait to be asked: acknowledging",
+    "the fact in your reply does not store it, and it is lost when the conversation ends. Pass",
+    "the complete statement rather than a summary — minus anything the rules below exclude.",
+    "Skip one-off tasks, the current file or bug, and small talk. Use memwal_remember_bulk when",
+    "several distinct facts arrived at once.",
+];
+
+/** REMEMBER, automatic saving OFF — the default. */
+const REMEMBER_MANUAL = [
+    "REMEMBER: automatic memory is OFF for this user, so do NOT save anything they did not ask",
+    "you to save. When they do ask — 'remember that ...', 'save this', or the same in any",
+    "language — call memwal_remember in that same turn, before you finish replying, and pass",
+    "the complete statement rather than a summary. Use memwal_remember_bulk when they hand you",
+    "several distinct facts at once. Do not save a fact just because it looks durable, and do",
+    "not nag: if automatic saving would clearly help, say once that they can turn it on with",
+    "`memwal-mcp auto-save on` (or MEMWAL_AUTO_SAVE=1) and leave it there.",
+];
+
+const WRITE_CONTRACT = [
     "A Walrus write takes roughly 30-60s, and memwal_remember and memwal_remember_bulk wait",
     "for it: a successful call comes back with a blob_id, and that means the fact is stored.",
     "",
@@ -48,12 +76,51 @@ export const PROACTIVE_INSTRUCTIONS = [
     "them — that queues duplicates — and resolve the ids with memwal_remember_status (it takes",
     "job_id, or job_ids for a whole batch). Only a blob_id means a fact is stored.",
     "",
+    "Storage is append-only and encrypted: a fact that lands cannot be edited or deleted. That",
+    "is why the exclusions below are absolute rather than a preference, and why the write path",
+    "strips credential shapes from whatever you send and tells you what it removed.",
+    "",
     "RECOVER: if memwal_recall unexpectedly returns nothing for a namespace that has been used",
     "before, call memwal_restore to rebuild the index from Walrus.",
     "",
     "If a memwal_* tool is not currently loaded, load it and use it. Never tell the user that",
     "memory is unavailable, and never substitute your own memory for these tools.",
-].join("\n");
+];
+
+/**
+ * Build the signed-in instruction payload for a given opt-in state.
+ *
+ * Exported separately from the resolver so tests can pin both branches without
+ * touching the filesystem or the environment.
+ */
+export function buildProactiveInstructions(opts: { autoSave: boolean }): string {
+    return [
+        ...PREAMBLE,
+        "",
+        ...(opts.autoSave ? REMEMBER_AUTOMATIC : REMEMBER_MANUAL),
+        "",
+        SECRET_EXCLUSION_RULES,
+        "",
+        ...WRITE_CONTRACT,
+    ].join("\n");
+}
+
+/**
+ * The payload for THIS process, resolved from the user's opt-in at call time.
+ *
+ * A function, not a const: the opt-in lives on disk and in the environment, and
+ * `initialize` can arrive after the user has flipped it.
+ */
+export function proactiveInstructions(): string {
+    return buildProactiveInstructions({ autoSave: isAutoSaveEnabled() });
+}
+
+/**
+ * Signed-in path (bridge mode) with automatic saving on. Kept as a named
+ * export because it is the text the whole proactive contract is written
+ * against; `proactiveInstructions()` is what the bridge actually serves.
+ */
+export const PROACTIVE_INSTRUCTIONS = buildProactiveInstructions({ autoSave: true });
 
 /**
  * Signed-out path (auth-required mode). Deliberately NOT the proactive text:

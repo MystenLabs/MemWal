@@ -24,7 +24,7 @@ import {
 } from "./client-info.js";
 import { randomUUID } from "node:crypto";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
-import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
+import { proactiveInstructions } from "./instructions.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { log, note } from "./logger.js";
 import {
@@ -198,7 +198,11 @@ function buildLocalInitializeResult(params: unknown): {
         // client: this local answer wins and the upstream initialize reply is
         // suppressed. Omitting it here silently strips the proactive contract
         // from every stdio client, which is the WALM-324 regression itself.
-        instructions: PROACTIVE_INSTRUCTIONS,
+        //
+        // Resolved per handshake, not read from a module const: whether the
+        // model is told to save unprompted depends on the user's automatic-save
+        // opt-in, which lives on disk and can change between spawns (WALM-642).
+        instructions: proactiveInstructions(),
     };
 }
 

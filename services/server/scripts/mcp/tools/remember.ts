@@ -3,6 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, walruscanBlobUrl } from "./util.js";
+import { SECRET_EXCLUSION_RULES, AUTO_SAVE_OPT_IN_RULE } from "./memory-policy.js";
+import { sanitizeFact, redactionNotice, refusalNotice } from "./redaction.js";
 import {
     REMEMBER_WAIT_MS,
     REMEMBER_POLL_INTERVAL_MS,
@@ -20,7 +22,7 @@ const REMEMBER_INPUT = {
         .string()
         .min(1)
         .describe(
-            "The full, detailed fact to save. Pass the COMPLETE statement — do not summarize."
+            "The full, detailed fact to save. Pass the COMPLETE statement — do not summarize. Leave credentials out: passwords, API keys, tokens, private keys, seed phrases, auth headers and URLs with an embedded user:password are stripped before the write and never stored."
         ),
     namespace: z
         .string()
@@ -54,21 +56,40 @@ export function registerRememberTool(
         {
             ...TOOL_METADATA.memwal_remember,
             description:
-                "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. A Walrus write takes 30-60s and this call waits for it, so a success carries a blob_id and means the fact is stored. If it outruns that budget you get a job_id and the fact is NOT yet saved — say so rather than claiming it is stored, and resolve it with memwal_remember_status.",
+                "Save a durable fact about the user or project to their Walrus Memory. Call this whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — PROACTIVELY, without being asked, when they have turned automatic memory on. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. A Walrus write takes 30-60s and this call waits for it, so a success carries a blob_id and means the fact is stored. If it outruns that budget you get a job_id and the fact is NOT yet saved — say so rather than claiming it is stored, and resolve it with memwal_remember_status. " +
+                AUTO_SAVE_OPT_IN_RULE +
+                " " +
+                SECRET_EXCLUSION_RULES +
+                " Walrus storage is append-only: a stored secret cannot be deleted, so this tool strips credential shapes from the text before writing and tells you what it removed.",
             inputSchema: REMEMBER_INPUT,
         },
         wrapTool<{ text: string; namespace?: string }>(session, "memwal_remember", async ({ text, namespace }) => {
+            // Runs BEFORE anything reaches the SDK. Walrus is append-only, so a
+            // credential that gets written cannot be taken back (WALM-642).
+            const safe = sanitizeFact(text);
+            if (safe.refusal) {
+                return {
+                    content: [
+                        { type: "text" as const, text: refusalNotice(safe.refusal) },
+                    ],
+                };
+            }
+            const notice = redactionNotice(safe.kinds, safe.count);
+            const safeText = safe.text;
+
             // Two steps rather than `rememberAndWait`, because the accept and
             // the wait need separate budgets: acceptance is the part that
             // must succeed, the wait is a courtesy we cut short.
             const accepted = await withAcceptDeadline(
                 withRelayerRetry(
                     () =>
-                        session.memwal.rememberAsync(text, namespace, {
+                        session.memwal.rememberAsync(safeText, namespace, {
                             // Ours, not the SDK's random one — see
                             // derivedIdempotencyKey. This is what makes the
                             // accept-timeout message's retry promise true.
-                            idempotencyKey: derivedIdempotencyKey(namespace, text),
+                            // Keyed on the REDACTED text, so a retry of the
+                            // same fact derives the same key.
+                            idempotencyKey: derivedIdempotencyKey(namespace, safeText),
                         }),
                     "save this fact",
                 ),
@@ -76,11 +97,14 @@ export function registerRememberTool(
                 { idempotent: true },
             );
 
+            const withNotice = (body: string) =>
+                notice ? `${body}\n\n${notice}` : body;
+
             const pending = (waitedMs: number) => ({
                 content: [
                     {
                         type: "text" as const,
-                        text: pendingMessage(accepted.job_id, waitedMs),
+                        text: withNotice(pendingMessage(accepted.job_id, waitedMs)),
                     },
                 ],
             });
@@ -102,7 +126,9 @@ export function registerRememberTool(
                     content: [
                         {
                             type: "text" as const,
-                            text: `Saved to Walrus Memory. blob_id=${result.blob_id} namespace=${result.namespace}\nExplorer: ${walruscanBlobUrl(result.blob_id)}`,
+                            text: withNotice(
+                                `Saved to Walrus Memory. blob_id=${result.blob_id} namespace=${result.namespace}\nExplorer: ${walruscanBlobUrl(result.blob_id)}`,
+                            ),
                         },
                     ],
                 };

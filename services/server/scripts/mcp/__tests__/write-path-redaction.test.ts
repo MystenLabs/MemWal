@@ -1,0 +1,285 @@
+/**
+ * No credential reaches the SDK from any write tool (WALM-642).
+ *
+ * The ticket was reproduced exactly here: a preference plus a fake password URL
+ * sent through the real MCP server, with the SDK mocked, and `remember`,
+ * `remember_bulk` and `analyze` all passed the full text through unchanged.
+ * These tests are that repro, inverted — the mock now records everything the
+ * handler forwards, and every assertion is about what the SDK was *given*, not
+ * about what the tool said afterwards. A handler that redacted its reply but
+ * still forwarded the secret would pass a message-only test and fail these.
+ *
+ * Walrus storage is append-only and immutable, which is why the check has to be
+ * in front of the write: there is no delete to fall back on.
+ *
+ * The wait budget is zeroed so each tool returns at accept. That is the shortest
+ * path through each handler and it exercises the same pre-forward screen; the
+ * bounded-wait branch is covered by the `*-fast-return` files.
+ */
+process.env.MEMWAL_MCP_REMEMBER_WAIT_MS = "0";
+
+import assert from "node:assert/strict";
+import test, { type TestContext } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { MemWalSession } from "../auth.js";
+
+const { createMcpServer } = await import("../server.js");
+
+/** Everything the handlers handed to the SDK, in call order. */
+interface Forwarded {
+    remember: string[];
+    bulk: string[][];
+    analyze: string[];
+}
+
+function sessionWith(forwarded: Forwarded): MemWalSession {
+    return {
+        oauthScope: "memwal:read memwal:write",
+        namespace: "default",
+        memwal: {
+            async rememberAsync(text: string) {
+                forwarded.remember.push(text);
+                return { job_id: "job-1", status: "running" };
+            },
+            async rememberBulkAsync(items: Array<{ text: string }>) {
+                forwarded.bulk.push(items.map((i) => i.text));
+                return {
+                    job_ids: items.map((_, i) => `bulk-job-${i + 1}`),
+                    total: items.length,
+                    status: "accepted",
+                };
+            },
+            async analyze(text: string) {
+                forwarded.analyze.push(text);
+                // Echo the passage back as one extracted fact, so a leak that
+                // slipped through would also show up in the reply.
+                return {
+                    job_ids: ["analyze-job-1"],
+                    facts: [{ text }],
+                    fact_count: 1,
+                    status: "accepted",
+                    owner: "0xowner",
+                };
+            },
+        },
+    } as unknown as MemWalSession;
+}
+
+async function clientFor(session: MemWalSession, t: TestContext): Promise<Client> {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createMcpServer(session);
+    const client = new Client({ name: "write-path-redaction-test", version: "1.0.0" });
+    t.after(async () => {
+        await client.close();
+        await server.close();
+    });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return client;
+}
+
+function textOf(result: unknown): string {
+    return (result as { content: Array<{ text: string }> }).content
+        .map((c) => c.text)
+        .join("\n");
+}
+
+/** Everything the session was ever handed, flattened, plus the tool's reply. */
+function allForwarded(forwarded: Forwarded): string {
+    return [
+        ...forwarded.remember,
+        ...forwarded.bulk.flat(),
+        ...forwarded.analyze,
+    ].join("\n");
+}
+
+const PASSWORD = "hunter2";
+const MIXED =
+    "I prefer dark mode in every editor, and the staging db is " +
+    `postgres://admin:${PASSWORD}@db.internal:5432/app`;
+const PREFERENCE = "I prefer dark mode in every editor";
+
+// ── the reproduction, on all three write paths ──────────────────────────────
+
+test("memwal_remember keeps the preference and never forwards the password", async (t) => {
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const result = await client.callTool({
+        name: "memwal_remember",
+        arguments: { text: MIXED },
+    });
+
+    assert.equal(forwarded.remember.length, 1, "the write must still happen");
+    const sent = forwarded.remember[0];
+    assert.ok(!sent.includes(PASSWORD), "the password was forwarded to the SDK");
+    assert.ok(!sent.includes("admin:"), "the userinfo was forwarded to the SDK");
+    // The point of redacting rather than dropping: the fact survives.
+    assert.ok(sent.includes(PREFERENCE), "the preference was lost with the credential");
+    assert.ok(sent.includes("db.internal:5432/app"), "the host was lost too");
+
+    const text = textOf(result);
+    assert.ok(!text.includes(PASSWORD), "the reply echoed the password back");
+    assert.match(text, /url-credentials/);
+    assert.match(text, /credential span\(s\) were removed/);
+});
+
+test("memwal_remember_bulk screens every entry, and one bad entry does not sink the batch", async (t) => {
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const result = await client.callTool({
+        name: "memwal_remember_bulk",
+        arguments: {
+            facts: [
+                "I always use pnpm",
+                MIXED,
+                "sk-abcdefghijklmnopqrstuvwxyz0123",
+                "Deploy on Thursdays",
+            ],
+        },
+    });
+
+    assert.equal(forwarded.bulk.length, 1);
+    const sent = forwarded.bulk[0];
+    const joined = sent.join("\n");
+    assert.ok(!joined.includes(PASSWORD), "a password reached the SDK");
+    assert.ok(!joined.includes("sk-abcdefghijklmnopqrstuvwxyz0123"), "a key reached the SDK");
+
+    // Three survive: the two clean facts, plus the redacted mixed one. The
+    // bare key had no fact around it, so it is dropped rather than stored as
+    // an empty placeholder.
+    assert.equal(sent.length, 3);
+    assert.ok(sent.includes("I always use pnpm"), "a clean fact was altered or dropped");
+    assert.ok(sent.includes("Deploy on Thursdays"), "a clean fact was altered or dropped");
+    assert.ok(sent.some((s) => s.includes(PREFERENCE)));
+
+    const text = textOf(result);
+    assert.ok(!text.includes(PASSWORD));
+    assert.match(text, /NOT SAVED \(1\)/);
+    assert.match(text, /#3/, "the dropped entry must be identified by position");
+});
+
+test("memwal_analyze strips the passage before the extractor ever sees it", async (t) => {
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const result = await client.callTool({
+        name: "memwal_analyze",
+        arguments: {
+            text:
+                `${MIXED}\nAlso, my GitHub token is ghp_abcdefghijklmnopqrstuvwxyz0123456789 ` +
+                "and I review PRs on Fridays.",
+        },
+    });
+
+    assert.equal(forwarded.analyze.length, 1);
+    const sent = forwarded.analyze[0];
+    assert.ok(!sent.includes(PASSWORD), "the password reached the extractor LLM");
+    assert.ok(
+        !sent.includes("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+        "the GitHub token reached the extractor LLM",
+    );
+    assert.ok(sent.includes(PREFERENCE));
+    assert.ok(sent.includes("review PRs on Fridays"));
+
+    const text = textOf(result);
+    assert.ok(!text.includes(PASSWORD));
+    assert.match(text, /credential span\(s\) were removed/);
+});
+
+// ── the rules that are not about credentials ────────────────────────────────
+
+test("an explicit do-not-save is honoured on every write path", async (t) => {
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const text = "My bank PIN is 4821 — don't save this.";
+
+    for (const [name, args] of [
+        ["memwal_remember", { text }],
+        ["memwal_remember_bulk", { facts: [text] }],
+        ["memwal_analyze", { text }],
+    ] as Array<[string, Record<string, unknown>]>) {
+        const result = await client.callTool({ name, arguments: args });
+        assert.match(
+            textOf(result),
+            /NOT SAVED|Nothing was saved/,
+            `${name} did not say it withheld the text`,
+        );
+    }
+
+    assert.deepEqual(forwarded.remember, []);
+    assert.deepEqual(forwarded.bulk, []);
+    assert.deepEqual(forwarded.analyze, []);
+    assert.ok(!allForwarded(forwarded).includes("4821"));
+});
+
+test("pasted third-party content is not saved as a user fact", async (t) => {
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const pasted = "```\nERROR 500 from the vendor API\n  at handler (index.js:42)\n```";
+
+    const remembered = await client.callTool({
+        name: "memwal_remember",
+        arguments: { text: pasted },
+    });
+    assert.match(textOf(remembered), /pasted third-party content/);
+
+    const analyzed = await client.callTool({
+        name: "memwal_analyze",
+        arguments: { text: pasted },
+    });
+    assert.match(textOf(analyzed), /pasted third-party content/);
+
+    assert.deepEqual(forwarded.remember, []);
+    assert.deepEqual(forwarded.analyze, []);
+});
+
+// ── the ordinary case, which must be untouched ──────────────────────────────
+
+test("a plain preference is forwarded byte-for-byte, with no note attached", async (t) => {
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const clean = "I always use pnpm, TypeScript strict mode, and deploy on Thursdays.";
+
+    const remembered = await client.callTool({
+        name: "memwal_remember",
+        arguments: { text: clean },
+    });
+    assert.deepEqual(forwarded.remember, [clean]);
+    assert.doesNotMatch(textOf(remembered), /redacted|NOT SAVED/i);
+
+    await client.callTool({
+        name: "memwal_remember_bulk",
+        arguments: { facts: [clean, "My coffee order is a matcha oat latte"] },
+    });
+    assert.deepEqual(forwarded.bulk, [
+        [clean, "My coffee order is a matcha oat latte"],
+    ]);
+
+    await client.callTool({ name: "memwal_analyze", arguments: { text: clean } });
+    assert.deepEqual(forwarded.analyze, [clean]);
+});
+
+test("the idempotency key is derived from what is actually written", async (t) => {
+    // Keyed on the original, a retry of a redacted fact would derive a key for
+    // text that was never sent — and the accept-timeout message promises a
+    // retry is safe.
+    const seen: string[] = [];
+    const session = {
+        oauthScope: "memwal:read memwal:write",
+        namespace: "default",
+        memwal: {
+            async rememberAsync(text: string, _ns: unknown, opts: { idempotencyKey: string }) {
+                seen.push(`${text}::${opts.idempotencyKey}`);
+                return { job_id: "job-1", status: "running" };
+            },
+        },
+    } as unknown as MemWalSession;
+
+    const client = await clientFor(session, t);
+    await client.callTool({ name: "memwal_remember", arguments: { text: MIXED } });
+    await client.callTool({ name: "memwal_remember", arguments: { text: MIXED } });
+
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0], seen[1], "the same fact must derive the same key twice");
+    assert.ok(!seen[0].includes(PASSWORD));
+});

@@ -38,6 +38,7 @@ The command opens your browser, asks you to connect your Sui wallet, and saves c
 ```sh
 memwal-mcp
 memwal-mcp login
+memwal-mcp auto-save on|off
 memwal-mcp --logout
 memwal-mcp --help
 ```
@@ -52,8 +53,67 @@ Use CLI flags or environment variables to override the default Walrus Memory end
 | `--web-url <url>` | `MEMWAL_WEB_URL` | Override the web app URL used during login. |
 | `--label <text>` | `MEMWAL_CLIENT_LABEL` | Friendly delegate-key label shown in Walrus Memory. |
 | `--namespace <name>` (alias `--ns`) | `MEMWAL_NAMESPACE` | Default memory namespace applied when the agent omits one. |
+| `auto-save on\|off` | `MEMWAL_AUTO_SAVE` | Let the agent save durable facts unprompted. Off by default; see [Automatic Memory](#automatic-memory-opt-in). |
 
 Enable verbose stderr logging with `MEMWAL_MCP_DEBUG=1`.
+
+## Automatic Memory (opt-in)
+
+By default the agent saves **only what you ask it to save**. Turning automatic
+memory on lets it save durable facts — preferences, decisions, constraints,
+recurring workflows — without being asked:
+
+```sh
+npx -y @mysten-incubation/memwal-mcp auto-save on
+npx -y @mysten-incubation/memwal-mcp auto-save off
+npx -y @mysten-incubation/memwal-mcp auto-save        # report the current setting
+```
+
+The choice is stored as `{"autoSave": true}` in `settings.json` next to your
+credentials file, so it follows the same project-local-beats-global resolution.
+To pin one MCP client instead, set the environment variable — it overrides the
+file:
+
+```json
+{
+  "mcpServers": {
+    "memwal": {
+      "command": "npx",
+      "args": ["-y", "@mysten-incubation/memwal-mcp"],
+      "env": { "MEMWAL_AUTO_SAVE": "1" }
+    }
+  }
+}
+```
+
+Recall is never gated, and neither is an explicit "remember this" — the setting
+only decides whether the agent saves things you did not ask it to save.
+
+### What is never saved
+
+Walrus storage is append-only and encrypted: a memory that lands **cannot be
+edited or deleted**. So credentials are excluded in both modes, by the same
+rules stated in the server instructions, the tool descriptions and the plugin
+hooks — and enforced by a check that runs before any text is sent:
+
+- passwords, API keys, access and refresh tokens, private keys, seed and
+  recovery phrases, authorization headers, session cookies, and connection
+  strings or URLs with an embedded `user:password`;
+- anything you say not to save ("don't save this", "off the record");
+- pasted third-party content — a fenced block, a quoted passage — which is not
+  a fact about you.
+
+When a message mixes a preference with a credential, the **preference is kept**
+and only the credential is removed: "I prefer dark mode, db is
+`postgres://admin:hunter2@db.internal/app`" is stored with the password gone and
+the host intact. The agent is told which kinds were removed; the secret itself
+is never stored, logged, or echoed back.
+
+Detection targets specific credential shapes rather than "looks random", so
+identifiers you *do* want remembered — blob ids, Sui object ids, commit SHAs,
+digests — pass through untouched. The trade-off is that a secret in no
+recognisable shape can still slip past the check, which is why the model-facing
+rules exist alongside it.
 
 ## Default Namespace
 
@@ -146,7 +206,9 @@ You can also pass explicit URLs:
 
 ## Credential Storage
 
-Credentials are stored locally in `~/.memwal/credentials.json`. To remove them:
+Credentials are stored locally in `~/.memwal/credentials.json`, and the
+automatic-memory setting in `settings.json` beside it. To remove the
+credentials:
 
 ```sh
 npx -y @mysten-incubation/memwal-mcp --logout

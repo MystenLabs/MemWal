@@ -23,6 +23,7 @@ import { recoverPendingLogin, formatStrandedLoginNotice } from "./recovery.js";
 import { runAuthRequiredServer } from "./auth-required.js";
 import { notePendingLoginSuccess, runBridge } from "./bridge.js";
 import { loginFlow } from "./login.js";
+import { autoSaveStatus, autoSaveSummary, setAutoSave, AUTO_SAVE_ENV } from "./auto-save.js";
 import { log, note } from "./logger.js";
 
 /**
@@ -43,6 +44,8 @@ interface ParsedArgs {
     webUrl?: string;
     label?: string;
     namespace?: string;
+    /** `auto-save on|off|status` — the automatic-memory opt-in (WALM-642). */
+    autoSave?: "on" | "off" | "status";
     /** Args parseArgs did not recognise, in the order seen. For a flag
      *  written `--key=value`, only `--key` is recorded — see parseArgs. */
     unknown: string[];
@@ -59,7 +62,7 @@ const ENV_PRESETS: Record<string, { relayer: string; web: string }> = {
 
 /** Bare words that are commands rather than values. An unknown flag must not
  *  swallow one as its argument. */
-const POSITIONALS = new Set(["login", "approve-project", "revoke-project"]);
+const POSITIONALS = new Set(["login", "approve-project", "revoke-project", "auto-save", "on", "off", "status"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
     const out: ParsedArgs = {
@@ -93,6 +96,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
             case "revoke-project":
                 out.revokeProject = true;
                 break;
+            case "auto-save":
+            case "--auto-save": {
+                // `auto-save` on its own reports the state rather than
+                // changing it — a bare subcommand must never be read as
+                // consent to turn automatic saving on.
+                const value = argv[i + 1]?.toLowerCase();
+                if (value === "on" || value === "off" || value === "status") {
+                    out.autoSave = value;
+                    i++;
+                } else {
+                    out.autoSave = "status";
+                }
+                break;
+            }
             case "--prod":
             case "--dev":
             case "--staging":
@@ -177,6 +194,34 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         printHelp();
         return;
     }
+    // Runs before the credential paths below: reading or flipping the opt-in
+    // does not need an account, and a user deciding whether to enable
+    // automatic memory should not be pushed through a browser login first.
+    if (args.autoSave) {
+        if (args.autoSave === "status") {
+            note(autoSaveSummary());
+            return;
+        }
+        const enabled = args.autoSave === "on";
+        const { path } = setAutoSave(enabled);
+        note(
+            enabled
+                ? `Automatic memory is ON. The agent may now save durable facts without being asked; ` +
+                      `credentials are still excluded and stripped before any write. Saved to ${path}.`
+                : `Automatic memory is OFF. Facts are saved only when you ask for them. Saved to ${path}.`,
+        );
+        const status = autoSaveStatus();
+        if (status.source === "env" && status.enabled !== enabled) {
+            // The file was written, but this process would still answer the
+            // other way — say so rather than let the setting look ignored.
+            note(
+                `Note: ${AUTO_SAVE_ENV}=${process.env[AUTO_SAVE_ENV]} is set in this environment ` +
+                    `and overrides the file. Unset it for the saved choice to take effect.`,
+            );
+        }
+        return;
+    }
+
     if (args.logout) {
         const cleared = clearCreds();
         // Explicit sign-out discards the write-ahead record too. Without this
@@ -468,6 +513,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             note(`✅ Login complete. Credentials saved to ${credsPath()}`);
         }
         note(``);
+        // The one moment a human is guaranteed to be looking at this output —
+        // so it is where the automatic-save choice gets surfaced (WALM-642).
+        note(autoSaveSummary());
+        note(``);
         note(`Next: add this package to your MCP client config (Cursor / Claude Desktop / etc).`);
         note(`See \`memwal-mcp --help\` for ready-to-paste snippets.`);
         return;
@@ -513,6 +562,18 @@ export function helpText(): string {
         "                                   required again if the account,",
         "                                   delegate key or relayer changes.",
         "  memwal-mcp revoke-project        Withdraw that approval.",
+        "  memwal-mcp auto-save on|off      Turn automatic memory on or off.",
+        "                                   OFF by default: the agent saves only",
+        "                                   what you ask it to save. Turning it",
+        "                                   on lets the agent save durable facts",
+        "                                   unprompted. Credentials (passwords,",
+        "                                   API keys, tokens, private keys, seed",
+        "                                   phrases, auth headers, URLs with an",
+        "                                   embedded user:password) are excluded",
+        "                                   and stripped before any write, in",
+        "                                   both modes. Stored in settings.json",
+        "                                   next to credentials.json.",
+        "  memwal-mcp auto-save             Report the current setting.",
         "  memwal-mcp --help                Show this help.",
         "",
         "Options:",
@@ -548,6 +609,9 @@ export function helpText(): string {
         "                                   and approvals, overriding both the",
         "                                   project-local and global files.",
         "  MEMWAL_NAMESPACE                 same as --namespace",
+        "  MEMWAL_AUTO_SAVE=1               Automatic memory for this server",
+        "                                   only; overrides settings.json.",
+        "                                   Unset or 0 = off (the default).",
         "  MEMWAL_MCP_DEBUG=1               Verbose stderr logging.",
         "",
         "Minimal MCP client config (Cursor, Claude Desktop, etc.):",
@@ -601,6 +665,7 @@ export {
     revokeProjectCredsApproval,
     formatProjectCredsNotice,
 } from "./auth.js";
+export { isAutoSaveEnabled, autoSaveStatus, setAutoSave, settingsPath } from "./auto-save.js";
 export { loginFlow } from "./login.js";
 export { runBridge } from "./bridge.js";
 export type { MemWalCredentials, CredsResolution, ProjectCredsDecision } from "./auth.js";
