@@ -1024,3 +1024,39 @@ test("normal registration checkpoints the exact Blob from transaction effects", 
         })
     );
 });
+
+test("a rejected register expiration names the bound that broke the guard", () => {
+    // The guard rejects on three conditions joined by `||`. When every upload
+    // job on testnet hit this (2026-09-17) the logged sentence named the
+    // invariant but not the value, so the relayer logs could not say which
+    // condition fired. The message has to carry the shape it saw.
+    const signer = new Ed25519Keypair();
+    const transaction = new Transaction();
+    transaction.setSender(signer.toSuiAddress());
+    transaction.setGasOwner(signer.toSuiAddress());
+    transaction.setGasBudget(1_000n);
+    transaction.setGasPrice(1n);
+    transaction.setGasPayment([]);
+    transaction.setExpiration({
+        ValidDuring: {
+            minEpoch: "1",
+            maxEpoch: "2",
+            minTimestamp: "5",
+            maxTimestamp: null,
+            chain: "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD",
+            nonce: 1,
+        },
+    });
+
+    const resolved = TransactionDataBuilder.restore(transaction.getData() as never);
+    assert.throws(
+        () => assertAddressBalanceRegisterTransaction(resolved),
+        (error: Error) => {
+            assert.match(error.message, /must use a ValidDuring address-balance expiration/);
+            assert.match(error.message, /expiration=ValidDuring/);
+            assert.match(error.message, /minTimestamp="5"/);
+            assert.match(error.message, /maxTimestamp=null/);
+            return true;
+        },
+    );
+});
