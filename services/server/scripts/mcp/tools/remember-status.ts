@@ -6,7 +6,9 @@ import { wrapTool, walruscanBlobUrl, explorerFooter } from "./util.js";
 import {
     REMEMBER_POLL_INTERVAL_MS,
     isStillRunning,
+    isRateLimited,
     nameJobError,
+    rateLimitedError,
     withAcceptDeadline,
     withWaitDeadline,
 } from "./remember-wait.js";
@@ -149,7 +151,29 @@ export function registerRememberStatusTool(
                     );
                     return saved(result.blob_id, result.namespace);
                 } catch (err) {
-                    if (isStillRunning(err)) return stillRunning(job_id);
+                    if (isStillRunning(err)) {
+                        // Same masking as the batch path: the SDK's poll loop
+                        // hides a refused poll behind its own timeout, so
+                        // confirm with one direct read before calling it
+                        // progress.
+                        try {
+                            const status = await session.memwal.getRememberStatus(job_id);
+                            if (status.status === "done") {
+                                return saved(status.blob_id ?? "", status.namespace);
+                            }
+                            if (status.status !== "failed" && status.status !== "not_found") {
+                                return stillRunning(job_id, status.status);
+                            }
+                        } catch (probe) {
+                            if (isRateLimited(probe)) {
+                                throw rateLimitedError(
+                                    probe,
+                                    "check whether the write landed"
+                                );
+                            }
+                        }
+                        return stillRunning(job_id);
+                    }
                     throw nameJobError(err);
                 }
             }
@@ -173,7 +197,7 @@ async function settleBatch(
     // A zero budget is a single batched read, the same shortcut the one-job
     // path takes: `waitForRememberJobs` sleeps before its first poll, so a 0ms
     // deadline would report everything as still running without ever asking.
-    const rows =
+    let rows =
         budgetMs === 0
             ? (
                   await withAcceptDeadline(
@@ -201,6 +225,42 @@ async function settleBatch(
                   blob_id: r.blob_id,
                   error: r.error,
               }));
+
+    // `waitForRememberJobs` polls internally and swallows each poll's error,
+    // stamping every row "polling timed out" when the budget runs out. A batch
+    // whose polls were all REFUSED — a 429 on the status endpoint — is
+    // therefore indistinguishable from one that is genuinely still uploading,
+    // and reporting the refusal as progress is what sends an agent back to
+    // poll again on a budget it has already spent.
+    //
+    // Nothing moving at all is the shape that refusal takes, so confirm it
+    // with one direct read. Only then: if any row settled, the polls were
+    // clearly getting through and no probe is warranted.
+    const nothingMoved =
+        budgetMs > 0 && rows.length > 0 && rows.every((r) => r.status === "timeout");
+    if (nothingMoved) {
+        try {
+            rows = (
+                await withAcceptDeadline(
+                    session.memwal.getRememberBulkStatus(jobIds),
+                    "batch status read",
+                    { idempotent: true },
+                )
+            ).results.map((r) => ({
+                id: r.job_id,
+                status: r.status,
+                blob_id: r.blob_id ?? "",
+                error: r.error,
+            }));
+        } catch (err) {
+            if (isRateLimited(err)) {
+                throw rateLimitedError(err, "check whether the writes landed");
+            }
+            // Any other probe failure is not evidence about the jobs; fall
+            // back to what the wait already reported rather than inventing an
+            // outcome from a failed read.
+        }
+    }
 
     // `timeout` (the waited path) and pending/running/uploaded (the immediate
     // read) are the same thing to a caller: still in flight, ask again.

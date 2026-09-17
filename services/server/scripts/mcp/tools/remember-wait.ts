@@ -517,6 +517,36 @@ function retryAdvice(secs: number, layer: string | undefined): string {
         : `Retry after ~${secs}s.`;
 }
 
+/** True if the relayer refused this call with a rate limit. */
+export function isRateLimited(err: unknown): boolean {
+    return (err as { status?: number } | null)?.status === 429;
+}
+
+/**
+ * The rate-limit error an agent can act on, built from what the relayer said.
+ *
+ * Shared with `memwal_remember_status` so a throttled poll cannot be reported
+ * as "still uploading": a denied poll tells us nothing about the job, and
+ * rendering it as progress is what turns a rate limit into an agent that keeps
+ * polling and spends more of the budget it has already exhausted.
+ */
+export function rateLimitedError(err: unknown, what: string): Error {
+    const secs = Math.ceil(advisedCooldownMs(err) / 1000);
+    const { layer, limit } = rateLimitFacts(err);
+    const hit = layer
+        ? `Limit hit: ${layer} ${scopeOfLayer(layer)}` + (limit ? ` (${limit})` : "") + ". "
+        : "";
+    const e = new Error(
+        `Walrus Memory rate limit reached while trying to ${what}. ${hit}` +
+            `${retryAdvice(secs, layer)} To spend less of the budget, save several facts ` +
+            `with one memwal_remember_bulk call instead of repeated memwal_remember calls, ` +
+            `and settle a batch with a single memwal_remember_status(job_ids=[...]).`,
+    );
+    e.name = "MemWalRelayerUnavailable";
+    (e as Error & { status?: number }).status = 429;
+    return e;
+}
+
 /** Honour the relayer's `retry_after` instead of surfacing a raw 429.
  *
  * Once the per-delegate-key budget is spent the write is simply never made,
