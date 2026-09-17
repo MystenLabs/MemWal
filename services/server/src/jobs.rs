@@ -202,6 +202,7 @@ async fn update_remember_job_after_wallet_error(
     remember_job_id: Option<&str>,
     error: &WalletJobError,
     msg: &str,
+    attempt_info: Option<WalletJobAttemptInfo>,
 ) {
     let Some(jid) = remember_job_id else {
         return;
@@ -210,13 +211,17 @@ async fn update_remember_job_after_wallet_error(
     // Aborting errors (Permanent or ObjectLockedUntilEpoch) get no further
     // retries, so the row is terminal — mark it failed rather than leaving it
     // stuck on `running` forever. Retryable errors stay `running` for the next
-    // attempt. The error_msg carries the lock detail; the object-lock case
-    // also fires its own distinct Slack alert.
-    let status = if error.aborts_retries() {
-        "failed"
-    } else {
-        "running"
-    };
+    // attempt — UNLESS this was already the final attempt. Exhausted retries
+    // used to stay `running` with an error_msg until the 10-minute stale
+    // sweeper force-failed them, so clients polling GET /api/remember/:job_id
+    // reported "still uploading" for minutes after every wallet attempt had
+    // already died (dev 2026-09-17 upload-slot investigation). Pass
+    // `attempt_info` only from the attempt that actually failed the upload;
+    // lock-contention Defer callers pass None so a loser cannot mark failed
+    // while a winner is still working.
+    let exhausted = attempt_info.is_some_and(|info| info.exhausted_by(error));
+    let terminal = error.aborts_retries() || exhausted;
+    let status = if terminal { "failed" } else { "running" };
 
     // Terminal means no later attempt will ever insert the row, so the bytes
     // this job reserved at admission must go back to the owner now rather than
@@ -226,7 +231,7 @@ async fn update_remember_job_after_wallet_error(
     //
     // Safe to run even when a concurrent attempt already won and released:
     // release is a delete by id, so a second call is a no-op.
-    if error.aborts_retries() {
+    if terminal {
         crate::storage::db::release_storage_reservations_with_pool(pool, &[jid.to_string()]).await;
     }
 
@@ -736,6 +741,7 @@ pub(crate) async fn execute_wallet_job(
                         remember_job_id.as_deref(),
                         &err,
                         &msg,
+                        Some(attempt_info),
                     )
                     .await;
                     tracing::error!(
@@ -919,8 +925,14 @@ async fn insert_vector_and_mark_remember_done(
     {
         let msg = format!("insert_vector failed: {}", e);
         let classified = WalletJobError::classify_sidecar_error(&msg);
-        update_remember_job_after_wallet_error(state.db.pool(), remember_job_id, &classified, &msg)
-            .await;
+        update_remember_job_after_wallet_error(
+            state.db.pool(),
+            remember_job_id,
+            &classified,
+            &msg,
+            None,
+        )
+        .await;
         tracing::error!(
             "[wallet-job:upload] job_id={} {} classification={} retryable={}",
             remember_job_id.unwrap_or("-"),
@@ -1539,11 +1551,14 @@ async fn execute_upload_and_transfer(
                     attempt_info.max,
                     err,
                 );
+                // No attempt_info: a Defer loser must not mark the row failed
+                // on the final attempt while the lock holder is still working.
                 update_remember_job_after_wallet_error(
                     state.db.pool(),
                     Some(jid.as_str()),
                     &err,
                     err.message(),
+                    None,
                 )
                 .await;
                 tokio::time::sleep(backoff_duration(attempt_info.current as u32)).await;
@@ -1744,6 +1759,7 @@ async fn execute_upload_and_transfer_locked(
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
+                None,
             )
             .await;
             tracing::error!(
@@ -1790,11 +1806,23 @@ async fn execute_upload_and_transfer_locked(
                 // reclassifying its display text would incorrectly make it
                 // retryable and leave the polling row running.
                 let msg = err.message().to_string();
+                maybe_alert_walrus_upload_exhausted(
+                    state,
+                    &err,
+                    attempt_info,
+                    Some(jid.as_str()),
+                    &owner,
+                    &namespace,
+                    wallet_index,
+                    &msg,
+                )
+                .await;
                 update_remember_job_after_wallet_error(
                     state.db.pool(),
                     Some(jid.as_str()),
                     &err,
                     &msg,
+                    Some(attempt_info),
                 )
                 .await;
                 tracing::error!(
@@ -1944,6 +1972,7 @@ async fn execute_upload_and_transfer_locked(
                     remember_job_id.as_deref(),
                     &classified,
                     &msg,
+                    None,
                 )
                 .await;
 
@@ -2058,6 +2087,7 @@ async fn execute_upload_and_transfer_locked(
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
+                Some(attempt_info),
             )
             .await;
             tracing::error!(
@@ -4175,6 +4205,7 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             Some(job_id.as_str()),
             &WalletJobError::Transient("another attempt of upload job is in progress".into()),
             "another attempt of upload job is in progress",
+            None,
         )
         .await;
 
@@ -4193,6 +4224,76 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
             .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn exhausted_transient_upload_marks_the_row_failed_immediately() {
+        // Dev 2026-09-17: after attempt 5/5 of a Walrus 503 timeout the row
+        // stayed `running` until the 10-minute stale sweeper. Clients polling
+        // the job then reported "still uploading" long after every wallet
+        // attempt was spent. The final attempt must mark failed itself.
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &job_id, "running", None).await;
+
+        let err = WalletJobError::Transient(
+            "Internal Error: durable Walrus upload failed (503 Service Unavailable)".into(),
+        );
+        update_remember_job_after_wallet_error(
+            &pool,
+            Some(job_id.as_str()),
+            &err,
+            err.message(),
+            Some(WalletJobAttemptInfo {
+                current: MAX_ATTEMPTS as usize,
+                max: MAX_ATTEMPTS as usize,
+            }),
+        )
+        .await;
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "failed");
+        assert!(
+            row.1.as_deref().unwrap_or("").contains("503"),
+            "error_msg must keep the upload failure: {:?}",
+            row.1
+        );
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+
+        // An earlier attempt must still leave the row running for the next try.
+        let mid_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &mid_id, "running", None).await;
+        update_remember_job_after_wallet_error(
+            &pool,
+            Some(mid_id.as_str()),
+            &err,
+            err.message(),
+            Some(WalletJobAttemptInfo {
+                current: (MAX_ATTEMPTS as usize) - 1,
+                max: MAX_ATTEMPTS as usize,
+            }),
+        )
+        .await;
+        let mid: (String,) = sqlx::query_as("SELECT status FROM remember_jobs WHERE id = $1")
+            .bind(&mid_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mid.0, "running");
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&mid_id)
             .execute(&pool)
             .await;
     }
