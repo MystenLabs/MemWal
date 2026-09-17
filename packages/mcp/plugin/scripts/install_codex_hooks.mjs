@@ -33,6 +33,22 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(SCRIPT_DIR);
 
 function resolveMcpVersion() {
+    // Prefer the pin in .mcp.json so the Codex installer cannot launch an
+    // unpublished package version when plugin.json has already been bumped
+    // for the next release (2026-09-17: plugin.json=0.0.14 but npm had no
+    // 0.0.14 — only 0.0.13 / 0.0.14-dev.0).
+    try {
+        const mcp = JSON.parse(readFileSync(join(PLUGIN_ROOT, ".mcp.json"), "utf8"));
+        const args = mcp?.mcpServers?.memwal?.args;
+        if (Array.isArray(args)) {
+            const pinned = args.find(
+                (a) => typeof a === "string" && a.startsWith("@mysten-incubation/memwal-mcp@"),
+            );
+            if (pinned) return pinned.slice("@mysten-incubation/memwal-mcp@".length);
+        }
+    } catch {
+        // fall through
+    }
     return JSON.parse(readFileSync(join(PLUGIN_ROOT, "plugin.json"), "utf8")).version;
 }
 
