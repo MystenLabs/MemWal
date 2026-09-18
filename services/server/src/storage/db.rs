@@ -34,7 +34,7 @@ macro_rules! migration {
 ///    alphabetical order.
 /// 2. Two files share the version number `014`, which `sqlx::migrate!`
 ///    rejects outright.
-/// 3. `backfill_updated_at` and `recover_invalid_pagination_index` are
+/// 3. `backfill_updated_at` and `recover_invalid_concurrent_indexes` are
 ///    Rust steps that have to land between specific files.
 ///
 /// What is no longer manual is *completeness*: every `.sql` file in
@@ -78,7 +78,7 @@ const MIGRATIONS_BEFORE_BACKFILL: &[Migration] = &[
     migration!("014_storage_reservations.sql"),
     // owner-scoped read API: updated_at cursor column + agent_id/package_id.
     // Split across 014-019 (see each file's header, and
-    // backfill_updated_at's / recover_invalid_pagination_index's doc
+    // backfill_updated_at's / recover_invalid_concurrent_indexes's doc
     // comments below) to avoid holding ACCESS EXCLUSIVE across the
     // full-table backfill or the index build.
     migration!("014_memory_read_api_columns.sql"),
@@ -89,10 +89,14 @@ const MIGRATIONS_BEFORE_BACKFILL: &[Migration] = &[
 const MIGRATIONS_AFTER_BACKFILL: &[Migration] =
     &[migration!("015_memory_read_api_updated_at_not_null.sql")];
 
-/// Applied after `recover_invalid_pagination_index`, which must precede
-/// 016's `CREATE INDEX CONCURRENTLY IF NOT EXISTS` — that would
-/// otherwise silently no-op forever against a permanently INVALID index
-/// left behind by an interrupted build.
+/// Applied after `recover_invalid_concurrent_indexes`, which must precede
+/// every `CREATE INDEX CONCURRENTLY IF NOT EXISTS` in this slice — 016,
+/// 018 and 022. Each of those would otherwise silently no-op forever
+/// against a permanently INVALID index left behind by an interrupted
+/// build. Every such index is registered in
+/// `CONCURRENTLY_BUILT_INDEXES`; a new one added to this slice without
+/// being registered fails
+/// `every_concurrently_built_index_is_registered_for_recovery`.
 const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
     // keyset-pagination index for the memories listing endpoint.
     // Must stay in its own file/transaction — see 016's header comment.
@@ -242,6 +246,85 @@ mod tests {
         );
     }
 
+    /// Every index a migration in `MIGRATIONS_AFTER_INDEX_RECOVERY` builds
+    /// CONCURRENTLY must be registered in `CONCURRENTLY_BUILT_INDEXES`.
+    ///
+    /// Forgetting one fails silently, which is why it needs a test rather
+    /// than a convention: an interrupted build leaves the index INVALID,
+    /// `IF NOT EXISTS` then no-ops its migration on every later boot, and
+    /// the query it served quietly falls back to a scan. 022 is the case
+    /// that motivates the check -- it keeps `/health`'s write-outcome
+    /// probe cheap, so losing it disables a silent-failure detector,
+    /// silently.
+    #[test]
+    fn every_concurrently_built_index_is_registered_for_recovery() {
+        use std::collections::BTreeSet;
+
+        // `CREATE [UNIQUE] INDEX CONCURRENTLY [IF NOT EXISTS] <name>`,
+        // whether the name sits with the keywords or the `ON` clause wraps
+        // to the next line.
+        fn index_name(statement: &str) -> Option<String> {
+            let tokens: Vec<&str> = statement.split_whitespace().collect();
+            let at = tokens.iter().position(|t| *t == "concurrently")?;
+            let mut rest = &tokens[at + 1..];
+            for keyword in ["if", "not", "exists"] {
+                if rest.first() == Some(&keyword) {
+                    rest = &rest[1..];
+                }
+            }
+            rest.first()
+                .map(|name| {
+                    name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
+                        .to_owned()
+                })
+                .filter(|name| !name.is_empty())
+        }
+
+        let mut built: BTreeSet<String> = BTreeSet::new();
+        for (file, sql) in super::MIGRATIONS_AFTER_INDEX_RECOVERY {
+            for statement in sql.split(';') {
+                // Drop comment lines so a file header that merely mentions
+                // CREATE INDEX CONCURRENTLY is not read as one.
+                let code = statement
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("--"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_ascii_lowercase();
+                if !(code.contains("create")
+                    && code.contains("index")
+                    && code.contains("concurrently"))
+                {
+                    continue;
+                }
+                built.insert(
+                    index_name(&code)
+                        .unwrap_or_else(|| panic!("could not read an index name out of {file}")),
+                );
+            }
+        }
+
+        let registered: BTreeSet<String> = super::CONCURRENTLY_BUILT_INDEXES
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+
+        let unregistered: Vec<&String> = built.difference(&registered).collect();
+        assert!(
+            unregistered.is_empty(),
+            "index(es) built CONCURRENTLY but not registered for invalid-index \
+             recovery: {unregistered:?}. Add them to CONCURRENTLY_BUILT_INDEXES, or an \
+             interrupted build leaves them INVALID and their migration no-ops forever."
+        );
+
+        let stale: Vec<&String> = registered.difference(&built).collect();
+        assert!(
+            stale.is_empty(),
+            "CONCURRENTLY_BUILT_INDEXES names index(es) that no migration in \
+             MIGRATIONS_AFTER_INDEX_RECOVERY builds: {stale:?}"
+        );
+    }
+
     fn test_database_url() -> Option<String> {
         std::env::var("DATABASE_URL").ok()
     }
@@ -285,7 +368,7 @@ mod tests {
             .await
             .unwrap();
 
-        super::recover_invalid_pagination_index(&pool)
+        super::recover_invalid_concurrent_indexes(&pool)
             .await
             .unwrap();
 
@@ -1313,11 +1396,42 @@ fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
     }
 }
 
-/// Name of the keyset-pagination index migration 016 builds. Shared
-/// between the invalid-index recovery check and (in spirit) migration
-/// 016's own `CREATE INDEX CONCURRENTLY IF NOT EXISTS` -- kept as a
-/// constant here so the two names can't drift apart.
-const PAGINATION_INDEX_NAME: &str = "idx_vector_entries_owner_updated_id";
+/// Indexes built with `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, paired
+/// with the migration that builds each one.
+///
+/// `IF NOT EXISTS` matches by index NAME only -- it cannot tell whether
+/// an index already carrying that name is usable. So any entry here can
+/// be left permanently INVALID by an interrupted build, after which its
+/// migration no-ops forever while the planner refuses to use what was
+/// left behind. Nothing errors; the query just silently degrades.
+///
+/// The interruption that matters is the ordinary one, not an operator
+/// with Ctrl-C: `VectorDb::new` does not set `statement_timeout`, so
+/// these builds inherit the server default, and the larger the table the
+/// likelier the build exceeds it. That puts the failure most likely on
+/// exactly the tables where the index earns its keep.
+///
+/// Only indexes whose loss is SILENT belong here. Migration 013's
+/// `uq_remember_jobs_owner_idempotency_key` is deliberately absent: it is
+/// a unique index backing `ON CONFLICT (owner, idempotency_key)`, and an
+/// invalid one makes that upsert ERROR outright rather than quietly
+/// degrade, so it reports itself. It also runs in
+/// `MIGRATIONS_BEFORE_BACKFILL`, ahead of the single recovery pass below.
+///
+/// Add an entry whenever a migration in `MIGRATIONS_AFTER_INDEX_RECOVERY`
+/// builds an index CONCURRENTLY --
+/// `every_concurrently_built_index_is_registered_for_recovery` fails the
+/// suite if one is missed.
+const CONCURRENTLY_BUILT_INDEXES: &[(&str, &str)] = &[
+    // Keyset pagination for the memories listing endpoint.
+    ("idx_vector_entries_owner_updated_id", "016"),
+    // Expiry-refresh sweep ordering (ASC NULLS FIRST).
+    ("idx_vector_entries_expiry_synced_at", "018"),
+    // `/health` recent_write_outcomes window scan -- the probe that keeps
+    // `writes=degraded` alive, so losing it silently disables a
+    // silent-failure detector.
+    ("remember_jobs_recent_outcomes_idx", "022"),
+];
 
 /// Backfill `vector_entries.updated_at` from `created_at` in bounded
 /// batches.
@@ -1382,58 +1496,50 @@ async fn backfill_updated_at(pool: &PgPool) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Detect and recover from an INVALID `idx_vector_entries_owner_updated_id`
-/// left behind by an interrupted `CREATE INDEX CONCURRENTLY` build.
+/// Drop any INVALID index left behind by an interrupted
+/// `CREATE INDEX CONCURRENTLY` build, so the migration that owns it can
+/// rebuild it on this same boot.
 ///
-/// Migration 013 runs `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, and
-/// `IF NOT EXISTS` matches by index NAME only -- it has no idea whether
-/// an existing index with that name is actually usable. A
-/// `CONCURRENTLY` build that gets interrupted (process crash,
-/// statement timeout, deploy killing the connection mid-build) leaves
-/// behind a permanently INVALID index under the target name. From that
-/// point on, every future `VectorDb::new()` sees the name already
-/// exists, silently no-ops migration 013 forever, and every
-/// memories-listing query keyset-paginating on `(owner, updated_at,
-/// id)` silently degrades to a sequential scan -- with no error ever
-/// surfaced.
+/// See `CONCURRENTLY_BUILT_INDEXES` for why `IF NOT EXISTS` cannot
+/// recover on its own and which indexes are in scope.
 ///
-/// Called immediately before migration 013 runs. If an INVALID index is
-/// found, it is dropped (via `DROP INDEX CONCURRENTLY`, which -- like
-/// `CREATE INDEX CONCURRENTLY` -- cannot run inside a transaction
-/// block, hence the bare `sqlx::query(..).execute(pool)` with no
-/// explicit transaction wrapper) so migration 013's own `CREATE INDEX
-/// CONCURRENTLY IF NOT EXISTS` can actually rebuild it. The recovery is
-/// logged at `warn` level so it is visible in observability rather than
-/// silently happening on every boot.
-async fn recover_invalid_pagination_index(pool: &PgPool) -> Result<(), AppError> {
-    let index_is_invalid: Option<bool> = sqlx::query_scalar(
-        "SELECT pg_index.indisvalid FROM pg_index \
-         JOIN pg_class ON pg_class.oid = pg_index.indexrelid \
-         WHERE pg_class.relname = $1",
-    )
-    .bind(PAGINATION_INDEX_NAME)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        AppError::Internal(format!(
-            "Failed to check validity of {}: {}",
-            PAGINATION_INDEX_NAME, e
-        ))
-    })?;
+/// Called immediately before `MIGRATIONS_AFTER_INDEX_RECOVERY`, which is
+/// where every listed migration lives -- so one pass covers all of them,
+/// and each `CREATE INDEX CONCURRENTLY IF NOT EXISTS` that follows finds
+/// either a valid index or no index at all.
+///
+/// `DROP INDEX CONCURRENTLY` cannot run inside a transaction block either,
+/// hence the bare `sqlx::query(..).execute(pool)` with no explicit
+/// transaction wrapper. A recovery is logged at `warn` so it shows up in
+/// observability instead of silently happening on boot.
+async fn recover_invalid_concurrent_indexes(pool: &PgPool) -> Result<(), AppError> {
+    for (index, migration) in CONCURRENTLY_BUILT_INDEXES {
+        let index_is_invalid: Option<bool> = sqlx::query_scalar(
+            "SELECT pg_index.indisvalid FROM pg_index \
+             JOIN pg_class ON pg_class.oid = pg_index.indexrelid \
+             WHERE pg_class.relname = $1",
+        )
+        .bind(index)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to check validity of {}: {}", index, e)))?;
 
-    if index_is_invalid == Some(false) {
+        // None means no index by that name -- nothing built it yet, which
+        // its own migration handles. Some(true) is a healthy index.
+        if index_is_invalid != Some(false) {
+            continue;
+        }
+
         tracing::warn!(
-            index = PAGINATION_INDEX_NAME,
-            "found INVALID pagination index, likely left behind by an interrupted \
-             CREATE INDEX CONCURRENTLY build -- dropping it so migration 013 can rebuild it"
+            index = %index,
+            migration = %migration,
+            "found INVALID index, likely left behind by an interrupted CREATE INDEX \
+             CONCURRENTLY build -- dropping it so its migration can rebuild it"
         );
 
-        let drop_stmt = format!("DROP INDEX CONCURRENTLY {}", PAGINATION_INDEX_NAME);
+        let drop_stmt = format!("DROP INDEX CONCURRENTLY {}", index);
         sqlx::query(&drop_stmt).execute(pool).await.map_err(|e| {
-            AppError::Internal(format!(
-                "Failed to drop invalid index {}: {}",
-                PAGINATION_INDEX_NAME, e
-            ))
+            AppError::Internal(format!("Failed to drop invalid index {}: {}", index, e))
         })?;
     }
 
@@ -1529,7 +1635,7 @@ impl VectorDb {
 
         run_migrations(&pool, MIGRATIONS_AFTER_BACKFILL).await?;
 
-        recover_invalid_pagination_index(&pool).await?;
+        recover_invalid_concurrent_indexes(&pool).await?;
 
         run_migrations(&pool, MIGRATIONS_AFTER_INDEX_RECOVERY).await?;
 
@@ -1873,8 +1979,7 @@ impl VectorDb {
         window: std::time::Duration,
     ) -> Result<(i64, i64), AppError> {
         let started = std::time::Instant::now();
-        let since =
-            chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default();
+        let since = chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default();
         // SET LOCAL needs a transaction; the pool's statement_timeout is
         // the startup bound (up to 300s) and would let this scan run that
         // long. 1000ms matches WRITE_READY_PROBE_TIMEOUT on /health.
