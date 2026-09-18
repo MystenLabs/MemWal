@@ -1367,8 +1367,10 @@ export async function runBridge(
 
     /** Tool names the CONNECTED relayer advertised on its last `tools/list`,
      * minus the ones we serve locally. Empty until the client has listed tools
-     * at least once over a live session — until then the gate allows only the
-     * cold-start floor (`COLD_START_TOOL_NAMES`), not an unknown name. */
+     * at least once over the *current* session. `reconnect()` clears it: a
+     * stale allow would re-forward a tool the new relayer does not serve
+     * (GH #928), and a stale deny would refuse a tool it does. Until the
+     * next upstream list, the gate allows only the cold-start floor. */
     const upstreamToolNames = new Set<string>();
 
     /** IDs of forwarded `memwal_health` calls, each against the relayer URL the
@@ -1501,6 +1503,15 @@ export async function runBridge(
                     throttleNoticed = false;
                     clearHandshakeFailure();
                     endConnectEpisode();
+                    // This session has not advertised anything yet. Keep the
+                    // previous set and a login that swapped relayerUrl would
+                    // re-forward a tool the new one does not serve, or refuse
+                    // one it does, until the client happened to re-list.
+                    upstreamToolNames.clear();
+                    writeStdoutMessage({
+                        jsonrpc: "2.0",
+                        method: "notifications/tools/list_changed",
+                    });
                     // An accepted handshake retires any earlier rejection —
                     // `memwal_login` re-registers a key and lands here, not on
                     // the background connect's publish path, so clearing only

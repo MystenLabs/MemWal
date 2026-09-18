@@ -370,3 +370,272 @@ test("a tool the relayer does not serve is refused locally, not waited out", asy
     assert.notEqual(health.result?.isError, true);
     assert.match(JSON.stringify(health.result), /status=ok/);
 });
+
+/** First session advertises the newer tool; later sessions look like 0.0.13.
+ * Reproducing a login / SSE reconnect that swaps the relayer under the bridge. */
+const NEW_RELAYER_TOOLS = [...OLD_RELAYER_TOOLS, MISSING_TOOL];
+
+function startSkewRelayer() {
+    const sessions = [];
+    const callsSeen = [];
+    const server = http.createServer((req, res) => {
+        const url = new URL(req.url, "http://127.0.0.1");
+        if (req.method === "GET" && url.pathname === "/version") {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(
+                JSON.stringify({
+                    apiVersion: "1.0.0",
+                    relayerVersion: "0.0.14",
+                    minSupportedSdk: { mcp: "0.0.1" },
+                }),
+            );
+            return;
+        }
+        if (req.method === "GET" && url.pathname === "/api/mcp/sse") {
+            if (!hasBridgeAuth(req)) {
+                res.writeHead(401);
+                res.end();
+                return;
+            }
+            const first = sessions.length === 0;
+            const sessionId = `session-${sessions.length + 1}`;
+            res.writeHead(200, {
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                connection: "keep-alive",
+            });
+            res.write(`event: endpoint\ndata: /api/mcp/messages?sessionId=${sessionId}\n\n`);
+            sessions.push({ id: sessionId, res, first });
+            const hb = setInterval(() => {
+                if (res.writableEnded) {
+                    clearInterval(hb);
+                    return;
+                }
+                res.write(":\n\n");
+            }, 200);
+            hb.unref?.();
+            res.on("close", () => clearInterval(hb));
+            return;
+        }
+        if (req.method === "POST" && url.pathname === "/api/mcp/messages") {
+            if (!hasBridgeAuth(req)) {
+                res.writeHead(401);
+                res.end();
+                return;
+            }
+            const session = sessions.find((s) => s.id === url.searchParams.get("sessionId"));
+            let body = "";
+            req.on("data", (c) => (body += c));
+            req.on("end", () => {
+                if (!session) {
+                    res.writeHead(404);
+                    res.end();
+                    return;
+                }
+                res.writeHead(202);
+                res.end();
+                let msg;
+                try {
+                    msg = JSON.parse(body);
+                } catch {
+                    return;
+                }
+                const tools = session.first ? NEW_RELAYER_TOOLS : OLD_RELAYER_TOOLS;
+                const reply = (result) => {
+                    if (session.res.writableEnded) return;
+                    session.res.write(
+                        `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result })}\n\n`,
+                    );
+                };
+                if (msg.method === "initialize") {
+                    reply({
+                        protocolVersion: "2024-11-05",
+                        capabilities: { tools: { listChanged: true } },
+                        serverInfo: { name: "memwal-upstream", version: session.first ? "0.0.14" : "0.0.13" },
+                    });
+                    return;
+                }
+                if (msg.method === "tools/list") {
+                    reply({
+                        tools: tools.map((name) => ({
+                            name,
+                            description: `upstream ${name}`,
+                            inputSchema: { type: "object" },
+                        })),
+                    });
+                    return;
+                }
+                if (msg.method === "tools/call") {
+                    callsSeen.push({ session: session.id, name: msg.params?.name });
+                    if (msg.params?.name === "memwal_health") {
+                        reply({
+                            content: [{ type: "text", text: "status=ok version=skew" }],
+                            isError: false,
+                        });
+                        return;
+                    }
+                    if (msg.params?.name === MISSING_TOOL && session.first) {
+                        reply({
+                            content: [{ type: "text", text: "status=done blob_id=from-first-session" }],
+                            isError: false,
+                        });
+                    }
+                    // Later sessions: silence on the missing tool, same as 0.0.13.
+                }
+            });
+            return;
+        }
+        res.writeHead(404);
+        res.end();
+    });
+    return new Promise((res) => {
+        server.listen(0, "127.0.0.1", () => {
+            const { port } = server.address();
+            res({
+                server,
+                base: `http://127.0.0.1:${port}`,
+                callsSeen,
+                sessions,
+                closeFirst() {
+                    const first = sessions[0];
+                    if (first && !first.res.writableEnded) first.res.end();
+                },
+            });
+        });
+    });
+}
+
+test("reconnect forgets the previous relayer's tool set instead of stale-allowing", async (t) => {
+    const mock = await startSkewRelayer();
+    const home = mkdtempSync(join(tmpdir(), "memwal-toolskew-reconnect-"));
+    const credsPath = join(home, ".memwal", "credentials.json");
+    mkdirSync(dirname(credsPath), { recursive: true });
+    writeFileSync(credsPath, JSON.stringify(makeCreds(mock.base)), { mode: 0o600 });
+
+    const child = spawn(process.execPath, [BIN, "--relayer", mock.base, "--web-url", mock.base], {
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const received = [];
+    const listeners = new Set();
+    let buf = "";
+    child.stdout.on("data", (d) => {
+        buf += d.toString();
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            if (!line.trim()) continue;
+            let msg;
+            try {
+                msg = JSON.parse(line);
+            } catch {
+                continue;
+            }
+            received.push({ msg, at: Date.now() });
+            for (const l of [...listeners]) l(msg);
+        }
+    });
+    let stderrBuf = "";
+    child.stderr.on("data", (d) => (stderrBuf += d.toString()));
+
+    const send = (obj) => child.stdin.write(JSON.stringify(obj) + "\n");
+    const waitFor = (pred, ms = 15000) => {
+        const hit = received.find((r) => pred(r.msg));
+        if (hit) return Promise.resolve(hit.msg);
+        return new Promise((res, rej) => {
+            const timer = setTimeout(() => {
+                listeners.delete(l);
+                rej(
+                    new Error(
+                        `timed out waiting for message\n--- stderr ---\n${stderrBuf}\n--- received ---\n${received.map((r) => JSON.stringify(r.msg)).join("\n")}`,
+                    ),
+                );
+            }, ms);
+            const l = (m) => {
+                if (pred(m)) {
+                    clearTimeout(timer);
+                    listeners.delete(l);
+                    res(m);
+                }
+            };
+            listeners.add(l);
+        });
+    };
+
+    t.after(() => {
+        child.kill("SIGKILL");
+        mock.server.close();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "toolskew-reconnect", version: "1.0.0" },
+        },
+    });
+    await waitFor((m) => m.id === 1 && m.result, 10_000);
+
+    await waitFor((m) => m.method === "notifications/tools/list_changed", 10_000);
+    send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+    const firstList = await waitFor((m) => m.id === 2 && m.result, 10_000);
+    assert.ok(
+        firstList.result.tools.some((tool) => tool.name === MISSING_TOOL),
+        "first session must advertise the newer tool so the stale-allow path is live",
+    );
+
+    send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: MISSING_TOOL, arguments: { job_id: "job-1" } },
+    });
+    const firstCall = await waitFor((m) => m.id === 3 && m.result, 10_000);
+    assert.notEqual(firstCall.result?.isError, true);
+    assert.match(JSON.stringify(firstCall.result), /from-first-session/);
+
+    const changedBefore = received.filter(
+        (r) => r.msg.method === "notifications/tools/list_changed",
+    ).length;
+    mock.closeFirst();
+    await waitFor(
+        () =>
+            mock.sessions.length >= 2 &&
+            received.filter((r) => r.msg.method === "notifications/tools/list_changed").length >
+                changedBefore,
+        10_000,
+    );
+
+    // Do NOT re-list. The previous allow-set still named the tool; forwarding
+    // it into session-2 (0.0.13, silent on this name) is the #928 hang.
+    const startedAt = Date.now();
+    send({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: MISSING_TOOL, arguments: { job_id: "job-2" } },
+    });
+    const refusal = await waitFor((m) => m.id === 4, 10_000);
+    const elapsed = Date.now() - startedAt;
+    assert.equal(
+        refusal.result?.isError,
+        true,
+        `expected a local refusal after reconnect, got ${JSON.stringify(refusal)}`,
+    );
+    assert.match(refusal.result.content[0].text, new RegExp(MISSING_TOOL));
+    assert.match(refusal.result.content[0].text, /nothing was saved/i);
+    assert.ok(
+        elapsed < 5_000,
+        `post-reconnect refusal took ${elapsed}ms — expected it answered locally`,
+    );
+    assert.ok(
+        !mock.callsSeen.some((c) => c.session !== "session-1" && c.name === MISSING_TOOL),
+        `bridge forwarded ${MISSING_TOOL} to the new session: ${JSON.stringify(mock.callsSeen)}`,
+    );
+});
