@@ -122,7 +122,7 @@ test("cold-start write tools warn that a result may not be saved yet", () => {
     for (const name of ["memwal_remember", "memwal_remember_bulk"]) {
         const d = desc(TOOL_DEFINITIONS, name);
         assert.match(d, /NOT (yet )?(saved|stored)/i, `${name} omits the pending warning`);
-        assert.match(d, /settle it|settle them/, `${name} does not say to settle the job`);
+        assert.match(d, /settle it|settle them/i, `${name} does not say to settle the job`);
     }
 });
 
