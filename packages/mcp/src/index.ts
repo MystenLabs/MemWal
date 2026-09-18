@@ -15,6 +15,7 @@ import {
     clearPendingLogin,
     credsPath,
     formatProjectCredsNotice,
+    formatProjectCredsStorageWarning,
     loadCreds,
     resolveCreds,
     revokeProjectCredsApproval,
@@ -267,6 +268,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
                     `Already approved: ${approved.projectPath} → account ${approved.accountId} ` +
                         `on ${approved.relayerUrl}.`,
                 );
+                // Repeated on a no-op approve too: someone re-running this is
+                // checking what the state is, and "a private key gets written
+                // into your repo" is part of that state.
+                if (approved.projectPath) {
+                    note(formatProjectCredsStorageWarning(approved.projectPath));
+                }
                 break;
             default:
                 if (approved.outcome === "reapproved") {
@@ -284,6 +291,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
                     `Recorded in ${approved.approvalsPath}. Approval is required again if the ` +
                         `account, delegate key or relayer changes.`,
                 );
+                // Approving picks the WRITE target as well as the read one, and
+                // that target is inside the repository. Saying only where memory
+                // now goes would leave the user to discover the delegate key in
+                // their working tree — at best in a diff, at worst in a push.
+                if (approved.projectPath) {
+                    note(formatProjectCredsStorageWarning(approved.projectPath));
+                }
         }
         return;
     }
@@ -547,6 +561,8 @@ export function helpText(): string {
         "  MEMWAL_CREDS_DIR                 Use this directory for credentials",
         "                                   and approvals, overriding both the",
         "                                   project-local and global files.",
+        "                                   Must be an ABSOLUTE path outside the",
+        "                                   project; anything else is refused.",
         "  MEMWAL_NAMESPACE                 same as --namespace",
         "  MEMWAL_MCP_DEBUG=1               Verbose stderr logging.",
         "",
@@ -600,6 +616,7 @@ export {
     approveProjectCreds,
     revokeProjectCredsApproval,
     formatProjectCredsNotice,
+    formatProjectCredsStorageWarning,
 } from "./auth.js";
 export { loginFlow } from "./login.js";
 export { runBridge } from "./bridge.js";

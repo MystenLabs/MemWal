@@ -11,7 +11,7 @@
  */
 import { homedir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
-import { join, dirname, basename } from "node:path";
+import { join, dirname, basename, isAbsolute, relative } from "node:path";
 import {
     mkdirSync,
     readFileSync,
@@ -113,15 +113,146 @@ function projectCredsPath(): string | null {
 const APPROVALS_FILE = "project-approvals.json";
 
 /**
+ * Refusal of a `MEMWAL_CREDS_DIR` that cannot be trusted to sit outside a
+ * repository. Thrown, never swallowed — see {@link credsDirOverride}.
+ */
+export class UntrustedCredsDirError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "UntrustedCredsDirError";
+    }
+}
+
+/** True when `path` is `root` itself or something underneath it. String
+ * prefixes get `/repo` vs `/repo-2` wrong, so this asks `relative` instead. */
+function isInside(root: string, path: string): boolean {
+    const rel = relative(root, path);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * Canonical form of a path that need not exist yet.
+ *
+ * `realpathSync` throws on a missing leaf, and the override names a directory
+ * this process may be about to create — so resolve the deepest ancestor that
+ * does exist and re-append the rest. Without this, comparing it against the
+ * project root is decided by which spelling of a symlinked path each side
+ * happened to use: on macOS `/tmp/x` and `/private/tmp/x` are the same
+ * directory, and a containment check that says otherwise is a check an
+ * attacker picks the spelling to defeat.
+ */
+function canonicalDir(path: string): string {
+    const tail: string[] = [];
+    let dir = path;
+    for (;;) {
+        if (existsSync(dir)) return join(realpathSync(dir), ...tail.reverse());
+        const parent = dirname(dir);
+        if (parent === dir) return path;
+        tail.push(basename(dir));
+        dir = parent;
+    }
+}
+
+/**
+ * The repository the working directory is in, or null.
+ *
+ * Bounded exactly like {@link projectCredsPath}'s walk — nearest ancestor
+ * carrying `.git`, stopping at the home directory or the filesystem root — so
+ * "the project" means the same thing to the override check as it does to
+ * resolution.
+ */
+function projectRoot(): string | null {
+    const home = homedir();
+    let dir = process.cwd();
+    for (;;) {
+        if (dir === home) return null;
+        if (existsSync(join(dir, ".git"))) return dir;
+        const parent = dirname(dir);
+        if (parent === dir) return null;
+        dir = parent;
+    }
+}
+
+/**
+ * `MEMWAL_CREDS_DIR`, but only when it can be trusted — and the same answer for
+ * every reader of it.
+ *
+ * The override decides the credentials outright and skips the approval gate
+ * entirely, which makes it exactly as trustworthy as whoever set the
+ * environment. That is the right trade for the thing it exists for — a shell, a
+ * test harness, CI — and the wrong one for the way it is reachable: an MCP
+ * client reads `.cursor/mcp.json`, `.vscode/mcp.json` or `.claude/settings.json`
+ * OUT OF THE CHECKOUT and hands this process the `env` block it finds there. A
+ * committed `env` block is a repository setting its own override, which is the
+ * thing WALM-639 exists to stop.
+ *
+ * So two shapes are refused:
+ *
+ *   - **Relative.** `join("", CREDS_FILE)` is the bare string
+ *     `"credentials.json"` and `join(".memwal", CREDS_FILE)` is repo-local:
+ *     both resolve against `process.cwd()`. That moves the credentials AND the
+ *     approval store into whatever directory the client started in — usually
+ *     the project root, so the store that exists precisely so a repository
+ *     cannot carry its own approval becomes a file the repository carries.
+ *   - **Absolute, but inside the current project.** Editors expand
+ *     `${workspaceFolder}` inside those same config files, so "absolute" is not
+ *     by itself evidence a human typed it. An override pointing into the
+ *     checkout contradicts the one property this escape hatch is justified by.
+ *
+ * Refusing is loud on purpose, and matches the launcher's treatment of a
+ * relative runtime directory: falling back to the global directory in silence
+ * would hide a misconfigured — or hostile — client config, and leave the user
+ * to work out on their own why their override did nothing.
+ *
+ * An EMPTY value is the one thing that is not an error. It names no directory
+ * at all, which is what "unset" means, and it is what every other reader of
+ * this variable already treats it as; the bug was never that empty meant unset,
+ * it was that `??` let empty mean "the working directory".
+ */
+function credsDirOverride(): string | null {
+    const raw = process.env.MEMWAL_CREDS_DIR;
+    if (!raw) return null;
+
+    if (!isAbsolute(raw)) {
+        throw new UntrustedCredsDirError(
+            `MEMWAL_CREDS_DIR is a relative path (${JSON.stringify(raw)}). It resolves against ` +
+                `the working directory, which would put your credentials — and the record of ` +
+                `which project credentials you have approved — inside whatever directory this ` +
+                `process was started in. Set it to an absolute path, or unset it. ` +
+                `If you did not set it yourself, look at the \`env\` block of this project's MCP ` +
+                `config (.cursor/mcp.json, .vscode/mcp.json, .claude/settings.json): a value a ` +
+                `repository carries is the repository choosing where your memories go.`,
+        );
+    }
+
+    const root = projectRoot() ?? process.cwd();
+    const dir = canonicalDir(raw);
+    if (isInside(canonicalDir(root), dir)) {
+        throw new UntrustedCredsDirError(
+            `MEMWAL_CREDS_DIR (${raw}) points inside the current project (${root}). The ` +
+                `override skips the project-approval gate, so it has to name a directory no ` +
+                `repository can write — and an editor expands \`\${workspaceFolder}\` in a ` +
+                `committed MCP config, so an absolute path is not by itself proof that you ` +
+                `chose it. Point it outside the project, or unset it and run ` +
+                `\`memwal-mcp approve-project\` if you did mean to use this project's credentials.`,
+        );
+    }
+    return raw;
+}
+
+/**
  * Where records that a repository must not be able to write are kept.
  *
  * `MEMWAL_CREDS_DIR` is the trusted escape hatch — when it is set it decides
  * the credentials outright and project resolution never runs — so following it
  * here keeps a sandboxed run (tests, CI) from reaching into the real
- * `~/.memwal`, exactly as #705 required for the credentials file itself.
+ * `~/.memwal`, exactly as #705 required for the credentials file itself. It is
+ * read through {@link credsDirOverride} so that "trusted" means the same thing
+ * here, in {@link resolveCreds} and in {@link approveProjectCreds}: one rule,
+ * checked once, rather than three checks that can drift apart.
  */
 function trustedStateDir(): string {
-    return process.env.MEMWAL_CREDS_DIR ?? join(homedir(), ".memwal");
+    return credsDirOverride() ?? join(homedir(), ".memwal");
 }
 
 /** The approval store. Outside every repository, on purpose. */
@@ -248,8 +379,12 @@ export interface CredsResolution {
 /**
  * Which credentials file this process should read and write, and why.
  *
- * `MEMWAL_CREDS_DIR` wins outright: it is the trusted, explicitly-set escape
- * hatch and cannot come from a checkout. Otherwise the nearest project-local
+ * `MEMWAL_CREDS_DIR` wins outright, and skips the approval gate — but only a
+ * value {@link credsDirOverride} accepts, i.e. a non-empty ABSOLUTE path
+ * outside the current project. It is "trusted" exactly as far as whoever set
+ * the environment is, and an MCP client will hand this process an `env` block
+ * it read out of the checkout, so a value that could have been committed is
+ * refused rather than obeyed. Otherwise the nearest project-local
  * `.memwal/credentials.json` at or above the working directory is used IF the
  * user has approved that exact destination on this machine (WALM-639), and the
  * global file is used in every other case — including an unapproved, altered
@@ -260,7 +395,7 @@ export interface CredsResolution {
  * directory nor the approval store is knowable at import time.
  */
 export function resolveCreds(): CredsResolution {
-    const override = process.env.MEMWAL_CREDS_DIR;
+    const override = credsDirOverride();
     if (override) return { path: join(override, CREDS_FILE), source: "override" };
 
     const global = globalCredsPath();
@@ -350,7 +485,7 @@ export interface ApproveProjectResult {
  */
 export function approveProjectCreds(): ApproveProjectResult {
     const approvalsPath = projectApprovalsPath();
-    if (process.env.MEMWAL_CREDS_DIR) return { outcome: "overridden", approvalsPath };
+    if (credsDirOverride()) return { outcome: "overridden", approvalsPath };
 
     const projectPath = projectCredsPath();
     if (!projectPath) return { outcome: "none", approvalsPath };
@@ -462,6 +597,34 @@ export function formatProjectCredsNotice(
         );
     }
     return lines.join("\n");
+}
+
+/**
+ * What approving a project credentials file costs, beyond redirecting reads.
+ *
+ * Approval does not just decide which file is READ — it decides which file is
+ * WRITTEN. `saveCreds` writes to `credsPath()`, so from here on every sign-in
+ * from this project puts a fresh 64-hex Ed25519 delegate seed, in plaintext,
+ * into a directory that is inside the repository. An attacker who planted the
+ * file planted the directory too, so it is already tracked rather than ignored,
+ * and `git add -A` stages the key. The user cannot weigh that if nobody says
+ * it, and "you approved a destination" is not the same sentence as "you
+ * approved storing a private key in your repo".
+ *
+ * Separate from {@link formatProjectCredsNotice} on purpose: that one is about
+ * a file that was IGNORED, this one is about a file that is about to be used.
+ */
+export function formatProjectCredsStorageWarning(projectPath: string): string {
+    const dir = dirname(projectPath);
+    return [
+        `Note: ${dir} is inside the repository, and approving makes it the file this`,
+        `project signs and saves with. Every later sign-in from here writes a delegate`,
+        `PRIVATE KEY into ${basename(projectPath)} in plaintext — and a \`.memwal/\` a`,
+        `repository already carries is tracked, not ignored, so \`git add -A\` would stage it.`,
+        `Add \`.memwal/\` to .gitignore, and never commit ${basename(projectPath)}.`,
+        `(The short-lived login write-ahead record is kept outside the repository; the`,
+        `credentials file cannot be, because it is the file you approved.)`,
+    ].join("\n");
 }
 
 /**
@@ -629,15 +792,25 @@ export interface SaveCredsResult {
  * callback arrives, by which point a delegate key has already been registered
  * on-chain — so a warning that waits for both ids is a warning that arrives
  * too late to act on.
+ *
+ * When the file being replaced is an approved project one, that is also the
+ * last moment before a new private key lands inside a repository, so the
+ * storage warning is repeated here rather than left behind at approval time —
+ * approval may have been months ago, or done by someone else on the machine.
  */
 export function formatPendingSignInWarning(): string | null {
-    const current = loadCreds();
+    const resolution = resolveCreds();
+    const current = readCredsFile(resolution.path);
     if (!current) return null;
-    return (
-        `Signing in will replace the credentials in ${credsPath()} ` +
-        `(currently account ${current.accountId}). ` +
-        `The existing file is backed up if the new sign-in is a different account.`
-    );
+    const lines = [
+        `Signing in will replace the credentials in ${resolution.path} ` +
+            `(currently account ${current.accountId}). ` +
+            `The existing file is backed up if the new sign-in is a different account.`,
+    ];
+    if (resolution.source === "project") {
+        lines.push(formatProjectCredsStorageWarning(resolution.path));
+    }
+    return lines.join("\n");
 }
 
 /**
@@ -756,6 +929,10 @@ function isValid(obj: unknown): obj is MemWalCredentials {
 
 const PENDING_FILE = "login-pending.json";
 
+/** Where a PROJECT sign-in's write-ahead record goes, under the trusted state
+ * directory — one file per approved project. See {@link pendingLoginPath}. */
+const PENDING_DIR = "login-pending";
+
 /**
  * How long a stranded record stays recoverable.
  *
@@ -779,10 +956,31 @@ export interface PendingLogin {
     version: 1;
 }
 
-/** Sits beside whichever credentials file `credsPath()` resolves to, so a
- * project-local sign-in recovers into that same project. */
+/**
+ * Where the write-ahead record lives — never inside a repository.
+ *
+ * It used to sit beside whichever credentials file `credsPath()` resolved to,
+ * which reads as "recover into the project you signed in from" and is the right
+ * intent. But for an approved project that path is `<repo>/.memwal/`, so every
+ * sign-in dropped a plaintext 64-hex delegate seed into the working tree —
+ * under a directory an attacker who planted the credentials file had already
+ * created, so tracked rather than ignored, and staged by `git add -A`.
+ *
+ * Nothing about this record needs to be in the repo. It is short-lived
+ * handshake state, nobody edits it by hand, and the only property that matters
+ * is that the project which started a sign-in is the one that can reclaim it.
+ * So it moves to the trusted state directory, keyed by a hash of the
+ * credentials path: same per-project scoping, no key material in the checkout.
+ *
+ * The non-project cases are byte-for-byte where they always were —
+ * `dirname(credsPath())` IS `trustedStateDir()` for both the override and the
+ * global file — so a machine that has never approved a project sees no change.
+ */
 export function pendingLoginPath(): string {
-    return join(dirname(credsPath()), PENDING_FILE);
+    const resolution = resolveCreds();
+    if (resolution.source !== "project") return join(trustedStateDir(), PENDING_FILE);
+    const key = createHash("sha256").update(canonicalPath(resolution.path)).digest("hex");
+    return join(trustedStateDir(), PENDING_DIR, `${key}.json`);
 }
 
 /**
@@ -794,10 +992,10 @@ export function pendingLoginPath(): string {
  * the connect URL while claiming a durability that does not exist — the
  * original WALM-332 loss, now silent.
  *
- * Failing the login costs the user nothing: this file sits beside
- * `credentials.json`, so a directory that cannot take it cannot take the
- * credentials either. The same login would have failed at the callback anyway,
- * one on-chain `add_delegate_key` later.
+ * Failing the login costs the user nothing: this file lives in the same
+ * trusted state directory the approval record does, so a directory that cannot
+ * take it is one this process cannot keep state in at all. The same login would
+ * have failed at the callback anyway, one on-chain `add_delegate_key` later.
  */
 export function savePendingLogin(pending: PendingLogin): void {
     const path = pendingLoginPath();
