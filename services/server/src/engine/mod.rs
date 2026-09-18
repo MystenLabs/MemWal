@@ -40,6 +40,7 @@
 //!   middleware, unchanged.
 
 pub mod plaintext;
+pub mod stage;
 pub mod walrus_seal;
 
 use async_trait::async_trait;

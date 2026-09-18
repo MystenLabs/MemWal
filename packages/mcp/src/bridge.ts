@@ -24,6 +24,12 @@ import {
 } from "./client-info.js";
 import { randomUUID } from "node:crypto";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
+import {
+    describeHealthProbe,
+    probeRelayerHealth,
+    resolveHealthProbeMs,
+    type HealthProbe,
+} from "./health-probe.js";
 import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { log, note } from "./logger.js";
@@ -285,8 +291,13 @@ const MIN_CALL_TIMEOUT_MS = 1_000;
  * `MAX_STATUS_WAIT_MS` for `memwal_remember_status`, and the fixed `timeoutMs`
  * the bulk and analyze tools pass to the SDK. Keep them in lockstep: a value
  * below a tool's real ceiling abandons healthy work. Unlisted tools keep the
- * default. */
+ * default.
+ *
+ * `memwal_recall` is the exception to lockstep: the SDK aborts the recall
+ * request itself at 15s, but the checks it runs first (`/version`, `/config`)
+ * carry their own deadlines, or none on older SDKs. 90s covers those. */
 const TOOL_DEADLINE_MS: Readonly<Record<string, number>> = {
+    memwal_recall: 90_000,
     memwal_remember: 90_000,
     memwal_remember_status: 60_000,
     memwal_remember_bulk: 120_000,
@@ -462,6 +473,9 @@ interface InFlightEntry {
      * reply lost. Fixed when the request is first tracked, so a reconnect
      * replay keeps the original budget. */
     deadlineMs: number;
+    /** Set while the sweeper asks the relayer's `/health` why this sent call
+     * went unanswered, so the next sweep does not probe it again. */
+    probing?: boolean;
 }
 
 /** The relayer rejected the saved delegate key (HTTP 401 on the handshake).
@@ -1341,6 +1355,7 @@ export async function runBridge(
     const inFlight = new Map<string | number, InFlightEntry>();
     const callTimeoutMs = resolveCallTimeoutMs();
     const stalledHandshakeMs = resolveStalledHandshakeMs(callTimeoutMs);
+    const healthProbeMs = resolveHealthProbeMs();
 
     /** IDs of `tools/list` requests we've forwarded to the relayer. When
      * the response comes back through the SSE pump, we splice in the
@@ -2328,16 +2343,23 @@ export async function runBridge(
         neverSent: boolean,
         now: number,
         tool: string | null,
+        health?: { probe: HealthProbe; relayerUrl: string },
     ): {
         reason: string;
         opts: { toolText: string; errorMessage: string };
     } {
         if (!neverSent) {
+            // What the relayer's `/health` said just now: tells a dead
+            // relayer from a wrong URL from one stuck call.
+            const described = health ? describeHealthProbe(health.probe, health.relayerUrl) : null;
             // The request reached the relayer. What is missing is the reply,
             // and for a write that distinction is the whole message: the work
             // may have completed, may still be running, and cannot be assumed
             // undone. "Please retry" is only safe advice for a read.
             if (tool !== null && MUTATING_TOOLS.has(tool)) {
+                const healthNote = described
+                    ? `\nRelayer health: ${described.health}. ${described.verdict}`
+                    : "";
                 return {
                     reason: "no response to a sent write",
                     opts: {
@@ -2348,23 +2370,39 @@ export async function runBridge(
                             "it and does not mean nothing was stored. Do NOT simply repeat the " +
                             "call: run `memwal_recall` for this content first, and only re-save " +
                             "what is genuinely missing. Repeating a bulk save that already " +
-                            "landed stores a second paid copy.",
+                            "landed stores a second paid copy." +
+                            healthNote,
                         errorMessage:
                             `Walrus Memory ${tool} was sent but its reply never arrived. The write ` +
-                            "may have completed; verify with recall before retrying.",
+                            "may have completed; verify with recall before retrying." +
+                            healthNote,
                     },
                 };
             }
+            // Not "this call only reads": `memwal_restore` re-indexes. What
+            // makes a retry safe is that none of these can store a duplicate.
+            const nextStep =
+                described === null || described.reachable
+                    ? "Repeating this call cannot store a duplicate, so it is safe to retry " +
+                      "once. If it keeps happening, report it with the time of the call."
+                    : "Repeating this call cannot store a duplicate, so it is safe to retry " +
+                      "after the relayer is reachable again — wait a minute if the problem " +
+                      "is on the relayer's side.";
+            const healthValue = described?.health ?? "not checked";
             return {
                 reason: "no response",
                 opts: {
-                    toolText:
-                        "❌ Walrus Memory did not answer this call. The request reached the " +
-                        "relayer but the reply never came back. This call only reads, so it is " +
-                        "safe to retry.",
+                    toolText: [
+                        "❌ Walrus Memory did not answer this call.",
+                        "Cause: the request reached the relayer but no reply came back." +
+                            (described ? ` ${described.verdict}` : ""),
+                        `Relayer health: ${healthValue}`,
+                        `Next step: ${nextStep}`,
+                    ].join("\n"),
                     errorMessage:
-                        "Walrus Memory call was orphaned by a reconnect and never " +
-                        "received a response. Safe to retry: this call only reads.",
+                        "Walrus Memory call reached the relayer but never received a " +
+                        `response (relayer health: ${healthValue}). Safe to retry: it cannot ` +
+                        "store a duplicate.",
                 },
             };
         }
@@ -2414,6 +2452,8 @@ export async function runBridge(
     const orphanSweeper = setInterval(() => {
         const now = Date.now();
         const handshakeStalledMs = handshakeStalledForMs(now);
+        // One `/health` request per sweep, however many calls expired in it.
+        let sweepProbe: Promise<HealthProbe | null> | null = null;
         for (const [id, entry] of Array.from(inFlight.entries())) {
             const elapsedMs = now - entry.startedAt;
             // Never sent = no POST was ever issued for it. Read from the entry
@@ -2439,6 +2479,58 @@ export async function runBridge(
                     ? Math.min(stalledHandshakeMs, entry.deadlineMs)
                     : entry.deadlineMs;
             if (elapsedMs <= deadlineMs) continue;
+            // `initialize` is answered locally and gets no reply here, so
+            // there is nothing to explain and nothing to probe for.
+            if (!neverSent && entry.msg.method !== "initialize") {
+                // A sent call: ask the relayer's `/health` before answering,
+                // so the message can say whether it is down, unreachable, or
+                // up with this one call stuck. Only the answer waits on the
+                // probe; the bookkeeping stays synchronous.
+                if (entry.probing) continue;
+                entry.probing = true;
+                const relayerUrl = creds?.relayerUrl ?? config.relayerUrl;
+                // `probeRelayerHealth` does not reject, but a call left with
+                // `probing` set and no answer is the one outcome this path
+                // must never have, so a rejection still answers it.
+                sweepProbe ??= probeRelayerHealth(relayerUrl, healthProbeMs).catch(() => null);
+                void sweepProbe
+                    .then((probe) => {
+                        // A late reply, a logout or a shutdown may have answered
+                        // it while the probe ran. Answering again would be a
+                        // second response for the same id — and after stdin has
+                        // closed there is nobody left to answer.
+                        if (stdinClosed || inFlight.get(id) !== entry) return;
+                        const settledAt = Date.now();
+                        const { reason, opts } = expiredRequestReport(
+                            false,
+                            settledAt,
+                            toolNameOf(entry.msg),
+                            probe ? { probe, relayerUrl } : undefined,
+                        );
+                        log.warn("bridge.call_orphaned", {
+                            id,
+                            method: entry.msg.method ?? null,
+                            elapsedMs: settledAt - entry.startedAt,
+                            deadlineMs,
+                            reason,
+                            health: probe?.kind ?? null,
+                            healthMs: probe?.ms ?? null,
+                            handshakeStalledMs: handshakeStalledForMs(settledAt),
+                            lastHandshakeError,
+                        });
+                        failRequest(entry.msg, reason, opts);
+                    })
+                    .catch((err: unknown) => {
+                        // Never leave a call marked `probing` with no answer:
+                        // clearing it lets the next sweep answer it.
+                        entry.probing = false;
+                        log.warn("bridge.call_orphaned_answer_failed", {
+                            id,
+                            error: err instanceof Error ? err.message : String(err),
+                        });
+                    });
+                continue;
+            }
             // Built only for what actually expired: this walks `pendingForward`
             // and interpolates two user-facing strings, and the branch it
             // serves fires roughly never.

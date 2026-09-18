@@ -13,6 +13,7 @@ use redis::AsyncCommands;
 use sha2::Digest;
 use std::sync::Arc;
 
+use crate::engine::stage::{self, Budget, HangUpGuard, RecallStage, StageMarker};
 use crate::types::*;
 
 /// How far back the failure report on a recall response looks.
@@ -248,8 +249,110 @@ pub async fn recall(
         "recall request"
     );
 
+    // Stop just short of the caller's deadline, so the 504 can say which
+    // stage was running. The caller's clock started before auth did.
+    let already = crate::observability::current_request_started()
+        .map(|arrived| arrived.elapsed())
+        .unwrap_or_default();
+    let deadline = match stage::budget_for(body.deadline_ms, already) {
+        Budget::Unbounded => None,
+        Budget::Run(left) => Some(tokio::time::Instant::now() + left),
+        Budget::Exhausted => {
+            return Err(recall_timed_out(
+                owner,
+                namespace,
+                RecallStage::Auth,
+                already,
+                &body,
+            ));
+        }
+    };
+    let marker = StageMarker::default();
+    let guard = HangUpGuard::new(marker.clone(), owner.clone());
+    let outcome = stage::run_with_deadline(
+        &marker,
+        deadline,
+        recall_pipeline(&state, &auth, &body, &weights, sort),
+    )
+    .await;
+    guard.disarm();
+    let mut response = match outcome {
+        Ok(result) => result?,
+        Err(timed_out) => {
+            let elapsed = already + timed_out.elapsed;
+            return Err(recall_timed_out(
+                owner,
+                namespace,
+                timed_out.stage,
+                elapsed,
+                &body,
+            ));
+        }
+    };
+    // Reported even with no hits: an empty recall is exactly when a caller is
+    // most likely to be looking for the fact that failed.
+    response.failed_writes = join_failed_writes(failed_writes, deadline).await;
+    Ok(Json(response))
+}
+
+fn recall_timed_out(
+    owner: &str,
+    namespace: &str,
+    stage: RecallStage,
+    elapsed: std::time::Duration,
+    body: &RecallRequest,
+) -> AppError {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    tracing::warn!(
+        owner = %owner,
+        namespace = %namespace,
+        stage = stage.as_str(),
+        elapsed_ms,
+        deadline_ms = body.deadline_ms,
+        "recall timed out before the caller's deadline"
+    );
+    AppError::RecallTimeout {
+        stage: stage.as_str(),
+        elapsed_ms,
+    }
+}
+
+/// The failed-write report is a courtesy: never hold a finished recall past
+/// the caller's deadline for it.
+async fn join_failed_writes(
+    report: tokio::task::JoinHandle<Vec<FailedWrite>>,
+    deadline: Option<tokio::time::Instant>,
+) -> Vec<FailedWrite> {
+    let joined = match deadline {
+        None => report.await,
+        Some(deadline) => match tokio::time::timeout_at(deadline, report).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                tracing::warn!("recall: failed-write report dropped to meet the caller's deadline");
+                return Vec::new();
+            }
+        },
+    };
+    // A panic in the report task must not take the recall with it; the
+    // caller loses a warning, not their memories.
+    joined.unwrap_or_default()
+}
+
+/// Everything `recall` does after validation, as one future the handler can
+/// put a deadline on. Each `stage::enter` names the step a timeout reports.
+async fn recall_pipeline(
+    state: &Arc<AppState>,
+    auth: &AuthInfo,
+    body: &RecallRequest,
+    weights: &ScoringWeights,
+    sort: RecallSort,
+) -> Result<RecallResponse, AppError> {
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+
+    stage::enter(RecallStage::Embed);
     let t0 = std::time::Instant::now();
-    let query_vector = generate_recall_embedding_cached(&state, &body.query).await?;
+    let query_vector = generate_recall_embedding_cached(state, &body.query).await?;
     let embed_ms = t0.elapsed().as_millis();
 
     // Cap limit to prevent unbounded DB scans / memory use.
@@ -260,6 +363,7 @@ pub async fn recall(
     // outside the cosine top-`limit` entirely. `Relevance` fetches exactly
     // `limit`, so the default path issues the identical query it always has.
     let candidate_limit = sort.candidate_limit(limit);
+    stage::enter(RecallStage::VectorSearch);
     let t1 = std::time::Instant::now();
     let hits = state
         .db
@@ -279,14 +383,13 @@ pub async fn recall(
             "recall complete: 0 results (no vector hits) for owner={}",
             owner
         );
-        return Ok(Json(RecallResponse {
+        return Ok(RecallResponse {
             results: vec![],
             total: 0,
             dropped_count: 0,
-            // Reported even with no hits: an empty recall is exactly when a
-            // caller is most likely to be looking for the fact that failed.
-            failed_writes: failed_writes.await.unwrap_or_default(),
-        }));
+            // Filled in by `recall`, outside the deadline.
+            failed_writes: Vec::new(),
+        });
     }
 
     // Hydrate the hits through the storage engine: blob cache -> Walrus
@@ -295,6 +398,7 @@ pub async fn recall(
     // engine owns the
     // cache/decrypt-batch internals and derives the SEAL credential from
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
+    stage::enter(RecallStage::WalrusDownload);
     let t2 = std::time::Instant::now();
     let hit_refs: Vec<(String, f64)> = hits
         .iter()
@@ -302,7 +406,7 @@ pub async fn recall(
         .collect();
     let (mut hydrated, dropped_count, timings) = state
         .engine
-        .fetch_batch(owner, namespace, &hit_refs, &auth)
+        .fetch_batch(owner, namespace, &hit_refs, auth)
         .await?;
     let fetch_ms = t2.elapsed().as_millis();
 
@@ -335,7 +439,7 @@ pub async fn recall(
     // this is a no-op and preserves the pgvector cosine order exactly —
     // pinned by the `default_weights_preserve_input_order` and
     // `recency_zero_is_short_circuit_no_reorder` tests in services::ranker.
-    let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
+    let ranked = state.ranker.rank(hydrated, weights, chrono::Utc::now());
 
     let results: Vec<RecallResult> = super::recall_results_from_ranked(ranked);
     let total = results.len();
@@ -368,14 +472,13 @@ pub async fn recall(
         t0.elapsed().as_millis()
     );
 
-    Ok(Json(RecallResponse {
+    Ok(RecallResponse {
         results,
         total,
         dropped_count,
-        // A panic in the report task must not take the recall with it; the
-        // caller loses a warning, not their memories.
-        failed_writes: failed_writes.await.unwrap_or_default(),
-    }))
+        // Filled in by `recall`, outside the deadline.
+        failed_writes: Vec::new(),
+    })
 }
 
 /// POST /api/recall/manual
@@ -465,6 +568,53 @@ pub async fn recall_manual(
 
 #[cfg(test)]
 mod tests {
+    // ── Failed-write report vs the caller's deadline ─────────────
+
+    fn one_failed_write() -> Vec<crate::types::FailedWrite> {
+        vec![crate::types::FailedWrite {
+            job_id: "job-1".into(),
+            namespace: "default".into(),
+            error: None,
+            failed_at: "2026-09-18T00:00:00Z".into(),
+        }]
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_failed_write_report_is_dropped_at_the_deadline() {
+        // The recall itself is done; a stalled courtesy lookup must not turn
+        // it into a timeout.
+        let report = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            one_failed_write()
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        assert!(super::join_failed_writes(report, Some(deadline))
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_failed_write_report_is_kept_at_the_deadline() {
+        let report = tokio::spawn(async { one_failed_write() });
+        tokio::task::yield_now().await;
+        let deadline = tokio::time::Instant::now();
+        assert_eq!(
+            super::join_failed_writes(report, Some(deadline))
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_a_deadline_the_failed_write_report_is_waited_for() {
+        let report = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            one_failed_write()
+        });
+        assert_eq!(super::join_failed_writes(report, None).await.len(), 1);
+    }
+
     // ── Recall limit capped at 100 ───────────────────────────────
 
     #[test]
