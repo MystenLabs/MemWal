@@ -1032,7 +1032,8 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `/health` `writes` wire value: `"paused"` when `WRITES_PAUSED` is set.
+/// `/health` `writes` wire value: `"paused"`, `"degraded"`, or `"ok"`.
+/// Paused wins if both flags are set — write routes already 503.
 pub(crate) fn writes_health_status(paused: bool, degraded: bool) -> String {
     if paused {
         "paused".to_string()

@@ -236,19 +236,16 @@ export const WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS = parsePositiveIntEnv(
 );
 /** Per-request timeout for talking to a Walrus storage node.
  *
- * `createWalrusClient` gives the upload-relay branch an explicit 120s
- * timeout and gave the direct branch none, so direct uploads silently took
- * StorageNodeClient's own 30s default -- four times tighter, on the path a
- * deployment runs precisely when it has no relay fanning out for it. dev
- * uploads measured 51s end to end on a healthy day, so 30s per node left
- * almost no headroom, and a loaded testnet turned every remember into
- * "The operation was aborted due to timeout" after the blob was already
- * registered on chain.
+ * Applies to both the direct and relay paths (`storageNodeClientOptions`).
+ * `uploadRelay.timeout` (default 120s, `WALRUS_RELAY_TIMEOUT_MS`) is a
+ * different knob: one HTTP request to the upload relay, not a storage
+ * node. Before this env existed, neither path set
+ * `storageNodeClientOptions`, so both used StorageNodeClient's 30s
+ * default. The default here stays 30s so no environment shifts silently;
+ * what changes is that both paths now have a knob.
  *
- * The default keeps today's behaviour so no environment shifts silently;
- * what changes is that the direct path now HAS a knob. Note this is per
- * NODE request, not per write: raising it also lengthens how long a single
- * unresponsive node stalls a shard, so keep it under
+ * Per NODE request, not per write: raising it also lengthens how long a
+ * single unresponsive node stalls a shard. Keep it under
  * WALRUS_UPLOAD_ACQUIRE_TIMEOUT_MS.
  */
 export const WALRUS_STORAGE_NODE_TIMEOUT_MS = parsePositiveIntEnv(

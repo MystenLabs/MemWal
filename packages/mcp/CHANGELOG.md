@@ -2,6 +2,8 @@
 
 ## 0.0.14
 
+Unreleased. Plugin launchers pin `@mysten-incubation/memwal-mcp@0.0.14-dev.0` until `0.0.14` is on npm; unpin them in that release.
+
 ### Fixed
 
 - The cold-start tool list no longer advertises a tool the relayer may not serve. The bridge ships on npm and updates itself while a relayer ships per environment, so 0.0.14-dev.0 dialled prod and staging still on 0.0.13: cold start named `memwal_remember_status`, which neither registers, and the pending-write wording sent the agent to go call it — one live run spent 90.67s there before erroring. Cold start is now a floor rather than a forecast (`BASELINE_RELAYER_TOOLS`): it carries only what the oldest supported relayer serves and its descriptions name nothing outside it, while newer tools still reach the client a beat later on the relayer's own `tools/list`. Initialize `instructions` use the same floor (they used to name `memwal_remember_status` before any `tools/list`). And a call for a tool outside that floor — including during the cold-start window, before any upstream `tools/list` has been seen — is now answered locally and at once — naming the tools that do exist and saying plainly that nothing ran — instead of being forwarded into a wait that only ends at the orphan deadline. (#928)
