@@ -162,6 +162,8 @@ npx -y @mysten-incubation/memwal-mcp untrust-project   # undo
 
 Adoptions are recorded in `~/.memwal/trusted-projects.json`, outside any repository. Until a directory is listed there the client uses the global file and says which project file it skipped. In CI or a container, set `MEMWAL_TRUST_PROJECT_CREDS=1` instead.
 
+What is recorded is the account and relayer you approved. If either later changes — a `git pull`, a merged PR — the file stops being used until you approve it again.
+
 See [Credential locations](https://docs.wal.app/mcp/reference#credential-locations) for the full resolution order.
 
 ## License

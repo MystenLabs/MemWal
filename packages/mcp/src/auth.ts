@@ -147,43 +147,127 @@ function projectKey(dir: string): string {
     }
 }
 
-function loadTrustedProjects(): Set<string> {
-    try {
-        const parsed: unknown = JSON.parse(readFileSync(trustedProjectsPath(), "utf8"));
-        const dirs = (parsed as { dirs?: unknown })?.dirs;
-        if (!Array.isArray(dirs)) return new Set();
-        return new Set(dirs.filter((d): d is string => typeof d === "string"));
-    } catch {
-        // Missing, unreadable or malformed all mean the same thing: nothing has
-        // been adopted. Never fail open.
-        return new Set();
-    }
-}
-
-/** Whether `dir` — the directory *containing* `.memwal`, not `.memwal` itself
- * — has been adopted on this machine. */
-export function isProjectDirTrusted(dir: string): boolean {
-    return loadTrustedProjects().has(projectKey(dir));
+/**
+ * What was approved for a directory, not merely that it was approved.
+ *
+ * Adopting the *directory* alone would make approval a one-time gate on a file
+ * whose contents keep changing. The file lives in a repository: a `git pull`, a
+ * merged PR, a rebase can rewrite `accountId` or `relayerUrl` afterwards, and a
+ * directory adopted last month would carry the new values without asking. That
+ * is the original defect with one extra step, so the ledger records the pair
+ * the user actually saw and consented to.
+ */
+export interface TrustedProject {
+    dir: string;
+    /** Account the user approved for this directory. */
+    accountId: string;
+    /** Relayer the user approved for this directory — the host that receives
+     * the delegate key, and the half most worth changing quietly. */
+    relayerUrl: string;
+    approvedAt: string;
 }
 
 /**
- * Record a project directory as one whose credentials file this user adopts.
+ * Ledger schema version.
  *
- * Written through `writeSecretFile` even though the ledger holds no secret: a
- * world-writable ledger would let anything on the machine grant the trust this
- * gate exists to withhold, and the fresh-inode write is what guarantees `0600`
- * on a file something else may have created.
+ * v1 recorded bare directory strings with no fingerprint. Those entries are
+ * dropped rather than migrated: there is no way to reconstruct what the user
+ * approved, and assuming whatever the file says now would grant exactly the
+ * consent this record exists to prove. Re-running `trust-project` is cheap;
+ * inferring consent is not. v1 was never released, so this affects nobody
+ * outside this branch.
  */
-export function trustProjectDir(dir: string): string {
-    const key = projectKey(dir);
-    const trusted = loadTrustedProjects();
-    trusted.add(key);
+const TRUSTED_VERSION = 2;
+
+function loadTrustedProjects(): Map<string, TrustedProject> {
+    const out = new Map<string, TrustedProject>();
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(trustedProjectsPath(), "utf8"));
+        const doc = parsed as { version?: unknown; projects?: unknown };
+        if (doc?.version !== TRUSTED_VERSION || !Array.isArray(doc.projects)) return out;
+        for (const entry of doc.projects) {
+            const p = entry as Record<string, unknown>;
+            if (
+                typeof p?.dir === "string" &&
+                typeof p.accountId === "string" &&
+                typeof p.relayerUrl === "string"
+            ) {
+                out.set(p.dir, {
+                    dir: p.dir,
+                    accountId: p.accountId,
+                    relayerUrl: p.relayerUrl,
+                    approvedAt: typeof p.approvedAt === "string" ? p.approvedAt : "",
+                });
+            }
+        }
+        return out;
+    } catch {
+        // Missing, unreadable or malformed all mean the same thing: nothing has
+        // been adopted. Never fail open.
+        return out;
+    }
+}
+
+function writeTrustedProjects(trusted: Map<string, TrustedProject>): void {
+    // Through `writeSecretFile` even though the ledger holds no secret: a
+    // world-writable ledger would let anything on the machine grant the trust
+    // this gate exists to withhold, and the fresh-inode write is what
+    // guarantees `0600` on a file something else may have created.
     writeSecretFile(
         trustedProjectsPath(),
-        JSON.stringify({ version: 1, dirs: [...trusted].sort() }, null, 2),
+        JSON.stringify(
+            {
+                version: TRUSTED_VERSION,
+                projects: [...trusted.values()].sort((a, b) => a.dir.localeCompare(b.dir)),
+            },
+            null,
+            2,
+        ),
     );
-    log.info("creds.project_trusted", { dir: key });
-    return key;
+}
+
+/** What the user approved for `dir`, or null if they never did. */
+export function trustedProject(dir: string): TrustedProject | null {
+    return loadTrustedProjects().get(projectKey(dir)) ?? null;
+}
+
+export type TrustResult =
+    | { ok: true; project: TrustedProject; path: string }
+    /** No credentials file to approve. Adopting an empty directory would arm a
+     * future file — including one a later `git pull` brings in. */
+    | { ok: false; reason: "missing"; path: string }
+    /** Present but unusable: malformed, or naming a relayer we refuse. */
+    | { ok: false; reason: "invalid"; path: string };
+
+/**
+ * Record a project directory, together with the account and relayer its
+ * credentials file names right now, as approved by this user.
+ *
+ * Reads the file rather than taking the values from the caller, so what is
+ * stored is exactly what the next run will compare against.
+ */
+export function trustProjectDir(dir: string): TrustResult {
+    const key = projectKey(dir);
+    const path = join(key, ".memwal", CREDS_FILE);
+    if (!existsSync(path)) return { ok: false, reason: "missing", path };
+    const creds = readCredsAt(path);
+    if (!creds) return { ok: false, reason: "invalid", path };
+
+    const project: TrustedProject = {
+        dir: key,
+        accountId: creds.accountId,
+        relayerUrl: creds.relayerUrl,
+        approvedAt: new Date().toISOString(),
+    };
+    const trusted = loadTrustedProjects();
+    trusted.set(key, project);
+    writeTrustedProjects(trusted);
+    log.info("creds.project_trusted", {
+        dir: key,
+        accountId: project.accountId,
+        relayerUrl: project.relayerUrl,
+    });
+    return { ok: true, project, path };
 }
 
 /** Remove an adopted directory. Returns whether it was listed. */
@@ -191,10 +275,7 @@ export function untrustProjectDir(dir: string): boolean {
     const key = projectKey(dir);
     const trusted = loadTrustedProjects();
     if (!trusted.delete(key)) return false;
-    writeSecretFile(
-        trustedProjectsPath(),
-        JSON.stringify({ version: 1, dirs: [...trusted].sort() }, null, 2),
-    );
+    writeTrustedProjects(trusted);
     return true;
 }
 
@@ -220,9 +301,17 @@ export function projectDirOf(credentialsPath: string): string {
 export interface ResolvedCredsPath {
     /** The file this process actually reads and writes. */
     path: string;
-    /** A project-local file that was found but NOT adopted, and is therefore
-     * being ignored in favour of `path`. Absent when nothing was skipped. */
+    /** A project-local file that was found but NOT used, and is therefore being
+     * ignored in favour of `path`. Absent when nothing was skipped. */
     untrustedProjectPath?: string;
+    /** Why it was skipped. `never-adopted` is a file this machine has no record
+     * of; `changed` is one whose account or relayer no longer matches what was
+     * approved, which is the more alarming of the two — someone edited a file
+     * that had already been cleared. */
+    skipped?: "never-adopted" | "changed";
+    /** For `changed`: what was approved, and what the file says now. */
+    approved?: { accountId: string; relayerUrl: string };
+    found?: { accountId: string; relayerUrl: string };
 }
 
 /**
@@ -250,9 +339,36 @@ export function resolveCredsPath(): ResolvedCredsPath {
     const project = projectCredsPath();
     if (!project) return { path: globalCredsPath() };
     if (trustAllProjectsFromEnv()) return { path: project };
-    if (isProjectDirTrusted(projectDirOf(project))) return { path: project };
 
-    return { path: globalCredsPath(), untrustedProjectPath: project };
+    const approved = trustedProject(projectDirOf(project));
+    if (!approved) {
+        return { path: globalCredsPath(), untrustedProjectPath: project, skipped: "never-adopted" };
+    }
+
+    // Approval was for an account and a relayer, not for a filename. Read what
+    // the file says now and compare — a file that changed after it was cleared
+    // has not been consented to in its current form.
+    //
+    // An unreadable or invalid file is treated as changed rather than trusted:
+    // whatever the user approved, it was not this.
+    const current = readCredsAt(project);
+    if (
+        current &&
+        current.accountId === approved.accountId &&
+        current.relayerUrl === approved.relayerUrl
+    ) {
+        return { path: project };
+    }
+
+    return {
+        path: globalCredsPath(),
+        untrustedProjectPath: project,
+        skipped: "changed",
+        approved: { accountId: approved.accountId, relayerUrl: approved.relayerUrl },
+        found: current
+            ? { accountId: current.accountId, relayerUrl: current.relayerUrl }
+            : { accountId: "(unreadable)", relayerUrl: "(unreadable)" },
+    };
 }
 
 export function credsPath(): string {
@@ -272,6 +388,35 @@ export function formatUntrustedProjectCredsNotice(
     resolved: ResolvedCredsPath = resolveCredsPath(),
 ): string | null {
     if (!resolved.untrustedProjectPath) return null;
+
+    if (resolved.skipped === "changed") {
+        // Louder than the never-adopted case on purpose. This directory was
+        // cleared once and its credentials file has since been edited — which
+        // is what a repository would do to route around an approval already
+        // given, and what an innocent `git pull` looks like too. Naming both
+        // pairs is what lets the user tell those apart at a glance.
+        const lines = [
+            `Project credentials CHANGED since you approved them — not using them.`,
+            `  ${resolved.untrustedProjectPath}`,
+        ];
+        if (resolved.approved && resolved.found) {
+            lines.push(
+                `  approved account : ${resolved.approved.accountId}`,
+                `  file now says    : ${resolved.found.accountId}`,
+                `  approved relayer : ${resolved.approved.relayerUrl}`,
+                `  file now says    : ${resolved.found.relayerUrl}`,
+            );
+        }
+        lines.push(
+            `  Using ${resolved.path} instead.`,
+            `  If you made this change, re-approve it with:`,
+            `    npx -y @mysten-incubation/memwal-mcp trust-project`,
+            `  If you did not, the file was edited by something else — check what`,
+            `  wrote it before re-approving.`,
+        );
+        return lines.join("\n");
+    }
+
     return [
         `Ignoring project credentials at ${resolved.untrustedProjectPath}`,
         `  This machine has not adopted that directory. A credentials file can arrive`,
@@ -285,7 +430,18 @@ export function formatUntrustedProjectCredsNotice(
 
 /** Load credentials from disk. Returns null if missing or malformed. */
 export function loadCreds(): MemWalCredentials | null {
-    const path = credsPath();
+    return readCredsAt(credsPath());
+}
+
+/**
+ * Read and validate the credentials at an explicit path.
+ *
+ * Separate from {@link loadCreds} because the trust gate has to inspect a
+ * project file to decide whether to use it, and `loadCreds` resolves its own
+ * path through `credsPath()` — which calls the gate. Going through it would
+ * recurse.
+ */
+export function readCredsAt(path: string): MemWalCredentials | null {
     if (!existsSync(path)) return null;
     try {
         const raw = readFileSync(path, "utf8");

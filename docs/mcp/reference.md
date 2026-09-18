@@ -149,6 +149,8 @@ memwal-mcp untrust-project      # undoes it
 
 Adoptions are recorded in `~/.memwal/trusted-projects.json`, outside any repository. Until a directory is listed there, its credentials file is skipped, the global file is used instead, and the client says so on startup.
 
+What is recorded is the **account and relayer** you approved, not just the directory. If either changes afterwards — a `git pull`, a merged PR, an edit by anything else — the file stops being used until you approve it again, and the client shows both the approved pair and the current one so you can tell an expected change from one you did not make. A rotated delegate key or a relabel under the same account and relayer is not a change and passes silently.
+
 <Warning>
 This is not a formality. `.memwal/credentials.json` names the account, the delegate private key **and the relayer URL** the client sends them to. A repository can commit one — into a template, a scaffold, an example repo — and without adoption every clone that an editor or MCP host opens would sign in as whoever wrote that file and ship memories to whatever host it named, without running any code from the repository. Adopt directories whose credentials file you put there yourself.
 </Warning>

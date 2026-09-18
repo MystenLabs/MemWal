@@ -504,3 +504,174 @@ test("relayer URLs are accepted or refused on scheme and loopback", async (t) =>
         assert.equal(auth.isSafeRelayerUrl(bad), false, `${bad} should be refused`);
     }
 });
+
+/* ------------------------------------------------------------------------- *
+ * Approval covers an account and a relayer, not a filename.
+ *
+ * Adopting the directory alone made approval a one-time gate on a file whose
+ * contents keep changing. The file lives in a repository: a `git pull`, a
+ * merged PR or a rebase can rewrite `accountId` or `relayerUrl` afterwards, and
+ * a directory adopted last month would carry the new values without asking —
+ * the original defect with one extra step.
+ * ------------------------------------------------------------------------- */
+
+/** Overwrite the project credentials file, as a pull or a merge would. */
+function rewriteProjectCreds(cwd, { accountId = PROJECT_ACCOUNT, relayerUrl } = {}) {
+    const path = join(cwd, ".memwal", "credentials.json");
+    const creds = makeCreds(accountId, "Project");
+    if (relayerUrl) creds.relayerUrl = relayerUrl;
+    writeFileSync(path, JSON.stringify(creds), { mode: 0o600 });
+    return path;
+}
+
+test("trustProjectDir records the account and relayer it approved", async (t) => {
+    const { auth, cwd } = await sandbox(t, { project: PROJECT_ACCOUNT });
+
+    const result = auth.trustProjectDir(cwd);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.project.accountId, PROJECT_ACCOUNT);
+    assert.equal(result.project.relayerUrl, "https://relayer.example");
+    assert.equal(result.project.dir, cwd);
+    assert.deepEqual(auth.trustedProject(cwd)?.accountId, PROJECT_ACCOUNT);
+});
+
+test("a project whose account changed after approval is not used", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+        trust: true,
+    });
+    assert.equal(auth.credsPath(), join(cwd, ".memwal", "credentials.json"), "approved to start");
+
+    rewriteProjectCreds(cwd, { accountId: "0x" + "9".repeat(64) });
+
+    const resolved = auth.resolveCredsPath();
+    assert.equal(resolved.path, join(home, ".memwal", "credentials.json"));
+    assert.equal(resolved.skipped, "changed");
+    assert.equal(resolved.approved.accountId, PROJECT_ACCOUNT);
+    assert.equal(resolved.found.accountId, "0x" + "9".repeat(64));
+});
+
+test("a project whose relayer changed after approval is not used", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+        trust: true,
+    });
+
+    // The half most worth changing quietly: same account, new destination for
+    // the delegate key.
+    rewriteProjectCreds(cwd, { relayerUrl: "https://relay.attacker.example" });
+
+    const resolved = auth.resolveCredsPath();
+    assert.equal(resolved.path, join(home, ".memwal", "credentials.json"));
+    assert.equal(resolved.skipped, "changed");
+    assert.equal(resolved.found.relayerUrl, "https://relay.attacker.example");
+});
+
+test("the changed notice names both the approved and the current pair", async (t) => {
+    const { auth, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+        trust: true,
+    });
+    rewriteProjectCreds(cwd, { relayerUrl: "https://relay.attacker.example" });
+
+    const notice = auth.formatUntrustedProjectCredsNotice();
+
+    assert.match(notice, /CHANGED/, "this is louder than a file that was never adopted");
+    assert.match(notice, /https:\/\/relayer\.example/, "must name what was approved");
+    assert.match(notice, /https:\/\/relay\.attacker\.example/, "must name what it says now");
+    assert.match(notice, /trust-project/, "must name the way to re-approve");
+    assert.match(notice, /did not/, "must tell the user what it means if they did not do it");
+});
+
+test("re-approving after a change restores the project file", async (t) => {
+    const { auth, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+        trust: true,
+    });
+    rewriteProjectCreds(cwd, { accountId: "0x" + "9".repeat(64) });
+    assert.equal(auth.resolveCredsPath().skipped, "changed");
+
+    auth.trustProjectDir(cwd);
+
+    assert.equal(auth.credsPath(), join(cwd, ".memwal", "credentials.json"));
+    assert.equal(auth.resolveCredsPath().skipped, undefined);
+});
+
+test("a same-account, same-relayer rewrite is not a change", async (t) => {
+    const { auth, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+        trust: true,
+    });
+
+    // A rotated delegate key or a relabel must not nag: the approval was for an
+    // account and a relayer, and both still hold.
+    rewriteProjectCreds(cwd);
+
+    assert.equal(auth.credsPath(), join(cwd, ".memwal", "credentials.json"));
+    assert.equal(auth.resolveCredsPath().skipped, undefined);
+});
+
+test("an adopted file that becomes unreadable is skipped, not trusted", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+        trust: true,
+    });
+
+    writeFileSync(join(cwd, ".memwal", "credentials.json"), "{ not json", { mode: 0o600 });
+
+    const resolved = auth.resolveCredsPath();
+    assert.equal(resolved.path, join(home, ".memwal", "credentials.json"));
+    assert.equal(resolved.skipped, "changed", "whatever was approved, it was not this");
+});
+
+test("trustProjectDir refuses a directory with no credentials file", async (t) => {
+    const { auth, cwd } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+
+    const result = auth.trustProjectDir(cwd);
+
+    // Approving an empty directory would arm whatever lands there later.
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "missing");
+    assert.equal(auth.trustedProject(cwd), null);
+});
+
+test("trustProjectDir refuses a file it would not accept anyway", async (t) => {
+    const { auth, cwd } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+    mkdirSync(join(cwd, ".memwal"), { recursive: true });
+    const creds = makeCreds(PROJECT_ACCOUNT, "Project");
+    creds.relayerUrl = "http://relay.attacker.example";
+    writeFileSync(join(cwd, ".memwal", "credentials.json"), JSON.stringify(creds), { mode: 0o600 });
+
+    const result = auth.trustProjectDir(cwd);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "invalid");
+    assert.equal(auth.trustedProject(cwd), null);
+});
+
+test("a v1 ledger entry grants nothing", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+
+    // v1 recorded bare directory strings with no fingerprint. There is no way
+    // to reconstruct what the user approved, and assuming the file's current
+    // contents would grant exactly the consent the record exists to prove.
+    mkdirSync(join(home, ".memwal"), { recursive: true });
+    writeFileSync(
+        join(home, ".memwal", "trusted-projects.json"),
+        JSON.stringify({ version: 1, dirs: [cwd] }),
+        { mode: 0o600 },
+    );
+
+    assert.equal(auth.credsPath(), join(home, ".memwal", "credentials.json"));
+    assert.equal(auth.resolveCredsPath().skipped, "never-adopted");
+});

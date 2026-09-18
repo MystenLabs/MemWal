@@ -24,8 +24,7 @@ import { runAuthRequiredServer } from "./auth-required.js";
 import { notePendingLoginSuccess, runBridge } from "./bridge.js";
 import { loginFlow } from "./login.js";
 import { log, note } from "./logger.js";
-import { existsSync } from "node:fs";
-import { join, resolve as resolvePath } from "node:path";
+import { resolve as resolvePath } from "node:path";
 
 /**
  * Parsed CLI flags. All optional — env vars cover the same surface.
@@ -202,19 +201,29 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             );
             return;
         }
-        const candidate = join(target, ".memwal", "credentials.json");
-        if (!existsSync(candidate)) {
-            // Adopting a directory with no file in it would silently arm a
-            // future one — including a file a later `git pull` brings in.
-            note(`No credentials file at ${candidate}.`);
-            note(`Nothing adopted. Create it first, then run this again.`);
+        const result = trustProjectDir(target);
+        if (!result.ok) {
+            // Adopting a directory with no usable file in it would silently arm
+            // a future one — including a file a later `git pull` brings in.
+            note(
+                result.reason === "missing"
+                    ? `No credentials file at ${result.path}.`
+                    : `The credentials file at ${result.path} is not usable ` +
+                          `(malformed, or it names a relayer this client refuses).`,
+            );
+            note(`Nothing approved.`);
             process.exitCode = 1;
             return;
         }
-        const key = trustProjectDir(target);
-        note(`Now using project credentials in ${key}.`);
-        note(`  ${candidate}`);
-        note(`Undo with \`memwal-mcp untrust-project ${key}\`.`);
+        // Print what was approved, not just that something was. Approval covers
+        // this account and this relayer; a later change to either has to come
+        // back through here, so the user should see what they just cleared.
+        note(`Approved the project credentials in ${result.project.dir}:`);
+        note(`  file    ${result.path}`);
+        note(`  account ${result.project.accountId}`);
+        note(`  relayer ${result.project.relayerUrl}`);
+        note(`A change to that account or relayer needs approving again.`);
+        note(`Undo with \`memwal-mcp untrust-project ${result.project.dir}\`.`);
         return;
     }
 
