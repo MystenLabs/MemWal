@@ -1,6 +1,6 @@
-// Opt into accept-and-continue for this file. It is NOT the default — D1 kept
-// the wait, so a plain call blocks and returns a blob_id — but the path stays
-// reachable via this knob, and it is the path these tests cover.
+// Pin the wait at 0 so this file reads the product default even if the
+// process already had another MEMWAL_MCP_REMEMBER_WAIT_MS. Default is return
+// at accept; 90000 restores block-until-done.
 process.env.MEMWAL_MCP_REMEMBER_WAIT_MS = "0";
 
 import assert from "node:assert/strict";
@@ -16,14 +16,9 @@ const { REMEMBER_WAIT_MS, parseWaitBudget, MAX_REMEMBER_WAIT_MS } =
     await import("../tools/remember-wait.js");
 
 /**
- * `memwal_remember` blocks to terminal by default, so a result carries a real
- * blob_id — D1 settled that, and returning at accept is its own product
- * ticket. What this file covers is the accept-and-continue path an operator
- * opts into with `MEMWAL_MCP_REMEMBER_WAIT_MS=0`.
- *
- * The risk that path buys is an agent reading "accepted" as "saved", so these
- * tests pin what keeps it honest: an accepted result must never read as
- * success or carry a blob_id, and `memwal_remember_status` — the only thing
+ * Default wait is 0: `memwal_remember` returns at accept with a job_id.
+ * These tests pin what keeps that honest: an accepted result must never read
+ * as saved or carry a blob_id, and `memwal_remember_status` — the only thing
  * that can observe a job failing after acceptance — must report that failure
  * as an error rather than as a write still in flight.
  */
@@ -105,11 +100,8 @@ function textOf(result: unknown): string {
 }
 
 test("the default returns at accept, and blocking is opt-in", () => {
-    // Reverses D1. A full-ceiling call runs ACCEPT_DEADLINE_MS + 90_000 +
-    // WAIT_OVERSHOOT_GRACE_MS = 115s against the MCP SDK's 60s default
-    // tools/call timeout, so it could not honour "a result means it landed"
-    // anyway — it aborted mid-wait and the retry wrote the fact twice. Every
-    // budget that fits under 60s (<=35_000) is the in-between to avoid.
+    // Assignment above is so this module reads 0 even if the process already
+    // had another value. The product default is 0.
     assert.equal(parseWaitBudget(undefined), 0);
     assert.equal(parseWaitBudget(""), 0);
     assert.equal(REMEMBER_WAIT_MS, 0);
