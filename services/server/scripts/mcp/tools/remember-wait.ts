@@ -61,47 +61,10 @@ export const MAX_REMEMBER_WAIT_MS = 90_000;
 /**
  * Default wait before `memwal_remember` hands back a job_id.
  *
- * Zero — the tool returns at accept (~1.1s measured) and the agent continues
- * with other work while the write finishes. This REVERSES D1, which had kept
- * the full ceiling on the grounds that "a result means it landed" is the
- * contract callers have. Two things decided it the other way:
- *
- * 1. The blocking default could not honour that contract anyway. The MCP
- *    TypeScript SDK defaults a tools/call to
- *    `DEFAULT_REQUEST_TIMEOUT_MSEC = 60_000` (@modelcontextprotocol/sdk,
- *    shared/protocol.js:8, applied at :712 as
- *    `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC`). The legs are
- *    sequential, so a full-ceiling call reaches ACCEPT_DEADLINE_MS (15_000)
- *    + 90_000 + WAIT_OVERSHOOT_GRACE_MS (10_000) = 115s against a client that
- *    gives up at 60. On any host that does not raise its own timeout the call
- *    aborts mid-wait and the retry writes the fact a second time — see
- *    docs/troubleshooting/overview.md. Claude Code raises its ceiling and so
- *    never saw this; other hosts did.
- *
- * 2. A budget between zero and the real completion time is the worst setting,
- *    and against a measured 30–75s spread every budget that fits under the
- *    60s client timeout (≤35_000) is exactly that: it pays the wait and still
- *    lands in the pending branch on nearly every call. There is no value that
- *    both blocks meaningfully and fits. So: do not wait at all.
- *
- * Returning at accept is safe from disconnects because the job is a row in
- * `remember_jobs` driven by the relayer
- * (`spawn_persisted_remember_preparation` in
- * services/server/src/routes/remember.rs), not work held in this process.
- * Closing the client does not cancel it.
- *
- * It is NOT safe from a job that fails after acceptance — that is real, and
- * dev proved it on 2026-09-17 when every register transaction was rejected
- * post-accept. Only a later `memwal_remember_status` call surfaces that, which
- * is why the pending message points at it and refuses to claim the fact is
- * stored.
- *
- * An operator who wants the old always-block behaviour sets
- * `MEMWAL_MCP_REMEMBER_WAIT_MS=90000` knowingly.
- *
- * This constant does not fix `memwal_analyze`: its extraction leg is a
- * 60_000ms deadline (analyze.ts) that fully precedes the wait, so analyze
- * exceeds 60s for ANY value here, including 0. That needs its own decision.
+ * Zero — return at accept. The MCP SDK's default `tools/call` timeout is
+ * 60s; a budget that actually waits for Walrus (30–75s) overruns that, and
+ * any in-between budget that fits still returns pending on nearly every
+ * call. Restore block-until-done with `MEMWAL_MCP_REMEMBER_WAIT_MS=90000`.
  */
 const DEFAULT_REMEMBER_WAIT_MS = 0;
 
