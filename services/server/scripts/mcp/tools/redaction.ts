@@ -633,7 +633,8 @@ function wordsAround(text: string, token: string): number {
  */
 export function sanitizeFactBatch(inputs: string[]): SanitizedText[] {
     const perEntry = inputs.map((text) => sanitizeFact(text ?? ""));
-    if (perEntry.length < 2 && !perEntry.some((r) => !r.refusal)) return perEntry;
+    // Nothing survived the per-entry pass, so there is nothing left to screen.
+    if (perEntry.every((r) => r.refusal)) return perEntry;
 
     // What each entry contributes as CONTEXT. A refused entry is never
     // forwarded, but its words still say what the batch is about, so it keeps
