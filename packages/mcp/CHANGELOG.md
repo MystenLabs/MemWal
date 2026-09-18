@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal-mcp
 
+## Unreleased
+
+### Fixed
+
+- Say so when recovering an interrupted sign-in changes the active account. `recoverPendingLogin` called `saveCreds` and discarded its result, so the user was told only "Recovered credentials from an interrupted sign-in (delegate 0x…)" — nothing was lost, since the displaced file is still backed up, but nothing said the account had changed either. It changes across accounts more easily than it looks: the supersede guard bails only when `existing.createdAt >= pending.createdAt`, so a pending record newer than the saved credentials wins, which is right for the same account and fires across accounts too. Someone signed into A who started a sign-in for B and abandoned it after wallet approval was switched to B on the next client start, with every memory apparently vanished and a delegate address in a log line as the only clue. Recovery now emits the same replacement notice the normal login path already printed, naming the outgoing and incoming account and where the previous file was backed up. A same-account recovery keeps its quieter wording. (WALM-646, GH #924)
+
 ## 0.0.14
 
 ### Fixed

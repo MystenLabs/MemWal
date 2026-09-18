@@ -13,7 +13,14 @@
 import { randomUUID, createHash } from "node:crypto";
 
 import type { MemWalCredentials } from "./auth.js";
-import { loadCreds, saveCreds, loadPendingLogin, clearPendingLogin } from "./auth.js";
+import {
+    loadCreds,
+    saveCreds,
+    loadPendingLogin,
+    clearPendingLogin,
+    formatReplacementNotice,
+    type SaveCredsResult,
+} from "./auth.js";
 import { signMessage } from "./crypto.js";
 import { log } from "./logger.js";
 
@@ -34,6 +41,20 @@ export interface RecoveryResult {
     /** Set when a key may be registered on-chain but is not usable locally. */
     strandedPublicKey?: string;
     credentials?: MemWalCredentials;
+    /** What the `saveCreds` behind a `recovered` outcome actually did — which
+     * file it wrote, and whose credentials it displaced. */
+    saved?: SaveCredsResult;
+    /**
+     * The line to show when recovery replaced a DIFFERENT account's
+     * credentials, or undefined when it did not.
+     *
+     * Formatted here rather than left to the caller. The defect this fixes was
+     * precisely a caller that had the information and did not print it, so
+     * handing back a `SaveCredsResult` alone would leave the same omission one
+     * step away. `login.ts` derives its own via `formatReplacementNotice`; this
+     * is the same function, so both paths say the same thing.
+     */
+    replacementNotice?: string;
 }
 
 /** Same wall-clock budget as a normal cold-start probe: recovery must never
@@ -236,13 +257,28 @@ export async function recoverPendingLogin(): Promise<RecoveryResult> {
         createdAt: new Date().toISOString(),
         version: 1,
     };
-    saveCreds(creds);
+    // Consume what `saveCreds` reports. It backs up a displaced file either
+    // way, so nothing was ever lost — but the user was told only "recovered
+    // credentials from an interrupted sign-in (delegate 0x…)", which does not
+    // say that the ACTIVE ACCOUNT CHANGED.
+    //
+    // It changes across accounts more easily than it looks. The supersede guard
+    // above bails only when `existing.createdAt >= pending.createdAt`, so a
+    // pending record newer than the saved credentials wins — correct for the
+    // same account, but it fires across accounts too. Someone signed into A who
+    // began a sign-in for B and abandoned it after wallet approval is switched
+    // to B on the next client start. From where they sit every memory has
+    // vanished, and the only clue was a delegate address in a log line.
+    const saved = saveCreds(creds);
     clearPendingLogin();
+    const replacementNotice = formatReplacementNotice(saved, creds.accountId) ?? undefined;
     log.info("login.pending.recovered", {
         accountId: creds.accountId,
         delegateAddress: creds.delegateAddress,
+        // Absent on a same-account recovery, which is the quiet, common case.
+        replacedAccountId: saved.replacedAccountId,
     });
-    return { outcome: "recovered", credentials: creds };
+    return { outcome: "recovered", credentials: creds, saved, replacementNotice };
 }
 
 /**

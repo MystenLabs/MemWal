@@ -336,3 +336,138 @@ test("a plain 401 is still a rejection", async (t) => {
     const { recoverPendingLogin } = await importRecovery();
     assert.equal((await recoverPendingLogin()).outcome, "rejected");
 });
+
+/* ------------------------------------------------------------------------- *
+ * WALM-646 — recovery must say when it changed the active account.
+ *
+ * `recoverPendingLogin` called `saveCreds` and threw the result away, so the
+ * user saw only "Recovered credentials from an interrupted sign-in (delegate
+ * 0x…)". Nothing was lost — `backupIfReplacingAnotherAccount` still ran — but
+ * nothing said the ACTIVE ACCOUNT HAD CHANGED either.
+ *
+ * It changes across accounts more easily than it looks. The supersede guard
+ * bails only when `existing.createdAt >= pending.createdAt`, so a pending
+ * record newer than the saved credentials wins — right for the same account,
+ * but it fires across accounts too. Sign in as A, start a sign-in for B,
+ * abandon it after wallet approval, and the next client start is B. Every
+ * memory appears to have vanished and the only clue was a log line.
+ *
+ * These stub `fetch` rather than standing up a server like the tests above.
+ * What is under test is the save-and-report path, not the HTTP contract — the
+ * reclaim tests already prove the client signs its whoami — and a stub keeps
+ * the account timeline explicit instead of hidden behind a live handler.
+ * ------------------------------------------------------------------------- */
+
+const ACCOUNT_B = `0x${"d".repeat(64)}`;
+
+/** Answer /api/whoami as `accountId`, with no socket involved. */
+function stubWhoami(t, accountId) {
+    const real = globalThis.fetch;
+    globalThis.fetch = async () =>
+        new Response(
+            JSON.stringify({ account_id: accountId, owner: OWNER, package_id: PACKAGE }),
+            { status: 200, headers: { "content-type": "application/json" } },
+        );
+    t.after(() => {
+        globalThis.fetch = real;
+    });
+}
+
+/** Credentials already on disk, older than any pending record written after. */
+function writeExistingCreds(home, accountId) {
+    const creds = {
+        delegatePrivateKey: "99".repeat(32),
+        delegatePublicKeyHex: "88".repeat(32),
+        delegateAddress: `0x${"7".repeat(64)}`,
+        walletAddress: OWNER,
+        accountId,
+        packageId: PACKAGE,
+        relayerUrl: "https://relayer.example",
+        label: "Already signed in",
+        createdAt: new Date(Date.now() - 60_000).toISOString(),
+        version: 1,
+    };
+    writeFileSync(credsPath(home), JSON.stringify(creds), { mode: 0o600 });
+    return creds;
+}
+
+test("recovery onto a different account reports the switch", async (t) => {
+    const home = freshHome();
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    writeExistingCreds(home, ACCOUNT);
+    writePending(home, "https://relayer.example");
+    stubWhoami(t, ACCOUNT_B);
+
+    const { recoverPendingLogin } = await importRecovery();
+    const result = await recoverPendingLogin();
+
+    assert.equal(result.outcome, "recovered");
+    assert.ok(result.saved, "the saveCreds result must be consumed, not discarded");
+    assert.equal(result.saved.replacedAccountId, ACCOUNT, "names the account being left");
+    assert.ok(result.replacementNotice, "a cross-account recovery must produce a notice");
+    assert.match(result.replacementNotice, new RegExp(ACCOUNT), "must name the outgoing account");
+    assert.match(result.replacementNotice, new RegExp(ACCOUNT_B), "must name the incoming account");
+});
+
+test("the recovery notice is word-for-word the one the normal login path prints", async (t) => {
+    const home = freshHome();
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    writeExistingCreds(home, ACCOUNT);
+    writePending(home, "https://relayer.example");
+    stubWhoami(t, ACCOUNT_B);
+
+    const { recoverPendingLogin } = await importRecovery();
+    const result = await recoverPendingLogin();
+
+    // Two paths describing the same event differently is its own bug. Both go
+    // through formatReplacementNotice, and this pins that they still do.
+    const { formatReplacementNotice } = await import(`../dist/auth.js?t=${Date.now()}`);
+    assert.equal(result.replacementNotice, formatReplacementNotice(result.saved, ACCOUNT_B));
+});
+
+test("recovery within the same account stays quiet", async (t) => {
+    const home = freshHome();
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    writeExistingCreds(home, ACCOUNT);
+    writePending(home, "https://relayer.example");
+    stubWhoami(t, ACCOUNT);
+
+    const { recoverPendingLogin } = await importRecovery();
+    const result = await recoverPendingLogin();
+
+    assert.equal(result.outcome, "recovered");
+    // Reclaiming your own interrupted sign-in is routine. Warning about it
+    // would train the user to skip the warning that matters.
+    assert.equal(result.replacementNotice, undefined);
+    assert.equal(result.saved.replacedAccountId, undefined);
+});
+
+test("a first-ever recovery has no account to report leaving", async (t) => {
+    const home = freshHome();
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    writePending(home, "https://relayer.example");
+    stubWhoami(t, ACCOUNT_B);
+
+    const { recoverPendingLogin } = await importRecovery();
+    const result = await recoverPendingLogin();
+
+    assert.equal(result.outcome, "recovered");
+    assert.equal(result.replacementNotice, undefined, "nothing was displaced");
+});
+
+test("the displaced account's file is still backed up, and the notice points at it", async (t) => {
+    const home = freshHome();
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    writeExistingCreds(home, ACCOUNT);
+    writePending(home, "https://relayer.example");
+    stubWhoami(t, ACCOUNT_B);
+
+    const { recoverPendingLogin } = await importRecovery();
+    const result = await recoverPendingLogin();
+
+    assert.ok(result.saved.backedUpTo, "the outgoing account's file must be recoverable");
+    assert.equal(existsSync(result.saved.backedUpTo), true);
+    assert.match(result.replacementNotice, /credentials\.backup/, "tell the user where it went");
+    const backed = JSON.parse(readFileSync(result.saved.backedUpTo, "utf8"));
+    assert.equal(backed.accountId, ACCOUNT);
+});

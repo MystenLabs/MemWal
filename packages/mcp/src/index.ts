@@ -221,6 +221,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
                 `Recovered credentials from an interrupted sign-in ` +
                     `(delegate ${recovery.credentials.delegateAddress}).`,
             );
+            // Recovery can land on a DIFFERENT account than the one that was
+            // signed in — an abandoned sign-in for B, recovered over A. The
+            // line above does not say so, and the user's first symptom would
+            // otherwise be that every memory appears to have vanished. Same
+            // notice `login.ts` prints on the normal path, so the two read
+            // alike. Silent on a same-account recovery.
+            if (recovery.replacementNotice) note(recovery.replacementNotice);
         } else {
             const notice = formatStrandedLoginNotice(recovery);
             if (notice) note(notice);
