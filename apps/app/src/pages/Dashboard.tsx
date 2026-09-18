@@ -14,7 +14,7 @@ import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useNavigate } from 'react-router-dom'
-import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle } from 'lucide-react'
+import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
@@ -120,6 +120,9 @@ interface OnChainDelegateKey {
 const MAX_DELEGATE_KEYS = 20
 const MAX_DELEGATE_KEYS_MESSAGE = 'This wallet already has 20 delegate keys. Remove an old key before creating a new delegate key.'
 const DELEGATE_KEYS_SECTION_ID = 'delegate-keys'
+// Relayer clamps `limit` (default 100, max 500); these stay well inside that.
+const NAMESPACE_PAGE_SIZES = [15, 25, 50, 100]
+const NAMESPACE_DEFAULT_PAGE_SIZE = 15
 const PRIVATE_KEY_ENV = 'MEMWAL_PRIVATE_KEY'
 const ACCOUNT_ID_ENV = 'MEMWAL_ACCOUNT_ID'
 const SERVER_URL_ENV = 'MEMWAL_SERVER_URL'
@@ -254,7 +257,9 @@ export default function Dashboard({
     const [namespaces, setNamespaces] = useState<{ name: string; memory_count: number }[]>([])
     const [namespacesLoading, setNamespacesLoading] = useState(false)
     const [namespacesError, setNamespacesError] = useState('')
-    const [namespacesTruncated, setNamespacesTruncated] = useState(false)
+    const [namespacesPage, setNamespacesPage] = useState(0)
+    const [namespacesHasMore, setNamespacesHasMore] = useState(false)
+    const [namespacesPageSize, setNamespacesPageSize] = useState(NAMESPACE_DEFAULT_PAGE_SIZE)
     const [loadingKeys, setLoadingKeys] = useState(false)
     const [addingKey, setAddingKey] = useState(false)
     const [removingKey, setRemovingKey] = useState<string | null>(null)
@@ -462,19 +467,20 @@ export default function Dashboard({
     }, [fetchOnChainKeys])
 
     const namespacesFetchGen = useRef(0)
-    const fetchNamespaces = useCallback(async () => {
+    // cursors[i] is the `updated_after` cursor that opens page i; page 0 has none.
+    const namespacesCursors = useRef<(string | undefined)[]>([undefined])
+
+    const fetchNamespacesPage = useCallback(async (page: number) => {
         if (!delegateKey || !effectiveAccountObjectId || !address) return
         const gen = ++namespacesFetchGen.current
         setNamespacesLoading(true)
         setNamespacesError('')
-        setNamespacesTruncated(false)
         try {
             const owner = address.toLowerCase()
-            const collected: { name: string; memory_count: number }[] = []
-            let cursor: string | undefined
-            let truncated = false
-            for (let page = 0; page < 20; page++) {
-                const qs = new URLSearchParams({ limit: '100' })
+            let target = page
+            for (;;) {
+                const qs = new URLSearchParams({ limit: String(namespacesPageSize) })
+                const cursor = namespacesCursors.current[target]
                 if (cursor) qs.set('updated_after', cursor)
                 const path = `/v1/owners/${owner}/namespaces?${qs.toString()}`
                 const data = await apiGet(
@@ -488,22 +494,29 @@ export default function Dashboard({
                     has_more?: boolean
                 }
                 if (gen !== namespacesFetchGen.current) return
+                const rows: { name: string; memory_count: number }[] = []
                 for (const ns of data.namespaces ?? []) {
                     if (typeof ns.name === 'string') {
-                        collected.push({
-                            name: ns.name,
-                            memory_count: Number(ns.memory_count ?? 0),
-                        })
+                        rows.push({ name: ns.name, memory_count: Number(ns.memory_count ?? 0) })
                     }
                 }
-                if (!data.has_more) break
-                if (!data.next_cursor) break
-                cursor = data.next_cursor
-                if (page === 19) truncated = true
+                // Trust has_more + next_cursor, never rows.length: the relayer clamps limit.
+                const nextCursor = data.has_more ? (data.next_cursor ?? null) : null
+                namespacesCursors.current = namespacesCursors.current.slice(0, target + 1)
+                if (nextCursor) namespacesCursors.current[target + 1] = nextCursor
+                if (rows.length === 0 && target > 0) {
+                    // A continuation page can come back empty when namespaces move past
+                    // the relayer's snapshot_at while we page. Drop the cursor that opened
+                    // it and land on a real page instead of the first-load empty state.
+                    namespacesCursors.current.length = target
+                    target -= 1
+                    continue
+                }
+                setNamespaces(rows)
+                setNamespacesPage(target)
+                setNamespacesHasMore(Boolean(nextCursor))
+                return
             }
-            if (gen !== namespacesFetchGen.current) return
-            setNamespaces(collected)
-            setNamespacesTruncated(truncated)
         } catch (err) {
             if (gen !== namespacesFetchGen.current) return
             console.error('Failed to list namespaces:', err)
@@ -511,12 +524,30 @@ export default function Dashboard({
         } finally {
             if (gen === namespacesFetchGen.current) setNamespacesLoading(false)
         }
-    }, [delegateKey, effectiveAccountObjectId, address])
+    }, [delegateKey, effectiveAccountObjectId, address, namespacesPageSize])
+
+    const refreshNamespaces = useCallback(() => {
+        namespacesCursors.current = [undefined]
+        setNamespaces([])
+        setNamespacesPage(0)
+        setNamespacesHasMore(false)
+        void fetchNamespacesPage(0)
+    }, [fetchNamespacesPage])
 
     useEffect(() => {
-        setNamespaces([])
-        void fetchNamespaces()
-    }, [fetchNamespaces])
+        refreshNamespaces()
+    }, [refreshNamespaces])
+
+    // Every page before the current one was full, so the running offset is exact.
+    const namespacesRangeStart = namespacesPage * namespacesPageSize + 1
+    const namespacesRangeEnd = namespacesPage * namespacesPageSize + namespaces.length
+    const namespacesPageMemories = namespaces.reduce((n, ns) => n + ns.memory_count, 0)
+    // Hide the footer when everything fits on one page — but keep it once the
+    // user has picked a non-default page size, or raising the size to fit the
+    // whole list would remove the only control that can lower it again.
+    const namespacesIsPaginated = namespacesHasMore
+        || namespacesPage > 0
+        || namespacesPageSize !== NAMESPACE_DEFAULT_PAGE_SIZE
 
     // ============================================================
     // Generate + add a new delegate key (via SDK)
@@ -1120,13 +1151,17 @@ const result = await generateText({
                                 : namespacesError
                                     ? namespacesError
                                     : namespaces.length === 0
-                                        ? 'No indexed namespaces yet (or none the relayer can see for this account)'
-                                        : `${namespaces.reduce((n, ns) => n + ns.memory_count, 0)} memories across ${namespaces.length} ${namespaces.length === 1 ? 'namespace' : 'namespaces'}${namespacesTruncated ? ' (list truncated)' : ''}`
+                                        ? namespacesPage > 0
+                                            ? 'This page is empty — go back for the namespaces already listed'
+                                            : 'No indexed namespaces yet (or none the relayer can see for this account)'
+                                        : namespacesIsPaginated
+                                            ? `Showing ${namespacesRangeStart}–${namespacesRangeEnd} · ${namespacesPageMemories} ${namespacesPageMemories === 1 ? 'memory' : 'memories'} on this page`
+                                            : `${namespacesPageMemories} memories across ${namespaces.length} ${namespaces.length === 1 ? 'namespace' : 'namespaces'}`
                         }
                         action={
                             <button
                                 className="btn btn-secondary btn-sm dashboard-keys-refresh"
-                                onClick={() => void fetchNamespaces()}
+                                onClick={refreshNamespaces}
                                 disabled={namespacesLoading}
                                 aria-busy={namespacesLoading}
                             >
@@ -1163,6 +1198,53 @@ const result = await generateText({
                                     </tbody>
                                 </table>
                             </div>
+                        )}
+                        {!namespacesError && namespacesIsPaginated && (
+                            <nav className="dashboard-pagination" aria-label="Namespaces pages">
+                                <div className="dashboard-pagination-size">
+                                    <label htmlFor="namespaces-page-size">Items per page</label>
+                                    <select
+                                        id="namespaces-page-size"
+                                        className="dashboard-pagination-select"
+                                        value={namespacesPageSize}
+                                        onChange={(e) => setNamespacesPageSize(Number(e.target.value))}
+                                        disabled={namespacesLoading}
+                                    >
+                                        {NAMESPACE_PAGE_SIZES.map((size) => (
+                                            <option key={size} value={size}>{size}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="dashboard-pagination-end">
+                                    <span className="dashboard-pagination-status" aria-live="polite">
+                                        {namespaces.length > 0
+                                            ? `${namespacesRangeStart}–${namespacesRangeEnd}`
+                                            : `Page ${namespacesPage + 1}`}
+                                    </span>
+                                    <div className="dashboard-pagination-controls">
+                                        <button
+                                            type="button"
+                                            className="dashboard-pagination-btn"
+                                            onClick={() => void fetchNamespacesPage(namespacesPage - 1)}
+                                            disabled={namespacesPage === 0 || namespacesLoading}
+                                            title="Previous page"
+                                            aria-label="Previous page"
+                                        >
+                                            <ChevronLeft size={16} />
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="dashboard-pagination-btn"
+                                            onClick={() => void fetchNamespacesPage(namespacesPage + 1)}
+                                            disabled={!namespacesHasMore || namespacesLoading}
+                                            title="Next page"
+                                            aria-label="Next page"
+                                        >
+                                            <ChevronRight size={16} />
+                                        </button>
+                                    </div>
+                                </div>
+                            </nav>
                         )}
                     </Card>
                 )}
