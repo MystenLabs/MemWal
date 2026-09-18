@@ -13,6 +13,7 @@ use redis::AsyncCommands;
 use sha2::Digest;
 use std::sync::Arc;
 
+use crate::engine::stage::{self, HangUpGuard, RecallStage, StageMarker};
 use crate::types::*;
 
 /// How far back the failure report on a recall response looks.
@@ -248,8 +249,53 @@ pub async fn recall(
         "recall request"
     );
 
+    // A caller that sent its deadline gets the stage a recall was stuck in,
+    // just before it would have given up, instead of aborting blind
+    // (WALM-396). One that sent none keeps running to completion.
+    let marker = StageMarker::default();
+    let guard = HangUpGuard::new(marker.clone(), owner.clone());
+    let outcome = stage::run_with_deadline(
+        &marker,
+        stage::budget_for(body.deadline_ms),
+        recall_pipeline(&state, &auth, &body, &weights, sort, failed_writes),
+    )
+    .await;
+    guard.disarm();
+    match outcome {
+        Ok(result) => result.map(Json),
+        Err(timed_out) => {
+            tracing::warn!(
+                owner = %owner,
+                namespace = %namespace,
+                stage = timed_out.stage.as_str(),
+                elapsed_ms = timed_out.elapsed_ms,
+                deadline_ms = body.deadline_ms,
+                "recall timed out before the caller's deadline"
+            );
+            Err(AppError::RecallTimeout {
+                stage: timed_out.stage.as_str(),
+                elapsed_ms: timed_out.elapsed_ms,
+            })
+        }
+    }
+}
+
+/// Everything `recall` does after validation, as one future the handler can
+/// put a deadline on. Each `stage::enter` names the step a timeout reports.
+async fn recall_pipeline(
+    state: &Arc<AppState>,
+    auth: &AuthInfo,
+    body: &RecallRequest,
+    weights: &ScoringWeights,
+    sort: RecallSort,
+    failed_writes: tokio::task::JoinHandle<Vec<FailedWrite>>,
+) -> Result<RecallResponse, AppError> {
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+
+    stage::enter(RecallStage::Embed);
     let t0 = std::time::Instant::now();
-    let query_vector = generate_recall_embedding_cached(&state, &body.query).await?;
+    let query_vector = generate_recall_embedding_cached(state, &body.query).await?;
     let embed_ms = t0.elapsed().as_millis();
 
     // Cap limit to prevent unbounded DB scans / memory use.
@@ -260,6 +306,7 @@ pub async fn recall(
     // outside the cosine top-`limit` entirely. `Relevance` fetches exactly
     // `limit`, so the default path issues the identical query it always has.
     let candidate_limit = sort.candidate_limit(limit);
+    stage::enter(RecallStage::VectorSearch);
     let t1 = std::time::Instant::now();
     let hits = state
         .db
@@ -279,14 +326,14 @@ pub async fn recall(
             "recall complete: 0 results (no vector hits) for owner={}",
             owner
         );
-        return Ok(Json(RecallResponse {
+        return Ok(RecallResponse {
             results: vec![],
             total: 0,
             dropped_count: 0,
             // Reported even with no hits: an empty recall is exactly when a
             // caller is most likely to be looking for the fact that failed.
             failed_writes: failed_writes.await.unwrap_or_default(),
-        }));
+        });
     }
 
     // Hydrate the hits through the storage engine: blob cache -> Walrus
@@ -295,6 +342,7 @@ pub async fn recall(
     // engine owns the
     // cache/decrypt-batch internals and derives the SEAL credential from
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
+    stage::enter(RecallStage::WalrusDownload);
     let t2 = std::time::Instant::now();
     let hit_refs: Vec<(String, f64)> = hits
         .iter()
@@ -302,7 +350,7 @@ pub async fn recall(
         .collect();
     let (mut hydrated, dropped_count, timings) = state
         .engine
-        .fetch_batch(owner, namespace, &hit_refs, &auth)
+        .fetch_batch(owner, namespace, &hit_refs, auth)
         .await?;
     let fetch_ms = t2.elapsed().as_millis();
 
@@ -335,7 +383,7 @@ pub async fn recall(
     // this is a no-op and preserves the pgvector cosine order exactly —
     // pinned by the `default_weights_preserve_input_order` and
     // `recency_zero_is_short_circuit_no_reorder` tests in services::ranker.
-    let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
+    let ranked = state.ranker.rank(hydrated, weights, chrono::Utc::now());
 
     let results: Vec<RecallResult> = super::recall_results_from_ranked(ranked);
     let total = results.len();
@@ -368,14 +416,14 @@ pub async fn recall(
         t0.elapsed().as_millis()
     );
 
-    Ok(Json(RecallResponse {
+    Ok(RecallResponse {
         results,
         total,
         dropped_count,
         // A panic in the report task must not take the recall with it; the
         // caller loses a warning, not their memories.
         failed_writes: failed_writes.await.unwrap_or_default(),
-    }))
+    })
 }
 
 /// POST /api/recall/manual
