@@ -9,6 +9,13 @@
  * it makes sure the pinned version is installed under ~/.memwal/runtime and runs
  * that absolute entry point with the current node binary.
  *
+ * The runtime directory is trusted because of what it is, not because of how it is
+ * spelled: it must sit outside the project tree (an absolute
+ * `${workspaceFolder}/.memwal-runtime` is still the project), be a real directory
+ * owned by the current user, and not be group- or world-writable. See
+ * lib/mcp-launch.mjs for the checks and for what the install step does and does not
+ * guarantee.
+ *
  * Everything after the script path is forwarded to the server untouched, so the
  * manifests keep working with flags such as `--dev`, `--namespace work` or
  * `--relayer <url>`. The environment is inherited as-is, and the working directory

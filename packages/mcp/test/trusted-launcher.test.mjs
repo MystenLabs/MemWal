@@ -18,18 +18,37 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
     MCP_PACKAGE_NAME,
+    MCP_REGISTRY,
+    assertRuntimeRootLocation,
+    canonicalPath,
     expectedEntryPath,
+    installArguments,
     installDir,
+    installEnvironment,
+    npmSpawnPlan,
     pinnedVersion,
+    prepareRuntimeRoot,
+    quoteWindowsArgument,
     resolveInstalledEntry,
+    resolveNpm,
     runtimeRoot,
+    verifyTrustedDirectory,
 } from "../plugin/scripts/lib/mcp-launch.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -191,16 +210,23 @@ test("an install under a different version is not accepted for the pin", (t) => 
     assert.ok(!String(trusted.entry).includes(project.dir));
 });
 
-test("with no trusted install and no installer, the launcher fails instead of falling back", (t) => {
+test("with no trusted install and a failing install, the launcher fails instead of falling back", (t) => {
     const project = makeHostileProject(t);
     const trusted = makeTrustedRuntime(t, { populate: false });
 
-    // An empty PATH makes the `npm` lookup fail the way an offline or broken
-    // toolchain would. The launcher must surface that, never reach for the name.
-    const result = runLauncher([], {
-        cwd: project.dir,
-        env: { MEMWAL_MCP_RUNTIME_DIR: trusted.root, PATH: "" },
-    });
+    // A read-only trusted root makes the install fail the way an offline or broken
+    // toolchain would, without going near the network. (An empty PATH no longer does
+    // it: npm is resolved from process.execPath, which is the point of that change.)
+    let result;
+    chmodSync(trusted.root, 0o500);
+    try {
+        result = runLauncher([], {
+            cwd: project.dir,
+            env: { MEMWAL_MCP_RUNTIME_DIR: trusted.root },
+        });
+    } finally {
+        chmodSync(trusted.root, 0o700);
+    }
 
     assert.notEqual(result.status, 0, "launcher must not succeed without a trusted install");
     assert.doesNotMatch(result.stdout, new RegExp(LOCAL_MARKER));
@@ -278,4 +304,343 @@ test("no plugin launch manifest resolves the server through npx", () => {
         "the Codex fallback installer must register the launcher, not npx",
     );
     assert.match(installer, /launch_mcp\.mjs/);
+});
+
+/* ------------------------------------------------------------------------- *
+ * Review follow-ups (WALM-640): an absolute runtime root is not a trusted
+ * runtime root, and the install step must not execute what it has not verified.
+ * ------------------------------------------------------------------------- */
+
+const POSIX = process.platform !== "win32";
+
+/** A project that a repository could really ship: markers, config, planted runtime. */
+function makeRepoProject(t) {
+    const dir = mkdtempSync(join(tmpdir(), "memwal-repo-project-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "victim", version: "1.0.0" }));
+    return dir;
+}
+
+/** The whole WALM-640 tree, committed inside the repository under `name`. */
+function plantRuntimeRoot(projectDir, name = ".memwal-runtime") {
+    const root = join(projectDir, name);
+    const target = installDir(PIN, root);
+    mkdirSync(target, { recursive: true });
+    plantPackage(target, { version: PIN, marker: LOCAL_MARKER });
+    return root;
+}
+
+test("an absolute MEMWAL_MCP_RUNTIME_DIR inside the project is refused", (t) => {
+    const project = makeHostileProject(t);
+    // What a client writes into ${workspaceFolder}/.cursor/mcp.json expands to: an
+    // absolute path, which the old check accepted, pointing straight back into the
+    // repository that supplied it.
+    const plantedRoot = plantRuntimeRoot(project.dir);
+
+    const result = runLauncher(["--print-entry"], {
+        cwd: project.dir,
+        env: { MEMWAL_MCP_RUNTIME_DIR: plantedRoot },
+    });
+
+    assert.notEqual(result.status, 0, "an in-project runtime root must not be usable");
+    assert.match(result.stderr, /inside the project tree/);
+    assert.match(result.stderr, /refusing to fall back/);
+    assert.doesNotMatch(result.stdout, new RegExp(LOCAL_MARKER));
+    assert.doesNotMatch(result.stdout, new RegExp(plantedRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("the planted in-project tree is otherwise a complete, usable install", (t) => {
+    // Without this the test above could pass for the wrong reason (a tree that would
+    // not have resolved anyway). It is refused because of where it is, not what it is.
+    const project = makeHostileProject(t);
+    const plantedRoot = plantRuntimeRoot(project.dir);
+    assert.ok(
+        resolveInstalledEntry(installDir(PIN, plantedRoot), PIN),
+        "the planted tree must be a resolvable install, so the refusal is about location",
+    );
+});
+
+test("a runtime root inside the repository but above the cwd is refused too", (t) => {
+    const repo = makeRepoProject(t);
+    const plantedRoot = plantRuntimeRoot(repo);
+    const nested = join(repo, "packages", "app");
+    mkdirSync(nested, { recursive: true });
+
+    const result = runLauncher(["--print-entry"], {
+        cwd: nested,
+        env: { MEMWAL_MCP_RUNTIME_DIR: plantedRoot },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /inside the project tree/);
+    assert.doesNotMatch(result.stdout, new RegExp(LOCAL_MARKER));
+});
+
+test("a runtime root that only looks external is refused once symlinks resolve", (t) => {
+    if (!POSIX) return;
+    const project = makeHostileProject(t);
+    const plantedRoot = plantRuntimeRoot(project.dir);
+    const outside = mkdtempSync(join(tmpdir(), "memwal-link-"));
+    t.after(() => rmSync(outside, { recursive: true, force: true }));
+    const link = join(outside, "runtime");
+    symlinkSync(plantedRoot, link);
+
+    const result = runLauncher(["--print-entry"], {
+        cwd: project.dir,
+        env: { MEMWAL_MCP_RUNTIME_DIR: link },
+    });
+
+    assert.notEqual(result.status, 0, "a symlink into the project is still the project");
+    assert.match(result.stderr, /inside the project tree/);
+    assert.doesNotMatch(result.stdout, new RegExp(LOCAL_MARKER));
+});
+
+test("assertRuntimeRootLocation accepts a root outside the project and rejects one inside", (t) => {
+    const repo = makeRepoProject(t);
+    const outside = mkdtempSync(join(tmpdir(), "memwal-outside-"));
+    t.after(() => rmSync(outside, { recursive: true, force: true }));
+
+    assert.equal(assertRuntimeRootLocation(outside, { cwd: repo }), resolve(outside));
+    assert.throws(
+        () => assertRuntimeRootLocation(join(repo, ".memwal-runtime"), { cwd: repo }),
+        /inside the project tree/,
+    );
+    assert.throws(
+        () => assertRuntimeRootLocation(repo, { cwd: repo }),
+        /inside the project tree/,
+    );
+    // The reverse containment is just as wrong: the project must not sit inside the
+    // directory whose contents we are about to execute.
+    assert.throws(
+        () => assertRuntimeRootLocation(dirname(repo), { cwd: repo }),
+        /inside the project tree/,
+    );
+});
+
+test("a group-writable runtime root is refused", (t) => {
+    if (!POSIX) return;
+    const project = makeHostileProject(t);
+    const trusted = makeTrustedRuntime(t);
+    chmodSync(trusted.root, 0o777);
+
+    const result = runLauncher(["--print-entry"], {
+        cwd: project.dir,
+        env: { MEMWAL_MCP_RUNTIME_DIR: trusted.root },
+    });
+    chmodSync(trusted.root, 0o700);
+
+    assert.notEqual(result.status, 0, "a root anyone can write is not a trusted root");
+    assert.match(result.stderr, /group- or world-writable/);
+    assert.match(result.stderr, /refusing to fall back/);
+    assert.doesNotMatch(result.stdout, new RegExp(LOCAL_MARKER));
+});
+
+test("verifyTrustedDirectory rejects loose modes, symlinks and foreign owners", (t) => {
+    if (!POSIX) return;
+    const root = mkdtempSync(join(tmpdir(), "memwal-verify-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+
+    const good = join(root, "good");
+    mkdirSync(good, { mode: 0o700 });
+    assert.equal(verifyTrustedDirectory(good), true);
+    assert.equal(verifyTrustedDirectory(join(root, "absent")), false);
+
+    for (const mode of [0o770, 0o707, 0o777, 0o755 | 0o020]) {
+        chmodSync(good, mode);
+        assert.throws(() => verifyTrustedDirectory(good), /group- or world-writable/, `mode ${mode.toString(8)}`);
+    }
+    chmodSync(good, 0o700);
+
+    const link = join(root, "link");
+    symlinkSync(good, link);
+    assert.throws(() => verifyTrustedDirectory(link), /not a directory/);
+
+    const file = join(root, "file");
+    writeFileSync(file, "");
+    assert.throws(() => verifyTrustedDirectory(file), /not a directory/);
+
+    // A directory owned by somebody else. Skipped when the suite runs as that
+    // somebody else (root in a container), where the check cannot fire.
+    const foreign = "/usr";
+    if (process.getuid() !== 0 && lstatSync(foreign).uid !== process.getuid()) {
+        assert.throws(() => verifyTrustedDirectory(foreign), /owned by uid/);
+    }
+});
+
+test("the runtime root and ~/.memwal are created 0700, not at the umask default", (t) => {
+    if (!POSIX) return;
+    const home = mkdtempSync(join(tmpdir(), "memwal-home-mode-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+
+    const previousHome = process.env.HOME;
+    t.after(() => {
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+    });
+    process.env.HOME = home;
+
+    const root = prepareRuntimeRoot(join(home, ".memwal", "runtime"));
+    assert.equal(lstatSync(root).mode & 0o7777, 0o700);
+    // The launcher can run before the first login, so it is this call that creates
+    // ~/.memwal — the directory credentials.json later lands in.
+    assert.equal(lstatSync(join(home, ".memwal")).mode & 0o7777, 0o700);
+
+    // An override root is created 0700 as well, parents included.
+    const override = prepareRuntimeRoot(join(home, "elsewhere", "runtime"));
+    assert.equal(lstatSync(override).mode & 0o7777, 0o700);
+});
+
+test("the install never runs package scripts and never inherits the registry", () => {
+    const args = installArguments(`${MCP_PACKAGE_NAME}@${PIN}`, "/tmp/staging");
+    assert.ok(args.includes("--ignore-scripts"), `--ignore-scripts missing from ${args.join(" ")}`);
+    assert.ok(
+        args.includes(`--registry=${MCP_REGISTRY}`),
+        `an explicit registry is missing from ${args.join(" ")}`,
+    );
+    assert.equal(MCP_REGISTRY, "https://registry.npmjs.org/");
+
+    // npm puts the environment above every .npmrc, so a repository-supplied MCP env
+    // block would otherwise choose the registry no matter what cwd we install from.
+    const env = installEnvironment({
+        PATH: "/usr/bin",
+        HOME: "/home/user",
+        NPM_CONFIG_REGISTRY: "http://attacker.example/",
+        npm_config_registry: "http://attacker.example/",
+        npm_config_ca: "-----BEGIN CERTIFICATE-----",
+        npm_config_ignore_scripts: "false",
+        NODE_OPTIONS: "--require /tmp/evil.js",
+    });
+    assert.equal(env.PATH, "/usr/bin");
+    assert.equal(env.HOME, "/home/user");
+    assert.equal(env.npm_config_registry, MCP_REGISTRY);
+    assert.equal(env.npm_config_ignore_scripts, "true");
+    assert.equal(env.NPM_CONFIG_REGISTRY, undefined);
+    assert.equal(env.npm_config_ca, undefined);
+    assert.equal(env.NODE_OPTIONS, undefined);
+});
+
+test("npm is spawned as node <npm-cli.js>, with no .cmd and no shell, on win32 too", () => {
+    const nodeExe = "C:\\Program Files\\nodejs\\node.exe";
+    const npmCli = "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js";
+    const args = installArguments("pkg@1.0.0", "C:\\Users\\a b\\.memwal\\runtime\\staging");
+
+    const plan = npmSpawnPlan({ kind: "js", path: npmCli }, args, {
+        platform: "win32",
+        execPath: nodeExe,
+    });
+
+    assert.equal(plan.command, nodeExe);
+    assert.equal(plan.shell, false, "node.exe must never be spawned through a shell");
+    assert.deepEqual(plan.args, [npmCli, ...args]);
+    // Arguments go straight to the process, so they are NOT shell-quoted here.
+    assert.ok(plan.args.includes("C:\\Users\\a b\\.memwal\\runtime\\staging"));
+});
+
+test("the win32 npm.cmd fallback uses shell:true with cmd.exe-quoted arguments", () => {
+    // Since the CVE-2024-27980 fix (Node >= 18.20.2 / 20.12.2 / 21.7.3) spawning a
+    // .cmd without shell:true is EINVAL, which used to mean the server never started
+    // on Windows at all: ensureTrustedEntry -> install -> throw -> exit 1.
+    const npmCmd = "C:\\Program Files\\nodejs\\npm.cmd";
+    const staging = "C:\\Users\\a b\\.memwal\\runtime\\staging";
+    const plan = npmSpawnPlan({ kind: "bin", path: npmCmd }, installArguments("pkg@1.0.0", staging), {
+        platform: "win32",
+    });
+
+    assert.equal(plan.shell, true, "a .cmd target needs shell:true or spawnSync returns EINVAL");
+    assert.equal(plan.command, `"${npmCmd}"`, "the command path contains a space and must be quoted");
+    assert.ok(plan.args.includes(`"${staging}"`), "a path with a space must reach cmd.exe quoted");
+    assert.ok(plan.args.includes("--ignore-scripts"));
+    assert.ok(plan.args.includes(`--registry=${MCP_REGISTRY}`));
+    // Flags without metacharacters stay bare, so the command line stays readable.
+    assert.ok(plan.args.includes("install"));
+    assert.ok(plan.args.includes("pkg@1.0.0"));
+});
+
+test("quoteWindowsArgument quotes what cmd.exe would otherwise eat", () => {
+    assert.equal(quoteWindowsArgument("install"), "install");
+    assert.equal(quoteWindowsArgument("@scope/pkg@1.0.0"), "@scope/pkg@1.0.0");
+    assert.equal(quoteWindowsArgument("C:\\a b\\c"), '"C:\\a b\\c"');
+    assert.equal(quoteWindowsArgument("a&b"), '"a&b"');
+    assert.equal(quoteWindowsArgument('say "hi"'), '"say \\"hi\\""');
+});
+
+test("a posix npm binary is spawned directly, never through a shell", () => {
+    const plan = npmSpawnPlan({ kind: "bin", path: "/usr/local/bin/npm" }, ["install"], {
+        platform: "linux",
+    });
+    assert.equal(plan.command, "/usr/local/bin/npm");
+    assert.equal(plan.shell, false);
+    assert.deepEqual(plan.args, ["install"]);
+    assert.throws(() => npmSpawnPlan({ kind: "none", path: null }, ["install"]), /could not locate npm/);
+});
+
+test("resolveNpm returns an absolute path and skips PATH entries inside the project", (t) => {
+    const found = resolveNpm();
+    assert.notEqual(found.kind, "none", "npm must be resolvable in the test environment");
+    assert.ok(resolve(found.path) === found.path, `${found.path} is not absolute`);
+
+    const project = makeHostileProject(t);
+    const projectBin = join(project.dir, "node_modules", ".bin");
+    mkdirSync(projectBin, { recursive: true });
+    writeFileSync(join(projectBin, "npm"), "#!/bin/sh\necho PROJECT_NPM\n");
+    chmodSync(join(projectBin, "npm"), 0o755);
+
+    const elsewhere = mkdtempSync(join(tmpdir(), "memwal-npm-"));
+    t.after(() => rmSync(elsewhere, { recursive: true, force: true }));
+    writeFileSync(join(elsewhere, "npm"), "#!/bin/sh\necho OUTSIDE_NPM\n");
+    chmodSync(join(elsewhere, "npm"), 0o755);
+
+    // An execPath with no npm layout next to it forces the PATH scan.
+    const bare = mkdtempSync(join(tmpdir(), "memwal-bare-node-"));
+    t.after(() => rmSync(bare, { recursive: true, force: true }));
+    const resolved = resolveNpm({
+        execPath: join(bare, "node"),
+        platform: "linux",
+        env: { PATH: [".", "relative/bin", projectBin, elsewhere].join(":") },
+        cwd: project.dir,
+    });
+
+    assert.equal(resolved.kind, "bin");
+    assert.equal(canonicalPath(resolved.path), canonicalPath(join(elsewhere, "npm")));
+    assert.ok(!resolved.path.includes(project.dir), "npm must never come out of the project");
+});
+
+test("a client started in the home directory still gets the default root", (t) => {
+    // enclosingProjectRoot() must not treat $HOME as a project: ~/.memwal/runtime is
+    // inside the home directory by design, and refusing it would break every client
+    // that starts its servers there.
+    const home = mkdtempSync(join(tmpdir(), "memwal-home-cwd-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const target = join(home, ".memwal", "runtime", `memwal-mcp@${PIN}`);
+    mkdirSync(target, { recursive: true });
+    const entry = plantPackage(target, { version: PIN, marker: TRUSTED_MARKER });
+
+    const result = runLauncher(["--print-entry"], {
+        cwd: home,
+        env: { HOME: home, USERPROFILE: home, MEMWAL_MCP_RUNTIME_DIR: "" },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), entry);
+});
+
+test("a subdirectory of the home directory is a project again", (t) => {
+    const home = mkdtempSync(join(tmpdir(), "memwal-home-sub-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const project = join(home, "code", "victim");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, "package.json"), JSON.stringify({ name: "victim" }));
+    const planted = join(project, ".memwal-runtime");
+    mkdirSync(installDir(PIN, planted), { recursive: true });
+    plantPackage(installDir(PIN, planted), { version: PIN, marker: LOCAL_MARKER });
+
+    const result = runLauncher(["--print-entry"], {
+        cwd: project,
+        env: { HOME: home, USERPROFILE: home, MEMWAL_MCP_RUNTIME_DIR: planted },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /inside the project tree/);
+    assert.doesNotMatch(result.stdout, new RegExp(LOCAL_MARKER));
 });
