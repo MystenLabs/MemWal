@@ -102,7 +102,44 @@ const launcherPath = `packages/mcp/plugin/${LAUNCHER}`;
 if (!existsSync(launcherPath)) {
     throw new Error(`${launcherPath}: missing, but every launch site points at it`);
 }
+
+// Registering the launcher for *new* installations is only half of it: every user who
+// ran the installer before WALM-640 has `command = "npx"` in ~/.codex/config.toml, and
+// an installer that skips an existing block leaves them on the vulnerable resolution
+// for ever. Exercise the migration rather than grepping for its absence.
+const codexConfigPath = "packages/mcp/plugin/scripts/lib/codex-config.mjs";
+if (!existsSync(codexConfigPath)) {
+    throw new Error(`${codexConfigPath}: missing, but ${installerPath} migrates through it`);
+}
+const { planMcpRegistration } = await import(`../${codexConfigPath}`);
+const legacyConfig = [
+    "[features]",
+    "codex_hooks = true",
+    "",
+    "[mcp_servers.memwal]",
+    'command = "npx"',
+    `args = ["-y", "@mysten-incubation/memwal-mcp@${mcpVersion}"]`,
+    'env = { MEMWAL_NAMESPACE = "work" }',
+    "",
+    "[mcp_servers.other]",
+    'command = "other"',
+    "",
+].join("\n");
+const migrated = planMcpRegistration(legacyConfig, "/abs/plugin/scripts/launch_mcp.mjs");
+if (migrated.action !== "migrated") {
+    throw new Error(
+        `${codexConfigPath}: an existing npx [mcp_servers.memwal] block must be migrated, ` +
+            `received action "${migrated.action}" (WALM-640)`,
+    );
+}
+if (/command\s*=\s*"npx"/.test(migrated.content) || !migrated.content.includes(LAUNCHER)) {
+    throw new Error(`${codexConfigPath}: migration did not replace npx with ${LAUNCHER}`);
+}
+if (!migrated.content.includes("MEMWAL_NAMESPACE") || !migrated.content.includes("[mcp_servers.other]")) {
+    throw new Error(`${codexConfigPath}: migration dropped keys it does not own`);
+}
 console.log(`MCP package ${mcpVersion}: every launch site runs ${LAUNCHER} by absolute path`);
+console.log(`MCP package ${mcpVersion}: an existing npx Codex registration is migrated, not skipped`);
 
 function readVersion(content, kind) {
     if (kind === "version") return JSON.parse(content).version;
