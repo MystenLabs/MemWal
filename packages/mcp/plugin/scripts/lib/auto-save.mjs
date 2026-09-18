@@ -1,70 +1,62 @@
 /**
  * Automatic-save opt-in, hook-side (WALM-642).
  *
- * The mirror of `packages/mcp/src/auto-save.ts`, in plain ESM with no
- * dependencies and no network, because a hook is a `.mjs` file the client
- * spawns directly — it never loads this package's compiled `dist/`, and it
- * inherits none of the MCP server's configuration (a hook is spawned by Claude
- * Code or Codex, the MCP server by its own `command`/`env` block). A shared
- * file on disk is the only thing both sides can actually see, which is why the
- * choice is persisted rather than passed.
+ * This file used to be a hand-written MIRROR of `packages/mcp/src/auto-save.ts`
+ * — the same walk up the directory tree, the same "nearest project-local
+ * `.memwal/credentials.json` wins", the same settings lookup beside whatever
+ * that resolved to. Keeping two implementations of one security decision in
+ * step is not a thing anyone manages to do, and they drifted: the TypeScript
+ * side grew an approval gate (WALM-639) and this side did not, so a repository
+ * containing nothing but `.memwal/credentials.json` — contents never parsed,
+ * only `existsSync` — read as proof of a long-standing install and switched
+ * automatic memory ON for anyone who opened it. A committed `settings.json`
+ * next to it could pin `autoSave: true` outright and silence the
+ * consent-pending warning while it did.
  *
- * Resolution is deliberately identical to the TypeScript side:
- *   1. `MEMWAL_AUTO_SAVE` in the environment.
- *   2. `autoSave` in `settings.json`, in whichever `.memwal` directory the
- *      credentials resolve to — `MEMWAL_CREDS_DIR`, else the nearest
- *      project-local `.memwal/credentials.json` at or above the working
- *      directory, else `~/.memwal`.
- *   3. Unanswered: on for an install that predates the consent prompt, off for
- *      one created after it (`autoSaveConsent: "pending"`).
+ * So the mirror is gone. The MCP server resolves the state — approvals,
+ * project scoping, the consent answer, all of it — and publishes the ANSWER to
+ * `auto-save-state.json` in the trusted state dir (`MEMWAL_CREDS_DIR`, else
+ * `~/.memwal`). This file reads that file and nothing else.
  *
- * Any error reads as "not answered": a hook must never block a session, and an
- * unreadable file is not consent.
+ * What that buys:
+ *   - No resolution here at all, so there is nothing left to drift.
+ *   - Nothing under `process.cwd()` is ever read, so a checkout cannot
+ *     influence hook behaviour — not through a credentials file, not through a
+ *     settings file, not through anything it can add later.
+ *   - Unreadable, missing, malformed, or written by a newer version reads as
+ *     "state unknown", which is automatic memory OFF. A hook must never block a
+ *     session, and an absent answer is not consent.
+ *
+ * `MEMWAL_AUTO_SAVE` is still honoured first. It comes from this process's
+ * environment — the client's hook configuration, set by the user — never from a
+ * file a repository can carry.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 export const AUTO_SAVE_ENV = "MEMWAL_AUTO_SAVE";
 
-const CREDS_FILE = "credentials.json";
-const SETTINGS_FILE = "settings.json";
-
-function globalCredsPath() {
-    return join(homedir(), ".memwal", CREDS_FILE);
-}
+const HOOK_STATE_FILE = "auto-save-state.json";
+/** The only shape this file knows how to read. */
+const SUPPORTED_VERSION = 1;
 
 /**
- * Nearest project-local credentials file, walking up from the working
- * directory and stopping at the project root, the home directory, or the
- * filesystem root. Mirrors `projectCredsPath()` in src/auth.ts — the two must
- * agree, or a project-scoped opt-in would apply to the hooks and not the server
- * (or the other way round).
+ * The trusted state dir, resolved from the environment and the home directory
+ * only. Deliberately does NOT look at `process.cwd()`: that is the whole point.
+ *
+ * `MEMWAL_CREDS_DIR` is the same trusted escape hatch auth.ts uses, so a
+ * sandboxed run (tests, CI) points both sides at the same temporary directory.
  */
-function projectCredsPath() {
-    const home = homedir();
-    const global = globalCredsPath();
-    let dir = process.cwd();
-    for (;;) {
-        if (dir === home) return null;
-        const candidate = join(dir, ".memwal", CREDS_FILE);
-        if (candidate !== global && existsSync(candidate)) return candidate;
-        if (existsSync(join(dir, ".git"))) return null;
-        const parent = dirname(dir);
-        if (parent === dir) return null;
-        dir = parent;
-    }
-}
-
-function credsPath() {
+function trustedStateDir() {
     const override = process.env.MEMWAL_CREDS_DIR;
-    if (override) return join(override, CREDS_FILE);
-    return projectCredsPath() ?? globalCredsPath();
+    if (override) return override;
+    return join(homedir(), ".memwal");
 }
 
-/** Where a persisted choice lives for this working directory. */
-export function settingsPath() {
-    return join(dirname(credsPath()), SETTINGS_FILE);
+/** Where the MCP server publishes the resolved state. */
+export function hookStatePath() {
+    return join(trustedStateDir(), HOOK_STATE_FILE);
 }
 
 /** Human-written boolean. null = not set / unparseable, which is not consent. */
@@ -77,53 +69,59 @@ export function parseBooleanSetting(raw) {
     return null;
 }
 
-function readSettings() {
+/**
+ * The published state, or null when there is not a readable, understood one.
+ *
+ * Every failure mode collapses to null on purpose — missing file, unreadable
+ * file, corrupt JSON, a version this build does not know, a payload whose
+ * `enabled` is not a boolean. The caller turns null into "off".
+ */
+function readPublishedState() {
     try {
-        const path = settingsPath();
-        if (!existsSync(path)) return {};
+        const path = hookStatePath();
+        if (!existsSync(path)) return null;
         const parsed = JSON.parse(readFileSync(path, "utf8"));
-        return parsed && typeof parsed === "object" ? parsed : {};
+        if (!parsed || typeof parsed !== "object") return null;
+        if (parsed.version !== SUPPORTED_VERSION) return null;
+        if (typeof parsed.enabled !== "boolean") return null;
+        return parsed;
     } catch {
-        // Unreadable or corrupt is not an answer.
-        return {};
+        return null;
     }
 }
 
 /**
  * `{ enabled, state, source, pendingConsent }`.
  *
- * Mirrors `autoSaveStatus()` in src/auto-save.ts, including the two unset
- * rules: an install that predates the consent prompt (no stamp, credentials on
- * disk) keeps saving, and one created after it saves nothing until answered.
- * The two must agree, or the hooks would steer the agent one way while the MCP
- * server's instructions steered it the other.
+ * `source: "unavailable"` is the fail-safe: the server has not published a
+ * state this hook can read, so nothing is saved unprompted and the session is
+ * told the question is still open.
  */
 export function autoSaveStatus() {
-    const settings = readSettings();
-    const answered =
-        typeof settings.autoSave === "boolean" ? settings.autoSave : null;
-    const state = answered === null ? "unset" : answered ? "on" : "off";
-
     const fromEnv = parseBooleanSetting(process.env[AUTO_SAVE_ENV]);
     if (fromEnv !== null) {
-        return { enabled: fromEnv, state, source: "env", pendingConsent: false };
-    }
-    if (answered !== null) {
-        return { enabled: answered, state, source: "settings", pendingConsent: false };
+        return {
+            enabled: fromEnv,
+            state: fromEnv ? "on" : "off",
+            source: "env",
+            pendingConsent: false,
+        };
     }
 
-    const stamped = settings.autoSaveConsent === "pending";
-    let preExisting = false;
-    try {
-        preExisting = !stamped && existsSync(credsPath());
-    } catch {
-        /* best effort — an unreadable home directory reads as a new install */
+    const published = readPublishedState();
+    if (!published) {
+        return {
+            enabled: false,
+            state: "unset",
+            source: "unavailable",
+            pendingConsent: true,
+        };
     }
     return {
-        enabled: preExisting,
-        state: "unset",
-        source: preExisting ? "legacy" : "unanswered",
-        pendingConsent: true,
+        enabled: published.enabled,
+        state: published.state === "on" || published.state === "off" ? published.state : "unset",
+        source: typeof published.source === "string" ? published.source : "unavailable",
+        pendingConsent: published.pendingConsent === true,
     };
 }
 

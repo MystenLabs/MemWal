@@ -27,21 +27,44 @@
  * long-standing user, and start saving on its own — consent by never having
  * been asked.
  *
- * ── Where the answer comes from ────────────────────────────────────────────
- * Two mechanisms, both of which the package already uses, and no third one:
+ * ── Where the answer lives: the trusted state dir, and nowhere else ─────────
+ * The answer is a decision about the HUMAN, not about a credentials directory.
+ * It used to be stored beside whichever `credentials.json` won resolution,
+ * which had two consequences, both wrong:
  *
- *   1. `MEMWAL_AUTO_SAVE` — the env-var surface every other option has
- *      (`MEMWAL_NAMESPACE`, `MEMWAL_SERVER_URL`, ...). Set it in the client's
- *      `env` block to pin one MCP server on or off. Setting it deliberately is
- *      itself an answer, so it also stops the login prompt.
- *   2. `settings.json`, next to `credentials.json` — resolved by
- *      `credsPath()`, so it inherits project-local-beats-global and the
- *      `MEMWAL_CREDS_DIR` override for free, and a project that scopes its
- *      credentials scopes its memory behaviour with them.
+ *   1. Approving a project's credentials (WALM-639) moved `settingsPath()`
+ *      into the repository. A user who had already answered "off" globally got
+ *      a directory with no answer in it, fell through to the legacy
+ *      "credentials exist, so keep saving" rule, and had automatic memory
+ *      switched back ON by an approval that was only ever about where writes
+ *      go. The recorded "no" was never consulted there.
+ *   2. `setAutoSave` / `markConsentPending` then wrote the consent answer INTO
+ *      the repository, where it could be committed and shipped to everyone
+ *      else who cloned it.
  *
- * The state has to live on disk rather than in configuration because the
- * plugin's hooks are separate processes: a hook is spawned by the client, not
- * by this package, and inherits none of the MCP server's `env` or argv.
+ * So consent now lives in the trusted state dir — `MEMWAL_CREDS_DIR` when it is
+ * set, else `~/.memwal` — the same directory auth.ts keeps the project-approval
+ * store in, and for the same reason: a record a repository can write is a
+ * repository approving itself. Project scoping of CREDENTIALS is unchanged;
+ * project scoping of CONSENT is gone.
+ *
+ * The legacy probe reads the trusted directory's own `credentials.json` for the
+ * same reason. "Has this person used MemWal before" must not be answerable by a
+ * file inside a checkout.
+ *
+ * ── How the hooks see it ───────────────────────────────────────────────────
+ * The plugin's hooks are separate processes: a hook is spawned by the client,
+ * not by this package, and inherits none of the MCP server's `env` or argv. The
+ * hooks used to re-derive the whole resolution in plain ESM, and the two
+ * implementations drifted — the hook side kept the pre-WALM-639 presence rule,
+ * so a committed `.memwal/credentials.json` (contents never parsed, only
+ * `existsSync`) turned automatic memory on for anyone who opened the repo.
+ *
+ * Re-deriving is the bug, so the hooks no longer do it. This module publishes
+ * the RESOLVED state to `auto-save-state.json` in the trusted state dir, and
+ * the hooks read only that. A repository cannot write there, the hooks do no
+ * resolution of their own, and a hook that cannot read the file fails safe
+ * (automatic memory off). See `plugin/scripts/lib/auto-save.mjs`.
  */
 import { dirname, join } from "node:path";
 import {
@@ -51,17 +74,39 @@ import {
     readFileSync,
     writeFileSync,
 } from "node:fs";
-import { credsPath } from "./auth.js";
+import { projectApprovalsPath } from "./auth.js";
 import { log } from "./logger.js";
 
 /** Env var that pins automatic saving on or off for one MCP server process. */
 export const AUTO_SAVE_ENV = "MEMWAL_AUTO_SAVE";
 
 const SETTINGS_FILE = "settings.json";
+const CREDS_FILE = "credentials.json";
+/** Resolved state the plugin hooks read. Never written inside a repository. */
+const HOOK_STATE_FILE = "auto-save-state.json";
+/** Bumped if the hook-facing shape ever changes incompatibly. */
+const HOOK_STATE_VERSION = 1;
 
-/** Where the answer is stored: beside whichever credentials file is in play. */
+/**
+ * Where records a repository must not be able to write are kept:
+ * `MEMWAL_CREDS_DIR` when set, else `~/.memwal`.
+ *
+ * Derived from `projectApprovalsPath()` rather than recomputed, so this file
+ * and auth.ts cannot drift apart the way the hook copy did. auth.ts owns the
+ * definition; this reads it back.
+ */
+function trustedStateDir(): string {
+    return dirname(projectApprovalsPath());
+}
+
+/** Where the answer is stored. Outside every repository, on purpose. */
 export function settingsPath(): string {
-    return join(dirname(credsPath()), SETTINGS_FILE);
+    return join(trustedStateDir(), SETTINGS_FILE);
+}
+
+/** Where the resolved state is published for the plugin hooks to read. */
+export function hookStatePath(): string {
+    return join(trustedStateDir(), HOOK_STATE_FILE);
 }
 
 /** Shape of `settings.json`. Unknown keys are preserved on write. */
@@ -161,9 +206,11 @@ export function autoSaveStatus(): AutoSaveStatus {
     }
 
     // Unset. Which way it falls depends on whether this install was ever in a
-    // position to have been asked — see the module comment.
+    // position to have been asked — see the module comment. The probe is the
+    // TRUSTED directory's credentials file, never a project one: "has this
+    // person used MemWal before" must not be answerable by a checkout.
     const stamped = settings.autoSaveConsent === "pending";
-    const preExisting = !stamped && existsSync(credsPath());
+    const preExisting = !stamped && existsSync(join(trustedStateDir(), CREDS_FILE));
     return {
         enabled: preExisting,
         state: "unset",
@@ -176,8 +223,8 @@ export function autoSaveStatus(): AutoSaveStatus {
 /**
  * True when this process may save without being asked.
  *
- * Read at call time, never cached: a login can move `credsPath()`, and the
- * answer can be written between calls in the same process.
+ * Read at call time, never cached: the answer can be written between calls in
+ * the same process.
  */
 export function isAutoSaveEnabled(): boolean {
     return autoSaveStatus().enabled;
@@ -188,6 +235,56 @@ export function isConsentPending(): boolean {
     return autoSaveStatus().pendingConsent;
 }
 
+/** The file the plugin hooks read. Contains no secret — only the answer. */
+export interface HookAutoSaveState {
+    version: number;
+    enabled: boolean;
+    state: AutoSaveState;
+    source: AutoSaveSource;
+    pendingConsent: boolean;
+    /** The settings file this was resolved from, for diagnosis only. */
+    settingsPath: string;
+    updatedAt: string;
+}
+
+/**
+ * Publish the resolved state where the plugin hooks can read it.
+ *
+ * This is the whole hook contract: the hooks do no resolution, consult no
+ * project directory and parse no credentials file — they read this one file out
+ * of the trusted state dir, or they fail safe. Called at every point the answer
+ * can change (`setAutoSave`, `markConsentPending`) and once at start-up, so a
+ * hook spawned in the same session as an MCP server sees the current answer.
+ *
+ * Best effort: a read-only or missing home directory must not stop the server
+ * from running, and a hook that finds no file already behaves as "off".
+ */
+export function publishHookState(): HookAutoSaveState | null {
+    const status = autoSaveStatus();
+    const payload: HookAutoSaveState = {
+        version: HOOK_STATE_VERSION,
+        enabled: status.enabled,
+        state: status.state,
+        source: status.source,
+        pendingConsent: status.pendingConsent,
+        settingsPath: status.path,
+        updatedAt: new Date().toISOString(),
+    };
+    const path = hookStatePath();
+    try {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+        chmodSync(path, 0o600);
+        return payload;
+    } catch (err) {
+        log.warn("autosave.publish_failed", {
+            path,
+            error: err instanceof Error ? err.message : String(err),
+        });
+        return null;
+    }
+}
+
 /**
  * Record the answer, preserving any other keys already in the file. Clears the
  * pending stamp — the question has been answered and must not be asked again.
@@ -196,6 +293,7 @@ export function setAutoSave(enabled: boolean): { path: string; enabled: boolean 
     const next: MemWalSettings = { ...readSettings(), autoSave: enabled };
     delete next.autoSaveConsent;
     const path = writeSettings(next);
+    publishHookState();
     log.info("autosave.set", { enabled, path });
     return { path, enabled };
 }
@@ -214,6 +312,7 @@ export function markConsentPending(): void {
     if (typeof settings.autoSave === "boolean") return;
     if (settings.autoSaveConsent === "pending") return;
     writeSettings({ ...settings, autoSaveConsent: "pending" });
+    publishHookState();
     log.info("autosave.consent_pending", { path: settingsPath() });
 }
 

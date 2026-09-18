@@ -30,8 +30,10 @@ import {
     isAutoSaveEnabled,
     markConsentPending,
     parseBooleanSetting,
+    publishHookState,
     setAutoSave,
     settingsPath,
+    hookStatePath,
     AUTO_SAVE_ENV,
 } from "../dist/auto-save.js";
 import {
@@ -52,9 +54,18 @@ function freshCredsDir() {
     return dir;
 }
 
+/**
+ * Write an answer AND publish the resolved state, which is what the server
+ * does on every write and every start-up. The hooks read only the published
+ * state now (WALM-642), so a test that wrote settings.json alone would be
+ * testing a machine whose MCP server had never run.
+ */
 function writeSettings(dir, value) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "settings.json"), JSON.stringify(value));
+    withEnv({ MEMWAL_CREDS_DIR: dir, [AUTO_SAVE_ENV]: undefined }, () =>
+        publishHookState(),
+    );
 }
 
 /** Run one hook with a controlled environment and return its injected text. */
@@ -242,18 +253,22 @@ test("an unreadable or unparseable value is not consent", () => {
     rmSync(dir, { recursive: true, force: true });
 });
 
-test("the hook-side resolver answers identically to the compiled one", () => {
+test("the hook reads the published state rather than resolving anything itself", () => {
+    // The two implementations used to be hand-written mirrors and drifted
+    // apart, which is how a repo file came to switch automatic memory on
+    // (WALM-642). There is one resolver now: this asserts the hook reports what
+    // the server published, on every state, and that publishing is what moves
+    // it.
     const dir = freshCredsDir();
     withEnv({ MEMWAL_CREDS_DIR: dir, [AUTO_SAVE_ENV]: undefined }, () => {
-        assert.equal(hookAutoSave.isAutoSaveEnabled(), isAutoSaveEnabled());
-        assert.equal(hookAutoSave.settingsPath(), settingsPath());
+        assert.equal(hookAutoSave.hookStatePath(), hookStatePath());
 
-        // ...on every state, not just the answered one.
         markConsentPending();
         assert.equal(hookAutoSave.isAutoSaveEnabled(), false);
         assert.equal(hookAutoSave.autoSaveStatus().source, "unanswered");
 
         setAutoSave(true);
+        assert.equal(hookAutoSave.isAutoSaveEnabled(), isAutoSaveEnabled());
         assert.equal(hookAutoSave.isAutoSaveEnabled(), true);
         assert.equal(hookAutoSave.autoSaveStatus().source, "settings");
         assert.equal(hookAutoSave.autoSaveStatus().pendingConsent, false);
@@ -262,6 +277,39 @@ test("the hook-side resolver answers identically to the compiled one", () => {
             assert.equal(hookAutoSave.isAutoSaveEnabled(), false);
             assert.equal(hookAutoSave.autoSaveStatus().source, "env");
         });
+
+        // An answer the server has not published yet is not one the hook may
+        // act on: it has no way to tell a stale file from a current one, so
+        // "cannot tell" has to read as off.
+        rmSync(hookStatePath(), { force: true });
+        assert.equal(hookAutoSave.isAutoSaveEnabled(), false);
+        assert.equal(hookAutoSave.autoSaveStatus().source, "unavailable");
+        assert.equal(hookAutoSave.autoSaveStatus().pendingConsent, true);
+        assert.equal(isAutoSaveEnabled(), true, "the server's own answer is unchanged");
+    });
+    rmSync(dir, { recursive: true, force: true });
+});
+
+test("a published state this build does not understand fails safe", () => {
+    const dir = freshCredsDir();
+    withEnv({ MEMWAL_CREDS_DIR: dir, [AUTO_SAVE_ENV]: undefined }, () => {
+        setAutoSave(true);
+        assert.equal(hookAutoSave.isAutoSaveEnabled(), true);
+        for (const corrupt of [
+            "{ not json",
+            JSON.stringify({ version: 99, enabled: true }),
+            JSON.stringify({ version: 1, enabled: "yes" }),
+            JSON.stringify({ version: 1 }),
+            "null",
+        ]) {
+            writeFileSync(hookStatePath(), corrupt);
+            assert.equal(
+                hookAutoSave.isAutoSaveEnabled(),
+                false,
+                `treated as consent: ${corrupt}`,
+            );
+            assert.equal(hookAutoSave.autoSaveStatus().source, "unavailable");
+        }
     });
     rmSync(dir, { recursive: true, force: true });
 });

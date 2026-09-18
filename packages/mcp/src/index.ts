@@ -28,6 +28,7 @@ import {
     autoSaveSummary,
     markConsentPending,
     pendingConsentNotice,
+    publishHookState,
     setAutoSave,
     AUTO_SAVE_ENV,
 } from "./auto-save.js";
@@ -202,6 +203,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         printHelp();
         return;
     }
+
+    // Republish the resolved opt-in for the plugin hooks before anything else
+    // runs. The hooks do no resolution of their own — they read this file or
+    // they fail safe to "off" (WALM-642) — so every start-up refreshes it,
+    // including the ones that return early below. Best effort by design: a
+    // read-only home must not stop the server, and a hook that finds nothing
+    // already behaves as off.
+    publishHookState();
+
     // Runs before the credential paths below: reading or flipping the opt-in
     // does not need an account, and a user deciding whether to enable
     // automatic memory should not be pushed through a browser login first.
@@ -736,7 +746,9 @@ export {
     autoSaveStatus,
     setAutoSave,
     markConsentPending,
+    publishHookState,
     settingsPath,
+    hookStatePath,
 } from "./auto-save.js";
 export { askAutoSaveConsent, interpretConsentAnswer, CONSENT_PROMPT } from "./consent.js";
 export { loginFlow } from "./login.js";
