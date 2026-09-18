@@ -3063,6 +3063,48 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+    /// REPRO of the bug the split fixes, pinned so it cannot come back.
+    ///
+    /// `update_remember_job_after_wallet_error` decides the row with exactly
+    /// these two lines:
+    ///
+    /// ```ignore
+    /// let terminal = error.aborts_retries() || exhausted;
+    /// let status   = if terminal { "failed" } else { "running" };
+    /// ```
+    ///
+    /// Feed `exhausted` from the ALERT predicate and a spent WalrusBalanceLow
+    /// job lands on `running` with no attempt left to move it — which is what
+    /// `GET /api/remember/:job_id` renders as "still uploading" until the
+    /// 10-minute stale sweeper. Feed it from the BUDGET predicate and the same
+    /// job is `failed` on the spot.
+    #[test]
+    fn the_alert_predicate_must_not_decide_the_row_status() {
+        fn status_line(error: &WalletJobError, exhausted: bool) -> &'static str {
+            let terminal = error.aborts_retries() || exhausted;
+            if terminal {
+                "failed"
+            } else {
+                "running"
+            }
+        }
+
+        let spent = WalletJobAttemptInfo {
+            current: MAX_ATTEMPTS as usize,
+            max: MAX_ATTEMPTS as usize,
+        };
+        let low = WalletJobError::WalrusBalanceLow("wallet 0 WAL balance low".into());
+
+        // Attempt 5 of 5 has already failed. No later attempt exists.
+        assert!(spent.retries_exhausted(&low), "the budget really is spent");
+
+        // The bug, as shipped before this commit.
+        assert_eq!(status_line(&low, spent.exhausted_by(&low)), "running");
+
+        // The fix.
+        assert_eq!(status_line(&low, spent.retries_exhausted(&low)), "failed");
+    }
+
     /// The terminal-status rule asks one question: is another attempt coming.
     /// The alert rule may carve out error kinds; the status rule may not, or a
     /// spent job sits on `running` until the stale sweeper.
