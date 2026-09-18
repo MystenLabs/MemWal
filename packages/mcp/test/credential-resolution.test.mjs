@@ -46,9 +46,16 @@ function writeCredsAt(root, accountId, label) {
     return path;
 }
 
-/** Fresh sandbox: a HOME and a working directory, with the module re-imported
- * so it observes them. Returns the module plus both roots. */
-async function sandbox(t, { global: globalAccount, project: projectAccount }) {
+/**
+ * Fresh sandbox: a HOME and a working directory, with the module re-imported
+ * so it observes them. Returns the module plus both roots.
+ *
+ * `trust: true` adopts the project directory the way `trust-project` does. A
+ * project credentials file is ignored until the machine adopts it — a
+ * repository can ship one, and it names the account, the delegate key and the
+ * relayer — so every test that wants the project file in play has to say so.
+ */
+async function sandbox(t, { global: globalAccount, project: projectAccount, trust = false }) {
     // Canonicalise both roots: `process.cwd()` and `homedir()` report resolved
     // paths, so a raw mkdtemp path would not compare equal to what the module
     // computes. Needed on macOS (`/var` is a symlink to `/private/var`) and
@@ -77,14 +84,27 @@ async function sandbox(t, { global: globalAccount, project: projectAccount }) {
         rmSync(cwd, { recursive: true, force: true });
     });
 
+    const prevTrustEnv = process.env.MEMWAL_TRUST_PROJECT_CREDS;
+    delete process.env.MEMWAL_TRUST_PROJECT_CREDS;
+    const prevCredsDir = process.env.MEMWAL_CREDS_DIR;
+    delete process.env.MEMWAL_CREDS_DIR;
+    t.after(() => {
+        if (prevTrustEnv === undefined) delete process.env.MEMWAL_TRUST_PROJECT_CREDS;
+        else process.env.MEMWAL_TRUST_PROJECT_CREDS = prevTrustEnv;
+        if (prevCredsDir === undefined) delete process.env.MEMWAL_CREDS_DIR;
+        else process.env.MEMWAL_CREDS_DIR = prevCredsDir;
+    });
+
     const auth = await import(`../dist/auth.js?walm361=${Date.now()}-${Math.random()}`);
+    if (trust) auth.trustProjectDir(cwd);
     return { auth, home, cwd };
 }
 
-test("a project-local credentials file takes precedence over the global one", async (t) => {
+test("an adopted project-local credentials file takes precedence over the global one", async (t) => {
     const { auth, cwd } = await sandbox(t, {
         global: GLOBAL_ACCOUNT,
         project: PROJECT_ACCOUNT,
+        trust: true,
     });
 
     assert.equal(
@@ -110,6 +130,7 @@ test("saveCreds writes back to the project-local file when that is the one in us
     const { auth, home, cwd } = await sandbox(t, {
         global: GLOBAL_ACCOUNT,
         project: PROJECT_ACCOUNT,
+        trust: true,
     });
 
     const updated = makeCreds(PROJECT_ACCOUNT, "Renamed");
@@ -249,6 +270,7 @@ test("a subdirectory of the project resolves to the project's credentials", asyn
     const { auth, cwd } = await sandbox(t, {
         global: GLOBAL_ACCOUNT,
         project: PROJECT_ACCOUNT,
+        trust: true,
     });
     chdirBelow(cwd, "src", "nested");
 
@@ -295,6 +317,7 @@ test("removing a project file reports the global one that takes over", async (t)
     const { auth, home, cwd } = await sandbox(t, {
         global: GLOBAL_ACCOUNT,
         project: PROJECT_ACCOUNT,
+        trust: true,
     });
 
     const result = auth.clearCreds();
@@ -310,4 +333,174 @@ test("clearCreds with nothing to remove reports nothing", async (t) => {
     const { auth } = await sandbox(t, {});
 
     assert.deepEqual(auth.clearCreds(), {});
+});
+
+/* ------------------------------------------------------------------------- *
+ * Project credential trust.
+ *
+ * Presence was the opt-in, and a repository can satisfy presence. Committing
+ * `.memwal/credentials.json` into a template or scaffold meant every clone an
+ * MCP host launched with its cwd inside adopted the committed account, the
+ * committed delegate key, and — because the bridge dials `creds.relayerUrl`
+ * rather than the resolved config — the committed relayer. No code from the
+ * repository had to run.
+ *
+ * Adoption is now recorded in `~/.memwal/trusted-projects.json`, which is the
+ * one place a repository cannot write to.
+ * ------------------------------------------------------------------------- */
+
+test("a project credentials file this machine has not adopted is ignored", async (t) => {
+    const { auth, home } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+
+    assert.equal(
+        auth.credsPath(),
+        join(home, ".memwal", "credentials.json"),
+        "an unadopted project file must not be used",
+    );
+    assert.equal(
+        auth.loadCreds()?.accountId,
+        GLOBAL_ACCOUNT,
+        "the account must stay the one the user signed in as",
+    );
+});
+
+test("an unadopted project file is ignored even when there is no global one", async (t) => {
+    const { auth } = await sandbox(t, { project: PROJECT_ACCOUNT });
+
+    // Falling back to "signed out" is the safe outcome: the user is prompted to
+    // log in, rather than silently operating as whoever the repo named.
+    assert.equal(auth.loadCreds(), null, "no credentials beats someone else's credentials");
+});
+
+test("the skipped file is reported, with the command that adopts it", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+
+    const resolved = auth.resolveCredsPath();
+    assert.equal(resolved.untrustedProjectPath, join(cwd, ".memwal", "credentials.json"));
+    assert.equal(resolved.path, join(home, ".memwal", "credentials.json"));
+
+    const notice = auth.formatUntrustedProjectCredsNotice(resolved);
+    assert.ok(notice, "a skipped file must not be silent");
+    assert.ok(notice.includes(join(cwd, ".memwal", "credentials.json")), "must name what it skipped");
+    assert.ok(notice.includes(join(home, ".memwal", "credentials.json")), "must name what it used");
+    assert.match(notice, /trust-project/, "must name the way out");
+});
+
+test("nothing is reported when there is no project file to skip", async (t) => {
+    const { auth } = await sandbox(t, { global: GLOBAL_ACCOUNT });
+
+    assert.equal(auth.formatUntrustedProjectCredsNotice(), null);
+});
+
+test("adoption is per directory, not blanket", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+
+    // A sibling checkout that ships its own file stays ignored.
+    const other = join(cwd, "other");
+    writeCredsAt(other, "0x" + "9".repeat(64), "Other");
+    auth.trustProjectDir(cwd);
+    process.chdir(other);
+
+    assert.equal(
+        auth.credsPath(),
+        join(home, ".memwal", "credentials.json"),
+        "adopting one directory must not adopt another",
+    );
+});
+
+test("untrustProjectDir withdraws adoption", async (t) => {
+    const { auth, home, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+        trust: true,
+    });
+    assert.equal(auth.credsPath(), join(cwd, ".memwal", "credentials.json"));
+
+    assert.equal(auth.untrustProjectDir(cwd), true, "removing a listed directory reports true");
+    assert.equal(auth.credsPath(), join(home, ".memwal", "credentials.json"));
+    assert.equal(auth.untrustProjectDir(cwd), false, "removing it twice reports false");
+});
+
+test("MEMWAL_TRUST_PROJECT_CREDS adopts without the ledger", async (t) => {
+    const { auth, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+
+    // An env var is a channel the repository cannot reach, which is the whole
+    // distinction the gate turns on. CI and containers need it.
+    process.env.MEMWAL_TRUST_PROJECT_CREDS = "1";
+    assert.equal(auth.credsPath(), join(cwd, ".memwal", "credentials.json"));
+    assert.equal(auth.loadCreds()?.accountId, PROJECT_ACCOUNT);
+});
+
+test("MEMWAL_CREDS_DIR is an explicit instruction and bypasses the gate", async (t) => {
+    const { auth, cwd } = await sandbox(t, {
+        global: GLOBAL_ACCOUNT,
+        project: PROJECT_ACCOUNT,
+    });
+
+    process.env.MEMWAL_CREDS_DIR = join(cwd, ".memwal");
+    assert.equal(auth.credsPath(), join(cwd, ".memwal", "credentials.json"));
+    assert.equal(
+        auth.resolveCredsPath().untrustedProjectPath,
+        undefined,
+        "an explicit override is not a skipped file",
+    );
+});
+
+/* ------------------------------------------------------------------------- *
+ * Relayer URL validation.
+ *
+ * `bridge.ts` dials `creds.relayerUrl` and sends the delegate private key as a
+ * bearer token, so whatever reaches the credentials file picks the host that
+ * receives the seed. The limits are about the transport, not the identity of
+ * the host — self-hosted and staging relayers are supported.
+ * ------------------------------------------------------------------------- */
+
+test("a credentials file naming a plaintext remote relayer is rejected", async (t) => {
+    const { auth, home } = await sandbox(t, {});
+    const path = join(home, ".memwal", "credentials.json");
+    mkdirSync(dirname(path), { recursive: true });
+    const creds = makeCreds(GLOBAL_ACCOUNT, "Global");
+    creds.relayerUrl = "http://relay.attacker.example";
+    writeFileSync(path, JSON.stringify(creds), { mode: 0o600 });
+
+    assert.equal(auth.loadCreds(), null, "the seed must not cross a network in plaintext");
+});
+
+test("relayer URLs are accepted or refused on scheme and loopback", async (t) => {
+    const { auth } = await sandbox(t, {});
+
+    for (const ok of [
+        "https://relayer.memory.walrus.xyz",
+        "https://relayer.dev.memwal.ai",
+        "https://relay.self-hosted.internal:8443",
+        "http://127.0.0.1:8000",
+        "http://localhost:5173",
+        "http://[::1]:8000",
+    ]) {
+        assert.equal(auth.isSafeRelayerUrl(ok), true, `${ok} should be accepted`);
+    }
+
+    for (const bad of [
+        "http://relay.attacker.example",
+        "http://10.0.0.5:8000",
+        "file:///etc/passwd",
+        "data:text/plain,x",
+        "ftp://relay.example",
+        "not a url",
+        "",
+    ]) {
+        assert.equal(auth.isSafeRelayerUrl(bad), false, `${bad} should be refused`);
+    }
 });

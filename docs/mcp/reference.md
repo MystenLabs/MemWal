@@ -133,9 +133,29 @@ Credentials resolve from two places, in order:
 1. `.memwal/credentials.json` in the **working directory or a parent of it**
 2. `~/.memwal/credentials.json` (global, per machine)
 
-The search starts in the working directory and walks up, the way `.npmrc` and `.git/config` resolve, so a command run from a subfolder still picks up that project's credentials. The first `.memwal/credentials.json` it finds wins.
+The search starts in the working directory and walks up, the way `.npmrc` and `.git/config` resolve, so a command run from a subfolder still picks up that project's credentials. The first `.memwal/credentials.json` it finds wins — **once you have adopted that directory** (see below).
 
 The walk stops at your project root (the directory holding `.git`), at your home directory, or at the filesystem root, whichever comes first. That bound keeps one project from picking up a credentials file belonging to a parent folder that holds unrelated checkouts. If nothing is found inside it, the global file is used. Whichever file is chosen is the one read, written, and deleted for that run.
+
+### Adopting a project directory
+
+A project credentials file is **ignored until you adopt the directory it lives in**:
+
+```bash
+cd ~/code/my-project
+memwal-mcp trust-project        # adopts the current directory
+memwal-mcp untrust-project      # undoes it
+```
+
+Adoptions are recorded in `~/.memwal/trusted-projects.json`, outside any repository. Until a directory is listed there, its credentials file is skipped, the global file is used instead, and the client says so on startup.
+
+<Warning>
+This is not a formality. `.memwal/credentials.json` names the account, the delegate private key **and the relayer URL** the client sends them to. A repository can commit one — into a template, a scaffold, an example repo — and without adoption every clone that an editor or MCP host opens would sign in as whoever wrote that file and ship memories to whatever host it named, without running any code from the repository. Adopt directories whose credentials file you put there yourself.
+</Warning>
+
+For CI and containers, where there is no one to run the command and the checkout is already trusted by whoever configured the job, set `MEMWAL_TRUST_PROJECT_CREDS=1` to adopt any project file. An environment variable works here precisely because a repository cannot set one.
+
+`MEMWAL_CREDS_DIR` names a credentials directory outright and is not subject to adoption, for the same reason.
 
 ### Working on several accounts
 
@@ -148,17 +168,22 @@ cd ~/code/my-project
 mkdir -p .memwal
 memwal-mcp login          # writes to the global file the first time
 cp ~/.memwal/credentials.json .memwal/credentials.json
+memwal-mcp trust-project  # adopt it — the file is ignored until you do
 ```
 
 From then on, runs started from that directory or anywhere beneath it use the project's credentials, and runs started outside it keep using the global one.
 
 <Warning>
 `.memwal/credentials.json` holds a delegate private key. Add `.memwal/` to your `.gitignore`.
+
+That protects your key from being committed. It does **not** protect you from adopting someone else's — which is what [adoption](#adopting-a-project-directory) is for.
 </Warning>
 
 ### Migration
 
-Nothing to do. Creating a project-local file is the opt-in, so a machine without one behaves exactly as it did before, and the global file remains the fallback indefinitely.
+Nothing to do for the global file: a machine without a project-local file behaves exactly as it did before, and the global file remains the fallback indefinitely.
+
+If you already set up a project-local file, run `memwal-mcp trust-project` in that directory once. Until you do, it is skipped and the global file is used — the client prints the path it skipped and the command to adopt it.
 
 ### Replacing an account
 

@@ -124,3 +124,52 @@ test("--help does not promise that flag order decides a preset override", () => 
     assert.equal(before.relayerUrl, "https://custom.example");
     assert.equal(after.relayerUrl, "https://custom.example");
 });
+
+/* The project-credential trust commands.
+ *
+ * Both are bare words, so they share the hazard `login` already had: an unknown
+ * flag ahead of one must not swallow it, or `memwal-mcp --typo trust-project`
+ * silently becomes a run that adopts nothing. Both also take an OPTIONAL
+ * directory, which is the new part — the parser has to tell a directory from
+ * the next flag. */
+
+test("trust-project parses as a command, with the current directory by default", () => {
+    const args = parseArgs(["trust-project"]);
+    assert.equal(args.trustProject, true);
+    assert.equal(args.untrustProject, false);
+    assert.equal(args.trustProjectDir, undefined, "no argument means cwd, decided in main()");
+    assert.deepEqual(args.unknown, []);
+});
+
+test("trust-project takes an optional directory", () => {
+    const args = parseArgs(["trust-project", "/home/u/code/app"]);
+    assert.equal(args.trustProject, true);
+    assert.equal(args.trustProjectDir, "/home/u/code/app");
+});
+
+test("untrust-project parses as its own command", () => {
+    const args = parseArgs(["untrust-project", "/home/u/code/app"]);
+    assert.equal(args.untrustProject, true);
+    assert.equal(args.trustProject, false);
+    assert.equal(args.trustProjectDir, "/home/u/code/app");
+});
+
+test("trust-project does not swallow the flag that follows it", () => {
+    const args = parseArgs(["trust-project", "--dev"]);
+    assert.equal(args.trustProject, true);
+    assert.equal(args.trustProjectDir, undefined, "a flag is not a directory");
+    assert.equal(args.relayerUrl, "https://relayer.dev.memwal.ai", "--dev must still apply");
+});
+
+test("an unknown flag does not swallow the trust-project command", () => {
+    const args = parseArgs(["--typo", "trust-project"]);
+    assert.deepEqual(args.unknown, ["--typo"]);
+    assert.equal(args.trustProject, true, "adopting must not be silently skipped by a typo");
+});
+
+test("--help documents the trust commands", () => {
+    const help = helpText();
+    assert.match(help, /trust-project/, "an adoption step the user must run has to be discoverable");
+    assert.match(help, /untrust-project/);
+    assert.match(help, /MEMWAL_TRUST_PROJECT_CREDS/, "the CI escape hatch belongs in --help too");
+});

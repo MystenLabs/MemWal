@@ -152,6 +152,18 @@ Credentials are stored locally in `~/.memwal/credentials.json`. To remove them:
 npx -y @mysten-incubation/memwal-mcp --logout
 ```
 
+A project can have its own account by keeping a `.memwal/credentials.json` inside it, which takes precedence when the working directory is at or below that project. Because such a file names the account, the delegate private key **and the relayer URL** this client sends them to, one that arrives with a repository is ignored until you adopt the directory on this machine:
+
+```sh
+cd ~/code/my-project
+npx -y @mysten-incubation/memwal-mcp trust-project     # adopt
+npx -y @mysten-incubation/memwal-mcp untrust-project   # undo
+```
+
+Adoptions are recorded in `~/.memwal/trusted-projects.json`, outside any repository. Until a directory is listed there the client uses the global file and says which project file it skipped. In CI or a container, set `MEMWAL_TRUST_PROJECT_CREDS=1` instead.
+
+See [Credential locations](https://docs.wal.app/mcp/reference#credential-locations) for the full resolution order.
+
 ## License
 
 Apache-2.0

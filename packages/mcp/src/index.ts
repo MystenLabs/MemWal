@@ -9,12 +9,23 @@
  *   5. On 401 (revoked key), the bridge wipes credentials before throwing
  *      — the next process spawn will re-trigger login.
  */
-import { clearCreds, clearPendingLogin, credsPath, loadCreds } from "./auth.js";
+import {
+    clearCreds,
+    clearPendingLogin,
+    credsPath,
+    formatUntrustedProjectCredsNotice,
+    loadCreds,
+    resolveCredsPath,
+    trustProjectDir,
+    untrustProjectDir,
+} from "./auth.js";
 import { recoverPendingLogin, formatStrandedLoginNotice } from "./recovery.js";
 import { runAuthRequiredServer } from "./auth-required.js";
 import { notePendingLoginSuccess, runBridge } from "./bridge.js";
 import { loginFlow } from "./login.js";
 import { log, note } from "./logger.js";
+import { existsSync } from "node:fs";
+import { join, resolve as resolvePath } from "node:path";
 
 /**
  * Parsed CLI flags. All optional — env vars cover the same surface.
@@ -25,6 +36,12 @@ interface ParsedArgs {
     help: boolean;
     logout: boolean;
     forceLogin: boolean;
+    /** Adopt a project's `.memwal/credentials.json` on this machine. */
+    trustProject: boolean;
+    /** Withdraw that adoption. */
+    untrustProject: boolean;
+    /** Directory `trust-project` / `untrust-project` act on. Defaults to cwd. */
+    trustProjectDir?: string;
     relayerUrl?: string;
     webUrl?: string;
     label?: string;
@@ -45,10 +62,17 @@ const ENV_PRESETS: Record<string, { relayer: string; web: string }> = {
 
 /** Bare words that are commands rather than values. An unknown flag must not
  *  swallow one as its argument. */
-const POSITIONALS = new Set(["login"]);
+const POSITIONALS = new Set(["login", "trust-project", "untrust-project"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
-    const out: ParsedArgs = { help: false, logout: false, forceLogin: false, unknown: [] };
+    const out: ParsedArgs = {
+        help: false,
+        logout: false,
+        forceLogin: false,
+        trustProject: false,
+        untrustProject: false,
+        unknown: [],
+    };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         const next = () => argv[++i];
@@ -64,6 +88,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
             case "login":
                 out.forceLogin = true;
                 break;
+            case "trust-project":
+            case "untrust-project": {
+                if (a === "trust-project") out.trustProject = true;
+                else out.untrustProject = true;
+                // Optional directory argument. Only consumed when it is not
+                // itself a flag, so `trust-project --help` still prints help
+                // instead of adopting a directory named `--help`.
+                const dir = argv[i + 1];
+                if (dir !== undefined && !dir.startsWith("-") && !POSITIONALS.has(dir)) {
+                    out.trustProjectDir = dir;
+                    i++;
+                }
+                break;
+            }
             case "--prod":
             case "--dev":
             case "--staging":
@@ -148,6 +186,38 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         printHelp();
         return;
     }
+
+    // Adopting a project directory is a deliberate, local act — the one thing a
+    // repository cannot do for the user. Handled before credentials are touched
+    // so it works from a checkout whose file is currently being ignored, which
+    // is the only state anyone runs it from.
+    if (args.trustProject || args.untrustProject) {
+        const target = resolvePath(args.trustProjectDir ?? process.cwd());
+        if (args.untrustProject) {
+            const removed = untrustProjectDir(target);
+            note(
+                removed
+                    ? `No longer using project credentials in ${target}.`
+                    : `${target} was not adopted; nothing to remove.`,
+            );
+            return;
+        }
+        const candidate = join(target, ".memwal", "credentials.json");
+        if (!existsSync(candidate)) {
+            // Adopting a directory with no file in it would silently arm a
+            // future one — including a file a later `git pull` brings in.
+            note(`No credentials file at ${candidate}.`);
+            note(`Nothing adopted. Create it first, then run this again.`);
+            process.exitCode = 1;
+            return;
+        }
+        const key = trustProjectDir(target);
+        note(`Now using project credentials in ${key}.`);
+        note(`  ${candidate}`);
+        note(`Undo with \`memwal-mcp untrust-project ${key}\`.`);
+        return;
+    }
+
     if (args.logout) {
         const cleared = clearCreds();
         // Explicit sign-out discards the write-ahead record too. Without this
@@ -206,6 +276,21 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // also destroyed the file `saveCreds` needs in order to notice that the new
     // sign-in belongs to a different account (GH #628). The old file is now
     // replaced only on success, and backed up when the account changes.
+    // A project credentials file that was found and NOT adopted is skipped
+    // silently otherwise, and the user goes on believing they are signed in as
+    // whoever that file names. Emitted before the load so the reason precedes
+    // the consequence, and on every path — the MCP-host (non-TTY) spawn is
+    // exactly where a repo-supplied file would be picked up.
+    const resolvedCreds = resolveCredsPath();
+    const untrustedNotice = formatUntrustedProjectCredsNotice(resolvedCreds);
+    if (untrustedNotice) {
+        log.warn("creds.project_ignored_untrusted", {
+            ignored: resolvedCreds.untrustedProjectPath,
+            using: resolvedCreds.path,
+        });
+        note(untrustedNotice);
+    }
+
     let creds = args.forceLogin ? null : loadCreds();
     // A previous sign-in may have died after the browser registered our
     // delegate key on-chain but before the callback saved it (WALM-332). The
@@ -363,6 +448,14 @@ export function helpText(): string {
         "                                   browser).",
         "  memwal-mcp --logout              Delete saved credentials without",
         "                                   re-running login.",
+        "  memwal-mcp trust-project [dir]   Use the .memwal/credentials.json in",
+        "                                   [dir] (default: current directory).",
+        "                                   Project files are ignored until",
+        "                                   adopted, because a repository can",
+        "                                   ship one — it would choose the",
+        "                                   account, the delegate key and the",
+        "                                   relayer this client talks to.",
+        "  memwal-mcp untrust-project [dir] Undo that.",
         "  memwal-mcp --help                Show this help.",
         "",
         "Options:",
@@ -395,6 +488,14 @@ export function helpText(): string {
         "  MEMWAL_WEB_URL                   same as --web-url",
         "  MEMWAL_CLIENT_LABEL              same as --label",
         "  MEMWAL_NAMESPACE                 same as --namespace",
+        "  MEMWAL_CREDS_DIR                 Use this directory's",
+        "                                   credentials.json, bypassing both",
+        "                                   project and global resolution.",
+        "  MEMWAL_TRUST_PROJECT_CREDS=1     Adopt any project credentials file",
+        "                                   without trust-project. For CI and",
+        "                                   containers, where the checkout is",
+        "                                   already trusted by whoever",
+        "                                   configured the job.",
         "  MEMWAL_MCP_DEBUG=1               Verbose stderr logging.",
         "",
         "Minimal MCP client config (Cursor, Claude Desktop, etc.):",

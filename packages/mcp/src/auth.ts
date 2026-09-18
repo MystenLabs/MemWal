@@ -19,6 +19,7 @@ import {
     renameSync,
     unlinkSync,
     existsSync,
+    realpathSync,
 } from "node:fs";
 import { log } from "./logger.js";
 
@@ -93,27 +94,193 @@ function projectCredsPath(): string | null {
     }
 }
 
+/* ------------------------------------------------------------------------- *
+ * Project credential trust.
+ *
+ * `projectCredsPath()` finds a `.memwal/credentials.json` by presence alone,
+ * and the comment above it calls creating that file "the opt-in". Presence is
+ * only an opt-in when the person opting in is the one who put the file there.
+ * A repository can put it there too: commit `.memwal/credentials.json` into a
+ * template, scaffold or example repo, and every clone an MCP host launches with
+ * its cwd inside adopts the committed `accountId`, the committed
+ * `delegatePrivateKey`, and — because `bridge.ts` dials `creds.relayerUrl`
+ * rather than the resolved config — the committed relayer. No code from the
+ * repository has to run for any of that.
+ *
+ * That is strictly easier than an attack this codebase already refuses to
+ * allow. The H4 control in `index.ts` will not let a `--relayer` flag mutate
+ * the saved relayer, on the grounds that a pasted config snippet would
+ * otherwise mean "even subsequent runs without the flag ship the seed to the
+ * attacker". A committed file needs no paste, and survives without the flag by
+ * construction.
+ *
+ * Provenance therefore has to be recorded somewhere the repository cannot
+ * write. This ledger sits beside the global credentials file and lists the
+ * project directories this machine's user has adopted; a project file whose
+ * directory is not listed is ignored in favour of the global file, and the
+ * caller is told. Adding `.memwal/` to `.gitignore` — the only mitigation the
+ * docs offered — protects your key from being committed and says nothing about
+ * adopting someone else's.
+ * ------------------------------------------------------------------------- */
+
+const TRUSTED_FILE = "trusted-projects.json";
+
+function trustedProjectsPath(): string {
+    return join(homedir(), ".memwal", TRUSTED_FILE);
+}
+
 /**
- * Which credentials file this process should read and write.
+ * Canonical key for a project directory.
+ *
+ * Resolved, so a symlinked or relative route to the same project compares
+ * equal to the one that was adopted — otherwise trust granted through
+ * `/Users/x/work/repo` would not cover the same directory reached through a
+ * symlinked `/Users/x/w/repo`. Falls back to the literal path when it cannot be
+ * resolved, which fails closed: an unresolvable path will not match a stored
+ * resolved one.
+ */
+function projectKey(dir: string): string {
+    try {
+        return realpathSync(dir);
+    } catch {
+        return dir;
+    }
+}
+
+function loadTrustedProjects(): Set<string> {
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(trustedProjectsPath(), "utf8"));
+        const dirs = (parsed as { dirs?: unknown })?.dirs;
+        if (!Array.isArray(dirs)) return new Set();
+        return new Set(dirs.filter((d): d is string => typeof d === "string"));
+    } catch {
+        // Missing, unreadable or malformed all mean the same thing: nothing has
+        // been adopted. Never fail open.
+        return new Set();
+    }
+}
+
+/** Whether `dir` — the directory *containing* `.memwal`, not `.memwal` itself
+ * — has been adopted on this machine. */
+export function isProjectDirTrusted(dir: string): boolean {
+    return loadTrustedProjects().has(projectKey(dir));
+}
+
+/**
+ * Record a project directory as one whose credentials file this user adopts.
+ *
+ * Written through `writeSecretFile` even though the ledger holds no secret: a
+ * world-writable ledger would let anything on the machine grant the trust this
+ * gate exists to withhold, and the fresh-inode write is what guarantees `0600`
+ * on a file something else may have created.
+ */
+export function trustProjectDir(dir: string): string {
+    const key = projectKey(dir);
+    const trusted = loadTrustedProjects();
+    trusted.add(key);
+    writeSecretFile(
+        trustedProjectsPath(),
+        JSON.stringify({ version: 1, dirs: [...trusted].sort() }, null, 2),
+    );
+    log.info("creds.project_trusted", { dir: key });
+    return key;
+}
+
+/** Remove an adopted directory. Returns whether it was listed. */
+export function untrustProjectDir(dir: string): boolean {
+    const key = projectKey(dir);
+    const trusted = loadTrustedProjects();
+    if (!trusted.delete(key)) return false;
+    writeSecretFile(
+        trustedProjectsPath(),
+        JSON.stringify({ version: 1, dirs: [...trusted].sort() }, null, 2),
+    );
+    return true;
+}
+
+/**
+ * Blanket opt-in for non-interactive contexts — CI, containers, a devcontainer
+ * image — where there is no one to run `trust-project` and the checkout is
+ * already trusted by whoever configured the job.
+ *
+ * An environment variable is the right channel precisely because a repository
+ * cannot set one. That asymmetry is the whole distinction this gate turns on.
+ */
+function trustAllProjectsFromEnv(): boolean {
+    const v = process.env.MEMWAL_TRUST_PROJECT_CREDS;
+    return v === "1" || v === "true";
+}
+
+/** Where a project credentials file's trust is keyed: `<dir>/.memwal/credentials.json`
+ * is adopted by adopting `<dir>`. */
+export function projectDirOf(credentialsPath: string): string {
+    return dirname(dirname(credentialsPath));
+}
+
+export interface ResolvedCredsPath {
+    /** The file this process actually reads and writes. */
+    path: string;
+    /** A project-local file that was found but NOT adopted, and is therefore
+     * being ignored in favour of `path`. Absent when nothing was skipped. */
+    untrustedProjectPath?: string;
+}
+
+/**
+ * Which credentials file this process should read and write, and what it
+ * skipped getting there.
  *
  * The nearest project-local `.memwal/credentials.json` at or above the working
  * directory wins over the global one, the way `.npmrc` and `.git/config`
- * resolve. Signing in from one project otherwise repoints every other project
- * on the machine at a different account and delegate key, silently — memories
- * then land on the wrong account, on immutable storage, with no delete path
- * (GH #628).
+ * resolve — but only once this machine has adopted that directory. Signing in
+ * from one project otherwise repoints every other project on the machine at a
+ * different account and delegate key, silently (GH #628); adopting a file the
+ * project shipped repoints *this* one at someone else's account and relayer.
  *
- * Presence-based on purpose: creating the local file is the opt-in, so this is
- * purely additive. Resolved per call rather than at module load, because the
- * working directory is not knowable at import time.
+ * Resolved per call rather than at module load, because the working directory
+ * is not knowable at import time.
  *
- * `MEMWAL_CREDS_DIR` overrides both project and global resolution when set,
- * and is re-read on every call.
+ * `MEMWAL_CREDS_DIR` overrides both project and global resolution when set, and
+ * is re-read on every call. It is an explicit instruction through a channel the
+ * repository cannot reach, so it is not subject to the trust gate.
  */
-export function credsPath(): string {
+export function resolveCredsPath(): ResolvedCredsPath {
     const override = process.env.MEMWAL_CREDS_DIR;
-    if (override) return join(override, CREDS_FILE);
-    return projectCredsPath() ?? globalCredsPath();
+    if (override) return { path: join(override, CREDS_FILE) };
+
+    const project = projectCredsPath();
+    if (!project) return { path: globalCredsPath() };
+    if (trustAllProjectsFromEnv()) return { path: project };
+    if (isProjectDirTrusted(projectDirOf(project))) return { path: project };
+
+    return { path: globalCredsPath(), untrustedProjectPath: project };
+}
+
+export function credsPath(): string {
+    return resolveCredsPath().path;
+}
+
+/**
+ * The message shown when a project credentials file was found and ignored, or
+ * null when none was.
+ *
+ * Says what was skipped, what is being used instead, and the exact command that
+ * adopts it — a refusal the user cannot act on would just push them to
+ * `MEMWAL_TRUST_PROJECT_CREDS=1`, which is the blanket version of the thing
+ * being withheld.
+ */
+export function formatUntrustedProjectCredsNotice(
+    resolved: ResolvedCredsPath = resolveCredsPath(),
+): string | null {
+    if (!resolved.untrustedProjectPath) return null;
+    return [
+        `Ignoring project credentials at ${resolved.untrustedProjectPath}`,
+        `  This machine has not adopted that directory. A credentials file can arrive`,
+        `  with a repository, and it names the account, the delegate key AND the`,
+        `  relayer this client sends them to.`,
+        `  Using ${resolved.path} instead.`,
+        `  If you put that file there yourself, adopt it with:`,
+        `    npx -y @mysten-incubation/memwal-mcp trust-project`,
+    ].join("\n");
 }
 
 /** Load credentials from disk. Returns null if missing or malformed. */
@@ -389,6 +556,45 @@ export function clearCreds(): ClearCredsResult {
         : { removedPath: path };
 }
 
+/** Loopback in the forms a URL parser will hand back, IPv6 brackets stripped. */
+function isLoopbackHostname(hostname: string): boolean {
+    const host = hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    if (host === "localhost" || host.endsWith(".localhost")) return true;
+    if (host === "::1") return true;
+    return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+/**
+ * A relayer URL this client is willing to hand the delegate key to.
+ *
+ * `relayerUrl` was accepted as any string, and `bridge.ts` dials it — so
+ * whatever reaches `credentials.json` chooses the host that receives
+ * `Authorization: Bearer <delegatePrivateKey>` on every session. That is the
+ * long-lived Ed25519 seed, not a scoped token, so the transport it crosses is
+ * not a detail.
+ *
+ * Two limits, both about the transport rather than the identity of the host —
+ * a host allowlist would break every self-hosted and staging deployment, which
+ * are supported configurations:
+ *
+ *   - a non-HTTP scheme is never a relayer. `new URL()` will happily accept
+ *     `file:`, `data:` and a long tail of others.
+ *   - plaintext `http:` must not carry the seed across a network. Loopback is
+ *     exempt: `--local` is a documented preset (`http://127.0.0.1:8000`) and
+ *     there is no network segment to read it off.
+ */
+export function isSafeRelayerUrl(value: string): boolean {
+    let url: URL;
+    try {
+        url = new URL(value);
+    } catch {
+        return false;
+    }
+    if (url.protocol === "https:") return true;
+    if (url.protocol !== "http:") return false;
+    return isLoopbackHostname(url.hostname);
+}
+
 function isValid(obj: unknown): obj is MemWalCredentials {
     if (!obj || typeof obj !== "object") return false;
     const c = obj as Record<string, unknown>;
@@ -402,6 +608,7 @@ function isValid(obj: unknown): obj is MemWalCredentials {
         /^0x[0-9a-fA-F]{64}$/.test(c.accountId) &&
         typeof c.packageId === "string" &&
         typeof c.relayerUrl === "string" &&
+        isSafeRelayerUrl(c.relayerUrl) &&
         typeof c.createdAt === "string" &&
         c.version === 1
     );
@@ -555,6 +762,10 @@ function isValidPending(obj: unknown): obj is PendingLogin {
         /^[0-9a-fA-F]{64}$/.test(p.delegatePublicKeyHex) &&
         typeof p.delegateAddress === "string" &&
         typeof p.relayerUrl === "string" &&
+        // Recovery signs a `GET /api/whoami` against this URL and, on a 200,
+        // writes it into `credentials.json` as the saved relayer. Same reach as
+        // the credentials field, so the same limit.
+        isSafeRelayerUrl(p.relayerUrl) &&
         typeof p.createdAt === "string" &&
         p.version === 1
     );

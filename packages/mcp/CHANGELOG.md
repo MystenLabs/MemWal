@@ -1,5 +1,16 @@
 # @mysten-incubation/memwal-mcp
 
+## Unreleased
+
+### Security
+
+- A project's `.memwal/credentials.json` is no longer adopted on presence alone. Project-scoped credentials resolved the way `.npmrc` does — nearest file wins — and creating that file was treated as the opt-in. A repository can create it too: committed into a template, a scaffold or an example repo, it was picked up by every clone an editor or MCP host opened with its cwd inside, and it names the account, the delegate private key **and** `relayerUrl`, which the bridge dials in preference to the resolved config. So a clone would sign in as whoever wrote the file and send every subsequent `memwal_remember` to whatever host it named, with no code from the repository running and nothing on any visible surface saying so. That is the attack the `--relayer` flag is already refused for, reached by a committed file instead of a pasted flag. Adoption is now recorded in `~/.memwal/trusted-projects.json` — outside any repository — via `memwal-mcp trust-project [dir]`, undone with `untrust-project`, and defaulted on by `MEMWAL_TRUST_PROJECT_CREDS=1` for CI. An unadopted file is skipped in favour of the global one, and the client prints what it skipped and how to adopt it. `MEMWAL_CREDS_DIR` is unaffected: it is an instruction through a channel a repository cannot reach.
+- `relayerUrl` is validated before it is used, in both `credentials.json` and `login-pending.json`. It was accepted as any string while deciding the host that receives `Authorization: Bearer <delegatePrivateKey>` — the long-lived Ed25519 seed. A non-HTTP scheme is now refused outright, and plaintext `http:` is refused except to loopback, so `--local` keeps working. Deliberately a limit on the transport rather than a host allowlist, which self-hosted and staging relayers are supported configurations.
+
+### Changed
+
+- `memwal-mcp trust-project [dir]` and `memwal-mcp untrust-project [dir]` are new commands. With no argument they act on the current directory.
+
 ## 0.0.14
 
 ### Fixed
