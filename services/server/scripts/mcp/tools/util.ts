@@ -3,6 +3,7 @@
  */
 import type { MemWalSession } from "../auth.js";
 import { createLogger } from "../logger.js";
+import { classifyToolError, describeFailure, probeRelayerHealth } from "./failure.js";
 
 const log = createLogger("mcp");
 
@@ -47,6 +48,10 @@ export function explorerFooter(): string {
 }
 
 const DEFAULT_SLOW_TOOL_WARN_MS = 5000;
+
+/** How long a failed call waits on the relayer's `/health` before saying it
+ * got no answer. The call has already failed; this only buys its diagnosis. */
+const HEALTH_PROBE_TIMEOUT_MS = 2000;
 
 /**
  * Above this, a tool call is reported at `warn` rather than `info`.
@@ -172,11 +177,24 @@ export function wrapTool<Args>(
             const name = err?.name && err.name !== "Error"
                 ? err.name
                 : err?.constructor?.name ?? "Error";
+            // Timed before the probe below, which is diagnosis, not the call.
+            const fields = outcomeFields();
+            // A timeout or a failed connect says nothing about the relayer
+            // on its own; ask its `/health` so the agent learns whether it is
+            // down, unhealthy, or up with this one call stuck (WALM-396).
+            const failure = classifyToolError(err);
+            const probe =
+                failure.kind === "timeout" || failure.kind === "unreachable"
+                    ? await probeRelayerHealth(session.relayerUrl, HEALTH_PROBE_TIMEOUT_MS)
+                    : null;
             log.warn("tool.failed", {
-                ...outcomeFields(),
+                ...fields,
                 errName: name,
                 errMessage: err?.message ?? String(err),
                 causeCode: err?.cause?.code ?? null,
+                failureKind: failure.kind,
+                stage: failure.kind === "recall_timeout" ? failure.stage : null,
+                health: probe?.kind ?? null,
             });
             const msg = err?.message ?? String(err);
             const cause = err?.cause;
@@ -191,6 +209,13 @@ export function wrapTool<Args>(
                     ? ` cause_name=${cause?.constructor?.name} cause_msg=${cause?.message} cause_code=${cause?.code}`
                     : "")
             );
+
+            if (failure.kind !== "other") {
+                return {
+                    content: [{ type: "text", text: describeFailure(tool, failure, probe) }],
+                    isError: true,
+                };
+            }
 
             let prefix = "Tool error";
             switch (name) {
