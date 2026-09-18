@@ -1,11 +1,7 @@
 /**
- * Ask the relayer's public `/health` why a call went unanswered (WALM-396).
- *
- * A sent call whose reply never arrives says nothing on its own about why:
- * the relayer may be down, unreachable from this machine, configured wrong,
- * or up with this one call stuck inside it. Each wants a different response —
- * wait, check the network, fix `--relayer`, or just retry — so the bridge
- * probes before it answers.
+ * Ask the relayer's public `/health` why a call went unanswered: down,
+ * unreachable from this machine, configured wrong, or up with one call stuck.
+ * Each wants a different next step, so the bridge probes before it answers.
  */
 
 export type HealthProbe =

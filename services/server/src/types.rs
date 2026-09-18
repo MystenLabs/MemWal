@@ -1525,7 +1525,7 @@ pub struct RecallRequest {
     pub sort: Option<RecallSort>,
     /// How long the caller waits, in ms. When set, the recall stops just
     /// short of it and answers [`AppError::RecallTimeout`] naming the stage
-    /// it was in; omitted, it runs to completion as before (WALM-396).
+    /// it was in; omitted, it runs to completion.
     #[serde(default)]
     pub deadline_ms: Option<u64>,
 }
@@ -2281,8 +2281,7 @@ pub enum AppError {
     /// client-visible message, distinct from transient upstream failures.
     WritesPaused(String),
     /// A recall about to miss the caller's `deadline_ms`. HTTP 504 with
-    /// `code: "RECALL_TIMEOUT"` and the stage it was stuck in, so the caller
-    /// learns where it stalled instead of aborting blind (WALM-396).
+    /// `code: "RECALL_TIMEOUT"` and the stage it was stuck in.
     RecallTimeout {
         stage: &'static str,
         elapsed_ms: u64,
@@ -3508,7 +3507,7 @@ mod tests {
         );
     }
 
-    // ── RecallRequest.deadline_ms / RECALL_TIMEOUT (WALM-396) ────────────
+    // ── RecallRequest.deadline_ms / RECALL_TIMEOUT ───────────────────────
 
     #[test]
     fn recall_deadline_is_optional() {

@@ -808,9 +808,8 @@ export class MemWal {
                 // request byte-identical and the relayer applies its own
                 // "relevance" default.
                 sort: options.sort,
-                // How long this call waits. The relayer stops just short of
-                // it and answers with the step it was stuck in, rather than
-                // this request aborting with nothing to say why (WALM-396).
+                // How long this call waits, so the relayer can stop just
+                // short of it and name the step it was stuck in.
                 deadline_ms: RECALL_REQUEST_TIMEOUT_MS,
             }, { timeoutMs: RECALL_REQUEST_TIMEOUT_MS });
 

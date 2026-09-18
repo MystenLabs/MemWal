@@ -1,11 +1,7 @@
 /**
- * Why a tool call failed, in words an agent can act on (WALM-396).
- *
- * A recall that ran out of time used to surface as `Tool error: This
- * operation was aborted`: no step, no word on whether the relayer was up,
- * nothing to choose between retrying, waiting and reporting. Every message
- * built here carries the same three lines instead — `Cause`, `Relayer
- * health`, `Next step` — because the agent only reads text.
+ * Why a tool call failed, in words an agent can act on. Every message carries
+ * the same three lines — `Cause`, `Relayer health`, `Next step` — because the
+ * agent only reads text.
  */
 
 export type HealthProbe =
@@ -105,6 +101,12 @@ const STAGES: Record<string, { doing: string; next: string }> = {
     seal_decrypt: {
         doing: "decrypting memories with SEAL",
         next: "The SEAL key servers are slow. Wait a minute, then retry.",
+    },
+    auth: {
+        doing: "checking credentials, before the recall could start",
+        next:
+            "Checking the delegate key used up the whole deadline. Retry once; if it " +
+            "happens again, report it with the time of the call.",
     },
 };
 

@@ -295,9 +295,7 @@ const MIN_CALL_TIMEOUT_MS = 1_000;
  *
  * `memwal_recall` is the exception to lockstep: the SDK aborts the recall
  * request itself at 15s, but the checks it runs first (`/version`, `/config`)
- * carry their own deadlines, or none on older SDKs. 90s covers those with
- * room to spare and still answers a lost recall reply at 2 minutes instead
- * of 4 (WALM-396). */
+ * carry their own deadlines, or none on older SDKs. 90s covers those. */
 const TOOL_DEADLINE_MS: Readonly<Record<string, number>> = {
     memwal_recall: 90_000,
     memwal_remember: 90_000,
@@ -2351,9 +2349,8 @@ export async function runBridge(
         opts: { toolText: string; errorMessage: string };
     } {
         if (!neverSent) {
-            // What the relayer's `/health` said when asked just now, so the
-            // agent can tell a dead relayer from a wrong URL from one stuck
-            // call (WALM-396).
+            // What the relayer's `/health` said just now: tells a dead
+            // relayer from a wrong URL from one stuck call.
             const described = health ? describeHealthProbe(health.probe, health.relayerUrl) : null;
             // The request reached the relayer. What is missing is the reply,
             // and for a write that distinction is the whole message: the work
@@ -2389,8 +2386,8 @@ export async function runBridge(
                     ? "Repeating this call cannot store a duplicate, so it is safe to retry " +
                       "once. If it keeps happening, report it with the time of the call."
                     : "Repeating this call cannot store a duplicate, so it is safe to retry " +
-                      "once that is resolved — wait a minute if the problem is on the " +
-                      "relayer's side.";
+                      "after the relayer is reachable again — wait a minute if the problem " +
+                      "is on the relayer's side.";
             const healthValue = described?.health ?? "not checked";
             return {
                 reason: "no response",
@@ -2487,8 +2484,8 @@ export async function runBridge(
             if (!neverSent && entry.msg.method !== "initialize") {
                 // A sent call: ask the relayer's `/health` before answering,
                 // so the message can say whether it is down, unreachable, or
-                // up with this one call stuck (WALM-396). Only the answer
-                // waits on the probe; the bookkeeping stays synchronous.
+                // up with this one call stuck. Only the answer waits on the
+                // probe; the bookkeeping stays synchronous.
                 if (entry.probing) continue;
                 entry.probing = true;
                 const relayerUrl = creds?.relayerUrl ?? config.relayerUrl;
@@ -2496,32 +2493,42 @@ export async function runBridge(
                 // `probing` set and no answer is the one outcome this path
                 // must never have, so a rejection still answers it.
                 sweepProbe ??= probeRelayerHealth(relayerUrl, healthProbeMs).catch(() => null);
-                void sweepProbe.then((probe) => {
-                    // A late reply, a logout or a shutdown may have answered
-                    // it while the probe ran. Answering again would be a
-                    // second response for the same id — and after stdin has
-                    // closed there is nobody left to answer.
-                    if (stdinClosed || inFlight.get(id) !== entry) return;
-                    const settledAt = Date.now();
-                    const { reason, opts } = expiredRequestReport(
-                        false,
-                        settledAt,
-                        toolNameOf(entry.msg),
-                        probe ? { probe, relayerUrl } : undefined,
-                    );
-                    log.warn("bridge.call_orphaned", {
-                        id,
-                        method: entry.msg.method ?? null,
-                        elapsedMs: settledAt - entry.startedAt,
-                        deadlineMs,
-                        reason,
-                        health: probe?.kind ?? null,
-                        healthMs: probe?.ms ?? null,
-                        handshakeStalledMs: handshakeStalledForMs(settledAt),
-                        lastHandshakeError,
+                void sweepProbe
+                    .then((probe) => {
+                        // A late reply, a logout or a shutdown may have answered
+                        // it while the probe ran. Answering again would be a
+                        // second response for the same id — and after stdin has
+                        // closed there is nobody left to answer.
+                        if (stdinClosed || inFlight.get(id) !== entry) return;
+                        const settledAt = Date.now();
+                        const { reason, opts } = expiredRequestReport(
+                            false,
+                            settledAt,
+                            toolNameOf(entry.msg),
+                            probe ? { probe, relayerUrl } : undefined,
+                        );
+                        log.warn("bridge.call_orphaned", {
+                            id,
+                            method: entry.msg.method ?? null,
+                            elapsedMs: settledAt - entry.startedAt,
+                            deadlineMs,
+                            reason,
+                            health: probe?.kind ?? null,
+                            healthMs: probe?.ms ?? null,
+                            handshakeStalledMs: handshakeStalledForMs(settledAt),
+                            lastHandshakeError,
+                        });
+                        failRequest(entry.msg, reason, opts);
+                    })
+                    .catch((err: unknown) => {
+                        // Never leave a call marked `probing` with no answer:
+                        // clearing it lets the next sweep answer it.
+                        entry.probing = false;
+                        log.warn("bridge.call_orphaned_answer_failed", {
+                            id,
+                            error: err instanceof Error ? err.message : String(err),
+                        });
                     });
-                    failRequest(entry.msg, reason, opts);
-                });
                 continue;
             }
             // Built only for what actually expired: this walks `pendingForward`

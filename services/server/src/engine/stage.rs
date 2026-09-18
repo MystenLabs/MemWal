@@ -1,5 +1,5 @@
 //! Which step of a recall is running, so one that runs out of time can say
-//! where it was stuck (WALM-396).
+//! where it was stuck.
 //!
 //! The handler owns a [`StageMarker`] and runs the recall inside
 //! [`run_with_deadline`], which makes that marker the task's current one.
@@ -17,8 +17,8 @@ use tokio::time::Instant;
 
 /// Left for the 504 to reach the caller before its own deadline fires.
 const DEADLINE_MARGIN: Duration = Duration::from_millis(1_000);
-/// A budget shorter than this cannot fit an embed, so cutting at it would
-/// only turn recalls that might have finished into errors.
+/// Least a short caller deadline is given: less cannot fit an embed, so
+/// cutting there would only turn recalls that might have finished into errors.
 const MIN_BUDGET: Duration = Duration::from_millis(2_000);
 /// Upper bound on a caller-supplied deadline, so no number can overflow an
 /// `Instant`. Ten minutes is far past anything a recall caller waits.
@@ -31,6 +31,9 @@ pub enum RecallStage {
     VectorSearch = 1,
     WalrusDownload = 2,
     SealDecrypt = 3,
+    /// Before the recall started: credential check and rate limiting. Only
+    /// reported when that alone used up the caller's deadline.
+    Auth = 4,
 }
 
 impl RecallStage {
@@ -41,6 +44,7 @@ impl RecallStage {
             RecallStage::VectorSearch => "vector_search",
             RecallStage::WalrusDownload => "walrus_download",
             RecallStage::SealDecrypt => "seal_decrypt",
+            RecallStage::Auth => "auth",
         }
     }
 
@@ -49,7 +53,8 @@ impl RecallStage {
             0 => RecallStage::Embed,
             1 => RecallStage::VectorSearch,
             2 => RecallStage::WalrusDownload,
-            _ => RecallStage::SealDecrypt,
+            3 => RecallStage::SealDecrypt,
+            _ => RecallStage::Auth,
         }
     }
 }
@@ -78,41 +83,56 @@ pub fn enter(stage: RecallStage) {
     let _ = CURRENT.try_with(|marker| marker.set(stage));
 }
 
-/// How long a recall may run for a caller that said it waits `deadline_ms`,
-/// given `already` spent since the request arrived (auth, rate limiting).
-/// `None` when it said nothing: those callers keep today's behaviour.
-pub fn budget_for(deadline_ms: Option<u64>, already: Duration) -> Option<Duration> {
-    let caller = Duration::from_millis(deadline_ms?.min(MAX_DEADLINE_MS));
-    Some(
-        caller
-            .saturating_sub(DEADLINE_MARGIN)
-            .saturating_sub(already)
-            .max(MIN_BUDGET),
-    )
+/// What a caller's deadline leaves for the recall.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Budget {
+    /// No deadline sent: run to completion.
+    Unbounded,
+    /// Stop after this long.
+    Run(Duration),
+    /// The deadline went on auth and rate limiting. Any work now would
+    /// answer a caller that has already given up.
+    Exhausted,
+}
+
+/// What a caller that waits `deadline_ms` leaves for the recall, `already`
+/// having passed since the request arrived.
+pub fn budget_for(deadline_ms: Option<u64>, already: Duration) -> Budget {
+    let Some(deadline_ms) = deadline_ms else {
+        return Budget::Unbounded;
+    };
+    // The floor is for a short deadline, never for time already spent.
+    let usable = Duration::from_millis(deadline_ms.min(MAX_DEADLINE_MS))
+        .saturating_sub(DEADLINE_MARGIN)
+        .max(MIN_BUDGET);
+    match usable.checked_sub(already) {
+        Some(left) if !left.is_zero() => Budget::Run(left),
+        _ => Budget::Exhausted,
+    }
 }
 
 #[derive(Debug)]
 pub struct StageTimedOut {
     pub stage: RecallStage,
-    pub elapsed_ms: u64,
+    pub elapsed: Duration,
 }
 
-/// Run `fut` as the recall `marker` tracks, giving up after `budget`.
+/// Run `fut` as the recall `marker` tracks, giving up at `deadline`.
 pub async fn run_with_deadline<F: Future>(
     marker: &StageMarker,
-    budget: Option<Duration>,
+    deadline: Option<Instant>,
     fut: F,
 ) -> Result<F::Output, StageTimedOut> {
     let started = Instant::now();
     let tracked = CURRENT.scope(marker.clone(), fut);
-    let Some(budget) = budget else {
+    let Some(deadline) = deadline else {
         return Ok(tracked.await);
     };
-    tokio::time::timeout(budget, tracked)
+    tokio::time::timeout_at(deadline, tracked)
         .await
         .map_err(|_| StageTimedOut {
             stage: marker.get(),
-            elapsed_ms: started.elapsed().as_millis() as u64,
+            elapsed: started.elapsed(),
         })
 }
 
@@ -164,7 +184,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_missed_deadline_names_the_stage_that_was_running() {
         let marker = StageMarker::default();
-        let outcome = run_with_deadline(&marker, Some(Duration::from_secs(14)), async {
+        let deadline = Instant::now() + Duration::from_secs(14);
+        let outcome = run_with_deadline(&marker, Some(deadline), async {
             enter(RecallStage::Embed);
             tokio::time::sleep(Duration::from_secs(1)).await;
             enter(RecallStage::WalrusDownload);
@@ -174,7 +195,7 @@ mod tests {
 
         let timed_out = outcome.expect_err("a 60s download must not fit a 14s budget");
         assert_eq!(timed_out.stage, RecallStage::WalrusDownload);
-        assert_eq!(timed_out.elapsed_ms, 14_000);
+        assert_eq!(timed_out.elapsed, Duration::from_secs(14));
     }
 
     #[tokio::test(start_paused = true)]
@@ -203,6 +224,7 @@ mod tests {
         assert_eq!(RecallStage::VectorSearch.as_str(), "vector_search");
         assert_eq!(RecallStage::WalrusDownload.as_str(), "walrus_download");
         assert_eq!(RecallStage::SealDecrypt.as_str(), "seal_decrypt");
+        assert_eq!(RecallStage::Auth.as_str(), "auth");
     }
 
     #[test]
@@ -214,22 +236,26 @@ mod tests {
     }
 
     #[test]
-    fn the_budget_leaves_the_caller_a_second_and_never_drops_below_the_floor() {
+    fn the_budget_leaves_the_caller_a_second() {
         let none = Duration::ZERO;
-        assert_eq!(budget_for(None, none), None);
+        assert_eq!(budget_for(None, none), Budget::Unbounded);
         assert_eq!(
             budget_for(Some(15_000), none),
-            Some(Duration::from_millis(14_000))
-        );
-        // A deadline too short to fit an embed would only produce errors.
-        assert_eq!(
-            budget_for(Some(1_500), none),
-            Some(Duration::from_millis(2_000))
+            Budget::Run(Duration::from_millis(14_000))
         );
         // Capped, so no caller-supplied number can overflow an `Instant`.
         assert_eq!(
             budget_for(Some(u64::MAX), none),
-            Some(Duration::from_millis(599_000))
+            Budget::Run(Duration::from_millis(599_000))
+        );
+    }
+
+    #[test]
+    fn a_short_deadline_still_gets_the_floor() {
+        // Less than this cannot fit an embed.
+        assert_eq!(
+            budget_for(Some(1_500), Duration::ZERO),
+            Budget::Run(Duration::from_millis(2_000))
         );
     }
 
@@ -239,11 +265,28 @@ mod tests {
         // was running through all of it.
         assert_eq!(
             budget_for(Some(15_000), Duration::from_millis(3_000)),
-            Some(Duration::from_millis(11_000))
+            Budget::Run(Duration::from_millis(11_000))
+        );
+        // No floor once time is spent: 2s here would outlive the caller.
+        assert_eq!(
+            budget_for(Some(15_000), Duration::from_millis(13_500)),
+            Budget::Run(Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn a_deadline_spent_before_the_recall_starts_is_exhausted() {
+        assert_eq!(
+            budget_for(Some(15_000), Duration::from_millis(14_000)),
+            Budget::Exhausted
         );
         assert_eq!(
             budget_for(Some(15_000), Duration::from_millis(20_000)),
-            Some(Duration::from_millis(2_000))
+            Budget::Exhausted
+        );
+        assert_eq!(
+            budget_for(Some(1_500), Duration::from_millis(3_000)),
+            Budget::Exhausted
         );
     }
 }

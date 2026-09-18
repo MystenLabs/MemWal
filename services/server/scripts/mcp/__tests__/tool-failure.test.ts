@@ -218,6 +218,7 @@ test("each stage gets its own advice", () => {
         vector_search: /database|index/i,
         walrus_download: /lower `limit`/,
         seal_decrypt: /SEAL/,
+        auth: /delegate key/,
     };
     for (const [stage, advice] of Object.entries(expectations)) {
         const text = describeFailure(

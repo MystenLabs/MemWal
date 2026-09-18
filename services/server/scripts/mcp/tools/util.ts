@@ -181,7 +181,7 @@ export function wrapTool<Args>(
             const fields = outcomeFields();
             // A timeout or a failed connect says nothing about the relayer
             // on its own; ask its `/health` so the agent learns whether it is
-            // down, unhealthy, or up with this one call stuck (WALM-396).
+            // down, unhealthy, or up with this one call stuck.
             const failure = classifyToolError(err);
             const probe =
                 failure.kind === "timeout" || failure.kind === "unreachable"
