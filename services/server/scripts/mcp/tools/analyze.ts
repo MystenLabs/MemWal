@@ -14,12 +14,27 @@ import {
     withWaitDeadline,
 } from "./remember-wait.js";
 
+/**
+ * Ceiling on one passage, in characters.
+ *
+ * This schema had a `.min(1)` and no maximum while the tool is documented as
+ * taking a whole transcript, which made the input length entirely the caller's
+ * choice — and the redactor runs over every character of it on the sidecar's
+ * single thread, in front of every other in-flight tool call. The regexes are
+ * linear now (see `URL_USERINFO`), so this is a backstop rather than the fix:
+ * 200k characters screens in tens of milliseconds, is far more than any real
+ * transcript, and is well under what the extractor LLM behind `/api/analyze`
+ * would accept anyway.
+ */
+const MAX_ANALYZE_CHARS = 200_000;
+
 const ANALYZE_INPUT = {
     text: z
         .string()
         .min(1)
+        .max(MAX_ANALYZE_CHARS)
         .describe(
-            "Conversation transcript, note, or arbitrary text from which to extract memorable facts. Credential shapes (passwords, API keys, tokens, private keys, seed phrases, auth headers, URLs with an embedded user:password) are stripped from this text before it is sent for extraction, so no secret reaches the extractor or storage."
+            `Conversation transcript, note, or arbitrary text from which to extract memorable facts (max ${MAX_ANALYZE_CHARS} characters). Credential shapes (passwords, API keys, tokens, private keys, seed phrases, auth headers, URLs with an embedded user:password) are stripped from this text before it is sent for extraction, so no secret reaches the extractor or storage. A span the user asked not to save, or that is pasted third-party material, is dropped on its own — the rest of the passage is still extracted from.`
         ),
     namespace: z
         .string()

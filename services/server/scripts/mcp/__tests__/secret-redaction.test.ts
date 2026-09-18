@@ -330,3 +330,147 @@ test("the notices name the kind and never the value", () => {
 test("nothing removed means nothing said", () => {
     assert.equal(redactionNotice([], 0), "");
 });
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * Review findings on the WALM-642 branch. Each of these leaked, verbatim,
+ * through `sanitizeFact` before the fix beside it.
+ * ------------------------------------------------------------------------ */
+
+// ── finding 3: the credential-assignment gate missed whole spellings ────────
+
+test("SCREAMING_SNAKE and quoted-JSON credential names are assignments too", () => {
+    // `_` is a word character, so `\b` never fired between `_` and the
+    // keyword, and `_` is not `[a-z]` so the camelCase lookbehind did not
+    // either. That left the spelling credentials actually arrive in — a pasted
+    // env file or shell export — completely unguarded.
+    for (const [text, secret] of [
+        ["POSTGRES_PASSWORD=hunter2", "hunter2"],
+        [
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ],
+        ["DB_PASSWORD=hunter2SuperSecret", "hunter2SuperSecret"],
+        ["X_AUTH_TOKEN: abcd1234", "abcd1234"],
+        ["SESSION_SECRET=abcd1234efgh5678", "abcd1234efgh5678"],
+        ["my_api_key=abcd1234efgh5678", "abcd1234efgh5678"],
+    ] as Array<[string, string]>) {
+        const out = sanitizeFact(text);
+        assert.ok(out.changed, `not redacted at all: ${text}`);
+        assert.ok(!out.text.includes(secret), `the secret survived: ${text}`);
+    }
+
+    // A JSON object puts a closing quote between the key and the colon, which
+    // the old separator group demanded come immediately after the keyword.
+    const json = sanitizeFact(
+        'Save my config: {"username": "alice", "password": "hunter2-prod-9xQ"} for staging',
+    );
+    assert.equal(json.refusal, undefined);
+    assert.ok(!json.text.includes("hunter2-prod-9xQ"), "the JSON password survived");
+    assert.ok(json.text.includes("alice"), "the username is not a credential");
+    assert.ok(json.text.includes("for staging"), "the fact was lost with the password");
+});
+
+test("widening the gate did not widen it onto ordinary prose", () => {
+    // The lookbehind now admits `_`, `-` and digits. These are the sentences
+    // that must not start matching because of it.
+    for (const fact of [
+        "My password manager is 1Password and I rotate keys every quarter.",
+        "The API key for that service is stored in Vault, not in the repo.",
+        "My creds live in ~/.memwal/credentials.json and the fix landed in 4f2b8c1e9a7d6f5c4b3a29180716253443219876",
+        "We renamed the secret_store module to vault_client last sprint.",
+        "Token bucket rate limiting is what the relayer uses.",
+    ]) {
+        const out = sanitizeFact(fact);
+        assert.equal(out.text, fact, `changed a clean fact: ${fact}`);
+        assert.equal(out.changed, false);
+    }
+});
+
+// ── finding 5: the label rule only ever looked at hex ───────────────────────
+
+test("a labelled secret that is not hex is key material too", () => {
+    // 40 characters, base64-ish, three label words in front of it — and it came
+    // back completely unchanged, because `hasAdjacentCredentialLabel` was
+    // consulted only for HEX_RUN and the entropy rule demands 64+.
+    const AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    assertRedacted(
+        `My AWS secret access key is ${AWS_SECRET} for prod`,
+        AWS_SECRET,
+        "labelled-key-material",
+        ["My AWS secret access key", "for prod"],
+    );
+
+    // The pair, which is the shape it arrives in: the non-secret id was being
+    // redacted by the vendor rule while the secret half survived.
+    const pair = sanitizeFact(
+        `AWS creds for staging: AKIAIOSFODNN7EXAMPLE and the secret key is ${AWS_SECRET}`,
+    );
+    assert.ok(!pair.text.includes(AWS_SECRET), "the secret half of the pair survived");
+    assert.ok(!pair.text.includes("AKIAIOSFODNN7EXAMPLE"));
+});
+
+test("the label is still the only discriminator — bare runs pass", () => {
+    // The whole design: widening the SHAPE the rule can see must not weaken the
+    // gate in front of it, or every identifier this product exists to remember
+    // starts disappearing.
+    for (const fact of [
+        "The blob landed as blob_id=Xj9vKq2mP7nR4tW8yB1cE5gH0dF3sA6uZ2xN8qL4kM7",
+        "Pin the build to commit 4f2b8c1e9d7a3f5b6c0e2d4a8b1f3c5e7d9a0b2c",
+        "My Sui package id is 0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437",
+        "My delegatePublicKeyHex is 4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b and it is safe to share",
+        "The build id is 20260918T0930Z-linux-arm64-release-candidate",
+    ]) {
+        const out = sanitizeFact(fact);
+        assert.equal(out.text, fact, `redacted a legitimate identifier: ${fact}`);
+        assert.equal(out.changed, false);
+    }
+});
+
+// ── findings 6 + 7: the URL rule was quadratic, and mangled ordinary URLs ───
+
+test("an ordinary URL with a query string is not userinfo", () => {
+    // The password group excluded `/` and whitespace but not `?` or `=`, so
+    // this matched with `app.example.com` as the user and `8443?owner=alice` as
+    // the password: host and port destroyed, `corp.com` promoted to hostname,
+    // and a notice claiming a credential had been removed when there was none.
+    const fact =
+        "Our dashboard is at https://app.example.com:8443?owner=alice@corp.com and we deploy Fridays";
+    const out = sanitizeFact(fact);
+    assert.equal(out.text, fact, "an ordinary URL was mangled");
+    assert.equal(out.changed, false);
+    assert.equal(out.count, 0, "a redaction was reported where none happened");
+
+    // ...while a real connection string is untouched by the narrowing.
+    const real = sanitizeFact("staging is postgres://admin:hunter2@db.internal:5432/app");
+    assert.ok(!real.text.includes("hunter2"));
+    assert.ok(real.text.includes("db.internal:5432/app"), "the host was lost");
+});
+
+test("a long passage is screened in linear time", () => {
+    // `URL_USERINFO`'s scheme repeat was unbounded, so it was tried and
+    // abandoned at every start offset: 30 KB took 317 ms, 60 KB 1254 ms and
+    // 120 KB 4814 ms. `memwal_analyze` takes a whole transcript, the sidecar is
+    // single-threaded and a tools/call times out at 60 s, so a long paste was a
+    // stall for every other caller too.
+    //
+    // The budget is deliberately loose — this is a guard against a quadratic
+    // pattern coming back, not a benchmark, and CI machines are noisy. The
+    // shape is what matters: 4x the input must not be 16x the time.
+    const worst = "a".repeat(120 * 1024);
+    const started = Date.now();
+    sanitizeFact(worst);
+    const elapsed = Date.now() - started;
+    assert.ok(
+        elapsed < 1000,
+        `120 KB took ${elapsed} ms — a redaction pattern has gone superlinear again`,
+    );
+
+    const small = "a".repeat(30 * 1024);
+    const t0 = Date.now();
+    sanitizeFact(small);
+    const smallMs = Math.max(Date.now() - t0, 1);
+    assert.ok(
+        elapsed / smallMs < 12,
+        `120 KB/30 KB ratio was ${(elapsed / smallMs).toFixed(1)}x — that is quadratic, not linear`,
+    );
+});

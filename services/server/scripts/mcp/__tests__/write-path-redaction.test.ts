@@ -341,3 +341,39 @@ test("the idempotency key is derived from what is actually written", async (t) =
     assert.equal(seen[0], seen[1], "the same fact must derive the same key twice");
     assert.ok(!seen[0].includes(PASSWORD));
 });
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * Review findings on the WALM-642 branch, asserted where it counts: at what
+ * the SDK was handed.
+ * ------------------------------------------------------------------------ */
+
+test("memwal_analyze will not take an unbounded passage", async (t) => {
+    // The schema was `z.string().min(1)` with no maximum while the tool is
+    // documented as accepting a whole transcript, so the work the sidecar's
+    // single thread did in front of every other caller was the caller's choice.
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const result = await client.callTool({
+        name: "memwal_analyze",
+        arguments: { text: "a".repeat(200_001) },
+    });
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.deepEqual(forwarded.analyze, [], "an over-long passage was forwarded");
+});
+
+test("an ordinary URL is not mangled on the way to the SDK", async (t) => {
+    // The userinfo groups excluded `/` but not `?` or `=`, so this came out as
+    // `https://[redacted:url-credentials]@corp.com` — host and port destroyed,
+    // the mangled fact written to append-only storage, and the agent told a
+    // credential had been removed when there was none.
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const fact =
+        "Our dashboard is at https://app.example.com:8443?owner=alice@corp.com and we deploy Fridays";
+    const result = await client.callTool({
+        name: "memwal_remember",
+        arguments: { text: fact },
+    });
+    assert.deepEqual(forwarded.remember, [fact]);
+    assert.doesNotMatch(textOf(result), /redacted|credential span/i);
+});

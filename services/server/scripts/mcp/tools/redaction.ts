@@ -113,8 +113,27 @@ const PEM_OPEN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*/g;
  *
  * Only the userinfo is replaced: scheme, host, port and path are the part of a
  * connection string worth remembering.
+ *
+ * Two bounds on this pattern, both load-bearing:
+ *
+ *   - The scheme repeat is CAPPED. Unbounded (`[A-Za-z0-9+.-]*`) it had to be
+ *     tried and abandoned at every start offset, which is quadratic in the
+ *     input: 30 KB took 317 ms, 60 KB 1254 ms and 120 KB 4814 ms on one core.
+ *     `memwal_analyze` forwards a whole transcript and the sidecar is
+ *     single-threaded, so a long paste was a stall for every other caller, not
+ *     just for itself. 30 characters is longer than any registered scheme.
+ *   - The userinfo groups exclude `?`, `=` and `&`, not just `/` and
+ *     whitespace. Without that,
+ *     `https://app.example.com:8443?owner=alice@corp.com` matched with
+ *     `app.example.com` as the user and `8443?owner=alice` as the password:
+ *     the host and port were destroyed, `corp.com` was promoted to hostname,
+ *     the mangled fact was written to append-only storage, and the result told
+ *     the agent a credential had been removed when there was none. A query
+ *     string cannot appear before the userinfo in a real URL, so excluding
+ *     them costs nothing but a password that literally contains one.
  */
-const URL_USERINFO = /([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@/g;
+const URL_USERINFO =
+    /([A-Za-z][A-Za-z0-9+.-]{0,30}:\/\/)([^\s/@:?=&]+):([^\s/@?=&]+)@/g;
 
 /**
  * Authorization / cookie headers, value dropped, header name kept.
@@ -134,18 +153,37 @@ const COOKIE_HEADER =
 /**
  * `key=value` / `key: value` where the key names a credential.
  *
- * The separator must follow the keyword immediately, which is what keeps
- * ordinary prose out: "my password manager is 1Password" has no separator after
- * "password" and does not match.
+ * The separator must still follow the keyword (allowing one closing quote),
+ * which is what keeps ordinary prose out: "my password manager is 1Password"
+ * has no separator after "password" and does not match.
  *
- * `(?<=[a-z])` alongside `\b` is what makes a camelCase field name match. A
- * plain `\b` anchors only at a non-word character, so the keyword had to start
- * the identifier — and MemWal's own worst secret is spelled
- * `delegatePrivateKey`, where `PrivateKey` sits mid-identifier and was
- * therefore invisible to this rule.
+ * ── What the gate has to let in ────────────────────────────────────────────
+ * The keyword may start the identifier, sit mid-identifier, or follow a
+ * separator character, so the left gate is `\b` OR a lookbehind covering
+ * letters, digits, `_` and `-`:
+ *
+ *   - `(?<=[a-z])` is what makes `delegatePrivateKey` match — MemWal's own
+ *     worst secret, where `PrivateKey` sits mid-identifier and a plain `\b`
+ *     never fires.
+ *   - `_` is a WORD character, so `\b` does not fire between `_` and `P`
+ *     either, and `_` is not `[a-z]`. That left the entire SCREAMING_SNAKE
+ *     namespace open: `POSTGRES_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`,
+ *     `DB_PASSWORD=`, `X_AUTH_TOKEN:`, `SESSION_SECRET=` and `my_api_key=`
+ *     all passed through verbatim — the exact spelling a credential arrives in
+ *     when someone pastes an env file or a shell export.
+ *
+ * And a closing quote may sit between the keyword and the separator, because
+ * that is what a JSON object looks like: `{"username": "alice", "password":
+ * "hunter2-prod-9xQ"}` matched nothing at all before. The quote is captured
+ * with the separator and written back, so the shape of the line survives; only
+ * the value is replaced.
+ *
+ * `access[_-]?keys?` is in the list for `AWS_SECRET_ACCESS_KEY`: `secret` is
+ * there, but the separator does not follow it, and no alternative covered the
+ * `ACCESS_KEY` that does precede the `=`.
  */
 const CREDENTIAL_ASSIGNMENT =
-    /(?:\b|(?<=[a-z]))(passwords?|passwd|pwd|passphrases?|api[_-]?keys?|apikeys?|secret[_-]?keys?|client[_-]?secrets?|secrets?|access[_-]?tokens?|refresh[_-]?tokens?|auth[_-]?tokens?|bearer[_-]?tokens?|tokens?|private[_-]?keys?|credentials?)(\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s,;]+)/gi;
+    /(?:\b|(?<=[a-z0-9_-]))(passwords?|passwd|pwd|passphrases?|api[_-]?keys?|apikeys?|secret[_-]?keys?|access[_-]?keys?|client[_-]?secrets?|secrets?|access[_-]?tokens?|refresh[_-]?tokens?|auth[_-]?tokens?|bearer[_-]?tokens?|tokens?|private[_-]?keys?|credentials?)(["'`]?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s,;]+)/gi;
 
 /**
  * Vendor-prefixed keys. Each prefix is issued by exactly one service and never
@@ -237,21 +275,82 @@ const HEX_CREDENTIAL_LABEL =
 const HEX_LABEL_AFTER =
     /^[^A-Za-z0-9]{0,4}(?:is|was)?[^A-Za-z0-9]{0,4}(?:my|the|our|his|her|their)?[^A-Za-z0-9]{0,4}(?:delegate[\s_-]*)?(?:private[\s_-]*key|secret[\s_-]*key|seed|mnemonic|passphrase|api[\s_-]*key)/i;
 
-/** True when a credential word sits within a few tokens of [start, end). */
+/** Placeholders this module writes, for stripping out of a context window. */
+const PLACEHOLDER_RUN = /\[redacted:[a-z-]+\]/g;
+
+/**
+ * True when the span at [start, end) is itself part of a placeholder an earlier
+ * rule already wrote.
+ *
+ * `labelled-key-material` and `credential-assignment` are both 21 characters of
+ * exactly the alphabet {@link OPAQUE_RUN} scans for, so without this a run of
+ * redactions would start redacting its own output.
+ */
+function isInsidePlaceholder(text: string, start: number): boolean {
+    const before = text.slice(Math.max(0, start - 10), start);
+    return /\[redacted:$/.test(before);
+}
+
+/**
+ * True when a credential word sits within `window` characters of [start, end).
+ *
+ * `window` is a parameter because the batch screen (see
+ * {@link sanitizeFactBatch}) looks across entry boundaries, where the label and
+ * the value are further apart than "a few tokens" by construction.
+ */
 function hasAdjacentCredentialLabel(
     text: string,
     start: number,
     end: number,
+    window: number = HEX_LABEL_WINDOW,
 ): boolean {
     // Placeholders left by earlier rules carry the words "secret" and "key",
     // so a run of redactions would otherwise start labelling its own
     // neighbours — and the neighbour after `private_key=[redacted:...]` is
     // exactly the kind of bare SHA this rule must not touch.
     const before = text
-        .slice(Math.max(0, start - HEX_LABEL_WINDOW), start)
-        .replace(/\[redacted:[a-z-]+\]/g, " ");
+        .slice(Math.max(0, start - window), start)
+        .replace(PLACEHOLDER_RUN, " ");
     if (HEX_CREDENTIAL_LABEL.test(before)) return true;
-    return HEX_LABEL_AFTER.test(text.slice(end, end + HEX_LABEL_WINDOW));
+    return HEX_LABEL_AFTER.test(
+        text.slice(end, end + HEX_LABEL_WINDOW).replace(PLACEHOLDER_RUN, " "),
+    );
+}
+
+/**
+ * The same label gate, for key material that is not hex.
+ *
+ * `HEX_RUN` only ever looked at hex, and `HIGH_ENTROPY_CANDIDATE` demands 64+
+ * characters, so everything in between passed with a label in front of it:
+ * `My AWS secret access key is wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY for
+ * prod` came back completely unchanged, three label words and all. In an AWS
+ * key pair that meant the non-secret `AKIA...` id was redacted by the vendor
+ * rule while the 40-character secret half survived — the wrong half of the
+ * pair, every time.
+ *
+ * Same discriminator as the hex rule, for the same reason: the LABEL, never the
+ * shape. A bare 43-character blob id, a commit SHA or a Sui object id with no
+ * credential word near it still passes, which is the property the rest of this
+ * file is built around.
+ */
+const OPAQUE_RUN = /[A-Za-z0-9+/_=-]{20,}/g;
+
+/**
+ * A shape guard on top of the label, so an ordinary long word next to the word
+ * "secret" is not mistaken for key material.
+ *
+ * A generated credential is mixed case, or carries digits, or carries base64
+ * padding and separators; `my_api_key_rotation_policy` is none of those. This
+ * is not an entropy test and is not trying to be one — the label is still what
+ * decides. It only keeps prose out.
+ */
+function looksLikeOpaqueToken(token: string): boolean {
+    if (token.length < 20) return false;
+    const hasLower = /[a-z]/.test(token);
+    const hasUpper = /[A-Z]/.test(token);
+    const hasDigit = /[0-9]/.test(token);
+    const hasSymbol = /[+/=]/.test(token);
+    return (hasLower && hasUpper) || hasDigit || hasSymbol;
 }
 
 /**
@@ -387,6 +486,18 @@ export function sanitizeFact(input: string): SanitizedText {
             ? hit("labelled-key-material")
             : match,
     );
+
+    // Everything else a label makes into key material: the 20+ character
+    // base64/base64url runs that are too short for the entropy rule and not hex
+    // enough for HEX_RUN. Same window, same gate, same asymmetry — a bare run
+    // with nothing calling it a key still passes.
+    text = text.replace(OPAQUE_RUN, (match: string, offset: number, whole: string) => {
+        if (isInsidePlaceholder(whole, offset)) return match;
+        if (!looksLikeOpaqueToken(match)) return match;
+        return hasAdjacentCredentialLabel(whole, offset, offset + match.length)
+            ? hit("labelled-key-material")
+            : match;
+    });
 
     text = text.replace(HIGH_ENTROPY_CANDIDATE, (token: string) =>
         looksLikeSecretBlob(token) ? hit("high-entropy-secret") : token,
