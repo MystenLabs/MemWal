@@ -24,6 +24,12 @@ import {
 } from "./client-info.js";
 import { randomUUID } from "node:crypto";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
+import {
+    describeHealthProbe,
+    probeRelayerHealth,
+    resolveHealthProbeMs,
+    type HealthProbe,
+} from "./health-probe.js";
 import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { log, note } from "./logger.js";
@@ -285,8 +291,15 @@ const MIN_CALL_TIMEOUT_MS = 1_000;
  * `MAX_STATUS_WAIT_MS` for `memwal_remember_status`, and the fixed `timeoutMs`
  * the bulk and analyze tools pass to the SDK. Keep them in lockstep: a value
  * below a tool's real ceiling abandons healthy work. Unlisted tools keep the
- * default. */
+ * default.
+ *
+ * `memwal_recall` is the exception to lockstep: the SDK aborts the recall
+ * request itself at 15s, but the checks it runs first (`/version`, `/config`)
+ * carry their own deadlines, or none on older SDKs. 90s covers those with
+ * room to spare and still answers a lost recall reply at 2 minutes instead
+ * of 4 (WALM-396). */
 const TOOL_DEADLINE_MS: Readonly<Record<string, number>> = {
+    memwal_recall: 90_000,
     memwal_remember: 90_000,
     memwal_remember_status: 60_000,
     memwal_remember_bulk: 120_000,
@@ -462,6 +475,9 @@ interface InFlightEntry {
      * reply lost. Fixed when the request is first tracked, so a reconnect
      * replay keeps the original budget. */
     deadlineMs: number;
+    /** Set while the sweeper asks the relayer's `/health` why this sent call
+     * went unanswered, so the next sweep does not probe it again. */
+    probing?: boolean;
 }
 
 /** The relayer rejected the saved delegate key (HTTP 401 on the handshake).
@@ -1341,6 +1357,7 @@ export async function runBridge(
     const inFlight = new Map<string | number, InFlightEntry>();
     const callTimeoutMs = resolveCallTimeoutMs();
     const stalledHandshakeMs = resolveStalledHandshakeMs(callTimeoutMs);
+    const healthProbeMs = resolveHealthProbeMs();
 
     /** IDs of `tools/list` requests we've forwarded to the relayer. When
      * the response comes back through the SSE pump, we splice in the
@@ -2328,16 +2345,24 @@ export async function runBridge(
         neverSent: boolean,
         now: number,
         tool: string | null,
+        health?: { probe: HealthProbe; relayerUrl: string },
     ): {
         reason: string;
         opts: { toolText: string; errorMessage: string };
     } {
         if (!neverSent) {
+            // What the relayer's `/health` said when asked just now, so the
+            // agent can tell a dead relayer from a wrong URL from one stuck
+            // call (WALM-396).
+            const described = health ? describeHealthProbe(health.probe, health.relayerUrl) : null;
             // The request reached the relayer. What is missing is the reply,
             // and for a write that distinction is the whole message: the work
             // may have completed, may still be running, and cannot be assumed
             // undone. "Please retry" is only safe advice for a read.
             if (tool !== null && MUTATING_TOOLS.has(tool)) {
+                const healthNote = described
+                    ? `\nRelayer health: ${described.health}. ${described.verdict}`
+                    : "";
                 return {
                     reason: "no response to a sent write",
                     opts: {
@@ -2348,23 +2373,36 @@ export async function runBridge(
                             "it and does not mean nothing was stored. Do NOT simply repeat the " +
                             "call: run `memwal_recall` for this content first, and only re-save " +
                             "what is genuinely missing. Repeating a bulk save that already " +
-                            "landed stores a second paid copy.",
+                            "landed stores a second paid copy." +
+                            healthNote,
                         errorMessage:
                             `Walrus Memory ${tool} was sent but its reply never arrived. The write ` +
-                            "may have completed; verify with recall before retrying.",
+                            "may have completed; verify with recall before retrying." +
+                            healthNote,
                     },
                 };
             }
+            const nextStep =
+                described === null || described.reachable
+                    ? "This call only reads, so it is safe to retry once. If it keeps " +
+                      "happening, report it with the time of the call."
+                    : "This call only reads, so it is safe to retry once that is resolved — " +
+                      "wait a minute if the problem is on the relayer's side.";
+            const healthValue = described?.health ?? "not checked";
             return {
                 reason: "no response",
                 opts: {
-                    toolText:
-                        "❌ Walrus Memory did not answer this call. The request reached the " +
-                        "relayer but the reply never came back. This call only reads, so it is " +
-                        "safe to retry.",
+                    toolText: [
+                        "❌ Walrus Memory did not answer this call.",
+                        "Cause: the request reached the relayer but no reply came back." +
+                            (described ? ` ${described.verdict}` : ""),
+                        `Relayer health: ${healthValue}`,
+                        `Next step: ${nextStep}`,
+                    ].join("\n"),
                     errorMessage:
-                        "Walrus Memory call was orphaned by a reconnect and never " +
-                        "received a response. Safe to retry: this call only reads.",
+                        "Walrus Memory call reached the relayer but never received a " +
+                        `response (relayer health: ${healthValue}). Safe to retry: this call ` +
+                        "only reads.",
                 },
             };
         }
@@ -2439,6 +2477,43 @@ export async function runBridge(
                     ? Math.min(stalledHandshakeMs, entry.deadlineMs)
                     : entry.deadlineMs;
             if (elapsedMs <= deadlineMs) continue;
+            // `initialize` is answered locally and gets no reply here, so
+            // there is nothing to explain and nothing to probe for.
+            if (!neverSent && entry.msg.method !== "initialize") {
+                // A sent call: ask the relayer's `/health` before answering,
+                // so the message can say whether it is down, unreachable, or
+                // up with this one call stuck (WALM-396). Only the answer
+                // waits on the probe; the bookkeeping stays synchronous.
+                if (entry.probing) continue;
+                entry.probing = true;
+                const relayerUrl = creds?.relayerUrl ?? config.relayerUrl;
+                void probeRelayerHealth(relayerUrl, healthProbeMs).then((probe) => {
+                    // A late reply, a logout or a shutdown may have answered
+                    // it while the probe ran. Answering again would be a
+                    // second response for the same id.
+                    if (inFlight.get(id) !== entry) return;
+                    const settledAt = Date.now();
+                    const { reason, opts } = expiredRequestReport(
+                        false,
+                        settledAt,
+                        toolNameOf(entry.msg),
+                        { probe, relayerUrl },
+                    );
+                    log.warn("bridge.call_orphaned", {
+                        id,
+                        method: entry.msg.method ?? null,
+                        elapsedMs: settledAt - entry.startedAt,
+                        deadlineMs,
+                        reason,
+                        health: probe.kind,
+                        healthMs: probe.ms,
+                        handshakeStalledMs: handshakeStalledForMs(settledAt),
+                        lastHandshakeError,
+                    });
+                    failRequest(entry.msg, reason, opts);
+                });
+                continue;
+            }
             // Built only for what actually expired: this walks `pendingForward`
             // and interpolates two user-facing strings, and the branch it
             // serves fires roughly never.
