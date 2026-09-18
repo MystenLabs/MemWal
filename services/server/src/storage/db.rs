@@ -110,6 +110,9 @@ const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
     // Drops failure_reported_at if a preview deploy created it. IF EXISTS,
     // so a database that never had the column (CI, origin/dev-only) is fine.
     migration!("021_drop_failed_write_report_ack.sql"),
+    // Partial index for /health recent_write_outcomes. CONCURRENTLY, own
+    // file — see 022's header.
+    migration!("022_remember_jobs_recent_outcomes.sql"),
 ];
 
 /// Every migration the pipeline applies, in the order it applies them.
@@ -1861,10 +1864,10 @@ impl VectorDb {
     /// failed minutes after being accepted. This is the missing term.
     ///
     /// Counted rather than listed, and read behind a cache measured in
-    /// tens of seconds, because `remember_jobs` is indexed on `owner` and
-    /// on `status` but not on `updated_at` alone. The statement is also
-    /// cancelled at 1s (`SET LOCAL`) so a sequential scan cannot stall
-    /// the public `/health` handler; the probe fails open on timeout.
+    /// tens of seconds. Served by `remember_jobs_recent_outcomes_idx`
+    /// (022). The statement is also cancelled at 1s (`SET LOCAL`) so a
+    /// sequential scan cannot stall the public `/health` handler; the
+    /// probe fails open on timeout.
     pub async fn recent_write_outcomes(
         &self,
         window: std::time::Duration,
