@@ -165,13 +165,19 @@ export function wrapTool<Args>(
             // Name the failure in the structured line too. Without this the log
             // says a call failed and the operator still has to go find the
             // separate console.error below to learn how.
+            // Prefer an explicitly set `name` over the constructor's. The SDK
+            // signals a job outcome with a status code on a plain Error, whose
+            // constructor is always `Error` — routing on that alone left the
+            // switch below unreachable for exactly the cases it names.
+            const name = err?.name && err.name !== "Error"
+                ? err.name
+                : err?.constructor?.name ?? "Error";
             log.warn("tool.failed", {
                 ...outcomeFields(),
-                errName: err?.constructor?.name ?? "Error",
+                errName: name,
                 errMessage: err?.message ?? String(err),
                 causeCode: err?.cause?.code ?? null,
             });
-            const name = err?.constructor?.name ?? "Error";
             const msg = err?.message ?? String(err);
             const cause = err?.cause;
             const causeStr = cause

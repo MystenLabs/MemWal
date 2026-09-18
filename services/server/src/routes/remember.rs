@@ -115,7 +115,10 @@ fn redact_hex_addresses(msg: &str) -> String {
 /// current `status`. Infrastructure failures collapse to fixed copy, chosen by
 /// whether the job has stopped retrying. Everything else keeps its text with
 /// addresses redacted. The DB row is untouched.
-fn sanitize_job_error_for_client(status: &str, error_msg: Option<String>) -> Option<String> {
+pub(crate) fn sanitize_job_error_for_client(
+    status: &str,
+    error_msg: Option<String>,
+) -> Option<String> {
     let msg = error_msg?;
     if crate::jobs::WalletJobError::is_infrastructure_funding_error(&msg) {
         return Some(if status == "failed" {
@@ -226,7 +229,7 @@ fn spawn_prepare_remember_job(
                 )
                 .await?;
 
-                let wallet_index = state.key_pool.next_index().ok_or_else(|| {
+                let wallet_index = state.key_pool.least_loaded_index().ok_or_else(|| {
                     AppError::Internal(
                         "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
                             .into(),
@@ -410,7 +413,7 @@ fn spawn_prepare_bulk_remember_job(
                 for (job_id, namespace, vector, encrypted) in prepared {
                     let wallet_index = state
                         .key_pool
-                        .next_index()
+                        .least_loaded_index()
                         .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
                     let encrypted_b64 =
                         base64::engine::general_purpose::STANDARD.encode(&encrypted);
@@ -818,12 +821,35 @@ pub async fn remember(
                         namespace_owned,
                         auth.public_key.clone(),
                     );
+                    return Ok((
+                        StatusCode::ACCEPTED,
+                        Json(RememberAcceptedResponse {
+                            job_id: existing_id,
+                            status: "pending".to_string(),
+                        }),
+                    ));
                 }
+
+                // Losing the claim now means a concurrent retry took it, not
+                // that the TTL blocked us — `failed` rows are re-claimable
+                // immediately. Report whatever that winner left behind rather
+                // than asserting "pending" on its behalf: answering with a
+                // state we did not reach is what told callers a dead job was
+                // queued.
+                let actual: String = sqlx::query_scalar(
+                    "SELECT status FROM remember_jobs WHERE id = $1",
+                )
+                .bind(&existing_id)
+                .fetch_optional(state.db.pool())
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to re-read job status: {}", e)))?
+                .unwrap_or_else(|| existing_status.clone());
+
                 return Ok((
                     StatusCode::ACCEPTED,
                     Json(RememberAcceptedResponse {
                         job_id: existing_id,
-                        status: "pending".to_string(),
+                        status: actual,
                     }),
                 ));
             }
@@ -1020,15 +1046,38 @@ fn should_spawn_after_reset(rows_affected: u64) -> bool {
     rows_affected == 1
 }
 
+/// How long a preparation claim fences other claimants.
+///
+/// The TTL exists to stop a second request stealing a claim from a preparation
+/// that is still running. It must NOT apply to a job that already reached
+/// `failed`: that preparation is over — it either errored on its own or the
+/// stale sweeper failed it and cleared its token — so there is no live task to
+/// protect, and waiting out the TTL only blocks the retry the caller was just
+/// told to make.
+///
+/// That was not theoretical. `memwal_remember` tells an agent to send a failed
+/// fact again; the derived idempotency key collapses the retry onto the failed
+/// row; the claim was refused because it was less than 60s old; and the route
+/// answered 202 ACCEPTED anyway. The caller was told the write was queued while
+/// nothing whatsoever was running.
+///
+/// Letting a `failed` row be re-claimed immediately is safe because fencing is
+/// done by the TOKEN, not the clock: a new claim rotates `prepare_claim_token`,
+/// and any straggler's own UPDATE is `WHERE ... prepare_claim_token = <old>`,
+/// so it matches zero rows and returns before `enqueue_wallet_job`.
 const PREPARE_CLAIM_TTL_SECS: i64 = 60;
 
+/// Re-claiming clears `failure_reported_at` along with `error_msg`: the row is
+/// being reused for a fresh attempt, and the recall report only surfaces a
+/// failure once per row. Left set, a retry that failed AGAIN would never be
+/// reported — silent loss, which is the exact thing that report exists to stop.
 async fn claim_remember_preparation(
     pool: &sqlx::PgPool,
     job_id: &str,
 ) -> Result<Option<String>, AppError> {
     let token = uuid::Uuid::new_v4().to_string();
     let claimed: Option<String> = sqlx::query_scalar(
-        "UPDATE remember_jobs SET prepare_claimed_at = NOW(), prepare_claim_token = $3, status = CASE WHEN status = 'failed' AND blob_id IS NULL THEN 'pending' ELSE status END, error_msg = CASE WHEN blob_id IS NULL THEN NULL ELSE error_msg END, updated_at = NOW() WHERE id = $1 AND blob_id IS NULL AND status IN ('pending', 'failed') AND (prepare_claimed_at IS NULL OR prepare_claimed_at < NOW() - make_interval(secs => $2)) RETURNING prepare_claim_token",
+        "UPDATE remember_jobs SET prepare_claimed_at = NOW(), prepare_claim_token = $3, status = CASE WHEN status = 'failed' AND blob_id IS NULL THEN 'pending' ELSE status END, error_msg = CASE WHEN blob_id IS NULL THEN NULL ELSE error_msg END, failure_reported_at = CASE WHEN blob_id IS NULL THEN NULL ELSE failure_reported_at END, updated_at = NOW() WHERE id = $1 AND blob_id IS NULL AND status IN ('pending', 'failed') AND (prepare_claimed_at IS NULL OR prepare_claimed_at < NOW() - make_interval(secs => $2) OR status = 'failed') RETURNING prepare_claim_token",
     )
     .bind(job_id)
     .bind(PREPARE_CLAIM_TTL_SECS)
@@ -1579,6 +1628,110 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "done");
+    }
+
+    /// `memwal_remember` tells an agent to send a failed fact again. The
+    /// derived idempotency key collapses that retry onto the failed row, and
+    /// the claim used to be refused for 60s — while the route answered 202
+    /// ACCEPTED regardless, so the caller was told a write was queued when
+    /// nothing was running. A job that has finished failing has no live
+    /// preparation to fence.
+    /// The recall failure report fires once per ROW, and a re-claim reuses the
+    /// row for a fresh attempt. If the flag survived that reset, a retry that
+    /// failed again would never be reported — silent loss, which is precisely
+    /// what the report exists to prevent. Two fixes that are each correct
+    /// alone and wrong together.
+    #[tokio::test]
+    async fn reclaiming_a_reported_failure_lets_it_be_reported_again() {
+        let pool = idem_test_pool().await;
+        let job_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, error_msg, failure_reported_at)
+             VALUES ($1, '0xowner', 'ns', 'failed', 'first failure', NOW())",
+        )
+        .bind(&job_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        claim_remember_preparation(&pool, &job_id)
+            .await
+            .unwrap()
+            .expect("a failed job is re-claimable");
+
+        let reported: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT failure_reported_at FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            reported.is_none(),
+            "a re-claimed row must be reportable again if it fails a second time",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_job_is_reclaimable_immediately() {
+        let pool = idem_test_pool().await;
+        let job_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, prepare_claimed_at, prepare_claim_token)
+             VALUES ($1, '0xowner', 'ns', 'failed', NOW(), 'stale-token')",
+        )
+        .bind(&job_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Claimed one second ago — well inside PREPARE_CLAIM_TTL_SECS.
+        let claimed = claim_remember_preparation(&pool, &job_id).await.unwrap();
+        assert!(
+            claimed.is_some(),
+            "a failed job must be re-claimable without waiting out the TTL",
+        );
+
+        // And the retry is actually live, not merely reported as such.
+        let status: String = sqlx::query_scalar("SELECT status FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "pending");
+
+        // Rotating the token is what fences the previous attempt, so the old
+        // one can no longer write its preparation or reach the wallet queue.
+        let straggler = sqlx::query(
+            "UPDATE remember_jobs SET preparation_encrypted_b64 = 'late'
+             WHERE id = $1 AND prepare_claim_token = $2",
+        )
+        .bind(&job_id)
+        .bind("stale-token")
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(straggler.rows_affected(), 0, "the old claim must be fenced out");
+    }
+
+    /// The TTL still does its real job: a claim on a job that is genuinely
+    /// mid-preparation (`pending`, claimed just now) must not be stolen.
+    #[tokio::test]
+    async fn a_live_pending_claim_is_still_fenced() {
+        let pool = idem_test_pool().await;
+        let job_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, prepare_claimed_at, prepare_claim_token)
+             VALUES ($1, '0xowner', 'ns', 'pending', NOW(), 'live-token')",
+        )
+        .bind(&job_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            claim_remember_preparation(&pool, &job_id).await.unwrap().is_none(),
+            "a preparation still running must keep its claim",
+        );
     }
 
     #[tokio::test]

@@ -65,3 +65,58 @@ test("memwal_recall is advertised as a read-only search", () => {
         destructiveHint: false,
     });
 });
+
+/**
+ * The bridge carries its own copy of the tool list for the cold-start window,
+ * and nothing compares it to the sidecar's — the tests above only pin it
+ * against literals. That is how the two drifted: the sidecar grew batch
+ * settling and a pending-result contract, the bridge's copy did not, and the
+ * mismatch is invisible until a real session hits it.
+ *
+ * These pin the parts an agent acts on, so the next divergence fails here
+ * instead of in someone's first save of the session.
+ */
+
+test("cold-start memwal_remember_status accepts a whole batch", () => {
+    for (const list of [TOOL_DEFINITIONS, SIGNED_OUT_TOOL_DEFINITIONS]) {
+        const tool = list.find((t) => t.name === "memwal_remember_status");
+        assert.ok(tool, "missing memwal_remember_status");
+
+        // `memwal_remember_bulk` hands back a pending body telling the agent to
+        // call this with job_ids. Under additionalProperties:false an absent
+        // property makes that instruction unfollowable.
+        const ids = tool.inputSchema.properties.job_ids;
+        assert.ok(ids, "job_ids must be advertised, or a batch cannot be settled");
+        assert.equal(ids.type, "array");
+        assert.equal(ids.items.type, "string");
+        // Matches MAX_BULK_ITEMS, so a full batch settles in one call.
+        assert.equal(ids.maxItems, 20);
+
+        // Requiring job_id would reject the batch form outright.
+        assert.ok(
+            !(tool.inputSchema.required ?? []).includes("job_id"),
+            "job_id must not be required — the batch form passes job_ids instead",
+        );
+    }
+});
+
+test("cold-start waitMs bound matches the sidecar's ceiling", () => {
+    // The sidecar validates waitMs with zod and rejects anything above its own
+    // cap. Advertising a larger maximum invites the agent to send a value that
+    // comes straight back as an MCP validation error — observed live at 60000
+    // once the sidecar lowered its ceiling to 45000.
+    for (const list of [TOOL_DEFINITIONS, SIGNED_OUT_TOOL_DEFINITIONS]) {
+        const tool = list.find((t) => t.name === "memwal_remember_status");
+        assert.equal(tool.inputSchema.properties.waitMs.maximum, 45000);
+    }
+});
+
+test("cold-start write tools warn that a result may not be saved yet", () => {
+    // Both write tools return at accept now. An agent that was never told a
+    // pending result is normal reports it to the user as stored.
+    for (const name of ["memwal_remember", "memwal_remember_bulk"]) {
+        const d = desc(TOOL_DEFINITIONS, name);
+        assert.match(d, /NOT yet saved|NOT saved/i, `${name} omits the pending warning`);
+        assert.match(d, /memwal_remember_status/, `${name} does not say how to settle it`);
+    }
+});

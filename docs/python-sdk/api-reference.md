@@ -30,7 +30,7 @@ questions:
   - How does Ed25519 authentication work in the MemWal Python SDK?
 answer: >-
   The MemWal Python SDK API reference documents all methods on MemWal and MemWalSync
-  including remember, recall, analyze, ask, restore, health, and lower-level manual methods.
+  including remember, recall, analyze, ask, restore, list_namespaces, health, and lower-level manual methods.
   It also covers result dataclasses, exception hierarchy, middleware wrappers, utility
   functions for delegate key derivation, and the Ed25519 request signing protocol.
 ---
@@ -182,6 +182,37 @@ RestoreResult(restored: int, skipped: int, total: int, namespace: str, owner: st
 ```
 
 `truncated=true` is known-retryable-incomplete (this call's `limit`, or a still-expandable sidecar candidate fetch); `truncated=false` is not proof the sidecar saw every onchain blob (WALM-451 `sourceCapped`).
+
+### `list_namespaces(cursor=None, limit=None) -> NamespacesResult`
+
+List the namespaces this account holds memories in. Returns metadata only, with no blob fetch or decryption.
+
+Recall needs a namespace to search, so an agent on an unfamiliar account would otherwise have to guess names or fall back to `"default"`. Namespaces are flat and exact-match: to work with a prefix such as `proj/`, filter the names client-side and recall each one.
+
+- `cursor`: the previous page's `next_cursor`, to continue a walk or poll for namespaces changed since then
+- `limit`: page size; the relayer defaults to `100` and clamps to `500`
+
+```python
+NamespacesResult(
+    namespaces: list[NamespaceSummary],  # NamespaceSummary(id, name, memory_count, storage_used, updated_at)
+    next_cursor: str | None,
+    has_more: bool,
+    snapshot_version: int,
+)
+```
+
+Paginate on `has_more`, not on page length. The relayer clamps `limit`, so a caller asking for more than the cap gets exactly the cap back.
+
+```python
+cursor = None
+while True:
+    page = await memwal.list_namespaces(cursor=cursor)
+    for ns in page.namespaces:
+        print(ns.name, ns.memory_count)
+    cursor = page.next_cursor
+    if not page.has_more:
+        break
+```
 
 ### `health() -> HealthResult`
 

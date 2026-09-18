@@ -159,6 +159,26 @@ Proxy to the sidecar's `/sponsor/execute` endpoint. `sender` must match the shor
 
 Every route below requires the signed headers described in [Authentication](#authentication).
 
+### `GET /api/whoami`
+
+Return the account identity the caller's delegate key resolves to. Takes no request body.
+
+Authentication already resolves the account before any handler runs, so this route just hands back what the middleware computed. Returning `account_id` is safe here precisely because the route is authenticated. The caller has proven it holds a delegate key registered against this account, so it only ever learns about itself. The public `GET /api/accounts/:owner/exists` route deliberately withholds it.
+
+The motivating use is rebuilding local credentials: a client that holds a working delegate key but has lost the surrounding metadata (an interrupted sign-in, a wiped config file) needs `account_id`, `owner`, and `package_id` to write a usable credentials file, and the key alone proves entitlement to all three.
+
+**Response:**
+
+```json
+{
+  "account_id": "0x...",
+  "owner": "0x...",
+  "package_id": "0x..."
+}
+```
+
+**Mainnet only, when the caller cannot send `x-account-id`.** Recovering a lost account id is the one case where the client has no id to send, so authentication has to find it by scanning the `AccountRegistry` for the delegate key. That scan runs over Sui JSON-RPC, which Testnet no longer serves, so Testnet requires the `x-account-id` hint for delegate-key authentication and rejects the request with `401` when it is absent, including this one. A caller that already knows its account id can use this route on either network; a caller recovering one cannot use it on Testnet.
+
 ### `POST /api/remember`
 
 Submit text as an encrypted memory job. The relayer returns after creating a background job; embedding, Seal encryption, Walrus upload, and vector indexing continue asynchronously.
@@ -269,6 +289,8 @@ Search for memories matching a natural language query. Returns decrypted plainte
 
 `limit` defaults to `10`; the server caps it at `100`. `namespace` defaults to `"default"`. `scoring_weights` takes an optional object; omit it to keep the plain cosine-distance order.
 
+`sort` is optional: `"relevance"` (the cosine order, and the behaviour when omitted) or `"recent"` (the newest among the semantic matches). An explicit `sort`, `"relevance"` included, is the order, and the relayer ignores `scoring_weights` for that request.
+
 #### Scoring weights
 
 The optional `scoring_weights` object turns on composite ranking. The same object works on `/api/recall`, `/api/recall/manual`, and `/api/ask`.
@@ -297,7 +319,7 @@ The optional `scoring_weights` object turns on composite ranking. The same objec
 }
 ```
 
-`score` only appears when `scoring_weights` sets a nonzero `recency` or `importance` weight. A request that sets only the `semantic` weight keeps the plain cosine order, and the relayer omits `score`. `dropped_count` only appears when at least one match dropped out because its blob download or decryption failed; the relayer omits those matches from `results`.
+`score` only appears when `scoring_weights` sets a nonzero `recency` or `importance` weight and `sort` is omitted. A request that sets only the `semantic` weight keeps the plain cosine order, and the relayer omits `score`. `dropped_count` only appears when at least one match dropped out because its blob download or decryption failed; the relayer omits those matches from `results`.
 
 ### `POST /api/remember/manual`
 

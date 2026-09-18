@@ -38,7 +38,7 @@ mod sponsor;
 
 // Re-export every handler so `main.rs` keeps using `routes::<name>`
 // without having to know which submodule each handler lives in.
-pub use accounts::account_exists;
+pub use accounts::{account_exists, whoami};
 pub use admin::{ask, embed, forget, get_config, health, restore, stats, version};
 pub use analyze::analyze;
 pub use memory_read::{list_owner_agents, list_owner_memories, list_owner_namespaces};
@@ -247,6 +247,21 @@ pub(super) fn select_hits_for_sort(
     // sort, which is the whole point of the over-fetch.
     hits.truncate(limit);
     hits
+}
+
+/// The scoring weights `/api/recall` hands to the ranker. An explicit `sort`
+/// must not be re-ranked, so it yields the default (no-op) weights; malformed
+/// weights are rejected either way.
+pub(super) fn resolve_scoring_weights(
+    sort: Option<crate::types::RecallSort>,
+    requested: Option<crate::types::ScoringWeights>,
+) -> Result<crate::types::ScoringWeights, crate::types::AppError> {
+    let requested = requested.unwrap_or_default();
+    requested.validate()?;
+    if sort.is_some() {
+        return Ok(crate::types::ScoringWeights::default());
+    }
+    Ok(requested)
 }
 
 /// Project the ranker's output onto the `/api/recall` and `/api/ask` wire
@@ -458,6 +473,130 @@ mod recall_sort_tests {
         let kept = super::select_hits_for_sort(hits, RecallSort::Recent, 10);
 
         assert_eq!(kept.len(), 1);
+    }
+}
+
+/// Each test replays the recall handler's ordering (`select_hits_for_sort`,
+/// then the ranker with the resolved weights) over hand-scored rows.
+#[cfg(test)]
+mod recall_sort_precedence_tests {
+    use crate::engine::HydratedMemory;
+    use crate::services::ranker::{CompositeRanker, Ranker};
+    use crate::types::{AppError, RecallSort, ScoringWeights, SearchHit};
+
+    fn ts(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        ts("2026-07-06T00:00:00Z")
+    }
+
+    /// `distance` ascending is the order pgvector hands back.
+    fn search_hit(blob_id: &str, distance: f64, created_at: &str) -> SearchHit {
+        SearchHit {
+            blob_id: blob_id.to_string(),
+            distance,
+            created_at: ts(created_at),
+            importance: 0.5,
+        }
+    }
+
+    fn weights(recency: f64) -> ScoringWeights {
+        ScoringWeights {
+            semantic: 1.0,
+            recency,
+            recency_half_life_days: 30.0,
+            importance: 0.0,
+        }
+    }
+
+    fn recall_order(
+        hits: Vec<SearchHit>,
+        sort: Option<RecallSort>,
+        requested: ScoringWeights,
+    ) -> Vec<String> {
+        let weights = super::resolve_scoring_weights(sort, Some(requested)).unwrap();
+        let limit = hits.len();
+        let hydrated: Vec<HydratedMemory> =
+            super::select_hits_for_sort(hits, sort.unwrap_or_default(), limit)
+                .into_iter()
+                .map(|h| HydratedMemory {
+                    blob_id: h.blob_id,
+                    text: String::new(),
+                    distance: h.distance,
+                    created_at: Some(h.created_at),
+                    importance: Some(h.importance),
+                })
+                .collect();
+        CompositeRanker
+            .rank(hydrated, &weights, now())
+            .into_iter()
+            .map(|r| r.memory.blob_id)
+            .collect()
+    }
+
+    /// Composite scores at semantic 1.0 / recency 0.3 / half-life 30d:
+    ///   old-but-close  = 0.90 + 0.3 * 2^(-30/30) = 1.05
+    ///   newest-but-far = 0.10 + 0.3 * 2^(0/30)   = 0.40
+    fn ticket_repro_hits() -> Vec<SearchHit> {
+        vec![
+            search_hit("old-but-close", 0.10, "2026-06-06T00:00:00Z"),
+            search_hit("newest-but-far", 0.90, "2026-07-06T00:00:00Z"),
+        ]
+    }
+
+    /// Composite scores at semantic 1.0 / recency 0.8 / half-life 30d:
+    ///   close-old = 0.90 + 0.8 * 2^(-60/30) = 1.10
+    ///   far-new   = 0.80 + 0.8 * 2^(0/30)   = 1.60
+    /// so the ranker, when it runs, reverses the cosine order.
+    fn weights_reverse_cosine_hits() -> Vec<SearchHit> {
+        vec![
+            search_hit("close-old", 0.10, "2026-05-07T00:00:00Z"),
+            search_hit("far-new", 0.20, "2026-07-06T00:00:00Z"),
+        ]
+    }
+
+    #[test]
+    fn explicit_recent_is_not_reordered_by_scoring_weights() {
+        assert_eq!(
+            recall_order(ticket_repro_hits(), Some(RecallSort::Recent), weights(0.3)),
+            ["newest-but-far", "old-but-close"]
+        );
+    }
+
+    #[test]
+    fn explicit_relevance_is_not_reordered_by_scoring_weights() {
+        assert_eq!(
+            recall_order(
+                weights_reverse_cosine_hits(),
+                Some(RecallSort::Relevance),
+                weights(0.8)
+            ),
+            ["close-old", "far-new"]
+        );
+    }
+
+    #[test]
+    fn omitted_sort_lets_scoring_weights_rerank() {
+        assert_eq!(
+            recall_order(weights_reverse_cosine_hits(), None, weights(0.8)),
+            ["far-new", "close-old"]
+        );
+    }
+
+    /// Malformed weights are a 400 even when an explicit `sort` would ignore
+    /// them — `sort` does not quietly excuse a bad request.
+    #[test]
+    fn malformed_weights_are_rejected_even_when_sort_is_explicit() {
+        let mut malformed = weights(0.3);
+        malformed.semantic = f64::NAN;
+        assert!(matches!(
+            super::resolve_scoring_weights(Some(RecallSort::Recent), Some(malformed)),
+            Err(AppError::BadRequest(_))
+        ));
     }
 }
 

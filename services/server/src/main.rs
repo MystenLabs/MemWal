@@ -14,6 +14,7 @@ mod routes;
 mod security_delete_auth;
 mod security_delete_error;
 mod services;
+mod sidecar_saturation;
 mod storage;
 mod sui;
 mod types;
@@ -1431,10 +1432,10 @@ async fn main() {
     // Sidecar upload-queue saturation monitor. The watchdog above only
     // checks that /health answers; during the 2026-06-10 congestion incident
     // it stayed green while 120 uploads queued and jobs burned their retry
-    // budgets. This monitor reads the queue counters that /health already
-    // exposes and alerts ops while there is still time to act (add wallets /
-    // throttle the burst) — before queued requests outlive the sidecar's
-    // 120s acquire timeout and start failing.
+    // budgets. This monitor reads the sidecar's upload-queue counters and
+    // alerts ops while there is still time to act (add wallets / throttle the
+    // burst) — before queued requests outlive the sidecar's 120s acquire
+    // timeout and start failing.
     let saturation_threshold = parse_env_u64("SIDECAR_QUEUE_SATURATION_THRESHOLD", 20, 1, 10_000);
     let saturation_consecutive = parse_env_u32("SIDECAR_QUEUE_SATURATION_CONSECUTIVE", 4, 1, 100);
     let saturation_interval_secs =
@@ -1447,13 +1448,16 @@ async fn main() {
     );
     {
         let monitor_client = state.http_client.clone();
-        let monitor_url = health_url.clone();
+        let monitor_url = format!("{}{}", sidecar_url, sidecar_saturation::UPLOAD_METRICS_PATH);
         let monitor_alerts = Arc::clone(&state.alerts);
         let monitor_network = config.sui_network.clone();
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(saturation_interval_secs));
-            let mut consecutive_saturated = 0u32;
+            let mut tracker = sidecar_saturation::SaturationTracker::new(
+                saturation_threshold,
+                saturation_consecutive,
+            );
             loop {
                 interval.tick().await;
                 let body = match monitor_client
@@ -1465,57 +1469,79 @@ async fn main() {
                     Ok(resp) if resp.status().is_success() => {
                         match resp.json::<serde_json::Value>().await {
                             Ok(v) => v,
-                            Err(_) => continue,
+                            Err(err) => {
+                                tracing::error!(
+                                    "  sidecar: upload metrics body is not JSON, saturation alert is blind: {}",
+                                    err
+                                );
+                                continue;
+                            }
                         }
                     }
-                    // Liveness problems are the watchdog's job; only the
-                    // healthy-but-saturated case belongs here.
-                    _ => continue,
+                    // The sidecar answered, so the watchdog stays green; a
+                    // non-2xx here means the metrics route itself is broken.
+                    Ok(resp) => {
+                        tracing::error!(
+                            "  sidecar: {} returned status={}, saturation alert is blind",
+                            sidecar_saturation::UPLOAD_METRICS_PATH,
+                            resp.status()
+                        );
+                        continue;
+                    }
+                    // An unreachable sidecar is the watchdog's job.
+                    Err(_) => continue,
                 };
 
-                let queued = body["queuedWalrusUploads"].as_u64().unwrap_or(0);
-                let active = body["activeWalrusUploads"].as_u64().unwrap_or(0);
-                let global_capacity = body["walrusUploadLimits"]["globalCapacity"]
-                    .as_u64()
-                    .unwrap_or(0);
+                let sample = match sidecar_saturation::parse_upload_metrics(&body) {
+                    Ok(sample) => sample,
+                    Err(field) => {
+                        tracing::error!(
+                            "  sidecar: upload metrics missing {}, saturation alert is blind",
+                            field
+                        );
+                        continue;
+                    }
+                };
 
-                if queued > saturation_threshold {
-                    consecutive_saturated = consecutive_saturated.saturating_add(1);
-                    tracing::warn!(
-                        "  sidecar: upload queue saturated queued={} active={} capacity={} consecutive={}/{}",
-                        queued,
-                        active,
-                        global_capacity,
-                        consecutive_saturated,
-                        saturation_consecutive,
-                    );
-                } else {
-                    if consecutive_saturated >= saturation_consecutive {
+                match tracker.observe(sample.queued) {
+                    sidecar_saturation::QueueCheck::Clear => {}
+                    sidecar_saturation::QueueCheck::Drained => {
                         tracing::info!(
                             "  sidecar: upload queue drained (queued={} <= threshold {})",
-                            queued,
+                            sample.queued,
                             saturation_threshold,
                         );
                     }
-                    consecutive_saturated = 0;
-                }
-
-                // Alert once per crossing; the AlertManager dedup window
-                // handles re-alerting if the backlog persists.
-                if consecutive_saturated >= saturation_consecutive {
-                    let alert = crate::alerts::WalrusUploadQueueSaturatedAlert {
-                        sui_network: monitor_network.clone(),
-                        queued,
-                        active,
-                        global_capacity,
-                        threshold: saturation_threshold,
-                        consecutive_checks: consecutive_saturated,
-                    };
-                    if let Err(err) = monitor_alerts
-                        .notify_walrus_upload_queue_saturated(alert)
-                        .await
-                    {
-                        tracing::warn!("  sidecar: saturation alert delivery failed: {}", err);
+                    sidecar_saturation::QueueCheck::Saturated { consecutive, alert } => {
+                        tracing::warn!(
+                            "  sidecar: upload queue saturated queued={} active={} capacity={} consecutive={}/{}",
+                            sample.queued,
+                            sample.active,
+                            sample.global_capacity,
+                            consecutive,
+                            saturation_consecutive,
+                        );
+                        // Alert on every saturated check past the streak; the
+                        // AlertManager dedup window handles re-alerting.
+                        if alert {
+                            let alert = crate::alerts::WalrusUploadQueueSaturatedAlert {
+                                sui_network: monitor_network.clone(),
+                                queued: sample.queued,
+                                active: sample.active,
+                                global_capacity: sample.global_capacity,
+                                threshold: saturation_threshold,
+                                consecutive_checks: consecutive,
+                            };
+                            if let Err(err) = monitor_alerts
+                                .notify_walrus_upload_queue_saturated(alert)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "  sidecar: saturation alert delivery failed: {}",
+                                    err
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1981,6 +2007,11 @@ async fn main() {
         // Mode-blind; owner-scoped via AuthInfo.
         .route("/api/forget", post(routes::forget))
         .route("/api/stats", post(routes::stats))
+        // Identity echo — tells an authenticated caller which account its
+        // delegate key resolves to. Must stay inside this authed group; the
+        // account_id it returns is deliberately withheld from the public
+        // /api/accounts/{owner}/exists route. See routes::whoami.
+        .route("/api/whoami", get(routes::whoami))
         // Router::layer runs middleware bottom-to-top (last added runs first).
         // Keep auth outer so AuthInfo is in request extensions before rate limiting reads it.
         .layer(middleware::from_fn_with_state(

@@ -117,6 +117,11 @@ export function loginSuccessNotification(info: LoginSuccessInfo): string {
  *
  * `reason` null — no attempt on record — yields the empty string, so callers
  * can prefix unconditionally.
+ *
+ * The advice splits on whether the user approved the wallet step. If they did,
+ * the key is on-chain and in the write-ahead record (WALM-332), so a restart
+ * reclaims it. Signing in again would reuse that same key, and the dashboard's
+ * `add_delegate_key` aborts on a key that is already registered.
  */
 export function loginFailureNotice(reason: string | null): string {
     if (!reason) return "";
@@ -125,10 +130,12 @@ export function loginFailureNotice(reason: string | null): string {
         "",
         `Reason: ${reason}`,
         "",
-        "The unused key from this attempt may already be registered on your account. Remove it",
-        "from the dashboard if you are not using it. Sign in again and open the new link",
-        "straight away. A retry only helps once the MCP client is left running through the",
-        "wallet prompt.",
+        "If you approved the wallet step, that key is registered and saved on this machine.",
+        "Restart the MCP client within 24 hours and it is reclaimed. Signing in again cannot",
+        "register the same key twice, and removing it from the dashboard abandons it.",
+        "",
+        "If you did not approve it, sign in again and open the new link straight away. A",
+        "retry only helps once the MCP client is left running through the wallet prompt.",
         "",
         "---",
         "",

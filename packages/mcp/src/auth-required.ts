@@ -41,7 +41,7 @@ interface RpcMessage {
 const SIGNED_OUT_REMEMBER =
     "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.";
 const SIGNED_IN_REMEMBER =
-    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.";
+    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. A Walrus write takes 30-60s and this call waits for it, so a success carries a blob_id and means the fact is stored. If it outruns that budget you get a job_id and the fact is NOT yet saved — say so rather than claiming it is stored, and resolve it with memwal_remember_status.";
 const SIGNED_OUT_RECALL =
     "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.";
 const SIGNED_IN_RECALL =
@@ -72,7 +72,7 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Remember Multiple Facts",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
+            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. A Walrus write takes 30-60s and this call waits for them, so a success carries blob_ids and means the facts are stored. If they outrun that budget you get job_ids and the facts are NOT yet saved — say they are being saved rather than stored, and resolve them with memwal_remember_status.",
         inputSchema: {
             type: "object",
             properties: {
@@ -85,6 +85,35 @@ function buildToolDefinitions(proactive: boolean) {
                 namespace: { type: "string" },
             },
             required: ["facts"],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: "memwal_remember_status",
+        title: "Check a Remember Job",
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        description:
+            "Check whether in-flight Walrus Memory writes have landed. Call this with the job_id memwal_remember returned, or job_ids from memwal_remember_bulk, when the write was reported NOT saved yet. Returns the blob_id once stored, reports that it is still uploading (call again with the ids still listed), or reports that it failed \u2014 in which case the fact was never stored and you should send it again. A batch can come back mixed, so read every line before telling the user anything is saved.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                job_id: { type: "string", minLength: 1 },
+                // The sidecar takes either one id or a whole batch, and the
+                // pending body `memwal_remember_bulk` returns tells the agent
+                // to come back with `job_ids`. Advertising only `job_id` —
+                // required, under `additionalProperties: false` — made that
+                // instruction unfollowable for the whole cold-start window.
+                job_ids: {
+                    type: "array",
+                    items: { type: "string", minLength: 1 },
+                    minItems: 1,
+                    maxItems: 20,
+                },
+                waitMs: { type: "integer", minimum: 0, maximum: 45000, default: 10000 },
+            },
+            // Neither is required on its own; the sidecar rejects passing both
+            // and rejects passing neither, which JSON Schema cannot express
+            // here without a `oneOf` that some clients mishandle.
             additionalProperties: false,
         },
     },
@@ -198,6 +227,18 @@ const LOGIN_INSTRUCTION = [
     "",
     "Either path opens a browser tab — click **Connect Sui Wallet** and approve the on-chain",
     "`add_delegate_key` transaction. Credentials land at `~/.memwal/credentials.json`.",
+].join("\n");
+
+/** Replaces {@link LOGIN_INSTRUCTION} after a failed attempt, which
+ * {@link loginFailureNotice} has just described. The generic copy promises "no
+ * client restart" and leads with `memwal_login`; for a key the user already
+ * approved, a restart is the only thing that recovers it and signing in again
+ * cannot register it twice. So the retry is offered only for the case it
+ * actually fixes. */
+const LOGIN_RETRY_INSTRUCTION = [
+    "If you did not approve the wallet step, start a new sign-in: call the `memwal_login`",
+    "tool from this client, or run `npx -y @mysten-incubation/memwal-mcp login`. Open the",
+    "new link straight away and leave this client running through the wallet prompt.",
 ].join("\n");
 
 /** Set when a background `memwal_login` ends without credentials. The tool call
@@ -473,7 +514,12 @@ function handleAuthLine(
             id,
             result: {
                 content: [
-                    { type: "text", text: `${loginFailureNotice(lastLoginFailure)}${LOGIN_INSTRUCTION}` },
+                    {
+                        type: "text",
+                        text: lastLoginFailure
+                            ? `${loginFailureNotice(lastLoginFailure)}${LOGIN_RETRY_INSTRUCTION}`
+                            : LOGIN_INSTRUCTION,
+                    },
                 ],
                 isError: true,
             },

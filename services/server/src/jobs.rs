@@ -400,6 +400,31 @@ pub fn backoff_duration(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(2u64.pow(attempt))
 }
 
+/// How long a failed upload attempt should pause before Apalis re-queues it,
+/// or `None` when no pause is warranted.
+///
+/// Apalis attaches no retry/backoff layer (see `WalletJobError`'s doc
+/// comment), so a retriable error is re-polled almost immediately and the
+/// whole attempt budget burns inside one upstream rate-limit window. Observed
+/// in production: a single job took attempts 2, 3, 4 and 5 against Walrus
+/// `503 Too Many Requests` within one second, rotating through four wallets
+/// that never had a chance to land, and died as "exhausted retries" about a
+/// second after its first failure. The upstream limit is time-based, so
+/// rotating wallets cannot help — only waiting can.
+///
+/// Returns `None` for an aborting error (retrying it is pointless) and for the
+/// final attempt (nothing is coming, so the sleep would only delay the
+/// failure the caller is already reporting).
+fn upload_retry_backoff(
+    classified: &WalletJobError,
+    attempt_info: WalletJobAttemptInfo,
+) -> Option<std::time::Duration> {
+    if classified.aborts_retries() || attempt_info.current >= attempt_info.max {
+        return None;
+    }
+    Some(backoff_duration(attempt_info.current as u32))
+}
+
 pub(crate) fn wallet_job_request(
     job: WalletJob,
 ) -> Request<WalletJob, apalis_sql::context::SqlContext> {
@@ -521,6 +546,13 @@ pub(crate) async fn execute_wallet_job(
                     .into_apalis_error());
                 }
             };
+            // Mark this wallet busy for the rest of the attempt, so a
+            // concurrently-enqueued job picks an idle wallet instead of
+            // queueing behind this upload. Held by guard rather than paired
+            // calls because every return below — and there are many — has to
+            // release it.
+            let _wallet_slot = state.key_pool.begin_attempt(wallet_index);
+
             if wallet_index != enqueued_wallet_index || attempt_info.current > 1 {
                 tracing::info!(
                     "[wallet-job:upload] selected wallet for attempt: enqueued={} executing={} attempt={}/{}",
@@ -590,6 +622,19 @@ pub(crate) async fn execute_wallet_job(
             policy_package_id,
             end_epoch,
         } => {
+            // Mark the wallet busy for this transaction too. `least_loaded_index`
+            // answers "is this key signing right now", and only the upload arm
+            // was telling it — so a metadata+transfer, which signs on the very
+            // same wallet, read as idle. A concurrently-enqueued upload would
+            // then pick that key precisely because it looked free, and queue
+            // behind the transaction anyway. That is the failure join-shortest-
+            // queue exists to avoid, and it showed up as the pool converging on
+            // whichever key was mid-transfer.
+            //
+            // `enqueued_wallet_index` rather than a fresh pick: this operation
+            // must run on the key that already owns the blob object.
+            let _wallet_slot = state.key_pool.begin_attempt(enqueued_wallet_index);
+
             let result = execute_set_metadata_and_transfer(
                 state,
                 enqueued_wallet_index,
@@ -1759,6 +1804,22 @@ async fn execute_upload_and_transfer_locked(
                     err.kind(),
                     !err.aborts_retries()
                 );
+                // The durable upload has its own exit, so it needs its own
+                // spacing — this is the path a real retry actually took.
+                // Observed on dev: `durable Walrus upload request failed`
+                // classified transient at attempt 1/5, with the next attempt
+                // starting in the same second because only the legacy exit
+                // below had been given a backoff.
+                if let Some(delay) = upload_retry_backoff(&err, attempt_info) {
+                    tracing::info!(
+                        "[wallet-job:upload] job_id={} backing off {:?} before attempt {}/{}",
+                        jid,
+                        delay,
+                        attempt_info.current + 1,
+                        attempt_info.max,
+                    );
+                    tokio::time::sleep(delay).await;
+                }
                 Err(err)
             }
         };
@@ -2006,6 +2067,20 @@ async fn execute_upload_and_transfer_locked(
                 classified.kind(),
                 !classified.aborts_retries()
             );
+            // The wallet slot stays held across this sleep. That is
+            // deliberate: a backing-off job is still this wallet's turn, and
+            // releasing it would invite another job onto a wallet that is
+            // about to retry anyway.
+            if let Some(delay) = upload_retry_backoff(&classified, attempt_info) {
+                tracing::info!(
+                    "[wallet-job:upload] job_id={} backing off {:?} before attempt {}/{}",
+                    remember_job_id.as_deref().unwrap_or("-"),
+                    delay,
+                    attempt_info.current + 1,
+                    attempt_info.max,
+                );
+                tokio::time::sleep(delay).await;
+            }
             return Err(classified);
         }
     };
@@ -2863,7 +2938,7 @@ mod tests {
         is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
         mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
         persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
-        update_remember_job_after_wallet_error, upload_resume_disposition,
+        update_remember_job_after_wallet_error, upload_resume_disposition, upload_retry_backoff,
         wallet_index_for_upload_attempt, wallet_job_request, JobUploadLock, LockOutcome,
         UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
         MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
@@ -3031,6 +3106,47 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         assert_eq!(backoff_duration(3), std::time::Duration::from_secs(8));
         assert_eq!(backoff_duration(4), std::time::Duration::from_secs(16));
         assert_eq!(backoff_duration(5), std::time::Duration::from_secs(32));
+    }
+
+    #[test]
+    fn upload_retry_backs_off_between_attempts() {
+        // The production failure this exists for: attempts 2..5 against Walrus
+        // 503 "Too Many Requests" inside one second, four wallet rotations
+        // that never had a chance to land. Each attempt must now be spaced.
+        let rate_limited = WalletJobError::Transient(
+            "durable Walrus upload failed (503 Service Unavailable): {\"error\":\"Too Many Requests\"}"
+                .into(),
+        );
+        for attempt in 1..5usize {
+            assert_eq!(
+                upload_retry_backoff(
+                    &rate_limited,
+                    WalletJobAttemptInfo {
+                        current: attempt,
+                        max: 5
+                    }
+                ),
+                Some(backoff_duration(attempt as u32)),
+                "attempt {attempt} should wait before the next one",
+            );
+        }
+    }
+
+    #[test]
+    fn upload_retry_does_not_back_off_when_nothing_follows() {
+        let transient = WalletJobError::Transient("upstream hiccup".into());
+        // Final attempt: sleeping only delays the failure already being reported.
+        assert_eq!(
+            upload_retry_backoff(&transient, WalletJobAttemptInfo { current: 5, max: 5 }),
+            None
+        );
+        // Aborting errors never retry, so spacing them buys nothing.
+        let aborting = WalletJobError::GasPoolExhausted("balance::split ENotEnough".into());
+        assert!(aborting.aborts_retries());
+        assert_eq!(
+            upload_retry_backoff(&aborting, WalletJobAttemptInfo { current: 1, max: 5 }),
+            None
+        );
     }
 
     #[test]

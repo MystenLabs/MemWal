@@ -20,6 +20,7 @@ import {
     unlinkSync,
     existsSync,
 } from "node:fs";
+import { log } from "./logger.js";
 
 export interface MemWalCredentials {
     /** 64-hex Ed25519 private key seed (32 bytes). NEVER log this. */
@@ -403,5 +404,158 @@ function isValid(obj: unknown): obj is MemWalCredentials {
         typeof c.relayerUrl === "string" &&
         typeof c.createdAt === "string" &&
         c.version === 1
+    );
+}
+
+/* ------------------------------------------------------------------------- *
+ * Pending login — write-ahead for the delegate keypair (WALM-332).
+ *
+ * The browser registers our delegate public key on-chain, which costs gas and
+ * cannot be undone, and only afterwards POSTs the callback that makes us save
+ * the matching private key. Losing this process in that window used to destroy
+ * the only copy of the key, stranding a paid registration nobody could use.
+ *
+ * So the keypair is written here BEFORE the browser is given the connect URL,
+ * and cleared once `saveCreds` has the key safely in `credentials.json`. A
+ * record that outlives its flow is recovered on next start.
+ * ------------------------------------------------------------------------- */
+
+const PENDING_FILE = "login-pending.json";
+
+/**
+ * How long a stranded record stays recoverable.
+ *
+ * Deliberately far longer than the 5-minute login timeout: the whole point is
+ * to survive a client restart, and a user who quits for the evening and comes
+ * back tomorrow is exactly the case worth covering. The cost of holding it is
+ * an unregistered key on disk, which grants nothing.
+ */
+export const PENDING_LOGIN_TTL_MS = 24 * 60 * 60_000;
+
+export interface PendingLogin {
+    /** 64-hex Ed25519 private key seed. NEVER log this. */
+    delegatePrivateKey: string;
+    delegatePublicKeyHex: string;
+    delegateAddress: string;
+    /** Relayer the flow was started against — recovery must not repoint. */
+    relayerUrl: string;
+    label?: string;
+    /** ISO timestamp, for TTL expiry. */
+    createdAt: string;
+    version: 1;
+}
+
+/** Sits beside whichever credentials file `credsPath()` resolves to, so a
+ * project-local sign-in recovers into that same project. */
+export function pendingLoginPath(): string {
+    return join(dirname(credsPath()), PENDING_FILE);
+}
+
+/**
+ * Persist the pending keypair. Throws if it cannot.
+ *
+ * Deliberately NOT best-effort. The invariant this record exists to hold is
+ * that the delegate private key is on disk before its public half can reach a
+ * browser that will pay gas to register it. Swallowing the error would publish
+ * the connect URL while claiming a durability that does not exist — the
+ * original WALM-332 loss, now silent.
+ *
+ * Failing the login costs the user nothing: this file sits beside
+ * `credentials.json`, so a directory that cannot take it cannot take the
+ * credentials either. The same login would have failed at the callback anyway,
+ * one on-chain `add_delegate_key` later.
+ */
+export function savePendingLogin(pending: PendingLogin): void {
+    const path = pendingLoginPath();
+    try {
+        // The record holds the same plaintext private key as `credentials.json`,
+        // so it gets the same fresh-inode write.
+        writeSecretFile(path, JSON.stringify(pending, null, 2));
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error("login.pending.write_failed", { path, msg });
+        throw new Error(
+            `Could not write the login write-ahead record at ${path}: ${msg}. ` +
+                `Refusing to start a sign-in that could register a delegate key on-chain ` +
+                `without being able to save it.`,
+        );
+    }
+}
+
+/**
+ * A pending record this login can adopt instead of minting a new keypair.
+ *
+ * `loginFlow` used to generate a fresh keypair every call and overwrite the
+ * record unconditionally. Recovery only runs at process start and is skipped
+ * for `--login` / `forceLogin`, so a timed-out login followed by `memwal_login`
+ * in the same process replaced the only copy of a key the browser may already
+ * have paid to register. Reusing the record keeps that key reclaimable.
+ *
+ * Scoped to the same relayer: a key registered against one relayer's account
+ * proves nothing to another, and `recovery` must never repoint. TTL and shape
+ * are already enforced by {@link loadPendingLogin}.
+ */
+export function reusablePendingLogin(relayerUrl: string): PendingLogin | null {
+    const pending = loadPendingLogin();
+    if (!pending) return null;
+    if (pending.relayerUrl !== relayerUrl) {
+        log.warn("login.pending.relayer_changed", {
+            publicKey: pending.delegatePublicKeyHex,
+            from: pending.relayerUrl,
+            to: relayerUrl,
+        });
+        return null;
+    }
+    return pending;
+}
+
+/**
+ * Load a pending record, or null if there is none, it is malformed, or it has
+ * aged out. An expired record is deleted on read rather than left to linger.
+ */
+export function loadPendingLogin(): PendingLogin | null {
+    const path = pendingLoginPath();
+    if (!existsSync(path)) return null;
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+        clearPendingLogin();
+        return null;
+    }
+    if (!isValidPending(parsed)) {
+        clearPendingLogin();
+        return null;
+    }
+    const age = Date.now() - Date.parse(parsed.createdAt);
+    if (!Number.isFinite(age) || age > PENDING_LOGIN_TTL_MS) {
+        clearPendingLogin();
+        return null;
+    }
+    return parsed;
+}
+
+/** Remove the pending record. Safe to call when there isn't one. */
+export function clearPendingLogin(): void {
+    try {
+        const path = pendingLoginPath();
+        if (existsSync(path)) unlinkSync(path);
+    } catch {
+        /* best effort */
+    }
+}
+
+function isValidPending(obj: unknown): obj is PendingLogin {
+    if (!obj || typeof obj !== "object") return false;
+    const p = obj as Record<string, unknown>;
+    return (
+        typeof p.delegatePrivateKey === "string" &&
+        /^[0-9a-fA-F]{64}$/.test(p.delegatePrivateKey) &&
+        typeof p.delegatePublicKeyHex === "string" &&
+        /^[0-9a-fA-F]{64}$/.test(p.delegatePublicKeyHex) &&
+        typeof p.delegateAddress === "string" &&
+        typeof p.relayerUrl === "string" &&
+        typeof p.createdAt === "string" &&
+        p.version === 1
     );
 }

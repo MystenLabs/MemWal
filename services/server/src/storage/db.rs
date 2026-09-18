@@ -1837,6 +1837,108 @@ impl VectorDb {
         Ok(row)
     }
 
+    /// Writes this owner started that ended in `failed` within `window`.
+    ///
+    /// Serves the failure report attached to recall responses. Owner-scoped
+    /// from `AuthInfo`, never from request input, so one account cannot read
+    /// another's failures.
+    ///
+    /// Bounded by both a time window and `limit` because this runs on the
+    /// read path: recall is the hottest authed route, and an account with a
+    /// long tail of old failures must not turn every recall into a large
+    /// scan. `remember_jobs (owner, status, updated_at DESC)` (migration 006)
+    /// covers the predicate and the ordering, so this is an index range scan
+    /// of at most `limit` rows.
+    ///
+    /// Failures repeat across calls until they age out of the window. That is
+    /// deliberate — suppressing a report after one sighting would put the
+    /// notice back on the caller remembering to act on it, which is the
+    /// failure mode this whole path exists to remove.
+    /// Accepted-then-failed writes this owner has not been told about yet.
+    ///
+    /// Reporting is one-shot by construction. The rows are stamped in the same
+    /// statement that returns them, so the next recall sees them acknowledged
+    /// and stays quiet. Without that the same failures rode along on every
+    /// recall for the full window while the message told the agent to send the
+    /// facts again — so a compliant agent re-sent, the original row stayed
+    /// `failed` and in-window, and the next recall asked for the same thing.
+    /// Every pass was another paid Walrus write.
+    ///
+    /// `FOR UPDATE SKIP LOCKED` keeps two concurrent recalls from claiming the
+    /// same row and both reporting it.
+    pub async fn recent_failed_remember_jobs(
+        &self,
+        owner: &str,
+        window: std::time::Duration,
+        limit: i64,
+    ) -> Result<Vec<crate::types::FailedWrite>, AppError> {
+        let started = std::time::Instant::now();
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<String>,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(
+            // Claim-and-return in one statement: the UPDATE stamps the rows
+            // it is about to hand back, so a second recall — or a concurrent
+            // one in another session — cannot report the same failure again.
+            // Doing it as two statements would leave a window where both see
+            // the row unreported and both tell the agent to re-send it.
+            "UPDATE remember_jobs SET failure_reported_at = NOW()
+             WHERE id IN (
+                 SELECT id FROM remember_jobs
+                 WHERE owner = $1
+                   AND status = 'failed'
+                   AND failure_reported_at IS NULL
+                   AND updated_at >= $2
+                 ORDER BY updated_at DESC
+                 LIMIT $3
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING id, namespace, error_msg, updated_at",
+        )
+        .bind(owner)
+        .bind(chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await;
+
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(e) => {
+                crate::observability::observe_db(
+                    "remember_jobs.recent_failed",
+                    "error",
+                    started.elapsed(),
+                );
+                return Err(AppError::Internal(format!(
+                    "Failed to list failed remember jobs: {}",
+                    e
+                )));
+            }
+        };
+        crate::observability::observe_db("remember_jobs.recent_failed", "ok", started.elapsed());
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(job_id, namespace, error, failed_at)| crate::types::FailedWrite {
+                    job_id,
+                    namespace,
+                    // Raw here on purpose: `routes` is not reachable from the
+                    // lib crate, and this is the storage layer. The caller
+                    // (`routes::recall::failed_writes_for`) sanitizes before
+                    // any of it reaches a client.
+                    error,
+                    failed_at: failed_at.to_rfc3339(),
+                },
+            )
+            .collect())
+    }
+
     /// Hard-delete all vector index rows for a given owner + namespace.
     /// (Walrus blobs themselves persist — Walrus has no delete; this only
     /// removes the local `vector_entries` rows, so the memories stop being
@@ -2103,9 +2205,22 @@ impl VectorDb {
         Ok(rows)
     }
 
-    /// Mark worker-claimed remember jobs as failed when no worker has updated
-    /// them within the stale TTL. Pending rows are left alone because they may
-    /// simply be waiting behind legitimate queue backlog.
+    /// Mark remember jobs as failed once nothing can still move them:
+    /// `running`/`uploaded` whose worker stopped updating them, and `pending`
+    /// rows whose preparation never finished.
+    ///
+    /// `prepare_claimed_at IS NOT NULL` is load-bearing — only the single
+    /// `remember` path claims a preparation slot, so without it the sweep also
+    /// matches healthy `/api/remember/bulk` and `/api/analyze` rows, which
+    /// never set `preparation_encrypted_b64` at all.
+    ///
+    /// Clearing `prepare_claim_token` fences a slow preparation: its own
+    /// UPDATE is keyed on that token, so it can no longer reach
+    /// `enqueue_wallet_job`. Failing is the only option — the row stores
+    /// ciphertext, never plaintext, so nothing can be retried from.
+    ///
+    /// Quota is reclaimed by `release_reservations_for_terminal_jobs`, which
+    /// `main` runs immediately after this on the same tick.
     pub async fn fail_stale_remember_jobs(
         &self,
         stale_after: std::time::Duration,
@@ -2128,7 +2243,45 @@ impl VectorDb {
         if rows > 0 {
             tracing::warn!("Marked {} stale remember jobs as failed", rows);
         }
-        Ok(rows)
+
+        // Second pass rather than one OR'd predicate: this branch clears the
+        // preparation claim and carries its own error text, and the two are
+        // different enough that folding them together would hide which case
+        // actually fired in the logs.
+        let orphaned = sqlx::query(
+            "UPDATE remember_jobs
+             SET status = 'failed',
+                 error_msg = COALESCE(
+                     error_msg,
+                     'preparation never completed — the relayer stopped before this write was encrypted, so the fact was never stored and must be sent again'
+                 ),
+                 prepare_claim_token = NULL,
+                 prepare_claimed_at = NULL,
+                 updated_at = NOW()
+             WHERE status = 'pending'
+               AND prepare_claimed_at IS NOT NULL
+               AND preparation_encrypted_b64 IS NULL
+               AND updated_at < NOW() - ($1 * INTERVAL '1 second')",
+        )
+        .bind(stale_after_secs)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to fail orphaned remember preparations: {}", e))
+        })?;
+
+        let orphaned_rows = orphaned.rows_affected();
+        if orphaned_rows > 0 {
+            // Distinct wording from the sweep above: this one means writes were
+            // accepted and silently lost, which is an availability signal about
+            // the relayer, not a Walrus or wallet problem.
+            tracing::warn!(
+                "Marked {} remember jobs as failed whose preparation never completed",
+                orphaned_rows
+            );
+        }
+
+        Ok(rows + orphaned_rows)
     }
 
     /// Rows whose expiry data has never been synced, or was synced more
@@ -3627,5 +3780,236 @@ mod quota_admission_tests {
         );
 
         cleanup(&db, &owner).await;
+    }
+}
+
+#[cfg(test)]
+mod stale_sweep_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn test_database_url() -> String {
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://memwal:memwal_secret@localhost:5432/memwal".into())
+    }
+
+    async fn test_db() -> VectorDb {
+        VectorDb::new(&test_database_url())
+            .await
+            .expect("test database must be reachable with pgvector installed")
+    }
+
+    /// Unique per test so concurrent runs cannot see each other's rows.
+    fn unique_owner(tag: &str) -> String {
+        format!("0xtest-{}-{}", tag, uuid::Uuid::new_v4())
+    }
+
+    /// Insert one remember job, aged by `age_secs`, optionally already prepared.
+    ///
+    /// `prepare_claimed_at` is stamped only alongside a claim token, because
+    /// that is the only way a row can reach the database: the single-write
+    /// path claims and stamps together, while `/api/remember/bulk` and
+    /// `/api/analyze` insert neither. Stamping it unconditionally would hand
+    /// every seeded row the one column the orphan sweep keys on, so a helper
+    /// detail — not the sweep — would decide what the tests below prove.
+    async fn seed_job(
+        db: &VectorDb,
+        owner: &str,
+        status: &str,
+        prepared: bool,
+        claim_token: Option<&str>,
+        age_secs: i64,
+    ) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO remember_jobs
+                 (id, owner, namespace, status, preparation_encrypted_b64,
+                  prepare_claim_token, prepare_claimed_at, created_at, updated_at)
+             VALUES ($1, $2, 'default', $3, $4, $5,
+                     CASE WHEN $5::text IS NULL THEN NULL
+                          ELSE NOW() - ($6 * INTERVAL '1 second') END,
+                     NOW() - ($6 * INTERVAL '1 second'),
+                     NOW() - ($6 * INTERVAL '1 second'))",
+        )
+        .bind(&id)
+        .bind(owner)
+        .bind(status)
+        .bind(if prepared { Some("ZW5jcnlwdGVk") } else { None })
+        .bind(claim_token)
+        .bind(age_secs)
+        .execute(&db.pool)
+        .await
+        .expect("seed remember job");
+        id
+    }
+
+    async fn status_of(db: &VectorDb, id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM remember_jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read status")
+    }
+
+    /// A row committed by the route whose preparation never ran has no task
+    /// left to resume it: preparation lives in a `tokio::spawn` inside the
+    /// relayer, so a restart in that window strands it. Before this it sat at
+    /// `pending` forever and `memwal_remember_status` reported it as still
+    /// uploading — a write silently lost while the user was told it was coming.
+    #[tokio::test]
+    async fn orphaned_preparation_is_failed() {
+        let db = test_db().await;
+        let owner = unique_owner("orphan");
+        let id = seed_job(&db, &owner, "pending", false, Some("claim-1"), 900).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &id).await, "failed");
+        let msg: Option<String> =
+            sqlx::query_scalar("SELECT error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert!(
+            msg.unwrap_or_default().contains("never stored"),
+            "the message has to say the fact is gone, not merely that a job died",
+        );
+    }
+
+    /// The reason `pending` cannot be swept wholesale. A prepared job waits at
+    /// `pending` until a wallet worker takes it, and with
+    /// `WALRUS_UPLOAD_PER_WALLET_CONCURRENCY` defaulting to 1 that queue is
+    /// legitimately minutes deep. Failing these would abandon paid work that
+    /// was about to run.
+    #[tokio::test]
+    async fn prepared_job_waiting_on_the_upload_queue_is_left_alone() {
+        let db = test_db().await;
+        let owner = unique_owner("queued");
+        let id = seed_job(&db, &owner, "pending", true, Some("claim-1"), 900).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &id).await, "pending");
+    }
+
+    /// Preparation itself takes a moment (summarize, embed, SEAL encrypt), so
+    /// a young unprepared row is in-flight, not orphaned.
+    #[tokio::test]
+    async fn a_preparation_still_in_flight_is_left_alone() {
+        let db = test_db().await;
+        let owner = unique_owner("young");
+        let id = seed_job(&db, &owner, "pending", false, Some("claim-1"), 5).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &id).await, "pending");
+    }
+
+    /// What makes the sweep safe against a preparation that was merely very
+    /// slow rather than dead. Its own UPDATE is fenced on the claim token, so
+    /// once the sweeper clears it that statement matches zero rows and the task
+    /// returns before `enqueue_wallet_job` — it cannot mint a paid blob for a
+    /// job just declared dead.
+    #[tokio::test]
+    async fn clearing_the_claim_fences_a_late_preparation() {
+        let db = test_db().await;
+        let owner = unique_owner("fence");
+        let id = seed_job(&db, &owner, "pending", false, Some("claim-1"), 900).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        // Exactly the statement `spawn_prepare_remember_job` runs when it
+        // finishes, token and all.
+        let late = sqlx::query(
+            "UPDATE remember_jobs SET preparation_encrypted_b64 = $1, updated_at = NOW()
+             WHERE id = $2 AND ($3::TEXT IS NULL OR prepare_claim_token = $3)",
+        )
+        .bind("ZW5jcnlwdGVk")
+        .bind(&id)
+        .bind("claim-1")
+        .execute(&db.pool)
+        .await
+        .expect("late preparation");
+
+        assert_eq!(
+            late.rows_affected(),
+            0,
+            "a late preparation must be fenced out, or it would queue a paid write for a dead job",
+        );
+    }
+
+    /// The pre-existing sweep is unchanged.
+    #[tokio::test]
+    async fn a_stalled_worker_claim_still_fails() {
+        let db = test_db().await;
+        let owner = unique_owner("running");
+        let id = seed_job(&db, &owner, "running", true, None, 900).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &id).await, "failed");
+    }
+
+    /// `/api/remember/bulk` inserts its rows directly and never claims a
+    /// preparation slot, so `preparation_encrypted_b64` is ALWAYS NULL for a
+    /// bulk job — healthy or not. Keying the sweep on that column alone would
+    /// fail every bulk write that waits out the TTL behind a normal upload
+    /// backlog, destroying paid work that was about to run.
+    #[tokio::test]
+    async fn a_queued_bulk_job_is_never_swept() {
+        let db = test_db().await;
+        let owner = unique_owner("bulk");
+        // Exactly what remember_bulk writes: pending, no claim, no preparation.
+        let id = seed_job(&db, &owner, "pending", false, None, 900).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(
+            status_of(&db, &id).await,
+            "pending",
+            "a bulk job waiting on the upload queue must survive the sweep",
+        );
+    }
+
+    /// `/api/analyze` inserts the same shape (`prepare_claim_token: None`), so
+    /// it needs the same protection.
+    #[tokio::test]
+    async fn a_queued_analyze_job_is_never_swept() {
+        let db = test_db().await;
+        let owner = unique_owner("analyze");
+        let id = seed_job(&db, &owner, "pending", false, None, 3600).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &id).await, "pending");
+    }
+
+    /// A finished write is terminal and the sweeper must never touch it.
+    #[tokio::test]
+    async fn a_done_job_is_never_swept() {
+        let db = test_db().await;
+        let owner = unique_owner("done");
+        let id = seed_job(&db, &owner, "done", true, None, 900).await;
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &id).await, "done");
     }
 }

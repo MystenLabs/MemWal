@@ -15,6 +15,60 @@ use std::sync::Arc;
 
 use crate::types::*;
 
+/// How far back the failure report on a recall response looks.
+///
+/// A day covers the gap between one working session and the next, which is
+/// when an agent would otherwise never learn that yesterday's last write died
+/// after it was accepted.
+const FAILED_WRITE_REPORT_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Most failures reported on one recall. A caller acting on this re-sends the
+/// facts; a wall of them would crowd out the memories it actually asked for.
+const FAILED_WRITE_REPORT_LIMIT: i64 = 5;
+
+/// Recent writes that were accepted and then failed, for `owner`.
+///
+/// Never fails the recall it is attached to. This is a courtesy report on a
+/// read path — losing it costs the caller a warning, while propagating the
+/// error would cost them the memories they actually asked for, so a failed
+/// lookup degrades to "nothing to report" and says so in the log.
+async fn failed_writes_for(state: &AppState, owner: &str) -> Vec<FailedWrite> {
+    match state
+        .db
+        .recent_failed_remember_jobs(owner, FAILED_WRITE_REPORT_WINDOW, FAILED_WRITE_REPORT_LIMIT)
+        .await
+    {
+        Ok(failed) => failed
+            .into_iter()
+            .map(|mut w| {
+                // Every other client-facing view of `remember_jobs.error_msg`
+                // runs it through this first — `GET /api/remember/:job_id` and
+                // `POST /api/remember/bulk/status` both do. Reading the column
+                // straight into a recall response skipped both of the
+                // sanitizer's jobs: swapping an infrastructure-funding failure
+                // for INFRA_JOB_ERROR_MESSAGE (whose text exists to stop a user
+                // reading "Insufficient balance ... for owner 0x…" as an
+                // instruction to top that address up), and redacting long hex
+                // runs so the relayer's own wallet never reaches a tenant.
+                //
+                // These rows are `status = 'failed'` by construction — the
+                // query selects on it — so the status argument is fixed.
+                w.error = super::remember::sanitize_job_error_for_client("failed", w.error);
+                w
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                "recall: failed-write report unavailable for owner={}: {}",
+                owner,
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
 // ============================================================
 // Recall query-embedding cache (Redis) — wraps the Embedder service
 // ============================================================
@@ -162,17 +216,35 @@ pub async fn recall(
     // Validate scoring_weights up front — fail fast on malformed input
     // (NaN, out-of-range, sub-floor half-life) BEFORE we spend an embed +
     // vector search + Walrus + SEAL round-trip just to 400 at the end.
-    let weights = body.scoring_weights.clone().unwrap_or_default();
-    weights.validate()?;
+    // An explicit `sort` suppresses them; see `resolve_scoring_weights`.
+    let weights = super::resolve_scoring_weights(body.sort, body.scoring_weights.clone())?;
+    let sort = body.sort.unwrap_or_default();
 
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let namespace = &body.namespace;
+
+    // Started here rather than awaited at the end, so it overlaps the embed,
+    // search, Walrus download and SEAL decrypt that follow instead of adding
+    // to them. The published SDK aborts a recall after a hard 15s that no
+    // caller can raise, and recall has been measured landing on exactly that
+    // — so this report has to cost the critical path nothing.
+    let failed_writes = {
+        let state = state.clone();
+        let owner = owner.clone();
+        tokio::spawn(async move { failed_writes_for(&state, &owner).await })
+    };
+
     tracing::info!(
         query_len = body.query.len(),
         owner = %owner,
         namespace = %namespace,
         ranker_active = weights.is_ranker_active(),
+        scoring_weights_ignored = body.sort.is_some()
+            && body
+                .scoring_weights
+                .as_ref()
+                .is_some_and(ScoringWeights::is_ranker_active),
         "recall request"
     );
 
@@ -187,7 +259,7 @@ pub async fn recall(
     // row is frequently a mediocre semantic match and would otherwise fall
     // outside the cosine top-`limit` entirely. `Relevance` fetches exactly
     // `limit`, so the default path issues the identical query it always has.
-    let candidate_limit = body.sort.candidate_limit(limit);
+    let candidate_limit = sort.candidate_limit(limit);
     let t1 = std::time::Instant::now();
     let hits = state
         .db
@@ -199,7 +271,7 @@ pub async fn recall(
     // only distance + created_at, both already on the row, so the over-fetch
     // costs one wider SQL query instead of 5x the Walrus downloads and SEAL
     // decrypts.
-    let hits = super::select_hits_for_sort(hits, body.sort, limit);
+    let hits = super::select_hits_for_sort(hits, sort, limit);
     let hit_count = hits.len();
 
     if hits.is_empty() {
@@ -211,6 +283,9 @@ pub async fn recall(
             results: vec![],
             total: 0,
             dropped_count: 0,
+            // Reported even with no hits: an empty recall is exactly when a
+            // caller is most likely to be looking for the fact that failed.
+            failed_writes: failed_writes.await.unwrap_or_default(),
         }));
     }
 
@@ -297,6 +372,9 @@ pub async fn recall(
         results,
         total,
         dropped_count,
+        // A panic in the report task must not take the recall with it; the
+        // caller loses a warning, not their memories.
+        failed_writes: failed_writes.await.unwrap_or_default(),
     }))
 }
 
@@ -404,12 +482,40 @@ mod tests {
 
     // ── RecallResponse dropped_count serialization ───────────────
 
+    /// The failure report added for accepted-then-failed writes reads the same
+    /// `remember_jobs.error_msg` the job-status endpoints read, and reaches the
+    /// same untrusted caller — so it has to be sanitized the same way. It was
+    /// not, which put the relayer's own wallet address and balance shortfall
+    /// into every recall response for 24 hours after an infra failure.
+    ///
+    /// `infra_wal_balance_failure_hides_relayer_wallet_address` in
+    /// routes::remember pins this for `GET /api/remember/:job_id`; this pins
+    /// the same guarantee for the recall path.
+    #[test]
+    fn failed_write_report_hides_relayer_wallet_address() {
+        let raw = "walrus upload failed: Insufficient balance of \
+0x356a26eb9e012a68958082340d4c4116e7f55615ef27affcff209cf0ae544f59::wal::WAL for owner \
+0x8d3c1f0a9b2e4d6c7a5f8e1b0d4c9a2f3e6b7d8c1a0f9e2b3c4d5a6f7e8b9c0d. Required: 64367730, \
+Available: 10708877";
+
+        let out = crate::routes::remember::sanitize_job_error_for_client("failed", Some(raw.to_string()))
+            .expect("a failed job keeps an error");
+
+        // The operator's hot wallet and its shortfall are not the tenant's
+        // business, and reading them as "top this address up" is the exact
+        // confusion INFRA_JOB_ERROR_MESSAGE exists to prevent.
+        assert!(!out.contains("0x8d3c1f0a"), "wallet address leaked: {}", out);
+        assert!(!out.contains("Available"), "balance leaked: {}", out);
+        assert!(!out.contains("10708877"), "shortfall leaked: {}", out);
+    }
+
     #[test]
     fn recall_response_includes_dropped_count_when_nonzero() {
         let resp = crate::types::RecallResponse {
             results: vec![],
             total: 0,
             dropped_count: 3,
+            failed_writes: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["dropped_count"], 3);
@@ -421,6 +527,7 @@ mod tests {
             results: vec![],
             total: 0,
             dropped_count: 0,
+            failed_writes: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
         // skip_serializing_if = "is_zero_usize" → field absent

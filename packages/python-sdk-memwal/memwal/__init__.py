@@ -44,6 +44,8 @@ from .types import (
     EmbedResult,
     HealthResult,
     MemWalConfig,
+    NamespacesResult,
+    NamespaceSummary,
     RecallManualHit,
     RecallManualOptions,
     RecallManualResult,
@@ -114,6 +116,8 @@ __all__ = [
     "AnalyzedFact",
     "HealthResult",
     "RestoreResult",
+    "NamespaceSummary",
+    "NamespacesResult",
     "ScoringWeights",
     "RememberManualOptions",
     "RememberManualResult",
@@ -122,4 +126,4 @@ __all__ = [
     "RecallManualResult",
 ]
 
-__version__ = "0.1.10"
+__version__ = "0.1.11"
