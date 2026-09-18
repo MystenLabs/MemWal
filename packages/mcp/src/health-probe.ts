@@ -9,21 +9,24 @@
  */
 
 export type HealthProbe =
-    | { kind: "ok"; ms: number; version?: string }
+    | { kind: "ok"; ms: number; version?: string; writesUnavailable?: boolean }
     | { kind: "http"; ms: number; status: number }
     | { kind: "unreachable"; ms: number; code: string }
     | { kind: "timeout"; ms: number };
 
 const DEFAULT_HEALTH_PROBE_MS = 3_000;
 const MIN_HEALTH_PROBE_MS = 100;
+/** A diagnosis nobody waits a minute for. Also keeps the value inside what
+ * `AbortSignal.timeout` accepts. */
+const MAX_HEALTH_PROBE_MS = 60_000;
 
 /** Override via `MEMWAL_MCP_HEALTH_PROBE_MS`, mostly for tests. */
 export function resolveHealthProbeMs(): number {
     const raw = process.env.MEMWAL_MCP_HEALTH_PROBE_MS;
     if (!raw) return DEFAULT_HEALTH_PROBE_MS;
-    const n = Number(raw);
+    const n = Math.floor(Number(raw));
     if (!Number.isFinite(n) || n < MIN_HEALTH_PROBE_MS) return DEFAULT_HEALTH_PROBE_MS;
-    return n;
+    return Math.min(n, MAX_HEALTH_PROBE_MS);
 }
 
 /** `GET {baseUrl}/health`, bounded by `timeoutMs`. Never rejects: a probe
@@ -33,20 +36,30 @@ export async function probeRelayerHealth(
     timeoutMs: number,
 ): Promise<HealthProbe> {
     const started = Date.now();
-    const signal = AbortSignal.timeout(timeoutMs);
+    let signal: AbortSignal | undefined;
     try {
+        // Inside the `try`: `AbortSignal.timeout` throws on a value it
+        // cannot take, and this function must not reject.
+        signal = AbortSignal.timeout(timeoutMs);
         const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/health`, { signal });
         const ms = Date.now() - started;
         if (!res.ok) {
             await res.body?.cancel();
             return { kind: "http", ms, status: res.status };
         }
-        const body = (await res.json().catch(() => null)) as { version?: unknown } | null;
+        const body = (await res.json().catch(() => null)) as {
+            version?: unknown;
+            write_ready?: unknown;
+            writes?: unknown;
+        } | null;
         const version = typeof body?.version === "string" ? body.version : undefined;
-        return { kind: "ok", ms, version };
+        // `/health` answers 200 while writes are paused or Postgres is
+        // full; "ok" alone would hide the cause of a failed write.
+        const writesUnavailable = body?.write_ready === false || body?.writes === "paused";
+        return { kind: "ok", ms, version, ...(writesUnavailable ? { writesUnavailable } : {}) };
     } catch (err) {
         const ms = Date.now() - started;
-        if (signal.aborted) return { kind: "timeout", ms };
+        if (signal?.aborted) return { kind: "timeout", ms };
         const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
         return { kind: "unreachable", ms, code: typeof code === "string" ? code : "unknown" };
     }
@@ -64,7 +77,9 @@ export function describeHealthProbe(
     switch (probe.kind) {
         case "ok":
             return {
-                health: `ok (${probe.ms}ms${probe.version ? `, v${probe.version}` : ""})`,
+                health:
+                    `ok (${probe.ms}ms${probe.version ? `, v${probe.version}` : ""}` +
+                    `${probe.writesUnavailable ? ", writes unavailable" : ""})`,
                 verdict:
                     "The relayer is up, so this call stalled inside it or its reply was lost on the way back.",
                 reachable: true,

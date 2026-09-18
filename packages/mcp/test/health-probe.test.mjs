@@ -106,8 +106,35 @@ test("the probe budget has a default and an override", () => {
         assert.equal(resolveHealthProbeMs(), 750);
         process.env.MEMWAL_MCP_HEALTH_PROBE_MS = "nonsense";
         assert.equal(resolveHealthProbeMs(), 3000);
+        // `AbortSignal.timeout` throws on both of these; the resolver must
+        // never hand it one.
+        process.env.MEMWAL_MCP_HEALTH_PROBE_MS = "2500.5";
+        assert.equal(resolveHealthProbeMs(), 2500);
+        process.env.MEMWAL_MCP_HEALTH_PROBE_MS = String(2 ** 40);
+        assert.equal(resolveHealthProbeMs(), 60_000);
     } finally {
         if (saved === undefined) delete process.env.MEMWAL_MCP_HEALTH_PROBE_MS;
         else process.env.MEMWAL_MCP_HEALTH_PROBE_MS = saved;
     }
+});
+
+test("a probe given a budget AbortSignal cannot take still resolves", async (t) => {
+    // The sweeper answers the call from this promise. A rejection here would
+    // crash the bridge, or leave the call unanswered for good.
+    const relayer = await fakeRelayer(healthy);
+    t.after(relayer.close);
+    const probe = await probeRelayerHealth(relayer.url, 2500.5);
+    assert.ok(["ok", "unreachable"].includes(probe.kind), `got ${probe.kind}`);
+});
+
+test("paused writes show in the health line, since /health still answers 200", async (t) => {
+    const relayer = await fakeRelayer((res) =>
+        res
+            .writeHead(200, { "content-type": "application/json" })
+            .end(JSON.stringify({ status: "ok", version: "1.4.2", write_ready: false })),
+    );
+    t.after(relayer.close);
+    const probe = await probeRelayerHealth(relayer.url, 2000);
+    assert.equal(probe.writesUnavailable, true);
+    assert.match(describeHealthProbe(probe, relayer.url).health, /writes unavailable/);
 });

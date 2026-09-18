@@ -43,6 +43,9 @@ const DEFAULT_OTEL_SERVICE_NAME: &str = "memwal-relayer";
 pub struct RequestContext {
     request_id: String,
     route: String,
+    /// When the request reached the relayer, before auth and rate limiting,
+    /// so a caller-supplied deadline can be measured from arrival.
+    started: Instant,
 }
 
 tokio::task_local! {
@@ -460,6 +463,7 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
     request.extensions_mut().insert(RequestContext {
         request_id: request_id.clone(),
         route: route.clone(),
+        started,
     });
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         request
@@ -486,6 +490,7 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
     let context = RequestContext {
         request_id: request_id.clone(),
         route: route.clone(),
+        started,
     };
 
     REQUEST_CONTEXT
@@ -543,6 +548,11 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Response {
 
 pub fn current_request_id() -> Option<String> {
     REQUEST_CONTEXT.try_with(|ctx| ctx.request_id.clone()).ok()
+}
+
+/// When the current request reached the relayer, if this task serves one.
+pub fn current_request_started() -> Option<Instant> {
+    REQUEST_CONTEXT.try_with(|ctx| ctx.started).ok()
 }
 
 pub fn current_context() -> Option<RequestContext> {

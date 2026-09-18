@@ -78,11 +78,17 @@ pub fn enter(stage: RecallStage) {
     let _ = CURRENT.try_with(|marker| marker.set(stage));
 }
 
-/// How long a recall may run for a caller that said it waits `deadline_ms`.
+/// How long a recall may run for a caller that said it waits `deadline_ms`,
+/// given `already` spent since the request arrived (auth, rate limiting).
 /// `None` when it said nothing: those callers keep today's behaviour.
-pub fn budget_for(deadline_ms: Option<u64>) -> Option<Duration> {
+pub fn budget_for(deadline_ms: Option<u64>, already: Duration) -> Option<Duration> {
     let caller = Duration::from_millis(deadline_ms?.min(MAX_DEADLINE_MS));
-    Some(caller.saturating_sub(DEADLINE_MARGIN).max(MIN_BUDGET))
+    Some(
+        caller
+            .saturating_sub(DEADLINE_MARGIN)
+            .saturating_sub(already)
+            .max(MIN_BUDGET),
+    )
 }
 
 #[derive(Debug)]
@@ -138,7 +144,9 @@ impl HangUpGuard {
 
 impl Drop for HangUpGuard {
     fn drop(&mut self) {
-        if self.armed {
+        // A panic unwinding through the handler is not the caller hanging
+        // up, and reports itself.
+        if self.armed && !std::thread::panicking() {
             tracing::warn!(
                 owner = %self.owner,
                 stage = self.marker.get().as_str(),
@@ -207,17 +215,35 @@ mod tests {
 
     #[test]
     fn the_budget_leaves_the_caller_a_second_and_never_drops_below_the_floor() {
-        assert_eq!(budget_for(None), None);
+        let none = Duration::ZERO;
+        assert_eq!(budget_for(None, none), None);
         assert_eq!(
-            budget_for(Some(15_000)),
+            budget_for(Some(15_000), none),
             Some(Duration::from_millis(14_000))
         );
         // A deadline too short to fit an embed would only produce errors.
-        assert_eq!(budget_for(Some(1_500)), Some(Duration::from_millis(2_000)));
+        assert_eq!(
+            budget_for(Some(1_500), none),
+            Some(Duration::from_millis(2_000))
+        );
         // Capped, so no caller-supplied number can overflow an `Instant`.
         assert_eq!(
-            budget_for(Some(u64::MAX)),
+            budget_for(Some(u64::MAX), none),
             Some(Duration::from_millis(599_000))
+        );
+    }
+
+    #[test]
+    fn time_spent_before_the_handler_comes_out_of_the_budget() {
+        // Auth on a cold delegate key can take seconds; the caller's clock
+        // was running through all of it.
+        assert_eq!(
+            budget_for(Some(15_000), Duration::from_millis(3_000)),
+            Some(Duration::from_millis(11_000))
+        );
+        assert_eq!(
+            budget_for(Some(15_000), Duration::from_millis(20_000)),
+            Some(Duration::from_millis(2_000))
         );
     }
 }

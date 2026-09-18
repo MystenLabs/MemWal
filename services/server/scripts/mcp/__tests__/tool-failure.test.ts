@@ -122,7 +122,25 @@ test("a failed connect reads as unreachable, with the socket's code", () => {
     const err = new TypeError("fetch failed", {
         cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
     });
-    assert.deepEqual(classifyToolError(err), { kind: "unreachable", code: "ECONNREFUSED" });
+    assert.deepEqual(classifyToolError(err), {
+        kind: "unreachable",
+        code: "ECONNREFUSED",
+        host: null,
+    });
+});
+
+test("a failed DNS lookup keeps the host it was for", () => {
+    const err = new TypeError("fetch failed", {
+        cause: Object.assign(new Error("getaddrinfo ENOTFOUND fullnode.example"), {
+            code: "ENOTFOUND",
+            hostname: "fullnode.example",
+        }),
+    });
+    assert.deepEqual(classifyToolError(err), {
+        kind: "unreachable",
+        code: "ENOTFOUND",
+        host: "fullnode.example",
+    });
 });
 
 test("anything else keeps today's handling", () => {
@@ -157,6 +175,26 @@ test("a relayer that never answers is reported as a timeout, on time", async (t)
     const probe = await probeRelayerHealth(relayer.url, 200);
     assert.equal(probe.kind, "timeout");
     assert.ok(Date.now() - started < 2000, "the probe must not outlive its budget");
+});
+
+test("paused writes show in the health line, since /health still answers 200", async (t) => {
+    const relayer = await fakeRelayer((res) =>
+        res
+            .writeHead(200, { "content-type": "application/json" })
+            .end(JSON.stringify({ status: "ok", version: "1.4.2", writes: "paused" })),
+    );
+    t.after(relayer.close);
+    const probe = await probeRelayerHealth(relayer.url, 2000);
+    assert.equal(probe.kind === "ok" && probe.writesUnavailable, true);
+    assert.match(
+        describeFailure("memwal_remember", { kind: "timeout" }, probe),
+        /Relayer health: ok \(\d+ms, v1\.4\.2, writes unavailable\)/,
+    );
+});
+
+test("a probe given a budget AbortSignal cannot take still resolves", async () => {
+    const probe = await probeRelayerHealth("http://127.0.0.1:1", 2500.5);
+    assert.ok(probe.kind === "unreachable" || probe.kind === "timeout", probe.kind);
 });
 
 test("a relayer that refuses the connection is reported as unreachable", async () => {
@@ -228,6 +266,32 @@ test("a recall that cannot reach a dead relayer says so", async () => {
     const { text } = await textOf(sessionAt(await closedPortUrl()), "memwal_recall", err);
     assert.match(text, /ECONNREFUSED/);
     assert.match(text, /Relayer health: unreachable/);
+});
+
+test("a failed request is not blamed on a relayer that answers its health check", async (t) => {
+    // SDK 0.1.7 builds the SEAL session on the Sui fullnode before the
+    // recall request goes out, and a failure there is a bare "fetch failed".
+    const relayer = await fakeRelayer(healthy);
+    t.after(relayer.close);
+    const err = new TypeError("fetch failed", {
+        cause: Object.assign(new Error("getaddrinfo ENOTFOUND fullnode.example"), {
+            code: "ENOTFOUND",
+            hostname: "fullnode.example",
+        }),
+    });
+    const { text } = await textOf(sessionAt(relayer.url), "memwal_recall", err);
+    assert.match(text, /could not complete a network request/);
+    assert.match(text, /fullnode\.example/);
+    assert.match(text, /answered its health check/);
+    assert.doesNotMatch(text, /could not reach the relayer|stalled inside/);
+});
+
+test("a timeout on a healthy relayer does not claim the relayer is where it stalled", async (t) => {
+    const relayer = await fakeRelayer(healthy);
+    t.after(relayer.close);
+    const { text } = await textOf(sessionAt(relayer.url), "memwal_recall", named("AbortError"));
+    assert.match(text, /inside the relayer, or on a service it waits on first/);
+    assert.doesNotMatch(text, /stalled inside it\./);
 });
 
 test("a write that timed out is never offered a blind retry", async (t) => {

@@ -9,7 +9,7 @@
  */
 
 export type HealthProbe =
-    | { kind: "ok"; ms: number; version?: string }
+    | { kind: "ok"; ms: number; version?: string; writesUnavailable?: boolean }
     | { kind: "http"; ms: number; status: number }
     | { kind: "unreachable"; ms: number; code: string }
     | { kind: "timeout"; ms: number };
@@ -17,7 +17,7 @@ export type HealthProbe =
 export type ToolFailure =
     | { kind: "recall_timeout"; stage: string | null; elapsedMs: number | null }
     | { kind: "timeout" }
-    | { kind: "unreachable"; code: string }
+    | { kind: "unreachable"; code: string; host: string | null }
     | { kind: "other" };
 
 /** Tools whose call may already have stored something by the time it fails.
@@ -46,7 +46,9 @@ export function classifyToolError(err: unknown): ToolFailure {
         };
     }
     if (typeof e.name === "string" && TIMEOUT_NAMES.has(e.name)) return { kind: "timeout" };
-    if (e.message === "fetch failed") return { kind: "unreachable", code: codeOf(e.cause) };
+    if (e.message === "fetch failed") {
+        return { kind: "unreachable", code: codeOf(e.cause), host: hostOf(e.cause) };
+    }
     return { kind: "other" };
 }
 
@@ -57,20 +59,30 @@ export async function probeRelayerHealth(
     timeoutMs: number,
 ): Promise<HealthProbe> {
     const started = Date.now();
-    const signal = AbortSignal.timeout(timeoutMs);
+    let signal: AbortSignal | undefined;
     try {
+        // Inside the `try`: `AbortSignal.timeout` throws on a value it
+        // cannot take, and this function must not reject.
+        signal = AbortSignal.timeout(timeoutMs);
         const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/health`, { signal });
         const ms = Date.now() - started;
         if (!res.ok) {
             await res.body?.cancel();
             return { kind: "http", ms, status: res.status };
         }
-        const body = (await res.json().catch(() => null)) as { version?: unknown } | null;
+        const body = (await res.json().catch(() => null)) as {
+            version?: unknown;
+            write_ready?: unknown;
+            writes?: unknown;
+        } | null;
         const version = typeof body?.version === "string" ? body.version : undefined;
-        return { kind: "ok", ms, version };
+        // `/health` answers 200 while writes are paused or Postgres is
+        // full; "ok" alone would hide the cause of a failed write.
+        const writesUnavailable = body?.write_ready === false || body?.writes === "paused";
+        return { kind: "ok", ms, version, ...(writesUnavailable ? { writesUnavailable } : {}) };
     } catch (err) {
         const ms = Date.now() - started;
-        if (signal.aborted) return { kind: "timeout", ms };
+        if (signal?.aborted) return { kind: "timeout", ms };
         return { kind: "unreachable", ms, code: codeOf((err as { cause?: unknown })?.cause) };
     }
 }
@@ -114,15 +126,34 @@ export function describeFailure(
         );
     }
 
-    const headline =
-        failure.kind === "timeout"
-            ? `❌ Walrus Memory ${tool} timed out.`
-            : `❌ Walrus Memory ${tool} could not reach the relayer.`;
-    const cause =
-        failure.kind === "timeout"
-            ? "the relayer did not answer in time."
-            : `the connection to the relayer failed (${failure.code}).`;
+    // Before a recall reaches the relayer, the SDK builds a SEAL session on
+    // the Sui fullnode, and on 0.1.7 its 15s clock is already running. So a
+    // timeout or a failed request is only the relayer's when the relayer's
+    // own `/health` also fails; otherwise say what is actually known.
     const healthy = probe?.kind === "ok";
+    let headline: string;
+    let cause: string;
+    if (failure.kind === "timeout") {
+        headline = `❌ Walrus Memory ${tool} timed out.`;
+        cause = healthy
+            ? "no answer within the SDK's time limit. The relayer answered its health check, " +
+              "so the time went on this call: inside the relayer, or on a service it waits " +
+              "on first (such as the Sui fullnode)."
+            : "no answer within the SDK's time limit, and the relayer is not healthy.";
+    } else if (healthy) {
+        const where = failure.host ? ` to ${failure.host}` : "";
+        headline = `❌ Walrus Memory ${tool} could not complete a network request.`;
+        cause =
+            `a request this call depends on failed${where} (${failure.code}). The relayer ` +
+            "answered its health check, so the failure is on the way to another service " +
+            "this call needs (such as the Sui fullnode), or it was brief.";
+    } else {
+        headline = `❌ Walrus Memory ${tool} could not reach the relayer.`;
+        cause = `the connection to the relayer failed (${failure.code}).`;
+    }
+
+    // Not "this call only reads": `memwal_restore` re-indexes. What makes a
+    // retry safe is that none of these can store a duplicate.
     let next: string;
     if (WRITE_TOOLS.has(tool)) {
         next =
@@ -131,12 +162,12 @@ export function describeFailure(
             (healthy ? "" : " The relayer is not healthy right now, so wait a minute first.");
     } else if (healthy) {
         next =
-            "the relayer is up, so this call stalled inside it. It only reads, so it is " +
-            "safe to retry once; if it keeps happening, report it with the time of the call.";
+            "repeating this call cannot store a duplicate, so it is safe to retry once. If " +
+            "it keeps happening, report it with the time of the call.";
     } else {
         next =
-            "the relayer is not healthy right now. This call only reads, so it is safe to " +
-            "retry, but wait a minute first.";
+            "repeating this call cannot store a duplicate, so it is safe to retry, but " +
+            "wait a minute first: the relayer is not healthy right now.";
     }
     return lines(headline, cause, healthLine(probe), capitalize(next));
 }
@@ -145,7 +176,10 @@ function healthLine(probe: HealthProbe | null): string {
     if (probe === null) return "not checked.";
     switch (probe.kind) {
         case "ok":
-            return `ok (${probe.ms}ms${probe.version ? `, v${probe.version}` : ""}).`;
+            return (
+                `ok (${probe.ms}ms${probe.version ? `, v${probe.version}` : ""}` +
+                `${probe.writesUnavailable ? ", writes unavailable" : ""}).`
+            );
         case "http":
             return `HTTP ${probe.status} (${probe.ms}ms) — up, but not healthy.`;
         case "unreachable":
@@ -176,6 +210,15 @@ function parseObject(raw: unknown): Record<string, unknown> | null {
     } catch {
         return null;
     }
+}
+
+/** The host a failed connect was for, when Node says (`getaddrinfo` names
+ * the hostname, a refused connect the address). */
+function hostOf(cause: unknown): string | null {
+    const c = cause as { hostname?: unknown; address?: unknown } | null;
+    if (typeof c?.hostname === "string") return c.hostname;
+    if (typeof c?.address === "string") return c.address;
+    return null;
 }
 
 function codeOf(cause: unknown): string {

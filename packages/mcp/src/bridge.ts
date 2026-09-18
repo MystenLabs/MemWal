@@ -2382,12 +2382,15 @@ export async function runBridge(
                     },
                 };
             }
+            // Not "this call only reads": `memwal_restore` re-indexes. What
+            // makes a retry safe is that none of these can store a duplicate.
             const nextStep =
                 described === null || described.reachable
-                    ? "This call only reads, so it is safe to retry once. If it keeps " +
-                      "happening, report it with the time of the call."
-                    : "This call only reads, so it is safe to retry once that is resolved — " +
-                      "wait a minute if the problem is on the relayer's side.";
+                    ? "Repeating this call cannot store a duplicate, so it is safe to retry " +
+                      "once. If it keeps happening, report it with the time of the call."
+                    : "Repeating this call cannot store a duplicate, so it is safe to retry " +
+                      "once that is resolved — wait a minute if the problem is on the " +
+                      "relayer's side.";
             const healthValue = described?.health ?? "not checked";
             return {
                 reason: "no response",
@@ -2401,8 +2404,8 @@ export async function runBridge(
                     ].join("\n"),
                     errorMessage:
                         "Walrus Memory call reached the relayer but never received a " +
-                        `response (relayer health: ${healthValue}). Safe to retry: this call ` +
-                        "only reads.",
+                        `response (relayer health: ${healthValue}). Safe to retry: it cannot ` +
+                        "store a duplicate.",
                 },
             };
         }
@@ -2452,6 +2455,8 @@ export async function runBridge(
     const orphanSweeper = setInterval(() => {
         const now = Date.now();
         const handshakeStalledMs = handshakeStalledForMs(now);
+        // One `/health` request per sweep, however many calls expired in it.
+        let sweepProbe: Promise<HealthProbe | null> | null = null;
         for (const [id, entry] of Array.from(inFlight.entries())) {
             const elapsedMs = now - entry.startedAt;
             // Never sent = no POST was ever issued for it. Read from the entry
@@ -2487,17 +2492,22 @@ export async function runBridge(
                 if (entry.probing) continue;
                 entry.probing = true;
                 const relayerUrl = creds?.relayerUrl ?? config.relayerUrl;
-                void probeRelayerHealth(relayerUrl, healthProbeMs).then((probe) => {
+                // `probeRelayerHealth` does not reject, but a call left with
+                // `probing` set and no answer is the one outcome this path
+                // must never have, so a rejection still answers it.
+                sweepProbe ??= probeRelayerHealth(relayerUrl, healthProbeMs).catch(() => null);
+                void sweepProbe.then((probe) => {
                     // A late reply, a logout or a shutdown may have answered
                     // it while the probe ran. Answering again would be a
-                    // second response for the same id.
-                    if (inFlight.get(id) !== entry) return;
+                    // second response for the same id — and after stdin has
+                    // closed there is nobody left to answer.
+                    if (stdinClosed || inFlight.get(id) !== entry) return;
                     const settledAt = Date.now();
                     const { reason, opts } = expiredRequestReport(
                         false,
                         settledAt,
                         toolNameOf(entry.msg),
-                        { probe, relayerUrl },
+                        probe ? { probe, relayerUrl } : undefined,
                     );
                     log.warn("bridge.call_orphaned", {
                         id,
@@ -2505,8 +2515,8 @@ export async function runBridge(
                         elapsedMs: settledAt - entry.startedAt,
                         deadlineMs,
                         reason,
-                        health: probe.kind,
-                        healthMs: probe.ms,
+                        health: probe?.kind ?? null,
+                        healthMs: probe?.ms ?? null,
                         handshakeStalledMs: handshakeStalledForMs(settledAt),
                         lastHandshakeError,
                     });

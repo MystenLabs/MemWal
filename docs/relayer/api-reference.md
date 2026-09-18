@@ -291,7 +291,7 @@ Search for memories matching a natural language query. Returns decrypted plainte
 
 `sort` is optional: `"relevance"` (the cosine order, and the behaviour when omitted) or `"recent"` (the newest among the semantic matches). An explicit `sort`, `"relevance"` included, is the order, and the relayer ignores `scoring_weights` for that request.
 
-`deadline_ms` is optional: how long the caller waits for this response, in milliseconds. When set, the relayer stops about one second before it and answers `504` with the step that was still running, so the caller learns where the recall stalled instead of timing out blind. Omit it to let the recall run to completion. The TypeScript SDK sends `15000`.
+`deadline_ms` is optional: how long the caller waits for this response, in milliseconds. When set, the relayer stops about one second before it, counting from when the request arrived, and answers `504` with the step that was still running, so the caller learns where the recall stalled instead of timing out blind. The recall always gets at least 2 seconds, and values above `600000` are capped. Omit it to let the recall run to completion. The TypeScript SDK sends `15000`.
 
 ```json
 {

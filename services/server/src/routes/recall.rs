@@ -252,11 +252,15 @@ pub async fn recall(
     // A caller that sent its deadline gets the stage a recall was stuck in,
     // just before it would have given up, instead of aborting blind
     // (WALM-396). One that sent none keeps running to completion.
+    // The caller's clock started before auth and rate limiting did.
+    let already = crate::observability::current_request_started()
+        .map(|arrived| arrived.elapsed())
+        .unwrap_or_default();
     let marker = StageMarker::default();
     let guard = HangUpGuard::new(marker.clone(), owner.clone());
     let outcome = stage::run_with_deadline(
         &marker,
-        stage::budget_for(body.deadline_ms),
+        stage::budget_for(body.deadline_ms, already),
         recall_pipeline(&state, &auth, &body, &weights, sort, failed_writes),
     )
     .await;
@@ -264,17 +268,18 @@ pub async fn recall(
     match outcome {
         Ok(result) => result.map(Json),
         Err(timed_out) => {
+            let elapsed_ms = already.as_millis() as u64 + timed_out.elapsed_ms;
             tracing::warn!(
                 owner = %owner,
                 namespace = %namespace,
                 stage = timed_out.stage.as_str(),
-                elapsed_ms = timed_out.elapsed_ms,
+                elapsed_ms,
                 deadline_ms = body.deadline_ms,
                 "recall timed out before the caller's deadline"
             );
             Err(AppError::RecallTimeout {
                 stage: timed_out.stage.as_str(),
-                elapsed_ms: timed_out.elapsed_ms,
+                elapsed_ms,
             })
         }
     }
