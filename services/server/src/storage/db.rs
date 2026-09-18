@@ -1674,7 +1674,7 @@ async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), App
             AppError::Internal(format!("Failed to lock concurrent-index rebuild: {}", e))
         })?;
 
-    let outcome = rebuild_concurrent_indexes_locked(&mut conn).await;
+    let rebuilt = rebuild_concurrent_indexes_locked(&mut conn).await;
 
     let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
         .bind(CONCURRENT_INDEX_LOCK_KEYS.0)
@@ -1682,38 +1682,73 @@ async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), App
         .execute(&mut *conn)
         .await;
 
-    outcome
+    if !rebuilt.timeout_restored {
+        // SET statement_timeout = 0 is session-scoped. Returning this
+        // connection to the pool would let later /health queries run with
+        // no timeout. Drop it instead.
+        tracing::warn!(
+            "failed to restore statement_timeout after concurrent-index rebuild; \
+             discarding the session rather than returning it to the pool"
+        );
+        let _ = conn.close().await;
+    }
+
+    rebuilt.result
 }
 
-async fn rebuild_concurrent_indexes_locked(conn: &mut PgConnection) -> Result<(), AppError> {
-    let previous: String = sqlx::query_scalar("SHOW statement_timeout")
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to read statement_timeout: {}", e)))?;
+struct ConcurrentIndexRebuild {
+    result: Result<(), AppError>,
+    timeout_restored: bool,
+}
 
-    sqlx::query("SET statement_timeout = 0")
+async fn rebuild_concurrent_indexes_locked(conn: &mut PgConnection) -> ConcurrentIndexRebuild {
+    let previous: Result<String, _> = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *conn)
+        .await;
+
+    let previous = match previous {
+        Ok(v) => v,
+        Err(e) => {
+            return ConcurrentIndexRebuild {
+                result: Err(AppError::Internal(format!(
+                    "Failed to read statement_timeout: {}",
+                    e
+                ))),
+                timeout_restored: true,
+            };
+        }
+    };
+
+    if let Err(e) = sqlx::query("SET statement_timeout = 0")
         .execute(&mut *conn)
         .await
-        .map_err(|e| {
-            AppError::Internal(format!(
+    {
+        return ConcurrentIndexRebuild {
+            result: Err(AppError::Internal(format!(
                 "Failed to disable statement_timeout for concurrent index builds: {}",
                 e
-            ))
-        })?;
+            ))),
+            timeout_restored: true,
+        };
+    }
 
-    let outcome = async {
+    let result = async {
         recover_invalid_concurrent_indexes_on(conn).await?;
         run_migrations_on(conn, MIGRATIONS_AFTER_INDEX_RECOVERY).await?;
         Ok(())
     }
     .await;
 
-    let _ = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+    let timeout_restored = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
         .bind(&previous)
         .execute(&mut *conn)
-        .await;
+        .await
+        .is_ok();
 
-    outcome
+    ConcurrentIndexRebuild {
+        result,
+        timeout_restored,
+    }
 }
 
 /// Release storage reservations given only a pool handle.
