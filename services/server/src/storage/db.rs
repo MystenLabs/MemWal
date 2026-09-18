@@ -1653,20 +1653,13 @@ async fn concurrent_index_build_in_progress(
 
 /// Recover leftover INVALID indexes, then run 016/018/022, on one session.
 ///
-/// The advisory lock serializes replica boots so a follower cannot
-/// mistake the leader's in-progress CONCURRENTLY build for a crashed
-/// leftover. `statement_timeout = 0` for this session so a large
-/// `remember_jobs` cannot leave 022 INVALID by hitting the server GUC.
+/// The advisory lock serializes replica boots so a follower cannot mistake
+/// the leader's in-progress CONCURRENTLY build for a crashed leftover.
 ///
-/// The timeout goes off BEFORE the lock is taken, not after. Waiting on
-/// `pg_advisory_lock` is a statement like any other, and the wait it is
-/// there to perform is the leader's entire `CREATE INDEX CONCURRENTLY` --
-/// the same build the timeout is disabled for. Taking the lock under the
-/// inherited GUC cancels the follower with 57014 ("canceling statement due
-/// to statement timeout"), which fails `VectorDb::new()` and, under
-/// Railway's restart policy, crash-loops that replica for exactly as long
-/// as the leader's build runs. The follower is supposed to wait; give it a
-/// session that can.
+/// `statement_timeout = 0` goes on BEFORE the lock, not after: the wait the
+/// lock exists to perform is the leader's whole CONCURRENTLY build, and a
+/// blocked `pg_advisory_lock` is cancelled by statement_timeout like any
+/// other statement (57014), which fails `VectorDb::new()`.
 async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), AppError> {
     let mut conn = pool.acquire().await.map_err(|e| {
         AppError::Internal(format!(
@@ -1675,8 +1668,6 @@ async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), App
         ))
     })?;
 
-    // Nothing has been changed on this session yet, so both early returns
-    // hand a clean connection back to the pool.
     let previous: String = sqlx::query_scalar("SHOW statement_timeout")
         .fetch_one(&mut *conn)
         .await
@@ -1714,11 +1705,7 @@ async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), App
     result
 }
 
-/// Take the boot lock, do the work, and release it however the work ended.
-///
-/// Split out so the caller owns the `statement_timeout` window on both
-/// sides of the lock: a lock this cannot acquire still has to leave the
-/// session restorable.
+/// Take the boot lock, do the work, release it however the work ended.
 async fn lock_and_rebuild_concurrent_indexes(conn: &mut PgConnection) -> Result<(), AppError> {
     sqlx::query("SELECT pg_advisory_lock($1, $2)")
         .bind(CONCURRENT_INDEX_LOCK_KEYS.0)

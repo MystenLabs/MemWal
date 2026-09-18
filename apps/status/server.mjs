@@ -354,23 +354,13 @@ async function probeRelayer(name, rawBase, target) {
       }
     }
 
-    const rawWrites = isRecord(health) ? health.writes : undefined
     // /health stays HTTP 200 + status:"ok" through a Walrus outage so CI's
     // wait-for-relayer gate does not hang. The write-path signal is `writes`.
-    //
-    // Allowlist: a fourth writes value must not silently become operational
-    // the way degraded did before this PR. Only two things pass — the relayer
-    // said "ok", or it is old enough not to have the field at all.
-    //
-    // Absent is not the same as unreadable. A relayer that predates `writes`
-    // omits the key; anything present but not a string (null, a number, an
-    // object, a proxy's error envelope) is a payload we cannot classify, and
-    // an unclassifiable payload is not evidence of health. Collapsing both to
-    // '' would reopen the hole one value to the left of where it was.
+    // Allowlist, on the raw value: "ok", or absent on a relayer predating the
+    // field. Anything else — including a value we can't read — is degraded.
+    const writes = isRecord(health) ? health.writes : undefined
     const reportedOk =
-      isRecord(health) &&
-      health.status === 'ok' &&
-      (rawWrites === 'ok' || rawWrites === undefined)
+      isRecord(health) && health.status === 'ok' && (writes === 'ok' || writes === undefined)
     const status = response.ok ? (reportedOk ? 'operational' : 'degraded') : 'outage'
 
     return {
