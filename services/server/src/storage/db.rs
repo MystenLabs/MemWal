@@ -1653,13 +1653,10 @@ async fn concurrent_index_build_in_progress(
 
 /// Recover leftover INVALID indexes, then run 016/018/022, on one session.
 ///
-/// The advisory lock serializes replica boots so a follower cannot mistake
-/// the leader's in-progress CONCURRENTLY build for a crashed leftover.
-///
-/// `statement_timeout = 0` goes on BEFORE the lock, not after: the wait the
-/// lock exists to perform is the leader's whole CONCURRENTLY build, and a
-/// blocked `pg_advisory_lock` is cancelled by statement_timeout like any
-/// other statement (57014), which fails `VectorDb::new()`.
+/// The advisory lock serializes replica boots so a follower cannot
+/// mistake the leader's in-progress CONCURRENTLY build for a crashed
+/// leftover. `statement_timeout = 0` for this session so a large
+/// `remember_jobs` cannot leave 022 INVALID by hitting the server GUC.
 async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), AppError> {
     let mut conn = pool.acquire().await.map_err(|e| {
         AppError::Internal(format!(
@@ -1705,7 +1702,6 @@ async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), App
     result
 }
 
-/// Take the boot lock, do the work, release it however the work ended.
 async fn lock_and_rebuild_concurrent_indexes(conn: &mut PgConnection) -> Result<(), AppError> {
     sqlx::query("SELECT pg_advisory_lock($1, $2)")
         .bind(CONCURRENT_INDEX_LOCK_KEYS.0)

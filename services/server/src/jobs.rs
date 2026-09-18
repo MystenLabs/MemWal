@@ -445,19 +445,10 @@ pub(crate) struct WalletJobAttemptInfo {
 }
 
 impl WalletJobAttemptInfo {
-    /// True when no later attempt of this job will run.
-    ///
-    /// Decides whether the remember row is terminal, and that has one input:
-    /// is another attempt coming. Kept separate from `exhausted_by`, which
-    /// answers "is this worth an alert" and carves out an error kind for that
-    /// reason alone — borrowing it here left a spent WalrusBalanceLow job on
-    /// `running` until the 10-minute stale sweeper.
     fn retries_exhausted(&self, error: &WalletJobError) -> bool {
         !error.aborts_retries() && self.current >= self.max
     }
 
-    /// True when an exhausted budget is worth a distinct operator alert.
-    /// `WalrusBalanceLow` already pages with the actionable number.
     fn exhausted_by(&self, error: &WalletJobError) -> bool {
         if matches!(error, WalletJobError::WalrusBalanceLow(_)) {
             return false;
@@ -3049,12 +3040,6 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-    /// `update_remember_job_after_wallet_error` decides the row with:
-    ///     let terminal = error.aborts_retries() || exhausted;
-    ///     let status   = if terminal { "failed" } else { "running" };
-    /// Fed by the alert predicate, a spent WalrusBalanceLow job lands on
-    /// `running` with no attempt left to move it — what clients read as
-    /// "still uploading". Fed by the budget predicate, it fails on the spot.
     #[test]
     fn a_spent_budget_is_terminal_for_every_retryable_error() {
         let spent = WalletJobAttemptInfo {
@@ -3063,10 +3048,9 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         };
         let low = WalletJobError::WalrusBalanceLow("wallet 0 WAL balance low".into());
 
-        assert!(!spent.exhausted_by(&low), "the bug: alert rule says not spent");
-        assert!(spent.retries_exhausted(&low), "the fix: the budget is spent");
+        assert!(!spent.exhausted_by(&low));
+        assert!(spent.retries_exhausted(&low));
 
-        // Every other retryable error was already terminal; keep it that way.
         for err in [
             WalletJobError::Transient("durable Walrus upload failed (503)".into()),
             WalletJobError::UploadSlotCongestion("timed out waiting for upload slot".into()),
@@ -3074,8 +3058,6 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             assert!(spent.retries_exhausted(&err), "{}", err.kind());
         }
 
-        // Attempts left is never terminal; an aborting error is terminal via
-        // aborts_retries, not via this predicate.
         let mid = WalletJobAttemptInfo { current: 1, max: MAX_ATTEMPTS as usize };
         assert!(!mid.retries_exhausted(&low));
         let permanent = WalletJobError::Permanent("registerTransaction digest mismatch".into());
