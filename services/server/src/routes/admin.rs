@@ -352,7 +352,9 @@ fn durable_writes_degraded(failed: i64, succeeded: i64) -> bool {
 ///
 /// Fails open, like the Postgres probe: a database that cannot answer this
 /// is not evidence that Walrus is down, and `/health` must not invent an
-/// outage out of its own query failing.
+/// outage out of its own query failing. Bounded at
+/// `WRITE_READY_PROBE_TIMEOUT` (1s) so a sequential scan of `remember_jobs`
+/// cannot stall the liveness handler past the 30s cache TTL.
 async fn durable_writes_degraded_probe(state: &std::sync::Arc<AppState>) -> bool {
     {
         let cache = DURABLE_WRITE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
@@ -363,12 +365,23 @@ async fn durable_writes_degraded_probe(state: &std::sync::Arc<AppState>) -> bool
         }
     }
 
-    let degraded = match state.db.recent_write_outcomes(DURABLE_WRITE_WINDOW).await {
-        Ok((failed, succeeded)) => durable_writes_degraded(failed, succeeded),
-        Err(err) => {
+    let degraded = match tokio::time::timeout(
+        WRITE_READY_PROBE_TIMEOUT,
+        state.db.recent_write_outcomes(DURABLE_WRITE_WINDOW),
+    )
+    .await
+    {
+        Ok(Ok((failed, succeeded))) => durable_writes_degraded(failed, succeeded),
+        Ok(Err(err)) => {
             tracing::warn!(
                 error = %err,
                 "durable-write outcome probe failed; leaving the write path reported healthy"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                "durable-write outcome probe timed out; leaving the write path reported healthy"
             );
             false
         }
@@ -1400,6 +1413,16 @@ mod tests {
 
     #[test]
     fn postgres_write_ready_probe_timeout_is_one_second() {
+        assert_eq!(
+            super::WRITE_READY_PROBE_TIMEOUT,
+            std::time::Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn durable_write_probe_shares_the_one_second_bound() {
+        // A hung recent_write_outcomes scan must not stall /health past this;
+        // the probe fails open, same as the Postgres size check.
         assert_eq!(
             super::WRITE_READY_PROBE_TIMEOUT,
             std::time::Duration::from_secs(1)

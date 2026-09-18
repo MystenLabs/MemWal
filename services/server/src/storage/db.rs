@@ -1862,7 +1862,9 @@ impl VectorDb {
     ///
     /// Counted rather than listed, and read behind a cache measured in
     /// tens of seconds, because `remember_jobs` is indexed on `owner` and
-    /// on `status` but not on `updated_at` alone.
+    /// on `status` but not on `updated_at` alone. The statement is also
+    /// cancelled at 1s (`SET LOCAL`) so a sequential scan cannot stall
+    /// the public `/health` handler; the probe fails open on timeout.
     pub async fn recent_write_outcomes(
         &self,
         window: std::time::Duration,
@@ -1870,6 +1872,18 @@ impl VectorDb {
         let started = std::time::Instant::now();
         let since =
             chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default();
+        // SET LOCAL needs a transaction; the pool's statement_timeout is
+        // the startup bound (up to 300s) and would let this scan run that
+        // long. 1000ms matches WRITE_READY_PROBE_TIMEOUT on /health.
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            AppError::Internal(format!("Failed to count recent remember outcomes: {}", e))
+        })?;
+        sqlx::query("SELECT set_config('statement_timeout', '1000ms', true)")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to count recent remember outcomes: {}", e))
+            })?;
         let outcome = sqlx::query_as::<_, (i64, i64)>(
             "SELECT
                count(*) FILTER (WHERE status = 'failed'),
@@ -1879,8 +1893,9 @@ impl VectorDb {
                AND updated_at >= $1",
         )
         .bind(since)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await;
+        let _ = tx.rollback().await;
 
         match outcome {
             Ok(counts) => {
