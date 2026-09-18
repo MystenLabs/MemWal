@@ -291,6 +291,20 @@ Search for memories matching a natural language query. Returns decrypted plainte
 
 `sort` is optional: `"relevance"` (the cosine order, and the behaviour when omitted) or `"recent"` (the newest among the semantic matches). An explicit `sort`, `"relevance"` included, is the order, and the relayer ignores `scoring_weights` for that request.
 
+`deadline_ms` is optional: how long the caller waits for this response, in milliseconds. When set, the relayer stops about one second before it and answers `504` with the step that was still running, so the caller learns where the recall stalled instead of timing out blind. Omit it to let the recall run to completion. The TypeScript SDK sends `15000`.
+
+```json
+{
+  "error": "Recall timed out after 14001ms during walrus_download",
+  "message": "Recall timed out after 14001ms during walrus_download",
+  "code": "RECALL_TIMEOUT",
+  "stage": "walrus_download",
+  "elapsed_ms": 14001
+}
+```
+
+`stage` is one of `embed`, `vector_search`, `walrus_download`, or `seal_decrypt`.
+
 #### Scoring weights
 
 The optional `scoring_weights` object turns on composite ranking. The same object works on `/api/recall`, `/api/recall/manual`, and `/api/ask`.
