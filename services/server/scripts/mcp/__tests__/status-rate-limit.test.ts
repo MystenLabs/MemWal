@@ -186,3 +186,83 @@ test("a probe that fails for any other reason does not invent an outcome", async
     assert.match(text, /still uploading/i);
     assert.ok(!/NOT stored/.test(text), `a failed probe was read as a failed write: ${text}`);
 });
+
+/**
+ * Single-job wait path: the confirming probe used to fall through
+ * `failed` / `not_found` into `stillRunning`. That is the case the probe
+ * exists for — polls that were all 429s (or otherwise swallowed) so the
+ * SDK stamped timeout even though the job already died. The agent was then
+ * told not to re-send, which is silent loss.
+ */
+
+interface SingleJobBehaviour {
+    probe: "failed" | "not_found" | "running";
+}
+
+function timeout504(): Error {
+    const e = new Error("polling timed out after 30000ms");
+    (e as Error & { status?: number }).status = 504;
+    return e;
+}
+
+function sessionWithSingleJob(b: SingleJobBehaviour, calls: string[] = []): MemWalSession {
+    return {
+        oauthScope: "memwal:read memwal:write",
+        namespace: "default",
+        memwal: {
+            async waitForRememberJob(id: string) {
+                calls.push(`waitJob:${id}`);
+                throw timeout504();
+            },
+            async getRememberStatus(id: string) {
+                calls.push(`getStatus:${id}`);
+                if (b.probe === "failed") {
+                    return { job_id: id, status: "failed", error: "walrus upload rejected" };
+                }
+                if (b.probe === "not_found") {
+                    return { job_id: id, status: "not_found" };
+                }
+                return { job_id: id, status: "running" };
+            },
+        },
+    } as unknown as MemWalSession;
+}
+
+test("a single job whose wait times out and whose probe is failed is an error, not progress", async (t) => {
+    const calls: string[] = [];
+    const client = await clientFor(sessionWithSingleJob({ probe: "failed" }, calls), t);
+
+    const result = await client.callTool({
+        name: "memwal_remember_status",
+        arguments: { job_id: "job-1", waitMs: 30000 },
+    });
+    const text = textOf(result);
+
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.ok(
+        !/still uploading/i.test(text),
+        `a terminal failure still read as progress: ${text}`,
+    );
+    assert.match(text, /failed/i);
+    assert.ok(
+        calls.includes("getStatus:job-1"),
+        "timed-out wait must be confirmed with one direct read",
+    );
+});
+
+test("a single job whose wait times out and whose probe is not_found is an error, not progress", async (t) => {
+    const client = await clientFor(sessionWithSingleJob({ probe: "not_found" }), t);
+
+    const result = await client.callTool({
+        name: "memwal_remember_status",
+        arguments: { job_id: "job-1", waitMs: 30000 },
+    });
+    const text = textOf(result);
+
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.ok(
+        !/still uploading/i.test(text),
+        `a missing job still read as progress: ${text}`,
+    );
+    assert.match(text, /not found/i);
+});

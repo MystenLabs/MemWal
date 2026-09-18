@@ -112,33 +112,14 @@ export function registerRememberStatusTool(
                 // sleeps before its first poll, so a 0ms deadline would
                 // return "still running" without ever asking the relayer.
                 if (budget === 0) {
-                    const status = await withAcceptDeadline(
-                        session.memwal.getRememberStatus(job_id),
-                        "status read",
-                        { idempotent: true },
+                    return settleFromStatus(
+                        job_id,
+                        await withAcceptDeadline(
+                            session.memwal.getRememberStatus(job_id),
+                            "status read",
+                            { idempotent: true },
+                        ),
                     );
-                    if (status.status === "done") {
-                        return saved(status.blob_id ?? "", status.namespace);
-                    }
-                    if (status.status === "failed") {
-                        throw nameJobError(
-                            Object.assign(
-                                new Error(
-                                    `remember job failed: ${status.error ?? "unknown error"}`
-                                ),
-                                { status: 500, jobId: job_id }
-                            )
-                        );
-                    }
-                    if (status.status === "not_found") {
-                        throw nameJobError(
-                            Object.assign(
-                                new Error(`remember job not found: ${job_id}`),
-                                { status: 404, jobId: job_id }
-                            )
-                        );
-                    }
-                    return stillRunning(job_id, status.status);
                 }
 
                 try {
@@ -155,15 +136,16 @@ export function registerRememberStatusTool(
                         // Same masking as the batch path: the SDK's poll loop
                         // hides a refused poll behind its own timeout, so
                         // confirm with one direct read before calling it
-                        // progress.
+                        // progress. Interpret the probe OUTSIDE the catch so
+                        // a terminal job (`failed` / `not_found`) is not
+                        // swallowed back into "still uploading".
+                        let status;
                         try {
-                            const status = await session.memwal.getRememberStatus(job_id);
-                            if (status.status === "done") {
-                                return saved(status.blob_id ?? "", status.namespace);
-                            }
-                            if (status.status !== "failed" && status.status !== "not_found") {
-                                return stillRunning(job_id, status.status);
-                            }
+                            status = await withAcceptDeadline(
+                                session.memwal.getRememberStatus(job_id),
+                                "status read",
+                                { idempotent: true },
+                            );
                         } catch (probe) {
                             if (isRateLimited(probe)) {
                                 throw rateLimitedError(
@@ -171,8 +153,10 @@ export function registerRememberStatusTool(
                                     "check whether the write landed"
                                 );
                             }
+                            // A failed read is not evidence about the job.
+                            return stillRunning(job_id);
                         }
-                        return stillRunning(job_id);
+                        return settleFromStatus(job_id, status);
                     }
                     throw nameJobError(err);
                 }
@@ -311,6 +295,37 @@ async function settleBatch(
     if (done.length) parts.push(explorerFooter());
 
     return { content: [{ type: "text" as const, text: parts.join("\n\n") }] };
+}
+
+/** Map a job-status read onto the three outcomes this tool keeps distinct.
+ *
+ * Shared by the zero-budget path and the confirming probe after a wait
+ * timeout, so a terminal job cannot be reported as still uploading on one
+ * path and as an error on the other. */
+function settleFromStatus(
+    jobId: string,
+    status: { status: string; blob_id?: string; namespace?: string; error?: string },
+) {
+    if (status.status === "done") {
+        return saved(status.blob_id ?? "", status.namespace);
+    }
+    if (status.status === "failed") {
+        throw nameJobError(
+            Object.assign(
+                new Error(`remember job failed: ${status.error ?? "unknown error"}`),
+                { status: 500, jobId },
+            ),
+        );
+    }
+    if (status.status === "not_found") {
+        throw nameJobError(
+            Object.assign(new Error(`remember job not found: ${jobId}`), {
+                status: 404,
+                jobId,
+            }),
+        );
+    }
+    return stillRunning(jobId, status.status);
 }
 
 function saved(blobId: string, namespace?: string) {
