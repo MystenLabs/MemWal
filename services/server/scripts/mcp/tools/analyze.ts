@@ -4,7 +4,12 @@ import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
 import { SECRET_EXCLUSION_RULES, AUTO_SAVE_OPT_IN_RULE } from "./memory-policy.js";
-import { sanitizeFact, redactionNotice, refusalNotice } from "./redaction.js";
+import {
+    sanitizePassage,
+    redactionNotice,
+    refusalNotice,
+    droppedSpanNotice,
+} from "./redaction.js";
 import {
     REMEMBER_POLL_INTERVAL_MS,
     REMEMBER_WAIT_MS,
@@ -75,7 +80,7 @@ export function registerAnalyzeTool(
                 AUTO_SAVE_OPT_IN_RULE +
                 " " +
                 SECRET_EXCLUSION_RULES +
-                " This tool forwards a whole passage, so it is the easiest way to leak a credential that happened to sit next to a fact: the passage is stripped of credential shapes before it is sent for extraction, and a passage that is only a secret, or that the user asked not to save, is not sent at all.",
+                " This tool forwards a whole passage, so it is the easiest way to leak a credential that happened to sit next to a fact: the passage is stripped of credential shapes before it is sent for extraction. A span the user asked not to save, or that is pasted third-party material, is dropped on its own and named in the reply; only a passage with nothing usable left is refused outright.",
             inputSchema: ANALYZE_INPUT,
         },
         wrapTool<{ text: string; namespace?: string }>(session, "memwal_analyze", async ({ text, namespace }) => {
@@ -83,15 +88,30 @@ export function registerAnalyzeTool(
             // reaches the extractor LLM. Everything this tool stores is derived
             // from this text, so a credential left in it can be copied into any
             // number of extracted facts — on append-only storage (WALM-642).
-            const safe = sanitizeFact(text);
+            //
+            // `sanitizePassage`, not `sanitizeFact`: the refusal predicates are
+            // whole-string, and applied to a transcript one "don't save this
+            // part" line threw away every other turn with it. They are scoped
+            // per span here, so the offending span is dropped and named and the
+            // rest is still extracted from.
+            const safe = sanitizePassage(text);
             if (safe.refusal) {
                 return {
+                    // Flagged as an error, because it is not a successful call:
+                    // nothing was extracted and nothing was saved, and a bare
+                    // text result reads to a client exactly like one that did.
+                    isError: true,
                     content: [
                         { type: "text" as const, text: refusalNotice(safe.refusal) },
                     ],
                 };
             }
-            const notice = redactionNotice(safe.kinds, safe.count);
+            const notice = [
+                redactionNotice(safe.kinds, safe.count),
+                droppedSpanNotice(safe.dropped, safe.segments),
+            ]
+                .filter(Boolean)
+                .join("\n\n");
             const safeText = safe.text;
 
             // `analyze` (not `analyzeAndWait`) returns once extraction is done

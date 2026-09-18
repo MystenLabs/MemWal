@@ -5,7 +5,7 @@ import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
 import { SECRET_EXCLUSION_RULES, AUTO_SAVE_OPT_IN_RULE } from "./memory-policy.js";
 import {
-    sanitizeFact,
+    sanitizeFactBatch,
     redactionNotice,
     refusalMessage,
     type RedactionKind,
@@ -64,7 +64,7 @@ export function registerRememberBulkTool(
                 AUTO_SAVE_OPT_IN_RULE +
                 " " +
                 SECRET_EXCLUSION_RULES +
-                " Walrus storage is append-only: a stored secret cannot be deleted, so each entry is stripped of credential shapes before writing and entries that are nothing but a secret are dropped, with a note saying which.",
+                " Walrus storage is append-only: a stored secret cannot be deleted, so each entry is stripped of credential shapes before writing and entries that are nothing but a secret are dropped, with a note saying which. The batch is screened as a whole, so splitting a credential's label into one entry and its value into another does not get it past the filter.",
             inputSchema: REMEMBER_BULK_INPUT,
         },
         wrapTool<{ facts: string[]; namespace?: string }>(session, "memwal_remember_bulk", async ({ facts, namespace }) => {
@@ -74,9 +74,15 @@ export function registerRememberBulkTool(
             // part; an entry that is only a secret — or that the user asked
             // not to save — is dropped from the batch rather than the whole
             // call failing, so the other facts still land.
-            const screened = facts.map((text, index) => ({
+            //
+            // Screened as a BATCH, not entry by entry: every label-gated rule
+            // searches a window inside one string, so a label in one entry and
+            // its value in the next defeated all of them — including the one
+            // that exists for MemWal's own delegate private key. See
+            // `sanitizeFactBatch`.
+            const screened = sanitizeFactBatch(facts).map((result, index) => ({
                 index,
-                result: sanitizeFact(text),
+                result,
             }));
             const kept = screened.filter((s) => !s.result.refusal);
             const dropped = screened.filter((s) => s.result.refusal);

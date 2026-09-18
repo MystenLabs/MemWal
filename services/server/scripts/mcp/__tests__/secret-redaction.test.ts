@@ -12,8 +12,11 @@ import test from "node:test";
 
 import {
     sanitizeFact,
+    sanitizeFactBatch,
+    sanitizePassage,
     redactionNotice,
     refusalNotice,
+    droppedSpanNotice,
     type RedactionKind,
 } from "../tools/redaction.js";
 
@@ -473,4 +476,156 @@ test("a long passage is screened in linear time", () => {
         elapsed / smallMs < 12,
         `120 KB/30 KB ratio was ${(elapsed / smallMs).toFixed(1)}x — that is quadratic, not linear`,
     );
+});
+
+// ── finding 4: a secret split across bulk entries ──────────────────────────
+
+test("a credential split across two bulk entries is still caught", () => {
+    // The reporter's case. Every label-gated rule searches a window inside ONE
+    // string, so putting the label in one entry and the value in the next was
+    // a way past all of them — including the rule that exists specifically for
+    // MemWal's own delegate private key.
+    const SEED = "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+    const split = sanitizeFactBatch([
+        "my delegate private key for the mainnet account",
+        SEED,
+    ]);
+    assert.ok(
+        !split.map((r) => r.text).join("\n").includes(SEED),
+        "the delegate private key survived being split across entries",
+    );
+    assert.equal(split[1].refusal, "credential-only", "a bare key must be dropped, not stored");
+    assert.equal(split[0].refusal, undefined, "the label entry is a fact and should survive");
+
+    // The same value with filler words around it, and with the label AFTER it.
+    for (const facts of [
+        ["my delegate private key for the mainnet account", `the value to use is ${SEED} for that account`],
+        [SEED, "that is my delegate private key"],
+        ["I set up a second laptop", "my delegate private key is below", SEED],
+    ]) {
+        const out = sanitizeFactBatch(facts);
+        assert.ok(
+            !out.map((r) => r.text).join("\n").includes(SEED),
+            `the key survived: ${JSON.stringify(facts)}`,
+        );
+    }
+});
+
+test("the batch screen does not fire without a label anywhere in it", () => {
+    // Cross-entry awareness widens what counts as adjacent, which is exactly
+    // the kind of change that starts eating identifiers. The gate is still the
+    // label: a batch with none must be byte-for-byte untouched.
+    const facts = [
+        "The release digest is 4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b",
+        "My Sui package id is 0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437",
+        "The blob landed as blob_id=Xj9vKq2mP7nR4tW8yB1cE5gH0dF3sA6uZ2xN8qL4kM7",
+        "I always use pnpm",
+    ];
+    const out = sanitizeFactBatch(facts);
+    assert.deepEqual(out.map((r) => r.text), facts);
+    assert.deepEqual(out.map((r) => r.changed), [false, false, false, false]);
+});
+
+test("per-entry refusal granularity survives the batch screen", () => {
+    // The property that already worked: one bad entry is dropped and the rest
+    // of the batch still lands.
+    const out = sanitizeFactBatch([
+        "I always use pnpm",
+        "sk-abcdefghijklmnopqrstuvwxyz0123",
+        "Please don't save this one",
+        "Deploy on Thursdays",
+    ]);
+    assert.equal(out[0].refusal, undefined);
+    assert.equal(out[0].text, "I always use pnpm");
+    assert.equal(out[1].refusal, "credential-only");
+    assert.equal(out[2].refusal, "no-save-directive");
+    assert.equal(out[3].text, "Deploy on Thursdays");
+});
+
+// ── finding 8: one stray line discarded a whole transcript ─────────────────
+
+const TRANSCRIPT = [
+    "user: I always use pnpm for every project",
+    "assistant: noted",
+    "user: my staging box is app.example.com:8443",
+    "assistant: got it",
+    "user: my bank PIN is 4821 - don't save this part",
+    "assistant: understood",
+    "user: I deploy on Thursdays and never on Fridays",
+    "assistant: makes sense",
+].join("\n");
+
+test("one do-not-save line drops its span, not the whole transcript", () => {
+    const out = sanitizePassage(TRANSCRIPT);
+    assert.equal(out.refusal, undefined, "the whole passage was discarded again");
+    assert.ok(!out.text.includes("4821"), "the thing they asked not to save was kept");
+    assert.ok(!out.text.includes("don't save this part"));
+    // Everything else survived, on both sides of the dropped span.
+    assert.ok(out.text.includes("I always use pnpm for every project"));
+    assert.ok(out.text.includes("app.example.com:8443"));
+    assert.ok(out.text.includes("I deploy on Thursdays"));
+    // And the caller is told what went, by position and reason — never by text.
+    assert.ok(out.dropped.length > 0);
+    assert.ok(out.dropped.every((d) => d.reason === "no-save-directive"));
+    const notice = droppedSpanNotice(out.dropped, out.segments);
+    assert.match(notice, /span\(s\) were dropped/);
+    assert.ok(!notice.includes("4821"), "the notice echoed the dropped content");
+});
+
+test("a directive takes its own paragraph with it", () => {
+    // Scoping per line would save the PIN and drop only the sentence asking
+    // not to, which is the one outcome worse than dropping too much.
+    const out = sanitizePassage(
+        "I always use pnpm\n\nMy bank PIN is 4821\ndon't save this\n\nI deploy on Thursdays",
+    );
+    assert.equal(out.refusal, undefined);
+    assert.ok(!out.text.includes("4821"), "the directive's neighbour was saved anyway");
+    assert.ok(out.text.includes("I always use pnpm"));
+    assert.ok(out.text.includes("I deploy on Thursdays"));
+});
+
+test("a fenced transcript is analysed, a fenced code paste is still refused", () => {
+    // The tool documents a fenced transcript as its canonical input, and
+    // refused exactly that as pasted content.
+    const fenced = sanitizePassage("```\n" + TRANSCRIPT + "\n```");
+    assert.equal(fenced.refusal, undefined, "a fenced transcript was discarded");
+    assert.ok(fenced.text.includes("I always use pnpm for every project"));
+    assert.ok(!fenced.text.includes("4821"));
+
+    // A short fence, or one carrying a language tag, is a paste and stays one.
+    assert.equal(
+        sanitizePassage("```\nERROR 500 from the vendor API\n  at handler (index.js:42)\n```")
+            .refusal,
+        "pasted-content",
+    );
+    assert.equal(
+        sanitizePassage('```json\n{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4\n}\n```').refusal,
+        "pasted-content",
+    );
+    // ...and a fence INSIDE a passage is dropped without taking the rest.
+    const mixed = sanitizePassage(
+        "I always use pnpm\n\n```\nERROR 500\n```\n\nI deploy on Thursdays",
+    );
+    assert.equal(mixed.refusal, undefined);
+    assert.ok(mixed.text.includes("I always use pnpm"));
+    assert.ok(mixed.text.includes("I deploy on Thursdays"));
+    assert.ok(!mixed.text.includes("ERROR 500"));
+    assert.ok(mixed.dropped.some((d) => d.reason === "pasted-content"));
+});
+
+test("a passage with nothing left is still refused outright", () => {
+    // Scoping the refusal must not turn "save nothing" into "save something".
+    const out = sanitizePassage("My bank PIN is 4821 — don't save this.");
+    assert.equal(out.refusal, "no-save-directive");
+    assert.equal(out.text, "");
+    assert.ok(!out.text.includes("4821"));
+});
+
+test("a clean passage is forwarded byte-for-byte", () => {
+    const clean = "I always use pnpm, TypeScript strict mode, and deploy on Thursdays.";
+    const out = sanitizePassage(clean);
+    assert.equal(out.text, clean);
+    assert.equal(out.changed, false);
+    assert.deepEqual(out.dropped, []);
+    assert.equal(droppedSpanNotice(out.dropped, out.segments), "");
 });

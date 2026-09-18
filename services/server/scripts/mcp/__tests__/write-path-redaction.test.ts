@@ -347,6 +347,123 @@ test("the idempotency key is derived from what is actually written", async (t) =
  * the SDK was handed.
  * ------------------------------------------------------------------------ */
 
+test("splitting a secret across bulk entries does not reach the SDK", async (t) => {
+    // Every label-gated rule searched a window inside ONE string, so the label
+    // in one entry and its value in the next walked past all of them — with
+    // MemWal's own delegate private key, the worst thing this product can leak.
+    // An agent that paraphrases a user across two entries is enough; nothing
+    // here needs malice.
+    const SEED = "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+
+    const result = await client.callTool({
+        name: "memwal_remember_bulk",
+        arguments: {
+            facts: [
+                "I set up a second laptop today",
+                "my delegate private key for the mainnet account",
+                SEED,
+                "and I use the work namespace there",
+            ],
+        },
+    });
+
+    assert.equal(forwarded.bulk.length, 1, "the other facts must still be written");
+    assert.ok(
+        !forwarded.bulk[0].join("\n").includes(SEED),
+        "the delegate private key reached the SDK from a split batch",
+    );
+    assert.ok(!textOf(result).includes(SEED), "the reply echoed the delegate key back");
+    // The facts either side are still saved: this is a scalpel, not a batch
+    // refusal.
+    assert.ok(forwarded.bulk[0].some((f) => f.includes("second laptop")));
+    assert.ok(forwarded.bulk[0].some((f) => f.includes("work namespace")));
+});
+
+test("a bulk batch of plain identifiers is still forwarded byte-for-byte", async (t) => {
+    // The cross-entry screen only fires when a credential label is somewhere in
+    // the batch. Without one, nothing about the batch path may differ from the
+    // single-fact path.
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const facts = [
+        "My Sui package id is 0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437",
+        "The release digest is 4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b",
+        "I always use pnpm",
+    ];
+    const result = await client.callTool({
+        name: "memwal_remember_bulk",
+        arguments: { facts },
+    });
+    assert.deepEqual(forwarded.bulk, [facts]);
+    assert.doesNotMatch(textOf(result), /redacted|NOT SAVED/i);
+});
+
+test("one do-not-save line does not discard a whole transcript", async (t) => {
+    // `NO_SAVE_DIRECTIVE` is a whole-string predicate applied to a whole
+    // passage: one "don't save this part" line refused all forty turns, with
+    // `text: ""` and an instruction not to retry — and no `isError`, so the
+    // client read it as a successful call that had saved nothing.
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const transcript = [
+        "user: I always use pnpm for every project",
+        "assistant: noted",
+        "user: my bank PIN is 4821 - don't save this part",
+        "assistant: understood",
+        "user: I deploy on Thursdays and never on Fridays",
+        "assistant: makes sense",
+    ].join("\n");
+
+    const result = await client.callTool({
+        name: "memwal_analyze",
+        arguments: { text: transcript },
+    });
+
+    assert.equal(forwarded.analyze.length, 1, "the whole transcript was discarded again");
+    const sent = forwarded.analyze[0];
+    assert.ok(!sent.includes("4821"), "the withheld line reached the extractor");
+    assert.ok(sent.includes("I always use pnpm for every project"));
+    assert.ok(sent.includes("I deploy on Thursdays"));
+
+    const text = textOf(result);
+    assert.ok(!text.includes("4821"));
+    assert.match(text, /span\(s\) were dropped/, "the drop was not reported to the agent");
+});
+
+test("a fenced transcript is extracted from, and a refusal is flagged as one", async (t) => {
+    const forwarded: Forwarded = { remember: [], bulk: [], analyze: [] };
+    const client = await clientFor(sessionWith(forwarded), t);
+    const fenced =
+        "```\n" +
+        [
+            "user: I always use pnpm for every project",
+            "assistant: noted",
+            "user: I deploy on Thursdays and never on Fridays",
+            "assistant: makes sense",
+        ].join("\n") +
+        "\n```";
+
+    await client.callTool({ name: "memwal_analyze", arguments: { text: fenced } });
+    assert.equal(forwarded.analyze.length, 1, "a fenced transcript was refused as a paste");
+    assert.ok(forwarded.analyze[0].includes("I always use pnpm for every project"));
+
+    // A passage with nothing usable left is still refused — and now says so as
+    // an error, rather than looking like a call that succeeded and saved zero.
+    const refused = await client.callTool({
+        name: "memwal_analyze",
+        arguments: { text: "My bank PIN is 4821 — don't save this." },
+    });
+    assert.equal(forwarded.analyze.length, 1, "a refused passage was forwarded anyway");
+    assert.equal(
+        (refused as { isError?: boolean }).isError,
+        true,
+        "a call that saved nothing reported success",
+    );
+    assert.match(textOf(refused), /NOT SAVED/);
+});
+
 test("memwal_analyze will not take an unbounded passage", async (t) => {
     // The schema was `z.string().min(1)` with no maximum while the tool is
     // documented as accepting a whole transcript, so the work the sidecar's
