@@ -7,9 +7,6 @@ const mocks = vi.hoisted(() => ({
     address: '0xowner',
     accountId: '0xaccount',
     signAndExecute: vi.fn(),
-}))
-
-vi.mock('../config', () => ({
     config: {
         memwalServerUrl: 'https://relayer.test',
         memwalPackageId: '0xpkg',
@@ -17,6 +14,10 @@ vi.mock('../config', () => ({
         suiNetwork: 'testnet',
         docsUrl: 'https://docs.test',
     },
+}))
+
+vi.mock('../config', () => ({
+    config: mocks.config,
 }))
 vi.mock('@mysten/dapp-kit', () => ({
     ConnectModal: () => null,
@@ -73,6 +74,7 @@ async function signIn() {
 
 beforeEach(() => {
     vi.clearAllMocks()
+    mocks.config.docsUrl = 'https://docs.test'
     mocks.signAndExecute.mockResolvedValue({ digest: '0xdigest' })
 })
 
@@ -93,6 +95,22 @@ describe('MCP sign-in hand-off', () => {
         expect(screen.getByText(/most agents only write when told to/i)).toBeInTheDocument()
         expect(screen.getByText(/call memwal_remember in that same turn/i)).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /copy prompt/i })).toBeInTheDocument()
+        expect(screen.getByRole('link', { name: /more templates/i })).toHaveAttribute(
+            'href',
+            'https://docs.test/guides/system-prompt-templates',
+        )
+    })
+
+    it('keeps the template library link when no docs URL is configured', async () => {
+        mocks.config.docsUrl = ''
+        stubListener(async () => new Response('{}', { status: 200 }))
+        await signIn()
+
+        expect(await screen.findByText(/MCP client connected/i)).toBeInTheDocument()
+        expect(screen.getByRole('link', { name: /more templates/i })).toHaveAttribute(
+            'href',
+            'https://docs.wal.app/walrus-memory/guides/system-prompt-templates',
+        )
     })
 
     it('withholds the starter prompt when the hand-off never landed', async () => {
