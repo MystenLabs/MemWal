@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use crate::alerts::AlertManager;
 use crate::types::{AppError, SearchHit};
@@ -133,6 +133,22 @@ async fn run_migrations(pool: &PgPool, migrations: &[Migration]) -> Result<(), A
     for (name, sql) in migrations {
         sqlx::raw_sql(sql)
             .execute(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration {}: {}", name, e)))?;
+    }
+    Ok(())
+}
+
+/// Same as `run_migrations`, but on a held session — used so recover +
+/// `CREATE INDEX CONCURRENTLY` share the advisory lock that serializes
+/// replica boots.
+async fn run_migrations_on(
+    conn: &mut PgConnection,
+    migrations: &[Migration],
+) -> Result<(), AppError> {
+    for (name, sql) in migrations {
+        sqlx::raw_sql(sql)
+            .execute(&mut *conn)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to run migration {}: {}", name, e)))?;
     }
@@ -323,6 +339,20 @@ mod tests {
             "CONCURRENTLY_BUILT_INDEXES names index(es) that no migration in \
              MIGRATIONS_AFTER_INDEX_RECOVERY builds: {stale:?}"
         );
+    }
+
+    #[test]
+    fn drop_invalid_concurrent_index_uses_if_exists() {
+        let sql = super::drop_invalid_concurrent_index_sql("remember_jobs_recent_outcomes_idx");
+        assert!(sql.to_ascii_uppercase().contains("CONCURRENTLY"), "{sql}");
+        assert!(sql.to_ascii_uppercase().contains("IF EXISTS"), "{sql}");
+        assert!(sql.contains("remember_jobs_recent_outcomes_idx"), "{sql}");
+    }
+
+    #[test]
+    fn invalid_index_is_not_dropped_while_a_build_is_in_progress() {
+        assert!(!super::should_drop_invalid_concurrent_index(true));
+        assert!(super::should_drop_invalid_concurrent_index(false));
     }
 
     fn test_database_url() -> Option<String> {
@@ -1405,11 +1435,11 @@ fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
 /// migration no-ops forever while the planner refuses to use what was
 /// left behind. Nothing errors; the query just silently degrades.
 ///
-/// The interruption that matters is the ordinary one, not an operator
-/// with Ctrl-C: `VectorDb::new` does not set `statement_timeout`, so
-/// these builds inherit the server default, and the larger the table the
-/// likelier the build exceeds it. That puts the failure most likely on
-/// exactly the tables where the index earns its keep.
+/// The interruption that used to matter was the server
+/// `statement_timeout` cancelling a large `CREATE INDEX CONCURRENTLY`.
+/// The locked rebuild now sets `statement_timeout = 0` for that
+/// session so a large `remember_jobs` cannot leave 022 INVALID by
+/// hitting the GUC. Recovery still exists for a crash or kill mid-build.
 ///
 /// Only indexes whose loss is SILENT belong here. Migration 013's
 /// `uq_remember_jobs_owner_idempotency_key` is deliberately absent: it is
@@ -1432,6 +1462,22 @@ const CONCURRENTLY_BUILT_INDEXES: &[(&str, &str)] = &[
     // silent-failure detector.
     ("remember_jobs_recent_outcomes_idx", "022"),
 ];
+
+/// Session advisory lock for recover + `CREATE INDEX CONCURRENTLY`.
+/// Two replicas booting together (first 022 deploy, restart-all, scale-up)
+/// must not interleave recover and build: `indisvalid` is false for the
+/// entire live CONCURRENTLY build, so a follower that dropped "the
+/// leftover" would drop the leader's in-progress (or just-finished)
+/// index. Stable across deploys so rolling replicas share the key.
+const CONCURRENT_INDEX_LOCK_KEYS: (i32, i32) = (872_122, 22);
+
+fn should_drop_invalid_concurrent_index(build_in_progress: bool) -> bool {
+    !build_in_progress
+}
+
+fn drop_invalid_concurrent_index_sql(name: &str) -> String {
+    format!("DROP INDEX CONCURRENTLY IF EXISTS {}", name)
+}
 
 /// Backfill `vector_entries.updated_at` from `created_at` in bounded
 /// batches.
@@ -1503,16 +1549,28 @@ async fn backfill_updated_at(pool: &PgPool) -> Result<(), AppError> {
 /// See `CONCURRENTLY_BUILT_INDEXES` for why `IF NOT EXISTS` cannot
 /// recover on its own and which indexes are in scope.
 ///
-/// Called immediately before `MIGRATIONS_AFTER_INDEX_RECOVERY`, which is
-/// where every listed migration lives -- so one pass covers all of them,
-/// and each `CREATE INDEX CONCURRENTLY IF NOT EXISTS` that follows finds
-/// either a valid index or no index at all.
+/// `indisvalid = false` is also true for the entire duration of a *live*
+/// `CREATE INDEX CONCURRENTLY`. Dropping that catalog row races two
+/// replicas on first deploy of 022: the follower waits out the leader's
+/// build, then drops the now-valid index (or errors if the sibling
+/// already dropped it, which fails `VectorDb::new`). Skip the drop when
+/// `pg_stat_progress_create_index` shows a live build for that name.
+/// `DROP INDEX CONCURRENTLY IF EXISTS` so a sibling that already cleaned
+/// up does not abort boot.
 ///
-/// `DROP INDEX CONCURRENTLY` cannot run inside a transaction block either,
-/// hence the bare `sqlx::query(..).execute(pool)` with no explicit
-/// transaction wrapper. A recovery is logged at `warn` so it shows up in
-/// observability instead of silently happening on boot.
+/// Called immediately before `MIGRATIONS_AFTER_INDEX_RECOVERY` on the
+/// same session that holds `CONCURRENT_INDEX_LOCK_KEYS`.
 async fn recover_invalid_concurrent_indexes(pool: &PgPool) -> Result<(), AppError> {
+    let mut conn = pool.acquire().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to acquire a connection for concurrent-index recovery: {}",
+            e
+        ))
+    })?;
+    recover_invalid_concurrent_indexes_on(&mut conn).await
+}
+
+async fn recover_invalid_concurrent_indexes_on(conn: &mut PgConnection) -> Result<(), AppError> {
     for (index, migration) in CONCURRENTLY_BUILT_INDEXES {
         let index_is_invalid: Option<bool> = sqlx::query_scalar(
             "SELECT pg_index.indisvalid FROM pg_index \
@@ -1520,13 +1578,25 @@ async fn recover_invalid_concurrent_indexes(pool: &PgPool) -> Result<(), AppErro
              WHERE pg_class.relname = $1",
         )
         .bind(index)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to check validity of {}: {}", index, e)))?;
 
         // None means no index by that name -- nothing built it yet, which
         // its own migration handles. Some(true) is a healthy index.
         if index_is_invalid != Some(false) {
+            continue;
+        }
+
+        if !should_drop_invalid_concurrent_index(
+            concurrent_index_build_in_progress(conn, index).await?,
+        ) {
+            tracing::info!(
+                index = %index,
+                migration = %migration,
+                "INVALID concurrent index is a live CREATE INDEX CONCURRENTLY; \
+                 not dropping it"
+            );
             continue;
         }
 
@@ -1537,13 +1607,113 @@ async fn recover_invalid_concurrent_indexes(pool: &PgPool) -> Result<(), AppErro
              CONCURRENTLY build -- dropping it so its migration can rebuild it"
         );
 
-        let drop_stmt = format!("DROP INDEX CONCURRENTLY {}", index);
-        sqlx::query(&drop_stmt).execute(pool).await.map_err(|e| {
-            AppError::Internal(format!("Failed to drop invalid index {}: {}", index, e))
-        })?;
+        let drop_stmt = drop_invalid_concurrent_index_sql(index);
+        sqlx::query(&drop_stmt)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to drop invalid index {}: {}", index, e))
+            })?;
     }
 
     Ok(())
+}
+
+async fn concurrent_index_build_in_progress(
+    conn: &mut PgConnection,
+    index: &str,
+) -> Result<bool, AppError> {
+    match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM pg_stat_progress_create_index p
+            JOIN pg_class c ON c.oid = p.index_relid
+            WHERE c.relname = $1
+        )",
+    )
+    .bind(index)
+    .fetch_one(&mut *conn)
+    .await
+    {
+        Ok(in_progress) => Ok(in_progress),
+        Err(e) => {
+            // Regular roles may not see other backends' progress rows.
+            // The session advisory lock is the fence between replica boots;
+            // treat an unreadable view as "no live build we can see".
+            tracing::warn!(
+                error = %e,
+                index,
+                "could not read pg_stat_progress_create_index; \
+                 not treating the INVALID index as a live build"
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Recover leftover INVALID indexes, then run 016/018/022, on one session.
+///
+/// The advisory lock serializes replica boots so a follower cannot
+/// mistake the leader's in-progress CONCURRENTLY build for a crashed
+/// leftover. `statement_timeout = 0` for this session so a large
+/// `remember_jobs` cannot leave 022 INVALID by hitting the server GUC.
+async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), AppError> {
+    let mut conn = pool.acquire().await.map_err(|e| {
+        AppError::Internal(format!(
+            "Failed to acquire a connection for concurrent-index rebuild: {}",
+            e
+        ))
+    })?;
+
+    sqlx::query("SELECT pg_advisory_lock($1, $2)")
+        .bind(CONCURRENT_INDEX_LOCK_KEYS.0)
+        .bind(CONCURRENT_INDEX_LOCK_KEYS.1)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to lock concurrent-index rebuild: {}", e))
+        })?;
+
+    let outcome = rebuild_concurrent_indexes_locked(&mut conn).await;
+
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+        .bind(CONCURRENT_INDEX_LOCK_KEYS.0)
+        .bind(CONCURRENT_INDEX_LOCK_KEYS.1)
+        .execute(&mut *conn)
+        .await;
+
+    outcome
+}
+
+async fn rebuild_concurrent_indexes_locked(conn: &mut PgConnection) -> Result<(), AppError> {
+    let previous: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read statement_timeout: {}", e)))?;
+
+    sqlx::query("SET statement_timeout = 0")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to disable statement_timeout for concurrent index builds: {}",
+                e
+            ))
+        })?;
+
+    let outcome = async {
+        recover_invalid_concurrent_indexes_on(conn).await?;
+        run_migrations_on(conn, MIGRATIONS_AFTER_INDEX_RECOVERY).await?;
+        Ok(())
+    }
+    .await;
+
+    let _ = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+        .bind(&previous)
+        .execute(&mut *conn)
+        .await;
+
+    outcome
 }
 
 /// Release storage reservations given only a pool handle.
@@ -1635,9 +1805,7 @@ impl VectorDb {
 
         run_migrations(&pool, MIGRATIONS_AFTER_BACKFILL).await?;
 
-        recover_invalid_concurrent_indexes(&pool).await?;
-
-        run_migrations(&pool, MIGRATIONS_AFTER_INDEX_RECOVERY).await?;
+        recover_and_rebuild_concurrent_indexes(&pool).await?;
 
         tracing::info!("database connected and migrations applied");
 

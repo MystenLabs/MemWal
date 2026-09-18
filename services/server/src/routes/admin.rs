@@ -165,9 +165,10 @@ const DURABLE_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_secs
 /// Failures inside the window before the write path is called degraded.
 /// Writes fail individually all the time; one or two is not an outage.
 const DURABLE_WRITE_FAILURE_THRESHOLD: i64 = 3;
-/// Cached far longer than `write_ready`: this one aggregates over
-/// `remember_jobs`, which has no index on `updated_at` alone, so it must
-/// not run on every load-balancer tick.
+/// Cached far longer than `write_ready` so `/health` does not hit
+/// `remember_jobs` on every load-balancer tick. 022's partial
+/// `updated_at` index is the steady-state path; the 1s bound is a
+/// backstop, not the expected scan.
 const DURABLE_WRITE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const WRITE_READY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 /// Neon refuses `smgrextend` once cluster size is at the cap; treat less
@@ -352,12 +353,15 @@ fn durable_writes_degraded(failed: i64, succeeded: i64) -> bool {
 ///
 /// Fails open, like the Postgres probe: a database that cannot answer this
 /// is not evidence that Walrus is down, and `/health` must not invent an
-/// outage out of its own query failing. Bounded at
-/// `WRITE_READY_PROBE_TIMEOUT` (1s) so a sequential scan of `remember_jobs`
-/// cannot stall the liveness handler past the 30s cache TTL.
+/// outage out of its own query failing. Cached so `/health` does not hit
+/// `remember_jobs` on every load-balancer tick. 022's partial `updated_at`
+/// index keeps the 1s `WRITE_READY_PROBE_TIMEOUT` a backstop rather than
+/// the steady state.
 async fn durable_writes_degraded_probe(state: &std::sync::Arc<AppState>) -> bool {
     {
-        let cache = DURABLE_WRITE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = DURABLE_WRITE_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some((at, degraded)) = *cache {
             if at.elapsed() < DURABLE_WRITE_CACHE_TTL {
                 return degraded;
