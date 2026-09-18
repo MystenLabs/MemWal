@@ -1470,6 +1470,8 @@ const CONCURRENTLY_BUILT_INDEXES: &[(&str, &str)] = &[
 /// leftover" would drop the leader's in-progress (or just-finished)
 /// index. Stable across deploys so rolling replicas share the key.
 const CONCURRENT_INDEX_LOCK_KEYS: (i32, i32) = (872_122, 22);
+const CONCURRENT_INDEX_LOCK_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+const CONCURRENT_INDEX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
 fn should_drop_invalid_concurrent_index(build_in_progress: bool) -> bool {
     !build_in_progress
@@ -1653,9 +1655,12 @@ async fn concurrent_index_build_in_progress(
 
 /// Recover leftover INVALID indexes, then run 016/018/022, on one session.
 ///
-/// The advisory lock serializes replica boots so a follower cannot
-/// mistake the leader's in-progress CONCURRENTLY build for a crashed
-/// leftover. `statement_timeout = 0` for this session so a large
+/// The lock serializes replica boots so a follower cannot mistake the
+/// leader's in-progress CONCURRENTLY build for a crashed leftover. It is
+/// polled with `pg_try_advisory_lock` rather than waited on: a blocking
+/// `pg_advisory_lock` waiter holds a snapshot for the whole wait, and
+/// `CREATE INDEX CONCURRENTLY` waits for exactly such snapshots to finish,
+/// so the two deadlock. `statement_timeout = 0` for this session so a large
 /// `remember_jobs` cannot leave 022 INVALID by hitting the server GUC.
 async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), AppError> {
     let mut conn = pool.acquire().await.map_err(|e| {
@@ -1680,7 +1685,7 @@ async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), App
             ))
         })?;
 
-    let result = lock_and_rebuild_concurrent_indexes(&mut conn).await;
+    let (result, lock_released) = lock_and_rebuild_concurrent_indexes(&mut conn).await;
 
     let timeout_restored = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
         .bind(&previous)
@@ -1688,13 +1693,15 @@ async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), App
         .await
         .is_ok();
 
-    if !timeout_restored {
-        // SET statement_timeout = 0 is session-scoped. Returning this
-        // connection to the pool would let later /health queries run with
-        // no timeout. Drop it instead.
+    if !timeout_restored || !lock_released {
+        // Either a leaked `statement_timeout = 0` or a still-held session
+        // advisory lock. Both ride on the connection, so close it instead of
+        // returning it to the pool.
         tracing::warn!(
-            "failed to restore statement_timeout after concurrent-index rebuild; \
-             discarding the session rather than returning it to the pool"
+            timeout_restored,
+            lock_released,
+            "concurrent-index rebuild left the session dirty; discarding it \
+             rather than returning it to the pool"
         );
         let _ = conn.close().await;
     }
@@ -1702,15 +1709,36 @@ async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), App
     result
 }
 
-async fn lock_and_rebuild_concurrent_indexes(conn: &mut PgConnection) -> Result<(), AppError> {
-    sqlx::query("SELECT pg_advisory_lock($1, $2)")
-        .bind(CONCURRENT_INDEX_LOCK_KEYS.0)
-        .bind(CONCURRENT_INDEX_LOCK_KEYS.1)
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| {
-            AppError::Internal(format!("Failed to lock concurrent-index rebuild: {}", e))
-        })?;
+async fn lock_and_rebuild_concurrent_indexes(
+    conn: &mut PgConnection,
+) -> (Result<(), AppError>, bool) {
+    let mut waited = std::time::Duration::ZERO;
+    loop {
+        let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1, $2)")
+            .bind(CONCURRENT_INDEX_LOCK_KEYS.0)
+            .bind(CONCURRENT_INDEX_LOCK_KEYS.1)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to lock concurrent-index rebuild: {}", e))
+            });
+        match acquired {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(e) => return (Err(e), true),
+        }
+        if waited >= CONCURRENT_INDEX_LOCK_WAIT {
+            return (
+                Err(AppError::Internal(format!(
+                    "Timed out after {}s waiting for the concurrent-index rebuild lock",
+                    CONCURRENT_INDEX_LOCK_WAIT.as_secs()
+                ))),
+                true,
+            );
+        }
+        tokio::time::sleep(CONCURRENT_INDEX_LOCK_POLL).await;
+        waited += CONCURRENT_INDEX_LOCK_POLL;
+    }
 
     let result = async {
         recover_invalid_concurrent_indexes_on(conn).await?;
@@ -1719,13 +1747,14 @@ async fn lock_and_rebuild_concurrent_indexes(conn: &mut PgConnection) -> Result<
     }
     .await;
 
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+    let unlocked = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
         .bind(CONCURRENT_INDEX_LOCK_KEYS.0)
         .bind(CONCURRENT_INDEX_LOCK_KEYS.1)
         .execute(&mut *conn)
-        .await;
+        .await
+        .is_ok();
 
-    result
+    (result, unlocked)
 }
 
 /// Release storage reservations given only a pool handle.
