@@ -52,12 +52,34 @@ runs that absolute entry point with the current `node` binary:
 ~/.memwal/runtime/memwal-mcp@<version>/node_modules/@mysten-incubation/memwal-mcp/dist/bin/memwal-mcp.js
 ```
 
-It never consults your project's `node_modules`, a `PATH`-relative bin shim, or
-your project's `.npmrc`, and it fails rather than falling back to the package name
-if the pinned version cannot be installed. Everything after the script path is
-forwarded to the server unchanged, so flags such as `--namespace work` or
-`--relayer <url>` work exactly as they do above. Set `MEMWAL_MCP_RUNTIME_DIR` (an
-absolute path) to move the trusted directory elsewhere.
+It never consults your project's `node_modules` or a `PATH`-relative bin shim, and
+it fails rather than falling back to the package name if the pinned version cannot
+be installed. Everything after the script path is forwarded to the server
+unchanged, so flags such as `--namespace work` or `--relayer <url>` work exactly as
+they do above.
+
+The runtime directory is trusted because of what it is, not how it is spelled:
+
+- It must be outside the project the client started in. An absolute path is not
+  enough on its own — a client expands `${workspaceFolder}` to an absolute path
+  inside the repository, and a repository can commit a whole fake install there.
+- It must be a real directory (not a symlink), owned by you, and not group- or
+  world-writable. The launcher creates it with mode `0700` and refuses to run code
+  out of it otherwise. If you see a refusal, `chmod 700 ~/.memwal ~/.memwal/runtime`.
+- `MEMWAL_MCP_RUNTIME_DIR` moves it, subject to exactly the same rules.
+
+The one-off install is run with `--ignore-scripts` (so no `preinstall` or
+`postinstall` from the package or its dependencies executes), against an explicitly
+pinned public registry, with the `npm_config_*` and `NODE_OPTIONS` environment
+scrubbed for that spawn — npm ranks environment variables above every `.npmrc`, so
+a client `env` block would otherwise choose the registry. npm itself is run as
+`node <npm-cli.js>` resolved from the running node binary where that layout exists.
+
+What that does **not** give you is an integrity check of the package contents: it
+establishes where the code came from and that nobody else can write it, not that
+the registry served the bytes a reviewer read. If you install from a private
+registry, pre-populate the directory yourself (below) — the launcher then finds the
+install and never runs npm at all.
 
 If you configure MemWal without the plugin and want the same property, install the
 version you intend to run into a directory outside any project and point your
@@ -65,7 +87,9 @@ client at its absolute path:
 
 ```sh
 mkdir -p ~/.memwal/runtime/memwal-mcp@0.0.14
-npm install --prefix ~/.memwal/runtime/memwal-mcp@0.0.14 @mysten-incubation/memwal-mcp@0.0.14
+chmod 700 ~/.memwal ~/.memwal/runtime
+npm install --ignore-scripts --prefix ~/.memwal/runtime/memwal-mcp@0.0.14 \
+  @mysten-incubation/memwal-mcp@0.0.14
 ```
 
 ```json
