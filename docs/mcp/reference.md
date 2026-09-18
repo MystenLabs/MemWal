@@ -476,6 +476,8 @@ Work through the symptom that matches what you see.
 
 Quit and relaunch your MCP client. MCP servers only load at startup. If you used `claude mcp add`, run `claude mcp list` to confirm `memwal` is registered before restarting Claude Code.
 
+On Claude Code with the plugin installed, run `/reload-plugins` instead. It loads the plugin, its server and its hooks without a relaunch.
+
 ### Only `memwal_login` shows up
 
 Credentials are missing. Ask the agent to call `memwal_login`, or run `npx -y @mysten-incubation/memwal-mcp login --prod` from your terminal.
