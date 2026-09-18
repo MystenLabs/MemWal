@@ -282,6 +282,36 @@ test("a tool the relayer does not serve is refused locally, not waited out", asy
         `cold-start tools/list advertises ${MISSING_TOOL}, which no released relayer serves`,
     );
 
+    // Cold-start window: initialize instructions used to name this tool, and
+    // the gate used to fail open while `upstreamToolNames` was empty (it is
+    // only filled from a forwarded `tools/list`; the cold-start list is
+    // answered locally). Call it here, before any forwarded list.
+    const coldCallStarted = Date.now();
+    send({
+        jsonrpc: "2.0",
+        id: "cold-missing",
+        method: "tools/call",
+        params: { name: MISSING_TOOL, arguments: { job_id: "job-1" } },
+    });
+    const coldRefusal = await waitFor((m) => m.id === "cold-missing", 10_000);
+    const coldElapsed = Date.now() - coldCallStarted;
+    assert.equal(
+        coldRefusal.result?.isError,
+        true,
+        `expected a local error during cold start, got ${JSON.stringify(coldRefusal)}`,
+    );
+    assert.match(coldRefusal.result.content[0].text, new RegExp(MISSING_TOOL));
+    assert.match(coldRefusal.result.content[0].text, /tools\/list/);
+    assert.match(coldRefusal.result.content[0].text, /nothing was saved/i);
+    assert.ok(
+        coldElapsed < 5_000,
+        `cold-start refusal took ${coldElapsed}ms — expected it answered locally, not at the orphan deadline`,
+    );
+    assert.ok(
+        !mock.callsSeen.includes(MISSING_TOOL),
+        `bridge forwarded ${MISSING_TOOL} during cold start: ${mock.callsSeen}`,
+    );
+
     // Re-list once connected so the bridge learns what this relayer actually
     // registers. That reply is the authority the refusal below is based on.
     await waitFor((m) => m.method === "notifications/tools/list_changed", 10_000);

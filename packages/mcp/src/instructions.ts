@@ -17,7 +17,10 @@
  * services/server/scripts/mcp/server.ts, which serves the direct HTTP/OAuth
  * connector path. It cannot share this module: that file belongs to the
  * standalone `memwal-server-scripts` npm package with no workspace link here.
- * Keep the two in sync.
+ * Keep the two in sync, except: this copy must not name a tool cold start
+ * does not advertise (`memwal_remember_status` is the worked example — GH
+ * #928). The sidecar copy may name it; that process actually registers the
+ * tool.
  */
 
 /** Signed-in path (bridge mode). Full proactive contract. */
@@ -42,9 +45,10 @@ export const PROACTIVE_INSTRUCTIONS = [
     "By default memwal_remember and memwal_remember_bulk return in ~1s once the relayer has",
     "accepted the job (job_id / job_ids). The Walrus write continues in the background (~30-60s)",
     "and the fact is NOT stored yet. That is the normal result. Do not claim it is saved.",
-    "Do NOT re-send the same text — that queues duplicates. Resolve with memwal_remember_status",
-    "(job_id, or job_ids for a whole batch). Only a blob_id in the tool reply means the fact is",
-    "already stored (that happens when an optional wait budget was set and the write finished).",
+    "Do NOT re-send the same text — that queues duplicates. Settle it with the job-status tool",
+    "this server advertises (re-list tools if you do not see one; pass job_id, or job_ids for a",
+    "whole batch). Only a blob_id in the tool reply means the fact is already stored (that",
+    "happens when an optional wait budget was set and the write finished).",
     "",
     "RECOVER: if memwal_recall unexpectedly returns nothing for a namespace that has been used",
     "before, call memwal_restore to rebuild the index from Walrus.",

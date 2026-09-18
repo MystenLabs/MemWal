@@ -11,6 +11,7 @@ import {
     ALL_TOOL_DEFINITIONS,
     BASELINE_RELAYER_TOOLS,
 } from "../dist/auth-required.js";
+import { PROACTIVE_INSTRUCTIONS } from "../dist/instructions.js";
 
 function desc(list, name) {
     const tool = list.find((t) => t.name === name);
@@ -171,4 +172,23 @@ test("no cold-start description names a tool cold start does not advertise", () 
             );
         }
     }
+});
+
+test("initialize instructions do not name a tool cold start does not advertise", () => {
+    // Injected at `initialize`, before any `tools/list`. Naming
+    // `memwal_remember_status` here is the same #928 defect as listing it:
+    // the agent follows the sentence during the cold-start window, the
+    // local refusal used to be skipped while `upstreamToolNames` was empty,
+    // and the call sat in `inFlight` until the orphan deadline.
+    const advertised = new Set(TOOL_DEFINITIONS.map((t) => t.name));
+    advertised.add("memwal_login");
+    advertised.add("memwal_logout");
+    const named = PROACTIVE_INSTRUCTIONS.match(/memwal_[a-z_]+/g) ?? [];
+    const dangling = [...new Set(named)].filter((n) => !advertised.has(n));
+    assert.deepEqual(
+        dangling,
+        [],
+        `initialize instructions send the agent to unadvertised tools: ${dangling}`,
+    );
+    assert.doesNotMatch(PROACTIVE_INSTRUCTIONS, /memwal_remember_status/);
 });

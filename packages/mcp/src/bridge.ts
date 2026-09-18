@@ -251,6 +251,11 @@ const LOCAL_TOOLS_LIST = {
     ],
 };
 
+/** Names advertised at cold start (baseline relayer + locally-served). A
+ * `tools/call` for anything else is refused until an upstream `tools/list`
+ * has been seen — fail-closed, not fail-open. */
+const COLD_START_TOOL_NAMES = new Set(LOCAL_TOOLS_LIST.tools.map((t) => t.name));
+
 const URL_READY_TIMEOUT_MS = 5_000;
 
 /** Maximum silence we tolerate on the SSE stream before assuming the
@@ -1362,8 +1367,8 @@ export async function runBridge(
 
     /** Tool names the CONNECTED relayer advertised on its last `tools/list`,
      * minus the ones we serve locally. Empty until the client has listed tools
-     * at least once over a live session — until then we know nothing about the
-     * relayer's capabilities and gate nothing. */
+     * at least once over a live session — until then the gate allows only the
+     * cold-start floor (`COLD_START_TOOL_NAMES`), not an unknown name. */
     const upstreamToolNames = new Set<string>();
 
     /** IDs of forwarded `memwal_health` calls, each against the relayer URL the
@@ -2065,28 +2070,43 @@ export async function runBridge(
 
                 // Version skew: this bridge ships on npm and updates itself,
                 // while a relayer ships per environment and does not, so the
-                // bridge is routinely newer than the server it dials. A tool it
-                // advertised at cold start can be missing from the session that
-                // actually came up — `memwal_remember_status` against a prod
-                // relayer, which is GH #928. Forwarding that call parks it in
-                // `inFlight` until the orphan sweeper's deadline (60s + 30s
-                // headroom for that tool), and the user reads the 90s as a hang.
-                // A stale tool list is not a transport fault: say so now, while
-                // the agent can still act on it.
-                if (msg.method === "tools/call" && msg.id != null && upstreamToolNames.size > 0) {
+                // bridge is routinely newer than the server it dials. A tool
+                // named in initialize instructions or a cached list can be
+                // missing from the session that actually came up —
+                // `memwal_remember_status` against a prod relayer, which is
+                // GH #928. Forwarding that call parks it in `inFlight` until
+                // the orphan sweeper's deadline (60s + 30s headroom for that
+                // tool), and the user reads the 90s as a hang.
+                //
+                // Fail closed. Before any upstream `tools/list`, only the
+                // cold-start floor is callable. After one, only what that
+                // relayer advertised (plus locally-served tools). A stale
+                // tool list is not a transport fault: say so now, while the
+                // agent can still act on it.
+                if (msg.method === "tools/call" && msg.id != null) {
                     const called = (msg.params as { name?: string } | undefined)?.name;
-                    if (
-                        typeof called === "string" &&
-                        !upstreamToolNames.has(called) &&
-                        !LOCAL_TOOL_NAMES.has(called)
-                    ) {
-                        const available = [...upstreamToolNames, ...LOCAL_TOOL_NAMES].sort();
-                        log.warn("bridge.tool_not_served", { tool: called });
-                        failRequest(msg, "tool not served", {
-                            toolText: unknownToolText(called, available),
-                            errorMessage: `${called} is not served by this Walrus Memory relayer`,
-                        });
-                        return;
+                    if (typeof called === "string" && !LOCAL_TOOL_NAMES.has(called)) {
+                        const known =
+                            upstreamToolNames.size > 0
+                                ? upstreamToolNames
+                                : COLD_START_TOOL_NAMES;
+                        if (!known.has(called)) {
+                            const available = [
+                                ...(upstreamToolNames.size > 0
+                                    ? [...upstreamToolNames, ...LOCAL_TOOL_NAMES]
+                                    : COLD_START_TOOL_NAMES),
+                            ].sort();
+                            log.warn("bridge.tool_not_served", {
+                                tool: called,
+                                window:
+                                    upstreamToolNames.size > 0 ? "upstream" : "cold-start",
+                            });
+                            failRequest(msg, "tool not served", {
+                                toolText: unknownToolText(called, available),
+                                errorMessage: `${called} is not served by this Walrus Memory relayer`,
+                            });
+                            return;
+                        }
                     }
                 }
 

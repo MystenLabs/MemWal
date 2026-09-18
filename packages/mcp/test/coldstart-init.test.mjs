@@ -319,6 +319,11 @@ test("initialize is answered locally during a slow relayer cold start; tools/cal
     );
     assert.match(init.result.instructions, /memwal_recall/);
     assert.match(init.result.instructions, /memwal_remember/);
+    assert.doesNotMatch(
+        init.result.instructions,
+        /memwal_remember_status/,
+        "initialize instructions must not name a tool cold start does not advertise",
+    );
     assert.notEqual(
         init.result.serverInfo.version,
         "0.0.1",
