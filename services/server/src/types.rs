@@ -857,6 +857,37 @@ fn normalized_balance_monitor_interval(interval_secs: u64) -> u64 {
     interval_secs.max(MIN_BALANCE_MONITOR_INTERVAL_SECS)
 }
 
+/// Upper bound on wallet-job concurrency, mirroring the clamp the TS sidecar
+/// applies to `WALRUS_UPLOAD_MAX_CONCURRENCY` (`scripts/sidecar/config.ts`).
+const MAX_WALLET_JOB_CONCURRENCY: usize = 100;
+
+/// How many wallet jobs may run at once.
+///
+/// `WALLET_JOB_CONCURRENCY` wins whenever it is set — production sets it on
+/// Railway and that stays the source of truth. When it is unset we derive the
+/// same number the sidecar derives for its Walrus upload semaphore: one slot
+/// per configured upload wallet. The sidecar defaults
+/// `WALRUS_UPLOAD_MAX_CONCURRENCY` to `SERVER_SUI_PRIVATE_KEYS.length`, so
+/// deriving this side from the same wallet count keeps the two processes from
+/// drifting apart on a hard-coded number, as they did when this was `8` here
+/// and a wallet count there.
+pub fn wallet_job_concurrency_from_env(wallet_count: usize) -> usize {
+    resolve_wallet_job_concurrency(
+        nonempty_env("WALLET_JOB_CONCURRENCY").as_deref(),
+        wallet_count,
+    )
+}
+
+fn resolve_wallet_job_concurrency(configured: Option<&str>, wallet_count: usize) -> usize {
+    configured
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        // No wallets means uploads fail anyway; keep one worker so the queue
+        // still drains into a clear per-job error instead of stalling.
+        .unwrap_or_else(|| wallet_count.max(1))
+        .min(MAX_WALLET_JOB_CONCURRENCY)
+}
+
 fn sui_rpc_quota_from_env() -> (u32, std::time::Duration) {
     resolve_sui_rpc_quota(
         nonempty_env("SUI_RPC_REQUESTS_PER_WINDOW").as_deref(),
@@ -2857,6 +2888,51 @@ mod tests {
                 (0, std::time::Duration::from_secs(10))
             );
         }
+    }
+
+    // ── WALLET_JOB_CONCURRENCY resolution ─────────────────────────
+
+    #[test]
+    fn wallet_job_concurrency_prefers_the_configured_value() {
+        // Railway sets this in production; it wins over the wallet count even
+        // when the two disagree, in either direction.
+        assert_eq!(resolve_wallet_job_concurrency(Some("7"), 8), 7);
+        assert_eq!(resolve_wallet_job_concurrency(Some("12"), 8), 12);
+        assert_eq!(resolve_wallet_job_concurrency(Some(" 7 "), 8), 7);
+    }
+
+    #[test]
+    fn wallet_job_concurrency_falls_back_to_the_wallet_count() {
+        // Matches the sidecar's WALRUS_UPLOAD_MAX_CONCURRENCY default, so an
+        // unset env leaves both processes on the same number.
+        assert_eq!(resolve_wallet_job_concurrency(None, 8), 8);
+        assert_eq!(resolve_wallet_job_concurrency(None, 3), 3);
+    }
+
+    #[test]
+    fn wallet_job_concurrency_ignores_unusable_values() {
+        for configured in [Some(""), Some("0"), Some("-1"), Some("abc"), None] {
+            assert_eq!(resolve_wallet_job_concurrency(configured, 8), 8);
+        }
+    }
+
+    #[test]
+    fn wallet_job_concurrency_stays_within_the_sidecar_clamp() {
+        assert_eq!(
+            resolve_wallet_job_concurrency(Some("500"), 8),
+            MAX_WALLET_JOB_CONCURRENCY
+        );
+        assert_eq!(
+            resolve_wallet_job_concurrency(None, 500),
+            MAX_WALLET_JOB_CONCURRENCY
+        );
+    }
+
+    #[test]
+    fn wallet_job_concurrency_keeps_one_worker_without_wallets() {
+        // Uploads fail without keys, but the queue must still drain into a
+        // per-job error rather than stall with zero workers.
+        assert_eq!(resolve_wallet_job_concurrency(None, 0), 1);
     }
 
     fn with_walrus_storage_epochs_env<R>(value: Option<&str>, test: impl FnOnce() -> R) -> R {
