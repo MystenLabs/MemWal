@@ -219,7 +219,7 @@ async fn update_remember_job_after_wallet_error(
     // `attempt_info` only from the attempt that actually failed the upload;
     // lock-contention Defer callers pass None so a loser cannot mark failed
     // while a winner is still working.
-    let exhausted = attempt_info.is_some_and(|info| info.exhausted_by(error));
+    let exhausted = attempt_info.is_some_and(|info| info.retries_exhausted(error));
     let terminal = error.aborts_retries() || exhausted;
     let status = if terminal { "failed" } else { "running" };
 
@@ -445,14 +445,38 @@ pub(crate) struct WalletJobAttemptInfo {
 }
 
 impl WalletJobAttemptInfo {
+    /// True when no later attempt of this job will run.
+    ///
+    /// Only retryable (non-aborting) errors can "exhaust" the budget. An
+    /// aborting error — Permanent or ObjectLockedUntilEpoch — stops retries
+    /// immediately, and its caller already marks the row terminal on that
+    /// basis.
+    ///
+    /// Separate from `exhausted_by` on purpose. This one decides whether the
+    /// remember row is terminal, and that question has exactly one input: is
+    /// there another attempt coming. `exhausted_by` answers a different
+    /// question — is this worth waking an operator — and carves out an error
+    /// kind for that reason alone. Sharing one predicate let the alert rule
+    /// decide the row's status: a final attempt that died on
+    /// `WalrusBalanceLow` stayed `running` with no attempt left to move it,
+    /// so `GET /api/remember/:job_id` reported "still uploading" until the
+    /// 10-minute stale sweeper force-failed it — the exact hang
+    /// `exhausted_transient_upload_marks_the_row_failed_immediately` was
+    /// written to remove, surviving for one error class.
+    fn retries_exhausted(&self, error: &WalletJobError) -> bool {
+        !error.aborts_retries() && self.current >= self.max
+    }
+
+    /// True when an exhausted budget is worth a distinct operator alert.
+    ///
+    /// `WalrusBalanceLow` is excluded because it already fires its own
+    /// balance alert with the actionable number in it; a second
+    /// "retries exhausted" page on top of that is noise, not signal.
     fn exhausted_by(&self, error: &WalletJobError) -> bool {
         if matches!(error, WalletJobError::WalrusBalanceLow(_)) {
             return false;
         }
-        // Only retryable (non-aborting) errors can "exhaust" the budget. An
-        // aborting error — Permanent or ObjectLockedUntilEpoch — stops retries
-        // immediately, so it never produces a misleading "exhausted" alert.
-        !error.aborts_retries() && self.current >= self.max
+        self.retries_exhausted(error)
     }
 }
 
@@ -3038,6 +3062,61 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
 \"code\":\"NO_SIDE_EFFECT\",\"traceId\":\"12b3e920-b94b-4100-bb35-fc0f0a1804e1\"}";
 
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    /// The terminal-status rule asks one question: is another attempt coming.
+    /// The alert rule may carve out error kinds; the status rule may not, or a
+    /// spent job sits on `running` until the stale sweeper.
+    #[test]
+    fn a_spent_budget_is_terminal_for_every_retryable_error() {
+        let spent = WalletJobAttemptInfo {
+            current: MAX_ATTEMPTS as usize,
+            max: MAX_ATTEMPTS as usize,
+        };
+        for err in [
+            WalletJobError::Transient("durable Walrus upload failed (503)".into()),
+            WalletJobError::WalrusBalanceLow("wallet 0 WAL balance low".into()),
+            WalletJobError::UploadSlotCongestion("timed out waiting for upload slot".into()),
+        ] {
+            assert!(
+                spent.retries_exhausted(&err),
+                "expected a spent budget to be terminal for {}",
+                err.kind()
+            );
+        }
+    }
+
+    /// The alert keeps its carve-out: WalrusBalanceLow already pages with the
+    /// actionable number, so it must not also page as "retries exhausted".
+    #[test]
+    fn balance_low_is_terminal_but_not_separately_alerted() {
+        let spent = WalletJobAttemptInfo {
+            current: MAX_ATTEMPTS as usize,
+            max: MAX_ATTEMPTS as usize,
+        };
+        let low = WalletJobError::WalrusBalanceLow("wallet 0 WAL balance low".into());
+        assert!(spent.retries_exhausted(&low));
+        assert!(!spent.exhausted_by(&low));
+    }
+
+    /// A budget with attempts left is never terminal, and an aborting error is
+    /// terminal through `aborts_retries`, not through this predicate.
+    #[test]
+    fn retries_exhausted_is_only_about_the_budget() {
+        let mid = WalletJobAttemptInfo {
+            current: 1,
+            max: MAX_ATTEMPTS as usize,
+        };
+        let transient = WalletJobError::Transient("durable Walrus upload failed (503)".into());
+        assert!(!mid.retries_exhausted(&transient));
+
+        let spent = WalletJobAttemptInfo {
+            current: MAX_ATTEMPTS as usize,
+            max: MAX_ATTEMPTS as usize,
+        };
+        let permanent = WalletJobError::Permanent("registerTransaction digest mismatch".into());
+        assert!(!spent.retries_exhausted(&permanent));
+        assert!(permanent.aborts_retries());
+    }
 
     #[test]
     fn register_shape_rejection_is_permanent() {
