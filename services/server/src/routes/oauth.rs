@@ -24,7 +24,7 @@ use crate::oauth::{self, OAuthError};
 use crate::storage::db::oauth_rows::{
     OAuthClientRow, OAuthCodeRow, OAuthDelegateRow, OAuthGrantRow, OAuthSessionRow, OAuthTokenRow,
 };
-use crate::storage::sui::verify_delegate_key_onchain;
+use crate::storage::sui::{verify_delegate_key_onchain, OnchainVerifyError};
 use crate::types::AppState;
 
 /// Read the configured `McpOAuthConfig`, or fail with 404 if not configured.
@@ -558,6 +558,12 @@ pub struct SessionAccountResponse {
     pub needs_onchain_registration: bool,
     pub delegate_public_key: String,
     pub delegate_sui_address: String,
+    /// True when this session's own pending key is already on the account, so
+    /// an earlier attempt landed `add_delegate_key` and only `/complete` is
+    /// left. Distinguishes that resume from the reuse case, which also sets
+    /// `needs_onchain_registration: false` but points at a delegate from an
+    /// earlier grant.
+    pub resume_pending_registration: bool,
 }
 
 pub async fn session_account(
@@ -566,6 +572,7 @@ pub async fn session_account(
     Json(req): Json<SessionAccountRequest>,
 ) -> Result<Json<SessionAccountResponse>, OAuthError> {
     require_oauth(&state)?;
+    let account_id = sanitize_sui_object_id(&req.account_id)?;
     let session = state
         .db
         .fetch_oauth_session(&session_id)
@@ -576,15 +583,12 @@ pub async fn session_account(
     // (from a prior grant, any client)? If so, the consent UI can skip the
     // on-chain `add_delegate_key` tx entirely — this is what keeps a
     // reconnect from burning another slot toward the on-chain 20-key cap.
-    if let Some(existing) = state
-        .db
-        .find_reusable_oauth_delegate(&req.account_id)
-        .await?
-    {
+    if let Some(existing) = state.db.find_reusable_oauth_delegate(&account_id).await? {
         return Ok(Json(SessionAccountResponse {
             needs_onchain_registration: false,
             delegate_public_key: existing.delegate_public_key,
             delegate_sui_address: existing.delegate_address,
+            resume_pending_registration: false,
         }));
     }
 
@@ -594,10 +598,46 @@ pub async fn session_account(
         .await?
         .ok_or_else(|| OAuthError::server_error("session references an unknown delegate"))?;
 
+    // This session's own key can already be on the account: an earlier attempt
+    // landed `add_delegate_key` and then failed further along, which is exactly
+    // what a Sui 429 during `/complete` verify used to cause (WALM-605).
+    // Re-submitting aborts with `EDelegateKeyAlreadyExists`, and the consent UI
+    // cannot recognise that abort — it signs through the sponsor proxy, and
+    // `sponsor::mask_upstream` turns any upstream 5xx into a bare 502
+    // `sponsor_upstream_error` that never echoes the Move abort. So the skip has
+    // to be decided here, against the chain, rather than by string-matching a
+    // transaction error that does not survive the proxy.
+    let public_key_bytes = hex::decode(&delegate.delegate_public_key)
+        .map_err(|_| OAuthError::server_error("stored delegate public key is invalid"))?;
+    let resume = match classify_pending_key_preflight(
+        verify_delegate_key_onchain(
+            &state.http_client,
+            &state.config.sui_rpc_url,
+            state.sui_grpc_client.as_ref(),
+            &account_id,
+            &public_key_bytes,
+            &state.config.package_id,
+        )
+        .await,
+    ) {
+        PendingKeyPreflight::Resume => true,
+        PendingKeyPreflight::Register => false,
+        PendingKeyPreflight::Unknown { reason } => {
+            tracing::warn!(
+                %reason,
+                "oauth session_account: Sui unavailable, cannot tell whether this session's delegate key is already registered"
+            );
+            return Err(OAuthError::temporarily_unavailable(format!(
+                "could not check the delegate key on-chain right now, please retry: {reason}"
+            )));
+        }
+    };
+
     Ok(Json(SessionAccountResponse {
-        needs_onchain_registration: true,
+        needs_onchain_registration: !resume,
         delegate_public_key: delegate.delegate_public_key,
         delegate_sui_address: delegate.delegate_address,
+        resume_pending_registration: resume,
     }))
 }
 
@@ -634,6 +674,94 @@ fn sanitize_sui_object_id(raw: &str) -> Result<String, OAuthError> {
     }
 }
 
+/// What the chain told us about a delegate key, split by whether the answer
+/// was definitive. WALM-605: a Sui `GetObject` 429 is not evidence that the
+/// key is unregistered, and must not burn the one-time authorization session.
+#[derive(Debug)]
+enum DelegateVerifyOutcome {
+    /// The chain answered: the key is registered under `owner`.
+    Verified { owner: String },
+    /// The chain answered definitively "no" — key absent, account deactivated,
+    /// object missing or of the wrong type. Terminal for this session.
+    Unregistered { reason: String },
+    /// The chain could not be consulted (RPC 429/503/timeout, registry scan
+    /// cap). No answer yet, so the caller may re-submit the same request.
+    Retryable { reason: String },
+}
+
+impl DelegateVerifyOutcome {
+    /// Only a definitive answer spends the one-time authorization session. A
+    /// retryable upstream failure must leave it `pending` so the consent UI can
+    /// re-POST `/complete` instead of restarting `/oauth/authorize` (WALM-605).
+    ///
+    /// `session_complete` encodes this in its match arms; the tests below pin
+    /// the rule itself.
+    fn consumes_session(&self) -> bool {
+        !matches!(self, Self::Retryable { .. })
+    }
+}
+
+/// Classify a `verify_delegate_key_onchain` result. Deliberately delegates to
+/// `OnchainVerifyError::is_unavailable()` — the same primitive signed HTTP
+/// auth uses in `auth::cache_reverify_action` — so the OAuth callback and
+/// signed recall can never drift apart on what a Sui 429 means (WALM-429).
+fn classify_delegate_verify(result: Result<String, OnchainVerifyError>) -> DelegateVerifyOutcome {
+    match result {
+        Ok(owner) => DelegateVerifyOutcome::Verified { owner },
+        Err(e) if e.is_unavailable() => DelegateVerifyOutcome::Retryable {
+            reason: e.to_string(),
+        },
+        Err(e) => DelegateVerifyOutcome::Unregistered {
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// What `/account` should tell the consent UI about this session's own pending
+/// delegate key, given what the chain said about it.
+#[derive(Debug)]
+enum PendingKeyPreflight {
+    /// Already on the account: an earlier attempt landed `add_delegate_key` and
+    /// only `/complete` is left. Re-submitting would abort with
+    /// `EDelegateKeyAlreadyExists`, which the consent UI cannot see.
+    Resume,
+    /// Definitively absent — the ordinary first-time path.
+    Register,
+    /// The chain could not be consulted, so there is no safe guess: telling the
+    /// UI to register walks into a sponsor 502 it cannot classify, and telling
+    /// it to skip sends `/complete` at a key that is not on the account, which
+    /// is definitive Unregistered and burns the one-time session.
+    Unknown { reason: String },
+}
+
+/// Reuse `classify_delegate_verify` rather than re-reading `is_unavailable()`,
+/// so the preflight and `session_complete` cannot drift apart on what a Sui 429
+/// means (WALM-429 / WALM-605).
+fn classify_pending_key_preflight(
+    result: Result<String, OnchainVerifyError>,
+) -> PendingKeyPreflight {
+    match classify_delegate_verify(result) {
+        DelegateVerifyOutcome::Verified { .. } => PendingKeyPreflight::Resume,
+        DelegateVerifyOutcome::Unregistered { .. } => PendingKeyPreflight::Register,
+        DelegateVerifyOutcome::Retryable { reason } => PendingKeyPreflight::Unknown { reason },
+    }
+}
+
+/// Atomically claim a pending session so it can only ever be completed once —
+/// Postgres analog of the WALM-30 prior art's Redis GETDEL guarantee. This is
+/// the single gate on issuing an authorization code, so it stays the last step
+/// before minting one even though the on-chain read now happens earlier.
+async fn claim_oauth_session(
+    state: &AppState,
+    session_id: &str,
+) -> Result<OAuthSessionRow, OAuthError> {
+    state
+        .db
+        .consume_oauth_session(session_id)
+        .await?
+        .ok_or_else(|| OAuthError::invalid_request("session already used, expired, or unknown"))
+}
+
 pub async fn session_complete(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -659,12 +787,14 @@ pub async fn session_complete(
         .await
         .map_err(|_| OAuthError::invalid_request("wallet ownership proof is invalid"))?;
 
-    // Atomically claim the session so it can only ever be completed once —
-    // Postgres analog of the WALM-30 prior art's Redis GETDEL guarantee.
-    let session = state
+    // Read WITHOUT claiming: the claim is irreversible and belongs below the
+    // on-chain read (WALM-605). Single-use is unaffected — no code is minted
+    // until `claim_oauth_session` wins the `WHERE status = 'pending'` update.
+    let pending = state
         .db
-        .consume_oauth_session(&session_id)
+        .fetch_oauth_session(&session_id)
         .await?
+        .filter(|s| s.status == "pending")
         .ok_or_else(|| OAuthError::invalid_request("session already used, expired, or unknown"))?;
 
     // Both new and reused delegates require fresh on-chain verification.
@@ -675,7 +805,7 @@ pub async fn session_complete(
         None => (
             state
                 .db
-                .fetch_oauth_delegate(&session.delegate_ref)
+                .fetch_oauth_delegate(&pending.delegate_ref)
                 .await?
                 .ok_or_else(|| OAuthError::server_error("session delegate is missing"))?,
             false,
@@ -683,18 +813,42 @@ pub async fn session_complete(
     };
     let public_key_bytes = hex::decode(&delegate.delegate_public_key)
         .map_err(|_| OAuthError::server_error("stored delegate public key is invalid"))?;
-    let verified_owner = verify_delegate_key_onchain(
-        &state.http_client,
-        &state.config.sui_rpc_url,
-        state.sui_grpc_client.as_ref(),
-        &account_id,
-        &public_key_bytes,
-        &state.config.package_id,
-    )
-    .await
-    .map_err(|e| {
-        OAuthError::invalid_request(format!("delegate key is not registered on-chain: {e}"))
-    })?;
+    let outcome = classify_delegate_verify(
+        verify_delegate_key_onchain(
+            &state.http_client,
+            &state.config.sui_rpc_url,
+            state.sui_grpc_client.as_ref(),
+            &account_id,
+            &public_key_bytes,
+            &state.config.package_id,
+        )
+        .await,
+    );
+    // Claim only after a definitive on-chain answer; Retryable must leave
+    // status='pending'. Claiming per-arm rather than behind a boolean keeps the
+    // compiler, not a convention, responsible for that.
+    let (session, verified_owner) = match outcome {
+        DelegateVerifyOutcome::Retryable { reason } => {
+            // Deliberately no session_id: possession of one plus a wallet
+            // signature mints a code, so it does not belong in logs.
+            tracing::warn!(
+                %reason,
+                "oauth session_complete: Sui unavailable, leaving session pending for retry"
+            );
+            return Err(OAuthError::temporarily_unavailable(format!(
+                "could not verify the delegate key on-chain right now, please retry: {reason}"
+            )));
+        }
+        DelegateVerifyOutcome::Unregistered { reason } => {
+            claim_oauth_session(&state, &session_id).await?;
+            return Err(OAuthError::invalid_request(format!(
+                "delegate key is not registered on-chain: {reason}"
+            )));
+        }
+        DelegateVerifyOutcome::Verified { owner } => {
+            (claim_oauth_session(&state, &session_id).await?, owner)
+        }
+    };
     if !verified_owner.eq_ignore_ascii_case(&owner_address) {
         return Err(OAuthError::invalid_request(
             "verified owner does not match connected account",
@@ -761,11 +915,9 @@ pub async fn session_cancel(
     Json(req): Json<SessionCancelRequest>,
 ) -> Result<Json<RedirectResponse>, OAuthError> {
     require_oauth(&state)?;
-    let session = state
-        .db
-        .consume_oauth_session(&session_id)
-        .await?
-        .ok_or_else(|| OAuthError::invalid_request("session already used, expired, or unknown"))?;
+    // Cancelling consults nothing off-box, so there is no retryable failure:
+    // the denial is definitive and burning the session is the point.
+    let session = claim_oauth_session(&state, &session_id).await?;
 
     let error = req
         .error
@@ -1110,13 +1262,226 @@ pub async fn revoke(
 mod tests {
     use std::borrow::Cow;
 
+    use axum::response::IntoResponse;
     use sui_crypto::ed25519::Ed25519PrivateKey;
     use sui_crypto::SuiSigner;
     use sui_sdk_types::{PersonalMessage, UserSignature};
 
+    use crate::oauth::{OAuthError, OAUTH_UPSTREAM_RETRY_AFTER_SECS};
     use crate::security_delete_auth::{NativeWalletSignatureVerifier, WalletSignatureVerifier};
+    use crate::storage::sui::OnchainVerifyError;
 
-    use super::oauth_owner_proof_message;
+    use super::{
+        classify_delegate_verify, classify_pending_key_preflight, oauth_owner_proof_message,
+        DelegateVerifyOutcome, PendingKeyPreflight,
+    };
+
+    // ── WALM-605: a Sui 429 must not read as "unregistered" ──────────
+    //
+    // These cover the decision, not the handler: `session_complete` needs a
+    // Postgres pool, a Sui client and a wallet verifier, and this crate has no
+    // mock harness for them.
+
+    #[test]
+    fn rpc_error_during_verify_is_retryable_and_spares_the_session() {
+        // The exact WALM-605 report: Sui GetObject answers 429, which
+        // `map_get_object_status` classifies as RpcError.
+        let outcome = classify_delegate_verify(Err(OnchainVerifyError::RpcError(
+            "gRPC GetObject failed: 429 Too Many Requests".into(),
+        )));
+        assert!(matches!(outcome, DelegateVerifyOutcome::Retryable { .. }));
+        assert!(
+            !outcome.consumes_session(),
+            "a 429 must leave the one-time session pending so the user can retry"
+        );
+    }
+
+    // ── WALM-605: `/account` decides the duplicate-key skip, not the SPA ──
+    //
+    // The consent UI signs through the sponsor proxy, and `sponsor::mask_upstream`
+    // replaces any upstream 5xx with a bare 502 that never echoes the Move
+    // abort. So `EDelegateKeyAlreadyExists` is invisible to the client, and the
+    // "is a second add_delegate_key needed" question has to be answered here.
+
+    #[test]
+    fn a_key_already_on_the_account_tells_the_ui_to_resume_at_complete() {
+        // The WALM-605 journey: the transaction landed, then verify hit a 429.
+        let outcome = classify_pending_key_preflight(Ok("0xowner".into()));
+        assert!(matches!(outcome, PendingKeyPreflight::Resume));
+    }
+
+    #[test]
+    fn a_key_definitively_absent_tells_the_ui_to_register() {
+        for err in [
+            OnchainVerifyError::KeyNotFound("not in delegate_keys".into()),
+            OnchainVerifyError::NotFound("no such object".into()),
+            OnchainVerifyError::WrongObjectType("not a MemWalAccount".into()),
+        ] {
+            let label = err.to_string();
+            assert!(
+                matches!(
+                    classify_pending_key_preflight(Err(err)),
+                    PendingKeyPreflight::Register
+                ),
+                "{label} is a definitive no, so the first-time path is correct"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreachable_chain_refuses_to_guess_the_preflight() {
+        // Guessing "register" dead-ends on a sponsor 502 the SPA cannot read;
+        // guessing "skip" burns the session as Unregistered. The preflight
+        // claims nothing, so refusing costs the user only a retry.
+        for err in [
+            OnchainVerifyError::RpcError("gRPC GetObject failed: 429 Too Many Requests".into()),
+            OnchainVerifyError::ScanCapExceeded("registry scan cap".into()),
+        ] {
+            let label = err.to_string();
+            assert!(
+                matches!(
+                    classify_pending_key_preflight(Err(err)),
+                    PendingKeyPreflight::Unknown { .. }
+                ),
+                "{label} is not evidence either way"
+            );
+        }
+    }
+
+    #[test]
+    fn the_preflight_and_complete_agree_on_what_is_definitive() {
+        // Both read `OnchainVerifyError::is_unavailable()`. If one ever stops,
+        // a 429 becomes "unregistered" on that path again (WALM-429).
+        // Built twice rather than cloned: `OnchainVerifyError` is not `Clone`,
+        // and both classifiers take the value.
+        let cases: [fn() -> OnchainVerifyError; 6] = [
+            || OnchainVerifyError::RpcError("429".into()),
+            || OnchainVerifyError::ScanCapExceeded("cap".into()),
+            || OnchainVerifyError::KeyNotFound("absent".into()),
+            || OnchainVerifyError::NotFound("missing".into()),
+            || OnchainVerifyError::AccountDeactivated("dead".into()),
+            || OnchainVerifyError::WrongObjectType("foreign".into()),
+        ];
+        for build in cases {
+            let label = build().to_string();
+            let complete_is_definitive = classify_delegate_verify(Err(build())).consumes_session();
+            let preflight_is_definitive = !matches!(
+                classify_pending_key_preflight(Err(build())),
+                PendingKeyPreflight::Unknown { .. }
+            );
+            assert_eq!(
+                complete_is_definitive, preflight_is_definitive,
+                "{label} must be definitive on both paths or neither"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_cap_exceeded_during_verify_is_retryable() {
+        let outcome = classify_delegate_verify(Err(OnchainVerifyError::ScanCapExceeded(
+            "registry scan cap".into(),
+        )));
+        assert!(matches!(outcome, DelegateVerifyOutcome::Retryable { .. }));
+        assert!(!outcome.consumes_session());
+    }
+
+    #[test]
+    fn key_not_found_during_verify_is_unregistered_and_consumes_the_session() {
+        let outcome = classify_delegate_verify(Err(OnchainVerifyError::KeyNotFound(
+            "not in registry".into(),
+        )));
+        assert!(matches!(
+            outcome,
+            DelegateVerifyOutcome::Unregistered { .. }
+        ));
+        assert!(
+            outcome.consumes_session(),
+            "a genuine unregistered key is definitive and still burns the session"
+        );
+    }
+
+    #[test]
+    fn definitive_verify_failures_are_unregistered_and_consume_the_session() {
+        for err in [
+            OnchainVerifyError::NotFound("no such object".into()),
+            OnchainVerifyError::AccountDeactivated("deactivated".into()),
+            OnchainVerifyError::WrongObjectType("not a MemWalAccount".into()),
+        ] {
+            let outcome = classify_delegate_verify(Err(err));
+            assert!(
+                matches!(outcome, DelegateVerifyOutcome::Unregistered { .. }),
+                "{outcome:?}"
+            );
+            assert!(outcome.consumes_session(), "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn verified_key_consumes_the_session() {
+        let outcome = classify_delegate_verify(Ok("0xowner".into()));
+        match &outcome {
+            DelegateVerifyOutcome::Verified { owner } => assert_eq!(owner, "0xowner"),
+            other => panic!("expected Verified, got {other:?}"),
+        }
+        assert!(outcome.consumes_session());
+    }
+
+    #[test]
+    fn classification_tracks_is_unavailable_exactly() {
+        // Guard against the OAuth callback and signed HTTP auth drifting apart
+        // again: `Retryable` must be exactly `OnchainVerifyError::is_unavailable`.
+        for err in [
+            OnchainVerifyError::RpcError("429".into()),
+            OnchainVerifyError::ScanCapExceeded("cap".into()),
+            OnchainVerifyError::NotFound("missing".into()),
+            OnchainVerifyError::KeyNotFound("gone".into()),
+            OnchainVerifyError::AccountDeactivated("dead".into()),
+            OnchainVerifyError::WrongObjectType("type".into()),
+        ] {
+            let unavailable = err.is_unavailable();
+            let outcome = classify_delegate_verify(Err(err));
+            assert_eq!(
+                matches!(outcome, DelegateVerifyOutcome::Retryable { .. }),
+                unavailable,
+                "{outcome:?}"
+            );
+            assert_eq!(outcome.consumes_session(), !unavailable, "{outcome:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn retryable_verify_maps_to_a_503_the_client_can_retry() {
+        // The pre-fix behaviour was a 400 invalid_request, which the consent UI
+        // renders as a dead end. It must now be a retryable 503 with backoff.
+        let response = OAuthError::temporarily_unavailable("sui is throttling").into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(OAUTH_UPSTREAM_RETRY_AFTER_SECS.to_string().as_str())
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "temporarily_unavailable");
+    }
+
+    #[test]
+    fn unregistered_verify_stays_a_definitive_400() {
+        let response = OAuthError::invalid_request("delegate key is not registered on-chain: x")
+            .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .is_none());
+    }
 
     #[tokio::test]
     async fn delegate_reuse_rejects_proof_from_another_authorization_session() {
