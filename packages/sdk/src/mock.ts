@@ -22,6 +22,7 @@ import type {
     ListNamespacesOptions,
 } from "./types.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { resolveRecallCall } from "./recall-args.js";
 
 export interface MemWalMockSeed {
     text: string;
@@ -245,9 +246,16 @@ export class MemWalMock {
     }
 
     async recall(params: RecallParams): Promise<RecallResult>;
+    /**
+     * @deprecated Prefer `recall({ query, limit, namespace })`.
+     */
+    async recall(query: string, options: RecallOptions): Promise<RecallResult>;
+    /**
+     * @deprecated Prefer `recall({ query, limit, namespace })`.
+     */
     async recall(
         query: string,
-        limitOrOptions?: number | RecallOptions,
+        limit?: number,
         namespace?: string
     ): Promise<RecallResult>;
     async recall(
@@ -255,22 +263,11 @@ export class MemWalMock {
         limitOrOptions: number | RecallOptions | undefined = 10,
         namespace?: string
     ): Promise<RecallResult> {
-        let query: string;
-        let options: RecallOptions;
-        if (typeof queryOrParams === "object") {
-            const { query: objectQuery, ...rest } = queryOrParams;
-            query = objectQuery;
-            options = rest;
-        } else {
-            query = queryOrParams;
-            if (limitOrOptions == null) {
-                options = { limit: 10, namespace };
-            } else if (typeof limitOrOptions === "number") {
-                options = { limit: limitOrOptions, namespace };
-            } else {
-                options = limitOrOptions;
-            }
-        }
+        const { query, options } = resolveRecallCall(
+            queryOrParams,
+            limitOrOptions,
+            namespace
+        );
         validateText(query, "query");
         const resolvedNamespace = options.namespace ?? this.namespace;
         const resolvedLimit = options.topK ?? options.limit ?? 10;

@@ -85,6 +85,34 @@ test("MemWalMock matches production recall overloads and topK precedence", async
     assert.equal(objectStyle.results.length, 2);
 });
 
+test("MemWalMock throws when positional recall gets a namespace string as the second arg", async () => {
+    const mock = MemWalMock.create();
+    await mock.rememberAndWait("food allergies", "profile");
+
+    await assert.rejects(() => mock.recall("food allergies", "profile"), {
+        name: "TypeError",
+        message: /not a string/,
+    });
+
+    const positional = await mock.recall("food allergies", 5, "profile");
+    const optionsStyle = await mock.recall("food allergies", {
+        namespace: "profile",
+    });
+    const objectStyle = await mock.recall({
+        query: "food allergies",
+        namespace: "profile",
+    });
+    const defaultNs = await mock.recall({ query: "food allergies" });
+
+    assert.deepEqual(
+        positional.results.map((memory) => memory.text),
+        ["food allergies"]
+    );
+    assert.equal(optionsStyle.total, 1);
+    assert.equal(objectStyle.total, 1);
+    assert.equal(defaultNs.total, 0);
+});
+
 test("MemWalMock matches production token-budget behavior", async () => {
     const mock = MemWalMock.create({
         initialMemories: [
