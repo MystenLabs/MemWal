@@ -40,8 +40,10 @@ macro_rules! migration {
 /// What is no longer manual is *completeness*: every `.sql` file in
 /// `services/server/migrations` must appear in one of these three
 /// slices, and `every_migration_file_is_wired_into_the_pipeline` fails
-/// the test suite if one does not. Migration 021 reached dev unwired
-/// precisely because nothing checked that.
+/// the test suite if one does not. The original 021 ADD reached
+/// origin/dev as a file but never entered this list, which is why the
+/// check exists. This 021 is the DROP of that column, for environments
+/// that ran a PR-branch build that did wire the ADD.
 const MIGRATIONS_BEFORE_BACKFILL: &[Migration] = &[
     migration!("001_init.sql"),
     migration!("002_add_namespace.sql"),
@@ -105,6 +107,9 @@ const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
     // constraint 015 set up — see 019's header.
     migration!("019_memory_read_api_updated_at_set_not_null.sql"),
     migration!("020_read_api_followups.sql"),
+    // Drops failure_reported_at if a preview deploy created it. IF EXISTS,
+    // so a database that never had the column (CI, origin/dev-only) is fine.
+    migration!("021_drop_failed_write_report_ack.sql"),
 ];
 
 /// Every migration the pipeline applies, in the order it applies them.
