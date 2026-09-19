@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "agentTooling": {
+    "managedBy": "multi-repo-ponytail-graft/v1"
+  },
+  "dependencies": {
+    "@dietrichgebert/ponytail": "4.10.0",
+    "@nanonets/graft": "0.18.0"
+  }
+}

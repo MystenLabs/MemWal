@@ -1,0 +1,13 @@
+---
+alwaysApply: true
+---
+
+## Repository-local agent tools
+
+This repository pins Ponytail and Graft under
+`.agent-tools/ponytail-graft/`. Run every Graft command as
+`node .agent-tools/ponytail-graft/bin/graft.cjs ...`; any bare `graft ...`
+example in generated Graft guidance is shorthand for that repository-local
+launcher. Never substitute a global `graft` or an unpinned `npx` invocation.
+Ponytail governs implementation economy; Graft supplies repository evidence,
+especially for Ponytail ladder rung 2 (reuse what already exists).

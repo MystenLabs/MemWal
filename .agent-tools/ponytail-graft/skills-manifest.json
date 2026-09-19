@@ -1,0 +1,44 @@
+{
+  "rules": {
+    ".cursor/rules/ponytail.mdc": "324ed2ce69708bb661f77f6d94db3713cc5f8ee4b3da34539f002b0b5a4f814c",
+    ".cursor/rules/ponytail-graft-local.mdc": "1c75d4ec4821c5167e784c1a447e0948e5416f7b164f8cae9dd7f8ead220bf34"
+  },
+  "skills": {
+    ".claude/skills/ponytail": {
+      "SKILL.md": "1316a2f3f95741d2300b116fe0c2d81ce4a9568656ed0a62643f54aaf09957f2"
+    },
+    ".claude/skills/ponytail-audit": {
+      "SKILL.md": "5560b8e383dbe2ddfddc873a1e2bf2e586e23e0cd7d995537482b2315331f6d1"
+    },
+    ".claude/skills/ponytail-debt": {
+      "SKILL.md": "c84fba75f0ca12bfe83f9a78ea02fd125c5dd3f1fbb18124105a489937f284e6"
+    },
+    ".claude/skills/ponytail-gain": {
+      "SKILL.md": "24e01d1c9715cb136ba1c4f1e52a95940c0193558b876828e537736480d6408b"
+    },
+    ".claude/skills/ponytail-help": {
+      "SKILL.md": "2264d1615117b02b0fd5a69ec84cd2757006471a78e4d6c22eed6d581c1d37a4"
+    },
+    ".claude/skills/ponytail-review": {
+      "SKILL.md": "40df33b58fc6ef889b93585733feb9566b76e9586efa7f376785c1e995197ac0"
+    },
+    ".agents/skills/ponytail": {
+      "SKILL.md": "1316a2f3f95741d2300b116fe0c2d81ce4a9568656ed0a62643f54aaf09957f2"
+    },
+    ".agents/skills/ponytail-audit": {
+      "SKILL.md": "5560b8e383dbe2ddfddc873a1e2bf2e586e23e0cd7d995537482b2315331f6d1"
+    },
+    ".agents/skills/ponytail-debt": {
+      "SKILL.md": "c84fba75f0ca12bfe83f9a78ea02fd125c5dd3f1fbb18124105a489937f284e6"
+    },
+    ".agents/skills/ponytail-gain": {
+      "SKILL.md": "24e01d1c9715cb136ba1c4f1e52a95940c0193558b876828e537736480d6408b"
+    },
+    ".agents/skills/ponytail-help": {
+      "SKILL.md": "2264d1615117b02b0fd5a69ec84cd2757006471a78e4d6c22eed6d581c1d37a4"
+    },
+    ".agents/skills/ponytail-review": {
+      "SKILL.md": "40df33b58fc6ef889b93585733feb9566b76e9586efa7f376785c1e995197ac0"
+    }
+  }
+}
