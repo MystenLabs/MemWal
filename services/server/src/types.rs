@@ -1368,6 +1368,8 @@ pub struct RememberBulkItem {
 pub struct RememberBulkRequest {
     /// 1–MAX_BULK_ITEMS items to remember in one batched operation.
     pub items: Vec<RememberBulkItem>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 /// POST /api/remember/bulk — 202 Accepted response.

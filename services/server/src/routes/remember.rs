@@ -1341,6 +1341,7 @@ pub async fn remember_bulk(
             other => other,
         })?;
     }
+    validate_idempotency_key(body.idempotency_key.as_deref())?;
 
     let owner = &auth.owner;
     tracing::info!(
@@ -1352,31 +1353,62 @@ pub async fn remember_bulk(
     let mut job_ids: Vec<String> = Vec::with_capacity(body.items.len());
     let mut pending_items: Vec<PendingBulkRememberItem> = Vec::with_capacity(body.items.len());
 
-    for item in body.items {
+    for (i, item) in body.items.into_iter().enumerate() {
         let job_id = uuid::Uuid::new_v4().to_string();
+        let item_key = body
+            .idempotency_key
+            .as_deref()
+            .map(|key| format!("{}:{}", key, i));
+        let fingerprint = request_fingerprint(&item.text, &item.namespace);
 
-        if let Err(e) = sqlx::query(
+        let inserted = match sqlx::query(
             // `pending` (not `running`) so a fresh job takes the plain Upload
             // path; only a retry of an in-flight job (worker-set `running`)
             // triggers the crash-window reconcile. See the single-remember insert.
-            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, $3, 'pending', $4, $5)
+             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
         )
         .bind(&job_id)
         .bind(owner)
         .bind(&item.namespace)
+        .bind(item_key.as_deref())
+        .bind(item_key.as_ref().map(|_| fingerprint.as_str()))
         .execute(state.db.pool())
         .await
         {
-            crate::alerts::maybe_alert_sqlx_postgres_storage_exhausted(
-                &state.alerts,
-                &state.config.sui_network,
-                &e,
-            )
-            .await;
-            return Err(AppError::Internal(format!(
-                "Failed to create bulk job row: {}",
-                e
-            )));
+            Ok(inserted) => inserted,
+            Err(e) => {
+                crate::alerts::maybe_alert_sqlx_postgres_storage_exhausted(
+                    &state.alerts,
+                    &state.config.sui_network,
+                    &e,
+                )
+                .await;
+                return Err(AppError::Internal(format!(
+                    "Failed to create bulk job row: {}",
+                    e
+                )));
+            }
+        };
+
+        if inserted.rows_affected() == 0 {
+            let existing = match item_key.as_deref() {
+                Some(key) => find_remember_job_by_key(state.db.pool(), owner, key).await?,
+                None => None,
+            };
+            let (existing_id, _, _, existing_fingerprint) = existing.ok_or_else(|| {
+                AppError::Internal("Failed to create bulk job row: insert affected no rows".into())
+            })?;
+            if existing_fingerprint
+                .as_deref()
+                .is_some_and(|stored| stored != fingerprint)
+            {
+                return Err(AppError::Conflict(
+                    "idempotency_key was already used for a request with different content".into(),
+                ));
+            }
+            job_ids.push(existing_id);
+            continue;
         }
 
         pending_items.push(PendingBulkRememberItem {
@@ -1389,13 +1421,15 @@ pub async fn remember_bulk(
 
     let total = job_ids.len();
 
-    spawn_prepare_bulk_remember_job(
-        Arc::clone(&state),
-        owner.clone(),
-        auth.account_id.clone(),
-        auth.public_key.clone(),
-        pending_items,
-    );
+    if !pending_items.is_empty() {
+        spawn_prepare_bulk_remember_job(
+            Arc::clone(&state),
+            owner.clone(),
+            auth.account_id.clone(),
+            auth.public_key.clone(),
+            pending_items,
+        );
+    }
 
     tracing::info!("remember_bulk accepted: {} items owner={}", total, owner,);
 
@@ -1994,6 +2028,53 @@ mod tests {
             still,
             Some((job_id.clone(), "running".to_string(), None, None))
         );
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn bulk_derived_key_collapses_a_retried_item() {
+        let pool = idem_test_pool().await;
+        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
+        let item_key = "batch-1:0";
+        let fingerprint = request_fingerprint("bulk item text", "ns");
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+
+        let insert = "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, 'ns', 'pending', $3, $4)
+             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING";
+
+        sqlx::query(insert)
+            .bind(&job_id)
+            .bind(&owner)
+            .bind(item_key)
+            .bind(&fingerprint)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let retry = sqlx::query(insert)
+            .bind(format!("remember-job-{}", uuid::Uuid::new_v4()))
+            .bind(&owner)
+            .bind(item_key)
+            .bind(&fingerprint)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.rows_affected(),
+            0,
+            "retried bulk item must not mint a second job"
+        );
+
+        let found = find_remember_job_by_key(&pool, &owner, item_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.0, job_id);
+        assert_eq!(found.3.as_deref(), Some(fingerprint.as_str()));
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
             .bind(&owner)
