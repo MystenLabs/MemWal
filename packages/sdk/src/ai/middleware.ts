@@ -165,6 +165,8 @@ export function withMemWal(
         },
     });
 
+    wrapped.specificationVersion = model.specificationVersion;
+
     // Lets short-lived callers await outstanding auto-save writes before
     // exiting, e.g. `await model.flush()` right before `process.exit()`.
     wrapped.flush = async (): Promise<void> => {
