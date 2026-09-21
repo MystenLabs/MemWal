@@ -221,6 +221,54 @@ test("a forced login mints a fresh key instead of reusing the pending record", a
     assert.notEqual(after.delegatePrivateKey, stranded.delegatePrivateKey);
 });
 
+/**
+ * WALM-645 — minting over the record destroys the only copy of a key the
+ * browser may already have paid to register. Nothing else will ever name it
+ * again: recovery reads that same record, and it is gone. So the flow has to
+ * say which registration it is orphaning, while it still can.
+ */
+test("a forced login names the pending key it is about to discard", async (t) => {
+    const home = freshHome();
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+
+    mkdirSync(join(home, ".memwal"), { recursive: true });
+    const stranded = {
+        delegatePrivateKey: "d".repeat(64),
+        delegatePublicKeyHex: "e".repeat(64),
+        delegateAddress: `0x${"f".repeat(64)}`,
+        relayerUrl: RELAYER,
+        label: "Stranded",
+        createdAt: new Date().toISOString(),
+        version: 1,
+    };
+    writeFileSync(pendingPath(home), JSON.stringify(stranded), { mode: 0o600 });
+
+    const realWrite = process.stderr.write.bind(process.stderr);
+    const captured = [];
+    process.stderr.write = (chunk, ...rest) => {
+        captured.push(String(chunk));
+        return realWrite(chunk, ...rest);
+    };
+    t.after(() => {
+        process.stderr.write = realWrite;
+    });
+
+    const { flow } = await startLogin({ freshKey: true });
+    flow.catch(() => {});
+
+    const stderr = captured.join("");
+    assert.match(
+        stderr,
+        new RegExp(stranded.delegatePublicKeyHex),
+        "the discarded key's public half must be reported so it can be found in the dashboard",
+    );
+    assert.match(
+        stderr,
+        new RegExp(stranded.delegateAddress),
+        "the discarded key's address must be reported too",
+    );
+});
+
 test("a login against a different relayer does not reuse the record", async (t) => {
     // A key registered against one relayer's account proves nothing to
     // another, and recovery must never repoint a record at a new relayer.

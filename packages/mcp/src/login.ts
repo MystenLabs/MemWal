@@ -223,12 +223,29 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
     // timed-out login followed by `memwal_login` in the same process would
     // otherwise replace the only copy of a key the browser may already have
     // paid to register.
-    const reusable = opts.freshKey ? null : reusablePendingLogin(cfg.relayerUrl);
+    const onDisk = reusablePendingLogin(cfg.relayerUrl);
+    const discarded = opts.freshKey ? onDisk : null;
+    const reusable = discarded ? null : onDisk;
     if (reusable) {
         log.info("login.pending.reused", {
             publicKey: reusable.delegatePublicKeyHex,
             createdAt: reusable.createdAt,
         });
+    }
+    if (discarded) {
+        log.warn("login.pending.discarded", {
+            publicKey: discarded.delegatePublicKeyHex,
+            address: discarded.delegateAddress,
+            createdAt: discarded.createdAt,
+        });
+        note(
+            `Minting a fresh delegate key and abandoning the one left by the last ` +
+                `unfinished sign-in:\n` +
+                `  public key: ${discarded.delegatePublicKeyHex}\n` +
+                `  address:    ${discarded.delegateAddress}\n` +
+                `If you approved that key in your wallet, nothing will use it again — ` +
+                `remove it from the dashboard.`,
+        );
     }
     const keypair = reusable
         ? {

@@ -154,7 +154,14 @@ const LOCAL_TOOL_DEFINITIONS = [
             "Sign in (or re-sign in) to Walrus Memory by opening a browser. Use to switch wallets, refresh credentials, or sign in for the first time. Returns a click-able URL — the user must approve in their browser.",
         inputSchema: {
             type: "object",
-            properties: {},
+            properties: {
+                freshKey: {
+                    type: "boolean",
+                    default: false,
+                    description:
+                        "Mint a new delegate key instead of reusing the one a previous unfinished sign-in left pending. Leave false for an ordinary login. Set it only after a normal sign-in has already failed on the pending key — it abandons that key, which must then be removed from the dashboard if it was approved on-chain, and the new one needs its own add_delegate_key transaction.",
+                },
+            },
             additionalProperties: false,
         },
     },
@@ -919,6 +926,7 @@ function writeStdoutMessage(msg: RpcMessage): void {
 async function handleLocalLogin(
     config: BridgeConfig,
     onCredentials: (creds: MemWalCredentials) => Promise<void>,
+    freshKey: boolean,
 ): Promise<{ text: string; isError: boolean }> {
     const session = startOrReuseLoginFlow(
         {
@@ -927,6 +935,7 @@ async function handleLocalLogin(
             label: config.label,
             timeoutMs: resolveLoginTimeoutMs(),
             openBrowser: false,
+            freshKey,
         },
         async (creds) => {
             await onCredentials(creds);
@@ -972,8 +981,10 @@ async function handleLocalLogin(
                     // dashboard cannot register it twice.
                     data:
                         `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are ` +
-                        `unchanged. If you approved the wallet step, the next start reclaims that ` +
-                        `key; otherwise call memwal_login again to retry.`,
+                        `unchanged. The key is kept on disk and a later start reclaims it only if ` +
+                        `the relayer can confirm it was registered, which it cannot always do. ` +
+                        `Call memwal_login again to retry with that key, or with freshKey: true to ` +
+                        `mint a new one and abandon it.`,
                 },
             });
         },
@@ -2061,7 +2072,10 @@ export async function runBridge(
                 // can call them any time to re-auth or sign out without
                 // having to remove + re-add the MCP server.
                 if (msg.method === "tools/call" && msg.id != null) {
-                    const params = (msg.params ?? {}) as { name?: string };
+                    const params = (msg.params ?? {}) as {
+                        name?: string;
+                        arguments?: { freshKey?: unknown };
+                    };
                     // Tool NAME only, never `arguments` — memory text is the
                     // user's private data and must not reach a log file.
                     // Without this the only trace of a call is the host's own
@@ -2074,7 +2088,11 @@ export async function runBridge(
                         id: msg.id,
                     });
                     if (params.name === "memwal_login") {
-                        const result = await handleLocalLogin(config, adoptCredentials);
+                        const result = await handleLocalLogin(
+                            config,
+                            adoptCredentials,
+                            params.arguments?.freshKey === true,
+                        );
                         writeStdoutMessage({
                             jsonrpc: "2.0",
                             id: msg.id,

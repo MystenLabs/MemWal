@@ -284,10 +284,11 @@ export function formatStrandedLoginNotice(result: RecoveryResult): string | null
     } else if (result.outcome === "unavailable") {
         lines.push(
             `The relayer could not be reached to check. This will be retried on the`,
-            `next start. If sign-in keeps failing, run \`memwal-mcp login\`: it mints a`,
-            `fresh key instead of waiting on this one. Should the wallet step then`,
-            `refuse it, remove the key above from the dashboard first, because`,
-            `\`add_delegate_key\` cannot register a key that is already there.`,
+            `next start. If sign-in keeps failing, run`,
+            `\`npx -y @mysten-incubation/memwal-mcp login\`, or call \`memwal_login\` with`,
+            `\`freshKey: true\`: both mint a new key instead of waiting on this one.`,
+            `That abandons the key above, so if you approved it on-chain, remove it`,
+            `from the dashboard — nothing will use it again.`,
         );
     } else {
         lines.push(
