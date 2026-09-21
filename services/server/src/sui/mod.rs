@@ -9,7 +9,10 @@ pub mod input_freshness;
 pub mod tx_build;
 pub mod verifier;
 
-pub use client::{expires_at_from_epoch, RequestPriority, SuiClient, WalrusEpochSchedule};
+pub use client::{
+    expires_at_from_epoch, is_transient_grpc_code, RequestPriority, SuiClient, WalrusEpochSchedule,
+    DEFAULT_RPC_ATTEMPT_TIMEOUT,
+};
 
 use async_trait::async_trait;
 use sui_sdk_types::ExecutionStatus;

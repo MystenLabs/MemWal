@@ -1032,10 +1032,13 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `/health` `writes` wire value: `"paused"` when `WRITES_PAUSED` is set.
-pub(crate) fn writes_health_status(paused: bool) -> String {
+/// `/health` `writes` wire value: `"paused"`, `"degraded"`, or `"ok"`.
+/// Paused wins if both flags are set — write routes already 503.
+pub(crate) fn writes_health_status(paused: bool, degraded: bool) -> String {
     if paused {
         "paused".to_string()
+    } else if degraded {
+        "degraded".to_string()
     } else {
         "ok".to_string()
     }
@@ -1368,6 +1371,8 @@ pub struct RememberBulkItem {
 pub struct RememberBulkRequest {
     /// 1–MAX_BULK_ITEMS items to remember in one batched operation.
     pub items: Vec<RememberBulkItem>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 /// POST /api/remember/bulk — 202 Accepted response.
@@ -1576,45 +1581,6 @@ pub struct RecallResponse {
     /// failed and were silently omitted from `results`. Zero on the happy path.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub dropped_count: usize,
-    /// Writes this owner started recently that ended in `failed` — facts the
-    /// caller was told were accepted but that were never stored.
-    ///
-    /// Carried on the *read* path on purpose. A write now returns as soon as
-    /// the relayer accepts the job, so a failure after that point has no
-    /// caller left listening: `memwal_remember_status` answers it, but nothing
-    /// obliges an agent to ask, and saving a memory is typically the last
-    /// thing it does in a turn. Recall is the call an agent always makes, so
-    /// attaching the bad news here is what turns a silent loss into a visible
-    /// one.
-    ///
-    /// Empty on the happy path and omitted from the wire, so an older client
-    /// that ignores the field sees exactly today's response.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub failed_writes: Vec<FailedWrite>,
-}
-
-/// One write that was accepted and then failed, as reported back on recall.
-#[derive(Debug, Serialize)]
-pub struct FailedWrite {
-    /// The `job_id` the write returned when it was accepted, so a caller can
-    /// match this against what it was told at the time.
-    pub job_id: String,
-    pub namespace: String,
-    /// The failure message, after `sanitize_job_error_for_client` — the same
-    /// treatment `GET /api/remember/:job_id` and the bulk status endpoint give
-    /// it, and for the same two reasons. An infrastructure-funding failure is
-    /// replaced wholesale (its raw text names the relayer's own wallet and its
-    /// balance shortfall, which is neither the tenant's business nor safe to
-    /// show them: it reads as "top this address up"). Everything else keeps its
-    /// wording with long hex runs redacted.
-    ///
-    /// What survives is the part a caller can act on: whether this looks
-    /// transient or permanent, and so whether re-sending the fact is likely to
-    /// work.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// When the job reached `failed`, RFC 3339.
-    pub failed_at: String,
 }
 
 fn is_zero_usize(n: &usize) -> bool {
@@ -2089,9 +2055,18 @@ pub struct HealthResponse {
     /// fail open so CI `wait-for-relayer` does not hang. `status` stays
     /// `"ok"` while the relayer process is up.
     pub write_ready: bool,
-    /// Write-path admission: `"ok"` or `"paused"`. `"paused"` when
-    /// `WRITES_PAUSED` is set; write routes then return HTTP 503.
-    /// Distinct from `write_ready`. `/health` stays HTTP 200.
+    /// Write-path state: `"ok"`, `"degraded"`, or `"paused"`.
+    ///
+    /// `"paused"` when `WRITES_PAUSED` is set; write routes then return
+    /// HTTP 503. `"degraded"` when recent durable writes have been failing
+    /// and none have landed -- the relayer still accepts and durably
+    /// queues a write, but Walrus is not storing it, so a caller should
+    /// expect the job to fail minutes later rather than queue more.
+    ///
+    /// Deliberately separate from `write_ready`, which stays true through
+    /// a downstream outage: CI's wait-for-relayer gate blocks on
+    /// `write_ready is True`, so folding this into it would make a Walrus
+    /// outage hang every deploy. `/health` stays HTTP 200 throughout.
     pub writes: String,
 }
 
@@ -3566,8 +3541,11 @@ mod tests {
 
     #[tokio::test]
     async fn writes_paused_maps_to_503_with_stable_message() {
-        assert_eq!(writes_health_status(false), "ok");
-        assert_eq!(writes_health_status(true), "paused");
+        assert_eq!(writes_health_status(false, false), "ok");
+        assert_eq!(writes_health_status(false, true), "degraded");
+        assert_eq!(writes_health_status(true, false), "paused");
+        // An operator pause is the stronger statement and wins.
+        assert_eq!(writes_health_status(true, true), "paused");
         assert!(reject_if_writes_paused(false).is_ok());
         let err = reject_if_writes_paused(true).expect_err("paused writes");
         assert_eq!(err.kind(), "writes_paused");
