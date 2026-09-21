@@ -58,7 +58,12 @@ import type {
     RememberBulkItemResult,
     RelayerVersionMetadata,
 } from "./types.js";
-import { RememberJobTimeoutError } from "./types.js";
+import {
+    RememberJobFailedError,
+    RememberJobNotFoundError,
+    RememberJobTimeoutError,
+    relayerHttpError,
+} from "./errors.js";
 import {
     sha256hex,
     hexToBytes,
@@ -348,10 +353,7 @@ export class MemWal {
             }
 
             if (!("status" in status) || status.status === "not_found") {
-                throw Object.assign(new Error(`remember job not found: ${jobId}`), {
-                    status: 404,
-                    jobId,
-                });
+                throw new RememberJobNotFoundError(jobId);
             }
 
             if (status.status === "done") {
@@ -364,11 +366,9 @@ export class MemWal {
                 };
             }
             if (status.status === "failed") {
-                throw Object.assign(
-                    new Error(
-                        `remember job failed: ${redactInternalUrls(status.error ?? "unknown error")}`,
-                    ),
-                    { status: 500, jobId },
+                throw new RememberJobFailedError(
+                    jobId,
+                    redactInternalUrls(status.error ?? "unknown error"),
                 );
             }
         }
@@ -1413,21 +1413,13 @@ export class MemWal {
                 raw,
                 res.headers.get("x-auth-error"),
             );
-            const err = new Error(message) as Error & {
-                status?: number;
-                serverCode?: string;
-                retryAfterSeconds?: number;
-                cause?: string;
-            };
-            err.status = res.status;
-            if (serverCode) err.serverCode = serverCode;
             const retryAfter = Number(res.headers.get("retry-after"));
-            if (Number.isFinite(retryAfter) && retryAfter > 0) {
-                err.retryAfterSeconds = retryAfter;
-            }
-            // Preserve raw body on `cause` for in-process debugging only.
-            err.cause = raw;
-            throw err;
+            throw relayerHttpError(res.status, message, {
+                serverCode,
+                retryAfterSeconds:
+                    Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+                cause: raw,
+            });
         }
 
         return res.json() as Promise<T>;

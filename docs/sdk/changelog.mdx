@@ -28,16 +28,17 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.7. `waitForRememberJob` throws typed `RememberJobTimeoutError` on poll timeout; `waitForRememberJobs` still returns `status: "timeout"`. Request bodies are hashed with `@noble/hashes` rather than WebCrypto-or-`node:crypto`, so the SDK no longer imports a Node builtin that Vite silently externalises into a runtime crash in the browser, and it declares a Node 20 floor. `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. Empty-body 401s use the AUTH_REJECTED troubleshooting message instead of telling callers to run `memwal_login`. Account and manual PTBs use typed `tx.pure` helpers so they work with modern `@mysten/sui`. 0.1.6 added optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`, and reports HTTP 503 as a retryable upstream outage instead of a sign-in failure.
+  The latest TypeScript SDK release is 0.1.7. `waitForRememberJob` throws typed `RememberJobTimeoutError` on poll timeout, `RememberJobFailedError` on a failed job, and `RememberJobNotFoundError` when the job is missing; `waitForRememberJobs` still returns `status: "timeout"`. Signed-request HTTP 429 throws `RateLimitError`. Request bodies are hashed with `@noble/hashes` rather than WebCrypto-or-`node:crypto`, so the SDK no longer imports a Node builtin that Vite silently externalises into a runtime crash in the browser, and it declares a Node 20 floor. `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. Empty-body 401s use the AUTH_REJECTED troubleshooting message instead of telling callers to run `memwal_login`. Account and manual PTBs use typed `tx.pure` helpers so they work with modern `@mysten/sui`. 0.1.6 added optional `created_at` on `recall()` results, plus `sort` and `scoringWeights` on `RecallOptions`, and reports HTTP 503 as a retryable upstream outage instead of a sign-in failure.
 ---
 
 ## 0.1.7
 
-This release exports `RememberJobTimeoutError` from `waitForRememberJob` / `rememberAndWait` when polling misses the deadline, removes the Node `crypto` import that crashed bundled browser builds at runtime, adds `failed` on `restore()` results, declares a Node 20 floor, stops telling headless SDK clients to call `memwal_login` on empty-body 401s, and switches account and manual PTBs to typed `tx.pure` helpers.
+This release exports typed remember-job and rate-limit errors (`RememberJobTimeoutError`, `RememberJobFailedError`, `RememberJobNotFoundError`, `RateLimitError`), removes the Node `crypto` import that crashed bundled browser builds at runtime, adds `failed` on `restore()` results, declares a Node 20 floor, stops telling headless SDK clients to call `memwal_login` on empty-body 401s, and switches account and manual PTBs to typed `tx.pure` helpers.
 
 ### Added
 
 - `waitForRememberJob` throws `RememberJobTimeoutError` (`status` 504, `jobId`, `timeoutMs`) when polling misses the deadline. `waitForRememberJobs` still returns `status: "timeout"` for that case.
+- `waitForRememberJob` / `rememberAndWait` throw `RememberJobFailedError` (500) and `RememberJobNotFoundError` (404) instead of a mutated `Error`. Signed-request HTTP 429 throws `RateLimitError`.
 - `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ### Fixed

@@ -21,7 +21,13 @@ export {
     MemWalCompatibilityError,
     SUPPORTED_RELAYER_API_MAJOR,
 } from "./compatibility.js";
-export { RememberJobTimeoutError } from "./types.js";
+export {
+    RateLimitError,
+    RememberJobError,
+    RememberJobFailedError,
+    RememberJobNotFoundError,
+    RememberJobTimeoutError,
+} from "./errors.js";
 
 // Delegate key utilities (no @mysten/sui dependency)
 export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";

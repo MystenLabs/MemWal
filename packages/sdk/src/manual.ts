@@ -51,6 +51,7 @@ import {
     scoringWeightsToWire,
 } from "./utils.js";
 import { assertCompatibleRelayer, compatibilityErrorFromStatus } from "./compatibility.js";
+import { relayerHttpError } from "./errors.js";
 
 // ============================================================
 // Constants
@@ -894,20 +895,13 @@ export class MemWalManual {
                 raw,
                 res.headers.get("x-auth-error"),
             );
-            const err = new Error(sanitized) as Error & {
-                status?: number;
-                serverCode?: string;
-                retryAfterSeconds?: number;
-                cause?: string;
-            };
-            err.status = res.status;
-            if (serverCode) err.serverCode = serverCode;
             const retryAfter = Number(res.headers.get("retry-after"));
-            if (Number.isFinite(retryAfter) && retryAfter > 0) {
-                err.retryAfterSeconds = retryAfter;
-            }
-            err.cause = raw;
-            throw err;
+            throw relayerHttpError(res.status, sanitized, {
+                serverCode,
+                retryAfterSeconds:
+                    Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+                cause: raw,
+            });
         }
 
         return res.json() as Promise<T>;

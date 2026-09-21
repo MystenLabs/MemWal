@@ -7,6 +7,7 @@ export class MemWalCompatibilityError extends Error {
     constructor(message: string) {
         super(message);
         this.name = "MemWalCompatibilityError";
+        Object.setPrototypeOf(this, new.target.prototype);
     }
 }
 

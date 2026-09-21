@@ -5,6 +5,7 @@
 ### Added
 
 - `waitForRememberJob` throws `RememberJobTimeoutError` (`status` 504, `jobId`, `timeoutMs`) when polling misses the deadline. `waitForRememberJobs` still returns `status: "timeout"` for that case.
+- `waitForRememberJob` / `rememberAndWait` throw `RememberJobFailedError` (500) and `RememberJobNotFoundError` (404) instead of a mutated `Error`. Signed-request HTTP 429 throws `RateLimitError`.
 - `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ### Fixed
