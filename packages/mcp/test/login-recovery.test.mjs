@@ -336,3 +336,45 @@ test("a plain 401 is still a rejection", async (t) => {
     const { recoverPendingLogin } = await importRecovery();
     assert.equal((await recoverPendingLogin()).outcome, "rejected");
 });
+
+/**
+ * WALM-646 — the supersede guard is account-agnostic, so a sign-in for a
+ * second account that was abandoned after the wallet step still wins on
+ * timestamp and recovery adopts it. Nothing is lost (the displaced file is
+ * backed up), but the user is moved between accounts and has to be told.
+ */
+test("recovery says so when it switches the active account", async (t) => {
+    const home = freshHome();
+    const { server, url } = await startWhoami(okWhoami);
+    t.after(() => {
+        server.close();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    const accountA = `0x${"e".repeat(64)}`;
+    writeFileSync(
+        credsPath(home),
+        JSON.stringify({
+            delegatePrivateKey: "99".repeat(32),
+            delegatePublicKeyHex: "88".repeat(32),
+            delegateAddress: `0x${"7".repeat(64)}`,
+            walletAddress: OWNER,
+            accountId: accountA,
+            packageId: PACKAGE,
+            relayerUrl: url,
+            createdAt: new Date(Date.now() - 60_000).toISOString(),
+            version: 1,
+        }),
+        { mode: 0o600 },
+    );
+    writePending(home, url);
+
+    const { recoverPendingLogin } = await importRecovery();
+    const result = await recoverPendingLogin();
+
+    assert.equal(result.outcome, "recovered");
+    assert.equal(result.credentials.accountId, ACCOUNT);
+    assert.ok(result.replacementNotice, "switching accounts must not be silent");
+    assert.match(result.replacementNotice, new RegExp(accountA), "names the account left behind");
+    assert.match(result.replacementNotice, new RegExp(ACCOUNT), "names the account now in use");
+});

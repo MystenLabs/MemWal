@@ -165,6 +165,8 @@ export function withMemWal(
         },
     });
 
+    wrapped.specificationVersion = model.specificationVersion;
+
     // Lets short-lived callers await outstanding auto-save writes before
     // exiting, e.g. `await model.flush()` right before `process.exit()`.
     wrapped.flush = async (): Promise<void> => {
@@ -212,32 +214,30 @@ export function injectMemoryContext(
         -1
     );
 
+    const memoryMessage = {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: memoryContext }],
+    };
+
+    const result = [...prompt];
     if (lastUserIndex > 0) {
-        const result = [...prompt];
-        result.splice(
-            lastUserIndex,
-            0,
-            {
-                role: "system" as const,
-                content: UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION,
-            },
-            {
-                role: "user" as const,
-                content: [{ type: "text" as const, text: memoryContext }],
-            }
-        );
-        return result;
+        result.splice(lastUserIndex, 0, memoryMessage);
+    } else {
+        result.unshift(memoryMessage);
     }
 
-    return [
-        {
+    const leading = result[0] as { role?: string; content?: unknown };
+    if (leading.role === "system") {
+        result[0] = {
+            ...leading,
+            content: `${leading.content}\n\n${UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}`,
+        };
+    } else {
+        result.unshift({
             role: "system" as const,
             content: UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION,
-        },
-        {
-            role: "user" as const,
-            content: [{ type: "text" as const, text: memoryContext }],
-        },
-        ...prompt,
-    ];
+        });
+    }
+
+    return result;
 }
