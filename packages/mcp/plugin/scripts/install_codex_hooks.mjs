@@ -12,6 +12,11 @@
  * ${PLUGIN_ROOT} placeholder to this plugin's absolute path, and merges the
  * entries into ~/.codex/hooks.json.
  *
+ * The template is parsed as JSON *before* the placeholder is substituted, and
+ * the path is POSIX-single-quoted on its way into a hook command, so a plugin
+ * directory containing $(...), backticks, quotes or backslashes cannot break
+ * out of either the JSON document or the generated shell command.
+ *
  * Re-running is idempotent: entries this installer owns (identified by our
  * hook script filenames) are removed before fresh entries are added.
  *
@@ -28,6 +33,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { substituteHookPlaceholder } from "./lib/hook-template.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(SCRIPT_DIR);
@@ -64,12 +70,17 @@ const OWNER_MARKERS = [
     "on_post_tool.mjs",
 ];
 
+const PLACEHOLDER = "${PLUGIN_ROOT}";
+
 function loadTemplate() {
-    const raw = readFileSync(TEMPLATE_FILE, "utf8").replaceAll(
-        "${PLUGIN_ROOT}",
+    // Parse first, substitute second. Substituting into the raw text would let
+    // a path containing a double quote or a backslash rewrite the JSON
+    // document, and would leave `$(...)` or backticks live in the hook command.
+    return substituteHookPlaceholder(
+        JSON.parse(readFileSync(TEMPLATE_FILE, "utf8")),
+        PLACEHOLDER,
         PLUGIN_ROOT
     );
-    return JSON.parse(raw);
 }
 
 function loadExisting() {
