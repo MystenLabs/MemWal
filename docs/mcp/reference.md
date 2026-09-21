@@ -150,7 +150,9 @@ memwal-mcp approve-project
 
 Until then the global credentials are used and one stderr line names the file that was skipped, the account and relayer it wanted, and this command. An approval covers one exact project path, account, delegate key and relayer: change any of them and it has to be approved again. The record is kept in `~/.memwal/project-approvals.json`, outside the repository, so a repository cannot carry its own approval. `memwal-mcp revoke-project` withdraws it.
 
-`MEMWAL_CREDS_DIR` overrides project resolution entirely and needs no approval — it can only come from your own environment, never from a checkout.
+Approving decides which file is written as well as which is read. From then on a sign-in from that project stores a delegate private key, in plain text, in `.memwal/credentials.json` inside the repository — `approve-project` and the pre-sign-in warning both say so. Add `.memwal/` to `.gitignore`. The login write-ahead record is kept in `~/.memwal/login-pending/` and never enters the repository.
+
+`MEMWAL_CREDS_DIR` overrides project resolution entirely and needs no approval. Because it skips the gate it must be an **absolute path outside the current project**, and anything else is refused with an error rather than ignored: a relative value resolves against the working directory, which would put the credentials and the approval record inside the repository, and an MCP client hands this process the `env` block it reads from `.cursor/mcp.json`, `.vscode/mcp.json` or `.claude/settings.json` in the checkout — where editors expand `${workspaceFolder}`, so an in-project absolute path is not evidence you set it. An empty value means unset.
 
 ### Working on several accounts
 
