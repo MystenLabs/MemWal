@@ -24,6 +24,16 @@ import { recoverPendingLogin, formatStrandedLoginNotice } from "./recovery.js";
 import { runAuthRequiredServer } from "./auth-required.js";
 import { notePendingLoginSuccess, runBridge } from "./bridge.js";
 import { loginFlow } from "./login.js";
+import {
+    autoSaveStatus,
+    autoSaveSummary,
+    markConsentPending,
+    pendingConsentNotice,
+    publishHookState,
+    setAutoSave,
+    AUTO_SAVE_ENV,
+} from "./auto-save.js";
+import { askAutoSaveConsent, consentOutcomeNotice } from "./consent.js";
 import { log, note } from "./logger.js";
 
 /**
@@ -44,6 +54,8 @@ interface ParsedArgs {
     webUrl?: string;
     label?: string;
     namespace?: string;
+    /** `auto-save on|off|status` — the automatic-memory opt-in (WALM-642). */
+    autoSave?: "on" | "off" | "status";
     /** Args parseArgs did not recognise, in the order seen. For a flag
      *  written `--key=value`, only `--key` is recorded — see parseArgs. */
     unknown: string[];
@@ -60,7 +72,7 @@ const ENV_PRESETS: Record<string, { relayer: string; web: string }> = {
 
 /** Bare words that are commands rather than values. An unknown flag must not
  *  swallow one as its argument. */
-const POSITIONALS = new Set(["login", "approve-project", "revoke-project"]);
+const POSITIONALS = new Set(["login", "approve-project", "revoke-project", "auto-save", "on", "off", "status"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
     const out: ParsedArgs = {
@@ -94,6 +106,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
             case "revoke-project":
                 out.revokeProject = true;
                 break;
+            case "auto-save":
+            case "--auto-save": {
+                // `auto-save` on its own reports the state rather than
+                // changing it — a bare subcommand must never be read as
+                // consent to turn automatic saving on.
+                const value = argv[i + 1]?.toLowerCase();
+                if (value === "on" || value === "off" || value === "status") {
+                    out.autoSave = value;
+                    i++;
+                } else {
+                    out.autoSave = "status";
+                }
+                break;
+            }
             case "--prod":
             case "--dev":
             case "--staging":
@@ -178,6 +204,43 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         printHelp();
         return;
     }
+
+    // Republish the resolved opt-in for the plugin hooks before anything else
+    // runs. The hooks do no resolution of their own — they read this file or
+    // they fail safe to "off" (WALM-642) — so every start-up refreshes it,
+    // including the ones that return early below. Best effort by design: a
+    // read-only home must not stop the server, and a hook that finds nothing
+    // already behaves as off.
+    publishHookState();
+
+    // Runs before the credential paths below: reading or flipping the opt-in
+    // does not need an account, and a user deciding whether to enable
+    // automatic memory should not be pushed through a browser login first.
+    if (args.autoSave) {
+        if (args.autoSave === "status") {
+            note(autoSaveSummary());
+            return;
+        }
+        const enabled = args.autoSave === "on";
+        const { path } = setAutoSave(enabled);
+        note(
+            enabled
+                ? `Automatic memory is ON. The agent may now save durable facts without being asked; ` +
+                      `credentials are still excluded and stripped before any write. Saved to ${path}.`
+                : `Automatic memory is OFF. Facts are saved only when you ask for them. Saved to ${path}.`,
+        );
+        const status = autoSaveStatus();
+        if (status.source === "env" && status.enabled !== enabled) {
+            // The file was written, but this process would still answer the
+            // other way — say so rather than let the setting look ignored.
+            note(
+                `Note: ${AUTO_SAVE_ENV}=${process.env[AUTO_SAVE_ENV]} is set in this environment ` +
+                    `and overrides the file. Unset it for the saved choice to take effect.`,
+            );
+        }
+        return;
+    }
+
     if (args.logout) {
         const cleared = clearCreds();
         // Explicit sign-out discards the write-ahead record too. Without this
@@ -420,6 +483,13 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             // tool from the MCP client) opens the correct dashboard. Before
             // this fix `--dev` was silently dropped here and the flow always
             // routed to prod (https://memory.walrus.xyz).
+            // No credentials and no terminal: a brand-new install being set up
+            // through an MCP client. Stamp it now, while we can still tell it
+            // apart from a long-standing user — otherwise a sign-in through the
+            // `memwal_login` tool would later be indistinguishable from one,
+            // and automatic saving would switch itself on with nobody having
+            // been asked (WALM-642).
+            markConsentPending();
             const handoff = await runAuthRequiredServer({ relayerUrl, webUrl, label, namespace });
             if (handoff) {
                 // The user completed `memwal_login` in this SAME session: the
@@ -440,6 +510,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
                     delegateAddress: handoff.creds.delegateAddress,
                     credentialsPath: credsPath(),
                 });
+                const pendingAfterLogin = pendingConsentNotice();
+                if (pendingAfterLogin) note(pendingAfterLogin);
                 await runBridge(
                     handoff.creds,
                     { relayerUrl, webUrl, label, namespace },
@@ -454,6 +526,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         );
         creds = await loginFlow({ relayerUrl, webUrl, label });
         note(`Authorized as ${creds.walletAddress.slice(0, 10)}...`);
+        // Before the question is put, not after: if the user abandons the
+        // prompt, the install must still read as "never answered" rather than
+        // fall through to the pre-existing-user rule and start saving.
+        markConsentPending();
     } else {
         log.info("creds.loaded", {
             accountId: creds.accountId,
@@ -473,6 +549,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // user is the one looking at stdout — there's no MCP client to bridge
     // with, so hanging the process is the wrong default.
     if (process.stdin.isTTY) {
+        // The one moment there is demonstrably a human here. Consent is asked
+        // on a terminal and nowhere else — never as an MCP tool, a tool
+        // description or an instruction, because a model answering this is not
+        // the user answering it (WALM-642).
+        await askForConsentIfOwed();
+
         note(``);
         if (wasLoggedIn) {
             note(`✅ Already authorized as ${creds.walletAddress.slice(0, 10)}...${creds.walletAddress.slice(-6)}`);
@@ -483,12 +565,49 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             note(`✅ Login complete. Credentials saved to ${credsPath()}`);
         }
         note(``);
+        // The one moment a human is guaranteed to be looking at this output —
+        // so it is where the automatic-save choice gets surfaced (WALM-642).
+        note(autoSaveSummary());
+        note(``);
         note(`Next: add this package to your MCP client config (Cursor / Claude Desktop / etc).`);
         note(`See \`memwal-mcp --help\` for ready-to-paste snippets.`);
         return;
     }
 
+    // Non-interactive from here on. Say the state once on stderr — there is no
+    // one to ask, and a prompt on this stdin would hang the server forever.
+    const pending = pendingConsentNotice();
+    if (pending) note(pending);
+
     await runBridge(creds, { relayerUrl, webUrl, label, namespace });
+}
+
+/**
+ * Put the consent question to the user, if it is still owed one.
+ *
+ * Silent when the question has been answered, when `MEMWAL_AUTO_SAVE` has
+ * settled it, or when the input stream ends without an answer — in that last
+ * case the state stays unset and the question comes back next time, rather than
+ * a choice being recorded that nobody made. A declined answer is written once
+ * and never asked about again.
+ */
+async function askForConsentIfOwed(): Promise<void> {
+    if (!autoSaveStatus().pendingConsent) return;
+
+    const answer = await askAutoSaveConsent({
+        input: process.stdin,
+        output: process.stderr,
+        isTTY: process.stdin.isTTY === true,
+    });
+    if (answer === null) {
+        note(
+            "No answer recorded — automatic memory is unchanged and you will be " +
+                "asked again next time. Set it directly with `memwal-mcp auto-save on|off`.",
+        );
+        return;
+    }
+    const { path } = setAutoSave(answer);
+    note(consentOutcomeNotice(answer, path));
 }
 
 function printHelp(): void {
@@ -528,6 +647,23 @@ export function helpText(): string {
         "                                   required again if the account,",
         "                                   delegate key or relayer changes.",
         "  memwal-mcp revoke-project        Withdraw that approval.",
+        "  memwal-mcp auto-save on|off      Turn automatic memory on or off.",
+        "                                   ON once you agree to it: `login` asks",
+        "                                   in the terminal the first time, and",
+        "                                   nothing is saved unprompted until you",
+        "                                   answer. Saved memories are permanent",
+        "                                   — Walrus is immutable storage — so",
+        "                                   you can stop saving new ones but",
+        "                                   cannot delete one already saved.",
+        "                                   Credentials (passwords, API keys,",
+        "                                   tokens, private keys, seed phrases,",
+        "                                   auth headers, URLs with an embedded",
+        "                                   user:password) are stripped before",
+        "                                   any write either way — a safety net,",
+        "                                   not a guarantee. Stored in",
+        "                                   settings.json next to",
+        "                                   credentials.json.",
+        "  memwal-mcp auto-save             Report the current setting.",
         "  memwal-mcp --help                Show this help.",
         "",
         "Options:",
@@ -565,6 +701,9 @@ export function helpText(): string {
         "                                   Must be an ABSOLUTE path outside the",
         "                                   project; anything else is refused.",
         "  MEMWAL_NAMESPACE                 same as --namespace",
+        "  MEMWAL_AUTO_SAVE=1               Automatic memory for this server",
+        "                                   only; overrides settings.json and",
+        "                                   skips the login question. 0 = off.",
         "  MEMWAL_MCP_DEBUG=1               Verbose stderr logging.",
         "",
         "Minimal MCP client config (Cursor, Claude Desktop, etc.):",
@@ -619,6 +758,17 @@ export {
     formatProjectCredsNotice,
     formatProjectCredsStorageWarning,
 } from "./auth.js";
+export {
+    isAutoSaveEnabled,
+    isConsentPending,
+    autoSaveStatus,
+    setAutoSave,
+    markConsentPending,
+    publishHookState,
+    settingsPath,
+    hookStatePath,
+} from "./auto-save.js";
+export { askAutoSaveConsent, interpretConsentAnswer, CONSENT_PROMPT } from "./consent.js";
 export { loginFlow } from "./login.js";
 export { runBridge } from "./bridge.js";
 export type { MemWalCredentials, CredsResolution, ProjectCredsDecision } from "./auth.js";

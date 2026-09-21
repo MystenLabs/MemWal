@@ -3,6 +3,10 @@ import { createRequire } from "node:module";
 import { applyAgentClientFromServer } from "./agent-client.js";
 import type { MemWalSession } from "./auth.js";
 import { registerTools } from "./tools/index.js";
+import {
+    SECRET_EXCLUSION_RULES,
+    AUTO_SAVE_OPT_IN_RULE,
+} from "./tools/memory-policy.js";
 
 const requirePkg = createRequire(import.meta.url);
 
@@ -24,6 +28,10 @@ const PACKAGE_VERSION: string =
  * either offers its own built-in memory or denies the tool exists (WALM-324).
  * `instructions` travels with `initialize`, before any `tools/list`, so lazy
  * loading cannot strip it.
+ *
+ * The secret-exclusion and opt-in paragraphs are not written out here: they are
+ * pulled from tools/memory-policy.ts, the copy this package owns of the block
+ * shared with the MCP client and the plugin hooks (WALM-642).
  *
  * Keep roughly in sync with the plugin's SessionStart hook, which delivers
  * equivalent text on the plugin install path:
@@ -49,6 +57,13 @@ const INSTRUCTIONS = [
     "it, and it is lost when the conversation ends. Pass the complete statement rather than a",
     "summary. Skip one-off tasks, the current file or bug, and small talk. Use",
     "memwal_remember_bulk when several distinct facts arrived at once.",
+    "",
+    // WALM-642. Verbatim from tools/memory-policy.ts, which the tool
+    // descriptions state too, so instructions and descriptions cannot drift
+    // into telling the model two different things about secrets.
+    AUTO_SAVE_OPT_IN_RULE,
+    "",
+    SECRET_EXCLUSION_RULES,
     "",
     "By default memwal_remember and memwal_remember_bulk return in ~1s once the relayer has",
     "accepted the job (job_id / job_ids). The Walrus write continues in the background (~30-60s)",
