@@ -13,7 +13,13 @@
 import { randomUUID, createHash } from "node:crypto";
 
 import type { MemWalCredentials } from "./auth.js";
-import { loadCreds, saveCreds, loadPendingLogin, clearPendingLogin } from "./auth.js";
+import {
+    loadCreds,
+    saveCreds,
+    loadPendingLogin,
+    clearPendingLogin,
+    formatReplacementNotice,
+} from "./auth.js";
 import { signMessage } from "./crypto.js";
 import { log } from "./logger.js";
 
@@ -34,6 +40,7 @@ export interface RecoveryResult {
     /** Set when a key may be registered on-chain but is not usable locally. */
     strandedPublicKey?: string;
     credentials?: MemWalCredentials;
+    replacementNotice?: string;
 }
 
 /** Same wall-clock budget as a normal cold-start probe: recovery must never
@@ -236,13 +243,17 @@ export async function recoverPendingLogin(): Promise<RecoveryResult> {
         createdAt: new Date().toISOString(),
         version: 1,
     };
-    saveCreds(creds);
+    const saved = saveCreds(creds);
     clearPendingLogin();
     log.info("login.pending.recovered", {
         accountId: creds.accountId,
         delegateAddress: creds.delegateAddress,
     });
-    return { outcome: "recovered", credentials: creds };
+    return {
+        outcome: "recovered",
+        credentials: creds,
+        replacementNotice: formatReplacementNotice(saved, creds.accountId) ?? undefined,
+    };
 }
 
 /**

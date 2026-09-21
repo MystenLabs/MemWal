@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { generateText } from "ai";
+
 import { MemWal } from "../dist/memwal.js";
 import { withMemWal } from "../dist/ai/middleware.js";
 
@@ -57,6 +59,28 @@ test("flush() awaits the fire-and-forget auto-save analyze() call", async () => 
         await model.flush();
 
         assert.equal(analyzeCompleted, true);
+    } finally {
+        MemWal.prototype.recall = originalRecall;
+        MemWal.prototype.analyze = originalAnalyze;
+    }
+});
+
+test("a wrapped v2 model still reports its finish reason", async () => {
+    const originalRecall = MemWal.prototype.recall;
+    const originalAnalyze = MemWal.prototype.analyze;
+
+    MemWal.prototype.recall = async () => ({ results: [] });
+    MemWal.prototype.analyze = async () => { };
+
+    try {
+        const model = withMemWal(fakeLanguageModel(), {
+            key: TEST_KEY,
+            accountId: TEST_ACCOUNT_ID,
+        });
+
+        const result = await generateText({ model, prompt: "hi" });
+
+        assert.equal(result.finishReason, "stop");
     } finally {
         MemWal.prototype.recall = originalRecall;
         MemWal.prototype.analyze = originalAnalyze;

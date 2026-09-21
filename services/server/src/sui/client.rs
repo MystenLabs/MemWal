@@ -27,7 +27,7 @@ const MAX_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 // Must cover one full 10-second provider window: a request arriving just
 // after the 2,970th admission still gets a bounded chance to enter next window.
 const INTERACTIVE_GATE_BUDGET: Duration = Duration::from_secs(12);
-const DEFAULT_RPC_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_RPC_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RPC_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_RPC_MAX_IN_FLIGHT: usize = 64;
 const MAX_RPC_MAX_IN_FLIGHT: usize = 10_000;
@@ -365,14 +365,7 @@ impl SuiClient {
                     }
                     SuiErr::RateLimited
                 }
-                Ok(Err(status))
-                    if matches!(
-                        status.code(),
-                        tonic::Code::Unavailable
-                            | tonic::Code::DeadlineExceeded
-                            | tonic::Code::Aborted
-                    ) =>
-                {
+                Ok(Err(status)) if is_transient_grpc_code(status.code()) => {
                     SuiErr::Transport(status.to_string())
                 }
                 Ok(Err(status)) => return Err(Self::classify_rejection(status)),
@@ -457,6 +450,13 @@ impl SuiClient {
             status: effects.status().clone(),
         })
     }
+}
+
+pub fn is_transient_grpc_code(code: tonic::Code) -> bool {
+    matches!(
+        code,
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Aborted
+    )
 }
 
 fn provider_retry_delay(status: &tonic::Status) -> Duration {
