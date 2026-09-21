@@ -9,7 +9,17 @@
  *   5. On 401 (revoked key), the bridge wipes credentials before throwing
  *      — the next process spawn will re-trigger login.
  */
-import { clearCreds, clearPendingLogin, credsPath, loadCreds } from "./auth.js";
+import {
+    approveProjectCreds,
+    clearCreds,
+    clearPendingLogin,
+    credsPath,
+    formatProjectCredsNotice,
+    formatProjectCredsStorageWarning,
+    loadCreds,
+    resolveCreds,
+    revokeProjectCredsApproval,
+} from "./auth.js";
 import { recoverPendingLogin, formatStrandedLoginNotice } from "./recovery.js";
 import { runAuthRequiredServer } from "./auth-required.js";
 import { notePendingLoginSuccess, runBridge } from "./bridge.js";
@@ -25,6 +35,11 @@ interface ParsedArgs {
     help: boolean;
     logout: boolean;
     forceLogin: boolean;
+    /** Approve the project-local credentials found from the working directory
+     * (WALM-639). A repo file is inert until this has been run for it. */
+    approveProject: boolean;
+    /** Withdraw that approval again. */
+    revokeProject: boolean;
     relayerUrl?: string;
     webUrl?: string;
     label?: string;
@@ -45,10 +60,17 @@ const ENV_PRESETS: Record<string, { relayer: string; web: string }> = {
 
 /** Bare words that are commands rather than values. An unknown flag must not
  *  swallow one as its argument. */
-const POSITIONALS = new Set(["login"]);
+const POSITIONALS = new Set(["login", "approve-project", "revoke-project"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
-    const out: ParsedArgs = { help: false, logout: false, forceLogin: false, unknown: [] };
+    const out: ParsedArgs = {
+        help: false,
+        logout: false,
+        forceLogin: false,
+        approveProject: false,
+        revokeProject: false,
+        unknown: [],
+    };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         const next = () => argv[++i];
@@ -63,6 +85,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
             case "--login":
             case "login":
                 out.forceLogin = true;
+                break;
+            case "--approve-project":
+            case "approve-project":
+                out.approveProject = true;
+                break;
+            case "--revoke-project":
+            case "revoke-project":
+                out.revokeProject = true;
                 break;
             case "--prod":
             case "--dev":
@@ -174,6 +204,104 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         return;
     }
 
+    // A project-local `.memwal/credentials.json` decides the account and the
+    // relayer every memory from that directory goes to, and it lives inside a
+    // repository — so it stays inert until the user approves it here
+    // (WALM-639). The approval is a decision about where memory goes, so it
+    // wants a real terminal for the same reason `login` does: a non-interactive
+    // spawn is a script or an MCP client, and neither of those is the user
+    // saying yes.
+    if (args.approveProject || args.revokeProject) {
+        if (!process.stdin.isTTY) {
+            log.error("creds.project_approval.requires_tty", { cwd: process.cwd() });
+            note(
+                "error: `approve-project` / `revoke-project` require an interactive terminal " +
+                    "(stdin is not a TTY).",
+            );
+            note("       Run it in a terminal, from the project directory.");
+            process.exitCode = 1;
+            return;
+        }
+        if (args.revokeProject) {
+            const revoked = revokeProjectCredsApproval();
+            log.info("creds.project_approval.revoked", {
+                outcome: revoked.outcome,
+                projectPath: revoked.projectPath,
+            });
+            if (revoked.outcome === "none") {
+                note(`No approval on record for ${revoked.projectPath}.`);
+            } else {
+                note(`Approval withdrawn for ${revoked.projectPath}.`);
+                note(`Memory from this project goes to ${credsPath()} again.`);
+            }
+            return;
+        }
+        const approved = approveProjectCreds();
+        log.info("creds.project_approval", {
+            outcome: approved.outcome,
+            projectPath: approved.projectPath,
+            accountId: approved.accountId,
+            relayerUrl: approved.relayerUrl,
+        });
+        switch (approved.outcome) {
+            case "overridden":
+                note(
+                    `MEMWAL_CREDS_DIR is set (${process.env.MEMWAL_CREDS_DIR}), so project ` +
+                        `credentials are never used. Nothing to approve.`,
+                );
+                break;
+            case "none":
+                note(
+                    `No project credentials found at or above ${process.cwd()} ` +
+                        `(.memwal/credentials.json). Nothing to approve.`,
+                );
+                break;
+            case "unreadable":
+                note(
+                    `${approved.projectPath} is not a valid Walrus Memory credentials file. ` +
+                        `Nothing to approve.`,
+                );
+                process.exitCode = 1;
+                break;
+            case "already-approved":
+                note(
+                    `Already approved: ${approved.projectPath} → account ${approved.accountId} ` +
+                        `on ${approved.relayerUrl}.`,
+                );
+                // Repeated on a no-op approve too: someone re-running this is
+                // checking what the state is, and "a private key gets written
+                // into your repo" is part of that state.
+                if (approved.projectPath) {
+                    note(formatProjectCredsStorageWarning(approved.projectPath));
+                }
+                break;
+            default:
+                if (approved.outcome === "reapproved") {
+                    note(
+                        `The approved destination changed — was account ` +
+                            `${approved.previousAccountId} on ${approved.previousRelayerUrl}.`,
+                    );
+                }
+                note(`Approved ${approved.projectPath}.`);
+                note(
+                    `Memory written from this project now goes to account ${approved.accountId} ` +
+                        `on ${approved.relayerUrl}.`,
+                );
+                note(
+                    `Recorded in ${approved.approvalsPath}. Approval is required again if the ` +
+                        `account, delegate key or relayer changes.`,
+                );
+                // Approving picks the WRITE target as well as the read one, and
+                // that target is inside the repository. Saying only where memory
+                // now goes would leave the user to discover the delegate key in
+                // their working tree — at best in a diff, at worst in a push.
+                if (approved.projectPath) {
+                    note(formatProjectCredsStorageWarning(approved.projectPath));
+                }
+        }
+        return;
+    }
+
     // Resolve URLs: CLI > env > default.
     const relayerUrl =
         args.relayerUrl ?? process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz";
@@ -206,6 +334,26 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     // also destroyed the file `saveCreds` needs in order to notice that the new
     // sign-in belongs to a different account (GH #628). The old file is now
     // replaced only on success, and backed up when the account changes.
+    // Report a project-local credentials file that resolution refused to use,
+    // once, before anything else reads credentials. Staying silent would be the
+    // mirror of the silent redirect the gate exists to stop: the user put that
+    // file there expecting it to be used, and nothing else would tell them it
+    // was skipped or how to approve it (WALM-639).
+    const resolution = resolveCreds();
+    const projectNotice = formatProjectCredsNotice(resolution);
+    if (projectNotice) {
+        log.warn("creds.project_ignored", {
+            projectPath: resolution.project?.path,
+            decision: resolution.project?.decision,
+            // Destination it would have redirected to — never anything from
+            // the file's key material.
+            projectAccountId: resolution.project?.accountId,
+            projectRelayerUrl: resolution.project?.relayerUrl,
+            using: resolution.path,
+        });
+        note(projectNotice);
+    }
+
     let creds = args.forceLogin ? null : loadCreds();
     // A previous sign-in may have died after the browser registered our
     // delegate key on-chain but before the callback saved it (WALM-332). The
@@ -312,6 +460,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             delegateAddress: creds.delegateAddress,
             label: creds.label,
             relayerUrl: creds.relayerUrl,
+            // Which file won, and how. "Where is this sending my memory" is
+            // otherwise only answerable by re-deriving the resolution by hand.
+            credentialsPath: resolution.path,
+            credentialsSource: resolution.source,
         });
     }
 
@@ -326,6 +478,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
             note(`✅ Already authorized as ${creds.walletAddress.slice(0, 10)}...${creds.walletAddress.slice(-6)}`);
             note(`   Account:  ${creds.accountId}`);
             note(`   Relayer:  ${creds.relayerUrl}`);
+            note(`   Creds:    ${resolution.path} (${resolution.source})`);
         } else {
             note(`✅ Login complete. Credentials saved to ${credsPath()}`);
         }
@@ -364,6 +517,17 @@ export function helpText(): string {
         "                                   browser).",
         "  memwal-mcp --logout              Delete saved credentials without",
         "                                   re-running login.",
+        "  memwal-mcp approve-project       Approve the project-local",
+        "                                   .memwal/credentials.json found from",
+        "                                   the current directory, so memory",
+        "                                   written here goes to ITS account and",
+        "                                   relayer. Until approved the file is",
+        "                                   ignored and the global credentials",
+        "                                   are used. Approval is per machine,",
+        "                                   stored outside the repository, and",
+        "                                   required again if the account,",
+        "                                   delegate key or relayer changes.",
+        "  memwal-mcp revoke-project        Withdraw that approval.",
         "  memwal-mcp --help                Show this help.",
         "",
         "Options:",
@@ -395,6 +559,11 @@ export function helpText(): string {
         "  MEMWAL_SERVER_URL                same as --relayer",
         "  MEMWAL_WEB_URL                   same as --web-url",
         "  MEMWAL_CLIENT_LABEL              same as --label",
+        "  MEMWAL_CREDS_DIR                 Use this directory for credentials",
+        "                                   and approvals, overriding both the",
+        "                                   project-local and global files.",
+        "                                   Must be an ABSOLUTE path outside the",
+        "                                   project; anything else is refused.",
         "  MEMWAL_NAMESPACE                 same as --namespace",
         "  MEMWAL_MCP_DEBUG=1               Verbose stderr logging.",
         "",
@@ -439,7 +608,17 @@ export function helpText(): string {
 }
 
 // Re-exports — handy if someone wants to embed this in another tool.
-export { loadCreds, saveCreds, clearCreds, credsPath } from "./auth.js";
+export {
+    loadCreds,
+    saveCreds,
+    clearCreds,
+    credsPath,
+    resolveCreds,
+    approveProjectCreds,
+    revokeProjectCredsApproval,
+    formatProjectCredsNotice,
+    formatProjectCredsStorageWarning,
+} from "./auth.js";
 export { loginFlow } from "./login.js";
 export { runBridge } from "./bridge.js";
-export type { MemWalCredentials } from "./auth.js";
+export type { MemWalCredentials, CredsResolution, ProjectCredsDecision } from "./auth.js";
