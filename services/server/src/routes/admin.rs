@@ -150,11 +150,26 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
             ask: ASK_SYSTEM_PROMPT_VERSION.to_string(),
         },
         write_ready: write_ready(&state).await,
-        writes: writes_health_status(state.config.writes_paused),
+        writes: writes_health_status(
+            state.config.writes_paused,
+            durable_writes_degraded_probe(&state).await,
+        ),
     })
 }
 
 const WRITE_READY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+/// How far back `/health` looks when judging whether durable writes land.
+/// Long enough to span a few upload attempts with their backoff, short
+/// enough that recovery shows up without an operator waiting.
+const DURABLE_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// Failures inside the window before the write path is called degraded.
+/// Writes fail individually all the time; one or two is not an outage.
+const DURABLE_WRITE_FAILURE_THRESHOLD: i64 = 3;
+/// Cached far longer than `write_ready` so `/health` does not hit
+/// `remember_jobs` on every load-balancer tick. 022's partial
+/// `updated_at` index is the steady-state path; the 1s bound is a
+/// backstop, not the expected scan.
+const DURABLE_WRITE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const WRITE_READY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 /// Neon refuses `smgrextend` once cluster size is at the cap; treat less
 /// than 1MB remaining as not writable so `/health` trips before the next
@@ -315,6 +330,71 @@ fn postgres_can_accept_writes(used_bytes: i64, max_bytes: i64) -> bool {
 
 static WRITE_READY_CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
     std::sync::Mutex::new(None);
+
+static DURABLE_WRITE_CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+    std::sync::Mutex::new(None);
+
+/// Whether recent durable writes say the write path is degraded.
+///
+/// Silence is not failure: a window that finished no writes leaves this
+/// false, so a quiet deployment never reports itself broken. Nor is a
+/// single loss -- only a window that failed at least
+/// `DURABLE_WRITE_FAILURE_THRESHOLD` times AND landed nothing at all
+/// counts, which is what a downstream outage looks like and what a run of
+/// unlucky individual writes does not.
+fn durable_writes_degraded(failed: i64, succeeded: i64) -> bool {
+    if succeeded > 0 {
+        return false;
+    }
+    failed >= DURABLE_WRITE_FAILURE_THRESHOLD
+}
+
+/// Reads recent write outcomes behind `DURABLE_WRITE_CACHE_TTL`.
+///
+/// Fails open, like the Postgres probe: a database that cannot answer this
+/// is not evidence that Walrus is down, and `/health` must not invent an
+/// outage out of its own query failing. Cached so `/health` does not hit
+/// `remember_jobs` on every load-balancer tick. 022's partial `updated_at`
+/// index keeps the 1s `WRITE_READY_PROBE_TIMEOUT` a backstop rather than
+/// the steady state.
+async fn durable_writes_degraded_probe(state: &std::sync::Arc<AppState>) -> bool {
+    {
+        let cache = DURABLE_WRITE_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((at, degraded)) = *cache {
+            if at.elapsed() < DURABLE_WRITE_CACHE_TTL {
+                return degraded;
+            }
+        }
+    }
+
+    let degraded = match tokio::time::timeout(
+        WRITE_READY_PROBE_TIMEOUT,
+        state.db.recent_write_outcomes(DURABLE_WRITE_WINDOW),
+    )
+    .await
+    {
+        Ok(Ok((failed, succeeded))) => durable_writes_degraded(failed, succeeded),
+        Ok(Err(err)) => {
+            tracing::warn!(
+                error = %err,
+                "durable-write outcome probe failed; leaving the write path reported healthy"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                "durable-write outcome probe timed out; leaving the write path reported healthy"
+            );
+            false
+        }
+    };
+    if let Ok(mut cache) = DURABLE_WRITE_CACHE.lock() {
+        *cache = Some((std::time::Instant::now(), degraded));
+    }
+    degraded
+}
 
 /// GET /version
 pub async fn version() -> Json<crate::compatibility::VersionResponse> {
@@ -1307,6 +1387,21 @@ mod tests {
     }
 
     #[test]
+    fn durable_writes_degraded_only_when_nothing_lands() {
+        let threshold = super::DURABLE_WRITE_FAILURE_THRESHOLD;
+        // No finished writes at all: a quiet window, not an outage.
+        assert!(!super::durable_writes_degraded(0, 0));
+        // Below the threshold: individual writes do fail.
+        assert!(!super::durable_writes_degraded(threshold - 1, 0));
+        // At and past it, with nothing landing: this is the outage shape.
+        assert!(super::durable_writes_degraded(threshold, 0));
+        assert!(super::durable_writes_degraded(threshold * 100, 0));
+        // A single success means the path works, however many failed
+        // alongside it -- Walrus is storing blobs, these writes lost.
+        assert!(!super::durable_writes_degraded(threshold * 100, 1));
+    }
+
+    #[test]
     fn postgres_can_accept_writes_false_at_or_within_1mb_of_cap() {
         let max = 3072 * 1024 * 1024;
         assert!(!super::postgres_can_accept_writes(max, max));
@@ -1322,6 +1417,16 @@ mod tests {
 
     #[test]
     fn postgres_write_ready_probe_timeout_is_one_second() {
+        assert_eq!(
+            super::WRITE_READY_PROBE_TIMEOUT,
+            std::time::Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn durable_write_probe_shares_the_one_second_bound() {
+        // A hung recent_write_outcomes scan must not stall /health past this;
+        // the probe fails open, same as the Postgres size check.
         assert_eq!(
             super::WRITE_READY_PROBE_TIMEOUT,
             std::time::Duration::from_secs(1)
