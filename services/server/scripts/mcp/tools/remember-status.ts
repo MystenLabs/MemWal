@@ -224,18 +224,29 @@ async function settleBatch(
         budgetMs > 0 && rows.length > 0 && rows.every((r) => r.status === "timeout");
     if (nothingMoved) {
         try {
-            rows = (
-                await withAcceptDeadline(
-                    session.memwal.getRememberBulkStatus(jobIds),
-                    "batch status read",
-                    { idempotent: true },
-                )
-            ).results.map((r) => ({
-                id: r.job_id,
-                status: r.status,
-                blob_id: r.blob_id ?? "",
-                error: r.error,
-            }));
+            const probed = await withAcceptDeadline(
+                session.memwal.getRememberBulkStatus(jobIds),
+                "batch status read",
+                { idempotent: true },
+            );
+            // Merge by job id rather than replacing the list. The relayer is
+            // not obliged to echo one row per requested id in the order asked:
+            // omit the ids it cannot find and a wholesale replace would drop
+            // them from the report entirely, so a job that vanished between
+            // the wait and the probe is never mentioned and the caller never
+            // learns it has to re-send that fact. Keep every id, and take the
+            // probe's answer only where it gave one.
+            const byId = new Map(probed.results.map((r) => [r.job_id, r]));
+            rows = rows.map((row) => {
+                const fresh = byId.get(row.id);
+                if (!fresh) return row;
+                return {
+                    id: row.id,
+                    status: fresh.status,
+                    blob_id: fresh.blob_id ?? "",
+                    error: fresh.error,
+                };
+            });
         } catch (err) {
             if (isRateLimited(err)) {
                 throw rateLimitedError(err, "check whether the writes landed");
