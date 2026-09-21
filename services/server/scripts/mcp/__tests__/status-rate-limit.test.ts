@@ -23,7 +23,7 @@ interface Behaviour {
     /** What the SDK's internal poll loop reports when its budget expires. */
     waitStates: Array<"done" | "failed" | "timeout">;
     /** How the confirming direct read behaves. */
-    probe: "rate-limited" | "still-running" | "done" | "throws";
+    probe: "rate-limited" | "still-running" | "done" | "throws" | "partial";
 }
 
 function rateLimit429(): Error {
@@ -67,8 +67,12 @@ function sessionWith(b: Behaviour, calls: string[] = []): MemWalSession {
                 calls.push(`bulkStatus:${ids.join(",")}`);
                 if (b.probe === "rate-limited") throw rateLimit429();
                 if (b.probe === "throws") throw new Error("relayer unreachable");
+                // The relayer is not obliged to echo back one row per id it was
+                // asked about: a job it cannot find is simply absent from
+                // `results`. Answer for the first id only.
+                const answered = b.probe === "partial" ? ids.slice(0, 1) : ids;
                 return {
-                    results: ids.map((id, i) => ({
+                    results: answered.map((id, i) => ({
                         job_id: id,
                         status: b.probe === "done" ? "done" : "running",
                         blob_id: b.probe === "done" ? `blob-${i + 1}` : undefined,
@@ -265,4 +269,34 @@ test("a single job whose wait times out and whose probe is not_found is an error
         `a missing job still read as progress: ${text}`,
     );
     assert.match(text, /not found/i);
+});
+
+test("a probe that answers for fewer jobs than it was asked about loses none", async (t) => {
+    // The confirming probe used to REPLACE the wait's rows with whatever it
+    // returned. A relayer that omits an id it cannot find therefore erased
+    // that job from the report entirely: the caller was never told it had to
+    // send the fact again, which is the silent loss this tool exists to stop.
+    const calls: string[] = [];
+    const client = await clientFor(
+        sessionWith({ waitStates: ["timeout", "timeout"], probe: "partial" }, calls),
+        t,
+    );
+
+    const text = textOf(
+        await client.callTool({
+            name: "memwal_remember_status",
+            arguments: { job_ids: ["job-1", "job-2"], waitMs: 30000 },
+        }),
+    );
+
+    assert.ok(calls.some((c) => c.startsWith("bulkStatus:")), "the probe must have run");
+    assert.match(text, /job-1/, `the answered job is missing: ${text}`);
+    assert.match(
+        text,
+        /job-2/,
+        `the job the probe skipped was dropped from the report: ${text}`,
+    );
+    // Both are still in flight, so the count must cover both, not just the
+    // one row the probe happened to answer for.
+    assert.match(text, /2 still uploading/i, `wrong in-flight count: ${text}`);
 });
