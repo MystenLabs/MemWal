@@ -486,7 +486,7 @@ The URL is valid for **5 minutes**. Call the tool again to mint a fresh one. Mak
 
 ### Recall returns "No matching memories found" right after a remember
 
-`memwal_remember` waits for the Walrus upload to finish before returning, but under load the embedding/indexing step can lag a few seconds behind. Wait briefly, then retry the recall.
+By default `memwal_remember` returns at accept (`job_id`, ~1s). That reply is **not stored yet** — the Walrus write is still in flight. Empty recall immediately after accept is expected. Settle with the job-status tool this server advertises (`memwal_remember_status` on a current sidecar) and only treat `blob_id` as saved. `MEMWAL_MCP_REMEMBER_WAIT_MS=90000` is the opt-in wait-for-`blob_id` path (needs a client that raises the 60s tools/call ceiling).
 
 ### 401 Unauthorized from the relayer
 

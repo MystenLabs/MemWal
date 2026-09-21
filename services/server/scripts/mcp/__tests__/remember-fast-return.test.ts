@@ -1,6 +1,6 @@
-// Opt into accept-and-continue for this file. It is NOT the default — D1 kept
-// the wait, so a plain call blocks and returns a blob_id — but the path stays
-// reachable via this knob, and it is the path these tests cover.
+// Pin the wait at 0 so this file reads the product default even if the
+// process already had another MEMWAL_MCP_REMEMBER_WAIT_MS. Default is return
+// at accept; 90000 restores block-until-done.
 process.env.MEMWAL_MCP_REMEMBER_WAIT_MS = "0";
 
 import assert from "node:assert/strict";
@@ -16,14 +16,9 @@ const { REMEMBER_WAIT_MS, parseWaitBudget, MAX_REMEMBER_WAIT_MS } =
     await import("../tools/remember-wait.js");
 
 /**
- * `memwal_remember` blocks to terminal by default, so a result carries a real
- * blob_id — D1 settled that, and returning at accept is its own product
- * ticket. What this file covers is the accept-and-continue path an operator
- * opts into with `MEMWAL_MCP_REMEMBER_WAIT_MS=0`.
- *
- * The risk that path buys is an agent reading "accepted" as "saved", so these
- * tests pin what keeps it honest: an accepted result must never read as
- * success or carry a blob_id, and `memwal_remember_status` — the only thing
+ * Default wait is 0: `memwal_remember` returns at accept with a job_id.
+ * These tests pin what keeps that honest: an accepted result must never read
+ * as saved or carry a blob_id, and `memwal_remember_status` — the only thing
  * that can observe a job failing after acceptance — must report that failure
  * as an error rather than as a write still in flight.
  */
@@ -104,23 +99,23 @@ function textOf(result: unknown): string {
         .join("\n");
 }
 
-test("the default is the full wait, and zero is opt-in", () => {
-    // D1: a result means the fact landed, so an unset budget blocks to
-    // terminal. The in-between is the setting to avoid — a budget under the
-    // real completion time pays the wait AND still returns pending.
-    assert.equal(parseWaitBudget(undefined), MAX_REMEMBER_WAIT_MS);
-    assert.equal(parseWaitBudget(""), MAX_REMEMBER_WAIT_MS);
-    // ...and this file asked for the opt-in path at the top.
+test("the default returns at accept, and blocking is opt-in", () => {
+    // Assignment above is so this module reads 0 even if the process already
+    // had another value. The product default is 0.
+    assert.equal(parseWaitBudget(undefined), 0);
+    assert.equal(parseWaitBudget(""), 0);
     assert.equal(REMEMBER_WAIT_MS, 0);
     assert.equal(parseWaitBudget("0"), 0);
+    // An operator who wants the old behaviour still has it.
+    assert.equal(parseWaitBudget("90000"), MAX_REMEMBER_WAIT_MS);
 });
 
 test("a typo'd budget falls back to the default instead of picking one nobody asked for", () => {
     // Number("10s") is NaN, and every NaN comparison is false — an unvalidated
     // parse would sail past a range check.
-    assert.equal(parseWaitBudget("10s"), MAX_REMEMBER_WAIT_MS);
-    assert.equal(parseWaitBudget("abc"), MAX_REMEMBER_WAIT_MS);
-    assert.equal(parseWaitBudget("-1"), MAX_REMEMBER_WAIT_MS);
+    assert.equal(parseWaitBudget("10s"), 0);
+    assert.equal(parseWaitBudget("abc"), 0);
+    assert.equal(parseWaitBudget("-1"), 0);
 });
 
 test("a budget past the ceiling is clamped, not honoured", () => {
