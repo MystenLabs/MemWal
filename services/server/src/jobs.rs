@@ -2642,21 +2642,39 @@ impl WalletJobError {
     /// stay retryable.
     pub fn is_register_transaction_shape_error(msg: &str) -> bool {
         let lower = msg.to_ascii_lowercase();
-        if !lower.contains("registertransaction") {
-            return false;
-        }
-        lower.contains("must use a validduring address-balance expiration")
-            || lower.contains("must pay gas from the address balance")
-            || lower.contains("has no wal address-balance withdrawal")
-            || lower.contains("resolved wal from an owned coin")
-            || lower.contains("resolved the relay tip from an owned sui coin")
-            || lower.contains("must use a distinct gas owner")
-            || lower.contains("sender does not match")
-            || lower.contains("gas owner does not match")
-            || lower.contains("is not canonical base64")
-            || lower.contains("digest mismatch")
-            || lower.contains("contains invalid transactiondata")
+        Self::REGISTER_TRANSACTION_SHAPE_ASSERTIONS
+            .iter()
+            .any(|assertion| lower.contains(assertion))
     }
+
+    /// The sidecar's register-transaction assertion sentences, lowercased and
+    /// carrying the `registerTransaction` token they start with.
+    ///
+    /// Matched WHOLE, not as a `registertransaction`-anywhere guard plus a
+    /// phrase-anywhere test. The text being classified is a wrapper
+    /// (`durable Walrus upload failed (503 …): {json}`) that can carry a
+    /// nested cause, so those two conditions can be satisfied by unrelated
+    /// halves of one message: a transient RPC or relay failure that mentions
+    /// the register step and, somewhere else entirely, a broad phrase like
+    /// `digest mismatch` or `sender does not match`. Read loosely it becomes
+    /// `Permanent`, `aborts_retries()` is true, the row is failed on attempt
+    /// 1, and a write the next attempt would have landed is lost.
+    ///
+    /// The `sponsored registerTransaction …` variants are covered by the
+    /// shorter forms here, which they contain.
+    const REGISTER_TRANSACTION_SHAPE_ASSERTIONS: &'static [&'static str] = &[
+        "registertransaction must use a validduring address-balance expiration",
+        "registertransaction must pay gas from the address balance",
+        "registertransaction has no wal address-balance withdrawal",
+        "registertransaction resolved wal from an owned coin",
+        "registertransaction resolved the relay tip from an owned sui coin",
+        "registertransaction must use a distinct gas owner",
+        "registertransaction sender does not match",
+        "registertransaction gas owner does not match",
+        "registertransaction.transactionbytes is not canonical base64",
+        "registertransaction digest mismatch",
+        "registertransaction contains invalid transactiondata",
+    ];
 
     /// True if `msg` is a pool-wallet WAL shortfall. Deliberately the
     /// substring half of `parse_wal_balance_alert_info` without its
@@ -3118,6 +3136,34 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
         assert!(!WalletJobError::is_register_transaction_shape_error(
             "sponsor failed: sender does not match the wallet"
         ));
+    }
+
+    /// The assertion must follow the `registerTransaction` token, not merely
+    /// share a message with it. The classified text is a wrapper that can
+    /// carry a nested cause, so a transient failure naming the register step
+    /// in one clause and a broad phrase in another must stay retryable —
+    /// read as Permanent it dies on attempt 1 and the fact is lost.
+    #[test]
+    fn a_broad_phrase_elsewhere_in_the_message_is_not_a_shape_rejection() {
+        for msg in [
+            "durable Walrus upload failed (503 Service Unavailable): \
+{\"error\":\"timed out submitting registerTransaction\",\"code\":\"NO_SIDE_EFFECT\",\
+\"cause\":\"checkpoint digest mismatch on the fullnode\"}",
+            "registerTransaction step: upstream RPC error, sender does not match \
+the checkpoint it replied about",
+        ] {
+            assert!(
+                !WalletJobError::is_register_transaction_shape_error(msg),
+                "expected retryable for {msg}"
+            );
+            assert!(
+                matches!(
+                    WalletJobError::classify_sidecar_error(msg),
+                    WalletJobError::Transient(_)
+                ),
+                "expected Transient for {msg}"
+            );
+        }
     }
 
     fn test_database_url() -> String {
