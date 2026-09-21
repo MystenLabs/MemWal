@@ -149,6 +149,9 @@ def _validate_save_mode(save_mode: str) -> str:
     return save_mode
 
 
+_MAX_TRACKED_JOB_IDS = 1000
+
+
 class _PendingSaves:
     """Tracks in-flight fire-and-forget auto-save work (asyncio Tasks and
     background Threads) so a caller can drain it deterministically via
@@ -172,6 +175,8 @@ class _PendingSaves:
             return
         with self._lock:
             self._job_ids.extend(job_ids)
+            if len(self._job_ids) > _MAX_TRACKED_JOB_IDS:
+                del self._job_ids[:-_MAX_TRACKED_JOB_IDS]
 
     def drain_job_ids(self) -> List[str]:
         """Return every job ID recorded so far and forget them, so a second
@@ -252,7 +257,7 @@ async def _run_auto_save(
 
     ``analyze()`` returns cleanly with zero facts for content it cannot read
     as spoken facts (code, structured data), so a plain call there looks
-    identical to a successful save. Warn in that case and point at
+    identical to a successful save. Log in that case and point at
     ``save_mode="remember"`` rather than dropping the write silently.
     """
     try:
@@ -264,12 +269,11 @@ async def _run_auto_save(
         result = await memwal.analyze(text, namespace)
         pending.track_job_ids(list(result.job_ids))
         if not result.facts and not result.job_ids:
-            logger.warning(
-                "Walrus Memory auto-save extracted 0 facts from a %d-character "
-                "message and stored nothing. analyze() only extracts "
-                "spoken-fact-style statements — pass save_mode=\"remember\" to "
-                "store the message verbatim instead.",
-                len(text),
+            log(
+                "[Walrus Memory] Auto-save extracted 0 facts from a "
+                f"{len(text)}-character message and stored nothing. analyze() "
+                "only extracts spoken-fact-style statements — pass "
+                'save_mode="remember" to store the message verbatim instead.'
             )
     except Exception as e:  # noqa: BLE001 -- auto-save must never break the LLM call
         log(f"[Walrus Memory] Auto-save failed: {e}")
@@ -297,7 +301,12 @@ def _expose_memwal_controls(obj: Any, memwal: MemWal, pending: _PendingSaves) ->
         """Drain pending auto-saves, then poll their remember jobs to a
         terminal state and return per-job status + blob IDs."""
         await pending.flush()
-        return await memwal.wait_for_remember_jobs(pending.drain_job_ids(), opts)
+        job_ids = pending.drain_job_ids()
+        try:
+            return await memwal.wait_for_remember_jobs(job_ids, opts)
+        except Exception:
+            pending.track_job_ids(job_ids)
+            raise
 
     def memwal_wait_for_saves_sync(
         opts: Optional[RememberBulkOptions] = None,
@@ -306,11 +315,15 @@ def _expose_memwal_controls(obj: Any, memwal: MemWal, pending: _PendingSaves) ->
         blocking entry points (``OpenAI``, ``llm.invoke``)."""
         pending.flush_sync()
         job_ids = pending.drain_job_ids()
-        return _run_blocking(
-            lambda: _with_fresh_http_client(
-                memwal, memwal.wait_for_remember_jobs(job_ids, opts)
+        try:
+            return _run_blocking(
+                lambda: _with_fresh_http_client(
+                    memwal, memwal.wait_for_remember_jobs(job_ids, opts)
+                )
             )
-        )
+        except Exception:
+            pending.track_job_ids(job_ids)
+            raise
 
     object.__setattr__(obj, "_memwal", memwal)
     # Public alias: reaching wait_for_remember_jobs() and the rest of the

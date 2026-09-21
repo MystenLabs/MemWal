@@ -118,7 +118,7 @@ response = await smart_client.chat.completions.create(
 
 ### Choosing a save mode
 
-`analyze()` is lossy by design: it only extracts facts it can read as spoken statements. Code snippets, JSON, logs, and other non-sentence content produce zero facts, so nothing is stored. That path used to be silent; it now logs a warning naming the fix. When you are saving content like that, ask for verbatim storage:
+`analyze()` is lossy by design: it only extracts facts it can read as spoken statements. Code snippets, JSON, logs, and other non-sentence content produce zero facts, so nothing is stored. That path used to be silent; it now logs a message naming the fix through the `memwal` logger (at debug level, or warning with `debug=True`). When you are saving content like that, ask for verbatim storage:
 
 ```python
 smart_client = with_memwal_openai(

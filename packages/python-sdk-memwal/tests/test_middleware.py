@@ -26,6 +26,7 @@ import respx
 
 from memwal.client import MemWal
 from memwal.middleware import (
+    _MAX_TRACKED_JOB_IDS,
     _find_last_user_message,
     _format_memories,
     _inject_openai_memory,
@@ -917,19 +918,21 @@ class TestAutoSaveMode:
         )
 
     @respx.mock
-    async def test_analyze_mode_warns_when_zero_facts_extracted(self) -> None:
+    async def test_analyze_mode_reports_zero_facts_through_wrapper_log(self) -> None:
         _mock_seal_session_prereqs()
         respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
 
         pending = _PendingSaves()
+        messages: list = []
         with patch("memwal.middleware.logger") as mock_logger:
             await _run_auto_save(
                 self._memwal(), "def f():\n    return 1", "default", "analyze",
-                pending, lambda *_: None,
+                pending, messages.append,
             )
 
-        assert mock_logger.warning.called
-        assert "save_mode" in mock_logger.warning.call_args[0][0]
+        assert not mock_logger.warning.called
+        assert len(messages) == 1
+        assert "save_mode" in messages[0]
         assert pending.drain_job_ids() == []
 
     @respx.mock
@@ -982,6 +985,16 @@ class TestAutoSaveMode:
         pending.track_job_ids(["a", "b"])
         assert pending.drain_job_ids() == ["a", "b"]
         assert pending.drain_job_ids() == []
+
+    def test_tracked_job_ids_are_capped_keeping_the_newest(self) -> None:
+        pending = _PendingSaves()
+        for i in range(_MAX_TRACKED_JOB_IDS + 5):
+            pending.track_job_ids([f"job-{i}"])
+
+        job_ids = pending.drain_job_ids()
+        assert len(job_ids) == _MAX_TRACKED_JOB_IDS
+        assert job_ids[0] == "job-5"
+        assert job_ids[-1] == f"job-{_MAX_TRACKED_JOB_IDS + 4}"
 
 
 class TestConfirmableSaves:
@@ -1044,3 +1057,45 @@ class TestConfirmableSaves:
         assert callable(smart.memwal.wait_for_remember_jobs)
         assert callable(smart.memwal_wait_for_saves)
         assert callable(smart.memwal_wait_for_saves_sync)
+
+    @respx.mock
+    async def test_failed_wait_leaves_job_ids_for_the_next_wait(self) -> None:
+        _mock_seal_session_prereqs()
+        respx.post(_RECALL_URL).mock(return_value=_mock_recall([]))
+        respx.post(_REMEMBER_URL).mock(return_value=_mock_remember_accepted("job-1"))
+        status_route = respx.post(_BULK_STATUS_URL).mock(
+            return_value=httpx.Response(403, json={"error": "forbidden"})
+        )
+
+        smart = with_memwal_openai(
+            self._make_async_client(), key=_KEY_HEX, account_id=_ACCOUNT_ID,
+            server_url=_SERVER, auto_save=True, save_mode="remember",
+        )
+        await smart.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "def f(): return 1"}],
+        )
+
+        opts = RememberBulkOptions(poll_interval_ms=1, timeout_ms=5000)
+        try:
+            await smart.memwal_wait_for_saves(opts)
+        except Exception:
+            pass
+        else:
+            raise AssertionError("expected the failing poll to raise")
+
+        status_route.mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"job_id": "job-1", "status": "done", "blob_id": "blob-abc"}
+                    ]
+                },
+            )
+        )
+        result = await smart.memwal_wait_for_saves(opts)
+
+        assert result.total == 1
+        assert result.succeeded == 1
+        assert result.results[0].blob_id == "blob-abc"
