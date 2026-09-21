@@ -156,7 +156,10 @@ export function registerAnalyzeTool(
                 // same way memwal_remember_bulk renders it.
                 const state =
                     r.status === "timeout" ? `still uploading, job_id=${r.id}` : r.status;
-                return `${i + 1}. [${state}]${r.blob_id ? ` blob_id=${r.blob_id}` : ""} ${
+                // Only a settled row may show a blob_id — see remember-status.ts
+                // for why an unfinished write can already carry a real one.
+                const blob = r.status === "done" && r.blob_id ? ` blob_id=${r.blob_id}` : "";
+                return `${i + 1}. [${state}]${blob} ${
                     entries[i]?.text || "(unknown fact)"
                 }`;
             });
