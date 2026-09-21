@@ -15,8 +15,9 @@
  * actionable.
  */
 // A small non-zero wait so the bounded-wait branch is reachable at all. The
-// shipped default is 0 — the tool returns at accept and never polls — which
-// would make every assertion below about a partly landed batch unreachable.
+// shipped default is now 0 — the tools return at accept — so leaving it unset
+// would skip the wait entirely and every assertion below about a partly landed
+// batch would have nothing to observe.
 // Set before the dynamic import, because the budget is read once at load.
 process.env.MEMWAL_MCP_REMEMBER_WAIT_MS = "500";
 
@@ -68,7 +69,13 @@ function sessionWith(
                     })),
                     total: states.length,
                     succeeded: states.filter((s) => s === "done").length,
-                    failed: states.filter((s) => s === "failed").length,
+                    // Deliberately total-minus-succeeded, because that is what
+                    // the real `waitForRememberJobs` returns — a `timeout`
+                    // counts here. A stub that filtered on "failed" instead
+                    // would model a value the SDK never produces, and the
+                    // still-uploading-counted-as-failed case below could not
+                    // fail no matter what the tool printed.
+                    failed: states.length - states.filter((s) => s === "done").length,
                 };
             },
         },
@@ -136,6 +143,24 @@ test("a partly landed batch reports both halves", async (t) => {
     assert.match(text, /blob-1/, "the landed write shows its blob_id");
     assert.match(text, /analyze-job-2/, "the straggler shows its job_id");
     assert.match(text, /memwal_remember_status/, "and how to settle it");
+});
+
+test("a still-uploading write is not counted or labelled as failed", async (t) => {
+    // The straggler block already tells the agent this job is on its way and
+    // must not be re-sent. Printing `failed=1` next to it contradicts that,
+    // and an agent that believes the count re-sends — a duplicate paid Walrus
+    // write queued behind the original.
+    const text = await callAnalyze(sessionWith({ states: ["done", "timeout"] }), t);
+    assert.doesNotMatch(text, /failed=/, "a timeout is in flight, not failed");
+    assert.match(text, /1 still uploading/, "it is counted as in flight instead");
+    assert.doesNotMatch(text, /\[timeout\]/, "and not labelled with the raw status");
+    assert.match(text, /still uploading, job_id=analyze-job-2/);
+});
+
+test("a genuinely failed write is still counted as failed", async (t) => {
+    const text = await callAnalyze(sessionWith({ states: ["done", "failed"] }), t);
+    assert.match(text, /failed=1/, "a terminal failure must still be reported");
+    assert.doesNotMatch(text, /still uploading/);
 });
 
 test("text with nothing worth saving says so instead of handing back an empty batch", async (t) => {

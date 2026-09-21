@@ -41,7 +41,7 @@ interface RpcMessage {
 const SIGNED_OUT_REMEMBER =
     "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.";
 const SIGNED_IN_REMEMBER =
-    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. A Walrus write takes 30-60s and this call waits for it, so a success carries a blob_id and means the fact is stored. If it outruns that budget you get a job_id and the fact is NOT yet saved — say so rather than claiming it is stored, and resolve it with memwal_remember_status.";
+    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. By default this returns in ~1s once the relayer has accepted the job (job_id) — the Walrus write is still in flight and the fact is NOT stored yet. Do not claim it is saved. Settle it with the job-status tool this server advertises (re-list tools if you do not see one). A blob_id in the same reply means it already stored (optional wait budget).";
 const SIGNED_OUT_RECALL =
     "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.";
 const SIGNED_IN_RECALL =
@@ -72,7 +72,7 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Remember Multiple Facts",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. A Walrus write takes 30-60s and this call waits for them, so a success carries blob_ids and means the facts are stored. If they outrun that budget you get job_ids and the facts are NOT yet saved — say they are being saved rather than stored, and resolve them with memwal_remember_status.",
+            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. By default this returns in ~1s once the relayer has accepted the batch (job_ids) — the Walrus writes are still in flight and the facts are NOT stored yet. Do not claim they are saved. Settle them with the job-status tool this server advertises (re-list tools if you do not see one). A blob_id in the same reply means that fact already stored (optional wait budget).",
         inputSchema: {
             type: "object",
             properties: {
@@ -198,15 +198,55 @@ function buildToolDefinitions(proactive: boolean) {
     ];
 }
 
+/** Tool names the OLDEST relayer this bridge still talks to serves.
+ *
+ * The bridge ships on npm and updates itself; a relayer ships per environment
+ * and does not, so the bridge is routinely NEWER than the relayer it dials —
+ * 0.0.14-dev.0 against prod and staging on 0.0.13, which is GH #928. The
+ * cold-start list is served before any relayer capability is known, so every
+ * name in it that the dialled relayer does not serve is a tool the agent can
+ * be told about and then cannot call.
+ *
+ * Cold start is therefore a FLOOR, not a forecast: add a name here only once
+ * the tool has shipped to prod, never when it lands on dev. Newer tools reach
+ * the client a beat later anyway — the relayer's own `tools/list` replaces
+ * this one and `notifications/tools/list_changed` tells the client to re-read
+ * it. `memwal_remember_status` is the worked example: it exists on dev, not on
+ * prod/staging, and belongs here only after a prod release carries it. */
+export const BASELINE_RELAYER_TOOLS: ReadonlySet<string> = new Set([
+    "memwal_remember",
+    "memwal_remember_bulk",
+    "memwal_recall",
+    "memwal_analyze",
+    "memwal_restore",
+    "memwal_health",
+]);
+
+/** Served by this process, so no relayer has to know about it. Advertising it
+ * at cold start is always safe. */
+const LOCALLY_SERVED_TOOLS: ReadonlySet<string> = new Set(["memwal_login"]);
+
+/** Every tool this bridge can describe, baseline or not. Only the baseline
+ * subset is advertised at cold start; this is what the schema tests pin, so a
+ * newer tool's shape stays reviewed while it waits for a prod release. */
+export const ALL_TOOL_DEFINITIONS = buildToolDefinitions(true);
+
+/** Drop anything the oldest supported relayer would not serve. */
+function coldStartTools(proactive: boolean) {
+    return buildToolDefinitions(proactive).filter(
+        (t) => BASELINE_RELAYER_TOOLS.has(t.name) || LOCALLY_SERVED_TOOLS.has(t.name),
+    );
+}
+
 /** Signed-in cold-start list (bridge). Credentials exist; the relayer session
  * is not up yet. Proactive wording so clients that keep the first tools/list
  * still save/recall without being asked. */
-export const TOOL_DEFINITIONS = buildToolDefinitions(true);
+export const TOOL_DEFINITIONS = coldStartTools(true);
 
 /** Signed-out list (auth-required). No credentials, so every memory call
  * fails: keep conservative wording or the model will spam remember and get
  * a stream of auth errors. */
-export const SIGNED_OUT_TOOL_DEFINITIONS = buildToolDefinitions(false);
+export const SIGNED_OUT_TOOL_DEFINITIONS = coldStartTools(false);
 
 /** How long to wait for the local listener to bind + emit its URL before we
  * give up and return an error. Should be near-instant; 5s is paranoia. */

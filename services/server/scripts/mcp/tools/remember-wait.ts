@@ -61,26 +61,12 @@ export const MAX_REMEMBER_WAIT_MS = 90_000;
 /**
  * Default wait before `memwal_remember` hands back a job_id.
  *
- * Blocks to terminal, so a successful call returns a real `blob_id` and the
- * agent can say the fact is stored. D1 settled this: returning at accept is a
- * product change on its own ticket, not a side effect of a latency fix, and
- * the contract callers have today is "a result means it landed".
- *
- * That leaves the poll cadence as the part this file may legitimately shorten,
- * and the cadence work belongs to #902 — the wait itself stays.
- *
- * A budget BETWEEN zero and the real completion time is the one setting to
- * avoid. Against a measured 30–75s spread a 10s wait pays the 10s and still
- * lands in the pending branch on nearly every call: the cost of blocking with
- * none of the guarantee. So this is the full ceiling, and an operator who
- * genuinely wants accept-and-continue sets `MEMWAL_MCP_REMEMBER_WAIT_MS=0`
- * knowingly rather than inheriting it.
- *
- * The pending branch is still reachable and still correct — a write slower
- * than the ceiling returns a job_id and says plainly it is not saved yet —
- * it is simply no longer the default path.
+ * Zero — return at accept. The MCP SDK's default `tools/call` timeout is
+ * 60s; a budget that actually waits for Walrus (30–75s) overruns that, and
+ * any in-between budget that fits still returns pending on nearly every
+ * call. Restore block-until-done with `MEMWAL_MCP_REMEMBER_WAIT_MS=90000`.
  */
-const DEFAULT_REMEMBER_WAIT_MS = MAX_REMEMBER_WAIT_MS;
+const DEFAULT_REMEMBER_WAIT_MS = 0;
 
 
 
@@ -357,6 +343,43 @@ export function withAcceptDeadline<T>(
     );
 }
 
+/**
+ * The MCP TypeScript SDK's default `tools/call` timeout —
+ * `DEFAULT_REQUEST_TIMEOUT_MSEC` in @modelcontextprotocol/sdk
+ * (shared/protocol.js:8, applied at :712 as
+ * `options?.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC`).
+ *
+ * A host that does not raise its own ceiling aborts the call at this mark. An
+ * abort is strictly worse than a timeout we raise ourselves: the caller gets no
+ * message it can act on, and on a non-idempotent endpoint its retry writes
+ * everything twice. So every leg this file bounds must finish inside it.
+ */
+export const MCP_CLIENT_DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Headroom left under the client ceiling for JSON-RPC framing, transport and
+ * the relayer's own response write. A leg budgeted at exactly the ceiling loses
+ * the race it was meant to win.
+ */
+const CLIENT_TIMEOUT_HEADROOM_MS = 15_000;
+
+/**
+ * Deadline for `memwal_analyze`'s extraction leg.
+ *
+ * `/api/analyze` runs the extractor LLM inline before it answers, so this leg
+ * is real work, not an accept — 15s would cut off healthy extraction on any
+ * transcript worth extracting from. But it was budgeted at the full 60_000,
+ * exactly the client ceiling, so a slow extraction raced the host's abort and
+ * usually lost: the agent saw a dead call instead of a message, and `analyze`
+ * is the one endpoint with no idempotency key, so retrying it stores every
+ * extracted fact a second time.
+ *
+ * Derived from the ceiling rather than written as a literal so the two cannot
+ * drift apart.
+ */
+export const ANALYZE_EXTRACTION_DEADLINE_MS =
+    MCP_CLIENT_DEFAULT_TIMEOUT_MS - CLIENT_TIMEOUT_HEADROOM_MS;
+
 /** Bound a status wait at its own budget plus the overshoot grace. */
 export function withWaitDeadline<T>(work: Promise<T>, budgetMs: number): Promise<T> {
     return withDeadline(
@@ -405,6 +428,88 @@ function advisedCooldownMs(err: unknown): number {
     return typeof secs === "number" && secs > 0 ? secs * 1000 : 1_000;
 }
 
+/**
+ * What the relayer actually said it denied on.
+ *
+ * `rate_limit_response` (services/server/src/rate_limit.rs) answers a 429 with
+ * `{error, layer, limit, retry_after_seconds}`, and the SDK embeds that body
+ * verbatim in the error message. Read it rather than asserting a scope: there
+ * are three layers with different windows — `delegate_key` and `account_burst`
+ * per minute, `account_sustained` per HOUR — and naming the wrong one sends
+ * the caller to wait out a window that was never the one it hit.
+ */
+function rateLimitFacts(err: unknown): { layer?: string; limit?: string } {
+    const text = String((err as { message?: string } | null)?.message ?? "");
+    const open = text.indexOf("{");
+    const close = text.lastIndexOf("}");
+    if (open < 0 || close <= open) return {};
+    try {
+        const body = JSON.parse(text.slice(open, close + 1)) as Record<string, unknown>;
+        return {
+            layer: typeof body.layer === "string" ? body.layer : undefined,
+            limit: typeof body.limit === "string" ? body.limit : undefined,
+        };
+    } catch {
+        // A body we cannot parse is not a reason to lose the 429 itself.
+        return {};
+    }
+}
+
+/** Whose budget the named layer belongs to. */
+function scopeOfLayer(layer: string | undefined): string {
+    if (layer === "delegate_key") return "per delegate key";
+    if (layer === "account_burst" || layer === "account_sustained") return "per account";
+    return "on this account";
+}
+
+/**
+ * The retry advice.
+ *
+ * `retry_after_seconds` is a refill hint from a token bucket, NOT a reset. On
+ * the hourly `account_sustained` layer the relayer still advises ~300s, which
+ * buys back only a slice of a 1000/hour budget — waiting it out and retrying
+ * re-trips the limit whenever the budget is genuinely spent. Saying "resets in
+ * Ns; retry after that" turned that into a retry loop that never converges, so
+ * the message now says what the number is worth.
+ */
+function retryAdvice(secs: number, layer: string | undefined): string {
+    return layer === "account_sustained"
+        ? `The relayer advises retrying in ~${secs}s, but that is a partial refill of an ` +
+          `hourly budget, not a reset — if the budget is spent, a retry then fails again. ` +
+          `Report the failure rather than waiting and retrying in a loop.`
+        : `Retry after ~${secs}s.`;
+}
+
+/** True if the relayer refused this call with a rate limit. */
+export function isRateLimited(err: unknown): boolean {
+    return (err as { status?: number } | null)?.status === 429;
+}
+
+/**
+ * The rate-limit error an agent can act on, built from what the relayer said.
+ *
+ * Shared with `memwal_remember_status` so a throttled poll cannot be reported
+ * as "still uploading": a denied poll tells us nothing about the job, and
+ * rendering it as progress is what turns a rate limit into an agent that keeps
+ * polling and spends more of the budget it has already exhausted.
+ */
+export function rateLimitedError(err: unknown, what: string): Error {
+    const secs = Math.ceil(advisedCooldownMs(err) / 1000);
+    const { layer, limit } = rateLimitFacts(err);
+    const hit = layer
+        ? `Limit hit: ${layer} ${scopeOfLayer(layer)}` + (limit ? ` (${limit})` : "") + ". "
+        : "";
+    const e = new Error(
+        `Walrus Memory rate limit reached while trying to ${what}. ${hit}` +
+            `${retryAdvice(secs, layer)} To spend less of the budget, save several facts ` +
+            `with one memwal_remember_bulk call instead of repeated memwal_remember calls, ` +
+            `and settle a batch with a single memwal_remember_status(job_ids=[...]).`,
+    );
+    e.name = "MemWalRelayerUnavailable";
+    (e as Error & { status?: number }).status = 429;
+    return e;
+}
+
 /** Honour the relayer's `retry_after` instead of surfacing a raw 429.
  *
  * Once the per-delegate-key budget is spent the write is simply never made,
@@ -424,14 +529,19 @@ export async function withRelayerRetry<T>(work: () => Promise<T>, what: string):
             if (attempt === RELAYER_RETRY_ATTEMPTS || cooldown > MAX_ABSORBED_COOLDOWN_MS) {
                 const secs = Math.ceil(cooldown / 1000);
                 const limited = (err as { status?: number }).status === 429;
+                const { layer, limit } = limited ? rateLimitFacts(err) : {};
+                const hit = layer
+                    ? `Limit hit: ${layer} ${scopeOfLayer(layer)}` +
+                      (limit ? ` (${limit})` : "") + ". "
+                    : "";
                 const e = new Error(
                     limited
                         ? `Walrus Memory rate limit reached while trying to ${what}. THE FACT WAS NOT ` +
                           `SAVED — tell the user it could not be stored rather than that it is being ` +
-                          `saved. The limit is per delegate key and resets in about ${secs}s; retry ` +
-                          `after that. To spend less of the budget, save several facts with one ` +
-                          `memwal_remember_bulk call instead of repeated memwal_remember calls, and ` +
-                          `settle a batch with a single memwal_remember_status(job_ids=[...]).`
+                          `saved. ${hit}${retryAdvice(secs, layer)} To spend less of the budget, save ` +
+                          `several facts with one memwal_remember_bulk call instead of repeated ` +
+                          `memwal_remember calls, and settle a batch with a single ` +
+                          `memwal_remember_status(job_ids=[...]).`
                         : `Walrus Memory could not ${what}: the relayer's credential check is ` +
                           `temporarily unavailable. THE FACT WAS NOT SAVED. Retry in about ${secs}s.`,
                 );
