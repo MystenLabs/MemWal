@@ -55,6 +55,8 @@ Use CLI flags or environment variables to override the default Walrus Memory end
 
 Enable verbose stderr logging with `MEMWAL_MCP_DEBUG=1`.
 
+Set `MEMWAL_MCP_TRANSPORT=http` to dial the relayer's Streamable HTTP endpoint instead of the default SSE pair. Opt-in: reconnect replay is not transport-aware yet, so a write interrupted mid-send may be retried and duplicated.
+
 ## Default Namespace
 
 By default the MCP tool schemas expose an optional `namespace` argument and the
@@ -151,6 +153,16 @@ Credentials are stored locally in `~/.memwal/credentials.json`. To remove them:
 ```sh
 npx -y @mysten-incubation/memwal-mcp --logout
 ```
+
+A sign-in that is still in flight also writes `login-pending.json` beside that
+file, in whichever directory `credentials.json` resolves to — `MEMWAL_CREDS_DIR`
+moves both. It holds the delegate keypair minted for that sign-in, and it is
+written before the browser can register the public half on-chain so an
+interrupted login can be reclaimed instead of paid for a second time. Same
+owner-only mode `0600` as `credentials.json`.
+
+It is removed once the sign-in completes, on `--logout`, and on a successful
+recovery at the next start. A record older than 24 hours is discarded unread.
 
 ## License
 
