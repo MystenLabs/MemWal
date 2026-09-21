@@ -1,6 +1,9 @@
 """Offline mock client regression tests."""
 
+import base64
 import inspect
+import json
+import re
 
 import pytest
 
@@ -162,3 +165,102 @@ async def test_sync_mock_works_inside_an_existing_event_loop():
 
     assert stored.namespace == "notebook"
     assert recalled.results[0].text == "called from a running loop"
+
+
+@pytest.mark.asyncio
+async def test_mock_list_namespaces_aggregates_memories_by_namespace():
+    mock = MemWalMock.create(
+        initial_memories=[
+            MemWalMockSeed(text="one", namespace="work"),
+            MemWalMockSeed(text="two", namespace="work"),
+            MemWalMockSeed(text="旅行", namespace="home"),
+        ]
+    )
+
+    page = await mock.list_namespaces()
+    by_name = {ns.name: ns for ns in page.namespaces}
+
+    assert sorted(by_name) == ["home", "work"]
+    assert by_name["work"].memory_count == 2
+    assert by_name["work"].storage_used == 6
+    assert by_name["home"].storage_used == len("旅行".encode("utf-8"))
+    assert page.has_more is False
+    # Matches the live relayer's current wire-format version.
+    assert page.snapshot_version == 2
+
+
+@pytest.mark.asyncio
+async def test_mock_list_namespaces_reports_has_more_when_limit_truncates():
+    mock = MemWalMock.create(
+        initial_memories=[
+            MemWalMockSeed(text="a", namespace="alpha"),
+            MemWalMockSeed(text="b", namespace="bravo"),
+            MemWalMockSeed(text="c", namespace="charlie"),
+        ]
+    )
+
+    page = await mock.list_namespaces(limit=2)
+
+    assert len(page.namespaces) == 2
+    assert page.has_more is True, "has_more is the pagination signal, not page length"
+    assert page.next_cursor
+
+
+@pytest.mark.asyncio
+async def test_mock_namespace_cursor_uses_the_relayer_wire_format_and_resets_after_a_walk():
+    mock = MemWalMock.create(
+        initial_memories=[
+            MemWalMockSeed(text="a", namespace="旅行"),
+            MemWalMockSeed(text="b", namespace="work"),
+        ]
+    )
+
+    first = await mock.list_namespaces(limit=1)
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", first.next_cursor)
+    padded = first.next_cursor + "=" * (-len(first.next_cursor) % 4)
+    cursor = json.loads(base64.urlsafe_b64decode(padded))
+    assert cursor["namespace"] == "旅行"
+    assert cursor["updated_at"] == first.namespaces[0].updated_at
+    assert cursor["snapshot_at"]
+
+    last = await mock.list_namespaces(cursor=first.next_cursor)
+    assert [ns.name for ns in last.namespaces] == ["work"]
+    assert last.has_more is False
+    padded = last.next_cursor + "=" * (-len(last.next_cursor) % 4)
+    assert json.loads(base64.urlsafe_b64decode(padded))["snapshot_at"] is None
+
+    empty = await mock.list_namespaces(cursor=last.next_cursor)
+    assert empty.namespaces == []
+    assert empty.next_cursor == last.next_cursor
+
+
+@pytest.mark.asyncio
+async def test_mock_namespace_walk_defers_new_writes_until_the_next_poll():
+    mock = MemWalMock.create(
+        initial_memories=[
+            MemWalMockSeed(text="a", namespace="alpha"),
+            MemWalMockSeed(text="b", namespace="bravo"),
+        ]
+    )
+
+    first = await mock.list_namespaces(limit=1)
+    await mock.remember("new", "bravo")
+    last = await mock.list_namespaces(cursor=first.next_cursor)
+    assert last.namespaces == []
+    assert last.has_more is False
+
+    poll = await mock.list_namespaces(cursor=last.next_cursor)
+    assert [ns.name for ns in poll.namespaces] == ["bravo"]
+    assert poll.namespaces[0].memory_count == 2
+
+
+def test_sync_mock_list_namespaces_matches_production():
+    mock = MemWalMockSync.create(namespace="sync")
+    mock.remember("sync memory")
+
+    page = mock.list_namespaces(limit=10)
+
+    assert [ns.name for ns in page.namespaces] == ["sync"]
+    assert inspect.signature(MemWalMockSync.list_namespaces) == inspect.signature(
+        MemWalSync.list_namespaces
+    )

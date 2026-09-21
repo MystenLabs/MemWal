@@ -15,60 +15,6 @@ use std::sync::Arc;
 
 use crate::types::*;
 
-/// How far back the failure report on a recall response looks.
-///
-/// A day covers the gap between one working session and the next, which is
-/// when an agent would otherwise never learn that yesterday's last write died
-/// after it was accepted.
-const FAILED_WRITE_REPORT_WINDOW: std::time::Duration =
-    std::time::Duration::from_secs(24 * 60 * 60);
-
-/// Most failures reported on one recall. A caller acting on this re-sends the
-/// facts; a wall of them would crowd out the memories it actually asked for.
-const FAILED_WRITE_REPORT_LIMIT: i64 = 5;
-
-/// Recent writes that were accepted and then failed, for `owner`.
-///
-/// Never fails the recall it is attached to. This is a courtesy report on a
-/// read path — losing it costs the caller a warning, while propagating the
-/// error would cost them the memories they actually asked for, so a failed
-/// lookup degrades to "nothing to report" and says so in the log.
-async fn failed_writes_for(state: &AppState, owner: &str) -> Vec<FailedWrite> {
-    match state
-        .db
-        .recent_failed_remember_jobs(owner, FAILED_WRITE_REPORT_WINDOW, FAILED_WRITE_REPORT_LIMIT)
-        .await
-    {
-        Ok(failed) => failed
-            .into_iter()
-            .map(|mut w| {
-                // Every other client-facing view of `remember_jobs.error_msg`
-                // runs it through this first — `GET /api/remember/:job_id` and
-                // `POST /api/remember/bulk/status` both do. Reading the column
-                // straight into a recall response skipped both of the
-                // sanitizer's jobs: swapping an infrastructure-funding failure
-                // for INFRA_JOB_ERROR_MESSAGE (whose text exists to stop a user
-                // reading "Insufficient balance ... for owner 0x…" as an
-                // instruction to top that address up), and redacting long hex
-                // runs so the relayer's own wallet never reaches a tenant.
-                //
-                // These rows are `status = 'failed'` by construction — the
-                // query selects on it — so the status argument is fixed.
-                w.error = super::remember::sanitize_job_error_for_client("failed", w.error);
-                w
-            })
-            .collect(),
-        Err(e) => {
-            tracing::warn!(
-                "recall: failed-write report unavailable for owner={}: {}",
-                owner,
-                e
-            );
-            Vec::new()
-        }
-    }
-}
-
 // ============================================================
 // Recall query-embedding cache (Redis) — wraps the Embedder service
 // ============================================================
@@ -224,17 +170,6 @@ pub async fn recall(
     let owner = &auth.owner;
     let namespace = &body.namespace;
 
-    // Started here rather than awaited at the end, so it overlaps the embed,
-    // search, Walrus download and SEAL decrypt that follow instead of adding
-    // to them. The published SDK aborts a recall after a hard 15s that no
-    // caller can raise, and recall has been measured landing on exactly that
-    // — so this report has to cost the critical path nothing.
-    let failed_writes = {
-        let state = state.clone();
-        let owner = owner.clone();
-        tokio::spawn(async move { failed_writes_for(&state, &owner).await })
-    };
-
     tracing::info!(
         query_len = body.query.len(),
         owner = %owner,
@@ -283,9 +218,6 @@ pub async fn recall(
             results: vec![],
             total: 0,
             dropped_count: 0,
-            // Reported even with no hits: an empty recall is exactly when a
-            // caller is most likely to be looking for the fact that failed.
-            failed_writes: failed_writes.await.unwrap_or_default(),
         }));
     }
 
@@ -372,9 +304,6 @@ pub async fn recall(
         results,
         total,
         dropped_count,
-        // A panic in the report task must not take the recall with it; the
-        // caller loses a warning, not their memories.
-        failed_writes: failed_writes.await.unwrap_or_default(),
     }))
 }
 
@@ -515,7 +444,6 @@ Available: 10708877";
             results: vec![],
             total: 0,
             dropped_count: 3,
-            failed_writes: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["dropped_count"], 3);
@@ -527,7 +455,6 @@ Available: 10708877";
             results: vec![],
             total: 0,
             dropped_count: 0,
-            failed_writes: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
         // skip_serializing_if = "is_zero_usize" → field absent

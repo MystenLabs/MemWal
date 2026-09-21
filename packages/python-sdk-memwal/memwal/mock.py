@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import math
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from .types import (
@@ -18,6 +20,8 @@ from .types import (
     AskResult,
     EmbedResult,
     HealthResult,
+    NamespacesResult,
+    NamespaceSummary,
     RecallMemory,
     RecallParams,
     RecallResult,
@@ -33,6 +37,8 @@ from .types import (
     RememberResult,
     RestoreResult,
 )
+
+_MOCK_NAMESPACE_EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 @dataclass
@@ -64,6 +70,24 @@ def _distance(query_tokens: set[str], text: str) -> float:
         return 1.0
     matches = len(query_tokens.intersection(_tokens(text)))
     return 1.0 - matches / len(query_tokens)
+
+
+def _mock_timestamp(sequence: int) -> str:
+    # Same shape as the TypeScript mock's Date.toISOString(), so fixed-width
+    # timestamps compare correctly as strings.
+    moment = _MOCK_NAMESPACE_EPOCH + timedelta(seconds=sequence)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _encode_namespaces_cursor(payload: Dict[str, Any]) -> str:
+    # The relayer's cursor: URL-safe unpadded base64 of a JSON object.
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_namespaces_cursor(cursor: str) -> Dict[str, Any]:
+    padded = cursor + "=" * (-len(cursor) % 4)
+    return json.loads(base64.urlsafe_b64decode(padded))
 
 
 def _validate_text(text: str, field: str = "text") -> None:
@@ -344,6 +368,67 @@ class MemWalMock:
             failed=0,
         )
 
+    async def list_namespaces(
+        self,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> NamespacesResult:
+        grouped: Dict[str, List[_Memory]] = {}
+        for memory in self._memories:
+            grouped.setdefault(memory.namespace, []).append(memory)
+        summaries = sorted(
+            (
+                NamespaceSummary(
+                    id=f"mock-ns-{name}",
+                    name=name,
+                    memory_count=len(memories),
+                    storage_used=sum(len(m.text.encode("utf-8")) for m in memories),
+                    updated_at=_mock_timestamp(max(m.sequence for m in memories)),
+                )
+                for name, memories in grouped.items()
+            ),
+            key=lambda ns: (ns.updated_at, ns.name),
+        )
+
+        # Keyset walk pinned to a snapshot, like the relayer: writes made
+        # mid-walk surface on the next poll, not in the current walk.
+        after = _decode_namespaces_cursor(cursor) if cursor is not None else None
+        snapshot_at = (after or {}).get("snapshot_at") or _mock_timestamp(self._sequence)
+        remaining = [
+            ns
+            for ns in summaries
+            if ns.updated_at <= snapshot_at
+            and (
+                after is None
+                or (ns.updated_at, ns.name) > (after["updated_at"], after["namespace"])
+            )
+        ]
+        page = remaining if limit is None else remaining[:limit]
+        has_more = len(remaining) > len(page)
+
+        watermark = (
+            {"updated_at": page[-1].updated_at, "namespace": page[-1].name} if page else after
+        )
+        next_cursor = None
+        if watermark is not None:
+            next_cursor = _encode_namespaces_cursor(
+                {
+                    "updated_at": watermark["updated_at"],
+                    "namespace": watermark["namespace"],
+                    # A finished walk drops the snapshot so the next poll
+                    # takes a fresh one.
+                    "snapshot_at": snapshot_at if has_more else None,
+                }
+            )
+
+        return NamespacesResult(
+            namespaces=page,
+            next_cursor=next_cursor,
+            has_more=has_more,
+            # Matches the live relayer's current wire-format version.
+            snapshot_version=2,
+        )
+
     async def health(self) -> HealthResult:
         return HealthResult(
             status="ok",
@@ -581,6 +666,13 @@ class MemWalMockSync:
 
     def restore(self, namespace: str, limit: int = 10) -> RestoreResult:
         return self._run(self._inner.restore(namespace, limit))
+
+    def list_namespaces(
+        self,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> NamespacesResult:
+        return self._run(self._inner.list_namespaces(cursor, limit))
 
     def health(self) -> HealthResult:
         return self._run(self._inner.health())
