@@ -11,6 +11,12 @@
  * takes precedence over `~/.memwal/credentials.json`, npmrc/git-style. Purely
  * additive — a machine with no project-local file behaves exactly as before.
  *
+ * WALM-639 then made that precedence conditional: the project file only wins
+ * once the user has approved it on this machine, because the file itself lives
+ * inside the repository and could otherwise choose the destination on its own.
+ * The tests below that exercise precedence therefore approve first; the gate
+ * itself is covered in project-creds-approval.test.mjs.
+ *
  * `auth.js` resolves paths at call time, so each test sets HOME and cwd first
  * and then imports with a cache-busting query, the pattern used by
  * login-preflight.test.mjs.
@@ -48,7 +54,7 @@ function writeCredsAt(root, accountId, label) {
 
 /** Fresh sandbox: a HOME and a working directory, with the module re-imported
  * so it observes them. Returns the module plus both roots. */
-async function sandbox(t, { global: globalAccount, project: projectAccount }) {
+async function sandbox(t, { global: globalAccount, project: projectAccount, approve }) {
     // Canonicalise both roots: `process.cwd()` and `homedir()` report resolved
     // paths, so a raw mkdtemp path would not compare equal to what the module
     // computes. Needed on macOS (`/var` is a symlink to `/private/var`) and
@@ -78,13 +84,20 @@ async function sandbox(t, { global: globalAccount, project: projectAccount }) {
     });
 
     const auth = await import(`../dist/auth.js?walm361=${Date.now()}-${Math.random()}`);
+    // A project file is inert until approved (WALM-639). Tests about which file
+    // WINS approve it here so they keep testing precedence rather than the gate.
+    if (approve) {
+        const result = auth.approveProjectCreds();
+        assert.equal(result.outcome, "approved", `approval failed: ${result.outcome}`);
+    }
     return { auth, home, cwd };
 }
 
-test("a project-local credentials file takes precedence over the global one", async (t) => {
+test("an approved project-local credentials file takes precedence over the global one", async (t) => {
     const { auth, cwd } = await sandbox(t, {
         global: GLOBAL_ACCOUNT,
         project: PROJECT_ACCOUNT,
+        approve: true,
     });
 
     assert.equal(
@@ -110,6 +123,7 @@ test("saveCreds writes back to the project-local file when that is the one in us
     const { auth, home, cwd } = await sandbox(t, {
         global: GLOBAL_ACCOUNT,
         project: PROJECT_ACCOUNT,
+        approve: true,
     });
 
     const updated = makeCreds(PROJECT_ACCOUNT, "Renamed");
@@ -249,6 +263,7 @@ test("a subdirectory of the project resolves to the project's credentials", asyn
     const { auth, cwd } = await sandbox(t, {
         global: GLOBAL_ACCOUNT,
         project: PROJECT_ACCOUNT,
+        approve: true,
     });
     chdirBelow(cwd, "src", "nested");
 
@@ -295,6 +310,7 @@ test("removing a project file reports the global one that takes over", async (t)
     const { auth, home, cwd } = await sandbox(t, {
         global: GLOBAL_ACCOUNT,
         project: PROJECT_ACCOUNT,
+        approve: true,
     });
 
     const result = auth.clearCreds();
