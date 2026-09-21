@@ -4,6 +4,7 @@
  * advance and return one checkpointable WriteBlobStep.
  */
 
+import { createHash } from "node:crypto";
 import express, { type Express } from "express";
 import type {
     WriteBlobStep,
@@ -26,6 +27,7 @@ import {
     JSON_LIMIT_WALRUS_UPLOAD,
     MAX_WALRUS_EPOCHS,
     SERVER_SUI_PRIVATE_KEYS,
+    SUI_CHAIN_IDENTIFIER,
     SUI_NETWORK,
     SUI_TYPE,
     WALRUS_PACKAGE_ID,
@@ -256,6 +258,51 @@ function parsePreparedRegisterTransaction(raw: unknown): PreparedRegisterTransac
     };
 }
 
+/**
+ * The expiration a direct-signed register needs: one epoch of address-balance
+ * withdrawal.
+ *
+ * Paying gas from the address balance puts a `FundsWithdrawal` input in the
+ * transaction, and Sui admits that withdrawal only inside a `ValidDuring`
+ * window — the same rule `assertAddressBalanceRegisterTransaction` re-checks
+ * one line later. Neither `flow.register()` nor `Transaction.build()` sets one,
+ * so every direct-signed register failed its own assertion with
+ * "registerTransaction must use a ValidDuring address-balance expiration" and
+ * no blob was ever certified on this path.
+ *
+ * One epoch wide rather than a range: `validatePreparedRegisterTransaction`
+ * hands `maxEpoch` back as the journal's expiry guard, so a window outliving
+ * the reservation would keep replaying an entry Sui has already retired.
+ *
+ * The nonce is derived from the transaction kind rather than drawn at random,
+ * so re-preparing the same register — same blob, same epochs, same attributes —
+ * rebuilds byte-identical and the journal stays idempotent, while two different
+ * registers still reserve under different nonces.
+ */
+export function addressBalanceExpiration(epoch: bigint, transactionKind: Uint8Array) {
+    const bounded = String(epoch);
+    return {
+        ValidDuring: {
+            minEpoch: bounded,
+            maxEpoch: bounded,
+            minTimestamp: null,
+            maxTimestamp: null,
+            chain: SUI_CHAIN_IDENTIFIER,
+            nonce: createHash("sha256").update(transactionKind).digest().readUInt32BE(0),
+        },
+    } as const;
+}
+
+async function bindAddressBalanceExpiration(transaction: Transaction): Promise<void> {
+    const transactionKind = await transaction.build({
+        client: suiClient as any,
+        onlyTransactionKind: true,
+    });
+    transaction.setExpiration(
+        addressBalanceExpiration(await currentSuiEpoch(), transactionKind),
+    );
+}
+
 export async function prepareRegisterTransaction(
     transaction: Transaction,
     signer: Ed25519Keypair,
@@ -301,6 +348,7 @@ export async function prepareRegisterTransaction(
     // Fail-closed sponsorship already returned above. Remaining path is the
     // explicit phase-1 / unconfigured-Enoki direct sign.
     transaction.setGasPayment([]);
+    await bindAddressBalanceExpiration(transaction);
     const bytes = await transaction.build({ client: suiClient });
     assertAddressBalanceRegisterTransaction(TransactionDataBuilder.fromBytes(bytes));
     const signed = await signer.signTransaction(bytes);
@@ -368,11 +416,41 @@ export function assertSponsoredRegisterTransaction(
     assertRegisterTransactionUsesAddressBalanceWal(transactionData);
 }
 
+/** Render a bound the way the guard tests it, so `null` and `undefined` — which
+ * the guard treats differently but a template string renders identically — stay
+ * distinguishable in a log line. */
+function describeExpirationBound(value: unknown): string {
+    if (value === null) return "null";
+    if (value === undefined) return "undefined";
+    return JSON.stringify(value);
+}
+
+/** Describe an expiration precisely enough to act on it from a production log.
+ *
+ * The guard below rejects on three separate conditions joined by `||`, so the
+ * bare sentence it used to throw could not say which one fired. A run of these
+ * failures on testnet (every upload job, both deployments, 2026-09-17) could not
+ * be diagnosed from the relayer logs at all: the classifier reported the string,
+ * and the string named the invariant rather than the value that broke it. */
+function describeExpiration(expiration: TransactionDataBuilder["expiration"]): string {
+    if (!expiration) return "expiration=none";
+    if (expiration.$kind !== "ValidDuring") return `expiration=${expiration.$kind}`;
+    const { minEpoch, maxEpoch, minTimestamp, maxTimestamp } = expiration.ValidDuring;
+    return "expiration=ValidDuring"
+        + ` minEpoch=${describeExpirationBound(minEpoch)}`
+        + ` maxEpoch=${describeExpirationBound(maxEpoch)}`
+        + ` minTimestamp=${describeExpirationBound(minTimestamp)}`
+        + ` maxTimestamp=${describeExpirationBound(maxTimestamp)}`;
+}
+
 export function assertAddressBalanceRegisterTransaction(
     transactionData: TransactionDataBuilder,
 ): bigint {
     if (transactionData.gasData.payment?.length !== 0) {
-        throw new Error("registerTransaction must pay gas from the address balance");
+        throw new Error(
+            "registerTransaction must pay gas from the address balance"
+            + ` (gasData.payment.length=${String(transactionData.gasData.payment?.length ?? "undefined")})`,
+        );
     }
 
     const expiration = transactionData.expiration;
@@ -381,7 +459,10 @@ export function assertAddressBalanceRegisterTransaction(
         || expiration.ValidDuring.minTimestamp !== null
         || expiration.ValidDuring.maxTimestamp !== null
     ) {
-        throw new Error("registerTransaction must use a ValidDuring address-balance expiration");
+        throw new Error(
+            "registerTransaction must use a ValidDuring address-balance expiration"
+            + ` (${describeExpiration(expiration)})`,
+        );
     }
 
     assertRegisterTransactionUsesAddressBalanceWal(transactionData);

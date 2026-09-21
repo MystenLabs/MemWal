@@ -294,6 +294,110 @@ test("a rate-limited batch says the facts were not saved", async (t) => {
     assert.match(textOf(res), /NOT\s+SAVED/i);
 });
 
+/**
+ * The relayer runs three limiter layers with different windows —
+ * `delegate_key` and `account_burst` per minute, `account_sustained` per HOUR
+ * (services/server/src/rate_limit.rs). The message used to assert "the limit is
+ * per delegate key and resets in about Ns; retry after that" for all of them.
+ *
+ * Both halves were wrong on the hourly layer, and an agent that believed them
+ * waited out the advised window and retried into the same denial. Measured on
+ * dev 2026-09-17: a 429 carrying `account_sustained` / `1000
+ * weighted-requests/hour` / `retry_after_seconds: 300`, retried after 300s and
+ * again after 420s, denied both times.
+ */
+function rejectsWithRateLimitBody(layer: string, limit: string, retryAfterSeconds: number) {
+    return async () => {
+        const e = new Error(
+            `Walrus Memory server error (429): ` +
+                JSON.stringify({
+                    error: "Rate limit exceeded",
+                    layer,
+                    limit,
+                    retry_after_seconds: retryAfterSeconds,
+                }),
+        );
+        Object.assign(e, { status: 429, serverCode: "Rate limit exceeded", retryAfterSeconds });
+        throw e;
+    };
+}
+
+test("a rate-limit message names the layer the relayer actually denied on", async (t) => {
+    const client = await clientFor(
+        sessionRejecting(
+            rejectsWithRateLimitBody("account_sustained", "1000 weighted-requests/hour", 300),
+        ),
+        t,
+    );
+    const res = await client.callTool({ name: "memwal_remember", arguments: { text: "a fact" } });
+    assert.equal((res as { isError?: boolean }).isError, true);
+    const text = textOf(res);
+
+    assert.match(text, /NOT\s+SAVED/i);
+    assert.match(text, /account_sustained/);
+    assert.match(text, /1000 weighted-requests\/hour/);
+    // It is the account's budget, not the delegate key's.
+    assert.match(text, /per account/);
+    assert.doesNotMatch(text, /per delegate key/);
+    // And the advised number must not be sold as a reset.
+    assert.match(text, /not a reset/i);
+    assert.doesNotMatch(text, /resets in/i);
+});
+
+test("a per-minute layer keeps the plain retry advice", async (t) => {
+    const client = await clientFor(
+        sessionRejecting(rejectsWithRateLimitBody("delegate_key", "60 weighted-requests/min", 60)),
+        t,
+    );
+    const res = await client.callTool({ name: "memwal_remember", arguments: { text: "a fact" } });
+    const text = textOf(res);
+    assert.match(text, /delegate_key/);
+    assert.match(text, /per delegate key/);
+    assert.match(text, /Retry after ~60s/);
+    // The hourly caveat belongs only to the hourly layer.
+    assert.doesNotMatch(text, /not a reset/i);
+});
+
+test("a 429 with no parsable body still reports the limit", async (t) => {
+    const client = await clientFor(
+        sessionRejecting(rejectsWith(429, "Rate limit exceeded", 60, { job_id: "nope", status: "pending" })),
+        t,
+    );
+    const res = await client.callTool({ name: "memwal_remember", arguments: { text: "a fact" } });
+    const text = textOf(res);
+    assert.match(text, /NOT\s+SAVED/i);
+    assert.match(text, /Retry after ~60s/);
+    // No body means no layer to name — it must not invent one.
+    assert.doesNotMatch(text, /Limit hit:/);
+});
+
+/**
+ * `memwal_analyze`'s extraction leg runs the extractor LLM inline, so it is the
+ * one leg long enough to race the MCP client's own ceiling. Budgeted level with
+ * that ceiling it lost the race, and `analyze` carries no idempotency key, so
+ * the caller's retry re-extracted and re-stored every fact.
+ */
+test("the analyze extraction deadline fits under the client ceiling", async () => {
+    const { DEFAULT_REQUEST_TIMEOUT_MSEC } = await import(
+        "@modelcontextprotocol/sdk/shared/protocol.js"
+    );
+    const { ANALYZE_EXTRACTION_DEADLINE_MS, MCP_CLIENT_DEFAULT_TIMEOUT_MS } = await import(
+        "../tools/remember-wait.js"
+    );
+
+    // The constant we derive from must be the one the SDK actually applies.
+    assert.equal(MCP_CLIENT_DEFAULT_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MSEC);
+    assert.ok(
+        ANALYZE_EXTRACTION_DEADLINE_MS < DEFAULT_REQUEST_TIMEOUT_MSEC,
+        `extraction ${ANALYZE_EXTRACTION_DEADLINE_MS}ms must finish before the client gives up ` +
+            `at ${DEFAULT_REQUEST_TIMEOUT_MSEC}ms`,
+    );
+    assert.ok(
+        DEFAULT_REQUEST_TIMEOUT_MSEC - ANALYZE_EXTRACTION_DEADLINE_MS >= 10_000,
+        `only ${DEFAULT_REQUEST_TIMEOUT_MSEC - ANALYZE_EXTRACTION_DEADLINE_MS}ms of headroom`,
+    );
+});
+
 test("a non-retryable error is not retried", async (t) => {
     // A 500 could have been thrown after a write started; retrying bulk there
     // would store every fact twice.
