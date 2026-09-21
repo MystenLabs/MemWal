@@ -50,4 +50,15 @@ The docs source of truth is the markdown content under `docs/` in this repositor
 
 - run `pnpm dev:docs`
 - run `pnpm build:docs`
+- run `pnpm check:docs`
 - click through nav and sidebar links
+
+## Conventions check
+
+`pnpm check:docs` runs `scripts/check-docs-conventions.mjs` over the pages your branch changed. The same script runs in CI on every pull request. It enforces three things that reviewers otherwise have to catch by hand:
+
+1. **Linked terms.** `scripts/docs-conventions.json` lists concepts that have a canonical page or spec. A page that mentions one has to link it at least once. Add an entry to that file when a new canonical page lands. The script checks every internal target against `docs/docs.json` on each run, so a renamed route fails the check before a reader finds the broken link.
+2. **Consistent procedures.** A page that uses `<Steps>` cannot also write a procedure as a bolded numbered list, and a `## Troubleshooting` section has to match the format the sibling pages in its directory already use.
+3. **UI verification.** When a change touches a click-through procedure, the pull request body needs a `UI verification:` line naming who ran the flow and against which environment. "Nobody has run it yet" is a valid answer. The point is that a reviewer reads it in the description instead of asking.
+
+Run the script on specific pages with `node scripts/check-docs-conventions.mjs docs/mcp/overview.md`, or across the whole site with `--all`.
