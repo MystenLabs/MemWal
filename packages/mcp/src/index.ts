@@ -221,6 +221,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
                 `Recovered credentials from an interrupted sign-in ` +
                     `(delegate ${recovery.credentials.delegateAddress}).`,
             );
+            if (recovery.replacementNotice) note(recovery.replacementNotice);
         } else {
             const notice = formatStrandedLoginNotice(recovery);
             if (notice) note(notice);
