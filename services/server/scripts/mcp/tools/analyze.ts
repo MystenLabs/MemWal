@@ -4,12 +4,14 @@ import type { MemWalSession } from "../auth.js";
 import { TOOL_METADATA } from "./annotations.js";
 import { wrapTool, explorerFooter } from "./util.js";
 import {
+    ANALYZE_EXTRACTION_DEADLINE_MS,
     REMEMBER_POLL_INTERVAL_MS,
     REMEMBER_WAIT_MS,
     pendingBulkMessage,
     withAcceptDeadline,
     withRelayerRetry,
     withWaitDeadline,
+    isStillRunning,
 } from "./remember-wait.js";
 
 const ANALYZE_INPUT = {
@@ -75,7 +77,12 @@ export function registerAnalyzeTool(
                 // where it allows a remember 30s. The 15s accept ceiling would
                 // have cut off healthy extraction on any transcript long enough
                 // to be worth extracting from.
-                { idempotent: false, deadlineMs: 60_000 },
+                //
+                // Budgeted just under the MCP client's own ceiling rather than
+                // level with it: at 60_000 this leg raced the host's abort and
+                // the caller lost the error message, on the one endpoint whose
+                // retry duplicates every extracted fact.
+                { idempotent: false, deadlineMs: ANALYZE_EXTRACTION_DEADLINE_MS },
             );
 
             const facts = accepted.facts ?? [];
@@ -118,25 +125,56 @@ export function registerAnalyzeTool(
             const namespaces = entries.map(
                 () => namespace ?? session.namespace ?? "default"
             );
-            const result = await withWaitDeadline(
-                session.memwal.waitForRememberJobs(accepted.job_ids, namespaces, {
-                    timeoutMs: REMEMBER_WAIT_MS,
-                    pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
-                }),
-                REMEMBER_WAIT_MS,
-            );
+            // The wait is a courtesy; the accept above is the part that had to
+            // succeed. If the relayer goes quiet mid-poll `withWaitDeadline`
+            // raises MemWalRelayerUnresponsive, and letting that propagate
+            // would discard both the job_ids and the extracted facts — the
+            // caller would have no way to settle writes that are still running
+            // and no way to get the extraction back without paying for it
+            // again. `memwal_remember` already degrades this way; so does this.
+            let result;
+            try {
+                result = await withWaitDeadline(
+                    session.memwal.waitForRememberJobs(accepted.job_ids, namespaces, {
+                        timeoutMs: REMEMBER_WAIT_MS,
+                        pollIntervalMs: REMEMBER_POLL_INTERVAL_MS,
+                    }),
+                    REMEMBER_WAIT_MS,
+                );
+            } catch (err) {
+                if (!isStillRunning(err)) throw err;
+                return pending(Date.now() - startedAt);
+            }
             const waitedMs = Date.now() - startedAt;
 
             const unfinished = result.results.filter((r) => r.status === "timeout");
             if (unfinished.length === result.results.length) return pending(waitedMs);
 
-            const lines = result.results.map(
-                (r, i) =>
-                    `${i + 1}. [${r.status}]${r.blob_id ? ` blob_id=${r.blob_id}` : ""} ${
-                        entries[i]?.text || "(unknown fact)"
-                    }`
-            );
-            const summary = `Extracted ${facts.length} fact(s) — succeeded=${result.succeeded} failed=${result.failed}`;
+            const lines = result.results.map((r, i) => {
+                // `timeout` is not a failure — the write is still running and
+                // its job_id is how the caller settles it later. Rendered the
+                // same way memwal_remember_bulk renders it.
+                const state =
+                    r.status === "timeout" ? `still uploading, job_id=${r.id}` : r.status;
+                return `${i + 1}. [${state}]${r.blob_id ? ` blob_id=${r.blob_id}` : ""} ${
+                    entries[i]?.text || "(unknown fact)"
+                }`;
+            });
+            // `result.failed` is total-minus-succeeded, so it counts a
+            // still-uploading write as failed — while the stragglers block
+            // below tells the agent those same jobs are on their way and must
+            // not be re-sent. An agent reading `failed=` re-sends an in-flight
+            // write, which is a duplicate paid Walrus blob queued behind the
+            // original. Count only what actually reached a terminal failure.
+            // Same correction as remember-bulk.ts; this file was written from
+            // the same template one commit earlier and missed it.
+            const reallyFailed = result.results.filter(
+                (r) => r.status !== "done" && r.status !== "timeout",
+            ).length;
+            const summary =
+                `Extracted ${facts.length} fact(s) — succeeded=${result.succeeded}` +
+                (reallyFailed ? ` failed=${reallyFailed}` : "") +
+                (unfinished.length ? ` (${unfinished.length} still uploading)` : "");
             const stragglers =
                 unfinished.length > 0
                     ? `\n\n${pendingBulkMessage(
