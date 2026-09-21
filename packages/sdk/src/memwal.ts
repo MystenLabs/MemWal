@@ -1656,7 +1656,9 @@ export class MemWal {
         } catch (err) {
             // Translate our own expiry into something a caller can classify.
             // An abort the CALLER asked for is theirs and propagates untouched.
-            if (deadline.timedOut()) throw requestTimeoutError(method, path, deadlineMs);
+            if (deadline.timedOut() && (err as { status?: number }).status === undefined) {
+                throw requestTimeoutError(method, path, deadlineMs);
+            }
             throw err;
         } finally {
             deadline.dispose();

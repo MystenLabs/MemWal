@@ -200,3 +200,27 @@ test("a body that stalls after the headers is bounded too", { timeout: 10_000 },
         "the deadline should still be armed while the body is read",
     );
 });
+
+test("a classified error survives a deadline that expires during its body read", async () => {
+    const raw = JSON.stringify({ error: "Rate limit exceeded", retry_after_seconds: 60 });
+    stubRelayer((path) => {
+        if (path !== "/api/remember") return Promise.reject(new Error(path));
+        return Promise.resolve({
+            ok: false,
+            status: 429,
+            headers: new Headers({ "content-type": "application/json", "retry-after": "60" }),
+            text: () => new Promise((resolve) => setTimeout(() => resolve(raw), 300)),
+            json: () => new Promise((resolve) => setTimeout(() => resolve(JSON.parse(raw)), 300)),
+        });
+    });
+
+    await assert.rejects(
+        clientWith({ requestTimeoutMs: 120 }).rememberAsync("a durable fact"),
+        (err) => {
+            assert.equal(err.status, 429);
+            assert.equal(err.retryAfterSeconds, 60);
+            assert.equal(err.cause, raw);
+            return true;
+        },
+    );
+});
