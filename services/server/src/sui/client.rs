@@ -365,14 +365,7 @@ impl SuiClient {
                     }
                     SuiErr::RateLimited
                 }
-                Ok(Err(status))
-                    if matches!(
-                        status.code(),
-                        tonic::Code::Unavailable
-                            | tonic::Code::DeadlineExceeded
-                            | tonic::Code::Aborted
-                    ) =>
-                {
+                Ok(Err(status)) if is_transient_grpc_code(status.code()) => {
                     SuiErr::Transport(status.to_string())
                 }
                 Ok(Err(status)) => return Err(Self::classify_rejection(status)),
@@ -457,6 +450,13 @@ impl SuiClient {
             status: effects.status().clone(),
         })
     }
+}
+
+pub fn is_transient_grpc_code(code: tonic::Code) -> bool {
+    matches!(
+        code,
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Aborted
+    )
 }
 
 fn provider_retry_delay(status: &tonic::Status) -> Duration {

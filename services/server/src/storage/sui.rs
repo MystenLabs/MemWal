@@ -870,8 +870,46 @@ fn map_get_object_status(status: tonic::Status) -> OnchainVerifyError {
     }
 }
 
+const GET_OBJECT_ATTEMPTS: u32 = 3;
+const GET_OBJECT_RETRY_BASE_DELAY_MS: u64 = 500;
+static GET_OBJECT_RETRY_JITTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+async fn with_get_object_retry<T, F, Fut>(mut call: F) -> Result<T, tonic::Status>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+{
+    for attempt in 0..GET_OBJECT_ATTEMPTS {
+        let started = std::time::Instant::now();
+        let result = call().await;
+        let status_label = match &result {
+            Ok(_) => "200".to_string(),
+            Err(status) => status.code().to_string(),
+        };
+        crate::observability::observe_external(
+            "sui_grpc",
+            "GetObject",
+            &status_label,
+            started.elapsed(),
+        );
+
+        match result {
+            Err(status)
+                if attempt + 1 < GET_OBJECT_ATTEMPTS
+                    && crate::sui::is_transient_grpc_code(status.code()) => {}
+            outcome => return outcome,
+        }
+
+        let base = GET_OBJECT_RETRY_BASE_DELAY_MS.saturating_mul(1_u64 << attempt.min(16));
+        let sequence = GET_OBJECT_RETRY_JITTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let jitter = base.saturating_mul(((sequence * 37 + u64::from(attempt)) % 21) + 90) / 100;
+        tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
+    }
+    unreachable!("GET_OBJECT_ATTEMPTS is non-zero")
+}
+
 async fn grpc_get_object(
-    mut client: sui_rpc::Client,
+    client: sui_rpc::Client,
     account_object_id: &str,
 ) -> Result<sui_rpc::proto::sui::rpc::v2::Object, OnchainVerifyError> {
     let address = parse_object_id(account_object_id)?;
@@ -880,24 +918,16 @@ async fn grpc_get_object(
         paths: vec!["json".to_string(), "object_type".to_string()],
     });
 
-    let started = std::time::Instant::now();
-    let response = client.ledger_client().get_object(request).await;
-    let status_label = match &response {
-        Ok(_) => "200".to_string(),
-        Err(status) => status.code().to_string(),
-    };
-    crate::observability::observe_external(
-        "sui_grpc",
-        "GetObject",
-        &status_label,
-        started.elapsed(),
-    );
-
-    response
-        .map_err(map_get_object_status)?
-        .into_inner()
-        .object
-        .ok_or_else(|| OnchainVerifyError::NotFound("gRPC response missing object".into()))
+    with_get_object_retry(|| {
+        let mut client = client.clone();
+        let request = request.clone();
+        async move { client.ledger_client().get_object(request).await }
+    })
+    .await
+    .map_err(map_get_object_status)?
+    .into_inner()
+    .object
+    .ok_or_else(|| OnchainVerifyError::NotFound("gRPC response missing object".into()))
 }
 
 /// gRPC counterpart of `verify_delegate_key_onchain` above — same checks
@@ -1779,6 +1809,28 @@ mod tests {
                 assert!(matches!(err, OnchainVerifyError::NotFound(_)), "{err}");
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_object_retries_a_transient_unavailable() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let object = with_get_object_retry(|| {
+            let attempt = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    Err(tonic::Status::unavailable(
+                        "The service is currently unavailable",
+                    ))
+                } else {
+                    Ok("object")
+                }
+            }
+        })
+        .await
+        .expect("second attempt succeeds");
+
+        assert_eq!(object, "object");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]
