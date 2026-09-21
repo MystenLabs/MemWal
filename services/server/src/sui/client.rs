@@ -27,7 +27,7 @@ const MAX_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 // Must cover one full 10-second provider window: a request arriving just
 // after the 2,970th admission still gets a bounded chance to enter next window.
 const INTERACTIVE_GATE_BUDGET: Duration = Duration::from_secs(12);
-const DEFAULT_RPC_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_RPC_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RPC_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_RPC_MAX_IN_FLIGHT: usize = 64;
 const MAX_RPC_MAX_IN_FLIGHT: usize = 10_000;

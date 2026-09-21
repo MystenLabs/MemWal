@@ -11,6 +11,7 @@ pub mod verifier;
 
 pub use client::{
     expires_at_from_epoch, is_transient_grpc_code, RequestPriority, SuiClient, WalrusEpochSchedule,
+    DEFAULT_RPC_ATTEMPT_TIMEOUT,
 };
 
 use async_trait::async_trait;
