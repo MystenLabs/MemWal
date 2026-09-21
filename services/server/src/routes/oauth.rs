@@ -24,7 +24,7 @@ use crate::oauth::{self, OAuthError};
 use crate::storage::db::oauth_rows::{
     OAuthClientRow, OAuthCodeRow, OAuthDelegateRow, OAuthGrantRow, OAuthSessionRow, OAuthTokenRow,
 };
-use crate::storage::sui::verify_delegate_key_onchain;
+use crate::storage::sui::{verify_delegate_key_onchain, GET_OBJECT_ATTEMPTS};
 use crate::types::AppState;
 
 /// Read the configured `McpOAuthConfig`, or fail with 404 if not configured.
@@ -690,6 +690,7 @@ pub async fn session_complete(
         &account_id,
         &public_key_bytes,
         &state.config.package_id,
+        GET_OBJECT_ATTEMPTS,
     )
     .await
     .map_err(|e| {
