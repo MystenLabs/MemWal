@@ -16,60 +16,6 @@ use std::sync::Arc;
 use crate::engine::stage::{self, Budget, HangUpGuard, RecallStage, StageMarker};
 use crate::types::*;
 
-/// How far back the failure report on a recall response looks.
-///
-/// A day covers the gap between one working session and the next, which is
-/// when an agent would otherwise never learn that yesterday's last write died
-/// after it was accepted.
-const FAILED_WRITE_REPORT_WINDOW: std::time::Duration =
-    std::time::Duration::from_secs(24 * 60 * 60);
-
-/// Most failures reported on one recall. A caller acting on this re-sends the
-/// facts; a wall of them would crowd out the memories it actually asked for.
-const FAILED_WRITE_REPORT_LIMIT: i64 = 5;
-
-/// Recent writes that were accepted and then failed, for `owner`.
-///
-/// Never fails the recall it is attached to. This is a courtesy report on a
-/// read path — losing it costs the caller a warning, while propagating the
-/// error would cost them the memories they actually asked for, so a failed
-/// lookup degrades to "nothing to report" and says so in the log.
-async fn failed_writes_for(state: &AppState, owner: &str) -> Vec<FailedWrite> {
-    match state
-        .db
-        .recent_failed_remember_jobs(owner, FAILED_WRITE_REPORT_WINDOW, FAILED_WRITE_REPORT_LIMIT)
-        .await
-    {
-        Ok(failed) => failed
-            .into_iter()
-            .map(|mut w| {
-                // Every other client-facing view of `remember_jobs.error_msg`
-                // runs it through this first — `GET /api/remember/:job_id` and
-                // `POST /api/remember/bulk/status` both do. Reading the column
-                // straight into a recall response skipped both of the
-                // sanitizer's jobs: swapping an infrastructure-funding failure
-                // for INFRA_JOB_ERROR_MESSAGE (whose text exists to stop a user
-                // reading "Insufficient balance ... for owner 0x…" as an
-                // instruction to top that address up), and redacting long hex
-                // runs so the relayer's own wallet never reaches a tenant.
-                //
-                // These rows are `status = 'failed'` by construction — the
-                // query selects on it — so the status argument is fixed.
-                w.error = super::remember::sanitize_job_error_for_client("failed", w.error);
-                w
-            })
-            .collect(),
-        Err(e) => {
-            tracing::warn!(
-                "recall: failed-write report unavailable for owner={}: {}",
-                owner,
-                e
-            );
-            Vec::new()
-        }
-    }
-}
-
 // ============================================================
 // Recall query-embedding cache (Redis) — wraps the Embedder service
 // ============================================================
@@ -225,17 +171,6 @@ pub async fn recall(
     let owner = &auth.owner;
     let namespace = &body.namespace;
 
-    // Started here rather than awaited at the end, so it overlaps the embed,
-    // search, Walrus download and SEAL decrypt that follow instead of adding
-    // to them. The published SDK aborts a recall after a hard 15s that no
-    // caller can raise, and recall has been measured landing on exactly that
-    // — so this report has to cost the critical path nothing.
-    let failed_writes = {
-        let state = state.clone();
-        let owner = owner.clone();
-        tokio::spawn(async move { failed_writes_for(&state, &owner).await })
-    };
-
     tracing::info!(
         query_len = body.query.len(),
         owner = %owner,
@@ -276,7 +211,7 @@ pub async fn recall(
     )
     .await;
     guard.disarm();
-    let mut response = match outcome {
+    let response = match outcome {
         Ok(result) => result?,
         Err(timed_out) => {
             let elapsed = already + timed_out.elapsed;
@@ -289,9 +224,6 @@ pub async fn recall(
             ));
         }
     };
-    // Reported even with no hits: an empty recall is exactly when a caller is
-    // most likely to be looking for the fact that failed.
-    response.failed_writes = join_failed_writes(failed_writes, deadline).await;
     Ok(Json(response))
 }
 
@@ -315,27 +247,6 @@ fn recall_timed_out(
         stage: stage.as_str(),
         elapsed_ms,
     }
-}
-
-/// The failed-write report is a courtesy: never hold a finished recall past
-/// the caller's deadline for it.
-async fn join_failed_writes(
-    report: tokio::task::JoinHandle<Vec<FailedWrite>>,
-    deadline: Option<tokio::time::Instant>,
-) -> Vec<FailedWrite> {
-    let joined = match deadline {
-        None => report.await,
-        Some(deadline) => match tokio::time::timeout_at(deadline, report).await {
-            Ok(joined) => joined,
-            Err(_) => {
-                tracing::warn!("recall: failed-write report dropped to meet the caller's deadline");
-                return Vec::new();
-            }
-        },
-    };
-    // A panic in the report task must not take the recall with it; the
-    // caller loses a warning, not their memories.
-    joined.unwrap_or_default()
 }
 
 /// Everything `recall` does after validation, as one future the handler can
@@ -387,8 +298,6 @@ async fn recall_pipeline(
             results: vec![],
             total: 0,
             dropped_count: 0,
-            // Filled in by `recall`, outside the deadline.
-            failed_writes: Vec::new(),
         });
     }
 
@@ -476,8 +385,6 @@ async fn recall_pipeline(
         results,
         total,
         dropped_count,
-        // Filled in by `recall`, outside the deadline.
-        failed_writes: Vec::new(),
     })
 }
 
@@ -568,53 +475,6 @@ pub async fn recall_manual(
 
 #[cfg(test)]
 mod tests {
-    // ── Failed-write report vs the caller's deadline ─────────────
-
-    fn one_failed_write() -> Vec<crate::types::FailedWrite> {
-        vec![crate::types::FailedWrite {
-            job_id: "job-1".into(),
-            namespace: "default".into(),
-            error: None,
-            failed_at: "2026-09-18T00:00:00Z".into(),
-        }]
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_slow_failed_write_report_is_dropped_at_the_deadline() {
-        // The recall itself is done; a stalled courtesy lookup must not turn
-        // it into a timeout.
-        let report = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            one_failed_write()
-        });
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
-        assert!(super::join_failed_writes(report, Some(deadline))
-            .await
-            .is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_finished_failed_write_report_is_kept_at_the_deadline() {
-        let report = tokio::spawn(async { one_failed_write() });
-        tokio::task::yield_now().await;
-        let deadline = tokio::time::Instant::now();
-        assert_eq!(
-            super::join_failed_writes(report, Some(deadline))
-                .await
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn without_a_deadline_the_failed_write_report_is_waited_for() {
-        let report = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            one_failed_write()
-        });
-        assert_eq!(super::join_failed_writes(report, None).await.len(), 1);
-    }
-
     // ── Recall limit capped at 100 ───────────────────────────────
 
     #[test]
@@ -665,7 +525,6 @@ Available: 10708877";
             results: vec![],
             total: 0,
             dropped_count: 3,
-            failed_writes: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["dropped_count"], 3);
@@ -677,7 +536,6 @@ Available: 10708877";
             results: vec![],
             total: 0,
             dropped_count: 0,
-            failed_writes: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
         // skip_serializing_if = "is_zero_usize" → field absent

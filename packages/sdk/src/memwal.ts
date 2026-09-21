@@ -242,6 +242,44 @@ function isTransientPollingStatus(status: number): boolean {
 }
 
 /**
+ * How long a transient polling rejection asked us to wait, in ms.
+ *
+ * A 429 from the relayer's rate limiter is not an invitation to poll again in
+ * a second. The limiter counts our own status reads, so answering a
+ * `retry_after_seconds: 60` with the 10s backoff cap re-trips it on every
+ * attempt and the loop starves itself: the job then reads as "still uploading"
+ * for as long as the caller is willing to wait — including long after it has
+ * actually failed, which is the state that costs a user their fact.
+ *
+ * Clamped to what is left of the caller's own budget, so a 10-minute backoff
+ * costs at most the wait the caller already asked for. The loop then spends
+ * that remainder on one final read at the boundary rather than on a backoff
+ * curve nobody asked for.
+ */
+function retryAfterDelayMs(err: unknown, deadline: number): number {
+    const seconds =
+        (err as { retryAfterSeconds?: number }).retryAfterSeconds
+        ?? retryAfterSecondsFromBody((err as { cause?: unknown }).cause);
+    if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) return 0;
+    return Math.max(0, Math.min(seconds * 1000, deadline - Date.now()));
+}
+
+/**
+ * The relayer states the backoff in the 429 body as well as in `Retry-After`.
+ * A proxy that strips the header must not cost us the hint.
+ */
+function retryAfterSecondsFromBody(cause: unknown): number | undefined {
+    if (typeof cause !== "string") return undefined;
+    try {
+        const parsed = JSON.parse(cause) as { retry_after_seconds?: unknown };
+        const seconds = Number(parsed?.retry_after_seconds);
+        return Number.isFinite(seconds) ? seconds : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
  * Normalise the legacy `(text, namespace)` and new `(text, options)`
  * overloads of `analyze()` / `analyzeAndWait()` into a single
  * `AnalyzeOptions` object. Preserves backwards compatibility — a plain
@@ -436,9 +474,13 @@ export class MemWal {
         const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
+        let retryAfterMs = 0;
 
         while (Date.now() < deadline) {
-            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
+            // A retry-after the server just gave us wins over our own curve;
+            // the backoff resumes from where it was on the next normal poll.
+            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            retryAfterMs = 0;
 
             let status: RememberStatusResponse;
 
@@ -463,6 +505,7 @@ export class MemWal {
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
                 throw err;
@@ -617,9 +660,13 @@ export class MemWal {
         }));
         const pending = new Set(jobIds);
         let attempt = 0;
+        let retryAfterMs = 0;
 
         while (pending.size > 0 && Date.now() < deadline) {
-            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
+            // A retry-after the server just gave us wins over our own curve;
+            // the backoff resumes from where it was on the next normal poll.
+            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            retryAfterMs = 0;
 
             const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
             if (pendingIds.length === 0) {
@@ -636,6 +683,7 @@ export class MemWal {
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
                 throw err;
