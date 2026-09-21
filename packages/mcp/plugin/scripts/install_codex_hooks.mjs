@@ -12,6 +12,11 @@
  * ${PLUGIN_ROOT} placeholder to this plugin's absolute path, and merges the
  * entries into ~/.codex/hooks.json.
  *
+ * The template is parsed as JSON *before* the placeholder is substituted, and
+ * the path is POSIX-single-quoted on its way into a hook command, so a plugin
+ * directory containing $(...), backticks, quotes or backslashes cannot break
+ * out of either the JSON document or the generated shell command.
+ *
  * Re-running is idempotent: entries this installer owns (identified by our
  * hook script filenames) are removed before fresh entries are added.
  *
@@ -28,11 +33,28 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { substituteHookPlaceholder } from "./lib/hook-template.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(SCRIPT_DIR);
 
 function resolveMcpVersion() {
+    // Prefer the pin in .mcp.json so the Codex installer cannot launch an
+    // unpublished package version when plugin.json has already been bumped
+    // for the next release (2026-09-17: plugin.json=0.0.14 but npm had no
+    // 0.0.14 — only 0.0.13 / 0.0.14-dev.0).
+    try {
+        const mcp = JSON.parse(readFileSync(join(PLUGIN_ROOT, ".mcp.json"), "utf8"));
+        const args = mcp?.mcpServers?.memwal?.args;
+        if (Array.isArray(args)) {
+            const pinned = args.find(
+                (a) => typeof a === "string" && a.startsWith("@mysten-incubation/memwal-mcp@"),
+            );
+            if (pinned) return pinned.slice("@mysten-incubation/memwal-mcp@".length);
+        }
+    } catch {
+        // fall through
+    }
     return JSON.parse(readFileSync(join(PLUGIN_ROOT, "plugin.json"), "utf8")).version;
 }
 
@@ -48,12 +70,17 @@ const OWNER_MARKERS = [
     "on_post_tool.mjs",
 ];
 
+const PLACEHOLDER = "${PLUGIN_ROOT}";
+
 function loadTemplate() {
-    const raw = readFileSync(TEMPLATE_FILE, "utf8").replaceAll(
-        "${PLUGIN_ROOT}",
+    // Parse first, substitute second. Substituting into the raw text would let
+    // a path containing a double quote or a backslash rewrite the JSON
+    // document, and would leave `$(...)` or backticks live in the hook command.
+    return substituteHookPlaceholder(
+        JSON.parse(readFileSync(TEMPLATE_FILE, "utf8")),
+        PLACEHOLDER,
         PLUGIN_ROOT
     );
-    return JSON.parse(raw);
 }
 
 function loadExisting() {
