@@ -2904,6 +2904,24 @@ impl VectorDb {
         Ok(())
     }
 
+    pub async fn fetch_oauth_code(
+        &self,
+        client_id: &str,
+        code_sha256: &str,
+    ) -> Result<Option<oauth_rows::OAuthCodeRow>, AppError> {
+        sqlx::query_as::<_, oauth_rows::OAuthCodeRow>(
+            "SELECT code_sha256, client_id, redirect_uri, scope, resource, code_challenge,
+                    code_challenge_method, delegate_ref, account_id, owner_address, expires_at
+             FROM mcp_oauth_codes
+             WHERE code_sha256 = $1 AND client_id = $2 AND expires_at > NOW()",
+        )
+        .bind(code_sha256)
+        .bind(client_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read oauth code: {}", e)))
+    }
+
     /// Single-use consume via `DELETE ... RETURNING` — the first successful
     /// exchange deletes the row; any replay finds nothing. Also filters on
     /// `client_id` so a code minted for one client can never be redeemed by
