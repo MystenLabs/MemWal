@@ -321,6 +321,7 @@ function normalizeSuiNetworkForGrpc(network: string): string {
 export class MemWal {
     private privateKey: Uint8Array;
     private publicKey: Uint8Array | null = null;
+    private destroyed = false;
     private serverUrl: string;
     private namespace: string;
     private accountId: string;
@@ -383,6 +384,7 @@ export class MemWal {
      * Prevents key extraction from V8 heap dumps.
      */
     destroy(): void {
+        this.destroyed = true;
         if (this.privateKey) {
             this.privateKey.fill(0);
         }
@@ -1563,6 +1565,11 @@ export class MemWal {
         const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
         const msgBytes = new TextEncoder().encode(message);
 
+        if (this.destroyed) {
+            throw new Error(
+                "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
+            );
+        }
         // Sign with Ed25519
         const signature = await ed.signAsync(msgBytes, this.privateKey);
         const publicKey = await this.getPublicKey();
