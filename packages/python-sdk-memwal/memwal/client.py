@@ -34,7 +34,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, TypeVar, Union
 from urllib.parse import ParseResult, urlencode, urlparse
 
 import httpx
@@ -624,7 +624,7 @@ class MemWal:
                     continue
                 raise
 
-            still_pending: List[str] = []
+            terminal_ids: Set[str] = set()
             for item in batch.results:
                 if item.status == "done":
                     results[item.job_id] = RememberBulkItemResult(
@@ -633,6 +633,7 @@ class MemWal:
                         status="done",
                         error=None,
                     )
+                    terminal_ids.add(item.job_id)
                 elif item.status in ("failed", "not_found"):
                     results[item.job_id] = RememberBulkItemResult(
                         id=item.job_id,
@@ -640,9 +641,8 @@ class MemWal:
                         status="failed",
                         error=item.error,
                     )
-                else:
-                    still_pending.append(item.job_id)
-            pending = still_pending
+                    terminal_ids.add(item.job_id)
+            pending = [jid for jid in pending if jid not in terminal_ids]
 
         ordered = [results[job_id] for job_id in job_ids]
         succeeded = sum(1 for r in ordered if r.status == "done")

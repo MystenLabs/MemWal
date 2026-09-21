@@ -4,9 +4,11 @@ Step-by-step plan to test the auto-memory work (agentic tools + bulk + health + 
 
 > **Local note:** the standalone configs below point at your **local build** via
 > `node /Users/uydev/code/MemWal/packages/mcp/dist/bin/memwal-mcp.js --local`
-> (tests your local code, not the published npx package). The **shipped plugin
-> `.mcp.json` is prod** (`npx -y @mysten-incubation/memwal-mcp`) — no `--local` in
-> the committed file. It still reaches your **local relayer** because your saved
+> (tests your local code, not the published package). The **shipped plugin
+> `.mcp.json` is prod** — it runs `node "${CLAUDE_PLUGIN_ROOT}/scripts/launch_mcp.mjs"`,
+> which installs the pinned version into `~/.memwal/runtime` and launches that
+> absolute path (never `npx`, never your project's `node_modules`) — no `--local`
+> in the committed file. It still reaches your **local relayer** because your saved
 > creds (`~/.memwal/credentials.json`) point there. To force a local target by hand
 > (e.g. fresh/prod creds), `export MEMWAL_SERVER_URL=http://127.0.0.1:8000` in the
 > shell before launching the client — the prod bin reads it (`index.ts:116-117`),
@@ -252,7 +254,7 @@ client.
 
 ## 4. Before the PR
 
-- [x] `packages/mcp/plugin/.mcp.json` ships the prod default (`npx -y @mysten-incubation/memwal-mcp`) — no `--local` in the committed file
+- [x] `packages/mcp/plugin/.mcp.json` ships the prod default (`node "${CLAUDE_PLUGIN_ROOT}/scripts/launch_mcp.mjs"`, which installs the pin under `~/.memwal/runtime` and runs it by absolute path) — no `--local` in the committed file
 - [ ] Re-register `memwal-local` if you removed it for the plugin test
 - [ ] Remove the temporary local `memwal` entries from Claude Desktop / Cursor / Codex / OpenCode configs (or keep for ongoing local dev)
 

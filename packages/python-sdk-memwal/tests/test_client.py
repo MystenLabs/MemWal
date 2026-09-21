@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Sequence
 
 import httpx
 import nacl.signing
@@ -29,6 +29,9 @@ from memwal.types import (
     RecallParams,
     RememberBulkAcceptedResult,
     RememberBulkItem,
+    RememberBulkOptions,
+    RememberBulkStatusItem,
+    RememberBulkStatusResult,
     RememberManualOptions,
     ScoringWeights,
 )
@@ -427,6 +430,36 @@ class TestRememberBulkAsync:
         assert result.job_ids == ["job-1", "job-2"]
         assert result.total == 2
         assert result.status == "pending"
+
+    async def test_job_omitted_from_a_poll_stays_pending(
+        self, memwal_client: MemWal
+    ) -> None:
+        polls = 0
+
+        async def partial_status(
+            job_ids: Sequence[str],
+        ) -> RememberBulkStatusResult:
+            nonlocal polls
+            polls += 1
+            job_id = "job-1" if polls == 1 else "job-2"
+            return RememberBulkStatusResult(
+                results=[
+                    RememberBulkStatusItem(
+                        job_id=job_id,
+                        status="done",
+                        blob_id=f"blob-for-{job_id}",
+                    )
+                ]
+            )
+
+        memwal_client.get_remember_bulk_status = partial_status  # type: ignore[method-assign]
+
+        result = await memwal_client.wait_for_remember_jobs(
+            ["job-1", "job-2"],
+            RememberBulkOptions(poll_interval_ms=1, timeout_ms=5_000),
+        )
+
+        assert [item.status for item in result.results] == ["done", "done"]
 
 
 # ============================================================

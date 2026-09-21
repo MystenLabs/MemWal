@@ -199,8 +199,11 @@ export function registerRememberBulkTool(
                 // Label each result with its source fact by index. The SDK
                 // returns results in input order, but guard against a length /
                 // ordering mismatch so we never print "— undefined".
+                // Echo sanitized text only (WALM-642) — never the original facts[].
                 const text = safeFacts[i] ?? "";
-                const blob = r.blob_id ? ` blob_id=${r.blob_id}` : "";
+                // Only a settled row may show a blob_id — see remember-status.ts
+                // for why an unfinished write can already carry a real one.
+                const blob = r.status === "done" && r.blob_id ? ` blob_id=${r.blob_id}` : "";
                 const err = r.error ? ` error=${r.error}` : "";
                 // `timeout` is not a failure — the write is still running and
                 // its job_id is how the caller settles it later.

@@ -45,6 +45,7 @@ Every supported client runs the same local server, `npx -y @mysten-incubation/me
 ## Prerequisites
 
 - You need Node.js 20 or later, because the server runs through `npx` with no install step.
+- `npx` resolves the package name against the directory your client starts the server in, which is usually the project you have open. A project that contains an installed `@mysten-incubation/memwal-mcp` of its own would be run instead of the published package, and pinning a version in the command does not prevent it. The [plugin](/mcp/claude-code) avoids this by installing the pinned version into `~/.memwal/runtime` and launching that absolute path; to get the same property without the plugin, install the version yourself outside any project and point `command`/`args` at the absolute entry point (see the [package README](https://github.com/MystenLabs/MemWal/blob/dev/packages/mcp/README.md#how-the-plugin-launches-the-server)).
 - You need a [Walrus Memory account](/fundamentals/concepts/ownership-and-access). An unauthenticated memory-tool call returns sign-in instructions rather than signing you in, so ask the agent to run `memwal_login` and follow the URL it returns to connect your wallet. Config files carry no keys.
 
 ## Set up your client
