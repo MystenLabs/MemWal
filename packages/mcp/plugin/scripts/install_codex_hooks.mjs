@@ -23,7 +23,9 @@
  * against the commands it generates for this plugin directory) — never by the
  * hook script's filename, which another tool may legitimately share. Hooks
  * belonging to anyone else, including siblings inside the same group, and the
- * group's own settings are left untouched.
+ * group's own settings are left untouched. An existing [mcp_servers.memwal]
+ * block is migrated to the launcher when it still points at something else
+ * (WALM-640) instead of being reported as "already present".
  *
  * Usage:
  *   node install_codex_hooks.mjs              # install or update
@@ -40,28 +42,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { substituteHookPlaceholder } from "./lib/hook-template.mjs";
 
+import { planMcpRegistration } from "./lib/codex-config.mjs";
+
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = dirname(SCRIPT_DIR);
-
-function resolveMcpVersion() {
-    // Prefer the pin in .mcp.json so the Codex installer cannot launch an
-    // unpublished package version when plugin.json has already been bumped
-    // for the next release (2026-09-17: plugin.json=0.0.14 but npm had no
-    // 0.0.14 — only 0.0.13 / 0.0.14-dev.0).
-    try {
-        const mcp = JSON.parse(readFileSync(join(PLUGIN_ROOT, ".mcp.json"), "utf8"));
-        const args = mcp?.mcpServers?.memwal?.args;
-        if (Array.isArray(args)) {
-            const pinned = args.find(
-                (a) => typeof a === "string" && a.startsWith("@mysten-incubation/memwal-mcp@"),
-            );
-            if (pinned) return pinned.slice("@mysten-incubation/memwal-mcp@".length);
-        }
-    } catch {
-        // fall through
-    }
-    return JSON.parse(readFileSync(join(PLUGIN_ROOT, "plugin.json"), "utf8")).version;
-}
 
 const CODEX_DIR = join(homedir(), ".codex");
 const HOOKS_FILE = join(CODEX_DIR, "hooks.json");
@@ -188,18 +172,59 @@ function writeHooks(config) {
     writeFileSync(HOOKS_FILE, JSON.stringify(config, null, 2) + "\n");
 }
 
-/** Append [mcp_servers.memwal] to config.toml if it isn't registered yet. */
+/**
+ * Register — or migrate — [mcp_servers.memwal] in config.toml.
+ *
+ * Registers the plugin's launcher by absolute path rather than
+ * `npx @mysten-incubation/memwal-mcp@<pin>`. npx resolves that name against the
+ * directory Codex is started in, so a package installed in the user's project under
+ * the same name — claiming the pinned version — was run instead of ours (WALM-640).
+ * The launcher installs the pinned version under ~/.memwal/runtime and runs that
+ * absolute entry point, so no project directory takes part in the resolution.
+ *
+ * An existing block is REWRITTEN, not skipped. Everyone who ran this installer before
+ * WALM-640 has the `npx` form on disk, and a "already present" message on re-run would
+ * leave exactly the resolution this fix exists to remove in place for exactly the
+ * people who already installed. Unrelated keys in the block (`env`, timeouts, …) are
+ * preserved — see lib/codex-config.mjs.
+ */
 function ensureMcpRegistered() {
     mkdirSync(CODEX_DIR, { recursive: true });
-    let content = existsSync(CONFIG_FILE) ? readFileSync(CONFIG_FILE, "utf8") : "";
-    if (content.includes("[mcp_servers.memwal]")) return false;
-    const spec = `@mysten-incubation/memwal-mcp@${resolveMcpVersion()}`;
-    const block =
-        "\n[mcp_servers.memwal]\n" +
-        'command = "npx"\n' +
-        `args = ["-y", "${spec}"]\n`;
-    writeFileSync(CONFIG_FILE, (content.trimEnd() + "\n" + block).trimStart());
-    return true;
+    const content = existsSync(CONFIG_FILE) ? readFileSync(CONFIG_FILE, "utf8") : "";
+    const launcher = join(SCRIPT_DIR, "launch_mcp.mjs");
+    const plan = planMcpRegistration(content, launcher);
+    if (plan.action !== "unchanged") writeFileSync(CONFIG_FILE, plan.content);
+    return plan;
+}
+
+function reportMcpRegistration(plan) {
+    if (plan.action === "added") {
+        console.log(`Registered [mcp_servers.memwal] in ${CONFIG_FILE}`);
+        return;
+    }
+    if (plan.action === "unchanged") {
+        console.log(`[mcp_servers.memwal] in ${CONFIG_FILE} already runs the launcher`);
+        return;
+    }
+    console.log(`Migrated [mcp_servers.memwal] in ${CONFIG_FILE}:`);
+    console.log(`  was: command = ${plan.previous.command ?? "(absent)"}`);
+    console.log(`       args    = ${plan.previous.args ?? "(absent)"}`);
+    console.log(`  now: command = "node"`);
+    console.log(`       args    = [${JSON.stringify(launcherPath())}]`);
+    if (plan.previous.command?.includes("npx")) {
+        console.log(
+            "  (the old command resolved the package name against the directory Codex " +
+                "was started in — WALM-640)"
+        );
+    }
+    if (plan.preserved.length > 0) {
+        console.log(`  kept your other keys: ${plan.preserved.join(", ")}`);
+    }
+    console.log("  Restart Codex for the change to take effect.");
+}
+
+function launcherPath() {
+    return join(SCRIPT_DIR, "launch_mcp.mjs");
 }
 
 function featureFlagEnabled() {
@@ -245,16 +270,12 @@ function main() {
     config = mergeTemplate(config, template);
     writeHooks(config);
 
-    const mcpAdded = ensureMcpRegistered();
+    const mcpPlan = ensureMcpRegistered();
 
     console.log(`Installed MemWal hooks into ${HOOKS_FILE}`);
     console.log(`Plugin path: ${PLUGIN_ROOT}`);
     console.log("Events: SessionStart, UserPromptSubmit, PostToolUse");
-    console.log(
-        mcpAdded
-            ? `Registered [mcp_servers.memwal] in ${CONFIG_FILE}`
-            : `[mcp_servers.memwal] already present in ${CONFIG_FILE}`
-    );
+    reportMcpRegistration(mcpPlan);
 
     if (!featureFlagEnabled()) printFeatureFlagHint();
     return 0;
