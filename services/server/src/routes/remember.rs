@@ -1354,11 +1354,11 @@ pub async fn remember_bulk(
     let mut pending_items: Vec<PendingBulkRememberItem> = Vec::with_capacity(body.items.len());
 
     for (i, item) in body.items.into_iter().enumerate() {
-        let job_id = uuid::Uuid::new_v4().to_string();
+        let mut job_id = uuid::Uuid::new_v4().to_string();
         let item_key = body
             .idempotency_key
             .as_deref()
-            .map(|key| format!("{}:{}", key, i));
+            .map(|key| format!("bulk:{}:{}", key, i));
         let fingerprint = request_fingerprint(&item.text, &item.namespace);
 
         let inserted = match sqlx::query(
@@ -1407,8 +1407,14 @@ pub async fn remember_bulk(
                     "idempotency_key was already used for a request with different content".into(),
                 ));
             }
-            job_ids.push(existing_id);
-            continue;
+            if claim_remember_preparation(state.db.pool(), &existing_id)
+                .await?
+                .is_none()
+            {
+                job_ids.push(existing_id);
+                continue;
+            }
+            job_id = existing_id;
         }
 
         pending_items.push(PendingBulkRememberItem {
@@ -2039,7 +2045,7 @@ mod tests {
     async fn bulk_derived_key_collapses_a_retried_item() {
         let pool = idem_test_pool().await;
         let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
-        let item_key = "batch-1:0";
+        let item_key = "bulk:batch-1:0";
         let fingerprint = request_fingerprint("bulk item text", "ns");
         let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
 
@@ -2075,6 +2081,64 @@ mod tests {
             .unwrap();
         assert_eq!(found.0, job_id);
         assert_eq!(found.3.as_deref(), Some(fingerprint.as_str()));
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn bulk_retry_redrives_an_orphaned_pending_item() {
+        let pool = idem_test_pool().await;
+        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
+        let item_key = "bulk:batch-orphan:0";
+        let fingerprint = request_fingerprint("bulk item text", "ns");
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+
+        sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, 'ns', 'pending', $3, $4)",
+        )
+        .bind(&job_id)
+        .bind(&owner)
+        .bind(item_key)
+        .bind(&fingerprint)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let claimed_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT prepare_claimed_at FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            claimed_at.is_none(),
+            "fixture must start in the orphan state"
+        );
+
+        let existing = find_remember_job_by_key(&pool, &owner, item_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(existing.0, job_id);
+
+        let claim = claim_remember_preparation(&pool, &existing.0)
+            .await
+            .unwrap();
+        assert!(
+            claim.is_some(),
+            "an orphaned pending bulk item must be re-driven, not collapsed"
+        );
+
+        assert!(
+            claim_remember_preparation(&pool, &existing.0)
+                .await
+                .unwrap()
+                .is_none(),
+            "an item already being prepared must collapse onto the existing job"
+        );
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
             .bind(&owner)
