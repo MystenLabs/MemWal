@@ -31,9 +31,9 @@
  * environment — the client's hook configuration, set by the user — never from a
  * file a repository can carry.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 
 export const AUTO_SAVE_ENV = "MEMWAL_AUTO_SAVE";
 
@@ -41,17 +41,53 @@ const HOOK_STATE_FILE = "auto-save-state.json";
 /** The only shape this file knows how to read. */
 const SUPPORTED_VERSION = 1;
 
+function isInside(root, path) {
+    const rel = relative(root, path);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function canonicalDir(path) {
+    const tail = [];
+    let dir = path;
+    for (;;) {
+        if (existsSync(dir)) return join(realpathSync(dir), ...tail.reverse());
+        const parent = dirname(dir);
+        if (parent === dir) return path;
+        tail.push(basename(dir));
+        dir = parent;
+    }
+}
+
+function projectRoot() {
+    const home = homedir();
+    let dir = process.cwd();
+    for (;;) {
+        if (dir === home) return null;
+        if (existsSync(join(dir, ".git"))) return dir;
+        const parent = dirname(dir);
+        if (parent === dir) return null;
+        dir = parent;
+    }
+}
+
 /**
- * The trusted state dir, resolved from the environment and the home directory
- * only. Deliberately does NOT look at `process.cwd()`: that is the whole point.
+ * The trusted state dir: the home directory, unless `MEMWAL_CREDS_DIR` names a
+ * directory auth.ts would also trust — absolute, and outside the current
+ * project. `process.cwd()` is consulted only to locate that project, so that an
+ * override a checkout carries can be refused.
  *
  * `MEMWAL_CREDS_DIR` is the same trusted escape hatch auth.ts uses, so a
  * sandboxed run (tests, CI) points both sides at the same temporary directory.
+ * auth.ts throws on an untrusted value; a hook runs unattended on every prompt,
+ * so this one ignores it and falls back to the home directory.
  */
 function trustedStateDir() {
+    const fallback = join(homedir(), ".memwal");
     const override = process.env.MEMWAL_CREDS_DIR;
-    if (override) return override;
-    return join(homedir(), ".memwal");
+    if (!override || !isAbsolute(override)) return fallback;
+    const root = projectRoot() ?? process.cwd();
+    if (isInside(canonicalDir(root), canonicalDir(override))) return fallback;
+    return override;
 }
 
 /** Where the MCP server publishes the resolved state. */
