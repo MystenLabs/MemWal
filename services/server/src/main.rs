@@ -709,10 +709,9 @@ async fn init_apalis_pool(
     // `lock_timeout` is intentionally omitted. A leaked session lock_timeout
     // on a transaction-mode pooler backend is what aborted sqlx migrate
     // (15s wait → panic). Migrate now uses the direct host, but we still
-    // don't put lock_timeout on pooled backends. statement_timeout and
-    // idle_in_transaction_session_timeout bound queries without aborting
-    // lock waits; if they leak onto another pooler client they are still
-    // a bound, not a migrate-killer.
+    // don't put lock_timeout on pooled backends. statement_timeout is later,
+    // not exempt: it covers the lock wait too, so it still cancels a blocked
+    // statement, just at 300s instead of 15s.
     let statement_timeout = format!("{}ms", startup_timeout.as_millis().min(300_000));
     let pool_future = PgPoolOptions::new()
         .max_connections(10)

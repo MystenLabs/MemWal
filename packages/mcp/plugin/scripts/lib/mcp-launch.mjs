@@ -41,9 +41,11 @@
  *     package contents: it establishes *where* the code came from and that nobody
  *     else can write it, not that the registry served what a reviewer read.
  *
- * The version pin lives in exactly one place — `plugin/plugin.json`'s `version`,
- * which the release verifier already keeps equal to `packages/mcp/package.json` —
- * so the manifests cannot drift from the version that actually gets installed.
+ * The version pin lives in exactly one place — `plugin/plugin.json` — so the
+ * manifests cannot drift from the version that actually gets installed. It is
+ * that file's `version`, which the release verifier keeps equal to
+ * `packages/mcp/package.json`, unless `mcpPackageVersion` overrides it for the
+ * window where the release version is bumped in-tree but not yet on npm.
  */
 import {
     existsSync,
@@ -79,14 +81,18 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 export const PLUGIN_ROOT = dirname(dirname(SCRIPT_DIR));
 
 /**
- * The single source of truth for the version the plugin launches.
- * Kept equal to packages/mcp/package.json by scripts/verify-manual-sdk-release.mjs.
+ * The single source of truth for the version the plugin launches: `version`, kept
+ * equal to packages/mcp/package.json by scripts/verify-manual-sdk-release.mjs, or
+ * `mcpPackageVersion` while that release version is not yet published — installing
+ * a version npm does not have fails the launch outright.
  */
 export function pinnedVersion(pluginRoot = PLUGIN_ROOT) {
     const manifest = JSON.parse(readFileSync(join(pluginRoot, "plugin.json"), "utf8"));
-    const version = manifest.version;
+    const version = manifest.mcpPackageVersion ?? manifest.version;
     if (typeof version !== "string" || version.trim() === "") {
-        throw new Error(`${join(pluginRoot, "plugin.json")} has no usable "version"`);
+        throw new Error(
+            `${join(pluginRoot, "plugin.json")} has no usable "mcpPackageVersion" or "version"`,
+        );
     }
     return version;
 }

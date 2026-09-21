@@ -354,8 +354,13 @@ async function probeRelayer(name, rawBase, target) {
       }
     }
 
-    const writesPaused = isRecord(health) && health.writes === 'paused'
-    const reportedOk = isRecord(health) && health.status === 'ok' && !writesPaused
+    const writes = isRecord(health) ? health.writes : undefined
+    // /health stays HTTP 200 + status:"ok" through a Walrus outage so CI's
+    // wait-for-relayer gate does not hang. The write-path signal is `writes`.
+    // Allowlist: a fourth writes value must not silently become operational
+    // the way degraded did before this PR. Missing writes (old relayer) is ok.
+    const reportedOk =
+      isRecord(health) && health.status === 'ok' && (writes === 'ok' || writes === undefined)
     const status = response.ok ? (reportedOk ? 'operational' : 'degraded') : 'outage'
 
     return {

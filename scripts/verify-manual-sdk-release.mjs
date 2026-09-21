@@ -11,7 +11,7 @@ const releases = [
     },
     {
         name: "Python SDK",
-        version: "0.1.10",
+        version: "0.1.11",
         manifests: [
             ["packages/python-sdk-memwal/pyproject.toml", "toml-version"],
             ["packages/python-sdk-memwal/memwal/__init__.py", "python-version"],
@@ -68,8 +68,21 @@ for (const release of releases) {
 // there could answer to the pinned spec (WALM-640). Every launch site must run the
 // plugin's launcher, which installs the pin under ~/.memwal/runtime and runs that
 // absolute entry point. The pin itself is plugin/plugin.json's version, already
-// checked against packages/mcp/package.json above.
+// checked against packages/mcp/package.json above — or its `mcpPackageVersion`,
+// which names the published prerelease to install while that release version is
+// not yet on npm. A pin the registry cannot serve fails the launch outright, so the
+// override may only name a prerelease of the release it stands in for, and it has
+// to go when that release is published.
 const mcpVersion = JSON.parse(readFileSync("packages/mcp/package.json", "utf8")).version;
+const pinOverride = JSON.parse(
+    readFileSync("packages/mcp/plugin/plugin.json", "utf8"),
+).mcpPackageVersion;
+if (pinOverride !== undefined && !pinOverride.startsWith(`${mcpVersion}-`)) {
+    throw new Error(
+        `packages/mcp/plugin/plugin.json: "mcpPackageVersion" is ${pinOverride}, which is not ` +
+            `a prerelease of ${mcpVersion}; drop it once ${mcpVersion} is on npm`,
+    );
+}
 const LAUNCHER = "scripts/launch_mcp.mjs";
 for (const [pluginPath, rootPlaceholder] of [
     ["packages/mcp/plugin/.mcp.json", "${CLAUDE_PLUGIN_ROOT}"],

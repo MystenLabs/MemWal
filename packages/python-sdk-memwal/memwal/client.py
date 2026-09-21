@@ -35,7 +35,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
-from urllib.parse import ParseResult, urlparse
+from urllib.parse import ParseResult, urlencode, urlparse
 
 import httpx
 import nacl.signing
@@ -50,6 +50,8 @@ from .types import (
     EmbedResult,
     HealthResult,
     MemWalConfig,
+    NamespacesResult,
+    NamespaceSummary,
     RecallManualHit,
     RecallManualOptions,
     RecallManualResult,
@@ -289,6 +291,8 @@ class MemWal:
         self._session_build_task: Optional[asyncio.Task[str]] = None
         self._relayer_version_metadata: Optional[Dict[str, Any]] = None
         self._compatibility_lock: Optional[asyncio.Lock] = None
+        self._owner_address: Optional[str] = None
+        self._owner_task: Optional[asyncio.Task[str]] = None
         # Preserve a generated key across an ambiguous transport failure. A
         # subsequent identical call then collapses onto the accepted paid job.
         self._pending_remember_keys: Dict[str, str] = {}
@@ -962,6 +966,72 @@ class MemWal:
             failed=data.get("failed", 0),
         )
 
+    async def list_namespaces(
+        self,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> NamespacesResult:
+        """List the namespaces this account holds memories in.
+
+        Recall needs a namespace to search. Without this, an agent on an
+        unfamiliar account has to guess names or fall back to ``"default"``.
+        Returns metadata only: no blob fetch, no decryption.
+
+        Namespaces are flat and exact-match. To work with a prefix such as
+        ``proj/``, filter the names here and recall each one.
+
+        Paginate on ``has_more``, NOT page length: the relayer clamps
+        ``limit``, so asking for more than the cap returns exactly the cap.
+
+        Example::
+
+            cursor = None
+            while True:
+                page = await memwal.list_namespaces(cursor=cursor)
+                for ns in page.namespaces:
+                    print(ns.name, ns.memory_count)
+                cursor = page.next_cursor
+                if not page.has_more:
+                    break
+
+        Args:
+            cursor: A previous page's ``next_cursor``, to continue a walk or
+                poll for namespaces changed since then. Opaque; not a
+                timestamp or a namespace name.
+            limit: Page size. The relayer defaults to 100 and clamps to 500.
+
+        Returns:
+            :class:`NamespacesResult`.
+        """
+        owner = await self._resolve_owner()
+
+        params: Dict[str, str] = {}
+        if cursor is not None:
+            params["updated_after"] = cursor
+        if limit is not None:
+            params["limit"] = str(limit)
+        query = urlencode(params)
+
+        # The query string is part of the signed path: the relayer verifies
+        # against `path_and_query`, not `path`.
+        path = f"/v1/owners/{owner}/namespaces" + (f"?{query}" if query else "")
+        data = await self._signed_request("GET", path, {}, include_seal_session=False)
+        return NamespacesResult(
+            namespaces=[
+                NamespaceSummary(
+                    id=ns["id"],
+                    name=ns["name"],
+                    memory_count=ns["memory_count"],
+                    storage_used=ns["storage_used"],
+                    updated_at=ns["updated_at"],
+                )
+                for ns in data["namespaces"]
+            ],
+            next_cursor=data.get("next_cursor"),
+            has_more=data["has_more"],
+            snapshot_version=data["snapshot_version"],
+        )
+
     async def health(self) -> HealthResult:
         """Check server health. No authentication required.
 
@@ -1254,6 +1324,43 @@ class MemWal:
             return await self._session_build_task
         finally:
             self._session_build_task = None
+
+    async def _resolve_owner_inner(self) -> str:
+        # POST /api/stats authenticates with the same delegate scheme and
+        # returns the owner the relayer resolved from our key. Same approach
+        # as the TypeScript SDK's resolveOwner().
+        data = await self._signed_request(
+            "POST",
+            "/api/stats",
+            {"namespace": self._namespace},
+            include_seal_session=False,
+        )
+        owner = data.get("owner")
+        if not owner:
+            raise MemWalError(
+                "Walrus Memory could not resolve this account's owner address "
+                "(POST /api/stats returned no owner)."
+            )
+        self._owner_address = owner
+        return owner
+
+    async def _resolve_owner(self) -> str:
+        """Owner address for this account, memoised for the client's life.
+
+        The owner-scoped read routes take the address in the path, but the
+        client is configured with only a delegate key and account id.
+        """
+        if self._owner_address is not None:
+            return self._owner_address
+
+        if self._owner_task is not None:
+            return await self._owner_task
+
+        self._owner_task = asyncio.create_task(self._resolve_owner_inner())
+        try:
+            return await self._owner_task
+        finally:
+            self._owner_task = None
 
     async def _signed_request(
         self,
@@ -1667,6 +1774,14 @@ class MemWalSync:
         """Synchronous version of :meth:`MemWal.restore`. Default limit is 10
         (matches server + TypeScript SDK)."""
         return self._run(self._inner.restore(namespace, limit))
+
+    def list_namespaces(
+        self,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> NamespacesResult:
+        """Synchronous version of :meth:`MemWal.list_namespaces`."""
+        return self._run(self._inner.list_namespaces(cursor, limit))
 
     def health(self) -> HealthResult:
         """Synchronous version of :meth:`MemWal.health`."""
