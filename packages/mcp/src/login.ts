@@ -52,9 +52,10 @@ export interface LoginOptions {
      * can't see the spawned browser tab.
      */
     onUrl?: (connectUrl: string) => void;
+    freshKey?: boolean;
 }
 
-const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl">> & { label: string } = {
+const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl" | "freshKey">> & { label: string } = {
     webUrl: process.env.MEMWAL_WEB_URL ?? "https://memory.walrus.xyz",
     relayerUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
     label: process.env.MEMWAL_CLIENT_LABEL ?? "Walrus Memory MCP",
@@ -222,7 +223,7 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
     // timed-out login followed by `memwal_login` in the same process would
     // otherwise replace the only copy of a key the browser may already have
     // paid to register.
-    const reusable = reusablePendingLogin(cfg.relayerUrl);
+    const reusable = opts.freshKey ? null : reusablePendingLogin(cfg.relayerUrl);
     if (reusable) {
         log.info("login.pending.reused", {
             publicKey: reusable.delegatePublicKeyHex,
