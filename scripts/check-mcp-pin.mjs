@@ -17,6 +17,12 @@
  * Two findings, deliberately unequal:
  *
  *   ERROR   the pin is not published. The launcher cannot install it. Blocking.
+ *           One exception: on a ref headed for `main`, a pin equal to
+ *           packages/mcp/package.json's version is the release being cut, and
+ *           release-mcp.yml publishes exactly that from this tree moments later.
+ *           Erroring there would redden every release. The exception is scoped to
+ *           `main` on purpose: `dev` pinning an unpublished release version is
+ *           precisely the 2026-09-17 bug, and must stay an error.
  *
  *   WARNING the pin is published but is not what the dist-tag for this branch
  *           points at. Not blocking, because it cannot be: pushing to `dev`
@@ -32,6 +38,7 @@ import path from "node:path";
 
 const PACKAGE = "@mysten-incubation/memwal-mcp";
 const MANIFEST = "packages/mcp/plugin/plugin.json";
+const PACKAGE_JSON = "packages/mcp/package.json";
 const REGISTRY = "https://registry.npmjs.org";
 
 /** Which dist-tag this ref is supposed to be tracking. */
@@ -101,6 +108,25 @@ async function main() {
     ];
 
     if (!versions.includes(pin)) {
+        // The release being cut is allowed to pin ahead of npm: release-mcp.yml
+        // publishes packages/mcp/package.json's version from this very tree a
+        // moment after the push. Only on a ref headed for `main`, though —
+        // `dev` pinning an unpublished release version is the bug this exists
+        // to catch.
+        const releasing =
+            tag === "latest"
+            && pin === JSON.parse(fs.readFileSync(path.join(process.cwd(), PACKAGE_JSON), "utf8")).version;
+        if (releasing) {
+            annotate(
+                "warning",
+                `${MANIFEST} pins ${pin}, which npm does not carry yet. That is the release ` +
+                    `this ref publishes, so it is expected here — but nothing has verified the ` +
+                    `publish succeeded. Check the release job before announcing it.`,
+            );
+            summary.push(`Pinned to \`${pin}\`, the release this ref publishes. Not on npm yet.`);
+            summarise(summary);
+            return;
+        }
         annotate(
             "error",
             `${MANIFEST} pins ${PACKAGE}@${pin}, which is not published. ` +
