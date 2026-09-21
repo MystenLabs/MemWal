@@ -152,6 +152,45 @@ Credentials are stored locally in `~/.memwal/credentials.json`. To remove them:
 npx -y @mysten-incubation/memwal-mcp --logout
 ```
 
+### Per-project credentials
+
+A project can keep its own `.memwal/credentials.json` so memory written from it
+goes to a separate account. That file lives inside the repository, where anyone
+who can commit to it — or who can get you to open a clone — could otherwise
+choose the account and relayer your memories go to. So it is **ignored until you
+approve it**, once per machine:
+
+```sh
+cd path/to/project
+npx -y @mysten-incubation/memwal-mcp approve-project
+```
+
+Until then the global credentials are used, and a line on stderr names the file
+that was skipped and the destination it wanted. An approval covers one exact
+project path, account, delegate key and relayer: if any of those change, it has
+to be approved again. The record is kept in `~/.memwal/project-approvals.json`,
+outside the repository, so a repository cannot carry its own approval.
+`revoke-project` withdraws it.
+
+Approving also picks the file that is **written**: a later sign-in from that
+project saves a delegate private key into `.memwal/credentials.json` in plain
+text, inside the repository. `approve-project` says so, and so does the sign-in
+warning. Add `.memwal/` to your `.gitignore`. (The short-lived login
+write-ahead record is kept outside the repository either way.)
+
+`MEMWAL_CREDS_DIR` points both the credentials and the approval record at a
+directory of your choosing and overrides project resolution entirely, with no
+approval. Because it skips the gate, it must be an **absolute path outside the
+current project**: a relative value would resolve against the working directory
+and put the approval record inside the repository, and an MCP client passes on
+the `env` block it reads from `.cursor/mcp.json` / `.vscode/mcp.json` /
+`.claude/settings.json` in the checkout — where `${workspaceFolder}` is expanded,
+so an in-project absolute path is not proof you chose it. Anything else is
+refused with an error naming the value, rather than quietly ignored. An empty
+value means unset.
+
+`memwal_health` reports the destination in use as `account=… relayer=…`.
+
 ## License
 
 Apache-2.0

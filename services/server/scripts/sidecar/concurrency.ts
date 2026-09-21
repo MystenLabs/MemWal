@@ -126,7 +126,8 @@ export async function acquireWalrusUploadSlots(
         queuedWalrusUploads = Math.max(0, queuedWalrusUploads - 1);
         activeWalrusUploads += 1;
 
-        const waitMs = Date.now() - startedAt;
+        const acquiredAt = Date.now();
+        const waitMs = acquiredAt - startedAt;
         if (waitMs >= 1_000) {
             console.warn(`[walrus/upload] [${traceId}] limiter_acquired ${JSON.stringify({
                 jobId,
@@ -136,15 +137,37 @@ export async function acquireWalrusUploadSlots(
             })}`);
         }
 
+        // The underlying AsyncSemaphore release is not one-shot: a second call
+        // can free capacity a successor still holds. Keep the returned callback
+        // idempotent so route `finally` + error-path cleanup cannot over-release.
+        let released = false;
         return () => {
+            if (released) return;
+            released = true;
             activeWalrusUploads = Math.max(0, activeWalrusUploads - 1);
             releaseGlobal?.();
             releaseWallet?.();
+            console.log(`[walrus/upload] [${traceId}] limiter_released ${JSON.stringify({
+                jobId,
+                keyIndex,
+                waitMs,
+                heldMs: Date.now() - acquiredAt,
+                counts: getUploadCounts(),
+                limits: walrusUploadLimitSnapshot(keyIndex),
+            })}`);
         };
     } catch (err) {
         queuedWalrusUploads = Math.max(0, queuedWalrusUploads - 1);
         releaseGlobal?.();
         releaseWallet?.();
+        console.warn(`[walrus/upload] [${traceId}] limiter_acquire_failed ${JSON.stringify({
+            jobId,
+            keyIndex,
+            waitMs: Date.now() - startedAt,
+            error: err instanceof Error ? err.message : String(err),
+            counts: getUploadCounts(),
+            limits: walrusUploadLimitSnapshot(keyIndex),
+        })}`);
         throw err;
     }
 }
