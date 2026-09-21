@@ -6,7 +6,9 @@ import { wrapTool, walruscanBlobUrl, explorerFooter } from "./util.js";
 import {
     REMEMBER_POLL_INTERVAL_MS,
     isStillRunning,
+    isRateLimited,
     nameJobError,
+    rateLimitedError,
     withAcceptDeadline,
     withWaitDeadline,
 } from "./remember-wait.js";
@@ -110,33 +112,14 @@ export function registerRememberStatusTool(
                 // sleeps before its first poll, so a 0ms deadline would
                 // return "still running" without ever asking the relayer.
                 if (budget === 0) {
-                    const status = await withAcceptDeadline(
-                        session.memwal.getRememberStatus(job_id),
-                        "status read",
-                        { idempotent: true },
+                    return settleFromStatus(
+                        job_id,
+                        await withAcceptDeadline(
+                            session.memwal.getRememberStatus(job_id),
+                            "status read",
+                            { idempotent: true },
+                        ),
                     );
-                    if (status.status === "done") {
-                        return saved(status.blob_id ?? "", status.namespace);
-                    }
-                    if (status.status === "failed") {
-                        throw nameJobError(
-                            Object.assign(
-                                new Error(
-                                    `remember job failed: ${status.error ?? "unknown error"}`
-                                ),
-                                { status: 500, jobId: job_id }
-                            )
-                        );
-                    }
-                    if (status.status === "not_found") {
-                        throw nameJobError(
-                            Object.assign(
-                                new Error(`remember job not found: ${job_id}`),
-                                { status: 404, jobId: job_id }
-                            )
-                        );
-                    }
-                    return stillRunning(job_id, status.status);
                 }
 
                 try {
@@ -149,7 +132,32 @@ export function registerRememberStatusTool(
                     );
                     return saved(result.blob_id, result.namespace);
                 } catch (err) {
-                    if (isStillRunning(err)) return stillRunning(job_id);
+                    if (isStillRunning(err)) {
+                        // Same masking as the batch path: the SDK's poll loop
+                        // hides a refused poll behind its own timeout, so
+                        // confirm with one direct read before calling it
+                        // progress. Interpret the probe OUTSIDE the catch so
+                        // a terminal job (`failed` / `not_found`) is not
+                        // swallowed back into "still uploading".
+                        let status;
+                        try {
+                            status = await withAcceptDeadline(
+                                session.memwal.getRememberStatus(job_id),
+                                "status read",
+                                { idempotent: true },
+                            );
+                        } catch (probe) {
+                            if (isRateLimited(probe)) {
+                                throw rateLimitedError(
+                                    probe,
+                                    "check whether the write landed"
+                                );
+                            }
+                            // A failed read is not evidence about the job.
+                            return stillRunning(job_id);
+                        }
+                        return settleFromStatus(job_id, status);
+                    }
                     throw nameJobError(err);
                 }
             }
@@ -173,7 +181,7 @@ async function settleBatch(
     // A zero budget is a single batched read, the same shortcut the one-job
     // path takes: `waitForRememberJobs` sleeps before its first poll, so a 0ms
     // deadline would report everything as still running without ever asking.
-    const rows =
+    let rows =
         budgetMs === 0
             ? (
                   await withAcceptDeadline(
@@ -201,6 +209,53 @@ async function settleBatch(
                   blob_id: r.blob_id,
                   error: r.error,
               }));
+
+    // `waitForRememberJobs` polls internally and swallows each poll's error,
+    // stamping every row "polling timed out" when the budget runs out. A batch
+    // whose polls were all REFUSED — a 429 on the status endpoint — is
+    // therefore indistinguishable from one that is genuinely still uploading,
+    // and reporting the refusal as progress is what sends an agent back to
+    // poll again on a budget it has already spent.
+    //
+    // Nothing moving at all is the shape that refusal takes, so confirm it
+    // with one direct read. Only then: if any row settled, the polls were
+    // clearly getting through and no probe is warranted.
+    const nothingMoved =
+        budgetMs > 0 && rows.length > 0 && rows.every((r) => r.status === "timeout");
+    if (nothingMoved) {
+        try {
+            const probed = await withAcceptDeadline(
+                session.memwal.getRememberBulkStatus(jobIds),
+                "batch status read",
+                { idempotent: true },
+            );
+            // Merge by job id rather than replacing the list. The relayer is
+            // not obliged to echo one row per requested id in the order asked:
+            // omit the ids it cannot find and a wholesale replace would drop
+            // them from the report entirely, so a job that vanished between
+            // the wait and the probe is never mentioned and the caller never
+            // learns it has to re-send that fact. Keep every id, and take the
+            // probe's answer only where it gave one.
+            const byId = new Map(probed.results.map((r) => [r.job_id, r]));
+            rows = rows.map((row) => {
+                const fresh = byId.get(row.id);
+                if (!fresh) return row;
+                return {
+                    id: row.id,
+                    status: fresh.status,
+                    blob_id: fresh.blob_id ?? "",
+                    error: fresh.error,
+                };
+            });
+        } catch (err) {
+            if (isRateLimited(err)) {
+                throw rateLimitedError(err, "check whether the writes landed");
+            }
+            // Any other probe failure is not evidence about the jobs; fall
+            // back to what the wait already reported rather than inventing an
+            // outcome from a failed read.
+        }
+    }
 
     // `timeout` (the waited path) and pending/running/uploaded (the immediate
     // read) are the same thing to a caller: still in flight, ask again.
@@ -251,6 +306,37 @@ async function settleBatch(
     if (done.length) parts.push(explorerFooter());
 
     return { content: [{ type: "text" as const, text: parts.join("\n\n") }] };
+}
+
+/** Map a job-status read onto the three outcomes this tool keeps distinct.
+ *
+ * Shared by the zero-budget path and the confirming probe after a wait
+ * timeout, so a terminal job cannot be reported as still uploading on one
+ * path and as an error on the other. */
+function settleFromStatus(
+    jobId: string,
+    status: { status: string; blob_id?: string; namespace?: string; error?: string },
+) {
+    if (status.status === "done") {
+        return saved(status.blob_id ?? "", status.namespace);
+    }
+    if (status.status === "failed") {
+        throw nameJobError(
+            Object.assign(
+                new Error(`remember job failed: ${status.error ?? "unknown error"}`),
+                { status: 500, jobId },
+            ),
+        );
+    }
+    if (status.status === "not_found") {
+        throw nameJobError(
+            Object.assign(new Error(`remember job not found: ${jobId}`), {
+                status: 404,
+                jobId,
+            }),
+        );
+    }
+    return stillRunning(jobId, status.status);
 }
 
 function saved(blobId: string, namespace?: string) {
