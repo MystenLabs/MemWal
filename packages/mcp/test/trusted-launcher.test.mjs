@@ -306,6 +306,53 @@ test("no plugin launch manifest resolves the server through npx", () => {
     assert.match(installer, /launch_mcp\.mjs/);
 });
 
+test("the pinned MCP version is the release this plugin is, or a prerelease of it", () => {
+    const manifest = JSON.parse(readFileSync(join(PLUGIN_DIR, "plugin.json"), "utf8"));
+    const pin = manifest.mcpPackageVersion;
+
+    assert.equal(typeof pin, "string", "plugin.json must carry mcpPackageVersion");
+    assert.match(
+        pin,
+        /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/,
+        `mcpPackageVersion is not a semver: ${pin}`,
+    );
+
+    // The field exists so `version` can name the release being prepared while the
+    // launcher installs something npm actually carries — installing a version npm
+    // does not have fails the launch outright. That only works while the two stay
+    // tied. Bump `version` for the next release and leave `mcpPackageVersion` on a
+    // prerelease of the previous one and nothing breaks loudly: every install
+    // quietly keeps serving the older client, which is how 0.0.14-dev.0 outlived
+    // the relayer change that made its own instructions wrong. So: either the
+    // release itself, or a prerelease of it. Nothing else.
+    assert.ok(
+        pin === manifest.version || pin.startsWith(`${manifest.version}-`),
+        `mcpPackageVersion ${pin} is neither ${manifest.version} nor a prerelease of it`,
+    );
+
+    assert.equal(
+        pinnedVersion(PLUGIN_DIR),
+        pin,
+        "the launcher must install exactly what plugin.json pins",
+    );
+});
+
+test("pinnedVersion prefers mcpPackageVersion, falls back to version, and refuses neither", (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "memwal-plugin-manifest-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const write = (manifest) =>
+        writeFileSync(join(dir, "plugin.json"), JSON.stringify(manifest));
+
+    write({ version: "9.9.9", mcpPackageVersion: "9.9.9-dev.3" });
+    assert.equal(pinnedVersion(dir), "9.9.9-dev.3");
+
+    write({ version: "9.9.9" });
+    assert.equal(pinnedVersion(dir), "9.9.9", "an absent mcpPackageVersion falls back to version");
+
+    write({ version: "   " });
+    assert.throws(() => pinnedVersion(dir), /no usable/, "a blank version is not a pin");
+});
+
 /* ------------------------------------------------------------------------- *
  * Review follow-ups (WALM-640): an absolute runtime root is not a trusted
  * runtime root, and the install step must not execute what it has not verified.
