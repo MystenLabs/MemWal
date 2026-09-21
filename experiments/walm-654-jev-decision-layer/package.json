@@ -1,0 +1,15 @@
+{
+  "name": "walm-654-jev-decision-layer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase-1 spike: evaluate Jev as a decision/routing layer after Walrus Memory recall (WALM-654)",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "bench": "node src/run.js",
+    "bench:mock": "TYPESAFE_API_KEY= node src/run.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
