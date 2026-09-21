@@ -34,6 +34,7 @@ function hasBridgeAuth(req) {
 function startMockRelayer(onHealth) {
     const sessions = new Map();
     let sseGetCount = 0;
+    let recallPosts = 0;
     let swallowed = null;
     const mock = {};
     const server = http.createServer((req, res) => {
@@ -110,6 +111,7 @@ function startMockRelayer(onHealth) {
                     return;
                 }
                 if (msg.method === "tools/call" && msg.params?.name === "memwal_recall") {
+                    recallPosts += 1;
                     swallowed = { session, id: msg.id };
                 }
             });
@@ -120,6 +122,15 @@ function startMockRelayer(onHealth) {
     Object.assign(mock, {
         server,
         getSseGetCount: () => sseGetCount,
+        getRecallPosts: () => recallPosts,
+        /** End every open SSE stream, as a relayer restart or a proxy would.
+         * The bridge sees EOF and reconnects. */
+        dropSse: () => {
+            for (const [id, session] of sessions) {
+                sessions.delete(id);
+                session.res.end();
+            }
+        },
         releaseSwallowed: () => {
             if (!swallowed) return false;
             swallowed.session.res.write(
@@ -283,5 +294,25 @@ test("a reply that lands while the health check runs is delivered, and nothing e
     assert.notEqual(reply.result?.isError, true);
     // Give the probe time to settle and prove it writes nothing.
     await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(received.filter((m) => m.id === 2).length, 1);
+});
+
+test("a reconnect while the health check runs does not send the expired call again", async (t) => {
+    // The deadline fired, the probe is in flight, and then the stream dies.
+    // The reconnect replays what is still in flight — but not this call: the
+    // sweeper is already answering it as failed, and a second POST would run
+    // it twice, which for a write with no idempotency key stores it twice.
+    const mock = await startMockRelayer((_req, res, self) => {
+        self.dropSse();
+        setTimeout(() => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ status: "ok", version: "9.9.9" }));
+        }, 1200);
+    });
+    const { reply, received } = await recallAgainst(t, mock);
+    assert.equal(reply.result?.isError, true);
+    assert.match(textOf(reply), /did not answer this call/);
+    assert.ok(mock.getSseGetCount() >= 2, "the stream really was reopened");
+    assert.equal(mock.getRecallPosts(), 1, "the expired call was not posted a second time");
     assert.equal(received.filter((m) => m.id === 2).length, 1);
 });

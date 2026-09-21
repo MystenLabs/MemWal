@@ -476,6 +476,13 @@ interface InFlightEntry {
     /** Set while the sweeper asks the relayer's `/health` why this sent call
      * went unanswered, so the next sweep does not probe it again. */
     probing?: boolean;
+    /** Set once the sweeper has decided this sent call's reply is lost and it
+     * is being answered as failed. A replay would post it a second time — a
+     * duplicate write for a tool with no idempotency key — while the agent is
+     * told the call never ran, so `reconnect()` skips these. Never cleared,
+     * unlike `probing`: the call is past its deadline whichever way the answer
+     * goes. */
+    orphaned?: boolean;
 }
 
 /** The relayer rejected the saved delegate key (HTTP 401 on the handshake).
@@ -1531,6 +1538,15 @@ export async function runBridge(
                             log.info("bridge.replay_halted_signed_out", { id });
                             break;
                         }
+                        // The sweeper already declared this call's reply lost
+                        // and is answering it as failed. Posting it again would
+                        // run it a second time — a duplicate write for a tool
+                        // with no idempotency key — and the reply would be
+                        // dropped anyway, as a late answer for a closed-out id.
+                        if (entry.orphaned) {
+                            log.info("bridge.replay_skipped_orphaned", { id });
+                            continue;
+                        }
                         const msg = entry.msg;
                         try {
                             // A replayed `initialize` produces a fresh upstream
@@ -2488,6 +2504,9 @@ export async function runBridge(
                 // probe; the bookkeeping stays synchronous.
                 if (entry.probing) continue;
                 entry.probing = true;
+                // From here the call is the sweeper's to answer: a reconnect
+                // must not replay it behind the probe's back.
+                entry.orphaned = true;
                 const relayerUrl = creds?.relayerUrl ?? config.relayerUrl;
                 // `probeRelayerHealth` does not reject, but a call left with
                 // `probing` set and no answer is the one outcome this path

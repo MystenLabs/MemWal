@@ -53,9 +53,10 @@ test("recall tells the relayer how long it will wait", async () => {
 
     await client().recall({ query: "current task" });
 
-    // The same number the request is aborted at, so the relayer's cut-off
-    // (this minus its margin) always lands first.
-    assert.equal(sent.body.deadline_ms, 15_000);
+    // A second under the 15s the request is aborted at. The relayer counts its
+    // own margin from arrival, so without this gap a slow connect would leave
+    // the 504 landing after the abort it is meant to beat.
+    assert.equal(sent.body.deadline_ms, 14_000);
 });
 
 test("a relayer recall timeout reaches the caller with its code and stage", async () => {

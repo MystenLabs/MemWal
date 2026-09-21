@@ -35,7 +35,7 @@ answer: >-
 
 ### Added
 
-- `recall()` sends its own deadline as `deadline_ms` (15000) in the request body. A relayer that reads it answers a recall about to miss that deadline with a 504 whose `serverCode` is `RECALL_TIMEOUT` and whose body names the stuck step (`auth`, `embed`, `vector_search`, `walrus_download`, `seal_decrypt`), instead of the request aborting with no cause. Relayers that predate the field ignore it. (WALM-396)
+- `recall()` sends its own deadline as `deadline_ms` (14000, a second under the 15s it aborts at, so the relayer's answer beats the abort even on a slow connect) in the request body. A relayer that reads it answers a recall about to miss that deadline with a 504 whose `serverCode` is `RECALL_TIMEOUT` and whose body names the stuck step (`auth`, `embed`, `vector_search`, `walrus_download`, `seal_decrypt`), instead of the request aborting with no cause. Relayers that predate the field ignore it. (WALM-396)
 
 ### Fixed
 
