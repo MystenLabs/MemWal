@@ -154,15 +154,57 @@ Credentials are stored locally in `~/.memwal/credentials.json`. To remove them:
 npx -y @mysten-incubation/memwal-mcp --logout
 ```
 
-A sign-in that is still in flight also writes `login-pending.json` beside that
-file, in whichever directory `credentials.json` resolves to — `MEMWAL_CREDS_DIR`
-moves both. It holds the delegate keypair minted for that sign-in, and it is
-written before the browser can register the public half on-chain so an
-interrupted login can be reclaimed instead of paid for a second time. Same
-owner-only mode `0600` as `credentials.json`.
+A sign-in that is still in flight also writes a `login-pending.json`
+write-ahead record, beside `credentials.json` in `~/.memwal`. It holds the
+delegate keypair minted for that sign-in, written before the browser can
+register the public half on-chain so an interrupted login can be reclaimed
+instead of paid for a second time. Same owner-only mode `0600` as
+`credentials.json`.
 
 It is removed once the sign-in completes, on `--logout`, and on a successful
-recovery at the next start. A record older than 24 hours is discarded unread.
+recovery at the next start. A record older than 24 hours is discarded rather
+than reused.
+
+### Per-project credentials
+
+A project can keep its own `.memwal/credentials.json` so memory written from it
+goes to a separate account. That file lives inside the repository, where anyone
+who can commit to it — or who can get you to open a clone — could otherwise
+choose the account and relayer your memories go to. So it is **ignored until you
+approve it**, once per machine:
+
+```sh
+cd path/to/project
+npx -y @mysten-incubation/memwal-mcp approve-project
+```
+
+Until then the global credentials are used, and a line on stderr names the file
+that was skipped and the destination it wanted. An approval covers one exact
+project path, account, delegate key and relayer: if any of those change, it has
+to be approved again. The record is kept in `~/.memwal/project-approvals.json`,
+outside the repository, so a repository cannot carry its own approval.
+`revoke-project` withdraws it.
+
+Approving also picks the file that is **written**: a later sign-in from that
+project saves a delegate private key into `.memwal/credentials.json` in plain
+text, inside the repository. `approve-project` says so, and so does the sign-in
+warning. Add `.memwal/` to your `.gitignore`. The write-ahead record is the one
+thing that stays out: a project sign-in keeps it in `~/.memwal/login-pending/`,
+one file per approved project, so no key material lands in the checkout and a
+sign-in is still reclaimable only by the project that started it.
+
+`MEMWAL_CREDS_DIR` points the credentials, the approval record and the
+write-ahead record at a directory of your choosing and overrides project
+resolution entirely, with no approval. Because it skips the gate, it must be an
+**absolute path outside the current project**: a relative value would resolve
+against the working directory and put the approval record inside the
+repository, and an MCP client passes on the `env` block it reads from
+`.cursor/mcp.json` / `.vscode/mcp.json` / `.claude/settings.json` in the
+checkout — where `${workspaceFolder}` is expanded, so an in-project absolute
+path is not proof you chose it. Anything else is refused with an error naming
+the value, rather than quietly ignored. An empty value means unset.
+
+`memwal_health` reports the destination in use as `account=… relayer=…`.
 
 ## License
 

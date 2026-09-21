@@ -93,3 +93,68 @@ test("a job that genuinely failed is still an error, not a pending result", asyn
     assert.equal((res as { isError?: boolean }).isError, true);
     assert.match(textOf(res), /failed/i);
 });
+
+test("a relayer that goes quiet mid-wait still hands back every bulk job_id", async (t) => {
+    // Same hole as the single-write case, on the path where it costs most: a
+    // batch loses N job_ids at once, and `waitForRememberJobs` reporting
+    // stragglers per item does not help — the throw comes from the deadline
+    // wrapper around it, before any per-item result exists.
+    const client = await clientFor({
+        oauthScope: "memwal:read memwal:write",
+        namespace: "default",
+        memwal: {
+            async rememberBulkAsync() {
+                return { job_ids: ["bulk-1", "bulk-2"], total: 2, status: "accepted" };
+            },
+            async waitForRememberJobs() {
+                const err = new Error("Walrus Memory stopped responding while waiting");
+                err.name = "MemWalRelayerUnresponsive";
+                throw err;
+            },
+        },
+    } as unknown as MemWalSession, t);
+
+    const text = textOf(
+        await client.callTool({
+            name: "memwal_remember_bulk",
+            arguments: { facts: ["first fact", "second fact"] },
+        }),
+    );
+    assert.match(text, /bulk-1/, `job_ids were dropped: ${text}`);
+    assert.match(text, /bulk-2/, `job_ids were dropped: ${text}`);
+    assert.doesNotMatch(text, /^Saved \d+\/\d+/m, "must not read as stored");
+});
+
+test("a relayer that goes quiet mid-wait keeps analyze's job_ids AND its facts", async (t) => {
+    // Analyze pays an LLM extraction before the writes are queued. Throwing
+    // away the wait discarded both the job_ids and that extraction, so the
+    // caller could neither settle the running writes nor recover the facts
+    // without paying for them again.
+    const client = await clientFor({
+        oauthScope: "memwal:read memwal:write",
+        namespace: "default",
+        memwal: {
+            async analyze() {
+                return {
+                    job_ids: ["an-1", "an-2"],
+                    facts: [{ text: "drinks oat milk" }, { text: "ships on Fridays" }],
+                    status: "accepted",
+                };
+            },
+            async waitForRememberJobs() {
+                const err = new Error("Walrus Memory stopped responding while waiting");
+                err.name = "MemWalRelayerUnresponsive";
+                throw err;
+            },
+        },
+    } as unknown as MemWalSession, t);
+
+    const text = textOf(
+        await client.callTool({
+            name: "memwal_analyze",
+            arguments: { text: "a transcript worth extracting from" },
+        }),
+    );
+    assert.match(text, /an-1/, `job_ids were dropped: ${text}`);
+    assert.match(text, /drinks oat milk/, `extracted facts were dropped: ${text}`);
+});
