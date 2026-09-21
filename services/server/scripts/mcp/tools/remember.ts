@@ -56,7 +56,7 @@ export function registerRememberTool(
         {
             ...TOOL_METADATA.memwal_remember,
             description:
-                "Save a durable fact about the user or project to their Walrus Memory. Call this whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — PROACTIVELY, without being asked, when they have turned automatic memory on. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. A Walrus write takes 30-60s and this call waits for it, so a success carries a blob_id and means the fact is stored. If it outruns that budget you get a job_id and the fact is NOT yet saved — say so rather than claiming it is stored, and resolve it with memwal_remember_status. " +
+                "Save a durable fact about the user or project to their Walrus Memory. Call this whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — PROACTIVELY, without being asked, when they have turned automatic memory on. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. By default this returns in ~1s once the relayer has accepted the job (job_id) — the Walrus write is still in flight and the fact is NOT stored yet. Do not claim it is saved. Resolve with memwal_remember_status. A blob_id in the same reply means it did land inside an optional wait budget (MEMWAL_MCP_REMEMBER_WAIT_MS). " +
                 AUTO_SAVE_OPT_IN_RULE +
                 " " +
                 SECRET_EXCLUSION_RULES +

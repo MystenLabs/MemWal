@@ -128,9 +128,9 @@ A client-side timeout does not mean the save failed. The relayer accepts the wor
 
 **Symptom:** You save a memory, and an immediate recall finds nothing.
 
-**Cause:** A save returns once the Walrus upload completes, but the embedding and indexing step can lag a few seconds behind under load, so the memory is briefly unsearchable.
+**Cause:** MCP `memwal_remember` returns at accept by default (`job_id`). The fact is not on Walrus yet, so recall has nothing to find. Even after the write lands, embedding/indexing can lag a few seconds under load.
 
-**Fix:** Wait a moment, then retry the recall. If a memory is missing from the search index later, `memwal_restore` rebuilds the index for that namespace from Walrus.
+**Fix:** Do not treat the accept reply as stored. Settle with `memwal_remember_status` (or wait until the tool returns a `blob_id`). Then retry recall. If a memory is missing from the search index later, `memwal_restore` rebuilds the index for that namespace from Walrus. `MEMWAL_MCP_REMEMBER_WAIT_MS=90000` restores wait-for-`blob_id` on a client that raises the 60s tools/call ceiling.
 
 ## Quick reference
 

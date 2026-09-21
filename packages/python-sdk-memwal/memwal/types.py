@@ -229,6 +229,34 @@ class RestoreResult:
 
 
 @dataclass
+class NamespaceSummary:
+    """One namespace in a :meth:`MemWal.list_namespaces` page."""
+
+    id: str
+    name: str
+    memory_count: int
+    storage_used: int
+    #: ``MAX(updated_at)`` across the namespace's memories (RFC 3339), the
+    #: same value the relayer builds the keyset cursor from.
+    updated_at: str
+
+
+@dataclass
+class NamespacesResult:
+    """Result from list_namespaces()."""
+
+    namespaces: List[NamespaceSummary]
+    #: Pass back as ``cursor`` on the next call. Set on every page, including
+    #: the last, so a caller that finished a walk can poll from it later.
+    next_cursor: Optional[str]
+    #: Whether to keep paginating. Do NOT infer this from page length: the
+    #: relayer clamps ``limit``, so asking for more than the cap returns
+    #: exactly the cap.
+    has_more: bool
+    snapshot_version: int
+
+
+@dataclass
 class AskMemory:
     """A memory used to answer a question."""
 

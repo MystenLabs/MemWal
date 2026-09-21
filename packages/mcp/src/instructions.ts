@@ -17,10 +17,14 @@
  * services/server/scripts/mcp/server.ts, which serves the direct HTTP/OAuth
  * connector path. It cannot share this module: that file belongs to the
  * standalone `memwal-server-scripts` npm package with no workspace link here.
- * Keep the two in sync — the secret-exclusion paragraph is not retyped in
- * either, it comes from the shared policy block (memory-policy.ts here,
- * tools/memory-policy.ts there), which is pinned byte-for-byte by tests on
- * both sides.
+ * Keep the two in sync, except: this copy must not name a tool cold start
+ * does not advertise (`memwal_remember_status` is the worked example — GH
+ * #928). The sidecar copy may name it; that process actually registers the
+ * tool.
+ *
+ * The secret-exclusion paragraph is not retyped in either, it comes from the
+ * shared policy block (memory-policy.ts here, tools/memory-policy.ts there),
+ * which is pinned byte-for-byte by tests on both sides.
  *
  * WALM-642 split the REMEMBER section in two. Whether the model is told to
  * save unprompted now depends on the user having turned automatic memory on;
@@ -67,14 +71,13 @@ const REMEMBER_MANUAL = [
 ];
 
 const WRITE_CONTRACT = [
-    "A Walrus write takes roughly 30-60s, and memwal_remember and memwal_remember_bulk wait",
-    "for it: a successful call comes back with a blob_id, and that means the fact is stored.",
-    "",
-    "If a write outruns that budget the call returns job_ids instead, saying the facts are",
-    "ACCEPTED but NOT YET SAVED. That is the exception, not the normal result. When it",
-    "happens, say the facts are being saved rather than that they are saved, do NOT re-send",
-    "them — that queues duplicates — and resolve the ids with memwal_remember_status (it takes",
-    "job_id, or job_ids for a whole batch). Only a blob_id means a fact is stored.",
+    "By default memwal_remember and memwal_remember_bulk return in ~1s once the relayer has",
+    "accepted the job (job_id / job_ids). The Walrus write continues in the background (~30-60s)",
+    "and the fact is NOT stored yet. That is the normal result. Do not claim it is saved.",
+    "Do NOT re-send the same text — that queues duplicates. Settle it with the job-status tool",
+    "this server advertises (re-list tools if you do not see one; pass job_id, or job_ids for a",
+    "whole batch). Only a blob_id in the tool reply means the fact is already stored (that",
+    "happens when an optional wait budget was set and the write finished).",
     "",
     "Storage is append-only and encrypted: a fact that lands cannot be edited or deleted. That",
     "is why the exclusions below are absolute rather than a preference, and why the write path",
