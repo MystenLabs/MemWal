@@ -172,3 +172,31 @@ test("an unusable requestTimeoutMs falls back to the default rather than disabli
     }
     assert.equal(clientWith({ requestTimeoutMs: 1234 }).requestTimeoutMs, 1234);
 });
+
+test("a body that stalls after the headers is bounded too", { timeout: 10_000 }, async () => {
+    stubRelayer((path, init) => {
+        if (path !== "/api/remember") return Promise.reject(new Error(path));
+        return Promise.resolve({
+            ok: true,
+            status: 202,
+            headers: new Headers(),
+            json: () => hangUntilAborted(init),
+            text: () => hangUntilAborted(init),
+        });
+    });
+
+    const started = Date.now();
+    await assert.rejects(
+        clientWith({ requestTimeoutMs: 120 }).rememberAsync("a durable fact"),
+        (err) => {
+            assert.equal(err.name, "MemWalRequestTimeout");
+            assert.equal(err.status, 504);
+            assert.match(err.message, /POST \/api\/remember/);
+            return true;
+        },
+    );
+    assert.ok(
+        Date.now() - started < 2_000,
+        "the deadline should still be armed while the body is read",
+    );
+});
