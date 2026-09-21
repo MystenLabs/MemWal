@@ -294,7 +294,7 @@ export function normalizeServerUrl(url: string): string {
 /** Replace loopback URLs that leak sidecar topology into client-facing errors. */
 export function redactInternalUrls(text: string): string {
     return text.replace(
-        /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?[^ \t)\]>'"]*/gi,
+        /https?:\/\/(?:(?:[\w-]+\.)*localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|0\.0\.0\.0)(?::\d+)?[^ \t)\]>'"]*/gi,
         "[internal]",
     );
 }
