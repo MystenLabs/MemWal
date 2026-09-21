@@ -21,6 +21,18 @@ export interface MemWalConfig {
     serverUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
+    /**
+     * Deadline for a single relayer request, in milliseconds (default: 30000).
+     *
+     * `fetch` has no timeout of its own, so without this a stalled connection
+     * keeps a call pending for as long as the socket stays open — which is how
+     * a `remember` whose poll budget was 90s could still be running after two
+     * minutes. Endpoints that are legitimately slower (`restore`, `analyze`)
+     * carry their own larger deadline and ignore this.
+     *
+     * Raise it only for a genuinely slow link; it is a backstop, not a budget.
+     */
+    requestTimeoutMs?: number;
 }
 
 // ============================================================
@@ -165,6 +177,9 @@ export interface RecallOptions {
      *
      * For newest-wins, use `sort: "recent"` instead. It over-fetches
      * candidates server-side before ordering them by write-time.
+     *
+     * Ignored when `sort` is set: an explicit `sort`, `"relevance"` included,
+     * decides the order, and weights apply only when `sort` is omitted.
      */
     scoringWeights?: ScoringWeights;
     /**
@@ -179,6 +194,8 @@ export interface RecallOptions {
      * widens the candidate set; weights only re-rank the set that was already
      * returned, so weights alone cannot surface a record that fell outside
      * the window.
+     *
+     * Setting `sort` at all makes the relayer ignore `scoringWeights`.
      */
     sort?: "relevance" | "recent";
 }

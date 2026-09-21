@@ -50,3 +50,26 @@ test("recalled bytes are never inserted into a system message", () => {
     assert.equal(userMessages.length, 2);
     assert.equal(userMessages[0].content[0].text, attack);
 });
+
+test("the trust policy stays ahead of the first non-system message", () => {
+    const memory = "recalled fact";
+    const prompt = [
+        { role: "system", content: "be helpful" },
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "reply" }] },
+        { role: "user", content: [{ type: "text", text: "second" }] },
+    ];
+    const enriched = injectMemoryContext(prompt, memory);
+
+    const firstNonSystem = enriched.findIndex((message) => message.role !== "system");
+    assert.equal(
+        enriched.slice(firstNonSystem).some((message) => message.role === "system"),
+        false
+    );
+    assert.ok(
+        enriched.some(
+            (message) =>
+                message.role === "user" && message.content[0]?.text === memory
+        )
+    );
+});

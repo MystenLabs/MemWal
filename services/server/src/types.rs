@@ -1,3 +1,7 @@
+    /// Sanitized by `sanitize_job_error_for_client`, as on every other
+    /// client-facing job-status path: an infrastructure-funding failure is
+    /// replaced wholesale (its raw text names the relayer's own wallet and
+    /// balance), and long hex runs are redacted.
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -290,13 +294,30 @@ pub struct AppState {
 pub struct KeyPool {
     keys: Vec<String>,
     cursor: AtomicUsize,
+    /// Wallet transactions currently executing, per key.
+    ///
+    /// The sidecar enforces one upload at a time per wallet (concurrent
+    /// transactions from one signer can equivocate its owned objects, which
+    /// then stay locked until the epoch boundary). Blind round-robin does not
+    /// know that, so it hands a job to a wallet that is mid-upload while other
+    /// wallets sit idle — observed in production as a job waiting 6.2s for its
+    /// assigned wallet while the global limiter still had two free slots and
+    /// an empty queue.
+    ///
+    /// Counted per *executing attempt*, incremented and decremented inside one
+    /// scope by `WalletAttemptGuard`. Nothing crosses the job-queue boundary,
+    /// so a counter cannot drift: a restart zeroes it, which is accurate, and
+    /// every early return still releases because `Drop` runs.
+    inflight: Vec<AtomicUsize>,
 }
 
 impl KeyPool {
     pub fn new(keys: Vec<String>) -> Self {
+        let inflight = keys.iter().map(|_| AtomicUsize::new(0)).collect();
         Self {
             keys,
             cursor: AtomicUsize::new(0),
+            inflight,
         }
     }
 
@@ -318,6 +339,73 @@ impl KeyPool {
         }
     }
 
+    /// Returns the least-loaded key index, breaking ties in round-robin order.
+    ///
+    /// Join-shortest-queue rather than `next_index()`'s blind modulo: a wallet
+    /// that is mid-upload is skipped in favour of an idle one, which is the
+    /// whole point — the per-wallet limit is 1, so landing on a busy wallet
+    /// means queueing behind it even when the pool has capacity.
+    ///
+    /// The tie-break matters as much as the minimum. On an idle pool every
+    /// counter is 0, and a plain `argmin` would return index 0 every time,
+    /// funnelling all traffic onto one wallet — strictly worse than the
+    /// round-robin this replaces. Starting the scan at the rotating cursor
+    /// keeps equally-loaded keys spreading exactly as before.
+    pub fn least_loaded_index(&self) -> Option<usize> {
+        let len = self.keys.len();
+        if len == 0 {
+            return None;
+        }
+        let start = self.cursor.fetch_add(1, Ordering::Relaxed) % len;
+        let mut best = start;
+        let mut best_load = self.inflight[start].load(Ordering::Relaxed);
+        for step in 1..len {
+            let idx = (start + step) % len;
+            let load = self.inflight[idx].load(Ordering::Relaxed);
+            // Strictly less, so the first key scanned — the cursor's own —
+            // wins any tie and the rotation is preserved.
+            if load < best_load {
+                best = idx;
+                best_load = load;
+            }
+        }
+        Some(best)
+    }
+
+    /// Marks `index` busy for as long as the returned guard lives.
+    ///
+    /// Call this around the wallet transaction itself, not around enqueueing
+    /// one: the counter is meant to answer "is this wallet signing right now",
+    /// which is what the per-wallet limit actually serialises on.
+    pub fn begin_attempt(self: &Arc<Self>, index: usize) -> WalletAttemptGuard {
+        if let Some(slot) = self.inflight.get(index) {
+            slot.fetch_add(1, Ordering::Relaxed);
+        }
+        WalletAttemptGuard {
+            pool: Arc::clone(self),
+            index,
+        }
+    }
+
+    /// In-flight count per key. Observability only.
+    pub fn inflight_snapshot(&self) -> Vec<usize> {
+        self.inflight
+            .iter()
+            .map(|slot| slot.load(Ordering::Relaxed))
+            .collect()
+    }
+
+    fn end_attempt(&self, index: usize) {
+        if let Some(slot) = self.inflight.get(index) {
+            // Saturating: an extra release must not wrap to usize::MAX and
+            // leave this key looking permanently busiest, which would exclude
+            // it from selection for the life of the process.
+            let _ = slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+        }
+    }
+
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
@@ -326,6 +414,22 @@ impl KeyPool {
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.keys.len()
+    }
+}
+
+/// Releases a wallet's in-flight count when dropped.
+///
+/// A guard rather than paired calls because `execute_wallet_job` returns from
+/// many points; every one of them has to decrement, and `Drop` is the only way
+/// to get that for free — including while unwinding from a panic.
+pub struct WalletAttemptGuard {
+    pool: Arc<KeyPool>,
+    index: usize,
+}
+
+impl Drop for WalletAttemptGuard {
+    fn drop(&mut self) {
+        self.pool.end_attempt(self.index);
     }
 }
 
@@ -928,10 +1032,13 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `/health` `writes` wire value: `"paused"` when `WRITES_PAUSED` is set.
-pub(crate) fn writes_health_status(paused: bool) -> String {
+/// `/health` `writes` wire value: `"paused"`, `"degraded"`, or `"ok"`.
+/// Paused wins if both flags are set — write routes already 503.
+pub(crate) fn writes_health_status(paused: bool, degraded: bool) -> String {
     if paused {
         "paused".to_string()
+    } else if degraded {
+        "degraded".to_string()
     } else {
         "ok".to_string()
     }
@@ -1264,6 +1371,8 @@ pub struct RememberBulkItem {
 pub struct RememberBulkRequest {
     /// 1–MAX_BULK_ITEMS items to remember in one batched operation.
     pub items: Vec<RememberBulkItem>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 /// POST /api/remember/bulk — 202 Accepted response.
@@ -1414,8 +1523,11 @@ pub struct RecallRequest {
     pub scoring_weights: Option<ScoringWeights>,
     /// How to order results. Omitted → [`RecallSort::Relevance`], today's
     /// behaviour. See [`RecallSort`].
+    ///
+    /// `Option` because an explicit `sort`, `relevance` included, suppresses
+    /// `scoring_weights`, so omitted and explicit must stay distinct.
     #[serde(default)]
-    pub sort: RecallSort,
+    pub sort: Option<RecallSort>,
 }
 
 /// Result ordering mode for `/api/recall`.
@@ -1883,6 +1995,24 @@ pub struct AccountExistsResponse {
     pub exists: bool,
 }
 
+/// GET /api/whoami — the identity the caller's delegate key resolves to.
+///
+/// Unlike `AccountExistsResponse` this *does* carry `account_id`, which is
+/// safe here precisely because the route is authenticated: the caller proved
+/// possession of a delegate key already registered against this account, so
+/// it is being told its own identity, not anyone else's.
+///
+/// Exists so a client that holds a delegate key but lost the surrounding
+/// metadata can rebuild `credentials.json` (WALM-332). All three fields are
+/// required for that: `account_id` and `owner` come from the registry scan,
+/// `package_id` from server config.
+#[derive(Debug, Serialize)]
+pub struct WhoamiResponse {
+    pub account_id: String,
+    pub owner: String,
+    pub package_id: String,
+}
+
 /// POST /api/stats — count + stored bytes for a namespace.
 /// Used by the benchmark harness for verification. Mode-blind.
 #[derive(Debug, Deserialize)]
@@ -1925,9 +2055,18 @@ pub struct HealthResponse {
     /// fail open so CI `wait-for-relayer` does not hang. `status` stays
     /// `"ok"` while the relayer process is up.
     pub write_ready: bool,
-    /// Write-path admission: `"ok"` or `"paused"`. `"paused"` when
-    /// `WRITES_PAUSED` is set; write routes then return HTTP 503.
-    /// Distinct from `write_ready`. `/health` stays HTTP 200.
+    /// Write-path state: `"ok"`, `"degraded"`, or `"paused"`.
+    ///
+    /// `"paused"` when `WRITES_PAUSED` is set; write routes then return
+    /// HTTP 503. `"degraded"` when recent durable writes have been failing
+    /// and none have landed -- the relayer still accepts and durably
+    /// queues a write, but Walrus is not storing it, so a caller should
+    /// expect the job to fail minutes later rather than queue more.
+    ///
+    /// Deliberately separate from `write_ready`, which stays true through
+    /// a downstream outage: CI's wait-for-relayer gate blocks on
+    /// `write_ready is True`, so folding this into it would make a Walrus
+    /// outage hang every deploy. `/health` stays HTTP 200 throughout.
     pub writes: String,
 }
 
@@ -2222,6 +2361,126 @@ mod tests {
     use std::sync::Mutex;
 
     static WALRUS_STORAGE_EPOCHS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn pool(n: usize) -> Arc<KeyPool> {
+        Arc::new(KeyPool::new((0..n).map(|i| format!("key{i}")).collect()))
+    }
+
+    #[test]
+    fn an_idle_pool_still_spreads_round_robin() {
+        // The regression this guards: with every counter at 0 a plain argmin
+        // returns index 0 forever, funnelling the whole pool onto one wallet
+        // — worse than the round-robin it replaces.
+        let pool = pool(4);
+        let picked: Vec<_> = (0..8).map(|_| pool.least_loaded_index().unwrap()).collect();
+        assert_eq!(picked, vec![0, 1, 2, 3, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_busy_wallet_is_skipped_for_an_idle_one() {
+        // The production case: a job waited 6.2s for its assigned wallet while
+        // other wallets sat idle, because round-robin could not see the load.
+        let pool = pool(4);
+        let _busy = pool.begin_attempt(1);
+        // Cursor lands on 1 next, but 1 is busy and 2 is not.
+        let _ = pool.least_loaded_index();
+        assert_eq!(pool.least_loaded_index().unwrap(), 2);
+    }
+
+    #[test]
+    fn selection_avoids_every_busy_wallet_until_only_busy_ones_remain() {
+        let pool = pool(3);
+        let _a = pool.begin_attempt(0);
+        let _b = pool.begin_attempt(1);
+        // Only wallet 2 is free, so every pick goes there regardless of cursor.
+        for _ in 0..6 {
+            assert_eq!(pool.least_loaded_index().unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn a_fully_busy_pool_falls_back_to_spreading_evenly() {
+        // Saturated is not a special case: equal load means the tie-break
+        // decides, so behaviour degrades exactly to round-robin.
+        let pool = pool(3);
+        let _a = pool.begin_attempt(0);
+        let _b = pool.begin_attempt(1);
+        let _c = pool.begin_attempt(2);
+        let picked: Vec<_> = (0..6).map(|_| pool.least_loaded_index().unwrap()).collect();
+        assert_eq!(picked, vec![0, 1, 2, 0, 1, 2]);
+    }
+
+    #[test]
+    fn dropping_the_guard_frees_the_wallet() {
+        let pool = pool(2);
+        {
+            let _busy = pool.begin_attempt(0);
+            assert_eq!(pool.inflight_snapshot(), vec![1, 0]);
+        }
+        assert_eq!(pool.inflight_snapshot(), vec![0, 0]);
+    }
+
+    #[test]
+    fn the_guard_releases_on_an_early_return() {
+        // `execute_wallet_job` returns from many points; the guard exists so
+        // none of them has to remember to decrement.
+        let pool = pool(2);
+        fn bail(pool: &Arc<KeyPool>) -> Result<(), ()> {
+            let _slot = pool.begin_attempt(1);
+            Err(())
+        }
+        assert!(bail(&pool).is_err());
+        assert_eq!(pool.inflight_snapshot(), vec![0, 0]);
+    }
+
+    #[test]
+    fn nested_attempts_on_one_wallet_count_and_release_independently() {
+        let pool = pool(2);
+        let first = pool.begin_attempt(0);
+        let second = pool.begin_attempt(0);
+        assert_eq!(pool.inflight_snapshot(), vec![2, 0]);
+        drop(first);
+        assert_eq!(pool.inflight_snapshot(), vec![1, 0]);
+        drop(second);
+        assert_eq!(pool.inflight_snapshot(), vec![0, 0]);
+    }
+
+    #[test]
+    fn releasing_below_zero_saturates_instead_of_wrapping() {
+        // A wrapped counter would read as usize::MAX and exclude the wallet
+        // from selection for the life of the process.
+        let pool = pool(2);
+        pool.end_attempt(0);
+        pool.end_attempt(0);
+        assert_eq!(pool.inflight_snapshot(), vec![0, 0]);
+        let _busy = pool.begin_attempt(1);
+        assert_eq!(pool.least_loaded_index().unwrap(), 0);
+    }
+
+    #[test]
+    fn an_out_of_range_index_is_ignored_rather_than_panicking() {
+        let pool = pool(2);
+        let guard = pool.begin_attempt(99);
+        assert_eq!(pool.inflight_snapshot(), vec![0, 0]);
+        drop(guard);
+        assert_eq!(pool.inflight_snapshot(), vec![0, 0]);
+    }
+
+    #[test]
+    fn an_empty_pool_selects_nothing() {
+        let pool = Arc::new(KeyPool::new(vec![]));
+        assert_eq!(pool.least_loaded_index(), None);
+        assert_eq!(pool.next_index(), None);
+    }
+
+    #[test]
+    fn next_index_is_unchanged_for_the_retry_path() {
+        // Retries derive their wallet from the job's own start index, not the
+        // global cursor, so `next_index` has to keep its old semantics.
+        let pool = pool(3);
+        let picked: Vec<_> = (0..6).map(|_| pool.next_index().unwrap()).collect();
+        assert_eq!(picked, vec![0, 1, 2, 0, 1, 2]);
+    }
 
     #[test]
     fn balance_monitor_interval_has_a_safe_minimum() {
@@ -3178,6 +3437,22 @@ mod tests {
             .unwrap();
     }
 
+    // ── RecallRequest.sort — omitted vs explicit ─────────────────────────
+
+    #[test]
+    fn recall_sort_keeps_omitted_apart_from_explicit_relevance() {
+        let parse = |body: &str| serde_json::from_str::<RecallRequest>(body).unwrap().sort;
+        assert_eq!(parse(r#"{"query":"q"}"#), None);
+        assert_eq!(
+            parse(r#"{"query":"q","sort":"relevance"}"#),
+            Some(RecallSort::Relevance)
+        );
+        assert_eq!(
+            parse(r#"{"query":"q","sort":"recent"}"#),
+            Some(RecallSort::Recent)
+        );
+    }
+
     // ── ScoringWeights::is_ranker_active() — opt-in predicate ────────────
 
     #[test]
@@ -3266,8 +3541,11 @@ mod tests {
 
     #[tokio::test]
     async fn writes_paused_maps_to_503_with_stable_message() {
-        assert_eq!(writes_health_status(false), "ok");
-        assert_eq!(writes_health_status(true), "paused");
+        assert_eq!(writes_health_status(false, false), "ok");
+        assert_eq!(writes_health_status(false, true), "degraded");
+        assert_eq!(writes_health_status(true, false), "paused");
+        // An operator pause is the stronger statement and wins.
+        assert_eq!(writes_health_status(true, true), "paused");
         assert!(reject_if_writes_paused(false).is_ok());
         let err = reject_if_writes_paused(true).expect_err("paused writes");
         assert_eq!(err.kind(), "writes_paused");

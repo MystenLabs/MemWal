@@ -865,7 +865,7 @@ pub async fn analyze(
         }
 
         // Pick next wallet slot (round-robin) and enqueue UploadAndTransfer
-        let Some(wallet_index) = state.key_pool.next_index() else {
+        let Some(wallet_index) = state.key_pool.least_loaded_index() else {
             rate_limit::release_storage_quota(&state, &all_ids[idx..]).await;
             return Err(AppError::Internal("No Sui keys configured".into()));
         };

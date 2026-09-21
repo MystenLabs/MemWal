@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MemWalSession } from "../auth.js";
 
 import { registerRememberTool } from "./remember.js";
+import { registerRememberStatusTool } from "./remember-status.js";
 import { registerRememberBulkTool } from "./remember-bulk.js";
 import { registerRecallTool } from "./recall.js";
 import { registerAnalyzeTool } from "./analyze.js";
@@ -26,6 +27,7 @@ export function registerTools(server: McpServer, session: MemWalSession): void {
 
     if (canWrite) {
         registerRememberTool(server, session);
+        registerRememberStatusTool(server, session);
         registerRememberBulkTool(server, session);
         registerAnalyzeTool(server, session);
         registerRestoreTool(server, session);
@@ -38,6 +40,7 @@ export function registerTools(server: McpServer, session: MemWalSession): void {
 
 export {
     registerRememberTool,
+    registerRememberStatusTool,
     registerRememberBulkTool,
     registerRecallTool,
     registerAnalyzeTool,

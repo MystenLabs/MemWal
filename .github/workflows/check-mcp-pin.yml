@@ -1,0 +1,64 @@
+name: Check MCP launcher pin
+
+# The plugin launcher installs whatever `mcpPackageVersion` in
+# packages/mcp/plugin/plugin.json names, so a pin npm does not carry breaks every
+# fresh plugin install until someone edits the manifest. Whether a version exists
+# is a fact about npm rather than about this repository, so no unit test can hold
+# it — trusted-launcher.test.mjs checks the shape of the pin and its relationship
+# to `version`, and this checks that the thing actually exists.
+#
+# Its own workflow rather than a job in test.yml for the same reason as
+# check-model-ids: the failure can arrive with no commit attached. The `dev`
+# dist-tag moves whenever a push to `dev` touches packages/mcp, and that number is
+# never committed back, so the manifest drifts on its own. test.yml has no
+# schedule trigger.
+#
+# The registry endpoint is public, so this needs no token and no environment.
+
+on:
+  pull_request:
+    # Only when the pin, the check, or the launcher that reads the pin moves.
+    # Every other PR would be taking a network dependency on npm for nothing.
+    paths:
+      - "packages/mcp/plugin/plugin.json"
+      - "packages/mcp/plugin/scripts/lib/mcp-launch.mjs"
+      - "scripts/check-mcp-pin.mjs"
+      - ".github/workflows/check-mcp-pin.yml"
+  push:
+    branches: [main, staging, dev]
+    paths:
+      - "packages/mcp/plugin/plugin.json"
+      - "scripts/check-mcp-pin.mjs"
+      - ".github/workflows/check-mcp-pin.yml"
+  schedule:
+    # Catches the drift nobody pushed: a dist-tag that moved under a manifest
+    # that did not. Reads nothing shared, so it needs no bench-account offset.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: check-mcp-pin-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  mcp-pin:
+    name: Launcher pin is published
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # No install step: the check is dependency-free and talks to the public
+      # registry over fetch.
+      - name: Check the launcher pin against npm
+        run: node scripts/check-mcp-pin.mjs

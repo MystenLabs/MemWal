@@ -116,10 +116,16 @@ describe('MCP sign-in hand-off', () => {
         expect(screen.getByText(/Nothing answered on your computer/i)).toBeInTheDocument()
         expect(screen.getByText(/stopped waiting after this tab was already open/i)).toBeInTheDocument()
         expect(screen.queryByText(/opened too late/i)).not.toBeInTheDocument()
-        expect(screen.getByText(/Sign in again and open the new link straight away/i)).toBeInTheDocument()
-        expect(screen.getByText(/left running through the wallet prompt/i)).toBeInTheDocument()
-        expect(screen.getByText(/unused key from this attempt is already on your account/i)).toBeInTheDocument()
         expect(screen.queryByText(/usually works/i)).not.toBeInTheDocument()
+        // The key is registered and saved by the client that started this
+        // sign-in, so a restart reclaims it. Signing in again cannot register
+        // it twice, and removing it from the dashboard throws it away.
+        expect(screen.getByText(/Restart your MCP client within 24 hours/i)).toBeInTheDocument()
+        expect(screen.getByText(/only if you mean to abandon it/i)).toBeInTheDocument()
+        expect(
+            screen.queryByText(/Remove it from the dashboard if you are not using it/i),
+        ).not.toBeInTheDocument()
+        expect(screen.queryByText(/Sign in again and open the new link straight away/i)).not.toBeInTheDocument()
     })
 
     it('explains an expired link when preflight cannot reach the listener', async () => {

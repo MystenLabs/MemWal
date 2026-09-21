@@ -43,8 +43,19 @@ There are two ways to use MemWal. The difference is whether you also get the **l
 | MemWal MCP: memory tools (`memwal_remember`, `memwal_recall`, …) | ✓ | ✓ |
 | Lifecycle hooks: automatic recall/save reminders | ✓ | ✗ |
 
-- **Plugin** bundles the MCP server **and** lifecycle hooks. The `SessionStart` hook tells the agent to prefer the `memwal_*` tools over any built-in or local memory feature, and when to save without being asked. Automatic memory works with no further instructions from you. Available on **Claude Code**, **Codex**, **Antigravity**, and **Cursor**.
+- **Plugin** bundles the MCP server **and** lifecycle hooks. The `SessionStart` hook tells the agent to prefer the `memwal_*` tools over any built-in or local memory feature, and when to save without being asked. Available on **Claude Code**, **Codex**, **Antigravity**, and **Cursor**.
 - **MCP-only** gives the agent the memory tools on **every** MCP client. The tool descriptions encourage proactive use, so agents often do save and recall on their own. Treat that as best-effort: it varies by client and model, and on a client that ships its own memory feature the built-in one commonly wins.
+
+Saving **without being asked is on once you agree to it**: `memwal-mcp login`
+asks the question in your terminal the first time, and on a fresh install
+nothing is saved unprompted until you answer. Saved memories are permanent —
+Walrus is immutable storage — which is why the question comes first. Change the
+answer any time with `memwal-mcp auto-save on|off` (or `MEMWAL_AUTO_SAVE` in
+your client's `env` block). Recall, and anything you explicitly ask to be
+remembered, work either way. Credentials — passwords, API keys, tokens, private keys, seed
+phrases, authorization headers, and URLs with an embedded `user:password` — are
+excluded in both modes and stripped before a memory is written, because Walrus
+storage is append-only and a stored secret cannot be deleted.
 
 <Note>
 Prefer the plugin wherever you can install it. It is the tested path for reliable automatic save and recall, and it needs no extra instructions from you. On MCP-only clients, paste the client's instruction block (see [Claude Desktop](/mcp/claude-desktop#add-memory-instructions)) to get closer to the same behavior.

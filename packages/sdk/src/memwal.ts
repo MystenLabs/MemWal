@@ -115,6 +115,15 @@ const SEAL_SESSION_TTL_MIN = 5;
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
 
+/** Per-call knobs for `signedRequest`. `timeoutMs` overrides the client-wide
+ * deadline for one endpoint; `signal` is the caller's own cancellation and is
+ * honoured alongside it, never replaced by it. */
+interface SignedRequestOptions {
+    includeDelegateKey?: boolean;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+}
+
 type RememberStatusResponse = RememberJobStatus | { error?: string };
 
 function sleep(ms: number): Promise<void> {
@@ -128,8 +137,138 @@ function pollingDelayMs(baseMs: number, attempt: number): number {
     return Math.floor(capped * jitter);
 }
 
+/** Window over which the same (namespace, text) resolves to one key.
+ *
+ * `pendingRememberKeys` only dedupes retries that reuse one client instance,
+ * and callers such as the MCP sidecar build a fresh client per session — so a
+ * random key let a reconnect replay mint a second paid blob. The bucket bounds
+ * the collapse: `remember_jobs` rows are never pruned, so an unbucketed key
+ * would dedupe against a job from any point in history. */
+const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
+
+async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
+    const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
+    return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
+}
+
+/** Deadline for a request that names no other.
+ *
+ * `fetch` imposes none, and a poll loop checks its budget only between polls —
+ * so one stalled read ran past `timeoutMs` entirely. 30s mirrors the relayer's
+ * own outbound client. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/** `POST /api/restore` bounds itself at 55s server-side and answers with an
+ * error rather than going quiet, so the client must outlast that or it would
+ * abandon a response already on its way. */
+const RESTORE_REQUEST_TIMEOUT_MS = 60_000;
+
+/** `POST /api/analyze` runs the extractor LLM inline before it accepts, so it
+ * is the one write that legitimately outruns the default. */
+const ANALYZE_REQUEST_TIMEOUT_MS = 60_000;
+
+/** `POST /api/recall` has carried its own 15s deadline since before the rest
+ * had any; keeping it named makes that a decision rather than an accident. */
+const RECALL_REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * Abort signal that fires after `ms`, or when `caller` aborts — whichever is
+ * first. Built by hand rather than with `AbortSignal.any`, which lands too
+ * recently to rely on across Node, browsers and Workers alike.
+ *
+ * Returns the signal plus a `dispose` the caller must run in a `finally`, so a
+ * pending timer never outlives its request.
+ */
+function deadlineSignal(
+    ms: number,
+    caller?: AbortSignal,
+): { signal: AbortSignal; timedOut: () => boolean; dispose: () => void } {
+    const controller = new AbortController();
+    let expired = false;
+
+    const onCallerAbort = () => controller.abort(caller?.reason);
+    if (caller) {
+        if (caller.aborted) controller.abort(caller.reason);
+        else caller.addEventListener("abort", onCallerAbort, { once: true });
+    }
+
+    const timer = setTimeout(() => {
+        expired = true;
+        controller.abort();
+    }, ms);
+    // Deliberately NOT unref'd. A deadline is the one timer somebody IS
+    // waiting on: unref'd, it stops firing the moment nothing else holds the
+    // loop open, and the stalled request it was meant to bound hangs forever
+    // instead. `dispose()` runs in the caller's `finally`, so the timer cannot
+    // outlive its request either way.
+
+    return {
+        signal: controller.signal,
+        timedOut: () => expired,
+        dispose: () => {
+            clearTimeout(timer);
+            caller?.removeEventListener("abort", onCallerAbort);
+        },
+    };
+}
+
+/**
+ * The error a request deadline produces.
+ *
+ * `status: 504` is load-bearing, not decoration: `isTransientPollingStatus`
+ * treats it as retryable, so one stalled poll inside a wait loop is abandoned
+ * and retried against the remaining budget instead of failing the whole wait.
+ */
+function requestTimeoutError(method: string, path: string, ms: number): Error {
+    const err = new Error(
+        `Walrus Memory request timed out after ${ms}ms (${method} ${path}). The relayer ` +
+            `accepted the connection but did not answer in time.`,
+    );
+    err.name = "MemWalRequestTimeout";
+    (err as Error & { status?: number }).status = 504;
+    return err;
+}
+
 function isTransientPollingStatus(status: number): boolean {
     return status === 0 || status === 429 || status >= 500;
+}
+
+/**
+ * How long a transient polling rejection asked us to wait, in ms.
+ *
+ * A 429 from the relayer's rate limiter is not an invitation to poll again in
+ * a second. The limiter counts our own status reads, so answering a
+ * `retry_after_seconds: 60` with the 10s backoff cap re-trips it on every
+ * attempt and the loop starves itself: the job then reads as "still uploading"
+ * for as long as the caller is willing to wait — including long after it has
+ * actually failed, which is the state that costs a user their fact.
+ *
+ * Clamped to what is left of the caller's own budget, so a 10-minute backoff
+ * costs at most the wait the caller already asked for. The loop then spends
+ * that remainder on one final read at the boundary rather than on a backoff
+ * curve nobody asked for.
+ */
+function retryAfterDelayMs(err: unknown, deadline: number): number {
+    const seconds =
+        (err as { retryAfterSeconds?: number }).retryAfterSeconds
+        ?? retryAfterSecondsFromBody((err as { cause?: unknown }).cause);
+    if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) return 0;
+    return Math.max(0, Math.min(seconds * 1000, deadline - Date.now()));
+}
+
+/**
+ * The relayer states the backoff in the 429 body as well as in `Retry-After`.
+ * A proxy that strips the header must not cost us the hint.
+ */
+function retryAfterSecondsFromBody(cause: unknown): number | undefined {
+    if (typeof cause !== "string") return undefined;
+    try {
+        const parsed = JSON.parse(cause) as { retry_after_seconds?: unknown };
+        const seconds = Number(parsed?.retry_after_seconds);
+        return Number.isFinite(seconds) ? seconds : undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 /**
@@ -182,9 +321,12 @@ function normalizeSuiNetworkForGrpc(network: string): string {
 export class MemWal {
     private privateKey: Uint8Array;
     private publicKey: Uint8Array | null = null;
+    private destroyed = false;
     private serverUrl: string;
     private namespace: string;
     private accountId: string;
+    /** Deadline applied to any request that does not name its own. */
+    private requestTimeoutMs: number;
 
     // ENG-1697 state — all internal, never surfaced to user code.
     // The public API (`MemWal.create({ key, accountId })`) is unchanged.
@@ -219,6 +361,12 @@ export class MemWal {
         // non-localhost host.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
         this.namespace = config.namespace ?? "default";
+        // A non-positive or non-finite override would disable the backstop
+        // entirely, which is the bug this exists to prevent.
+        this.requestTimeoutMs =
+            Number.isFinite(config.requestTimeoutMs) && (config.requestTimeoutMs as number) > 0
+                ? (config.requestTimeoutMs as number)
+                : DEFAULT_REQUEST_TIMEOUT_MS;
     }
 
     /**
@@ -236,6 +384,7 @@ export class MemWal {
      * Prevents key extraction from V8 heap dumps.
      */
     destroy(): void {
+        this.destroyed = true;
         if (this.privateKey) {
             this.privateKey.fill(0);
         }
@@ -268,7 +417,7 @@ export class MemWal {
         const generatedKey = options.idempotencyKey === undefined;
         const idempotencyKey = options.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
-            ?? crypto.randomUUID();
+            ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
         const accepted = await this.signedRequest<RememberAcceptedResult>(
@@ -319,9 +468,13 @@ export class MemWal {
         const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
+        let retryAfterMs = 0;
 
         while (Date.now() < deadline) {
-            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
+            // A retry-after the server just gave us wins over our own curve;
+            // the backoff resumes from where it was on the next normal poll.
+            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            retryAfterMs = 0;
 
             let status: RememberStatusResponse;
 
@@ -331,10 +484,22 @@ export class MemWal {
                     `/api/remember/${jobId}`,
                     {},
                     [200, 404],
+                    // Bound each poll by the client deadline, and never past
+                    // what is left of the budget. Without this the loop only
+                    // checks the deadline between polls, so one stalled read
+                    // runs past `timeoutMs` however small it was — the whole
+                    // reason a 90s wait was seen still going at 120s. Taking
+                    // the min of the two matters in both directions: the
+                    // remaining budget keeps a poll from outliving the wait,
+                    // and the client deadline keeps ONE stalled poll from
+                    // swallowing the entire budget, so the loop still gets to
+                    // retry. An expired poll surfaces as a transient 504.
+                    { timeoutMs: this.pollDeadlineMs(deadline) },
                 );
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
                 throw err;
@@ -385,7 +550,7 @@ export class MemWal {
         const generatedKey = opts.idempotencyKey === undefined;
         const idempotencyKey = opts.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
-            ?? crypto.randomUUID();
+            ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
         const accepted = await this.rememberAsync(text, resolvedNamespace, { idempotencyKey });
@@ -460,11 +625,16 @@ export class MemWal {
         return accepted;
     }
 
-    async getRememberBulkStatus(jobIds: string[]): Promise<RememberBulkStatusResult> {
+    async getRememberBulkStatus(
+        jobIds: string[],
+        opts: { timeoutMs?: number } = {},
+    ): Promise<RememberBulkStatusResult> {
         return this.signedRequest<RememberBulkStatusResult>(
             "POST",
             "/api/remember/bulk/status",
             { job_ids: jobIds },
+            [200],
+            { timeoutMs: opts.timeoutMs },
         );
     }
 
@@ -484,9 +654,13 @@ export class MemWal {
         }));
         const pending = new Set(jobIds);
         let attempt = 0;
+        let retryAfterMs = 0;
 
         while (pending.size > 0 && Date.now() < deadline) {
-            await sleep(pollingDelayMs(pollIntervalMs, attempt++));
+            // A retry-after the server just gave us wins over our own curve;
+            // the backoff resumes from where it was on the next normal poll.
+            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            retryAfterMs = 0;
 
             const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
             if (pendingIds.length === 0) {
@@ -496,10 +670,14 @@ export class MemWal {
             let batchStatus: RememberBulkStatusResult;
 
             try {
-                batchStatus = await this.getRememberBulkStatus(pendingIds);
+                // Bounded the same way as the single-job poll.
+                batchStatus = await this.getRememberBulkStatus(pendingIds, {
+                    timeoutMs: this.pollDeadlineMs(deadline),
+                });
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
                 throw err;
@@ -666,9 +844,7 @@ export class MemWal {
         const limit = options.topK ?? options.limit ?? 10;
         const resolvedNamespace = options.namespace ?? this.namespace;
 
-        const ac = new AbortController();
-        const tid = setTimeout(() => ac.abort(), 15000);
-        try {
+        {
             const result = await this.signedRequest<RecallResult>("POST", "/api/recall", {
                 query,
                 limit,
@@ -682,7 +858,7 @@ export class MemWal {
                 // request byte-identical and the relayer applies its own
                 // "relevance" default.
                 sort: options.sort,
-            }, { signal: ac.signal });
+            }, { timeoutMs: RECALL_REQUEST_TIMEOUT_MS });
 
             let processed = result;
             if (typeof options.maxDistance === "number") {
@@ -716,8 +892,6 @@ export class MemWal {
             }
 
             return processed;
-        } finally {
-            clearTimeout(tid);
         }
     }
 
@@ -843,7 +1017,9 @@ export class MemWal {
         };
         const wireOccurredAt = occurredAtToWire(options.occurredAt);
         if (wireOccurredAt !== undefined) body.occurred_at = wireOccurredAt;
-        return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", body, [200, 202]);
+        return this.signedRequest<AnalyzeResult>("POST", "/api/analyze", body, [200, 202], {
+            timeoutMs: ANALYZE_REQUEST_TIMEOUT_MS,
+        });
     }
 
     /**
@@ -912,10 +1088,13 @@ export class MemWal {
      * ```
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
-        const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
-            namespace,
-            limit,
-        });
+        const result = await this.signedRequest<RestoreResult>(
+            "POST",
+            "/api/restore",
+            { namespace, limit },
+            [200],
+            { timeoutMs: RESTORE_REQUEST_TIMEOUT_MS },
+        );
         // Relayers older than WALM-319 omit `truncated` entirely — treat
         // "not present" as "not known to be truncated" rather than drop
         // the field or require every relayer version to send it.
@@ -1015,11 +1194,11 @@ export class MemWal {
      * Check server health. The endpoint is public and does not require request signing.
      */
     async health(): Promise<HealthResult> {
-        const res = await fetch(`${this.serverUrl}/health`);
+        const res = await this.fetchWithDeadline<HealthResult>(`${this.serverUrl}/health`);
         if (!res.ok) {
             throw new Error(`Health check failed: ${res.status}`);
         }
-        return res.json() as Promise<HealthResult>;
+        return res.body as HealthResult;
     }
 
     /**
@@ -1060,20 +1239,26 @@ export class MemWal {
     }
 
     private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
-        const versionRes = await fetch(`${this.serverUrl}/version`, { method: "GET" });
+        const versionRes = await this.fetchWithDeadline<Partial<RelayerVersionMetadata>>(
+            `${this.serverUrl}/version`,
+            { method: "GET" },
+        );
         let body: Partial<RelayerVersionMetadata>;
 
         if (versionRes.ok) {
-            body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
+            body = versionRes.body as Partial<RelayerVersionMetadata>;
         } else if (versionRes.status === 404 || versionRes.status === 405) {
-            const healthRes = await fetch(`${this.serverUrl}/health`, { method: "GET" });
+            const healthRes = await this.fetchWithDeadline<Partial<RelayerVersionMetadata>>(
+                `${this.serverUrl}/health`,
+                { method: "GET" },
+            );
             if (!healthRes.ok) {
                 throw new Error(
                     `Walrus Memory compatibility check failed: GET /version returned ` +
                         `${versionRes.status}, and GET /health returned ${healthRes.status}`,
                 );
             }
-            body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
+            body = healthRes.body as Partial<RelayerVersionMetadata>;
         } else {
             throw new Error(
                 `Walrus Memory compatibility check failed: GET /version returned ${versionRes.status}`,
@@ -1109,11 +1294,14 @@ export class MemWal {
 
     private async fetchServerConfig(): Promise<ServerConfig> {
         if (this.serverConfig) return this.serverConfig;
-        const res = await fetch(`${this.serverUrl}/config`, { method: "GET" });
+        const res = await this.fetchWithDeadline<Record<string, unknown>>(
+            `${this.serverUrl}/config`,
+            { method: "GET" },
+        );
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
         }
-        const body = (await res.json()) as Record<string, unknown>;
+        const body = res.body as Record<string, unknown>;
         if (typeof body.packageId !== "string" || !body.packageId ||
             typeof body.network !== "string" || !body.network) {
             throw new Error("GET /config response missing packageId / network");
@@ -1322,12 +1510,50 @@ export class MemWal {
      * @param acceptedStatuses - HTTP status codes to treat as success (default [200]).
      *   Pass [200, 202] for endpoints that return 202 Accepted.
      */
+    /**
+     * `fetch` plus the JSON body read, with this client's deadline applied across both.
+     *
+     * For the handshake endpoints that skip request signing — `/health`,
+     * `/version`, `/config`. They are the worst place to leave unbounded: the
+     * compatibility probe and config fetch run before the first real call, so
+     * one stalled socket there hangs every method on the client, not just one.
+     */
+    /** Deadline for one status poll: the client deadline, clamped so it can
+     * never outlive the wait budget it belongs to. */
+    private pollDeadlineMs(deadline: number): number {
+        return Math.max(1, Math.min(this.requestTimeoutMs, deadline - Date.now()));
+    }
+
+    private async fetchWithDeadline<T>(
+        url: string,
+        init: RequestInit = {},
+        timeoutMs?: number,
+    ): Promise<{ ok: boolean; status: number; body: T | undefined }> {
+        const ms = timeoutMs ?? this.requestTimeoutMs;
+        const deadline = deadlineSignal(ms);
+        try {
+            const res = await fetch(url, { ...init, signal: deadline.signal });
+            return {
+                ok: res.ok,
+                status: res.status,
+                body: res.ok ? ((await res.json()) as T) : undefined,
+            };
+        } catch (err) {
+            if (deadline.timedOut()) {
+                throw requestTimeoutError(init.method ?? "GET", url, ms);
+            }
+            throw err;
+        } finally {
+            deadline.dispose();
+        }
+    }
+
     private async signedRequest<T>(
         method: string,
         path: string,
         body: object,
-        acceptedStatusesOrOptions: number[] | { includeDelegateKey?: boolean; signal?: AbortSignal } = [200],
-        requestOptions: { includeDelegateKey?: boolean; signal?: AbortSignal } = {},
+        acceptedStatusesOrOptions: number[] | SignedRequestOptions = [200],
+        requestOptions: SignedRequestOptions = {},
     ): Promise<T> {
         const acceptedStatuses = Array.isArray(acceptedStatusesOrOptions)
             ? acceptedStatusesOrOptions
@@ -1353,6 +1579,11 @@ export class MemWal {
         const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
         const msgBytes = new TextEncoder().encode(message);
 
+        if (this.destroyed) {
+            throw new Error(
+                "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
+            );
+        }
         // Sign with Ed25519
         const signature = await ed.signAsync(msgBytes, this.privateKey);
         const publicKey = await this.getPublicKey();
@@ -1374,47 +1605,63 @@ export class MemWal {
         if (options.includeDelegateKey !== false) {
             headers["x-seal-session"] = await this.buildSealSession();
         }
-        const res = await fetch(url, {
-            method,
-            headers,
-            body: method === "GET" ? undefined : bodyStr,
-            signal: options.signal,
-        });
+        // Bound the request. `fetch` never times out on its own, so this is the
+        // only thing standing between a stalled socket and a call that hangs
+        // for as long as the connection stays open.
+        const deadlineMs = options.timeoutMs ?? this.requestTimeoutMs;
+        const deadline = deadlineSignal(deadlineMs, options.signal);
+        try {
+            const res = await fetch(url, {
+                method,
+                headers,
+                body: method === "GET" ? undefined : bodyStr,
+                signal: deadline.signal,
+            });
 
-        if (!acceptedStatuses.includes(res.status)) {
-            // LOW-26: sanitize server error bodies before surfacing to callers.
-            const raw = await res.text();
-            const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
-            if (compatibilityError) throw compatibilityError;
+            if (!acceptedStatuses.includes(res.status)) {
+                // LOW-26: sanitize server error bodies before surfacing to callers.
+                const raw = await res.text();
+                const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+                if (compatibilityError) throw compatibilityError;
 
-            // A stale/future-dated signature is rejected with 401 + a machine-
-            // readable reason header. Surface it as an actionable clock-drift
-            // error rather than an opaque 401 so the caller can fix node time.
-            const clockDriftError = clockDriftErrorFromResponse(res);
-            if (clockDriftError) throw clockDriftError;
+                // A stale/future-dated signature is rejected with 401 + a machine-
+                // readable reason header. Surface it as an actionable clock-drift
+                // error rather than an opaque 401 so the caller can fix node time.
+                const clockDriftError = clockDriftErrorFromResponse(res);
+                if (clockDriftError) throw clockDriftError;
 
-            const { message, serverCode } = sanitizeServerError(
-                res.status,
-                raw,
-                res.headers.get("x-auth-error"),
-            );
-            const err = new Error(message) as Error & {
-                status?: number;
-                serverCode?: string;
-                retryAfterSeconds?: number;
-                cause?: string;
-            };
-            err.status = res.status;
-            if (serverCode) err.serverCode = serverCode;
-            const retryAfter = Number(res.headers.get("retry-after"));
-            if (Number.isFinite(retryAfter) && retryAfter > 0) {
-                err.retryAfterSeconds = retryAfter;
+                const { message, serverCode } = sanitizeServerError(
+                    res.status,
+                    raw,
+                    res.headers.get("x-auth-error"),
+                );
+                const err = new Error(message) as Error & {
+                    status?: number;
+                    serverCode?: string;
+                    retryAfterSeconds?: number;
+                    cause?: string;
+                };
+                err.status = res.status;
+                if (serverCode) err.serverCode = serverCode;
+                const retryAfter = Number(res.headers.get("retry-after"));
+                if (Number.isFinite(retryAfter) && retryAfter > 0) {
+                    err.retryAfterSeconds = retryAfter;
+                }
+                // Preserve raw body on `cause` for in-process debugging only.
+                err.cause = raw;
+                throw err;
             }
-            // Preserve raw body on `cause` for in-process debugging only.
-            err.cause = raw;
-            throw err;
-        }
 
-        return res.json() as Promise<T>;
+            return (await res.json()) as T;
+        } catch (err) {
+            // Translate our own expiry into something a caller can classify.
+            // An abort the CALLER asked for is theirs and propagates untouched.
+            if (deadline.timedOut() && (err as { status?: number }).status === undefined) {
+                throw requestTimeoutError(method, path, deadlineMs);
+            }
+            throw err;
+        } finally {
+            deadline.dispose();
+        }
     }
 }
