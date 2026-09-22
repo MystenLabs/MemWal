@@ -24,7 +24,7 @@ Bad:
 Bullets with an area prefix, same pattern as Walrus Sites release notes
 (`portal:`, `site-builder:` there → use MemWal areas here).
 
-Areas: `mcp:` `sdk:` `python-sdk:` `server:` `plugin:` `docs:` `ci:` `app:`
+Areas: `mcp:` `sdk:` `python-sdk:` `relayer:` `docs:` `ci:` `app:`
 -->
 
 -
@@ -38,10 +38,9 @@ Areas: `mcp:` `sdk:` `python-sdk:` `server:` `plugin:` `docs:` `ci:` `app:`
 ## Changelog
 
 <!--
-Pick one. If this should show up on docs.wal.app/changelog, say which package
-and whether the Summary/Changes above are ready to paste.
+If this should show up on docs.wal.app/changelog, check Release note needed
+and fill the Area. The release cut decision is not made by the PR author.
 -->
 
-- [ ] Not user facing (skip public changelog)
-- [ ] User facing for: `mcp` / `sdk` / `python-sdk` / `server` / `plugin` (circle one)
-- [ ] Summary + Changes above are changelog ready
+- [ ] No release note needed (no change to what users run)
+- [ ] Release note needed. Area: ______

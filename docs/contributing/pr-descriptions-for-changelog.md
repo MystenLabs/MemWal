@@ -24,9 +24,8 @@ questions:
   - "How do Walrus Sites and Walrus Memory keep changelog wording uniform?"
 answer: >-
   User facing MemWal PRs should open with a short impact summary, then area
-  prefixed bullets (mcp, sdk, server, plugin, docs, ci), matching the Walrus
-  Sites style used on docs.wal.app/changelog. Agents and humans use the same
-  GitHub pull request template.
+  prefixed bullets (mcp, sdk, python-sdk, relayer, docs, ci, app), matching the
+  Walrus Sites style used on docs.wal.app/changelog.
 ---
 
 # PR descriptions for public changelog
@@ -60,19 +59,19 @@ both score and distance so clients can tune similarity without guessing.
 
 ### Areas to prefix
 
-`mcp:` · `sdk:` · `python-sdk:` · `server:` · `plugin:` · `docs:` · `ci:` · `app:`
+`mcp:` · `sdk:` · `python-sdk:` · `relayer:` · `docs:` · `ci:` · `app:`
 
-## What agents should do
+## When opening a PR
 
 When opening or drafting a MemWal PR:
 
 1. Fill `.github/pull_request_template.md`.
 2. Write the Summary so it can be pasted into the public changelog with light edits.
-3. Mark the Changelog checkboxes (user facing vs not).
+3. Mark Changelog: no release note needed, or release note needed with an Area.
 4. Do not bury the only user facing sentence under internal review chatter.
 
 Internal only work (refactors with no user impact, CI only, chore) can set
-Summary to `N/A` and check **Not user facing**.
+Summary to `N/A` and check **No release note needed**.
 
 ## Related
 
