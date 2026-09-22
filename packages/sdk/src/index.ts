@@ -40,6 +40,11 @@ export type {
     SponsorPersonalMessageSigner,
 } from "./sponsor-auth.js";
 
+// Trustless verification (public-inputs-only; @mysten/sui loaded dynamically,
+// so this stays importable from the dependency-light default entry point).
+export { verifyMemory } from "./verify.js";
+export type { VerifyOptions, VerifyReport, MemWalNetwork } from "./verify.js";
+
 // Types for the default client, including its lightweight manual endpoints.
 export type {
     MemWalConfig,
