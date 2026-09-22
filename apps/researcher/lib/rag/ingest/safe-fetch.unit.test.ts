@@ -4,7 +4,15 @@ import { createServer } from "node:http";
 import { resolve } from "node:path";
 import test from "node:test";
 import { ChatbotError } from "@/lib/errors";
-import { assertPublicUrl, fetchPublicUrl, isBlockedAddress } from "./safe-fetch";
+import {
+  assertPublicDestination,
+  assertPublicUrl,
+  fetchPinned,
+  fetchPublicUrl,
+  isBlockedAddress,
+  type PinnedTransport,
+  pinnedRequestOptions,
+} from "./safe-fetch";
 
 // Regression tests for issue #778: a PDF file part named a URL that the server
 // downloaded with a bare fetch, so a chat request could make the server call
@@ -212,56 +220,146 @@ test("ingest downloads the PDF through the guard rather than bare fetch", () => 
 });
 
 test("fetchPublicUrl refuses a redirect into a blocked range", async () => {
-  // fetch would follow a redirect itself, skipping the check on the new target,
-  // so fetchPublicUrl follows by hand and re-checks each hop. Stubbing fetch is
-  // the only way to stage a public first hop from a test.
-  const originalFetch = globalThis.fetch;
+  // A client that followed redirects itself would skip the check on the new
+  // target, so fetchPublicUrl follows by hand and re-checks each hop. The
+  // transport is injected to stage a public first hop: there is no public
+  // address a unit test may actually dial.
   const requested: string[] = [];
 
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    requested.push(String(input));
+  const transport: PinnedTransport = async (url, address) => {
+    requested.push(`${url.toString()} via ${address}`);
 
     return new Response(null, {
       status: 302,
       headers: { location: "http://169.254.169.254/latest/meta-data/" },
     });
-  }) as typeof fetch;
+  };
 
-  try {
-    await assertRejectedWith(
-      () => fetchPublicUrl("https://8.8.8.8/file.pdf"),
-      /private or reserved address/
-    );
-    // Only the first, allowed hop was ever requested.
-    assert.deepEqual(requested, ["https://8.8.8.8/file.pdf"]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  await assertRejectedWith(
+    () => fetchPublicUrl("https://8.8.8.8/file.pdf", undefined, transport),
+    /private or reserved address/
+  );
+  // Only the first, allowed hop was ever sent — and it was pinned to the
+  // address that hop validated to.
+  assert.deepEqual(requested, ["https://8.8.8.8/file.pdf via 8.8.8.8"]);
 });
 
 test("fetchPublicUrl maps a malformed redirect Location to ChatbotError", async () => {
   // new URL(location, url) throws TypeError on a broken Location. Without a
   // catch, chat's generic handler turns that into offline:chat (503) instead
   // of the same 400 assertPublicUrl uses for a bad user-supplied URL.
-  const originalFetch = globalThis.fetch;
   const requested: string[] = [];
 
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    requested.push(String(input));
+  const transport: PinnedTransport = async (url) => {
+    requested.push(url.toString());
 
     return new Response(null, {
       status: 302,
       headers: { location: "http://[" },
     });
-  }) as typeof fetch;
+  };
 
-  try {
-    await assertRejectedWith(
-      () => fetchPublicUrl("https://8.8.8.8/file.pdf"),
-      /Invalid URL format/
-    );
-    assert.deepEqual(requested, ["https://8.8.8.8/file.pdf"]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  await assertRejectedWith(
+    () => fetchPublicUrl("https://8.8.8.8/file.pdf", undefined, transport),
+    /Invalid URL format/
+  );
+  assert.deepEqual(requested, ["https://8.8.8.8/file.pdf"]);
+});
+
+// ── WALM-682: the connection is pinned to the address that was validated ──
+//
+// The checks above all stop at "was this destination allowed?". They cannot see
+// the gap the report named: assertPublicUrl resolved the host, approved the
+// answer, and then handed the *name* back to a client that resolved it a second
+// time. Nothing tied the two answers together, so a host could return a public
+// address to the check and a private one to the connection.
+
+test("the connection goes to the pinned address, not to a re-resolved name", async (t) => {
+  // The URL names example.com — a host that really does resolve, to a real
+  // public address. The pinned address is this loopback server. If the client
+  // re-resolved the name, the request would leave the machine and never arrive
+  // here, so the handler running at all is the proof that the pin held.
+  let seenHost: string | undefined;
+  let seenPath: string | undefined;
+
+  const server = createServer((request, response) => {
+    seenHost = request.headers.host;
+    seenPath = request.url ?? "";
+    response.end("pinned");
+  });
+  await new Promise<void>((done) => {
+    server.listen(0, "127.0.0.1", done);
+  });
+  t.after(
+    () =>
+      new Promise<void>((done) => {
+        server.close(() => done());
+      })
+  );
+
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  const response = await fetchPinned(
+    new URL(`http://example.com:${address.port}/doc.pdf?x=1`),
+    "127.0.0.1",
+    undefined,
+    5000
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "pinned");
+  assert.equal(seenPath, "/doc.pdf?x=1");
+  // Pinned by address, still addressed to the original host: name-based virtual
+  // hosts and TLS identity both depend on this staying the hostname.
+  assert.equal(seenHost, `example.com:${address.port}`);
+});
+
+test("pinnedRequestOptions separates where we connect from who we talk to", () => {
+  const options = pinnedRequestOptions(
+    new URL("https://files.example.com/a/b.pdf?q=1"),
+    "203.0.113.10"
+  );
+
+  assert.equal(options.host, "203.0.113.10", "dials the validated address");
+  assert.equal(options.port, 443);
+  assert.equal(options.path, "/a/b.pdf?q=1");
+  assert.equal(options.headers.host, "files.example.com");
+  // Certificates are still verified against the hostname, so pinning the
+  // address does not buy SSRF protection at the cost of TLS.
+  assert.equal(options.servername, "files.example.com");
+  assert.equal(options.rejectUnauthorized, true);
+});
+
+test("a non-default port travels in the Host header", () => {
+  const options = pinnedRequestOptions(
+    new URL("https://files.example.com:8443/x"),
+    "203.0.113.10"
+  );
+
+  assert.equal(options.port, 8443);
+  assert.equal(options.headers.host, "files.example.com:8443");
+});
+
+test("an IP literal gets no SNI but still verifies its certificate", () => {
+  // SNI is a hostname extension; for a literal the certificate has to carry the
+  // address itself, and rejectUnauthorized is what enforces that.
+  const options = pinnedRequestOptions(
+    new URL("https://203.0.113.10/x"),
+    "203.0.113.10"
+  );
+
+  assert.equal(options.servername, undefined);
+  assert.equal(options.rejectUnauthorized, true);
+});
+
+test("assertPublicDestination carries the validated addresses out", async () => {
+  // assertPublicUrl threw the addresses away; that is what made pinning
+  // impossible for the caller.
+  const { addresses, url } = await assertPublicDestination(
+    "https://203.0.113.10/x.pdf"
+  );
+
+  assert.deepEqual(addresses, ["203.0.113.10"]);
+  assert.equal(url.hostname, "203.0.113.10");
 });
