@@ -13,6 +13,7 @@ use redis::AsyncCommands;
 use sha2::Digest;
 use std::sync::Arc;
 
+use crate::engine::stage::{self, Budget, HangUpGuard, RecallStage, StageMarker};
 use crate::types::*;
 
 // ============================================================
@@ -183,8 +184,86 @@ pub async fn recall(
         "recall request"
     );
 
+    // Stop just short of the caller's deadline, so the 504 can say which
+    // stage was running. The caller's clock started before auth did.
+    let already = crate::observability::current_request_started()
+        .map(|arrived| arrived.elapsed())
+        .unwrap_or_default();
+    let deadline = match stage::budget_for(body.deadline_ms, already) {
+        Budget::Unbounded => None,
+        Budget::Run(left) => Some(tokio::time::Instant::now() + left),
+        Budget::Exhausted => {
+            return Err(recall_timed_out(
+                owner,
+                namespace,
+                RecallStage::Auth,
+                already,
+                &body,
+            ));
+        }
+    };
+    let marker = StageMarker::default();
+    let guard = HangUpGuard::new(marker.clone(), owner.clone());
+    let outcome = stage::run_with_deadline(
+        &marker,
+        deadline,
+        recall_pipeline(&state, &auth, &body, &weights, sort),
+    )
+    .await;
+    guard.disarm();
+    let response = match outcome {
+        Ok(result) => result?,
+        Err(timed_out) => {
+            let elapsed = already + timed_out.elapsed;
+            return Err(recall_timed_out(
+                owner,
+                namespace,
+                timed_out.stage,
+                elapsed,
+                &body,
+            ));
+        }
+    };
+    Ok(Json(response))
+}
+
+fn recall_timed_out(
+    owner: &str,
+    namespace: &str,
+    stage: RecallStage,
+    elapsed: std::time::Duration,
+    body: &RecallRequest,
+) -> AppError {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    tracing::warn!(
+        owner = %owner,
+        namespace = %namespace,
+        stage = stage.as_str(),
+        elapsed_ms,
+        deadline_ms = body.deadline_ms,
+        "recall timed out before the caller's deadline"
+    );
+    AppError::RecallTimeout {
+        stage: stage.as_str(),
+        elapsed_ms,
+    }
+}
+
+/// Everything `recall` does after validation, as one future the handler can
+/// put a deadline on. Each `stage::enter` names the step a timeout reports.
+async fn recall_pipeline(
+    state: &Arc<AppState>,
+    auth: &AuthInfo,
+    body: &RecallRequest,
+    weights: &ScoringWeights,
+    sort: RecallSort,
+) -> Result<RecallResponse, AppError> {
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+
+    stage::enter(RecallStage::Embed);
     let t0 = std::time::Instant::now();
-    let query_vector = generate_recall_embedding_cached(&state, &body.query).await?;
+    let query_vector = generate_recall_embedding_cached(state, &body.query).await?;
     let embed_ms = t0.elapsed().as_millis();
 
     // Cap limit to prevent unbounded DB scans / memory use.
@@ -195,6 +274,7 @@ pub async fn recall(
     // outside the cosine top-`limit` entirely. `Relevance` fetches exactly
     // `limit`, so the default path issues the identical query it always has.
     let candidate_limit = sort.candidate_limit(limit);
+    stage::enter(RecallStage::VectorSearch);
     let t1 = std::time::Instant::now();
     let hits = state
         .db
@@ -214,11 +294,11 @@ pub async fn recall(
             "recall complete: 0 results (no vector hits) for owner={}",
             owner
         );
-        return Ok(Json(RecallResponse {
+        return Ok(RecallResponse {
             results: vec![],
             total: 0,
             dropped_count: 0,
-        }));
+        });
     }
 
     // Hydrate the hits through the storage engine: blob cache -> Walrus
@@ -227,6 +307,7 @@ pub async fn recall(
     // engine owns the
     // cache/decrypt-batch internals and derives the SEAL credential from
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
+    stage::enter(RecallStage::WalrusDownload);
     let t2 = std::time::Instant::now();
     let hit_refs: Vec<(String, f64)> = hits
         .iter()
@@ -234,7 +315,7 @@ pub async fn recall(
         .collect();
     let (mut hydrated, dropped_count, timings) = state
         .engine
-        .fetch_batch(owner, namespace, &hit_refs, &auth)
+        .fetch_batch(owner, namespace, &hit_refs, auth)
         .await?;
     let fetch_ms = t2.elapsed().as_millis();
 
@@ -267,7 +348,7 @@ pub async fn recall(
     // this is a no-op and preserves the pgvector cosine order exactly —
     // pinned by the `default_weights_preserve_input_order` and
     // `recency_zero_is_short_circuit_no_reorder` tests in services::ranker.
-    let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
+    let ranked = state.ranker.rank(hydrated, weights, chrono::Utc::now());
 
     let results: Vec<RecallResult> = super::recall_results_from_ranked(ranked);
     let total = results.len();
@@ -300,11 +381,11 @@ pub async fn recall(
         t0.elapsed().as_millis()
     );
 
-    Ok(Json(RecallResponse {
+    Ok(RecallResponse {
         results,
         total,
         dropped_count,
-    }))
+    })
 }
 
 /// POST /api/recall/manual

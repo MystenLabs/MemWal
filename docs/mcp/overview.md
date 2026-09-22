@@ -80,11 +80,11 @@ What the user actually does differs per client. Pick your row:
 
 | Client | Automatic memory (hooks) | What you do |
 |---|:-:|---|
-| [Claude Code](/mcp/claude-code) | ✓ Plugin | `/plugin marketplace add MystenLabs/MemWal`, then `/plugin install memwal@memwal-plugins` |
+| [Claude Code](/mcp/claude-code) | ✓ Plugin | Code tab: use the [Claude Code plugin setup](/mcp/claude-code) with the explicit HTTPS marketplace URL; regular Claude Desktop/web chat: use the [OAuth connector](/mcp/claude-connector) |
 | [Codex](/mcp/codex) | ✓ Plugin | `codex plugin marketplace add MystenLabs/MemWal`, then `codex plugin add memwal@memwal-plugins`, then trust the hooks through `/hooks` |
 | [Antigravity](/mcp/antigravity) | ✓ Plugin | `npx degit MystenLabs/MemWal/packages/mcp/plugin ~/.gemini/config/plugins/memwal` |
 | [Cursor](/mcp/cursor) | ✓ Plugin | `npx -y degit MystenLabs/MemWal/packages/mcp/plugin ~/.cursor/plugins/local/memwal` |
-| [Claude Desktop](/mcp/claude-desktop) | ✗ MCP-only | Edit `claude_desktop_config.json`, then [add memory instructions](/mcp/claude-desktop#add-memory-instructions) |
+| [Claude Desktop](/mcp/claude-desktop) | ✗ MCP-only | Regular chat: use the [OAuth connector](/mcp/claude-connector); local MCP is optional. The Code tab uses [Claude Code](/mcp/claude-code). |
 | [OpenCode](/mcp/opencode) | ✗ MCP-only | Edit the OpenCode MCP config |
 | ChatGPT desktop app | ✓ Plugin | Ships Codex, so follow [Codex](/mcp/codex) |
 | ChatGPT web (Connectors) | ✗ Not supported | n/a |

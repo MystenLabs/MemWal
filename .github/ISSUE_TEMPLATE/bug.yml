@@ -10,7 +10,7 @@ body:
 
         Do not paste delegate private keys, mnemonics, or other secrets.
 
-        If this is a security finding, use a [private advisory](https://github.com/MystenLabs/MemWal/security/advisories/new) instead of this form.
+        If this is a security finding, email [security@mystenlabs.com](mailto:security@mystenlabs.com). Do not use this form. See our [security policy](https://github.com/MystenLabs/MemWal/security/policy).
 
   - type: dropdown
     id: surface

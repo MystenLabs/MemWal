@@ -450,6 +450,7 @@ impl MemoryEngine for WalrusSealEngine {
         );
 
         // Step 2: batch-decrypt the ciphertexts in chunks.
+        super::stage::enter(super::stage::RecallStage::SealDecrypt);
         let seal_start = std::time::Instant::now();
         let batch_input: Vec<(String, Vec<u8>)> = fetched
             .iter()
