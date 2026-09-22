@@ -24,7 +24,6 @@ pub async fn verify_delegate_key_onchain(
     account_object_id: &str,
     public_key_bytes: &[u8],
     expected_type_origin_package_id: &str,
-    get_object_attempts: u32,
 ) -> Result<String, OnchainVerifyError> {
     if let Some(grpc_client) = grpc_client {
         return verify_delegate_key_onchain_grpc(
@@ -32,7 +31,6 @@ pub async fn verify_delegate_key_onchain(
             account_object_id,
             public_key_bytes,
             expected_type_origin_package_id,
-            get_object_attempts,
         )
         .await;
     }
@@ -477,14 +475,15 @@ pub async fn verify_delegate_key_cached(
     // nothing. The owned key is built only where the map is actually written.
     let probe: &dyn DelegateAccountKey = &(account_object_id, public_key_bytes);
 
-    let get_object_attempts = {
-        let entries = cache.entries.read().await;
-        match entries.get(probe) {
-            Some(cached) if cached.is_fresh() => return Ok(cached.owner.clone()),
-            Some(cached) if cached.is_servable_while_unavailable() => 1,
-            _ => GET_OBJECT_ATTEMPTS,
-        }
-    };
+    if let Some(cached) = cache
+        .entries
+        .read()
+        .await
+        .get(probe)
+        .filter(|c| c.is_fresh())
+    {
+        return Ok(cached.owner.clone());
+    }
 
     // Read before the chain call, compared after it. See `evictions`.
     let generation_before = cache.evictions.load(std::sync::atomic::Ordering::Acquire);
@@ -514,7 +513,6 @@ pub async fn verify_delegate_key_cached(
         account_object_id,
         public_key_bytes,
         expected_type_origin_package_id,
-        get_object_attempts,
     )
     .await
     {
@@ -872,54 +870,9 @@ fn map_get_object_status(status: tonic::Status) -> OnchainVerifyError {
     }
 }
 
-pub const GET_OBJECT_ATTEMPTS: u32 = 3;
-const GET_OBJECT_RETRY_BASE_DELAY_MS: u64 = 500;
-static GET_OBJECT_RETRY_JITTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-async fn with_get_object_retry<T, F, Fut>(attempts: u32, mut call: F) -> Result<T, tonic::Status>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, tonic::Status>>,
-{
-    for attempt in 0..attempts {
-        let started = std::time::Instant::now();
-        let result =
-            match tokio::time::timeout(crate::sui::DEFAULT_RPC_ATTEMPT_TIMEOUT, call()).await {
-                Ok(result) => result,
-                Err(_) => Err(tonic::Status::deadline_exceeded(format!(
-                    "GetObject exceeded {}ms",
-                    crate::sui::DEFAULT_RPC_ATTEMPT_TIMEOUT.as_millis()
-                ))),
-            };
-        let status_label = match &result {
-            Ok(_) => "200".to_string(),
-            Err(status) => status.code().to_string(),
-        };
-        crate::observability::observe_external(
-            "sui_grpc",
-            "GetObject",
-            &status_label,
-            started.elapsed(),
-        );
-
-        match result {
-            Err(status)
-                if attempt + 1 < attempts && crate::sui::is_transient_grpc_code(status.code()) => {}
-            outcome => return outcome,
-        }
-
-        let base = GET_OBJECT_RETRY_BASE_DELAY_MS.saturating_mul(1_u64 << attempt.min(16));
-        let sequence = GET_OBJECT_RETRY_JITTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let jitter = base.saturating_mul(((sequence * 37 + u64::from(attempt)) % 21) + 90) / 100;
-        tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
-    }
-    unreachable!("attempts is non-zero")
-}
-
 async fn grpc_get_object(
-    client: sui_rpc::Client,
+    mut client: sui_rpc::Client,
     account_object_id: &str,
-    attempts: u32,
 ) -> Result<sui_rpc::proto::sui::rpc::v2::Object, OnchainVerifyError> {
     let address = parse_object_id(account_object_id)?;
     let mut request = sui_rpc::proto::sui::rpc::v2::GetObjectRequest::new(&address);
@@ -927,16 +880,24 @@ async fn grpc_get_object(
         paths: vec!["json".to_string(), "object_type".to_string()],
     });
 
-    with_get_object_retry(attempts, || {
-        let mut client = client.clone();
-        let request = request.clone();
-        async move { client.ledger_client().get_object(request).await }
-    })
-    .await
-    .map_err(map_get_object_status)?
-    .into_inner()
-    .object
-    .ok_or_else(|| OnchainVerifyError::NotFound("gRPC response missing object".into()))
+    let started = std::time::Instant::now();
+    let response = client.ledger_client().get_object(request).await;
+    let status_label = match &response {
+        Ok(_) => "200".to_string(),
+        Err(status) => status.code().to_string(),
+    };
+    crate::observability::observe_external(
+        "sui_grpc",
+        "GetObject",
+        &status_label,
+        started.elapsed(),
+    );
+
+    response
+        .map_err(map_get_object_status)?
+        .into_inner()
+        .object
+        .ok_or_else(|| OnchainVerifyError::NotFound("gRPC response missing object".into()))
 }
 
 /// gRPC counterpart of `verify_delegate_key_onchain` above — same checks
@@ -952,9 +913,8 @@ async fn verify_delegate_key_onchain_grpc(
     account_object_id: &str,
     public_key_bytes: &[u8],
     expected_type_origin_package_id: &str,
-    attempts: u32,
 ) -> Result<String, OnchainVerifyError> {
-    let object = grpc_get_object(client, account_object_id, attempts).await?;
+    let object = grpc_get_object(client, account_object_id).await?;
 
     // #398: verify the Move type before trusting any field (gRPC path).
     ensure_memwal_account_type(
@@ -1032,7 +992,7 @@ async fn list_delegate_keys_onchain_grpc(
     account_object_id: &str,
     expected_type_origin_package_id: &str,
 ) -> Result<Vec<DelegateKeyInfo>, OnchainVerifyError> {
-    let object = grpc_get_object(client, account_object_id, GET_OBJECT_ATTEMPTS).await?;
+    let object = grpc_get_object(client, account_object_id).await?;
 
     ensure_memwal_account_type(
         object.object_type.as_deref(),
@@ -1281,7 +1241,6 @@ pub async fn find_account_by_delegate_key(
                 account_id,
                 public_key_bytes,
                 expected_type_origin_package_id,
-                GET_OBJECT_ATTEMPTS,
             )
             .await
             {
@@ -1820,45 +1779,6 @@ mod tests {
                 assert!(matches!(err, OnchainVerifyError::NotFound(_)), "{err}");
             }
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn get_object_retries_a_transient_unavailable() {
-        let calls = std::sync::atomic::AtomicU32::new(0);
-        let object = with_get_object_retry(GET_OBJECT_ATTEMPTS, || {
-            let attempt = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async move {
-                if attempt == 0 {
-                    Err(tonic::Status::unavailable(
-                        "The service is currently unavailable",
-                    ))
-                } else {
-                    Ok("object")
-                }
-            }
-        })
-        .await
-        .expect("second attempt succeeds");
-
-        assert_eq!(object, "object");
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn get_object_makes_one_attempt_when_a_stale_entry_can_be_served() {
-        let calls = std::sync::atomic::AtomicU32::new(0);
-        let result: Result<&str, tonic::Status> = with_get_object_retry(1, || {
-            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async move {
-                Err(tonic::Status::unavailable(
-                    "The service is currently unavailable",
-                ))
-            }
-        })
-        .await;
-
-        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -3010,14 +2930,8 @@ mod tests {
         let expected_pkg = "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6";
 
         let client = sui_rpc::Client::new("https://fullnode.testnet.sui.io").unwrap();
-        let result = verify_delegate_key_onchain_grpc(
-            client,
-            account_id,
-            &wrong_key,
-            expected_pkg,
-            GET_OBJECT_ATTEMPTS,
-        )
-        .await;
+        let result =
+            verify_delegate_key_onchain_grpc(client, account_id, &wrong_key, expected_pkg).await;
 
         // The account genuinely exists and gRPC parses it correctly — a
         // non-matching key must fail with KeyNotFound, not RpcError. Getting
@@ -3042,7 +2956,6 @@ mod tests {
             fake_id,
             &[0u8; 32],
             "0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6",
-            GET_OBJECT_ATTEMPTS,
         )
         .await;
         assert!(

@@ -23,7 +23,6 @@ import {
     UPLOAD_RELAY_TIP_TIMEOUT_MS,
     WALRUS_CLIENT_MAX_AGE_MS,
     WALRUS_DIRECT_UPLOAD,
-    WALRUS_STORAGE_NODE_TIMEOUT_MS,
     WALRUS_PACKAGE_ID,
     WALRUS_STAKING_POOL_ID,
     WALRUS_SYSTEM_OBJECT_ID,
@@ -71,9 +70,6 @@ function createWalrusClient(): WalrusClient {
         !WALRUS_DIRECT_UPLOAD && !!WALRUS_UPLOAD_RELAY_URL && WALRUS_UPLOAD_RELAY_URL !== "none";
     const baseConfig = {
         suiClient: suiClient as any,
-        // Applies to both branches: the relay still reads slivers back from
-        // storage nodes, and the direct branch has nothing else to set it.
-        storageNodeClientOptions: { timeout: WALRUS_STORAGE_NODE_TIMEOUT_MS },
         ...(useRelay
             ? {
                   uploadRelay: {

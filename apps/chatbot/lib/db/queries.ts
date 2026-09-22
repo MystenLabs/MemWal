@@ -292,7 +292,7 @@ export async function voteMessage({
     const [existingVote] = await db
       .select()
       .from(vote)
-      .where(and(eq(vote.chatId, chatId), eq(vote.messageId, messageId)));
+      .where(and(eq(vote.messageId, messageId)));
 
     if (existingVote) {
       return await db

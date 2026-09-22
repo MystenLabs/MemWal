@@ -57,8 +57,6 @@ await memwal.restore("demo");
 
 ## Contributing
 
-Report security issues by email to [security@mystenlabs.com](mailto:security@mystenlabs.com). Do not report security issues through GitHub or Discord. See [SECURITY.md](SECURITY.md).
-
 We want to be explicit about this while Walrus Memory is in beta: feedback, bug reports, docs fixes,
 examples, and implementation contributions are all welcome.
 

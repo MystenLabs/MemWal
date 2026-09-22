@@ -40,18 +40,8 @@ export function registerHealthTool(
             const relayerNote = session.publicRelayerUrl
                 ? ` relayer=${session.publicRelayerUrl}`
                 : "";
-            // "degraded" is the case write_ready cannot express: the relayer
-            // still accepts and durably queues a write, so write_ready stays
-            // true, but recent durable writes are failing and none are
-            // landing. Say so, or an agent keeps queueing writes that fail
-            // minutes later.
-            const writesStateNote =
-                extra.writes === "paused"
-                    ? " writes=paused"
-                    : extra.writes === "degraded"
-                      ? " writes=degraded (accepted, but recent writes are failing downstream)"
-                      : "";
-            const writeNote = `${readyNote}${writesStateNote}`;
+            const pausedNote = extra.writes === "paused" ? " writes=paused" : "";
+            const writeNote = `${readyNote}${pausedNote}`;
             return {
                 content: [
                     {

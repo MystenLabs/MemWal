@@ -102,7 +102,6 @@ interface ComponentRow {
   uptimeLabel: string
   history: HistoryBucket[]
   writesPaused?: boolean
-  writesDegraded?: boolean
 }
 
 interface IncidentDay {
@@ -167,10 +166,9 @@ function getOverallStatus(snapshot: StatusSnapshot | null, loadState: LoadState)
   return 'monitoring'
 }
 
-function getStatusTitle(status: StatusKind, writesPaused = false, writesDegraded = false) {
+function getStatusTitle(status: StatusKind, writesPaused = false) {
   if (status === 'operational') return 'All Systems Operational'
   if (status === 'degraded' && writesPaused) return 'Writes Paused'
-  if (status === 'degraded' && writesDegraded) return 'Writes Degraded'
   if (status === 'degraded') return 'Degraded Performance'
   if (status === 'outage') return 'Service Disruption'
   return 'Checking System Status'
@@ -263,7 +261,6 @@ function buildRows(snapshot: StatusSnapshot | null, loadState: LoadState): Compo
       uptimeLabel: formatUptime(history),
       history: normalizeBuckets(history, component.status),
       writesPaused: component.health?.writes === 'paused',
-      writesDegraded: component.health?.writes === 'degraded',
     }
   })
 }
@@ -404,20 +401,8 @@ function calendarRangeLabel(months: CalendarMonth[]) {
   return `${months[0].label} to ${months[months.length - 1].label}`
 }
 
-function StatusPill({
-  status,
-  writesPaused,
-  writesDegraded,
-}: {
-  status: StatusKind
-  writesPaused?: boolean
-  writesDegraded?: boolean
-}) {
-  const label = writesPaused
-    ? 'Writes Paused'
-    : writesDegraded
-      ? 'Writes Degraded'
-      : statusLabel[status]
+function StatusPill({ status, writesPaused }: { status: StatusKind; writesPaused?: boolean }) {
+  const label = writesPaused ? 'Writes Paused' : statusLabel[status]
   return <span className={`status-pill status-pill--${status}`}>{label}</span>
 }
 
@@ -484,11 +469,7 @@ function ComponentStatusRow({ row }: { row: ComponentRow }) {
     <article className="component-row">
       <div className="component-row__header">
         <h2>{row.name}</h2>
-        <StatusPill
-          status={row.status}
-          writesPaused={row.writesPaused}
-          writesDegraded={row.writesDegraded}
-        />
+        <StatusPill status={row.status} writesPaused={row.writesPaused} />
       </div>
 
       <div className="component-row__history" aria-label={`${row.name} uptime history`}>
@@ -1073,7 +1054,6 @@ export default function App() {
 
   const overallStatus = getOverallStatus(snapshot, loadState)
   const writesPaused = (snapshot?.components ?? []).some((c) => c.health?.writes === 'paused')
-  const writesDegraded = (snapshot?.components ?? []).some((c) => c.health?.writes === 'degraded')
   const rows = useMemo(() => buildRows(snapshot, loadState), [snapshot, loadState])
   const uptimeRows = useMemo(() => rows.filter((row) => row.status !== 'monitoring'), [rows])
   const productionHistory = snapshot?.histories?.['relayer-production']
@@ -1093,7 +1073,7 @@ export default function App() {
         {route === 'current' && (
           <>
             <section className={`summary-banner summary-banner--${overallStatus}`} aria-live="polite">
-              <h1>{getStatusTitle(overallStatus, writesPaused, writesDegraded)}</h1>
+              <h1>{getStatusTitle(overallStatus, writesPaused)}</h1>
             </section>
 
             {(error || componentError || snapshot?.database?.error) && (

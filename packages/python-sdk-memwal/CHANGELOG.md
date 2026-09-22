@@ -1,11 +1,5 @@
 # memwal
 
-## 0.1.11
-
-### Added
-
-- `list_namespaces(cursor=None, limit=None)` lists the namespaces that hold memories (name, `memory_count`, `storage_used`, `updated_at`), so an agent can discover namespaces instead of guessing. Metadata only; no decryption. Paginate on `has_more`. `MemWalSync` and the mock clients have it too.
-
 ## 0.1.10
 
 ### Added

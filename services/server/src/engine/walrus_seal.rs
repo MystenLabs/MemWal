@@ -240,20 +240,14 @@ impl MemoryEngine for WalrusSealEngine {
         importance: f32,
         agent_public_key: Option<&str>,
     ) -> Result<MemoryRef, AppError> {
-        // Pick the least-loaded Sui key slot so concurrent stores don't
-        // serialise on one signer. Round-robin alone could land on a wallet
-        // that is mid-upload while another sits idle; the per-wallet limit is
-        // 1, so that costs the full upload of whatever is ahead.
-        let key_index = self.key_pool.least_loaded_index().ok_or_else(|| {
+        // Pick the next Sui key slot (round-robin) so concurrent stores
+        // don't serialise on one signer.
+        let key_index = self.key_pool.next_index().ok_or_else(|| {
             AppError::Internal(
                 "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
                     .into(),
             )
         })?;
-
-        // Hold the slot for the duration of the upload, so a store running
-        // concurrently sees this wallet as busy and picks another.
-        let _wallet_slot = self.key_pool.begin_attempt(key_index);
 
         // Upload the prepared ciphertext to Walrus via the relay sidecar
         // (pool key pays gas). `defer_transfer = false` — the blob is
@@ -450,7 +444,6 @@ impl MemoryEngine for WalrusSealEngine {
         );
 
         // Step 2: batch-decrypt the ciphertexts in chunks.
-        super::stage::enter(super::stage::RecallStage::SealDecrypt);
         let seal_start = std::time::Instant::now();
         let batch_input: Vec<(String, Vec<u8>)> = fetched
             .iter()

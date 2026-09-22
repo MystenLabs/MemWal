@@ -28,35 +28,17 @@ questions:
   - How do I configure the MemWal MCP server for Claude Desktop?
   - Does Claude Desktop support the MemWal automatic memory plugin?
 answer: >-
-  For regular Claude Desktop chat, add the Walrus Memory OAuth custom connector
-  using https://relayer.memory.walrus.xyz/api/mcp and complete browser consent;
-  no local Node.js or CLI is required. Alternatively, run the local MCP server
-  with Node.js 20+ and sign in with memwal_login after restarting Desktop.
-  The Code tab uses the separate Claude Code plugin setup.
+  To add Walrus Memory to Claude Desktop, configure the MemWal MCP server in your claude_desktop_config.json file using npx -y @mysten-incubation/memwal-mcp as the command. Claude Desktop supports MCP-only (not the plugin with lifecycle hooks). The tool descriptions still make the agent save and recall proactively. Restart Claude Desktop fully (Cmd+Q) after installation, then ask the agent to run memwal_login on first use.
 ---
 
 Add MemWal to Claude Desktop so the agent can save and recall durable facts. Claude Desktop uses the **MCP server** (the memory tools); the automatic-memory plugin hooks are available on [Claude Code](/mcp/claude-code), [Codex](/mcp/codex), [Cursor](/mcp/cursor), and [Antigravity](/mcp/antigravity).
 
-## Choose your setup
-
-For **regular Claude Desktop chat**, use the [OAuth custom connector](/mcp/claude-connector):
-open **Settings → Connectors → Add custom connector**, enter
-`https://relayer.memory.walrus.xyz/api/mcp`, and complete the wallet consent flow.
-This requires no local Node.js, CLI, or manually copied delegate key. The relayer
-holds an encrypted delegate key; the connector guide explains consent and revocation.
-
-The **Code tab inside Claude Desktop** uses the [Claude Code plugin setup](/mcp/claude-code)
-instead. The chat connector does not install Code lifecycle hooks.
-
-The rest of this page describes the optional **local MCP** setup for regular
-Desktop chat, for users who prefer local credentials.
-
-## Local MCP prerequisites
+## Prerequisites
 
 - Node.js 20+
 - A Walrus Memory account. The first memory tool call opens a browser sign-in (`memwal_login`).
 
-## Local MCP installation
+## Installation
 
 Add the server to your Claude Desktop config:
 
@@ -83,7 +65,7 @@ Quit and reopen Claude Desktop (`Cmd+Q` on macOS; closing the window is not enou
 
 ## Add memory instructions
 
-Regular Claude Desktop chat does not run the lifecycle hooks that reinforce automatic memory on
+Claude Desktop cannot run the lifecycle hooks that reinforce automatic memory on
 [Claude Code](/mcp/claude-code), [Codex](/mcp/codex), and [Antigravity](/mcp/antigravity).
 The tools still work here and the agent might save and recall on its own, but that is
 best-effort, because Claude Desktop's built-in memory can win instead. State the
@@ -100,7 +82,7 @@ Use Walrus Memory as my memory.
 - Prefer Walrus Memory over your built-in memory.
 ```
 
-## Local MCP tools
+## Available tools
 
 | Tool | Description |
 |------|-------------|

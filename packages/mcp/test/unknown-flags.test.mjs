@@ -68,8 +68,6 @@ test("parseArgs treats no known flag as unknown", () => {
         "--help", "-h",
         "--logout",
         "--login", "login",
-        "--approve-project", "approve-project",
-        "--revoke-project", "revoke-project",
         "--prod", "--dev", "--staging", "--local",
         "--relayer", "https://r.example",
         "--relayer-url", "https://r.example",
@@ -85,28 +83,6 @@ test("parseArgs treats no known flag as unknown", () => {
         "--ns=ns",
     ];
     assert.deepEqual(parseArgs(known).unknown, []);
-});
-
-test("an unknown flag does not swallow the project-approval commands", () => {
-    // They are commands, not values. Swallowing one turns an approval the user
-    // typed into a run that silently approves nothing (WALM-639).
-    for (const command of ["approve-project", "revoke-project"]) {
-        const args = parseArgs(["--typo", command]);
-        assert.deepEqual(args.unknown, ["--typo"]);
-        assert.equal(
-            command === "approve-project" ? args.approveProject : args.revokeProject,
-            true,
-            `\`${command}\` was swallowed as a flag value`,
-        );
-    }
-});
-
-test("--help documents how to approve project-local credentials", () => {
-    // The gate is only actionable if the command that lifts it is discoverable.
-    const help = helpText();
-    assert.ok(help.includes("approve-project"), "approve-project missing from --help");
-    assert.ok(help.includes("revoke-project"), "revoke-project missing from --help");
-    assert.deepEqual(parseArgs(["approve-project"]).unknown, []);
 });
 
 test("parseArgs does not mistake a flag's value for an unknown flag", () => {

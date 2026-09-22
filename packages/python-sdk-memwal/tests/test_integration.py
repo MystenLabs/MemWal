@@ -258,30 +258,6 @@ class TestRemember:
 
 
 @requires_key
-class TestListNamespaces:
-    """list_namespaces() against live server. Read-only; writes nothing."""
-
-    def test_walks_every_page_on_has_more(self) -> None:
-        # limit=1 forces a cursor into the signed query string on every page
-        # after the first, which is what the relayer verifies the signature over.
-        mw = _sync_client()
-        names: list[str] = []
-        cursor = None
-        for _ in range(1000):
-            page = mw.list_namespaces(cursor=cursor, limit=1)
-            assert len(page.namespaces) <= 1
-            assert page.snapshot_version >= 1
-            names.extend(ns.name for ns in page.namespaces)
-            cursor = page.next_cursor
-            if not page.has_more:
-                break
-        else:
-            pytest.fail("namespace walk did not finish in 1000 pages")
-        assert len(names) == len(set(names)), "a single walk must not repeat a namespace"
-        print(f"\n  namespaces={len(names)}")
-
-
-@requires_key
 class TestRecall:
     """recall() against live server."""
 

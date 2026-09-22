@@ -202,7 +202,6 @@ async fn update_remember_job_after_wallet_error(
     remember_job_id: Option<&str>,
     error: &WalletJobError,
     msg: &str,
-    attempt_info: Option<WalletJobAttemptInfo>,
 ) {
     let Some(jid) = remember_job_id else {
         return;
@@ -211,17 +210,13 @@ async fn update_remember_job_after_wallet_error(
     // Aborting errors (Permanent or ObjectLockedUntilEpoch) get no further
     // retries, so the row is terminal — mark it failed rather than leaving it
     // stuck on `running` forever. Retryable errors stay `running` for the next
-    // attempt — UNLESS this was already the final attempt. Exhausted retries
-    // used to stay `running` with an error_msg until the 10-minute stale
-    // sweeper force-failed them, so clients polling GET /api/remember/:job_id
-    // reported "still uploading" for minutes after every wallet attempt had
-    // already died (dev 2026-09-17 upload-slot investigation). Pass
-    // `attempt_info` only from the attempt that actually failed the upload;
-    // lock-contention Defer callers pass None so a loser cannot mark failed
-    // while a winner is still working.
-    let exhausted = attempt_info.is_some_and(|info| info.retries_exhausted(error));
-    let terminal = error.aborts_retries() || exhausted;
-    let status = if terminal { "failed" } else { "running" };
+    // attempt. The error_msg carries the lock detail; the object-lock case
+    // also fires its own distinct Slack alert.
+    let status = if error.aborts_retries() {
+        "failed"
+    } else {
+        "running"
+    };
 
     // Terminal means no later attempt will ever insert the row, so the bytes
     // this job reserved at admission must go back to the owner now rather than
@@ -231,7 +226,7 @@ async fn update_remember_job_after_wallet_error(
     //
     // Safe to run even when a concurrent attempt already won and released:
     // release is a delete by id, so a second call is a no-op.
-    if terminal {
+    if error.aborts_retries() {
         crate::storage::db::release_storage_reservations_with_pool(pool, &[jid.to_string()]).await;
     }
 
@@ -405,31 +400,6 @@ pub fn backoff_duration(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(2u64.pow(attempt))
 }
 
-/// How long a failed upload attempt should pause before Apalis re-queues it,
-/// or `None` when no pause is warranted.
-///
-/// Apalis attaches no retry/backoff layer (see `WalletJobError`'s doc
-/// comment), so a retriable error is re-polled almost immediately and the
-/// whole attempt budget burns inside one upstream rate-limit window. Observed
-/// in production: a single job took attempts 2, 3, 4 and 5 against Walrus
-/// `503 Too Many Requests` within one second, rotating through four wallets
-/// that never had a chance to land, and died as "exhausted retries" about a
-/// second after its first failure. The upstream limit is time-based, so
-/// rotating wallets cannot help — only waiting can.
-///
-/// Returns `None` for an aborting error (retrying it is pointless) and for the
-/// final attempt (nothing is coming, so the sleep would only delay the
-/// failure the caller is already reporting).
-fn upload_retry_backoff(
-    classified: &WalletJobError,
-    attempt_info: WalletJobAttemptInfo,
-) -> Option<std::time::Duration> {
-    if classified.aborts_retries() || attempt_info.current >= attempt_info.max {
-        return None;
-    }
-    Some(backoff_duration(attempt_info.current as u32))
-}
-
 pub(crate) fn wallet_job_request(
     job: WalletJob,
 ) -> Request<WalletJob, apalis_sql::context::SqlContext> {
@@ -445,15 +415,14 @@ pub(crate) struct WalletJobAttemptInfo {
 }
 
 impl WalletJobAttemptInfo {
-    fn retries_exhausted(&self, error: &WalletJobError) -> bool {
-        !error.aborts_retries() && self.current >= self.max
-    }
-
     fn exhausted_by(&self, error: &WalletJobError) -> bool {
         if matches!(error, WalletJobError::WalrusBalanceLow(_)) {
             return false;
         }
-        self.retries_exhausted(error)
+        // Only retryable (non-aborting) errors can "exhaust" the budget. An
+        // aborting error — Permanent or ObjectLockedUntilEpoch — stops retries
+        // immediately, so it never produces a misleading "exhausted" alert.
+        !error.aborts_retries() && self.current >= self.max
     }
 }
 
@@ -552,13 +521,6 @@ pub(crate) async fn execute_wallet_job(
                     .into_apalis_error());
                 }
             };
-            // Mark this wallet busy for the rest of the attempt, so a
-            // concurrently-enqueued job picks an idle wallet instead of
-            // queueing behind this upload. Held by guard rather than paired
-            // calls because every return below — and there are many — has to
-            // release it.
-            let _wallet_slot = state.key_pool.begin_attempt(wallet_index);
-
             if wallet_index != enqueued_wallet_index || attempt_info.current > 1 {
                 tracing::info!(
                     "[wallet-job:upload] selected wallet for attempt: enqueued={} executing={} attempt={}/{}",
@@ -628,19 +590,6 @@ pub(crate) async fn execute_wallet_job(
             policy_package_id,
             end_epoch,
         } => {
-            // Mark the wallet busy for this transaction too. `least_loaded_index`
-            // answers "is this key signing right now", and only the upload arm
-            // was telling it — so a metadata+transfer, which signs on the very
-            // same wallet, read as idle. A concurrently-enqueued upload would
-            // then pick that key precisely because it looked free, and queue
-            // behind the transaction anyway. That is the failure join-shortest-
-            // queue exists to avoid, and it showed up as the pool converging on
-            // whichever key was mid-transfer.
-            //
-            // `enqueued_wallet_index` rather than a fresh pick: this operation
-            // must run on the key that already owns the blob object.
-            let _wallet_slot = state.key_pool.begin_attempt(enqueued_wallet_index);
-
             let result = execute_set_metadata_and_transfer(
                 state,
                 enqueued_wallet_index,
@@ -742,7 +691,6 @@ pub(crate) async fn execute_wallet_job(
                         remember_job_id.as_deref(),
                         &err,
                         &msg,
-                        Some(attempt_info),
                     )
                     .await;
                     tracing::error!(
@@ -926,14 +874,8 @@ async fn insert_vector_and_mark_remember_done(
     {
         let msg = format!("insert_vector failed: {}", e);
         let classified = WalletJobError::classify_sidecar_error(&msg);
-        update_remember_job_after_wallet_error(
-            state.db.pool(),
-            remember_job_id,
-            &classified,
-            &msg,
-            None,
-        )
-        .await;
+        update_remember_job_after_wallet_error(state.db.pool(), remember_job_id, &classified, &msg)
+            .await;
         tracing::error!(
             "[wallet-job:upload] job_id={} {} classification={} retryable={}",
             remember_job_id.unwrap_or("-"),
@@ -1552,14 +1494,11 @@ async fn execute_upload_and_transfer(
                     attempt_info.max,
                     err,
                 );
-                // No attempt_info: a Defer loser must not mark the row failed
-                // on the final attempt while the lock holder is still working.
                 update_remember_job_after_wallet_error(
                     state.db.pool(),
                     Some(jid.as_str()),
                     &err,
                     err.message(),
-                    None,
                 )
                 .await;
                 tokio::time::sleep(backoff_duration(attempt_info.current as u32)).await;
@@ -1760,7 +1699,6 @@ async fn execute_upload_and_transfer_locked(
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
-                None,
             )
             .await;
             tracing::error!(
@@ -1807,23 +1745,11 @@ async fn execute_upload_and_transfer_locked(
                 // reclassifying its display text would incorrectly make it
                 // retryable and leave the polling row running.
                 let msg = err.message().to_string();
-                maybe_alert_walrus_upload_exhausted(
-                    state,
-                    &err,
-                    attempt_info,
-                    Some(jid.as_str()),
-                    &owner,
-                    &namespace,
-                    wallet_index,
-                    &msg,
-                )
-                .await;
                 update_remember_job_after_wallet_error(
                     state.db.pool(),
                     Some(jid.as_str()),
                     &err,
                     &msg,
-                    Some(attempt_info),
                 )
                 .await;
                 tracing::error!(
@@ -1833,22 +1759,6 @@ async fn execute_upload_and_transfer_locked(
                     err.kind(),
                     !err.aborts_retries()
                 );
-                // The durable upload has its own exit, so it needs its own
-                // spacing — this is the path a real retry actually took.
-                // Observed on dev: `durable Walrus upload request failed`
-                // classified transient at attempt 1/5, with the next attempt
-                // starting in the same second because only the legacy exit
-                // below had been given a backoff.
-                if let Some(delay) = upload_retry_backoff(&err, attempt_info) {
-                    tracing::info!(
-                        "[wallet-job:upload] job_id={} backing off {:?} before attempt {}/{}",
-                        jid,
-                        delay,
-                        attempt_info.current + 1,
-                        attempt_info.max,
-                    );
-                    tokio::time::sleep(delay).await;
-                }
                 Err(err)
             }
         };
@@ -1973,7 +1883,6 @@ async fn execute_upload_and_transfer_locked(
                     remember_job_id.as_deref(),
                     &classified,
                     &msg,
-                    None,
                 )
                 .await;
 
@@ -2088,7 +1997,6 @@ async fn execute_upload_and_transfer_locked(
                 remember_job_id.as_deref(),
                 &classified,
                 &msg,
-                Some(attempt_info),
             )
             .await;
             tracing::error!(
@@ -2098,20 +2006,6 @@ async fn execute_upload_and_transfer_locked(
                 classified.kind(),
                 !classified.aborts_retries()
             );
-            // The wallet slot stays held across this sleep. That is
-            // deliberate: a backing-off job is still this wallet's turn, and
-            // releasing it would invite another job onto a wallet that is
-            // about to retry anyway.
-            if let Some(delay) = upload_retry_backoff(&classified, attempt_info) {
-                tracing::info!(
-                    "[wallet-job:upload] job_id={} backing off {:?} before attempt {}/{}",
-                    remember_job_id.as_deref().unwrap_or("-"),
-                    delay,
-                    attempt_info.current + 1,
-                    attempt_info.max,
-                );
-                tokio::time::sleep(delay).await;
-            }
             return Err(classified);
         }
     };
@@ -2624,58 +2518,6 @@ impl WalletJobError {
         lower.contains("timed out waiting for") && lower.contains("upload slot")
     }
 
-    /// True if `msg` is one of the sidecar's register-transaction journal
-    /// assertions (`validatePreparedRegisterTransaction` and friends in
-    /// scripts/sidecar/routes/walrus-upload-journal.ts).
-    ///
-    /// These describe the SHAPE of a transaction the sidecar already built —
-    /// wrong gas source, missing WAL withdrawal, sender/gas-owner mismatch,
-    /// non-canonical bytes, digest mismatch. Replaying the journal rebuilds
-    /// the same shape, so every retry re-fails identically; the job burns its
-    /// whole retry budget before dying. Classify Permanent so it dies on the
-    /// first attempt and the caller is told to send the fact again.
-    ///
-    /// Anchored on the assertion text rather than the transport's
-    /// `NO_SIDE_EFFECT` code on purpose: that code means only "nothing reached
-    /// the chain" and is also returned for pre-submission infra blips
-    /// (`causeCode: SHARED_SERVICE_UNAVAILABLE` in retry/rpc.ts), which must
-    /// stay retryable.
-    pub fn is_register_transaction_shape_error(msg: &str) -> bool {
-        let lower = msg.to_ascii_lowercase();
-        Self::REGISTER_TRANSACTION_SHAPE_ASSERTIONS
-            .iter()
-            .any(|assertion| lower.contains(assertion))
-    }
-
-    /// The sidecar's register-transaction assertion sentences, lowercased and
-    /// carrying the `registerTransaction` token they start with.
-    ///
-    /// Matched WHOLE, not as a `registertransaction`-anywhere guard plus a
-    /// phrase-anywhere test. The text being classified is a wrapper
-    /// (`durable Walrus upload failed (503 …): {json}`) that can carry a
-    /// nested cause, so those two conditions can be satisfied by unrelated
-    /// halves of one message: a transient RPC or relay failure that mentions
-    /// the register step and, somewhere else entirely, a broad phrase like
-    /// `digest mismatch` or `sender does not match`. Read loosely it becomes
-    /// `Permanent`, `aborts_retries()` is true, the row is failed on attempt
-    /// 1, and a write the next attempt would have landed is lost.
-    ///
-    /// The `sponsored registerTransaction …` variants are covered by the
-    /// shorter forms here, which they contain.
-    const REGISTER_TRANSACTION_SHAPE_ASSERTIONS: &'static [&'static str] = &[
-        "registertransaction must use a validduring address-balance expiration",
-        "registertransaction must pay gas from the address balance",
-        "registertransaction has no wal address-balance withdrawal",
-        "registertransaction resolved wal from an owned coin",
-        "registertransaction resolved the relay tip from an owned sui coin",
-        "registertransaction must use a distinct gas owner",
-        "registertransaction sender does not match",
-        "registertransaction gas owner does not match",
-        "registertransaction.transactionbytes is not canonical base64",
-        "registertransaction digest mismatch",
-        "registertransaction contains invalid transactiondata",
-    ];
-
     /// True if `msg` is a pool-wallet WAL shortfall. Deliberately the
     /// substring half of `parse_wal_balance_alert_info` without its
     /// `available < WAL_BALANCE_LOW_THRESHOLD_MIST` gate: that threshold
@@ -2709,13 +2551,6 @@ impl WalletJobError {
         }
         if parse_wal_balance_alert_info(msg).is_some() {
             return WalletJobError::WalrusBalanceLow(msg.to_string());
-        }
-        // Register-transaction shape assertions are deterministic for the same
-        // journal — see is_register_transaction_shape_error. Checked early so a
-        // shape rejection cannot fall through to the Transient catch-all at the
-        // end and spend the job's retry budget re-failing identically.
-        if Self::is_register_transaction_shape_error(msg) {
-            return WalletJobError::Permanent(msg.to_string());
         }
         // Sidecar upload limiter saturated — see UploadSlotCongestion docs.
         if Self::is_upload_slot_congestion_error(msg) {
@@ -3028,7 +2863,7 @@ mod tests {
         is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
         mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
         persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
-        update_remember_job_after_wallet_error, upload_resume_disposition, upload_retry_backoff,
+        update_remember_job_after_wallet_error, upload_resume_disposition,
         wallet_index_for_upload_attempt, wallet_job_request, JobUploadLock, LockOutcome,
         UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
         MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
@@ -3047,124 +2882,7 @@ SequenceNumber(884613305), o#B61aVqEgDskxru255FTdzua2RxbbnhDMFxmQ8SCxvj3n) alrea
 different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82BtHrp3F) \
 { k#80127c70.., k#81626d03.. } with 6842 stake].";
 
-    /// The exact production error string from the dev-relayer write outage of
-    /// 2026-09-17 (job d67d1fc2…, trace 12b3e920…). Every remember on dev failed
-    /// with this shape and, classified Transient, burned its retry budget before
-    /// dying — 0 blobs certified over the whole window.
-    const PROD_REGISTER_SHAPE_ERROR: &str =
-        "durable Walrus upload failed (503 Service Unavailable): \
-{\"error\":\"registerTransaction must use a ValidDuring address-balance expiration\",\
-\"code\":\"NO_SIDE_EFFECT\",\"traceId\":\"12b3e920-b94b-4100-bb35-fc0f0a1804e1\"}";
-
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-
-    #[test]
-    fn a_spent_budget_is_terminal_for_every_retryable_error() {
-        let spent = WalletJobAttemptInfo {
-            current: MAX_ATTEMPTS as usize,
-            max: MAX_ATTEMPTS as usize,
-        };
-        let low = WalletJobError::WalrusBalanceLow("wallet 0 WAL balance low".into());
-
-        assert!(!spent.exhausted_by(&low));
-        assert!(spent.retries_exhausted(&low));
-
-        for err in [
-            WalletJobError::Transient("durable Walrus upload failed (503)".into()),
-            WalletJobError::UploadSlotCongestion("timed out waiting for upload slot".into()),
-        ] {
-            assert!(spent.retries_exhausted(&err), "{}", err.kind());
-        }
-
-        let mid = WalletJobAttemptInfo { current: 1, max: MAX_ATTEMPTS as usize };
-        assert!(!mid.retries_exhausted(&low));
-        let permanent = WalletJobError::Permanent("registerTransaction digest mismatch".into());
-        assert!(!spent.retries_exhausted(&permanent) && permanent.aborts_retries());
-    }
-
-    #[test]
-    fn register_shape_rejection_is_permanent() {
-        assert!(matches!(
-            WalletJobError::classify_sidecar_error(PROD_REGISTER_SHAPE_ERROR),
-            WalletJobError::Permanent(_)
-        ));
-    }
-
-    #[test]
-    fn every_register_shape_assertion_is_permanent() {
-        for msg in [
-            "registerTransaction must pay gas from the address balance",
-            "registerTransaction has no WAL address-balance withdrawal",
-            "registerTransaction resolved WAL from an owned coin",
-            "registerTransaction resolved the relay tip from an owned SUI coin",
-            "sponsored registerTransaction must use a distinct gas owner",
-            "sponsored registerTransaction sender does not match the wallet",
-            "registerTransaction gas owner does not match the journaled wallet",
-            "registerTransaction.transactionBytes is not canonical base64",
-            "registerTransaction digest mismatch: expected abc, got def",
-            "registerTransaction contains invalid TransactionData: bad bytes",
-        ] {
-            assert!(
-                matches!(
-                    WalletJobError::classify_sidecar_error(msg),
-                    WalletJobError::Permanent(_)
-                ),
-                "expected Permanent for {msg}"
-            );
-        }
-    }
-
-    /// `NO_SIDE_EFFECT` alone must stay retryable: retry/rpc.ts returns it for
-    /// any pre-submission failure, including shared-infra blips that the next
-    /// attempt succeeds through.
-    #[test]
-    fn no_side_effect_without_a_shape_assertion_stays_transient() {
-        assert!(matches!(
-            WalletJobError::classify_sidecar_error(
-                "durable Walrus upload failed (503 Service Unavailable): \
-{\"error\":\"fetch failed\",\"code\":\"NO_SIDE_EFFECT\",\
-\"causeCode\":\"SHARED_SERVICE_UNAVAILABLE\"}"
-            ),
-            WalletJobError::Transient(_)
-        ));
-    }
-
-    /// The shape check keys on the assertion text, so an unrelated message that
-    /// merely mentions a sender mismatch must not be swallowed by it.
-    #[test]
-    fn unrelated_sender_mismatch_is_not_a_shape_rejection() {
-        assert!(!WalletJobError::is_register_transaction_shape_error(
-            "sponsor failed: sender does not match the wallet"
-        ));
-    }
-
-    /// The assertion must follow the `registerTransaction` token, not merely
-    /// share a message with it. The classified text is a wrapper that can
-    /// carry a nested cause, so a transient failure naming the register step
-    /// in one clause and a broad phrase in another must stay retryable —
-    /// read as Permanent it dies on attempt 1 and the fact is lost.
-    #[test]
-    fn a_broad_phrase_elsewhere_in_the_message_is_not_a_shape_rejection() {
-        for msg in [
-            "durable Walrus upload failed (503 Service Unavailable): \
-{\"error\":\"timed out submitting registerTransaction\",\"code\":\"NO_SIDE_EFFECT\",\
-\"cause\":\"checkpoint digest mismatch on the fullnode\"}",
-            "registerTransaction step: upstream RPC error, sender does not match \
-the checkpoint it replied about",
-        ] {
-            assert!(
-                !WalletJobError::is_register_transaction_shape_error(msg),
-                "expected retryable for {msg}"
-            );
-            assert!(
-                matches!(
-                    WalletJobError::classify_sidecar_error(msg),
-                    WalletJobError::Transient(_)
-                ),
-                "expected Transient for {msg}"
-            );
-        }
-    }
 
     fn test_database_url() -> String {
         std::env::var("DATABASE_URL")
@@ -3313,47 +3031,6 @@ the checkpoint it replied about",
         assert_eq!(backoff_duration(3), std::time::Duration::from_secs(8));
         assert_eq!(backoff_duration(4), std::time::Duration::from_secs(16));
         assert_eq!(backoff_duration(5), std::time::Duration::from_secs(32));
-    }
-
-    #[test]
-    fn upload_retry_backs_off_between_attempts() {
-        // The production failure this exists for: attempts 2..5 against Walrus
-        // 503 "Too Many Requests" inside one second, four wallet rotations
-        // that never had a chance to land. Each attempt must now be spaced.
-        let rate_limited = WalletJobError::Transient(
-            "durable Walrus upload failed (503 Service Unavailable): {\"error\":\"Too Many Requests\"}"
-                .into(),
-        );
-        for attempt in 1..5usize {
-            assert_eq!(
-                upload_retry_backoff(
-                    &rate_limited,
-                    WalletJobAttemptInfo {
-                        current: attempt,
-                        max: 5
-                    }
-                ),
-                Some(backoff_duration(attempt as u32)),
-                "attempt {attempt} should wait before the next one",
-            );
-        }
-    }
-
-    #[test]
-    fn upload_retry_does_not_back_off_when_nothing_follows() {
-        let transient = WalletJobError::Transient("upstream hiccup".into());
-        // Final attempt: sleeping only delays the failure already being reported.
-        assert_eq!(
-            upload_retry_backoff(&transient, WalletJobAttemptInfo { current: 5, max: 5 }),
-            None
-        );
-        // Aborting errors never retry, so spacing them buys nothing.
-        let aborting = WalletJobError::GasPoolExhausted("balance::split ENotEnough".into());
-        assert!(aborting.aborts_retries());
-        assert_eq!(
-            upload_retry_backoff(&aborting, WalletJobAttemptInfo { current: 1, max: 5 }),
-            None
-        );
     }
 
     #[test]
@@ -4276,7 +3953,6 @@ the checkpoint it replied about",
             Some(job_id.as_str()),
             &WalletJobError::Transient("another attempt of upload job is in progress".into()),
             "another attempt of upload job is in progress",
-            None,
         )
         .await;
 
@@ -4295,76 +3971,6 @@ the checkpoint it replied about",
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
             .bind(&job_id)
-            .execute(&pool)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn exhausted_transient_upload_marks_the_row_failed_immediately() {
-        // Dev 2026-09-17: after attempt 5/5 of a Walrus 503 timeout the row
-        // stayed `running` until the 10-minute stale sweeper. Clients polling
-        // the job then reported "still uploading" long after every wallet
-        // attempt was spent. The final attempt must mark failed itself.
-        let pool = test_pool().await;
-        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
-        insert_job_with_status(&pool, &job_id, "running", None).await;
-
-        let err = WalletJobError::Transient(
-            "Internal Error: durable Walrus upload failed (503 Service Unavailable)".into(),
-        );
-        update_remember_job_after_wallet_error(
-            &pool,
-            Some(job_id.as_str()),
-            &err,
-            err.message(),
-            Some(WalletJobAttemptInfo {
-                current: MAX_ATTEMPTS as usize,
-                max: MAX_ATTEMPTS as usize,
-            }),
-        )
-        .await;
-
-        let row: (String, Option<String>) =
-            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
-                .bind(&job_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(row.0, "failed");
-        assert!(
-            row.1.as_deref().unwrap_or("").contains("503"),
-            "error_msg must keep the upload failure: {:?}",
-            row.1
-        );
-
-        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
-            .bind(&job_id)
-            .execute(&pool)
-            .await;
-
-        // An earlier attempt must still leave the row running for the next try.
-        let mid_id = format!("remember-job-{}", uuid::Uuid::new_v4());
-        insert_job_with_status(&pool, &mid_id, "running", None).await;
-        update_remember_job_after_wallet_error(
-            &pool,
-            Some(mid_id.as_str()),
-            &err,
-            err.message(),
-            Some(WalletJobAttemptInfo {
-                current: (MAX_ATTEMPTS as usize) - 1,
-                max: MAX_ATTEMPTS as usize,
-            }),
-        )
-        .await;
-        let mid: (String,) = sqlx::query_as("SELECT status FROM remember_jobs WHERE id = $1")
-            .bind(&mid_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(mid.0, "running");
-
-        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
-            .bind(&mid_id)
             .execute(&pool)
             .await;
     }

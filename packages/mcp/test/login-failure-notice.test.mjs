@@ -208,36 +208,9 @@ test("a sign-in that never completes is reported on the next tool call", async (
     assert.match(text, /never completed/);
     assert.match(text, /left running through the/);
     assert.doesNotMatch(text, /usually works/);
-    assertKeepsTheStrandedKey(text);
+    assert.match(text, /already be registered on your account/);
     // Still tells them how to sign in, rather than replacing the instruction.
     assert.match(text, /memwal_login/);
-    // ...but not by promising the opposite of the notice above it: an approved
-    // key is reclaimed by a restart, so the blob cannot also sell "no restart".
-    assert.doesNotMatch(text, /no client restart/i);
-});
-
-/**
- * A failed attempt leaves its key in the write-ahead record (WALM-332), so the
- * notice must send an approved key to a restart, which reclaims it. Signing in
- * again reuses that key and the dashboard cannot register it twice, and
- * removing it from the dashboard throws away the registration the user paid
- * for. Both the wrapper and the timeout reason inside it are checked.
- */
-function assertKeepsTheStrandedKey(text) {
-    assert.match(text, /Restart the MCP client/);
-    assert.match(text, /reclaim/);
-    assert.doesNotMatch(text, /revoke/i);
-    for (const sentence of text.split(/(?<=\.)\s+/)) {
-        if (/dashboard/.test(sentence)) {
-            assert.match(sentence, /abandon/, `dashboard advice must be limited to abandoning: "${sentence}"`);
-        }
-    }
-}
-
-test("the failure notice keeps a stranded key reclaimable", async () => {
-    const { loginFailureNotice } = await import("../dist/messages.js");
-    assert.equal(loginFailureNotice(null), "");
-    assertKeepsTheStrandedKey(loginFailureNotice("Login timed out after 1ms."));
 });
 
 test("a signed-in memwal_login timeout warns through the bridge", async (t) => {

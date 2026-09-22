@@ -2,20 +2,11 @@
  * UserPromptSubmit injects one full decision rubric per session, then a
  * one-line nudge. It must not classify remember vs recall from English
  * keywords — every substantive prompt in a fresh session gets the same text.
- *
- * WALM-642 made the save half of that rubric depend on the user's standing
- * automatic-memory answer, so "the same text" is now per state: the tests below
- * pin the ON variant by asking for it explicitly, and `auto-save-optin.test.mjs`
- * pins what an answered-no and an unanswered install inject instead. Every run
- * is pointed at an empty MEMWAL_CREDS_DIR so the developer's own
- * ~/.memwal/settings.json cannot decide the result.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
     DECISION_RUBRIC,
@@ -24,20 +15,11 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOOK = resolve(__dirname, "../plugin/scripts/on_user_prompt.mjs");
-const EMPTY_CREDS_DIR = mkdtempSync(join(tmpdir(), "memwal-hook-test-"));
 
 function runHook(prompt, sessionId = `test-${Math.random().toString(16).slice(2)}`) {
     const result = spawnSync(process.execPath, [HOOK], {
         input: JSON.stringify({ prompt, session_id: sessionId }),
         encoding: "utf8",
-        env: {
-            ...process.env,
-            MEMWAL_CREDS_DIR: EMPTY_CREDS_DIR,
-            // These cases are about classification, not consent: pin the
-            // automatic-save rubric explicitly so they keep testing the thing
-            // they were written for, whatever the resolver would decide.
-            MEMWAL_AUTO_SAVE: "1",
-        },
     });
     assert.equal(result.status, 0, result.stderr);
     if (!result.stdout.trim()) return "";

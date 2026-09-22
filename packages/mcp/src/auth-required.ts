@@ -27,11 +27,6 @@ import { loginFailureNotice, loginPrompt, loginSuccessNotification } from "./mes
 import { log } from "./logger.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
-import {
-    SECRET_EXCLUSION_RULES,
-    SECRET_EXCLUSION_SUMMARY,
-    AUTO_SAVE_OPT_IN_RULE,
-} from "./memory-policy.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
 interface RpcMessage {
@@ -43,22 +38,10 @@ interface RpcMessage {
     error?: unknown;
 }
 
-/**
- * WALM-642: every write-tool description below ends with the shared policy
- * block, the same text the `instructions` field and the plugin hooks carry, so
- * an agent that only ever sees one of the three still gets the same rules.
- * The signed-out variants get the one-line summary — they exist to keep a
- * credential-less model from spamming writes, and the full block would be the
- * longest thing in a list of tools that cannot run yet.
- */
 const SIGNED_OUT_REMEMBER =
-    "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize. " +
-    SECRET_EXCLUSION_SUMMARY;
+    "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.";
 const SIGNED_IN_REMEMBER =
-    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this' — provided they have turned automatic memory on. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. By default this returns in ~1s once the relayer has accepted the job (job_id) — the Walrus write is still in flight and the fact is NOT stored yet. Do not claim it is saved. Settle it with the job-status tool this server advertises (re-list tools if you do not see one). A blob_id in the same reply means it already stored (optional wait budget). " +
-    AUTO_SAVE_OPT_IN_RULE +
-    " " +
-    SECRET_EXCLUSION_RULES;
+    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead.";
 const SIGNED_OUT_RECALL =
     "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.";
 const SIGNED_IN_RECALL =
@@ -89,8 +72,7 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Remember Multiple Facts",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. By default this returns in ~1s once the relayer has accepted the batch (job_ids) — the Walrus writes are still in flight and the facts are NOT stored yet. Do not claim they are saved. Settle them with the job-status tool this server advertises (re-list tools if you do not see one). A blob_id in the same reply means that fact already stored (optional wait budget). " +
-            (proactive ? AUTO_SAVE_OPT_IN_RULE + " " + SECRET_EXCLUSION_RULES : SECRET_EXCLUSION_SUMMARY),
+            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls.",
         inputSchema: {
             type: "object",
             properties: {
@@ -103,35 +85,6 @@ function buildToolDefinitions(proactive: boolean) {
                 namespace: { type: "string" },
             },
             required: ["facts"],
-            additionalProperties: false,
-        },
-    },
-    {
-        name: "memwal_remember_status",
-        title: "Check a Remember Job",
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        description:
-            "Check whether in-flight Walrus Memory writes have landed. Call this with the job_id memwal_remember returned, or job_ids from memwal_remember_bulk, when the write was reported NOT saved yet. Returns the blob_id once stored, reports that it is still uploading (call again with the ids still listed), or reports that it failed \u2014 in which case the fact was never stored and you should send it again. A batch can come back mixed, so read every line before telling the user anything is saved.",
-        inputSchema: {
-            type: "object",
-            properties: {
-                job_id: { type: "string", minLength: 1 },
-                // The sidecar takes either one id or a whole batch, and the
-                // pending body `memwal_remember_bulk` returns tells the agent
-                // to come back with `job_ids`. Advertising only `job_id` —
-                // required, under `additionalProperties: false` — made that
-                // instruction unfollowable for the whole cold-start window.
-                job_ids: {
-                    type: "array",
-                    items: { type: "string", minLength: 1 },
-                    minItems: 1,
-                    maxItems: 20,
-                },
-                waitMs: { type: "integer", minimum: 0, maximum: 45000, default: 10000 },
-            },
-            // Neither is required on its own; the sidecar rejects passing both
-            // and rejects passing neither, which JSON Schema cannot express
-            // here without a `oneOf` that some clients mishandle.
             additionalProperties: false,
         },
     },
@@ -162,8 +115,7 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Analyze and Remember",
         annotations: { readOnlyHint: false, destructiveHint: true },
         description:
-            "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead. " +
-            (proactive ? AUTO_SAVE_OPT_IN_RULE + " " + SECRET_EXCLUSION_RULES : SECRET_EXCLUSION_SUMMARY),
+            "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead.",
         inputSchema: {
             type: "object",
             properties: {
@@ -217,55 +169,15 @@ function buildToolDefinitions(proactive: boolean) {
     ];
 }
 
-/** Tool names the OLDEST relayer this bridge still talks to serves.
- *
- * The bridge ships on npm and updates itself; a relayer ships per environment
- * and does not, so the bridge is routinely NEWER than the relayer it dials —
- * 0.0.14-dev.0 against prod and staging on 0.0.13, which is GH #928. The
- * cold-start list is served before any relayer capability is known, so every
- * name in it that the dialled relayer does not serve is a tool the agent can
- * be told about and then cannot call.
- *
- * Cold start is therefore a FLOOR, not a forecast: add a name here only once
- * the tool has shipped to prod, never when it lands on dev. Newer tools reach
- * the client a beat later anyway — the relayer's own `tools/list` replaces
- * this one and `notifications/tools/list_changed` tells the client to re-read
- * it. `memwal_remember_status` is the worked example: it exists on dev, not on
- * prod/staging, and belongs here only after a prod release carries it. */
-export const BASELINE_RELAYER_TOOLS: ReadonlySet<string> = new Set([
-    "memwal_remember",
-    "memwal_remember_bulk",
-    "memwal_recall",
-    "memwal_analyze",
-    "memwal_restore",
-    "memwal_health",
-]);
-
-/** Served by this process, so no relayer has to know about it. Advertising it
- * at cold start is always safe. */
-const LOCALLY_SERVED_TOOLS: ReadonlySet<string> = new Set(["memwal_login"]);
-
-/** Every tool this bridge can describe, baseline or not. Only the baseline
- * subset is advertised at cold start; this is what the schema tests pin, so a
- * newer tool's shape stays reviewed while it waits for a prod release. */
-export const ALL_TOOL_DEFINITIONS = buildToolDefinitions(true);
-
-/** Drop anything the oldest supported relayer would not serve. */
-function coldStartTools(proactive: boolean) {
-    return buildToolDefinitions(proactive).filter(
-        (t) => BASELINE_RELAYER_TOOLS.has(t.name) || LOCALLY_SERVED_TOOLS.has(t.name),
-    );
-}
-
 /** Signed-in cold-start list (bridge). Credentials exist; the relayer session
  * is not up yet. Proactive wording so clients that keep the first tools/list
  * still save/recall without being asked. */
-export const TOOL_DEFINITIONS = coldStartTools(true);
+export const TOOL_DEFINITIONS = buildToolDefinitions(true);
 
 /** Signed-out list (auth-required). No credentials, so every memory call
  * fails: keep conservative wording or the model will spam remember and get
  * a stream of auth errors. */
-export const SIGNED_OUT_TOOL_DEFINITIONS = coldStartTools(false);
+export const SIGNED_OUT_TOOL_DEFINITIONS = buildToolDefinitions(false);
 
 /** How long to wait for the local listener to bind + emit its URL before we
  * give up and return an error. Should be near-instant; 5s is paranoia. */
@@ -286,18 +198,6 @@ const LOGIN_INSTRUCTION = [
     "",
     "Either path opens a browser tab — click **Connect Sui Wallet** and approve the on-chain",
     "`add_delegate_key` transaction. Credentials land at `~/.memwal/credentials.json`.",
-].join("\n");
-
-/** Replaces {@link LOGIN_INSTRUCTION} after a failed attempt, which
- * {@link loginFailureNotice} has just described. The generic copy promises "no
- * client restart" and leads with `memwal_login`; for a key the user already
- * approved, a restart is the only thing that recovers it and signing in again
- * cannot register it twice. So the retry is offered only for the case it
- * actually fixes. */
-const LOGIN_RETRY_INSTRUCTION = [
-    "If you did not approve the wallet step, start a new sign-in: call the `memwal_login`",
-    "tool from this client, or run `npx -y @mysten-incubation/memwal-mcp login`. Open the",
-    "new link straight away and leave this client running through the wallet prompt.",
 ].join("\n");
 
 /** Set when a background `memwal_login` ends without credentials. The tool call
@@ -573,12 +473,7 @@ function handleAuthLine(
             id,
             result: {
                 content: [
-                    {
-                        type: "text",
-                        text: lastLoginFailure
-                            ? `${loginFailureNotice(lastLoginFailure)}${LOGIN_RETRY_INSTRUCTION}`
-                            : LOGIN_INSTRUCTION,
-                    },
+                    { type: "text", text: `${loginFailureNotice(lastLoginFailure)}${LOGIN_INSTRUCTION}` },
                 ],
                 isError: true,
             },

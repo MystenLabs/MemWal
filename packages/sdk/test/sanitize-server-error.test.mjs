@@ -74,12 +74,3 @@ test("localhost sidecar URLs are stripped from error text", () => {
     assert.doesNotMatch(message, /localhost:9000/);
     assert.match(message, /\[internal\]/);
 });
-
-test("IPv6 loopback sidecar URLs are stripped from error text", () => {
-    const { message } = sanitizeServerError(
-        500,
-        "Sidecar seal/encrypt request failed: error sending request for url (http://[::1]:9000/seal/encrypt)",
-    );
-    assert.doesNotMatch(message, /::1/);
-    assert.match(message, /\[internal\]/);
-});

@@ -3,7 +3,7 @@
  *
  * Registration order is load-bearing:
  *   1. request-id + CORS-strip middleware run for every request.
- *   2. /health, /ready, /metrics/*, and full-mode MCP routes are mounted BEFORE
+ *   2. /health, /ready, /metrics/wallet, and full-mode MCP routes are mounted BEFORE
  *      the shared-secret middleware — they must stay reachable without the
  *      sidecar token (probes, scrapers, and MCP traffic that carries the
  *      end-user's own Bearer token instead).
@@ -22,7 +22,6 @@ import {
 import {
     registerHealthRoute,
     registerInternalWalletBalancesRoute,
-    registerUploadMetricsRoute,
     registerWalletMetricsRoute,
 } from "./routes/health.js";
 import { registerSealRoutes } from "./routes/seal.js";
@@ -73,7 +72,6 @@ export function createSidecarApp(mode: "full" | "writer" = SIDECAR_ROUTE_MODE): 
     // Wallet-execution metrics — placed before auth so operators / scrapers
     // don't need a token.
     registerWalletMetricsRoute(app);
-    registerUploadMetricsRoute(app);
 
     app.use(sharedSecretAuthMiddleware);
 

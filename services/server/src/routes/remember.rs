@@ -115,10 +115,7 @@ fn redact_hex_addresses(msg: &str) -> String {
 /// current `status`. Infrastructure failures collapse to fixed copy, chosen by
 /// whether the job has stopped retrying. Everything else keeps its text with
 /// addresses redacted. The DB row is untouched.
-pub(crate) fn sanitize_job_error_for_client(
-    status: &str,
-    error_msg: Option<String>,
-) -> Option<String> {
+fn sanitize_job_error_for_client(status: &str, error_msg: Option<String>) -> Option<String> {
     let msg = error_msg?;
     if crate::jobs::WalletJobError::is_infrastructure_funding_error(&msg) {
         return Some(if status == "failed" {
@@ -229,7 +226,7 @@ fn spawn_prepare_remember_job(
                 )
                 .await?;
 
-                let wallet_index = state.key_pool.least_loaded_index().ok_or_else(|| {
+                let wallet_index = state.key_pool.next_index().ok_or_else(|| {
                     AppError::Internal(
                         "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
                             .into(),
@@ -413,7 +410,7 @@ fn spawn_prepare_bulk_remember_job(
                 for (job_id, namespace, vector, encrypted) in prepared {
                     let wallet_index = state
                         .key_pool
-                        .least_loaded_index()
+                        .next_index()
                         .ok_or_else(|| AppError::Internal("No Sui keys configured".into()))?;
                     let encrypted_b64 =
                         base64::engine::general_purpose::STANDARD.encode(&encrypted);
@@ -821,35 +818,12 @@ pub async fn remember(
                         namespace_owned,
                         auth.public_key.clone(),
                     );
-                    return Ok((
-                        StatusCode::ACCEPTED,
-                        Json(RememberAcceptedResponse {
-                            job_id: existing_id,
-                            status: "pending".to_string(),
-                        }),
-                    ));
                 }
-
-                // Losing the claim now means a concurrent retry took it, not
-                // that the TTL blocked us — `failed` rows are re-claimable
-                // immediately. Report whatever that winner left behind rather
-                // than asserting "pending" on its behalf: answering with a
-                // state we did not reach is what told callers a dead job was
-                // queued.
-                let actual: String = sqlx::query_scalar(
-                    "SELECT status FROM remember_jobs WHERE id = $1",
-                )
-                .bind(&existing_id)
-                .fetch_optional(state.db.pool())
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to re-read job status: {}", e)))?
-                .unwrap_or_else(|| existing_status.clone());
-
                 return Ok((
                     StatusCode::ACCEPTED,
                     Json(RememberAcceptedResponse {
                         job_id: existing_id,
-                        status: actual,
+                        status: "pending".to_string(),
                     }),
                 ));
             }
@@ -1046,25 +1020,6 @@ fn should_spawn_after_reset(rows_affected: u64) -> bool {
     rows_affected == 1
 }
 
-/// How long a preparation claim fences other claimants.
-///
-/// The TTL exists to stop a second request stealing a claim from a preparation
-/// that is still running. It must NOT apply to a job that already reached
-/// `failed`: that preparation is over — it either errored on its own or the
-/// stale sweeper failed it and cleared its token — so there is no live task to
-/// protect, and waiting out the TTL only blocks the retry the caller was just
-/// told to make.
-///
-/// That was not theoretical. `memwal_remember` tells an agent to send a failed
-/// fact again; the derived idempotency key collapses the retry onto the failed
-/// row; the claim was refused because it was less than 60s old; and the route
-/// answered 202 ACCEPTED anyway. The caller was told the write was queued while
-/// nothing whatsoever was running.
-///
-/// Letting a `failed` row be re-claimed immediately is safe because fencing is
-/// done by the TOKEN, not the clock: a new claim rotates `prepare_claim_token`,
-/// and any straggler's own UPDATE is `WHERE ... prepare_claim_token = <old>`,
-/// so it matches zero rows and returns before `enqueue_wallet_job`.
 const PREPARE_CLAIM_TTL_SECS: i64 = 60;
 
 async fn claim_remember_preparation(
@@ -1073,7 +1028,7 @@ async fn claim_remember_preparation(
 ) -> Result<Option<String>, AppError> {
     let token = uuid::Uuid::new_v4().to_string();
     let claimed: Option<String> = sqlx::query_scalar(
-        "UPDATE remember_jobs SET prepare_claimed_at = NOW(), prepare_claim_token = $3, status = CASE WHEN status = 'failed' AND blob_id IS NULL THEN 'pending' ELSE status END, error_msg = CASE WHEN blob_id IS NULL THEN NULL ELSE error_msg END, updated_at = NOW() WHERE id = $1 AND blob_id IS NULL AND status IN ('pending', 'failed') AND (prepare_claimed_at IS NULL OR prepare_claimed_at < NOW() - make_interval(secs => $2) OR status = 'failed') RETURNING prepare_claim_token",
+        "UPDATE remember_jobs SET prepare_claimed_at = NOW(), prepare_claim_token = $3, status = CASE WHEN status = 'failed' AND blob_id IS NULL THEN 'pending' ELSE status END, error_msg = CASE WHEN blob_id IS NULL THEN NULL ELSE error_msg END, updated_at = NOW() WHERE id = $1 AND blob_id IS NULL AND status IN ('pending', 'failed') AND (prepare_claimed_at IS NULL OR prepare_claimed_at < NOW() - make_interval(secs => $2)) RETURNING prepare_claim_token",
     )
     .bind(job_id)
     .bind(PREPARE_CLAIM_TTL_SECS)
@@ -1337,7 +1292,6 @@ pub async fn remember_bulk(
             other => other,
         })?;
     }
-    validate_idempotency_key(body.idempotency_key.as_deref())?;
 
     let owner = &auth.owner;
     tracing::info!(
@@ -1349,68 +1303,31 @@ pub async fn remember_bulk(
     let mut job_ids: Vec<String> = Vec::with_capacity(body.items.len());
     let mut pending_items: Vec<PendingBulkRememberItem> = Vec::with_capacity(body.items.len());
 
-    for (i, item) in body.items.into_iter().enumerate() {
-        let mut job_id = uuid::Uuid::new_v4().to_string();
-        let item_key = body
-            .idempotency_key
-            .as_deref()
-            .map(|key| format!("bulk:{}:{}", key, i));
-        let fingerprint = request_fingerprint(&item.text, &item.namespace);
+    for item in body.items {
+        let job_id = uuid::Uuid::new_v4().to_string();
 
-        let inserted = match sqlx::query(
+        if let Err(e) = sqlx::query(
             // `pending` (not `running`) so a fresh job takes the plain Upload
             // path; only a retry of an in-flight job (worker-set `running`)
             // triggers the crash-window reconcile. See the single-remember insert.
-            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, $3, 'pending', $4, $5)
-             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+            "INSERT INTO remember_jobs (id, owner, namespace, status) VALUES ($1, $2, $3, 'pending')",
         )
         .bind(&job_id)
         .bind(owner)
         .bind(&item.namespace)
-        .bind(item_key.as_deref())
-        .bind(item_key.as_ref().map(|_| fingerprint.as_str()))
         .execute(state.db.pool())
         .await
         {
-            Ok(inserted) => inserted,
-            Err(e) => {
-                crate::alerts::maybe_alert_sqlx_postgres_storage_exhausted(
-                    &state.alerts,
-                    &state.config.sui_network,
-                    &e,
-                )
-                .await;
-                return Err(AppError::Internal(format!(
-                    "Failed to create bulk job row: {}",
-                    e
-                )));
-            }
-        };
-
-        if inserted.rows_affected() == 0 {
-            let existing = match item_key.as_deref() {
-                Some(key) => find_remember_job_by_key(state.db.pool(), owner, key).await?,
-                None => None,
-            };
-            let (existing_id, _, _, existing_fingerprint) = existing.ok_or_else(|| {
-                AppError::Internal("Failed to create bulk job row: insert affected no rows".into())
-            })?;
-            if existing_fingerprint
-                .as_deref()
-                .is_some_and(|stored| stored != fingerprint)
-            {
-                return Err(AppError::Conflict(
-                    "idempotency_key was already used for a request with different content".into(),
-                ));
-            }
-            if claim_remember_preparation(state.db.pool(), &existing_id)
-                .await?
-                .is_none()
-            {
-                job_ids.push(existing_id);
-                continue;
-            }
-            job_id = existing_id;
+            crate::alerts::maybe_alert_sqlx_postgres_storage_exhausted(
+                &state.alerts,
+                &state.config.sui_network,
+                &e,
+            )
+            .await;
+            return Err(AppError::Internal(format!(
+                "Failed to create bulk job row: {}",
+                e
+            )));
         }
 
         pending_items.push(PendingBulkRememberItem {
@@ -1423,15 +1340,13 @@ pub async fn remember_bulk(
 
     let total = job_ids.len();
 
-    if !pending_items.is_empty() {
-        spawn_prepare_bulk_remember_job(
-            Arc::clone(&state),
-            owner.clone(),
-            auth.account_id.clone(),
-            auth.public_key.clone(),
-            pending_items,
-        );
-    }
+    spawn_prepare_bulk_remember_job(
+        Arc::clone(&state),
+        owner.clone(),
+        auth.account_id.clone(),
+        auth.public_key.clone(),
+        pending_items,
+    );
 
     tracing::info!("remember_bulk accepted: {} items owner={}", total, owner,);
 
@@ -1664,69 +1579,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "done");
-    }
-
-    #[tokio::test]
-    async fn a_failed_job_is_reclaimable_immediately() {
-        let pool = idem_test_pool().await;
-        let job_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO remember_jobs (id, owner, namespace, status, prepare_claimed_at, prepare_claim_token)
-             VALUES ($1, '0xowner', 'ns', 'failed', NOW(), 'stale-token')",
-        )
-        .bind(&job_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // Claimed one second ago — well inside PREPARE_CLAIM_TTL_SECS.
-        let claimed = claim_remember_preparation(&pool, &job_id).await.unwrap();
-        assert!(
-            claimed.is_some(),
-            "a failed job must be re-claimable without waiting out the TTL",
-        );
-
-        // And the retry is actually live, not merely reported as such.
-        let status: String = sqlx::query_scalar("SELECT status FROM remember_jobs WHERE id = $1")
-            .bind(&job_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(status, "pending");
-
-        // Rotating the token is what fences the previous attempt, so the old
-        // one can no longer write its preparation or reach the wallet queue.
-        let straggler = sqlx::query(
-            "UPDATE remember_jobs SET preparation_encrypted_b64 = 'late'
-             WHERE id = $1 AND prepare_claim_token = $2",
-        )
-        .bind(&job_id)
-        .bind("stale-token")
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert_eq!(straggler.rows_affected(), 0, "the old claim must be fenced out");
-    }
-
-    /// The TTL still does its real job: a claim on a job that is genuinely
-    /// mid-preparation (`pending`, claimed just now) must not be stolen.
-    #[tokio::test]
-    async fn a_live_pending_claim_is_still_fenced() {
-        let pool = idem_test_pool().await;
-        let job_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO remember_jobs (id, owner, namespace, status, prepare_claimed_at, prepare_claim_token)
-             VALUES ($1, '0xowner', 'ns', 'pending', NOW(), 'live-token')",
-        )
-        .bind(&job_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        assert!(
-            claim_remember_preparation(&pool, &job_id).await.unwrap().is_none(),
-            "a preparation still running must keep its claim",
-        );
     }
 
     #[tokio::test]
@@ -1988,111 +1840,6 @@ mod tests {
         assert_eq!(
             still,
             Some((job_id.clone(), "running".to_string(), None, None))
-        );
-
-        let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
-            .bind(&owner)
-            .execute(&pool)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn bulk_derived_key_collapses_a_retried_item() {
-        let pool = idem_test_pool().await;
-        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
-        let item_key = "bulk:batch-1:0";
-        let fingerprint = request_fingerprint("bulk item text", "ns");
-        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
-
-        let insert = "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, 'ns', 'pending', $3, $4)
-             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING";
-
-        sqlx::query(insert)
-            .bind(&job_id)
-            .bind(&owner)
-            .bind(item_key)
-            .bind(&fingerprint)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let retry = sqlx::query(insert)
-            .bind(format!("remember-job-{}", uuid::Uuid::new_v4()))
-            .bind(&owner)
-            .bind(item_key)
-            .bind(&fingerprint)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            retry.rows_affected(),
-            0,
-            "retried bulk item must not mint a second job"
-        );
-
-        let found = find_remember_job_by_key(&pool, &owner, item_key)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(found.0, job_id);
-        assert_eq!(found.3.as_deref(), Some(fingerprint.as_str()));
-
-        let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
-            .bind(&owner)
-            .execute(&pool)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn bulk_retry_redrives_an_orphaned_pending_item() {
-        let pool = idem_test_pool().await;
-        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
-        let item_key = "bulk:batch-orphan:0";
-        let fingerprint = request_fingerprint("bulk item text", "ns");
-        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
-
-        sqlx::query(
-            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, 'ns', 'pending', $3, $4)",
-        )
-        .bind(&job_id)
-        .bind(&owner)
-        .bind(item_key)
-        .bind(&fingerprint)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let claimed_at: Option<chrono::DateTime<chrono::Utc>> =
-            sqlx::query_scalar("SELECT prepare_claimed_at FROM remember_jobs WHERE id = $1")
-                .bind(&job_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(
-            claimed_at.is_none(),
-            "fixture must start in the orphan state"
-        );
-
-        let existing = find_remember_job_by_key(&pool, &owner, item_key)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(existing.0, job_id);
-
-        let claim = claim_remember_preparation(&pool, &existing.0)
-            .await
-            .unwrap();
-        assert!(
-            claim.is_some(),
-            "an orphaned pending bulk item must be re-driven, not collapsed"
-        );
-
-        assert!(
-            claim_remember_preparation(&pool, &existing.0)
-                .await
-                .unwrap()
-                .is_none(),
-            "an item already being prepared must collapse onto the existing job"
         );
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")

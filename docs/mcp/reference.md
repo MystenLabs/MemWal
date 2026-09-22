@@ -53,9 +53,7 @@ This is why many first-run sessions show `memwal_login` before the other tools a
 
 ### memwal_remember
 
-Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** when the user states a preference, decision, constraint, correction, identity detail, or recurring workflow, not only when they explicitly ask — provided automatic memory is on. That is the user's standing answer to a question `memwal-mcp login` asks once in a terminal; it can be changed with `memwal-mcp auto-save on|off`. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize.
-
-Credentials are never stored. Passwords, API keys, access and refresh tokens, private keys, seed phrases, authorization headers, session cookies, and URLs with an embedded `user:password` are stripped from the text before the write, on this tool, `memwal_remember_bulk` and `memwal_analyze` alike. A message that mixes a preference with a credential keeps the preference and loses only the credential; the reply names which kinds were removed.
+Save a durable fact to the user's Walrus Memory. The agent calls this **proactively** when the user states a preference, decision, constraint, correction, identity detail, or recurring workflow, not only when they explicitly ask. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize.
 
 | **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
@@ -132,27 +130,12 @@ Both session tools (`memwal_login`, `memwal_logout`) are intercepted locally by 
 
 Credentials resolve from two places, in order:
 
-1. `.memwal/credentials.json` in the **working directory or a parent of it** — used only once you have [approved it](#approving-a-project-file)
+1. `.memwal/credentials.json` in the **working directory or a parent of it**
 2. `~/.memwal/credentials.json` (global, per machine)
 
-The search starts in the working directory and walks up, the way `.npmrc` and `.git/config` resolve, so a command run from a subfolder still picks up that project's credentials. The first `.memwal/credentials.json` it finds wins, provided you approved it.
+The search starts in the working directory and walks up, the way `.npmrc` and `.git/config` resolve, so a command run from a subfolder still picks up that project's credentials. The first `.memwal/credentials.json` it finds wins.
 
 The walk stops at your project root (the directory holding `.git`), at your home directory, or at the filesystem root, whichever comes first. That bound keeps one project from picking up a credentials file belonging to a parent folder that holds unrelated checkouts. If nothing is found inside it, the global file is used. Whichever file is chosen is the one read, written, and deleted for that run.
-
-### Approving a project file
-
-A project's `.memwal/credentials.json` lives inside the repository, so anyone who can commit to it — or who can get you to open a clone — could otherwise pick the account and relayer every memory written from that directory goes to. The file is therefore **ignored until you approve it**, once per machine:
-
-```bash
-cd ~/code/my-project
-memwal-mcp approve-project
-```
-
-Until then the global credentials are used and one stderr line names the file that was skipped, the account and relayer it wanted, and this command. An approval covers one exact project path, account, delegate key and relayer: change any of them and it has to be approved again. The record is kept in `~/.memwal/project-approvals.json`, outside the repository, so a repository cannot carry its own approval. `memwal-mcp revoke-project` withdraws it.
-
-Approving decides which file is written as well as which is read. From then on a sign-in from that project stores a delegate private key, in plain text, in `.memwal/credentials.json` inside the repository — `approve-project` and the pre-sign-in warning both say so. Add `.memwal/` to `.gitignore`. The login write-ahead record is kept in `~/.memwal/login-pending/` and never enters the repository.
-
-`MEMWAL_CREDS_DIR` overrides project resolution entirely and needs no approval. Because it skips the gate it must be an **absolute path outside the current project**, and anything else is refused with an error rather than ignored: a relative value resolves against the working directory, which would put the credentials and the approval record inside the repository, and an MCP client hands this process the `env` block it reads from `.cursor/mcp.json`, `.vscode/mcp.json` or `.claude/settings.json` in the checkout — where editors expand `${workspaceFolder}`, so an in-project absolute path is not evidence you set it. An empty value means unset.
 
 ### Working on several accounts
 
@@ -165,7 +148,6 @@ cd ~/code/my-project
 mkdir -p .memwal
 memwal-mcp login          # writes to the global file the first time
 cp ~/.memwal/credentials.json .memwal/credentials.json
-memwal-mcp approve-project
 ```
 
 From then on, runs started from that directory or anywhere beneath it use the project's credentials, and runs started outside it keep using the global one.
@@ -176,9 +158,7 @@ From then on, runs started from that directory or anywhere beneath it use the pr
 
 ### Migration
 
-Nothing to do for a machine without a project-local file: it behaves exactly as it did before, and the global file remains the fallback indefinitely.
-
-If you already have a project-local file, run `memwal-mcp approve-project` in that project once. Until you do, runs from it fall back to the global credentials and say so on stderr — they do not fail.
+Nothing to do. Creating a project-local file is the opt-in, so a machine without one behaves exactly as it did before, and the global file remains the fallback indefinitely.
 
 ### Replacing an account
 
@@ -215,8 +195,6 @@ The stdio package accepts CLI flags and environment variables. **CLI takes prece
 | `--namespace <name>` (alias `--ns`) | `MEMWAL_NAMESPACE` | Default memory namespace injected into memory tool calls that omit one. See [Default namespace](#default-namespace). |
 | `--login` (or `login` subcommand) | Not applicable | Force a re-login even when credentials exist. The existing file is kept until the new sign-in succeeds. |
 | `--logout` | Not applicable | Delete the credentials file currently in use and exit. |
-| `approve-project` | Not applicable | Approve the project-local `.memwal/credentials.json` found from the current directory, so it is the file used here. Requires an interactive terminal. See [Approving a project file](#approving-a-project-file). |
-| `revoke-project` | Not applicable | Withdraw that approval. Requires an interactive terminal. |
 | `--help`, `-h` | Not applicable | Print usage and exit. |
 
 Set `MEMWAL_MCP_DEBUG=1` to enable verbose stderr logging.
@@ -508,7 +486,7 @@ The URL is valid for **5 minutes**. Call the tool again to mint a fresh one. Mak
 
 ### Recall returns "No matching memories found" right after a remember
 
-By default `memwal_remember` returns at accept (`job_id`, ~1s). That reply is **not stored yet** — the Walrus write is still in flight. Empty recall immediately after accept is expected. Settle with the job-status tool this server advertises (`memwal_remember_status` on a current sidecar) and only treat `blob_id` as saved. `MEMWAL_MCP_REMEMBER_WAIT_MS=90000` is the opt-in wait-for-`blob_id` path (needs a client that raises the 60s tools/call ceiling).
+`memwal_remember` waits for the Walrus upload to finish before returning, but under load the embedding/indexing step can lag a few seconds behind. Wait briefly, then retry the recall.
 
 ### 401 Unauthorized from the relayer
 

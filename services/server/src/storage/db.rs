@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgPool;
 
 use crate::alerts::AlertManager;
 use crate::types::{AppError, SearchHit};
@@ -11,167 +11,10 @@ use crate::types::{AppError, SearchHit};
 /// background sweep. Keep a single constant so the two cannot drift.
 pub const TOMBSTONE_RETENTION: chrono::Duration = chrono::Duration::days(30);
 
-/// One migration file, paired with the name the pipeline reports it by.
-type Migration = (&'static str, &'static str);
-
-/// Pairs a migration's file name with its embedded contents so the two
-/// cannot drift apart.
-macro_rules! migration {
-    ($file:literal) => {
-        ($file, include_str!(concat!("../../migrations/", $file)))
-    };
-}
-
-/// The migration pipeline, split at the two points where `VectorDb::new`
-/// has to run Rust in between files.
-///
-/// This stays an explicit, hand-ordered list rather than a
-/// `sqlx::migrate!` directory scan, for three reasons that all still
-/// hold:
-///
-/// 1. `014_storage_reservations.sql` must run *before*
-///    `014_memory_read_api_columns.sql` — the reverse of their
-///    alphabetical order.
-/// 2. Two files share the version number `014`, which `sqlx::migrate!`
-///    rejects outright.
-/// 3. `backfill_updated_at` and `recover_invalid_concurrent_indexes` are
-///    Rust steps that have to land between specific files.
-///
-/// What is no longer manual is *completeness*: every `.sql` file in
-/// `services/server/migrations` must appear in one of these three
-/// slices, and `every_migration_file_is_wired_into_the_pipeline` fails
-/// the test suite if one does not. The original 021 ADD reached
-/// origin/dev as a file but never entered this list, which is why the
-/// check exists. This 021 is the DROP of that column, for environments
-/// that ran a PR-branch build that did wire the ADD.
-const MIGRATIONS_BEFORE_BACKFILL: &[Migration] = &[
-    migration!("001_init.sql"),
-    migration!("002_add_namespace.sql"),
-    migration!("003_rate_limiter.sql"),
-    migration!("004_delegate_key_cache_expires.sql"),
-    migration!("005_remember_jobs.sql"),
-    // composite index on (owner, status, updated_at DESC) for bulk poll
-    migration!("006_bulk_remember.sql"),
-    // collapse per-wallet Apalis queues to a single `wallet_jobs` queue.
-    // Equivocation locks are no longer a practical concern on Sui (per
-    // Will Bradley, Mysten, 2026-05-12); concurrent workers on one wallet
-    // + retry handling is sufficient.
-    migration!("007_collapse_wallet_queues.sql"),
-    // nullable `plaintext` column for benchmark-mode storage
-    // (PlaintextEngine). NULL for all production rows — additive.
-    // Renumbered from 007 -> 008 during rebase onto dev to avoid collision
-    // with the wallet-queue collapse migration.
-    migration!("008_benchmark_plaintext.sql"),
-    // importance signal column on vector_entries.
-    migration!("009_importance_signal.sql"),
-    // Permanent restore-failure negative cache (GH #501 / WALM-299).
-    migration!("010_restore_failed_blobs.sql"),
-    // MCP OAuth 2.1 (Claude custom connectors): client registry,
-    // server-custodied delegate keys, and authorization state.
-    migration!("011_mcp_oauth.sql"),
-    // Durable idempotency, preparation, and paid-upload recovery state.
-    migration!("012_remember_write_idempotency.sql"),
-    // Build the owner/key uniqueness constraint without blocking writes.
-    migration!("013_remember_write_idempotency_index.sql"),
-    // per-owner storage quota reservations. Makes quota admission atomic
-    // with the eventual insert (GH #532 / WALM-359).
-    migration!("014_storage_reservations.sql"),
-    // owner-scoped read API: updated_at cursor column + agent_id/package_id.
-    // Split across 014-019 (see each file's header, and
-    // backfill_updated_at's / recover_invalid_concurrent_indexes's doc
-    // comments below) to avoid holding ACCESS EXCLUSIVE across the
-    // full-table backfill or the index build.
-    migration!("014_memory_read_api_columns.sql"),
-];
-
-/// Applied after `backfill_updated_at`: 015 validates NOT NULL and will
-/// error if any `updated_at` row is still NULL.
-const MIGRATIONS_AFTER_BACKFILL: &[Migration] =
-    &[migration!("015_memory_read_api_updated_at_not_null.sql")];
-
-/// Applied after `recover_invalid_concurrent_indexes`, which must precede
-/// every `CREATE INDEX CONCURRENTLY IF NOT EXISTS` in this slice — 016,
-/// 018 and 022. Each of those would otherwise silently no-op forever
-/// against a permanently INVALID index left behind by an interrupted
-/// build. Every such index is registered in
-/// `CONCURRENTLY_BUILT_INDEXES`; a new one added to this slice without
-/// being registered fails
-/// `every_concurrently_built_index_is_registered_for_recovery`.
-const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
-    // keyset-pagination index for the memories listing endpoint.
-    // Must stay in its own file/transaction — see 016's header comment.
-    migration!("016_memory_read_api_index.sql"),
-    // per-memory expiry columns.
-    migration!("017_memory_expiry_columns.sql"),
-    // index on expiry_synced_at so the periodic expiry refresh sweep
-    // doesn't full-scan vector_entries every tick. Must stay in its own
-    // file/transaction — see 018's header comment.
-    migration!("018_memory_expiry_synced_at_index.sql"),
-    // Finalizes updated_at NOT NULL cheaply using the validated CHECK
-    // constraint 015 set up — see 019's header.
-    migration!("019_memory_read_api_updated_at_set_not_null.sql"),
-    migration!("020_read_api_followups.sql"),
-    // Drops failure_reported_at if a preview deploy created it. IF EXISTS,
-    // so a database that never had the column (CI, origin/dev-only) is fine.
-    migration!("021_drop_failed_write_report_ack.sql"),
-    // Partial index for /health recent_write_outcomes. CONCURRENTLY, own
-    // file — see 022's header.
-    migration!("022_remember_jobs_recent_outcomes.sql"),
-];
-
-/// Every migration the pipeline applies, in the order it applies them.
-#[cfg(test)]
-fn all_migrations() -> impl Iterator<Item = &'static Migration> {
-    MIGRATIONS_BEFORE_BACKFILL
-        .iter()
-        .chain(MIGRATIONS_AFTER_BACKFILL)
-        .chain(MIGRATIONS_AFTER_INDEX_RECOVERY)
-}
-
-/// Applies one slice of the pipeline, naming the file that failed.
-async fn run_migrations(pool: &PgPool, migrations: &[Migration]) -> Result<(), AppError> {
-    for (name, sql) in migrations {
-        sqlx::raw_sql(sql)
-            .execute(pool)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration {}: {}", name, e)))?;
-    }
-    Ok(())
-}
-
-/// Same as `run_migrations`, but on a held session — used so recover +
-/// `CREATE INDEX CONCURRENTLY` share the advisory lock that serializes
-/// replica boots.
-async fn run_migrations_on(
-    conn: &mut PgConnection,
-    migrations: &[Migration],
-) -> Result<(), AppError> {
-    for (name, sql) in migrations {
-        sqlx::raw_sql(sql)
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to run migration {}: {}", name, e)))?;
-    }
-    Ok(())
-}
-
 pub struct VectorDb {
     pool: PgPool,
     storage_alerts: Option<(Arc<AlertManager>, String)>,
 }
-
-/// Serialises `VectorDb::new()` across the test binary.
-///
-/// The migration chain is idempotent per statement but NOT safe to run
-/// concurrently: `CREATE TABLE IF NOT EXISTS` is not atomic in Postgres, so two
-/// tests that build a db at the same moment race inside migration 011 and one
-/// loses with `duplicate key value violates unique constraint
-/// "pg_type_typname_nsp_index"` on `mcp_oauth_clients`. Tests then fail on an
-/// unreachable database rather than on anything they assert. `jobs::tests`
-/// already guards its pool this way; these modules did not, which left the race
-/// latent until a test was added.
-#[cfg(test)]
-static DB_SETUP_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
 impl VectorDb {
     pub fn with_storage_alerts(self, alerts: Arc<AlertManager>, sui_network: String) -> Self {
@@ -210,151 +53,6 @@ mod tests {
 
     static VECTOR_SCHEMA_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-    /// Looks a migration up in the pipeline by file name.
-    ///
-    /// Test helpers below build deliberately partial schemas — only the
-    /// tables a given module touches — so they cannot just replay the
-    /// whole pipeline. Going through this lookup still keeps them from
-    /// drifting: a renamed or deleted migration panics here by name
-    /// instead of failing later as a missing column.
-    fn migration_sql(name: &str) -> &'static str {
-        super::all_migrations()
-            .find(|(n, _)| *n == name)
-            .map(|(_, sql)| *sql)
-            .unwrap_or_else(|| panic!("migration {name} is not wired into the pipeline"))
-    }
-
-    /// Every `.sql` file in `services/server/migrations` must be wired
-    /// into the pipeline.
-    #[test]
-    fn every_migration_file_is_wired_into_the_pipeline() {
-        use std::collections::BTreeSet;
-
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
-        let on_disk: BTreeSet<String> = std::fs::read_dir(dir)
-            .expect("migrations directory should be readable")
-            .map(|entry| {
-                entry
-                    .expect("migrations directory entry should be readable")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .filter(|name| name.ends_with(".sql"))
-            .collect();
-
-        let wired: BTreeSet<String> = super::all_migrations()
-            .map(|(name, _)| (*name).to_owned())
-            .collect();
-
-        let unwired: Vec<&String> = on_disk.difference(&wired).collect();
-        assert!(
-            unwired.is_empty(),
-            "migration file(s) exist on disk but are not applied by VectorDb::new: {unwired:?}. \
-             Add them to MIGRATIONS_BEFORE_BACKFILL / _AFTER_BACKFILL / \
-             _AFTER_INDEX_RECOVERY in the position the pipeline needs."
-        );
-
-        let missing: Vec<&String> = wired.difference(&on_disk).collect();
-        assert!(
-            missing.is_empty(),
-            "pipeline references migration file(s) that no longer exist: {missing:?}"
-        );
-    }
-
-    /// Every index a migration in `MIGRATIONS_AFTER_INDEX_RECOVERY` builds
-    /// CONCURRENTLY must be registered in `CONCURRENTLY_BUILT_INDEXES`.
-    ///
-    /// Forgetting one fails silently, which is why it needs a test rather
-    /// than a convention: an interrupted build leaves the index INVALID,
-    /// `IF NOT EXISTS` then no-ops its migration on every later boot, and
-    /// the query it served quietly falls back to a scan. 022 is the case
-    /// that motivates the check -- it keeps `/health`'s write-outcome
-    /// probe cheap, so losing it disables a silent-failure detector,
-    /// silently.
-    #[test]
-    fn every_concurrently_built_index_is_registered_for_recovery() {
-        use std::collections::BTreeSet;
-
-        // `CREATE [UNIQUE] INDEX CONCURRENTLY [IF NOT EXISTS] <name>`,
-        // whether the name sits with the keywords or the `ON` clause wraps
-        // to the next line.
-        fn index_name(statement: &str) -> Option<String> {
-            let tokens: Vec<&str> = statement.split_whitespace().collect();
-            let at = tokens.iter().position(|t| *t == "concurrently")?;
-            let mut rest = &tokens[at + 1..];
-            for keyword in ["if", "not", "exists"] {
-                if rest.first() == Some(&keyword) {
-                    rest = &rest[1..];
-                }
-            }
-            rest.first()
-                .map(|name| {
-                    name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
-                        .to_owned()
-                })
-                .filter(|name| !name.is_empty())
-        }
-
-        let mut built: BTreeSet<String> = BTreeSet::new();
-        for (file, sql) in super::MIGRATIONS_AFTER_INDEX_RECOVERY {
-            for statement in sql.split(';') {
-                // Drop comment lines so a file header that merely mentions
-                // CREATE INDEX CONCURRENTLY is not read as one.
-                let code = statement
-                    .lines()
-                    .filter(|line| !line.trim_start().starts_with("--"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_ascii_lowercase();
-                if !(code.contains("create")
-                    && code.contains("index")
-                    && code.contains("concurrently"))
-                {
-                    continue;
-                }
-                built.insert(
-                    index_name(&code)
-                        .unwrap_or_else(|| panic!("could not read an index name out of {file}")),
-                );
-            }
-        }
-
-        let registered: BTreeSet<String> = super::CONCURRENTLY_BUILT_INDEXES
-            .iter()
-            .map(|(name, _)| (*name).to_owned())
-            .collect();
-
-        let unregistered: Vec<&String> = built.difference(&registered).collect();
-        assert!(
-            unregistered.is_empty(),
-            "index(es) built CONCURRENTLY but not registered for invalid-index \
-             recovery: {unregistered:?}. Add them to CONCURRENTLY_BUILT_INDEXES, or an \
-             interrupted build leaves them INVALID and their migration no-ops forever."
-        );
-
-        let stale: Vec<&String> = registered.difference(&built).collect();
-        assert!(
-            stale.is_empty(),
-            "CONCURRENTLY_BUILT_INDEXES names index(es) that no migration in \
-             MIGRATIONS_AFTER_INDEX_RECOVERY builds: {stale:?}"
-        );
-    }
-
-    #[test]
-    fn drop_invalid_concurrent_index_uses_if_exists() {
-        let sql = super::drop_invalid_concurrent_index_sql("remember_jobs_recent_outcomes_idx");
-        assert!(sql.to_ascii_uppercase().contains("CONCURRENTLY"), "{sql}");
-        assert!(sql.to_ascii_uppercase().contains("IF EXISTS"), "{sql}");
-        assert!(sql.contains("remember_jobs_recent_outcomes_idx"), "{sql}");
-    }
-
-    #[test]
-    fn invalid_index_is_not_dropped_while_a_build_is_in_progress() {
-        assert!(!super::should_drop_invalid_concurrent_index(true));
-        assert!(super::should_drop_invalid_concurrent_index(false));
-    }
-
     fn test_database_url() -> Option<String> {
         std::env::var("DATABASE_URL").ok()
     }
@@ -376,13 +74,13 @@ mod tests {
             .lock()
             .await;
         for migration in [
-            migration_sql("001_init.sql"),
-            migration_sql("002_add_namespace.sql"),
-            migration_sql("003_rate_limiter.sql"),
-            migration_sql("008_benchmark_plaintext.sql"),
-            migration_sql("009_importance_signal.sql"),
-            migration_sql("010_restore_failed_blobs.sql"),
-            migration_sql("014_memory_read_api_columns.sql"),
+            include_str!("../../migrations/001_init.sql"),
+            include_str!("../../migrations/002_add_namespace.sql"),
+            include_str!("../../migrations/003_rate_limiter.sql"),
+            include_str!("../../migrations/008_benchmark_plaintext.sql"),
+            include_str!("../../migrations/009_importance_signal.sql"),
+            include_str!("../../migrations/010_restore_failed_blobs.sql"),
+            include_str!("../../migrations/014_memory_read_api_columns.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -393,21 +91,23 @@ mod tests {
         // CONCURRENTLY IF NOT EXISTS.
         super::backfill_updated_at(&pool).await.unwrap();
 
-        sqlx::raw_sql(migration_sql("015_memory_read_api_updated_at_not_null.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/015_memory_read_api_updated_at_not_null.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        super::recover_invalid_concurrent_indexes(&pool)
+        super::recover_invalid_pagination_index(&pool)
             .await
             .unwrap();
 
         for migration in [
-            migration_sql("016_memory_read_api_index.sql"),
-            migration_sql("017_memory_expiry_columns.sql"),
-            migration_sql("018_memory_expiry_synced_at_index.sql"),
-            migration_sql("019_memory_read_api_updated_at_set_not_null.sql"),
-            migration_sql("020_read_api_followups.sql"),
+            include_str!("../../migrations/016_memory_read_api_index.sql"),
+            include_str!("../../migrations/017_memory_expiry_columns.sql"),
+            include_str!("../../migrations/018_memory_expiry_synced_at_index.sql"),
+            include_str!("../../migrations/019_memory_read_api_updated_at_set_not_null.sql"),
+            include_str!("../../migrations/020_read_api_followups.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -486,7 +186,7 @@ mod tests {
 
     async fn oauth_test_db() -> Option<VectorDb> {
         let db = test_db().await?;
-        sqlx::raw_sql(migration_sql("011_mcp_oauth.sql"))
+        sqlx::raw_sql(include_str!("../../migrations/011_mcp_oauth.sql"))
             .execute(db.pool())
             .await
             .expect("OAuth migration must create tables on a fresh test database");
@@ -1230,9 +930,9 @@ mod tests {
     async fn remember_jobs_test_db() -> Option<VectorDb> {
         let db = test_db().await?;
         for migration in [
-            migration_sql("005_remember_jobs.sql"),
-            migration_sql("012_remember_write_idempotency.sql"),
-            migration_sql("013_remember_write_idempotency_index.sql"),
+            include_str!("../../migrations/005_remember_jobs.sql"),
+            include_str!("../../migrations/012_remember_write_idempotency.sql"),
+            include_str!("../../migrations/013_remember_write_idempotency_index.sql"),
         ] {
             sqlx::raw_sql(migration).execute(db.pool()).await.unwrap();
         }
@@ -1426,60 +1126,11 @@ fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
     }
 }
 
-/// Indexes built with `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, paired
-/// with the migration that builds each one.
-///
-/// `IF NOT EXISTS` matches by index NAME only -- it cannot tell whether
-/// an index already carrying that name is usable. So any entry here can
-/// be left permanently INVALID by an interrupted build, after which its
-/// migration no-ops forever while the planner refuses to use what was
-/// left behind. Nothing errors; the query just silently degrades.
-///
-/// The interruption that used to matter was the server
-/// `statement_timeout` cancelling a large `CREATE INDEX CONCURRENTLY`.
-/// The locked rebuild now sets `statement_timeout = 0` for that
-/// session so a large `remember_jobs` cannot leave 022 INVALID by
-/// hitting the GUC. Recovery still exists for a crash or kill mid-build.
-///
-/// Only indexes whose loss is SILENT belong here. Migration 013's
-/// `uq_remember_jobs_owner_idempotency_key` is deliberately absent: it is
-/// a unique index backing `ON CONFLICT (owner, idempotency_key)`, and an
-/// invalid one makes that upsert ERROR outright rather than quietly
-/// degrade, so it reports itself. It also runs in
-/// `MIGRATIONS_BEFORE_BACKFILL`, ahead of the single recovery pass below.
-///
-/// Add an entry whenever a migration in `MIGRATIONS_AFTER_INDEX_RECOVERY`
-/// builds an index CONCURRENTLY --
-/// `every_concurrently_built_index_is_registered_for_recovery` fails the
-/// suite if one is missed.
-const CONCURRENTLY_BUILT_INDEXES: &[(&str, &str)] = &[
-    // Keyset pagination for the memories listing endpoint.
-    ("idx_vector_entries_owner_updated_id", "016"),
-    // Expiry-refresh sweep ordering (ASC NULLS FIRST).
-    ("idx_vector_entries_expiry_synced_at", "018"),
-    // `/health` recent_write_outcomes window scan -- the probe that keeps
-    // `writes=degraded` alive, so losing it silently disables a
-    // silent-failure detector.
-    ("remember_jobs_recent_outcomes_idx", "022"),
-];
-
-/// Session advisory lock for recover + `CREATE INDEX CONCURRENTLY`.
-/// Two replicas booting together (first 022 deploy, restart-all, scale-up)
-/// must not interleave recover and build: `indisvalid` is false for the
-/// entire live CONCURRENTLY build, so a follower that dropped "the
-/// leftover" would drop the leader's in-progress (or just-finished)
-/// index. Stable across deploys so rolling replicas share the key.
-const CONCURRENT_INDEX_LOCK_KEYS: (i32, i32) = (872_122, 22);
-const CONCURRENT_INDEX_LOCK_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-const CONCURRENT_INDEX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
-
-fn should_drop_invalid_concurrent_index(build_in_progress: bool) -> bool {
-    !build_in_progress
-}
-
-fn drop_invalid_concurrent_index_sql(name: &str) -> String {
-    format!("DROP INDEX CONCURRENTLY IF EXISTS {}", name)
-}
+/// Name of the keyset-pagination index migration 016 builds. Shared
+/// between the invalid-index recovery check and (in spirit) migration
+/// 016's own `CREATE INDEX CONCURRENTLY IF NOT EXISTS` -- kept as a
+/// constant here so the two names can't drift apart.
+const PAGINATION_INDEX_NAME: &str = "idx_vector_entries_owner_updated_id";
 
 /// Backfill `vector_entries.updated_at` from `created_at` in bounded
 /// batches.
@@ -1544,217 +1195,62 @@ async fn backfill_updated_at(pool: &PgPool) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Drop any INVALID index left behind by an interrupted
-/// `CREATE INDEX CONCURRENTLY` build, so the migration that owns it can
-/// rebuild it on this same boot.
+/// Detect and recover from an INVALID `idx_vector_entries_owner_updated_id`
+/// left behind by an interrupted `CREATE INDEX CONCURRENTLY` build.
 ///
-/// See `CONCURRENTLY_BUILT_INDEXES` for why `IF NOT EXISTS` cannot
-/// recover on its own and which indexes are in scope.
+/// Migration 013 runs `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, and
+/// `IF NOT EXISTS` matches by index NAME only -- it has no idea whether
+/// an existing index with that name is actually usable. A
+/// `CONCURRENTLY` build that gets interrupted (process crash,
+/// statement timeout, deploy killing the connection mid-build) leaves
+/// behind a permanently INVALID index under the target name. From that
+/// point on, every future `VectorDb::new()` sees the name already
+/// exists, silently no-ops migration 013 forever, and every
+/// memories-listing query keyset-paginating on `(owner, updated_at,
+/// id)` silently degrades to a sequential scan -- with no error ever
+/// surfaced.
 ///
-/// `indisvalid = false` is also true for the entire duration of a *live*
-/// `CREATE INDEX CONCURRENTLY`. Dropping that catalog row races two
-/// replicas on first deploy of 022: the follower waits out the leader's
-/// build, then drops the now-valid index (or errors if the sibling
-/// already dropped it, which fails `VectorDb::new`). Skip the drop when
-/// `pg_stat_progress_create_index` shows a live build for that name.
-/// `DROP INDEX CONCURRENTLY IF EXISTS` so a sibling that already cleaned
-/// up does not abort boot.
-///
-/// Called immediately before `MIGRATIONS_AFTER_INDEX_RECOVERY` on the
-/// same session that holds `CONCURRENT_INDEX_LOCK_KEYS`.
-async fn recover_invalid_concurrent_indexes(pool: &PgPool) -> Result<(), AppError> {
-    let mut conn = pool.acquire().await.map_err(|e| {
+/// Called immediately before migration 013 runs. If an INVALID index is
+/// found, it is dropped (via `DROP INDEX CONCURRENTLY`, which -- like
+/// `CREATE INDEX CONCURRENTLY` -- cannot run inside a transaction
+/// block, hence the bare `sqlx::query(..).execute(pool)` with no
+/// explicit transaction wrapper) so migration 013's own `CREATE INDEX
+/// CONCURRENTLY IF NOT EXISTS` can actually rebuild it. The recovery is
+/// logged at `warn` level so it is visible in observability rather than
+/// silently happening on every boot.
+async fn recover_invalid_pagination_index(pool: &PgPool) -> Result<(), AppError> {
+    let index_is_invalid: Option<bool> = sqlx::query_scalar(
+        "SELECT pg_index.indisvalid FROM pg_index \
+         JOIN pg_class ON pg_class.oid = pg_index.indexrelid \
+         WHERE pg_class.relname = $1",
+    )
+    .bind(PAGINATION_INDEX_NAME)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
         AppError::Internal(format!(
-            "Failed to acquire a connection for concurrent-index recovery: {}",
-            e
+            "Failed to check validity of {}: {}",
+            PAGINATION_INDEX_NAME, e
         ))
     })?;
-    recover_invalid_concurrent_indexes_on(&mut conn).await
-}
 
-async fn recover_invalid_concurrent_indexes_on(conn: &mut PgConnection) -> Result<(), AppError> {
-    for (index, migration) in CONCURRENTLY_BUILT_INDEXES {
-        let index_is_invalid: Option<bool> = sqlx::query_scalar(
-            "SELECT pg_index.indisvalid FROM pg_index \
-             JOIN pg_class ON pg_class.oid = pg_index.indexrelid \
-             WHERE pg_class.relname = $1",
-        )
-        .bind(index)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to check validity of {}: {}", index, e)))?;
-
-        // None means no index by that name -- nothing built it yet, which
-        // its own migration handles. Some(true) is a healthy index.
-        if index_is_invalid != Some(false) {
-            continue;
-        }
-
-        if !should_drop_invalid_concurrent_index(
-            concurrent_index_build_in_progress(conn, index).await?,
-        ) {
-            tracing::info!(
-                index = %index,
-                migration = %migration,
-                "INVALID concurrent index is a live CREATE INDEX CONCURRENTLY; \
-                 not dropping it"
-            );
-            continue;
-        }
-
+    if index_is_invalid == Some(false) {
         tracing::warn!(
-            index = %index,
-            migration = %migration,
-            "found INVALID index, likely left behind by an interrupted CREATE INDEX \
-             CONCURRENTLY build -- dropping it so its migration can rebuild it"
+            index = PAGINATION_INDEX_NAME,
+            "found INVALID pagination index, likely left behind by an interrupted \
+             CREATE INDEX CONCURRENTLY build -- dropping it so migration 013 can rebuild it"
         );
 
-        let drop_stmt = drop_invalid_concurrent_index_sql(index);
-        sqlx::query(&drop_stmt)
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!("Failed to drop invalid index {}: {}", index, e))
-            })?;
+        let drop_stmt = format!("DROP INDEX CONCURRENTLY {}", PAGINATION_INDEX_NAME);
+        sqlx::query(&drop_stmt).execute(pool).await.map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to drop invalid index {}: {}",
+                PAGINATION_INDEX_NAME, e
+            ))
+        })?;
     }
 
     Ok(())
-}
-
-async fn concurrent_index_build_in_progress(
-    conn: &mut PgConnection,
-    index: &str,
-) -> Result<bool, AppError> {
-    match sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM pg_stat_progress_create_index p
-            JOIN pg_class c ON c.oid = p.index_relid
-            WHERE c.relname = $1
-        )",
-    )
-    .bind(index)
-    .fetch_one(&mut *conn)
-    .await
-    {
-        Ok(in_progress) => Ok(in_progress),
-        Err(e) => {
-            // Regular roles may not see other backends' progress rows.
-            // The session advisory lock is the fence between replica boots;
-            // treat an unreadable view as "no live build we can see".
-            tracing::warn!(
-                error = %e,
-                index,
-                "could not read pg_stat_progress_create_index; \
-                 not treating the INVALID index as a live build"
-            );
-            Ok(false)
-        }
-    }
-}
-
-/// Recover leftover INVALID indexes, then run 016/018/022, on one session.
-///
-/// The lock serializes replica boots so a follower cannot mistake the
-/// leader's in-progress CONCURRENTLY build for a crashed leftover. It is
-/// polled with `pg_try_advisory_lock` rather than waited on: a blocking
-/// `pg_advisory_lock` waiter holds a snapshot for the whole wait, and
-/// `CREATE INDEX CONCURRENTLY` waits for exactly such snapshots to finish,
-/// so the two deadlock. `statement_timeout = 0` for this session so a large
-/// `remember_jobs` cannot leave 022 INVALID by hitting the server GUC.
-async fn recover_and_rebuild_concurrent_indexes(pool: &PgPool) -> Result<(), AppError> {
-    let mut conn = pool.acquire().await.map_err(|e| {
-        AppError::Internal(format!(
-            "Failed to acquire a connection for concurrent-index rebuild: {}",
-            e
-        ))
-    })?;
-
-    let previous: String = sqlx::query_scalar("SHOW statement_timeout")
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to read statement_timeout: {}", e)))?;
-
-    sqlx::query("SET statement_timeout = 0")
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| {
-            AppError::Internal(format!(
-                "Failed to disable statement_timeout for concurrent index builds: {}",
-                e
-            ))
-        })?;
-
-    let (result, lock_released) = lock_and_rebuild_concurrent_indexes(&mut conn).await;
-
-    let timeout_restored = sqlx::query("SELECT set_config('statement_timeout', $1, false)")
-        .bind(&previous)
-        .execute(&mut *conn)
-        .await
-        .is_ok();
-
-    if !timeout_restored || !lock_released {
-        // Either a leaked `statement_timeout = 0` or a still-held session
-        // advisory lock. Both ride on the connection, so close it instead of
-        // returning it to the pool.
-        tracing::warn!(
-            timeout_restored,
-            lock_released,
-            "concurrent-index rebuild left the session dirty; discarding it \
-             rather than returning it to the pool"
-        );
-        let _ = conn.close().await;
-    }
-
-    result
-}
-
-async fn lock_and_rebuild_concurrent_indexes(
-    conn: &mut PgConnection,
-) -> (Result<(), AppError>, bool) {
-    let mut waited = std::time::Duration::ZERO;
-    loop {
-        let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1, $2)")
-            .bind(CONCURRENT_INDEX_LOCK_KEYS.0)
-            .bind(CONCURRENT_INDEX_LOCK_KEYS.1)
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!("Failed to lock concurrent-index rebuild: {}", e))
-            });
-        match acquired {
-            Ok(true) => break,
-            Ok(false) => {}
-            Err(e) => return (Err(e), true),
-        }
-        if waited >= CONCURRENT_INDEX_LOCK_WAIT {
-            return (
-                Err(AppError::Internal(format!(
-                    "Timed out after {}s waiting for the concurrent-index rebuild lock",
-                    CONCURRENT_INDEX_LOCK_WAIT.as_secs()
-                ))),
-                true,
-            );
-        }
-        tokio::time::sleep(CONCURRENT_INDEX_LOCK_POLL).await;
-        waited += CONCURRENT_INDEX_LOCK_POLL;
-    }
-
-    let result = async {
-        recover_invalid_concurrent_indexes_on(conn).await?;
-        run_migrations_on(conn, MIGRATIONS_AFTER_INDEX_RECOVERY).await?;
-        Ok(())
-    }
-    .await;
-
-    let unlocked = sqlx::query("SELECT pg_advisory_unlock($1, $2)")
-        .bind(CONCURRENT_INDEX_LOCK_KEYS.0)
-        .bind(CONCURRENT_INDEX_LOCK_KEYS.1)
-        .execute(&mut *conn)
-        .await
-        .is_ok();
-
-    (result, unlocked)
 }
 
 /// Release storage reservations given only a pool handle.
@@ -1834,19 +1330,190 @@ impl VectorDb {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to connect to database: {}", e)))?;
 
-        // Run migrations. The ordering, and the two Rust steps woven
-        // between these slices, are load-bearing — see
-        // MIGRATIONS_BEFORE_BACKFILL's comment.
-        run_migrations(&pool, MIGRATIONS_BEFORE_BACKFILL).await?;
+        // Run migrations
+        let migration_001 = include_str!("../../migrations/001_init.sql");
+        sqlx::raw_sql(migration_001)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 001: {}", e)))?;
+
+        let migration_002 = include_str!("../../migrations/002_add_namespace.sql");
+        sqlx::raw_sql(migration_002)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 002: {}", e)))?;
+
+        let migration_003 = include_str!("../../migrations/003_rate_limiter.sql");
+        sqlx::raw_sql(migration_003)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 003: {}", e)))?;
+
+        let migration_004 = include_str!("../../migrations/004_delegate_key_cache_expires.sql");
+        sqlx::raw_sql(migration_004)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 004: {}", e)))?;
+
+        let migration_005 = include_str!("../../migrations/005_remember_jobs.sql");
+        sqlx::raw_sql(migration_005)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 005: {}", e)))?;
+
+        // composite index on (owner, status, updated_at DESC) for bulk poll
+        let migration_006 = include_str!("../../migrations/006_bulk_remember.sql");
+        sqlx::raw_sql(migration_006)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 006: {}", e)))?;
+
+        // collapse per-wallet Apalis queues to a single `wallet_jobs`
+        // queue. Equivocation locks are no longer a practical concern on Sui
+        // (per Will Bradley, Mysten, 2026-05-12); concurrent workers on one
+        // wallet + retry handling is sufficient.
+        let migration_007 = include_str!("../../migrations/007_collapse_wallet_queues.sql");
+        sqlx::raw_sql(migration_007)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 007: {}", e)))?;
+
+        // nullable `plaintext` column for benchmark-mode storage
+        // (PlaintextEngine). NULL for all production rows — additive.
+        // Renumbered from 007 → 008 during rebase onto dev to avoid collision
+        // with the wallet-queue collapse migration.
+        let migration_008 = include_str!("../../migrations/008_benchmark_plaintext.sql");
+        sqlx::raw_sql(migration_008)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 008: {}", e)))?;
+
+        // importance signal column on vector_entries.
+        let migration_009 = include_str!("../../migrations/009_importance_signal.sql");
+        sqlx::raw_sql(migration_009)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 009: {}", e)))?;
+
+        // Permanent restore-failure negative cache (GH #501 / WALM-299).
+        let migration_010 = include_str!("../../migrations/010_restore_failed_blobs.sql");
+        sqlx::raw_sql(migration_010)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 010: {}", e)))?;
+
+        // MCP OAuth 2.1 (Claude custom connectors): client registry,
+        // server-custodied delegate keys, and authorization state.
+        let migration_011 = include_str!("../../migrations/011_mcp_oauth.sql");
+        sqlx::raw_sql(migration_011)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 011: {}", e)))?;
+
+        // Durable idempotency, preparation, and paid-upload recovery state.
+        let migration_012 = include_str!("../../migrations/012_remember_write_idempotency.sql");
+        sqlx::raw_sql(migration_012)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 012: {}", e)))?;
+
+        // Build the owner/key uniqueness constraint without blocking writes.
+        let migration_013 =
+            include_str!("../../migrations/013_remember_write_idempotency_index.sql");
+        sqlx::raw_sql(migration_013)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 013: {}", e)))?;
+
+        // per-owner storage quota reservations. Makes quota admission atomic
+        // with the eventual insert (GH #532 / WALM-359).
+        let migration_014_reservations =
+            include_str!("../../migrations/014_storage_reservations.sql");
+        sqlx::raw_sql(migration_014_reservations)
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to run migration 014 (storage reservations): {}",
+                    e
+                ))
+            })?;
+
+        // owner-scoped read API: updated_at cursor column + agent_id/package_id.
+        // Split across 014-019 (see each file's header, and
+        // backfill_updated_at's / recover_invalid_pagination_index's doc
+        // comments above) to avoid holding ACCESS EXCLUSIVE across the
+        // full-table backfill or index build.
+        let migration_014_read_api =
+            include_str!("../../migrations/014_memory_read_api_columns.sql");
+        sqlx::raw_sql(migration_014_read_api)
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to run migration 014 (read API columns): {}",
+                    e
+                ))
+            })?;
 
         // Backfill runs as batched Rust code, not a migration file, since
         // Postgres can't COMMIT mid-loop inside a plain migration
         // statement — see backfill_updated_at()'s doc comment.
         backfill_updated_at(&pool).await?;
 
-        run_migrations(&pool, MIGRATIONS_AFTER_BACKFILL).await?;
+        // Requires the backfill above to have already completed — this
+        // validates NOT NULL and will error if any updated_at row is
+        // still NULL.
+        let migration_015 =
+            include_str!("../../migrations/015_memory_read_api_updated_at_not_null.sql");
+        sqlx::raw_sql(migration_015)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 015: {}", e)))?;
 
-        recover_and_rebuild_concurrent_indexes(&pool).await?;
+        // Must run before migration 016's CREATE INDEX CONCURRENTLY IF NOT
+        // EXISTS, which would otherwise silently no-op forever against a
+        // permanently INVALID index from an interrupted build.
+        recover_invalid_pagination_index(&pool).await?;
+
+        // keyset-pagination index for the memories listing endpoint.
+        // Must stay in its own file/transaction — see 016's header comment.
+        let migration_016 = include_str!("../../migrations/016_memory_read_api_index.sql");
+        sqlx::raw_sql(migration_016)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 016: {}", e)))?;
+
+        // per-memory expiry columns.
+        let migration_017 = include_str!("../../migrations/017_memory_expiry_columns.sql");
+        sqlx::raw_sql(migration_017)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 017: {}", e)))?;
+
+        // index on expiry_synced_at so the periodic expiry refresh sweep
+        // doesn't full-scan vector_entries every tick. Must stay
+        // in its own file/transaction — see 018's header comment.
+        let migration_018 = include_str!("../../migrations/018_memory_expiry_synced_at_index.sql");
+        sqlx::raw_sql(migration_018)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 018: {}", e)))?;
+
+        // Finalizes updated_at NOT NULL cheaply using the validated CHECK
+        // constraint 015 set up — see 019's header.
+        let migration_019 =
+            include_str!("../../migrations/019_memory_read_api_updated_at_set_not_null.sql");
+        sqlx::raw_sql(migration_019)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 019: {}", e)))?;
+
+        let migration_020 = include_str!("../../migrations/020_read_api_followups.sql");
+        sqlx::raw_sql(migration_020)
+            .execute(&pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to run migration 020: {}", e)))?;
 
         tracing::info!("database connected and migrations applied");
 
@@ -2170,73 +1837,6 @@ impl VectorDb {
         Ok(row)
     }
 
-    /// How durable writes that finished inside `window` turned out,
-    /// across every owner: `(failed, succeeded)`.
-    ///
-    /// `write_ready` is a sidecar probe AND a Postgres size check. Neither
-    /// can see Walrus refusing every upload, so a total Walrus outage left
-    /// `/health` reporting a healthy write path while every remember
-    /// failed minutes after being accepted. This is the missing term.
-    ///
-    /// Counted rather than listed, and read behind a cache measured in
-    /// tens of seconds. Served by `remember_jobs_recent_outcomes_idx`
-    /// (022). The statement is also cancelled at 1s (`SET LOCAL`) so a
-    /// sequential scan cannot stall the public `/health` handler; the
-    /// probe fails open on timeout.
-    pub async fn recent_write_outcomes(
-        &self,
-        window: std::time::Duration,
-    ) -> Result<(i64, i64), AppError> {
-        let started = std::time::Instant::now();
-        let since = chrono::Utc::now() - chrono::Duration::from_std(window).unwrap_or_default();
-        // SET LOCAL needs a transaction; the pool's statement_timeout is
-        // the startup bound (up to 300s) and would let this scan run that
-        // long. 1000ms matches WRITE_READY_PROBE_TIMEOUT on /health.
-        let mut tx = self.pool.begin().await.map_err(|e| {
-            AppError::Internal(format!("Failed to count recent remember outcomes: {}", e))
-        })?;
-        sqlx::query("SELECT set_config('statement_timeout', '1000ms', true)")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!("Failed to count recent remember outcomes: {}", e))
-            })?;
-        let outcome = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT
-               count(*) FILTER (WHERE status = 'failed'),
-               count(*) FILTER (WHERE status IN ('done', 'uploaded'))
-             FROM remember_jobs
-             WHERE status IN ('failed', 'done', 'uploaded')
-               AND updated_at >= $1",
-        )
-        .bind(since)
-        .fetch_one(&mut *tx)
-        .await;
-        let _ = tx.rollback().await;
-
-        match outcome {
-            Ok(counts) => {
-                crate::observability::observe_db(
-                    "remember_jobs.recent_outcomes",
-                    "ok",
-                    started.elapsed(),
-                );
-                Ok(counts)
-            }
-            Err(e) => {
-                crate::observability::observe_db(
-                    "remember_jobs.recent_outcomes",
-                    "error",
-                    started.elapsed(),
-                );
-                Err(AppError::Internal(format!(
-                    "Failed to count recent remember outcomes: {}",
-                    e
-                )))
-            }
-        }
-    }
-
     /// Hard-delete all vector index rows for a given owner + namespace.
     /// (Walrus blobs themselves persist — Walrus has no delete; this only
     /// removes the local `vector_entries` rows, so the memories stop being
@@ -2503,22 +2103,9 @@ impl VectorDb {
         Ok(rows)
     }
 
-    /// Mark remember jobs as failed once nothing can still move them:
-    /// `running`/`uploaded` whose worker stopped updating them, and `pending`
-    /// rows whose preparation never finished.
-    ///
-    /// `prepare_claimed_at IS NOT NULL` is load-bearing — only the single
-    /// `remember` path claims a preparation slot, so without it the sweep also
-    /// matches healthy `/api/remember/bulk` and `/api/analyze` rows, which
-    /// never set `preparation_encrypted_b64` at all.
-    ///
-    /// Clearing `prepare_claim_token` fences a slow preparation: its own
-    /// UPDATE is keyed on that token, so it can no longer reach
-    /// `enqueue_wallet_job`. Failing is the only option — the row stores
-    /// ciphertext, never plaintext, so nothing can be retried from.
-    ///
-    /// Quota is reclaimed by `release_reservations_for_terminal_jobs`, which
-    /// `main` runs immediately after this on the same tick.
+    /// Mark worker-claimed remember jobs as failed when no worker has updated
+    /// them within the stale TTL. Pending rows are left alone because they may
+    /// simply be waiting behind legitimate queue backlog.
     pub async fn fail_stale_remember_jobs(
         &self,
         stale_after: std::time::Duration,
@@ -2541,45 +2128,7 @@ impl VectorDb {
         if rows > 0 {
             tracing::warn!("Marked {} stale remember jobs as failed", rows);
         }
-
-        // Second pass rather than one OR'd predicate: this branch clears the
-        // preparation claim and carries its own error text, and the two are
-        // different enough that folding them together would hide which case
-        // actually fired in the logs.
-        let orphaned = sqlx::query(
-            "UPDATE remember_jobs
-             SET status = 'failed',
-                 error_msg = COALESCE(
-                     error_msg,
-                     'preparation never completed — the relayer stopped before this write was encrypted, so the fact was never stored and must be sent again'
-                 ),
-                 prepare_claim_token = NULL,
-                 prepare_claimed_at = NULL,
-                 updated_at = NOW()
-             WHERE status = 'pending'
-               AND prepare_claimed_at IS NOT NULL
-               AND preparation_encrypted_b64 IS NULL
-               AND updated_at < NOW() - ($1 * INTERVAL '1 second')",
-        )
-        .bind(stale_after_secs)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| {
-            AppError::Internal(format!("Failed to fail orphaned remember preparations: {}", e))
-        })?;
-
-        let orphaned_rows = orphaned.rows_affected();
-        if orphaned_rows > 0 {
-            // Distinct wording from the sweep above: this one means writes were
-            // accepted and silently lost, which is an availability signal about
-            // the relayer, not a Walrus or wallet problem.
-            tracing::warn!(
-                "Marked {} remember jobs as failed whose preparation never completed",
-                orphaned_rows
-            );
-        }
-
-        Ok(rows + orphaned_rows)
+        Ok(rows)
     }
 
     /// Rows whose expiry data has never been synced, or was synced more
@@ -3202,24 +2751,6 @@ impl VectorDb {
         Ok(())
     }
 
-    pub async fn fetch_oauth_code(
-        &self,
-        client_id: &str,
-        code_sha256: &str,
-    ) -> Result<Option<oauth_rows::OAuthCodeRow>, AppError> {
-        sqlx::query_as::<_, oauth_rows::OAuthCodeRow>(
-            "SELECT code_sha256, client_id, redirect_uri, scope, resource, code_challenge,
-                    code_challenge_method, delegate_ref, account_id, owner_address, expires_at
-             FROM mcp_oauth_codes
-             WHERE code_sha256 = $1 AND client_id = $2 AND expires_at > NOW()",
-        )
-        .bind(code_sha256)
-        .bind(client_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to read oauth code: {}", e)))
-    }
-
     /// Single-use consume via `DELETE ... RETURNING` — the first successful
     /// exchange deletes the row; any replay finds nothing. Also filters on
     /// `client_id` so a code minted for one client can never be redeemed by
@@ -3691,10 +3222,6 @@ mod quota_admission_tests {
     }
 
     async fn test_db() -> VectorDb {
-        let _guard = super::DB_SETUP_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
         VectorDb::new(&test_database_url())
             .await
             .expect("test database must be reachable with pgvector installed")
@@ -4100,240 +3627,5 @@ mod quota_admission_tests {
         );
 
         cleanup(&db, &owner).await;
-    }
-}
-
-#[cfg(test)]
-mod stale_sweep_tests {
-    use super::*;
-    use std::time::Duration;
-
-    fn test_database_url() -> String {
-        std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://memwal:memwal_secret@localhost:5432/memwal".into())
-    }
-
-    async fn test_db() -> VectorDb {
-        let _guard = super::DB_SETUP_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
-        VectorDb::new(&test_database_url())
-            .await
-            .expect("test database must be reachable with pgvector installed")
-    }
-
-    /// Unique per test so concurrent runs cannot see each other's rows.
-    fn unique_owner(tag: &str) -> String {
-        format!("0xtest-{}-{}", tag, uuid::Uuid::new_v4())
-    }
-
-    /// Insert one remember job, aged by `age_secs`, optionally already prepared.
-    ///
-    /// `prepare_claimed_at` is stamped only alongside a claim token, because
-    /// that is the only way a row can reach the database: the single-write
-    /// path claims and stamps together, while `/api/remember/bulk` and
-    /// `/api/analyze` insert neither. Stamping it unconditionally would hand
-    /// every seeded row the one column the orphan sweep keys on, so a helper
-    /// detail — not the sweep — would decide what the tests below prove.
-    async fn seed_job(
-        db: &VectorDb,
-        owner: &str,
-        status: &str,
-        prepared: bool,
-        claim_token: Option<&str>,
-        age_secs: i64,
-    ) -> String {
-        let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO remember_jobs
-                 (id, owner, namespace, status, preparation_encrypted_b64,
-                  prepare_claim_token, prepare_claimed_at, created_at, updated_at)
-             VALUES ($1, $2, 'default', $3, $4, $5,
-                     CASE WHEN $5::text IS NULL THEN NULL
-                          ELSE NOW() - ($6 * INTERVAL '1 second') END,
-                     NOW() - ($6 * INTERVAL '1 second'),
-                     NOW() - ($6 * INTERVAL '1 second'))",
-        )
-        .bind(&id)
-        .bind(owner)
-        .bind(status)
-        .bind(if prepared { Some("ZW5jcnlwdGVk") } else { None })
-        .bind(claim_token)
-        .bind(age_secs)
-        .execute(&db.pool)
-        .await
-        .expect("seed remember job");
-        id
-    }
-
-    async fn status_of(db: &VectorDb, id: &str) -> String {
-        sqlx::query_scalar("SELECT status FROM remember_jobs WHERE id = $1")
-            .bind(id)
-            .fetch_one(&db.pool)
-            .await
-            .expect("read status")
-    }
-
-    /// A row committed by the route whose preparation never ran has no task
-    /// left to resume it: preparation lives in a `tokio::spawn` inside the
-    /// relayer, so a restart in that window strands it. Before this it sat at
-    /// `pending` forever and `memwal_remember_status` reported it as still
-    /// uploading — a write silently lost while the user was told it was coming.
-    #[tokio::test]
-    async fn orphaned_preparation_is_failed() {
-        let db = test_db().await;
-        let owner = unique_owner("orphan");
-        let id = seed_job(&db, &owner, "pending", false, Some("claim-1"), 900).await;
-
-        db.fail_stale_remember_jobs(Duration::from_secs(600))
-            .await
-            .expect("sweep");
-
-        assert_eq!(status_of(&db, &id).await, "failed");
-        let msg: Option<String> =
-            sqlx::query_scalar("SELECT error_msg FROM remember_jobs WHERE id = $1")
-                .bind(&id)
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        assert!(
-            msg.unwrap_or_default().contains("never stored"),
-            "the message has to say the fact is gone, not merely that a job died",
-        );
-    }
-
-    /// The reason `pending` cannot be swept wholesale. A prepared job waits at
-    /// `pending` until a wallet worker takes it, and with
-    /// `WALRUS_UPLOAD_PER_WALLET_CONCURRENCY` defaulting to 1 that queue is
-    /// legitimately minutes deep. Failing these would abandon paid work that
-    /// was about to run.
-    #[tokio::test]
-    async fn prepared_job_waiting_on_the_upload_queue_is_left_alone() {
-        let db = test_db().await;
-        let owner = unique_owner("queued");
-        let id = seed_job(&db, &owner, "pending", true, Some("claim-1"), 900).await;
-
-        db.fail_stale_remember_jobs(Duration::from_secs(600))
-            .await
-            .expect("sweep");
-
-        assert_eq!(status_of(&db, &id).await, "pending");
-    }
-
-    /// Preparation itself takes a moment (summarize, embed, SEAL encrypt), so
-    /// a young unprepared row is in-flight, not orphaned.
-    #[tokio::test]
-    async fn a_preparation_still_in_flight_is_left_alone() {
-        let db = test_db().await;
-        let owner = unique_owner("young");
-        let id = seed_job(&db, &owner, "pending", false, Some("claim-1"), 5).await;
-
-        db.fail_stale_remember_jobs(Duration::from_secs(600))
-            .await
-            .expect("sweep");
-
-        assert_eq!(status_of(&db, &id).await, "pending");
-    }
-
-    /// What makes the sweep safe against a preparation that was merely very
-    /// slow rather than dead. Its own UPDATE is fenced on the claim token, so
-    /// once the sweeper clears it that statement matches zero rows and the task
-    /// returns before `enqueue_wallet_job` — it cannot mint a paid blob for a
-    /// job just declared dead.
-    #[tokio::test]
-    async fn clearing_the_claim_fences_a_late_preparation() {
-        let db = test_db().await;
-        let owner = unique_owner("fence");
-        let id = seed_job(&db, &owner, "pending", false, Some("claim-1"), 900).await;
-
-        db.fail_stale_remember_jobs(Duration::from_secs(600))
-            .await
-            .expect("sweep");
-
-        // Exactly the statement `spawn_prepare_remember_job` runs when it
-        // finishes, token and all.
-        let late = sqlx::query(
-            "UPDATE remember_jobs SET preparation_encrypted_b64 = $1, updated_at = NOW()
-             WHERE id = $2 AND ($3::TEXT IS NULL OR prepare_claim_token = $3)",
-        )
-        .bind("ZW5jcnlwdGVk")
-        .bind(&id)
-        .bind("claim-1")
-        .execute(&db.pool)
-        .await
-        .expect("late preparation");
-
-        assert_eq!(
-            late.rows_affected(),
-            0,
-            "a late preparation must be fenced out, or it would queue a paid write for a dead job",
-        );
-    }
-
-    /// The pre-existing sweep is unchanged.
-    #[tokio::test]
-    async fn a_stalled_worker_claim_still_fails() {
-        let db = test_db().await;
-        let owner = unique_owner("running");
-        let id = seed_job(&db, &owner, "running", true, None, 900).await;
-
-        db.fail_stale_remember_jobs(Duration::from_secs(600))
-            .await
-            .expect("sweep");
-
-        assert_eq!(status_of(&db, &id).await, "failed");
-    }
-
-    /// `/api/remember/bulk` inserts its rows directly and never claims a
-    /// preparation slot, so `preparation_encrypted_b64` is ALWAYS NULL for a
-    /// bulk job — healthy or not. Keying the sweep on that column alone would
-    /// fail every bulk write that waits out the TTL behind a normal upload
-    /// backlog, destroying paid work that was about to run.
-    #[tokio::test]
-    async fn a_queued_bulk_job_is_never_swept() {
-        let db = test_db().await;
-        let owner = unique_owner("bulk");
-        // Exactly what remember_bulk writes: pending, no claim, no preparation.
-        let id = seed_job(&db, &owner, "pending", false, None, 900).await;
-
-        db.fail_stale_remember_jobs(Duration::from_secs(600))
-            .await
-            .expect("sweep");
-
-        assert_eq!(
-            status_of(&db, &id).await,
-            "pending",
-            "a bulk job waiting on the upload queue must survive the sweep",
-        );
-    }
-
-    /// `/api/analyze` inserts the same shape (`prepare_claim_token: None`), so
-    /// it needs the same protection.
-    #[tokio::test]
-    async fn a_queued_analyze_job_is_never_swept() {
-        let db = test_db().await;
-        let owner = unique_owner("analyze");
-        let id = seed_job(&db, &owner, "pending", false, None, 3600).await;
-
-        db.fail_stale_remember_jobs(Duration::from_secs(600))
-            .await
-            .expect("sweep");
-
-        assert_eq!(status_of(&db, &id).await, "pending");
-    }
-
-    /// A finished write is terminal and the sweeper must never touch it.
-    #[tokio::test]
-    async fn a_done_job_is_never_swept() {
-        let db = test_db().await;
-        let owner = unique_owner("done");
-        let id = seed_job(&db, &owner, "done", true, None, 900).await;
-
-        db.fail_stale_remember_jobs(Duration::from_secs(600))
-            .await
-            .expect("sweep");
-
-        assert_eq!(status_of(&db, &id).await, "done");
     }
 }

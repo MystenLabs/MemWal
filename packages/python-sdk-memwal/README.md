@@ -100,7 +100,7 @@ async def test_memory_flow():
     assert "dark mode" in result.results[0].text
 ```
 
-The mock supports remember/job polling, bulk remember, recall, analyze, embed, ask, health, restore, list_namespaces, `forget(blob_id)`, and `clear(namespace)`. For deterministic behavior, `analyze` stores its full input as one fact instead of invoking an LLM extractor. Its simple relevance score is for application tests, not production search-quality evaluation.
+The mock supports remember/job polling, bulk remember, recall, analyze, embed, ask, health, restore, `forget(blob_id)`, and `clear(namespace)`. For deterministic behavior, `analyze` stores its full input as one fact instead of invoking an LLM extractor. Its simple relevance score is for application tests, not production search-quality evaluation.
 
 ### Context Manager
 
@@ -206,7 +206,6 @@ Create a new async client.
 | `await analyze(text, namespace?)` | Extract and store facts |
 | `await ask(question, limit?, namespace?)` | Ask a question answered using memories |
 | `await restore(namespace, limit?)` | Restore a namespace |
-| `await list_namespaces(cursor?, limit?)` | List namespaces that hold memories; paginate on `has_more` |
 | `await health()` | Check server health |
 | `await remember_manual(opts)` | Store encrypted payload + pre-computed vector |
 | `await recall_manual(opts)` | Search with pre-computed vector |

@@ -167,12 +167,8 @@ test("auth-required mode picks up credentials mid-session without a restart", as
     const init = await waitFor((m) => m.id === 1 && m.result);
     assert.equal(init.result.serverInfo.name, "memwal");
 
-    // Pre-login discovery is the cold-start FLOOR, not the post-handoff list:
-    // it carries only what the oldest supported relayer serves, plus the
-    // locally served memwal_login (see BASELINE_RELAYER_TOOLS). The relayer's
-    // own tools/list replaces it once the session is up, so a tool that has
-    // reached dev but not prod — memwal_remember_status today — is absent
-    // here on purpose. Assert the safety metadata of the floor itself.
+    // Pre-login discovery must expose the same safety metadata clients will
+    // receive after the bridge hands off to the remote relayer.
     send({ jsonrpc: "2.0", id: 10, method: "tools/list", params: {} });
     const listed = await waitFor((m) => m.id === 10 && m.result);
     const metadata = Object.fromEntries(

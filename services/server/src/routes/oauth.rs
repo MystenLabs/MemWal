@@ -24,7 +24,7 @@ use crate::oauth::{self, OAuthError};
 use crate::storage::db::oauth_rows::{
     OAuthClientRow, OAuthCodeRow, OAuthDelegateRow, OAuthGrantRow, OAuthSessionRow, OAuthTokenRow,
 };
-use crate::storage::sui::{verify_delegate_key_onchain, GET_OBJECT_ATTEMPTS};
+use crate::storage::sui::verify_delegate_key_onchain;
 use crate::types::AppState;
 
 /// Read the configured `McpOAuthConfig`, or fail with 404 if not configured.
@@ -690,7 +690,6 @@ pub async fn session_complete(
         &account_id,
         &public_key_bytes,
         &state.config.package_id,
-        GET_OBJECT_ATTEMPTS,
     )
     .await
     .map_err(|e| {
@@ -956,10 +955,9 @@ pub async fn token(
                 .as_deref()
                 .ok_or_else(|| OAuthError::invalid_request("code_verifier is required"))?;
 
-            let code_sha256 = oauth::hash_token(code);
             let code_row = state
                 .db
-                .fetch_oauth_code(&client.client_id, &code_sha256)
+                .consume_oauth_code(&client.client_id, &oauth::hash_token(code))
                 .await?
                 .ok_or_else(|| {
                     OAuthError::invalid_grant(
@@ -985,16 +983,6 @@ pub async fn token(
                     ));
                 }
             }
-
-            let code_row = state
-                .db
-                .consume_oauth_code(&client.client_id, &code_sha256)
-                .await?
-                .ok_or_else(|| {
-                    OAuthError::invalid_grant(
-                        "authorization code is invalid, expired, or already used",
-                    )
-                })?;
 
             let grant_id = oauth::random_token(oauth::GRANT_ID_PREFIX);
             state
@@ -1151,63 +1139,5 @@ mod tests {
             .verify_personal(&owner, signed_message.as_bytes(), &signature.to_base64())
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn fetch_oauth_code_reads_without_consuming() {
-        let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://memwal:memwal_secret@localhost:5432/memwal".into());
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(&url)
-            .await
-            .unwrap();
-        sqlx::raw_sql(include_str!("../../migrations/011_mcp_oauth.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let db = crate::storage::db::VectorDb::from_pool(pool);
-
-        let client_id = format!("mcpc_{}", uuid::Uuid::new_v4().simple());
-        let code_sha256 = format!("{:064x}", uuid::Uuid::new_v4().as_u128());
-        db.insert_oauth_code(&super::OAuthCodeRow {
-            code_sha256: code_sha256.clone(),
-            client_id: client_id.clone(),
-            redirect_uri: "https://claude.ai/api/mcp/auth_callback".into(),
-            scope: "memwal".into(),
-            resource: "https://relayer.example/mcp".into(),
-            code_challenge: "challenge".into(),
-            code_challenge_method: "S256".into(),
-            delegate_ref: "mwd_ref".into(),
-            account_id: format!("0x{}", "11".repeat(32)),
-            owner_address: format!("0x{}", "22".repeat(32)),
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-        })
-        .await
-        .unwrap();
-
-        let read = db
-            .fetch_oauth_code(&client_id, &code_sha256)
-            .await
-            .unwrap()
-            .expect("fetch returns the code");
-        assert_eq!(read.code_sha256, code_sha256);
-        let again = db.fetch_oauth_code(&client_id, &code_sha256).await.unwrap();
-        assert!(again.is_some(), "fetch must leave the code redeemable");
-
-        let consumed = db
-            .consume_oauth_code(&client_id, &code_sha256)
-            .await
-            .unwrap()
-            .expect("consume returns the code");
-        assert_eq!(consumed.code_sha256, code_sha256);
-        assert!(
-            db.consume_oauth_code(&client_id, &code_sha256)
-                .await
-                .unwrap()
-                .is_none(),
-            "the code must stay single-use"
-        );
     }
 }
