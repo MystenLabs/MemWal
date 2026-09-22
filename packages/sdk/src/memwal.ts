@@ -171,6 +171,14 @@ const ANALYZE_REQUEST_TIMEOUT_MS = 60_000;
  * had any; keeping it named makes that a decision rather than an accident. */
 const RECALL_REQUEST_TIMEOUT_MS = 15_000;
 
+/** What `recall()` tells the relayer it will wait, so the 504 naming the stuck
+ * stage arrives before the abort above rather than after it. A second under
+ * that abort because the two clocks start at different moments: this timer
+ * starts before `fetch`, the relayer's when the request lands, and the margin
+ * the relayer keeps for its reply cannot also cover DNS, TCP and TLS. Derived
+ * from the timeout so the two can never drift apart. */
+const RECALL_DEADLINE_MS = RECALL_REQUEST_TIMEOUT_MS - 1_000;
+
 /**
  * Abort signal that fires after `ms`, or when `caller` aborts — whichever is
  * first. Built by hand rather than with `AbortSignal.any`, which lands too
@@ -858,6 +866,9 @@ export class MemWal {
                 // request byte-identical and the relayer applies its own
                 // "relevance" default.
                 sort: options.sort,
+                // How long this call waits, so the relayer can stop just
+                // short of it and name the step it was stuck in.
+                deadline_ms: RECALL_DEADLINE_MS,
             }, { timeoutMs: RECALL_REQUEST_TIMEOUT_MS });
 
             let processed = result;

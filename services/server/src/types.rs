@@ -1528,6 +1528,11 @@ pub struct RecallRequest {
     /// `scoring_weights`, so omitted and explicit must stay distinct.
     #[serde(default)]
     pub sort: Option<RecallSort>,
+    /// How long the caller waits, in ms. When set, the recall stops just
+    /// short of it and answers [`AppError::RecallTimeout`] naming the stage
+    /// it was in; omitted, it runs to completion.
+    #[serde(default)]
+    pub deadline_ms: Option<u64>,
 }
 
 /// Result ordering mode for `/api/recall`.
@@ -2250,6 +2255,12 @@ pub enum AppError {
     /// Operator write pause (`WRITES_PAUSED`). HTTP 503 with a stable
     /// client-visible message, distinct from transient upstream failures.
     WritesPaused(String),
+    /// A recall about to miss the caller's `deadline_ms`. HTTP 504 with
+    /// `code: "RECALL_TIMEOUT"` and the stage it was stuck in.
+    RecallTimeout {
+        stage: &'static str,
+        elapsed_ms: u64,
+    },
 }
 
 impl std::fmt::Display for AppError {
@@ -2262,6 +2273,9 @@ impl std::fmt::Display for AppError {
             AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
             AppError::RateLimited(msg) => write!(f, "Rate Limited: {}", msg),
+            AppError::RecallTimeout { stage, elapsed_ms } => {
+                write!(f, "Recall Timeout: {} after {}ms", stage, elapsed_ms)
+            }
             AppError::QuotaExceeded(msg) => write!(f, "Quota Exceeded: {}", msg),
             AppError::UpstreamUnavailable(msg) => write!(f, "Upstream Unavailable: {}", msg),
             AppError::WritesPaused(msg) => write!(f, "Writes Paused: {}", msg),
@@ -2298,6 +2312,20 @@ impl axum::response::IntoResponse for AppError {
             AppError::QuotaExceeded(msg) => (axum::http::StatusCode::PAYMENT_REQUIRED, msg.clone()),
             AppError::WritesPaused(msg) => {
                 (axum::http::StatusCode::SERVICE_UNAVAILABLE, msg.clone())
+            }
+            AppError::RecallTimeout { stage, elapsed_ms } => {
+                // Not `{error}` alone: the SDK reads `code` into
+                // `serverCode` and shows `message`, and callers read
+                // `stage` to decide what to do next.
+                let message = format!("Recall timed out after {elapsed_ms}ms during {stage}");
+                let body = serde_json::json!({
+                    "error": message,
+                    "message": message,
+                    "code": "RECALL_TIMEOUT",
+                    "stage": stage,
+                    "elapsed_ms": elapsed_ms,
+                });
+                return (axum::http::StatusCode::GATEWAY_TIMEOUT, axum::Json(body)).into_response();
             }
             AppError::UpstreamUnavailable(msg) => {
                 // log the upstream details server-side, return
@@ -2337,6 +2365,7 @@ impl AppError {
             AppError::QuotaExceeded(_) => "quota_exceeded",
             AppError::UpstreamUnavailable(_) => "upstream_unavailable",
             AppError::WritesPaused(_) => "writes_paused",
+            AppError::RecallTimeout { .. } => "recall_timeout",
         }
     }
 }
@@ -3451,6 +3480,41 @@ mod tests {
             parse(r#"{"query":"q","sort":"recent"}"#),
             Some(RecallSort::Recent)
         );
+    }
+
+    // ── RecallRequest.deadline_ms / RECALL_TIMEOUT ───────────────────────
+
+    #[test]
+    fn recall_deadline_is_optional() {
+        let parse = |body: &str| {
+            serde_json::from_str::<RecallRequest>(body)
+                .unwrap()
+                .deadline_ms
+        };
+        assert_eq!(parse(r#"{"query":"q"}"#), None);
+        assert_eq!(parse(r#"{"query":"q","deadline_ms":15000}"#), Some(15_000));
+    }
+
+    #[tokio::test]
+    async fn recall_timeout_is_a_504_that_names_the_stage() {
+        let err = AppError::RecallTimeout {
+            stage: "walrus_download",
+            elapsed_ms: 14_001,
+        };
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "RECALL_TIMEOUT");
+        assert_eq!(body["stage"], "walrus_download");
+        assert_eq!(body["elapsed_ms"], 14_001);
+        // `message` is what the TypeScript SDK shows; `error` is what every
+        // other relayer error carries.
+        assert_eq!(body["message"], body["error"]);
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("walrus_download"));
     }
 
     // ── ScoringWeights::is_ranker_active() — opt-in predicate ────────────
