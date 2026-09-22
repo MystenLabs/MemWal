@@ -59,7 +59,7 @@ Every supported client runs the same local server, `npx -y @mysten-incubation/me
 | OpenCode | `~/.config/opencode/opencode.json` | Add the [OpenCode block](#config-blocks) below |
 | Antigravity | Plugin directory or MCP config | `npx degit MystenLabs/MemWal/packages/mcp/plugin ~/.gemini/config/plugins/memwal`, or the [JSON block](#config-blocks); see [Antigravity](/mcp/antigravity) |
 
-After any of these, restart the client (MCP servers load at startup) and ask the agent to run `memwal_login`.
+After any of these, restart the client (MCP servers load at startup) and ask the agent to run `memwal_login`. Claude Code is the exception: after a plugin install, `/reload-plugins` applies it in the session you are already in.
 
 ### Config blocks
 

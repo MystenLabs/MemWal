@@ -60,8 +60,10 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
         /plugin install memwal@memwal-plugins
         ```
       </Step>
-      <Step title="Restart and sign in">
-        Restart Claude Code, then ask the agent to run `memwal_login` and open the URL it returns to connect your wallet. MCP-only is not a complete Claude Code setup: without the plugin, the agent often writes Claude's built-in `MEMORY.md` instead of calling `memwal_remember`.
+      <Step title="Reload and sign in">
+        Run `/reload-plugins`. Claude Code picks up the plugin, its MCP server and its hooks in the session you are already in, so there is no need to quit and reopen. Relaunch only if the `memwal_*` tools still do not appear after the reload.
+
+        Then ask the agent to run `memwal_login` and open the URL it returns to connect your wallet. MCP-only is not a complete Claude Code setup: without the plugin, the agent often writes Claude's built-in `MEMORY.md` instead of calling `memwal_remember`.
 
         Claude's system prompt still prefers `MEMORY.md` over MCP instructions. Show this block, get the user's go-ahead, then merge it into `~/.claude/CLAUDE.md` (do not replace the file). If `<!-- memwal:start -->` ... `<!-- memwal:end -->` is already there, replace that span only. Turn off Claude's built-in / native memory in account settings if it is on:
 
@@ -81,7 +83,7 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
     ```bash
     claude mcp add --scope user memwal -- npx -y @mysten-incubation/memwal-mcp
     ```
-    Restart Claude Code, then ask the agent to run `memwal_login` on first use.
+    Restart Claude Code so it picks up the new server, then ask the agent to run `memwal_login` on first use. `/reload-plugins` applies plugin installs, not a plain `claude mcp add`.
 
     Or connect to the relayer over HTTP directly (no local package):
     ```bash
@@ -167,7 +169,7 @@ Work through these three checks in order; each one isolates a different layer.
 ## Troubleshooting FAQ
 
 **`/mcp` reports memwal as failed or missing.**
-Restart Claude Code first; MCP servers load at startup. If it still fails, run `npx -y @mysten-incubation/memwal-mcp --help` in a plain terminal: that surfaces the real error, most often a Node version below 20 or a `PATH` without `npx` in the environment Claude Code inherits. For a full trace, add `MEMWAL_MCP_DEBUG=1` to the server's environment.
+Run `/reload-plugins` first if you installed the plugin; that reconnects its MCP server without a restart. For an MCP-only install, restart Claude Code instead, since a plain `claude mcp add` is only read at startup. If it still fails, run `npx -y @mysten-incubation/memwal-mcp --help` in a plain terminal: that surfaces the real error, most often a Node version below 20 or a `PATH` without `npx` in the environment Claude Code inherits. For a full trace, add `MEMWAL_MCP_DEBUG=1` to the server's environment.
 
 **`/plugin` commands are not recognized.**
 Your Claude Code version predates plugin support. Update Claude Code, or use the MCP-only install; the memory tools behave the same, you only lose the automatic-memory hooks.
@@ -190,7 +192,10 @@ Ask the agent to run `memwal_logout`, which wipes `~/.memwal/credentials.json`, 
 Every recall runs inside one account and namespace. If you set `MEMWAL_NAMESPACE` (or `--namespace`) after saving, earlier memories live in the previous namespace. If the namespace matches and results are still missing, run `memwal_restore <namespace>` to rebuild the search index from Walrus; the stored memories are the source of truth, and you can rebuild the index at any time.
 
 **Hooks are not firing.**
-The lifecycle hooks ship only with the **plugin** install; MCP-only provides the tools without hooks. Confirm the plugin appears in `/plugin` and restart after installing.
+The lifecycle hooks ship only with the **plugin** install; MCP-only provides the tools without hooks. Confirm the plugin appears in `/plugin`, then run `/reload-plugins` so the hooks load into the current session.
+
+**`claude plugin install` fails with `EPERM` on `settings.json` or `.cc-writes`.**
+An agent running in a sandbox often cannot write Claude Code's config from its shell, even though its file-editing tools can. Add `"memwal@memwal-plugins": true` to `enabledPlugins` in `~/.claude/settings.json`, back it up first, and register the install in `~/.claude/plugins/installed_plugins.json` under schema `version: 2`. The [setup skill](https://memory.walrus.xyz/skills/setup) carries the exact shape. `claude plugin list` and `claude mcp list` only read, so they still work for verification.
 
 **The agent writes `MEMORY.md` instead of calling `memwal_remember`.**
 Claude Code's built-in memory is in the system prompt and outranks MCP instructions. Confirm the plugin is enabled, merge the Walrus Memory block into `~/.claude/CLAUDE.md`, and turn off Claude's built-in / native memory in account settings.
