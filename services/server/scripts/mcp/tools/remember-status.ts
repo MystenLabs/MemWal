@@ -266,7 +266,18 @@ async function settleBatch(
     const done = rows.filter((r) => r.status === "done");
 
     const lines = rows.map((r, i) => {
-        const blob = r.blob_id ? ` blob_id=${r.blob_id}` : "";
+        // Only a settled row may show a blob_id. An `uploaded` row already has
+        // a real one — the blob IS on Walrus — but the job is not finished:
+        // `persist_uploaded_state` writes blob_id at that point, and the
+        // SetMetadataAndTransfer + insert_vector legs that make the fact
+        // recallable, and hand the blob object to the user, still have to run
+        // before `done`. Printing it next to "still uploading" contradicts this
+        // server's own instruction that "only a blob_id in the tool reply means
+        // the fact is already stored", and an agent that believes the blob_id
+        // tells the user a fact is saved that a later failure can still lose.
+        // The single-job path never shows one on a running job (`stillRunning`);
+        // neither does this.
+        const blob = r.status === "done" && r.blob_id ? ` blob_id=${r.blob_id}` : "";
         // `waitForRememberJobs` stamps "polling timed out after Nms" on rows
         // that simply had not landed when the budget ran out. That is our
         // clock expiring, not the job failing, so showing it as `error=` next

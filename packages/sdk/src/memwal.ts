@@ -329,6 +329,7 @@ function normalizeSuiNetworkForGrpc(network: string): string {
 export class MemWal {
     private privateKey: Uint8Array;
     private publicKey: Uint8Array | null = null;
+    private destroyed = false;
     private serverUrl: string;
     private namespace: string;
     private accountId: string;
@@ -391,6 +392,7 @@ export class MemWal {
      * Prevents key extraction from V8 heap dumps.
      */
     destroy(): void {
+        this.destroyed = true;
         if (this.privateKey) {
             this.privateKey.fill(0);
         }
@@ -1203,11 +1205,11 @@ export class MemWal {
      * Check server health. The endpoint is public and does not require request signing.
      */
     async health(): Promise<HealthResult> {
-        const res = await this.fetchWithDeadline(`${this.serverUrl}/health`);
+        const res = await this.fetchWithDeadline<HealthResult>(`${this.serverUrl}/health`);
         if (!res.ok) {
             throw new Error(`Health check failed: ${res.status}`);
         }
-        return res.json() as Promise<HealthResult>;
+        return res.body as HealthResult;
     }
 
     /**
@@ -1248,20 +1250,26 @@ export class MemWal {
     }
 
     private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
-        const versionRes = await this.fetchWithDeadline(`${this.serverUrl}/version`, { method: "GET" });
+        const versionRes = await this.fetchWithDeadline<Partial<RelayerVersionMetadata>>(
+            `${this.serverUrl}/version`,
+            { method: "GET" },
+        );
         let body: Partial<RelayerVersionMetadata>;
 
         if (versionRes.ok) {
-            body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
+            body = versionRes.body as Partial<RelayerVersionMetadata>;
         } else if (versionRes.status === 404 || versionRes.status === 405) {
-            const healthRes = await this.fetchWithDeadline(`${this.serverUrl}/health`, { method: "GET" });
+            const healthRes = await this.fetchWithDeadline<Partial<RelayerVersionMetadata>>(
+                `${this.serverUrl}/health`,
+                { method: "GET" },
+            );
             if (!healthRes.ok) {
                 throw new Error(
                     `Walrus Memory compatibility check failed: GET /version returned ` +
                         `${versionRes.status}, and GET /health returned ${healthRes.status}`,
                 );
             }
-            body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
+            body = healthRes.body as Partial<RelayerVersionMetadata>;
         } else {
             throw new Error(
                 `Walrus Memory compatibility check failed: GET /version returned ${versionRes.status}`,
@@ -1297,11 +1305,14 @@ export class MemWal {
 
     private async fetchServerConfig(): Promise<ServerConfig> {
         if (this.serverConfig) return this.serverConfig;
-        const res = await this.fetchWithDeadline(`${this.serverUrl}/config`, { method: "GET" });
+        const res = await this.fetchWithDeadline<Record<string, unknown>>(
+            `${this.serverUrl}/config`,
+            { method: "GET" },
+        );
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
         }
-        const body = (await res.json()) as Record<string, unknown>;
+        const body = res.body as Record<string, unknown>;
         if (typeof body.packageId !== "string" || !body.packageId ||
             typeof body.network !== "string" || !body.network) {
             throw new Error("GET /config response missing packageId / network");
@@ -1511,7 +1522,7 @@ export class MemWal {
      *   Pass [200, 202] for endpoints that return 202 Accepted.
      */
     /**
-     * `fetch` with this client's deadline applied.
+     * `fetch` plus the JSON body read, with this client's deadline applied across both.
      *
      * For the handshake endpoints that skip request signing — `/health`,
      * `/version`, `/config`. They are the worst place to leave unbounded: the
@@ -1524,15 +1535,20 @@ export class MemWal {
         return Math.max(1, Math.min(this.requestTimeoutMs, deadline - Date.now()));
     }
 
-    private async fetchWithDeadline(
+    private async fetchWithDeadline<T>(
         url: string,
         init: RequestInit = {},
         timeoutMs?: number,
-    ): Promise<Response> {
+    ): Promise<{ ok: boolean; status: number; body: T | undefined }> {
         const ms = timeoutMs ?? this.requestTimeoutMs;
         const deadline = deadlineSignal(ms);
         try {
-            return await fetch(url, { ...init, signal: deadline.signal });
+            const res = await fetch(url, { ...init, signal: deadline.signal });
+            return {
+                ok: res.ok,
+                status: res.status,
+                body: res.ok ? ((await res.json()) as T) : undefined,
+            };
         } catch (err) {
             if (deadline.timedOut()) {
                 throw requestTimeoutError(init.method ?? "GET", url, ms);
@@ -1574,6 +1590,11 @@ export class MemWal {
         const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
         const msgBytes = new TextEncoder().encode(message);
 
+        if (this.destroyed) {
+            throw new Error(
+                "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
+            );
+        }
         // Sign with Ed25519
         const signature = await ed.signAsync(msgBytes, this.privateKey);
         const publicKey = await this.getPublicKey();
@@ -1600,57 +1621,58 @@ export class MemWal {
         // for as long as the connection stays open.
         const deadlineMs = options.timeoutMs ?? this.requestTimeoutMs;
         const deadline = deadlineSignal(deadlineMs, options.signal);
-        let res: Response;
         try {
-            res = await fetch(url, {
+            const res = await fetch(url, {
                 method,
                 headers,
                 body: method === "GET" ? undefined : bodyStr,
                 signal: deadline.signal,
             });
+
+            if (!acceptedStatuses.includes(res.status)) {
+                // LOW-26: sanitize server error bodies before surfacing to callers.
+                const raw = await res.text();
+                const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+                if (compatibilityError) throw compatibilityError;
+
+                // A stale/future-dated signature is rejected with 401 + a machine-
+                // readable reason header. Surface it as an actionable clock-drift
+                // error rather than an opaque 401 so the caller can fix node time.
+                const clockDriftError = clockDriftErrorFromResponse(res);
+                if (clockDriftError) throw clockDriftError;
+
+                const { message, serverCode } = sanitizeServerError(
+                    res.status,
+                    raw,
+                    res.headers.get("x-auth-error"),
+                );
+                const err = new Error(message) as Error & {
+                    status?: number;
+                    serverCode?: string;
+                    retryAfterSeconds?: number;
+                    cause?: string;
+                };
+                err.status = res.status;
+                if (serverCode) err.serverCode = serverCode;
+                const retryAfter = Number(res.headers.get("retry-after"));
+                if (Number.isFinite(retryAfter) && retryAfter > 0) {
+                    err.retryAfterSeconds = retryAfter;
+                }
+                // Preserve raw body on `cause` for in-process debugging only.
+                err.cause = raw;
+                throw err;
+            }
+
+            return (await res.json()) as T;
         } catch (err) {
             // Translate our own expiry into something a caller can classify.
             // An abort the CALLER asked for is theirs and propagates untouched.
-            if (deadline.timedOut()) throw requestTimeoutError(method, path, deadlineMs);
+            if (deadline.timedOut() && (err as { status?: number }).status === undefined) {
+                throw requestTimeoutError(method, path, deadlineMs);
+            }
             throw err;
         } finally {
             deadline.dispose();
         }
-
-        if (!acceptedStatuses.includes(res.status)) {
-            // LOW-26: sanitize server error bodies before surfacing to callers.
-            const raw = await res.text();
-            const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
-            if (compatibilityError) throw compatibilityError;
-
-            // A stale/future-dated signature is rejected with 401 + a machine-
-            // readable reason header. Surface it as an actionable clock-drift
-            // error rather than an opaque 401 so the caller can fix node time.
-            const clockDriftError = clockDriftErrorFromResponse(res);
-            if (clockDriftError) throw clockDriftError;
-
-            const { message, serverCode } = sanitizeServerError(
-                res.status,
-                raw,
-                res.headers.get("x-auth-error"),
-            );
-            const err = new Error(message) as Error & {
-                status?: number;
-                serverCode?: string;
-                retryAfterSeconds?: number;
-                cause?: string;
-            };
-            err.status = res.status;
-            if (serverCode) err.serverCode = serverCode;
-            const retryAfter = Number(res.headers.get("retry-after"));
-            if (Number.isFinite(retryAfter) && retryAfter > 0) {
-                err.retryAfterSeconds = retryAfter;
-            }
-            // Preserve raw body on `cause` for in-process debugging only.
-            err.cause = raw;
-            throw err;
-        }
-
-        return res.json() as Promise<T>;
     }
 }

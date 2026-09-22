@@ -27,6 +27,11 @@ import { loginFailureNotice, loginPrompt, loginSuccessNotification } from "./mes
 import { log } from "./logger.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
+import {
+    SECRET_EXCLUSION_RULES,
+    SECRET_EXCLUSION_SUMMARY,
+    AUTO_SAVE_OPT_IN_RULE,
+} from "./memory-policy.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
 interface RpcMessage {
@@ -38,10 +43,22 @@ interface RpcMessage {
     error?: unknown;
 }
 
+/**
+ * WALM-642: every write-tool description below ends with the shared policy
+ * block, the same text the `instructions` field and the plugin hooks carry, so
+ * an agent that only ever sees one of the three still gets the same rules.
+ * The signed-out variants get the one-line summary — they exist to keep a
+ * credential-less model from spamming writes, and the full block would be the
+ * longest thing in a list of tools that cannot run yet.
+ */
 const SIGNED_OUT_REMEMBER =
-    "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize.";
+    "Save a fact to the user's Walrus Memory personal memory. Call ONLY when the user explicitly asks to remember/save something. Pass the full, detailed text — never summarize. " +
+    SECRET_EXCLUSION_SUMMARY;
 const SIGNED_IN_REMEMBER =
-    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this'. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. By default this returns in ~1s once the relayer has accepted the job (job_id) — the Walrus write is still in flight and the fact is NOT stored yet. Do not claim it is saved. Settle it with the job-status tool this server advertises (re-list tools if you do not see one). A blob_id in the same reply means it already stored (optional wait budget).";
+    "Save a durable fact about the user or project to their Walrus Memory. Call this PROACTIVELY whenever the user states a preference, decision, constraint, correction, identity detail, or recurring workflow — even if they did not say 'remember this' — provided they have turned automatic memory on. Skip one-off tasks, the current file or bug, and small talk. Pass the full statement; do not summarize. To save several facts at once, use memwal_remember_bulk instead. By default this returns in ~1s once the relayer has accepted the job (job_id) — the Walrus write is still in flight and the fact is NOT stored yet. Do not claim it is saved. Settle it with the job-status tool this server advertises (re-list tools if you do not see one). A blob_id in the same reply means it already stored (optional wait budget). " +
+    AUTO_SAVE_OPT_IN_RULE +
+    " " +
+    SECRET_EXCLUSION_RULES;
 const SIGNED_OUT_RECALL =
     "Search the user's Walrus Memory for facts relevant to a query. Returns matching memories ranked by relevance.";
 const SIGNED_IN_RECALL =
@@ -72,7 +89,8 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Remember Multiple Facts",
         annotations: { readOnlyHint: false, destructiveHint: false },
         description:
-            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. By default this returns in ~1s once the relayer has accepted the batch (job_ids) — the Walrus writes are still in flight and the facts are NOT stored yet. Do not claim they are saved. Settle them with the job-status tool this server advertises (re-list tools if you do not see one). A blob_id in the same reply means that fact already stored (optional wait budget).",
+            "Save multiple durable facts in one call. Use when you learned several distinct facts at once (onboarding details, a list of preferences, decisions from a discussion). Pass an array of complete fact statements (max 20) — do not summarize. Prefer this over repeated memwal_remember calls. By default this returns in ~1s once the relayer has accepted the batch (job_ids) — the Walrus writes are still in flight and the facts are NOT stored yet. Do not claim they are saved. Settle them with the job-status tool this server advertises (re-list tools if you do not see one). A blob_id in the same reply means that fact already stored (optional wait budget). " +
+            (proactive ? AUTO_SAVE_OPT_IN_RULE + " " + SECRET_EXCLUSION_RULES : SECRET_EXCLUSION_SUMMARY),
         inputSchema: {
             type: "object",
             properties: {
@@ -144,7 +162,8 @@ function buildToolDefinitions(proactive: boolean) {
         title: "Analyze and Remember",
         annotations: { readOnlyHint: false, destructiveHint: true },
         description:
-            "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead.",
+            "Extract memorable facts from a longer passage of text (preferences, habits, biographical info, constraints) and save each as a separate Walrus Memory memory. Use this when you want MemWal's LLM to split the facts out of a transcript or notes for you; if you already know the exact facts, use memwal_remember or memwal_remember_bulk instead. " +
+            (proactive ? AUTO_SAVE_OPT_IN_RULE + " " + SECRET_EXCLUSION_RULES : SECRET_EXCLUSION_SUMMARY),
         inputSchema: {
             type: "object",
             properties: {
