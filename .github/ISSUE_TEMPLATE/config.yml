@@ -10,5 +10,5 @@ contact_links:
     url: https://discord.gg/walrusprotocol
     about: Questions and builder support that are not a bug or a feature request.
   - name: Report a security vulnerability
-    url: https://github.com/MystenLabs/MemWal/security/advisories/new
-    about: Private advisory. Do not file a public issue for security findings.
+    url: https://github.com/MystenLabs/MemWal/security/policy
+    about: Email security@mystenlabs.com. Do not report security issues through GitHub or Discord.

@@ -27,6 +27,8 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { BASELINE_RELAYER_TOOLS } from "../dist/auth-required.js";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BIN = resolve(__dirname, "../dist/bin/memwal-mcp.js");
 const EXPECTED_BEARER = "a".repeat(64);
@@ -37,13 +39,16 @@ const EXPECTED_ACCOUNT_ID = "0x" + "3".repeat(64);
  * `initialize` would blow the assertion deadlines below. */
 const SSE_DELAY_MS = 3_000;
 
-/** The tools the real relayer sidecar registers
- * (services/server/scripts/mcp/tools/index.ts). The cold-start static list must
- * cover exactly these (plus the locally-served login/logout), so the
- * static→refreshed transition doesn't change the tool set under the client. */
+/** The tools the CURRENT relayer sidecar registers
+ * (services/server/scripts/mcp/tools/index.ts) — i.e. a relayer as new as this
+ * bridge. The cold-start static list must be a SUBSET of this: it may lag the
+ * sidecar (a newer tool simply shows up on the post-connect re-list), but it
+ * must never advertise a name the relayer does not serve. A bridge is routinely
+ * newer than the relayer it dials, and over-advertising is GH #928. */
 const UPSTREAM_TOOL_NAMES = [
     "memwal_remember",
     "memwal_remember_bulk",
+    "memwal_remember_status",
     "memwal_recall",
     "memwal_analyze",
     "memwal_restore",
@@ -314,6 +319,11 @@ test("initialize is answered locally during a slow relayer cold start; tools/cal
     );
     assert.match(init.result.instructions, /memwal_recall/);
     assert.match(init.result.instructions, /memwal_remember/);
+    assert.doesNotMatch(
+        init.result.instructions,
+        /memwal_remember_status/,
+        "initialize instructions must not name a tool cold start does not advertise",
+    );
     assert.notEqual(
         init.result.serverInfo.version,
         "0.0.1",
@@ -324,13 +334,13 @@ test("initialize is answered locally during a slow relayer cold start; tools/cal
         `initialize took ${initElapsed}ms — expected it answered locally, well before the ${SSE_DELAY_MS}ms relayer connect`,
     );
 
-    // 2) tools/list at cold start is served locally and instantly with the
-    //    static list, which must be EXACTLY the upstream tool set plus the
-    //    locally-served login/logout — each name once.
+    // 2) tools/list at cold start is served locally and instantly from the
+    //    static list. It must fit INSIDE the upstream tool set (plus the
+    //    locally-served login/logout) and cover the baseline — each name once.
     send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const list = await waitFor((m) => m.id === 2 && m.result, SSE_DELAY_MS);
     const coldNames = list.result.tools.map((t) => t.name);
-    const expectedNames = new Set([...UPSTREAM_TOOL_NAMES, "memwal_login", "memwal_logout"]);
+    const servableNames = new Set([...UPSTREAM_TOOL_NAMES, "memwal_login", "memwal_logout"]);
     // Unique names (TOOL_DEFINITIONS bundles its own memwal_login; a blind concat
     // with the local login/logout defs would list it twice).
     assert.equal(
@@ -338,12 +348,21 @@ test("initialize is answered locally during a slow relayer cold start; tools/cal
         coldNames.length,
         `cold tools/list has duplicate tool names: ${coldNames}`,
     );
-    // Exact set match — guards against the cold list drifting from the real
-    // upstream registration (e.g. missing memwal_remember_bulk / memwal_health).
+    // Over-advertising is the GH #928 failure: the agent is handed a name the
+    // relayer cannot answer, and the call waits out the orphan deadline.
+    const overAdvertised = coldNames.filter((n) => !servableNames.has(n));
     assert.deepEqual(
-        new Set(coldNames),
-        expectedNames,
-        `cold tools/list set mismatch. got ${[...coldNames].sort()}, expected ${[...expectedNames].sort()}`,
+        overAdvertised,
+        [],
+        `cold tools/list advertises tools no relayer serves: ${overAdvertised}`,
+    );
+    // Under-advertising below the baseline is the opposite drift: a tool every
+    // supported relayer has, missing for the whole cold-start window.
+    const missingBaseline = [...BASELINE_RELAYER_TOOLS].filter((n) => !coldNames.includes(n));
+    assert.deepEqual(
+        missingBaseline,
+        [],
+        `cold tools/list omits baseline tools: ${missingBaseline}`,
     );
 
     // 3) tools/call sent BEFORE the stream is up must be buffered and served
@@ -374,9 +393,10 @@ test("initialize is answered locally during a slow relayer cold start; tools/cal
     assert.equal(initReplies[0].msg.result.serverInfo.name, "memwal");
 
     // 6) After connect, a re-list is forwarded upstream and spliced with
-    //    login/logout. That authoritative set must EQUAL the cold static set —
-    //    the static→refreshed transition must not change the tool set (each
-    //    name once, no dup even if upstream ever served login).
+    //    login/logout. That authoritative set is what the client acts on, and
+    //    every cold-start name must still be in it — the transition may ADD
+    //    tools (a relayer newer than the baseline) but must never take one
+    //    away under a client that already read the cold list.
     send({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} });
     const relist = await waitFor((m) => m.id === 4 && m.result, 10_000);
     const splicedNames = relist.result.tools.map((t) => t.name);
@@ -385,10 +405,16 @@ test("initialize is answered locally during a slow relayer cold start; tools/cal
         splicedNames.length,
         `post-connect tools/list has duplicate tool names: ${splicedNames}`,
     );
+    const withdrawn = coldNames.filter((n) => !splicedNames.includes(n));
+    assert.deepEqual(
+        withdrawn,
+        [],
+        `post-connect tools/list withdrew cold-start tools: ${withdrawn}. cold=${[...coldNames].sort()} spliced=${[...splicedNames].sort()}`,
+    );
     assert.deepEqual(
         new Set(splicedNames),
-        new Set(coldNames),
-        `cold and post-connect tool sets differ. cold=${[...coldNames].sort()} spliced=${[...splicedNames].sort()}`,
+        servableNames,
+        `post-connect tools/list must mirror the relayer. got ${[...splicedNames].sort()}, expected ${[...servableNames].sort()}`,
     );
 
     assert.ok(mock.getSseGetCount() >= 1, "expected at least one SSE handshake");

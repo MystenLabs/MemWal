@@ -82,9 +82,13 @@ These routes require no authentication.
 
 Service liveness check. `status` is `"ok"` when the relayer process is up. HTTP 200 means the process is running, not that writes are accepted.
 
-`writes` is `"ok"` or `"paused"`. `"paused"` when `WRITES_PAUSED` is set (`1` / `true` / `yes`); empty or unset is `"ok"`. That flag is write-path admission, not a health-only signal: `POST /api/remember`, `/api/remember/manual`, `/api/remember/bulk`, and `/api/analyze` then return HTTP 503 with `{"error":"writes are paused"}`. `/health` itself stays HTTP 200 with `status: "ok"` and `writes: "paused"`, so clients can distinguish an intentional pause from an integrator bug. Reads (`recall`, `restore`, remember job status) stay available.
+`writes` is `"ok"`, `"degraded"`, or `"paused"`.
 
-`write_ready` is `true` when the encryption sidecar process answered its own `/health` **and** Postgres can accept writes (cached a few seconds). Postgres is considered not writable when Neon cluster size (`pg_cluster_size`, not `pg_database_size` of this database) is at or within 1MB of `neon.max_cluster_size`. If `pg_cluster_size()` is missing (no `neon` extension), the probe falls back to `sum(pg_database_size)` against that GUC. Self-hosted Postgres without the GUC keeps the sidecar-only check. Probe errors and timeouts fail open (`write_ready` stays true) so CI is not blocked; timeouts log at warn. A sidecar outage or a disk/project-size write outage can still return HTTP 200 with `write_ready: false`. Use `writes`, not `write_ready`, for the pause signal. `write_ready: true` is not a guarantee that remember or analyze succeed.
+- `"paused"` when `WRITES_PAUSED` is set (`1` / `true` / `yes`). That flag is write-path admission, not a health-only signal: `POST /api/remember`, `/api/remember/manual`, `/api/remember/bulk`, and `/api/analyze` then return HTTP 503 with `{"error":"writes are paused"}`. `/health` itself stays HTTP 200 with `status: "ok"` and `writes: "paused"`, so clients can distinguish an intentional pause from an integrator bug. Reads (`recall`, `restore`, remember job status) stay available.
+- `"degraded"` when recent durable writes (last 15 minutes) have **failed at least three times and none have landed**. The relayer still accepts and queues a write (`write_ready` stays `true`; HTTP 200), but Walrus is not storing it — expect the job to fail rather than queue more. A single success in that window keeps `"ok"` even if other writes failed: this is a total-outage detector, not a per-request verdict. `memwal_health` prints `writes=degraded` when this is set.
+- `"ok"` otherwise (including a quiet window with no finished writes).
+
+`write_ready` is `true` when the encryption sidecar process answered its own `/health` **and** Postgres can accept writes (cached a few seconds). Postgres is considered not writable when Neon cluster size (`pg_cluster_size`, not `pg_database_size` of this database) is at or within 1MB of `neon.max_cluster_size`. If `pg_cluster_size()` is missing (no `neon` extension), the probe falls back to `sum(pg_database_size)` against that GUC. Self-hosted Postgres without the GUC keeps the sidecar-only check. Probe errors and timeouts fail open (`write_ready` stays true) so CI is not blocked; timeouts log at warn. A sidecar outage or a disk/project-size write outage can still return HTTP 200 with `write_ready: false`. Use `writes`, not `write_ready`, for the pause or Walrus-outage signal. `write_ready: true` is not a guarantee that remember or analyze succeed.
 
 **Response:**
 
@@ -158,6 +162,26 @@ Proxy to the sidecar's `/sponsor/execute` endpoint. `sender` must match the shor
 ## Protected routes
 
 Every route below requires the signed headers described in [Authentication](#authentication).
+
+### `GET /api/whoami`
+
+Return the account identity the caller's delegate key resolves to. Takes no request body.
+
+Authentication already resolves the account before any handler runs, so this route just hands back what the middleware computed. Returning `account_id` is safe here precisely because the route is authenticated. The caller has proven it holds a delegate key registered against this account, so it only ever learns about itself. The public `GET /api/accounts/:owner/exists` route deliberately withholds it.
+
+The motivating use is rebuilding local credentials: a client that holds a working delegate key but has lost the surrounding metadata (an interrupted sign-in, a wiped config file) needs `account_id`, `owner`, and `package_id` to write a usable credentials file, and the key alone proves entitlement to all three.
+
+**Response:**
+
+```json
+{
+  "account_id": "0x...",
+  "owner": "0x...",
+  "package_id": "0x..."
+}
+```
+
+**Mainnet only, when the caller cannot send `x-account-id`.** Recovering a lost account id is the one case where the client has no id to send, so authentication has to find it by scanning the `AccountRegistry` for the delegate key. That scan runs over Sui JSON-RPC, which Testnet no longer serves, so Testnet requires the `x-account-id` hint for delegate-key authentication and rejects the request with `401` when it is absent, including this one. A caller that already knows its account id can use this route on either network; a caller recovering one cannot use it on Testnet.
 
 ### `POST /api/remember`
 
@@ -269,6 +293,22 @@ Search for memories matching a natural language query. Returns decrypted plainte
 
 `limit` defaults to `10`; the server caps it at `100`. `namespace` defaults to `"default"`. `scoring_weights` takes an optional object; omit it to keep the plain cosine-distance order.
 
+`sort` is optional: `"relevance"` (the cosine order, and the behaviour when omitted) or `"recent"` (the newest among the semantic matches). An explicit `sort`, `"relevance"` included, is the order, and the relayer ignores `scoring_weights` for that request.
+
+`deadline_ms` is optional: how long the caller waits for this response, in milliseconds. When set, the relayer stops about one second before it, counting from when the request arrived, and answers `504` with the step that was still running, so the caller learns where the recall stalled instead of timing out blind. A short deadline still gets at least 2 seconds of work; if the whole deadline went on authentication before the recall started, the relayer answers at once with stage `auth`. Values above `600000` are capped. Omit it to let the recall run to completion. The TypeScript SDK sends `14000`, a second under the 15s it aborts `recall()` at: the relayer's own margin runs from arrival, so it covers the reply's trip back but not the connect the caller's timer already started on.
+
+```json
+{
+  "error": "Recall timed out after 14001ms during walrus_download",
+  "message": "Recall timed out after 14001ms during walrus_download",
+  "code": "RECALL_TIMEOUT",
+  "stage": "walrus_download",
+  "elapsed_ms": 14001
+}
+```
+
+`stage` is one of `auth`, `embed`, `vector_search`, `walrus_download`, or `seal_decrypt`.
+
 #### Scoring weights
 
 The optional `scoring_weights` object turns on composite ranking. The same object works on `/api/recall`, `/api/recall/manual`, and `/api/ask`.
@@ -297,7 +337,7 @@ The optional `scoring_weights` object turns on composite ranking. The same objec
 }
 ```
 
-`score` only appears when `scoring_weights` sets a nonzero `recency` or `importance` weight. A request that sets only the `semantic` weight keeps the plain cosine order, and the relayer omits `score`. `dropped_count` only appears when at least one match dropped out because its blob download or decryption failed; the relayer omits those matches from `results`.
+`score` only appears when `scoring_weights` sets a nonzero `recency` or `importance` weight and `sort` is omitted. A request that sets only the `semantic` weight keeps the plain cosine order, and the relayer omits `score`. `dropped_count` only appears when at least one match dropped out because its blob download or decryption failed; the relayer omits those matches from `results`.
 
 ### `POST /api/remember/manual`
 

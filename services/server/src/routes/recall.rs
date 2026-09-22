@@ -13,6 +13,7 @@ use redis::AsyncCommands;
 use sha2::Digest;
 use std::sync::Arc;
 
+use crate::engine::stage::{self, Budget, HangUpGuard, RecallStage, StageMarker};
 use crate::types::*;
 
 // ============================================================
@@ -162,22 +163,107 @@ pub async fn recall(
     // Validate scoring_weights up front — fail fast on malformed input
     // (NaN, out-of-range, sub-floor half-life) BEFORE we spend an embed +
     // vector search + Walrus + SEAL round-trip just to 400 at the end.
-    let weights = body.scoring_weights.clone().unwrap_or_default();
-    weights.validate()?;
+    // An explicit `sort` suppresses them; see `resolve_scoring_weights`.
+    let weights = super::resolve_scoring_weights(body.sort, body.scoring_weights.clone())?;
+    let sort = body.sort.unwrap_or_default();
 
     // Owner is derived from delegate key via onchain verification (auth middleware)
     let owner = &auth.owner;
     let namespace = &body.namespace;
+
     tracing::info!(
         query_len = body.query.len(),
         owner = %owner,
         namespace = %namespace,
         ranker_active = weights.is_ranker_active(),
+        scoring_weights_ignored = body.sort.is_some()
+            && body
+                .scoring_weights
+                .as_ref()
+                .is_some_and(ScoringWeights::is_ranker_active),
         "recall request"
     );
 
+    // Stop just short of the caller's deadline, so the 504 can say which
+    // stage was running. The caller's clock started before auth did.
+    let already = crate::observability::current_request_started()
+        .map(|arrived| arrived.elapsed())
+        .unwrap_or_default();
+    let deadline = match stage::budget_for(body.deadline_ms, already) {
+        Budget::Unbounded => None,
+        Budget::Run(left) => Some(tokio::time::Instant::now() + left),
+        Budget::Exhausted => {
+            return Err(recall_timed_out(
+                owner,
+                namespace,
+                RecallStage::Auth,
+                already,
+                &body,
+            ));
+        }
+    };
+    let marker = StageMarker::default();
+    let guard = HangUpGuard::new(marker.clone(), owner.clone());
+    let outcome = stage::run_with_deadline(
+        &marker,
+        deadline,
+        recall_pipeline(&state, &auth, &body, &weights, sort),
+    )
+    .await;
+    guard.disarm();
+    let response = match outcome {
+        Ok(result) => result?,
+        Err(timed_out) => {
+            let elapsed = already + timed_out.elapsed;
+            return Err(recall_timed_out(
+                owner,
+                namespace,
+                timed_out.stage,
+                elapsed,
+                &body,
+            ));
+        }
+    };
+    Ok(Json(response))
+}
+
+fn recall_timed_out(
+    owner: &str,
+    namespace: &str,
+    stage: RecallStage,
+    elapsed: std::time::Duration,
+    body: &RecallRequest,
+) -> AppError {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    tracing::warn!(
+        owner = %owner,
+        namespace = %namespace,
+        stage = stage.as_str(),
+        elapsed_ms,
+        deadline_ms = body.deadline_ms,
+        "recall timed out before the caller's deadline"
+    );
+    AppError::RecallTimeout {
+        stage: stage.as_str(),
+        elapsed_ms,
+    }
+}
+
+/// Everything `recall` does after validation, as one future the handler can
+/// put a deadline on. Each `stage::enter` names the step a timeout reports.
+async fn recall_pipeline(
+    state: &Arc<AppState>,
+    auth: &AuthInfo,
+    body: &RecallRequest,
+    weights: &ScoringWeights,
+    sort: RecallSort,
+) -> Result<RecallResponse, AppError> {
+    let owner = &auth.owner;
+    let namespace = &body.namespace;
+
+    stage::enter(RecallStage::Embed);
     let t0 = std::time::Instant::now();
-    let query_vector = generate_recall_embedding_cached(&state, &body.query).await?;
+    let query_vector = generate_recall_embedding_cached(state, &body.query).await?;
     let embed_ms = t0.elapsed().as_millis();
 
     // Cap limit to prevent unbounded DB scans / memory use.
@@ -187,7 +273,8 @@ pub async fn recall(
     // row is frequently a mediocre semantic match and would otherwise fall
     // outside the cosine top-`limit` entirely. `Relevance` fetches exactly
     // `limit`, so the default path issues the identical query it always has.
-    let candidate_limit = body.sort.candidate_limit(limit);
+    let candidate_limit = sort.candidate_limit(limit);
+    stage::enter(RecallStage::VectorSearch);
     let t1 = std::time::Instant::now();
     let hits = state
         .db
@@ -199,7 +286,7 @@ pub async fn recall(
     // only distance + created_at, both already on the row, so the over-fetch
     // costs one wider SQL query instead of 5x the Walrus downloads and SEAL
     // decrypts.
-    let hits = super::select_hits_for_sort(hits, body.sort, limit);
+    let hits = super::select_hits_for_sort(hits, sort, limit);
     let hit_count = hits.len();
 
     if hits.is_empty() {
@@ -207,11 +294,11 @@ pub async fn recall(
             "recall complete: 0 results (no vector hits) for owner={}",
             owner
         );
-        return Ok(Json(RecallResponse {
+        return Ok(RecallResponse {
             results: vec![],
             total: 0,
             dropped_count: 0,
-        }));
+        });
     }
 
     // Hydrate the hits through the storage engine: blob cache -> Walrus
@@ -220,6 +307,7 @@ pub async fn recall(
     // engine owns the
     // cache/decrypt-batch internals and derives the SEAL credential from
     // `auth`; per-blob timing breakdowns are visible in its tracing spans.
+    stage::enter(RecallStage::WalrusDownload);
     let t2 = std::time::Instant::now();
     let hit_refs: Vec<(String, f64)> = hits
         .iter()
@@ -227,7 +315,7 @@ pub async fn recall(
         .collect();
     let (mut hydrated, dropped_count, timings) = state
         .engine
-        .fetch_batch(owner, namespace, &hit_refs, &auth)
+        .fetch_batch(owner, namespace, &hit_refs, auth)
         .await?;
     let fetch_ms = t2.elapsed().as_millis();
 
@@ -260,7 +348,7 @@ pub async fn recall(
     // this is a no-op and preserves the pgvector cosine order exactly —
     // pinned by the `default_weights_preserve_input_order` and
     // `recency_zero_is_short_circuit_no_reorder` tests in services::ranker.
-    let ranked = state.ranker.rank(hydrated, &weights, chrono::Utc::now());
+    let ranked = state.ranker.rank(hydrated, weights, chrono::Utc::now());
 
     let results: Vec<RecallResult> = super::recall_results_from_ranked(ranked);
     let total = results.len();
@@ -293,11 +381,11 @@ pub async fn recall(
         t0.elapsed().as_millis()
     );
 
-    Ok(Json(RecallResponse {
+    Ok(RecallResponse {
         results,
         total,
         dropped_count,
-    }))
+    })
 }
 
 /// POST /api/recall/manual
@@ -403,6 +491,33 @@ mod tests {
     }
 
     // ── RecallResponse dropped_count serialization ───────────────
+
+    /// The failure report added for accepted-then-failed writes reads the same
+    /// `remember_jobs.error_msg` the job-status endpoints read, and reaches the
+    /// same untrusted caller — so it has to be sanitized the same way. It was
+    /// not, which put the relayer's own wallet address and balance shortfall
+    /// into every recall response for 24 hours after an infra failure.
+    ///
+    /// `infra_wal_balance_failure_hides_relayer_wallet_address` in
+    /// routes::remember pins this for `GET /api/remember/:job_id`; this pins
+    /// the same guarantee for the recall path.
+    #[test]
+    fn failed_write_report_hides_relayer_wallet_address() {
+        let raw = "walrus upload failed: Insufficient balance of \
+0x356a26eb9e012a68958082340d4c4116e7f55615ef27affcff209cf0ae544f59::wal::WAL for owner \
+0x8d3c1f0a9b2e4d6c7a5f8e1b0d4c9a2f3e6b7d8c1a0f9e2b3c4d5a6f7e8b9c0d. Required: 64367730, \
+Available: 10708877";
+
+        let out = crate::routes::remember::sanitize_job_error_for_client("failed", Some(raw.to_string()))
+            .expect("a failed job keeps an error");
+
+        // The operator's hot wallet and its shortfall are not the tenant's
+        // business, and reading them as "top this address up" is the exact
+        // confusion INFRA_JOB_ERROR_MESSAGE exists to prevent.
+        assert!(!out.contains("0x8d3c1f0a"), "wallet address leaked: {}", out);
+        assert!(!out.contains("Available"), "balance leaked: {}", out);
+        assert!(!out.contains("10708877"), "shortfall leaked: {}", out);
+    }
 
     #[test]
     fn recall_response_includes_dropped_count_when_nonzero() {

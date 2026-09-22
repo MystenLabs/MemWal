@@ -42,9 +42,14 @@ answer: >-
 
 Every supported client runs the same local server, `npx -y @mysten-incubation/memwal-mcp`, and differs only in where the configuration lives. Pick your client below, add the server, restart, and sign in.
 
+For regular Claude Desktop or web chat, use the [OAuth custom connector](/mcp/claude-connector)
+instead of the local setup below. It needs no local Node.js or CLI. The Code tab
+inside Claude Desktop uses the [Claude Code plugin guide](/mcp/claude-code).
+
 ## Prerequisites
 
 - You need Node.js 20 or later, because the server runs through `npx` with no install step.
+- `npx` resolves the package name against the directory your client starts the server in, which is usually the project you have open. A project that contains an installed `@mysten-incubation/memwal-mcp` of its own would be run instead of the published package, and pinning a version in the command does not prevent it. The [plugin](/mcp/claude-code) avoids this by installing the pinned version into `~/.memwal/runtime` and launching that absolute path; to get the same property without the plugin, install the version yourself outside any project and point `command`/`args` at the absolute entry point (see the [package README](https://github.com/MystenLabs/MemWal/blob/dev/packages/mcp/README.md#how-the-plugin-launches-the-server)).
 - You need a [Walrus Memory account](/fundamentals/concepts/ownership-and-access). An unauthenticated memory-tool call returns sign-in instructions rather than signing you in, so ask the agent to run `memwal_login` and follow the URL it returns to connect your wallet. Config files carry no keys.
 
 ## Set up your client

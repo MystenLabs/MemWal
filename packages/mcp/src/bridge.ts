@@ -15,7 +15,7 @@
  * Re-auth requires an explicit `memwal-mcp login` from the user.
  */
 import type { MemWalCredentials } from "./auth.js";
-import { clearCreds, credsPath, loadCreds } from "./auth.js";
+import { clearCreds, clearPendingLogin, credsPath, loadCreds } from "./auth.js";
 import { TOOL_DEFINITIONS } from "./auth-required.js";
 import {
     clientInfoHeaders,
@@ -24,7 +24,13 @@ import {
 } from "./client-info.js";
 import { randomUUID } from "node:crypto";
 import { ensureCompatibleRelayer, resolveConnectTimeoutMs } from "./compatibility.js";
-import { PROACTIVE_INSTRUCTIONS } from "./instructions.js";
+import {
+    describeHealthProbe,
+    probeRelayerHealth,
+    resolveHealthProbeMs,
+    type HealthProbe,
+} from "./health-probe.js";
+import { proactiveInstructions } from "./instructions.js";
 import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
 import { log, note } from "./logger.js";
 import {
@@ -33,6 +39,7 @@ import {
     loginSuccessNotification,
     type LoginSuccessInfo,
 } from "./messages.js";
+import { openStreamableSession, resolveTransport } from "./streamable.js";
 import { MEMWAL_MCP_VERSION } from "./version.js";
 
 /** Bridge mode runtime config — the URLs / label resolved at boot from
@@ -74,7 +81,8 @@ const NAMESPACE_TOOLS = new Set([
  *     per-call namespace always wins over the configured default.
  */
 /**
- * Name the relayer this process dialled in a `memwal_health` result.
+ * Name the destination this process is bound to in a `memwal_health` result:
+ * the relayer it dialled, and the account it signs for.
  *
  * The relayer-side text can only report an origin its deployment published, and
  * stays silent on a self-hosted or local one, where the sidecar knows nothing
@@ -86,10 +94,18 @@ const NAMESPACE_TOOLS = new Set([
  * Rewrites an existing `relayer=` field rather than appending a second one: when
  * both sides know the origin they describe the same session, and two
  * conflicting fields would be worse than neither.
+ *
+ * `account=` rides along for the same reason (WALM-639). A project-local
+ * credentials file can point this process at a different account than the one
+ * the user signed in with, and "which account am I writing to" was otherwise
+ * only visible in stderr the MCP host usually hides — so the half of the
+ * destination that decides WHOSE memory this is now shows up beside the half
+ * that decides where it is stored.
  */
 export function annotateHealthResult(
     result: { content?: unknown; isError?: unknown },
     relayerUrl: string,
+    accountId?: string,
 ): void {
     // A failed health call has no session to describe; naming a relayer beside
     // an error reads as though that relayer answered.
@@ -103,6 +119,11 @@ export function annotateHealthResult(
     block.text = existing.test(block.text)
         ? block.text.replace(existing, `relayer=${relayerUrl}`)
         : `${block.text} relayer=${relayerUrl}`;
+    if (!accountId) return;
+    const existingAccount = /\baccount=\S+/;
+    block.text = existingAccount.test(block.text)
+        ? block.text.replace(existingAccount, `account=${accountId}`)
+        : `${block.text} account=${accountId}`;
 }
 
 export function applyDefaultNamespace(msg: RpcMessage, namespace?: string): RpcMessage {
@@ -183,7 +204,11 @@ function buildLocalInitializeResult(params: unknown): {
         // client: this local answer wins and the upstream initialize reply is
         // suppressed. Omitting it here silently strips the proactive contract
         // from every stdio client, which is the WALM-324 regression itself.
-        instructions: PROACTIVE_INSTRUCTIONS,
+        //
+        // Resolved per handshake, not read from a module const: whether the
+        // model is told to save unprompted depends on the user's automatic-save
+        // opt-in, which lives on disk and can change between spawns (WALM-642).
+        instructions: proactiveInstructions(),
     };
 }
 
@@ -213,6 +238,18 @@ const SIGNED_OUT_FAILURE = {
 const UNAUTHORIZED_TEXT =
     "❌ Walrus Memory rejected the saved credentials (HTTP 401). The delegate key may have been revoked or is no longer registered on this account. Call `memwal_login` to sign in again — saved credentials were NOT modified.";
 
+/** Reply for a `tools/call` naming a tool the connected relayer does not
+ * serve. Names what IS on offer, because the agent's next move is to pick one
+ * of those — "unknown tool" alone leaves it guessing or retrying. */
+export function unknownToolText(name: string, available: string[]): string {
+    return (
+        `❌ \`${name}\` is not a tool this Walrus Memory server offers. ` +
+        `Available: ${available.join(", ")}. ` +
+        `Your tool list is stale — re-read \`tools/list\` and use one of those instead. ` +
+        `Nothing ran, so nothing was saved or changed.`
+    );
+}
+
 /** `failRequest` options for every credentials-rejected refusal, so one refused
  * at handshake time and one refused on arrival afterwards read identically. */
 const UNAUTHORIZED_FAILURE = {
@@ -237,6 +274,11 @@ const LOCAL_TOOLS_LIST = {
         ...LOCAL_TOOL_DEFINITIONS,
     ],
 };
+
+/** Names advertised at cold start (baseline relayer + locally-served). A
+ * `tools/call` for anything else is refused until an upstream `tools/list`
+ * has been seen — fail-closed, not fail-open. */
+const COLD_START_TOOL_NAMES = new Set(LOCAL_TOOLS_LIST.tools.map((t) => t.name));
 
 const URL_READY_TIMEOUT_MS = 5_000;
 
@@ -268,6 +310,62 @@ const DEFAULT_CALL_TIMEOUT_MS = SLOWEST_SERVER_TOOL_MS + 60_000;
 
 /** An override below this is a mistake, not an intent. */
 const MIN_CALL_TIMEOUT_MS = 1_000;
+
+/** Longest a given tool can legitimately take server-side, keyed by tool name.
+ *
+ * `DEFAULT_CALL_TIMEOUT_MS` is sized for `memwal_analyze`, the slowest tool
+ * there is. Applying that one number to every call means a request whose reply
+ * is lost — the relayer answered, the stream dropped before it arrived — keeps
+ * the agent blocked for 240s even when the tool could not still be working.
+ * Users read that as a hang and reload the client.
+ *
+ * Each entry is the ceiling the matching tool enforces on itself in
+ * `services/server/scripts/mcp/tools/`: `MAX_REMEMBER_WAIT_MS` for
+ * `memwal_remember` (its default wait is 0 — it returns at accept — but an
+ * operator can raise `MEMWAL_MCP_REMEMBER_WAIT_MS` up to that cap),
+ * `MAX_STATUS_WAIT_MS` for `memwal_remember_status`, and the fixed `timeoutMs`
+ * the bulk and analyze tools pass to the SDK. Keep them in lockstep: a value
+ * below a tool's real ceiling abandons healthy work. Unlisted tools keep the
+ * default.
+ *
+ * `memwal_recall` is the exception to lockstep: the SDK aborts the recall
+ * request itself at 15s, but the checks it runs first (`/version`, `/config`)
+ * carry their own deadlines, or none on older SDKs. 90s covers those. */
+const TOOL_DEADLINE_MS: Readonly<Record<string, number>> = {
+    memwal_recall: 90_000,
+    memwal_remember: 90_000,
+    memwal_remember_status: 60_000,
+    memwal_remember_bulk: 120_000,
+    memwal_analyze: SLOWEST_SERVER_TOOL_MS,
+};
+
+/** Absorbs relayer + transport overhead on top of a tool's own ceiling. The
+ * sidecar answers at its deadline with a result or an error envelope rather
+ * than going quiet, so the reply is one network hop behind it; 30s is many
+ * times that. Cutting a merely-late reply off early is the expensive mistake —
+ * the agent would retry a write that actually landed. */
+const ORPHAN_HEADROOM_MS = 30_000;
+
+/** Tool name for a `tools/call`, or null for any other JSON-RPC method. */
+function toolNameOf(msg: RpcMessage): string | null {
+    if (msg.method !== "tools/call") return null;
+    const params = msg.params;
+    if (params == null || typeof params !== "object") return null;
+    const name = (params as { name?: unknown }).name;
+    return typeof name === "string" ? name : null;
+}
+
+/** Deadline for one tracked request. A tool with a known ceiling gets that
+ * plus headroom; everything else keeps the global default. An explicit
+ * `MEMWAL_MCP_CALL_TIMEOUT_MS` pins every call, so tests still drive expiry
+ * from one knob. */
+function resolveDeadlineMs(msg: RpcMessage): number {
+    const fallback = resolveCallTimeoutMs();
+    if (process.env.MEMWAL_MCP_CALL_TIMEOUT_MS) return fallback;
+    const tool = toolNameOf(msg);
+    const ceiling = tool === null ? undefined : TOOL_DEADLINE_MS[tool];
+    return ceiling === undefined ? fallback : ceiling + ORPHAN_HEADROOM_MS;
+}
 
 /** Without a cap, a long deadline drifts by a third of itself. */
 const MAX_ORPHAN_SWEEP_MS = 5_000;
@@ -406,6 +504,20 @@ interface InFlightEntry {
      * mid-session outage — the ordinary case — a request that never left the
      * process was indistinguishable from one already sent. */
     sent?: boolean;
+    /** How long this call may go unanswered before the sweeper declares its
+     * reply lost. Fixed when the request is first tracked, so a reconnect
+     * replay keeps the original budget. */
+    deadlineMs: number;
+    /** Set while the sweeper asks the relayer's `/health` why this sent call
+     * went unanswered, so the next sweep does not probe it again. */
+    probing?: boolean;
+    /** Set once the sweeper has decided this sent call's reply is lost and it
+     * is being answered as failed. A replay would post it a second time — a
+     * duplicate write for a tool with no idempotency key — while the agent is
+     * told the call never ran, so `reconnect()` skips these. Never cleared,
+     * unlike `probing`: the call is past its deadline whichever way the answer
+     * goes. */
+    orphaned?: boolean;
 }
 
 /** The relayer rejected the saved delegate key (HTTP 401 on the handshake).
@@ -423,6 +535,12 @@ class RelayerUnauthorizedError extends Error {
 interface SseHandshakeResult {
     /** Absolute URL the client must POST to for outbound JSON-RPC messages. */
     postUrl: string;
+    /**
+     * Forward one message, resolving with the HTTP status. Same shape as the
+     * Streamable transport's `send`, so the forwarding path does not have to
+     * know which transport is underneath.
+     */
+    send: (msg: RpcMessage, creds: MemWalCredentials, extra: Record<string, string>) => Promise<number>;
     /** Per-line iterator for incoming SSE messages (already-parsed JSON-RPC). */
     iter: AsyncIterator<RpcMessage>;
     /** Abort + close the SSE stream. */
@@ -438,6 +556,28 @@ function mcpAuthHeaders(
         "x-memwal-account-id": creds.accountId,
         ...extra,
     };
+}
+
+/**
+ * Open a relayer session on the configured transport.
+ *
+ * `MEMWAL_MCP_TRANSPORT=http` dials the Streamable HTTP endpoint, which
+ * answers a call on the same request instead of splitting POST from reply.
+ * Default stays SSE until the new path has production mileage.
+ */
+async function openRelaySession(
+    relayerUrl: string,
+    creds: MemWalCredentials,
+    extraHeaders: Record<string, string> = {},
+): Promise<SseHandshakeResult> {
+    if (resolveTransport(process.env.MEMWAL_MCP_TRANSPORT) === "http") {
+        // `postUrl` is logging-only on this path; the session owns its
+        // endpoint. A plain cast, not `as unknown as` — the two shapes must
+        // stay structurally compatible, and a widening cast would hide it if
+        // they ever stopped being.
+        return (await openStreamableSession(relayerUrl, creds, extraHeaders)) as SseHandshakeResult;
+    }
+    return openSseStream(relayerUrl, creds, extraHeaders);
 }
 
 async function openSseStream(
@@ -712,6 +852,7 @@ async function openSseStream(
 
     return {
         postUrl,
+        send: (msg, sendCreds, extra) => postMessage(postUrl, msg, sendCreds, extra),
         iter,
         abort: () => {
             controller.abort();
@@ -810,6 +951,11 @@ async function handleLocalLogin(
                 },
             });
         },
+        // This tool call has already returned "here is your URL, go sign in",
+        // so a later failure has no response left to ride home on. Without an
+        // out-of-band notification the agent sits waiting on a flow that is
+        // already dead. MCP logging notifications are fire-and-forget and safe
+        // to emit at any point in the session.
         (err) => {
             const msg = err instanceof Error ? err.message : String(err);
             log.warn("memwal_login.bridge.failed", { msg });
@@ -819,7 +965,15 @@ async function handleLocalLogin(
                 params: {
                     level: "warning",
                     logger: "memwal-mcp",
-                    data: `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are unchanged; call memwal_login again to retry.`,
+                    // The reclaim is only possible because of the write-ahead
+                    // record (WALM-332): a key the browser already paid to
+                    // register is no longer lost with the process. A retry
+                    // cannot help that key, since it reuses it and the
+                    // dashboard cannot register it twice.
+                    data:
+                        `Walrus Memory sign-in did not complete: ${msg}. Existing credentials are ` +
+                        `unchanged. If you approved the wallet step, the next start reclaims that ` +
+                        `key; otherwise call memwal_login again to retry.`,
                 },
             });
         },
@@ -861,6 +1015,15 @@ async function handleLocalLogin(
 function handleLocalLogout(): { text: string; isError: boolean } {
     try {
         const cleared = clearCreds();
+        // Explicit sign-out discards the write-ahead record too. Without this
+        // an interrupted re-login leaves `login-pending.json` behind, and the
+        // next start's `recoverPendingLogin` signs the user straight back in.
+        //
+        // Kept out of `clearCreds()` so only a deliberate sign-out discards a
+        // key that may still be reclaimable. `clearCreds` is exported, and a
+        // 401 deliberately does NOT wipe credentials (see the relayer-401
+        // handling above), so the two are not the same decision.
+        clearPendingLogin();
         log.info("memwal_logout.bridge.success", {
             removedPath: cleared.removedPath ?? null,
             fallbackPath: cleared.fallbackPath ?? null,
@@ -1092,7 +1255,7 @@ export async function runBridge(
     }
     function postIfCurrent(
         epoch: number,
-        postUrl: string,
+        send: SseHandshakeResult["send"],
         msg: RpcMessage,
         postCreds: MemWalCredentials,
     ): Promise<number> {
@@ -1105,7 +1268,7 @@ export async function runBridge(
             const tracked = inFlight.get(msg.id);
             if (tracked) tracked.sent = true;
         }
-        return postMessage(postUrl, msg, postCreds, extraHeaders).then((status) => {
+        return send(msg, postCreds, extraHeaders).then((status) => {
             // 404 is the relayer saying that session does not exist, so the
             // message was discarded rather than routed: it provably did not
             // run, and the request goes back to being never-sent.
@@ -1234,6 +1397,7 @@ export async function runBridge(
     const inFlight = new Map<string | number, InFlightEntry>();
     const callTimeoutMs = resolveCallTimeoutMs();
     const stalledHandshakeMs = resolveStalledHandshakeMs(callTimeoutMs);
+    const healthProbeMs = resolveHealthProbeMs();
 
     /** IDs of `tools/list` requests we've forwarded to the relayer. When
      * the response comes back through the SSE pump, we splice in the
@@ -1241,11 +1405,22 @@ export async function runBridge(
      * client surfaces them in its tool palette. */
     const pendingListIds = new Set<string | number>();
 
-    /** IDs of forwarded `memwal_health` calls, each against the relayer URL the
-     * call went out on. Captured at send time rather than read at reply time so
-     * a reconnect that swapped credentials mid-flight cannot label the answer
-     * with a relayer it did not come from. */
-    const pendingHealthIds = new Map<string | number, string>();
+    /** Tool names the CONNECTED relayer advertised on its last `tools/list`,
+     * minus the ones we serve locally. Empty until the client has listed tools
+     * at least once over the *current* session. `reconnect()` clears it: a
+     * stale allow would re-forward a tool the new relayer does not serve
+     * (GH #928), and a stale deny would refuse a tool it does. Until the
+     * next upstream list, the gate allows only the cold-start floor. */
+    const upstreamToolNames = new Set<string>();
+
+    /** IDs of forwarded `memwal_health` calls, each against the destination the
+     * call went out on — relayer URL and account. Captured at send time rather
+     * than read at reply time so a reconnect that swapped credentials mid-flight
+     * cannot label the answer with a destination it did not come from. */
+    const pendingHealthIds = new Map<
+        string | number,
+        { relayerUrl: string; accountId?: string }
+    >();
 
     /** Record a 429 and tell the user ONCE that this is a rate limit rather
      * than a broken config — the distinction the MCP host cannot make for
@@ -1334,7 +1509,7 @@ export async function runBridge(
                     // gone, so there is nothing to authorize a new session
                     // with. Belt-and-braces against `loggedOut` alone.
                     if (!openingCreds) break;
-                    const candidate = await openSseStream(
+                    const candidate = await openRelaySession(
                         openingCreds.relayerUrl,
                         openingCreds,
                         connectHeaders(),
@@ -1371,6 +1546,15 @@ export async function runBridge(
                     throttleNoticed = false;
                     clearHandshakeFailure();
                     endConnectEpisode();
+                    // This session has not advertised anything yet. Keep the
+                    // previous set and a login that swapped relayerUrl would
+                    // re-forward a tool the new one does not serve, or refuse
+                    // one it does, until the client happened to re-list.
+                    upstreamToolNames.clear();
+                    writeStdoutMessage({
+                        jsonrpc: "2.0",
+                        method: "notifications/tools/list_changed",
+                    });
                     // An accepted handshake retires any earlier rejection —
                     // `memwal_login` re-registers a key and lands here, not on
                     // the background connect's publish path, so clearing only
@@ -1409,6 +1593,15 @@ export async function runBridge(
                             log.info("bridge.replay_halted_signed_out", { id });
                             break;
                         }
+                        // The sweeper already declared this call's reply lost
+                        // and is answering it as failed. Posting it again would
+                        // run it a second time — a duplicate write for a tool
+                        // with no idempotency key — and the reply would be
+                        // dropped anyway, as a late answer for a closed-out id.
+                        if (entry.orphaned) {
+                            log.info("bridge.replay_skipped_orphaned", { id });
+                            continue;
+                        }
                         const msg = entry.msg;
                         try {
                             // A replayed `initialize` produces a fresh upstream
@@ -1425,9 +1618,9 @@ export async function runBridge(
                                 expectSuppressedReply(msg.id);
                             }
                             const epoch = sessionEpoch;
-                            const postUrl = sse.postUrl;
+                            const send = sse.send;
                             const status = await enqueuePost(() =>
-                                postIfCurrent(epoch, postUrl, msg, openingCreds),
+                                postIfCurrent(epoch, send, msg, openingCreds),
                             );
                             log.info("bridge.replayed", { id, status });
                         } catch (err) {
@@ -1750,6 +1943,16 @@ export async function runBridge(
                                 (t) => !LOCAL_TOOL_NAMES.has(t.name ?? ""),
                             );
                             result.tools = [...upstream, ...LOCAL_TOOL_DEFINITIONS];
+                            // Record what this relayer actually serves. A
+                            // later call for a name absent here is answered
+                            // locally instead of being forwarded into a wait
+                            // no reply will ever end.
+                            upstreamToolNames.clear();
+                            for (const t of upstream) {
+                                if (typeof t.name === "string" && t.name !== "") {
+                                    upstreamToolNames.add(t.name);
+                                }
+                            }
                         }
                     }
                     if (
@@ -1765,7 +1968,8 @@ export async function runBridge(
                         if (dialled !== undefined) {
                             annotateHealthResult(
                                 value.result as { content?: unknown; isError?: unknown },
-                                dialled,
+                                dialled.relayerUrl,
+                                dialled.accountId,
                             );
                         }
                     }
@@ -1928,6 +2132,48 @@ export async function runBridge(
                     return;
                 }
 
+                // Version skew: this bridge ships on npm and updates itself,
+                // while a relayer ships per environment and does not, so the
+                // bridge is routinely newer than the server it dials. A tool
+                // named in initialize instructions or a cached list can be
+                // missing from the session that actually came up —
+                // `memwal_remember_status` against a prod relayer, which is
+                // GH #928. Forwarding that call parks it in `inFlight` until
+                // the orphan sweeper's deadline (60s + 30s headroom for that
+                // tool), and the user reads the 90s as a hang.
+                //
+                // Fail closed. Before any upstream `tools/list`, only the
+                // cold-start floor is callable. After one, only what that
+                // relayer advertised (plus locally-served tools). A stale
+                // tool list is not a transport fault: say so now, while the
+                // agent can still act on it.
+                if (msg.method === "tools/call" && msg.id != null) {
+                    const called = (msg.params as { name?: string } | undefined)?.name;
+                    if (typeof called === "string" && !LOCAL_TOOL_NAMES.has(called)) {
+                        const known =
+                            upstreamToolNames.size > 0
+                                ? upstreamToolNames
+                                : COLD_START_TOOL_NAMES;
+                        if (!known.has(called)) {
+                            const available = [
+                                ...(upstreamToolNames.size > 0
+                                    ? [...upstreamToolNames, ...LOCAL_TOOL_NAMES]
+                                    : COLD_START_TOOL_NAMES),
+                            ].sort();
+                            log.warn("bridge.tool_not_served", {
+                                tool: called,
+                                window:
+                                    upstreamToolNames.size > 0 ? "upstream" : "cold-start",
+                            });
+                            failRequest(msg, "tool not served", {
+                                toolText: unknownToolText(called, available),
+                                errorMessage: `${called} is not served by this Walrus Memory relayer`,
+                            });
+                            return;
+                        }
+                    }
+                }
+
                 // Fill in the configured default namespace for memory tool
                 // calls that didn't pass one. Mutates msg in place so the
                 // forwarded — and any replayed-on-reconnect — copy carries it.
@@ -1946,7 +2192,10 @@ export async function runBridge(
                     msg.id != null &&
                     (msg.params as { name?: string } | undefined)?.name === "memwal_health"
                 ) {
-                    pendingHealthIds.set(msg.id, creds?.relayerUrl ?? config.relayerUrl);
+                    pendingHealthIds.set(msg.id, {
+                        relayerUrl: creds?.relayerUrl ?? config.relayerUrl,
+                        accountId: creds?.accountId,
+                    });
                 }
 
                 // Track requests (have both method and id) so we can replay
@@ -1957,7 +2206,11 @@ export async function runBridge(
                     msg.id !== undefined &&
                     msg.id !== null
                 ) {
-                    inFlight.set(msg.id, { msg, startedAt: Date.now() });
+                    inFlight.set(msg.id, {
+                        msg,
+                        startedAt: Date.now(),
+                        deadlineMs: resolveDeadlineMs(msg),
+                    });
                 }
                 // Relayer session not up yet, OR the post-connect flush is still
                 // draining — buffer so this request stays behind everything that
@@ -1997,10 +2250,10 @@ export async function runBridge(
                     return;
                 }
                 const epoch = sessionEpoch;
-                const postUrl = sse.postUrl;
+                const send = sse.send;
                 const postCreds = creds;
                 const status = await enqueuePost(() =>
-                    postIfCurrent(epoch, postUrl, msg, postCreds),
+                    postIfCurrent(epoch, send, msg, postCreds),
                 );
                 if (status === 404) {
                     log.warn("bridge.session_stale", { sessionUrl: sse.postUrl });
@@ -2038,10 +2291,10 @@ export async function runBridge(
                 const msg = pendingForward.shift()!;
                 try {
                     const epoch = sessionEpoch;
-                    const postUrl = sse.postUrl;
+                    const send = sse.send;
                     const postCreds = creds;
                     const status = await enqueuePost(() =>
-                        postIfCurrent(epoch, postUrl, msg, postCreds),
+                        postIfCurrent(epoch, send, msg, postCreds),
                     );
                     if (status === 404) {
                         // Stale session right after connect. EVERY id-bearing
@@ -2213,27 +2466,27 @@ export async function runBridge(
         "memwal_analyze",
     ]);
 
-    /** Name of the tool a tracked request was calling, when it was one. */
-    function toolNameOf(msg: RpcMessage): string | null {
-        if (msg.method !== "tools/call") return null;
-        const params = msg.params as { name?: unknown } | undefined;
-        return typeof params?.name === "string" ? params.name : null;
-    }
-
     function expiredRequestReport(
         neverSent: boolean,
         now: number,
         tool: string | null,
+        health?: { probe: HealthProbe; relayerUrl: string },
     ): {
         reason: string;
         opts: { toolText: string; errorMessage: string };
     } {
         if (!neverSent) {
+            // What the relayer's `/health` said just now: tells a dead
+            // relayer from a wrong URL from one stuck call.
+            const described = health ? describeHealthProbe(health.probe, health.relayerUrl) : null;
             // The request reached the relayer. What is missing is the reply,
             // and for a write that distinction is the whole message: the work
             // may have completed, may still be running, and cannot be assumed
             // undone. "Please retry" is only safe advice for a read.
             if (tool !== null && MUTATING_TOOLS.has(tool)) {
+                const healthNote = described
+                    ? `\nRelayer health: ${described.health}. ${described.verdict}`
+                    : "";
                 return {
                     reason: "no response to a sent write",
                     opts: {
@@ -2244,23 +2497,39 @@ export async function runBridge(
                             "it and does not mean nothing was stored. Do NOT simply repeat the " +
                             "call: run `memwal_recall` for this content first, and only re-save " +
                             "what is genuinely missing. Repeating a bulk save that already " +
-                            "landed stores a second paid copy.",
+                            "landed stores a second paid copy." +
+                            healthNote,
                         errorMessage:
                             `Walrus Memory ${tool} was sent but its reply never arrived. The write ` +
-                            "may have completed; verify with recall before retrying.",
+                            "may have completed; verify with recall before retrying." +
+                            healthNote,
                     },
                 };
             }
+            // Not "this call only reads": `memwal_restore` re-indexes. What
+            // makes a retry safe is that none of these can store a duplicate.
+            const nextStep =
+                described === null || described.reachable
+                    ? "Repeating this call cannot store a duplicate, so it is safe to retry " +
+                      "once. If it keeps happening, report it with the time of the call."
+                    : "Repeating this call cannot store a duplicate, so it is safe to retry " +
+                      "after the relayer is reachable again — wait a minute if the problem " +
+                      "is on the relayer's side.";
+            const healthValue = described?.health ?? "not checked";
             return {
                 reason: "no response",
                 opts: {
-                    toolText:
-                        "❌ Walrus Memory did not answer this call. The request reached the " +
-                        "relayer but the reply never came back. This call only reads, so it is " +
-                        "safe to retry.",
+                    toolText: [
+                        "❌ Walrus Memory did not answer this call.",
+                        "Cause: the request reached the relayer but no reply came back." +
+                            (described ? ` ${described.verdict}` : ""),
+                        `Relayer health: ${healthValue}`,
+                        `Next step: ${nextStep}`,
+                    ].join("\n"),
                     errorMessage:
-                        "Walrus Memory call was orphaned by a reconnect and never " +
-                        "received a response. Safe to retry: this call only reads.",
+                        "Walrus Memory call reached the relayer but never received a " +
+                        `response (relayer health: ${healthValue}). Safe to retry: it cannot ` +
+                        "store a duplicate.",
                 },
             };
         }
@@ -2310,6 +2579,8 @@ export async function runBridge(
     const orphanSweeper = setInterval(() => {
         const now = Date.now();
         const handshakeStalledMs = handshakeStalledForMs(now);
+        // One `/health` request per sweep, however many calls expired in it.
+        let sweepProbe: Promise<HealthProbe | null> | null = null;
         for (const [id, entry] of Array.from(inFlight.entries())) {
             const elapsedMs = now - entry.startedAt;
             // Never sent = no POST was ever issued for it. Read from the entry
@@ -2325,9 +2596,71 @@ export async function runBridge(
             // invites a duplicate write.
             const handshakeIsStalled =
                 handshakeStalledMs !== null && handshakeStalledMs > stalledHandshakeMs;
+            // `entry.deadlineMs` is this tool's own ceiling plus headroom, not
+            // the global one sized for the slowest tool — so a `memwal_remember`
+            // whose reply is lost is answered at 120s instead of 240s. The
+            // stalled-handshake shortcut still wins when it is tighter, but can
+            // never extend a tool past its own deadline.
             const deadlineMs =
-                neverSent && handshakeIsStalled ? stalledHandshakeMs : callTimeoutMs;
+                neverSent && handshakeIsStalled
+                    ? Math.min(stalledHandshakeMs, entry.deadlineMs)
+                    : entry.deadlineMs;
             if (elapsedMs <= deadlineMs) continue;
+            // `initialize` is answered locally and gets no reply here, so
+            // there is nothing to explain and nothing to probe for.
+            if (!neverSent && entry.msg.method !== "initialize") {
+                // A sent call: ask the relayer's `/health` before answering,
+                // so the message can say whether it is down, unreachable, or
+                // up with this one call stuck. Only the answer waits on the
+                // probe; the bookkeeping stays synchronous.
+                if (entry.probing) continue;
+                entry.probing = true;
+                // From here the call is the sweeper's to answer: a reconnect
+                // must not replay it behind the probe's back.
+                entry.orphaned = true;
+                const relayerUrl = creds?.relayerUrl ?? config.relayerUrl;
+                // `probeRelayerHealth` does not reject, but a call left with
+                // `probing` set and no answer is the one outcome this path
+                // must never have, so a rejection still answers it.
+                sweepProbe ??= probeRelayerHealth(relayerUrl, healthProbeMs).catch(() => null);
+                void sweepProbe
+                    .then((probe) => {
+                        // A late reply, a logout or a shutdown may have answered
+                        // it while the probe ran. Answering again would be a
+                        // second response for the same id — and after stdin has
+                        // closed there is nobody left to answer.
+                        if (stdinClosed || inFlight.get(id) !== entry) return;
+                        const settledAt = Date.now();
+                        const { reason, opts } = expiredRequestReport(
+                            false,
+                            settledAt,
+                            toolNameOf(entry.msg),
+                            probe ? { probe, relayerUrl } : undefined,
+                        );
+                        log.warn("bridge.call_orphaned", {
+                            id,
+                            method: entry.msg.method ?? null,
+                            elapsedMs: settledAt - entry.startedAt,
+                            deadlineMs,
+                            reason,
+                            health: probe?.kind ?? null,
+                            healthMs: probe?.ms ?? null,
+                            handshakeStalledMs: handshakeStalledForMs(settledAt),
+                            lastHandshakeError,
+                        });
+                        failRequest(entry.msg, reason, opts);
+                    })
+                    .catch((err: unknown) => {
+                        // Never leave a call marked `probing` with no answer:
+                        // clearing it lets the next sweep answer it.
+                        entry.probing = false;
+                        log.warn("bridge.call_orphaned_answer_failed", {
+                            id,
+                            error: err instanceof Error ? err.message : String(err),
+                        });
+                    });
+                continue;
+            }
             // Built only for what actually expired: this walks `pendingForward`
             // and interpolates two user-facing strings, and the branch it
             // serves fires roughly never.
@@ -2403,7 +2736,7 @@ export async function runBridge(
             }
             const openingGeneration = credentialGeneration;
             try {
-                const candidate = await openSseStream(creds.relayerUrl, creds, connectHeaders());
+                const candidate = await openRelaySession(creds.relayerUrl, creds, connectHeaders());
                 if (stdinClosed) {
                     candidate.abort();
                     break;
