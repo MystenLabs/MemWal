@@ -60,7 +60,13 @@ which does not require Node.js or the Claude Code CLI.
         claude plugin list
         ```
 
-        Alternatively, enter each slash command separately in an interactive Claude Code session that supports `/plugin`. Do not paste this block as a chat prompt. If the Desktop Code tab does not expose `/plugin`, use the terminal route above.
+        In Claude Desktop's Code tab, use the plugin UI instead: open the `+`
+        menu beside the prompt, choose **Plugins → Add plugin**, select MemWal
+        from a configured marketplace, then confirm it under **Manage plugins**.
+        Do not paste slash commands into chat as plain text.
+
+        Slash commands are an alternative only in an interactive Claude Code
+        session that exposes `/plugin`:
 
         ```
         /plugin marketplace add https://github.com/MystenLabs/MemWal.git

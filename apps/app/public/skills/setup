@@ -270,17 +270,24 @@ bundles the MCP server plus `SessionStart` / `UserPromptSubmit` / `PostToolUse`
 hooks. Those hooks make the agent prefer `memwal_*` over Claude Code's
 built-in `MEMORY.md`. MCP-only leaves auto-remember and auto-recall unreliable.
 
-This includes the Code tab inside Claude Desktop. Having the desktop app
-installed does not guarantee that the `claude` CLI is available in the shell.
-Before changing config, check `node --version`, `npm --version`, and
-`claude --version`. If a prerequisite is missing, explain the exact blocker
-and point to https://nodejs.org/ or https://code.claude.com/docs/en/setup.
-Do not create `enabledPlugins` entries as a substitute for a verified install.
-If the user only needs regular chat, offer the OAuth connector instead and
-explain that it does not add Code hooks.
+This includes the Code tab inside Claude Desktop. Claude's current Desktop
+plugin UI can install plugins without a terminal: open the `+` menu beside the
+prompt, choose **Plugins → Add plugin**, select MemWal from a configured
+marketplace, then use **Manage plugins** to confirm it is enabled. If the MemWal
+marketplace is not listed, add it with the terminal commands below. Do not paste
+`/plugin` commands into chat as plain text; that can make the agent edit settings
+without installing the plugin.
 
-Run the following as separate commands in a terminal, or execute them with a
-shell tool after explaining the changes. Stop on the first failed command.
+Having the desktop app installed does not guarantee that the `claude` CLI is
+available in a shell. For the terminal route, check `node --version`,
+`npm --version`, and `claude --version` first. If a prerequisite is missing,
+explain the exact blocker and point to https://nodejs.org/ or
+https://code.claude.com/docs/en/setup. Do not create `enabledPlugins` entries
+as a substitute for a verified install. If the user only needs regular chat,
+offer the OAuth connector instead; it does not add Code hooks.
+
+Run the following as separate commands in a terminal, stopping on the first
+failed command:
 
 ```bash
 claude plugin marketplace add https://github.com/MystenLabs/MemWal.git
@@ -293,10 +300,10 @@ claude mcp list
 enabled. `claude mcp list` should show a connected `memwal` server. If either
 command fails, stop and report the exact error.
 
-The slash commands below are only for a human inside an interactive Claude
-Code session that supports `/plugin`. Enter one command at a time; do not
-paste the whole block as a chat prompt. If the Code tab does not expose these
-commands, use the terminal route after checking its prerequisites:
+The slash commands are only for an interactive Claude Code session that
+actually exposes `/plugin`; they are not chat instructions. The Desktop UI path
+above is preferred when available. If `/plugin` is unavailable, use the
+terminal route instead:
 
 ```text
 /plugin marketplace add https://github.com/MystenLabs/MemWal.git
