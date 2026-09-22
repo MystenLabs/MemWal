@@ -1,6 +1,8 @@
 import { getSession } from "@/lib/auth/session";
 import { processSource } from "@/lib/rag";
+import { assertSourceFileWithinBudget } from "@/lib/rag/ingest/limits";
 import { ChatbotError } from "@/lib/errors";
+import { checkIpRateLimit, getClientIp } from "@/lib/ratelimit";
 
 export const maxDuration = 120; // source processing can take a while
 
@@ -14,19 +16,22 @@ export async function POST(request: Request) {
   const userId = session.user.id;
 
   try {
+    // Ingestion is the most expensive thing an authenticated user can ask for —
+    // PDF parsing, metadata generation, and one embedding call per batch — and
+    // this route had no limiter at all. The chat and auth routes already use
+    // this one; it was simply never wired here (WALM-683). `maxDuration` bounds
+    // a single request, not how many a caller may start.
+    await checkIpRateLimit(getClientIp(request));
+
     const contentType = request.headers.get("content-type") || "";
 
     if (contentType.includes("multipart/form-data")) {
       // PDF upload
       const formData = await request.formData();
-      const file = formData.get("file") as File | null;
-
-      if (!file || !file.name.toLowerCase().endsWith(".pdf")) {
-        return new ChatbotError(
-          "bad_request:api",
-          "Expected a PDF file"
-        ).toResponse();
-      }
+      // A cast is not a check: `formData.get("file") as File` accepted a plain
+      // text field, which then reached `.name` as undefined. Size is enforced
+      // here as well, before the body is buffered and parsed.
+      const file = assertSourceFileWithinBudget(formData.get("file"));
 
       const result = await processSource({
         source: { type: "pdf-file", file },

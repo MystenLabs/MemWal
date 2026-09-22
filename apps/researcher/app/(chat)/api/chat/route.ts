@@ -19,6 +19,7 @@ import {
 } from "@/lib/ai/source-processing";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { getResearchTools, processSource } from "@/lib/rag";
+import { MAX_SOURCES_PER_REQUEST } from "@/lib/rag/ingest/limits";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
@@ -224,6 +225,16 @@ export async function POST(request: Request) {
 
           if (sources.length > 0) {
             let processedCount = 0;
+
+            // One message can carry any number of file parts and URLs, and each
+            // one is a full ingestion. Cap how many a single request may start
+            // rather than letting message size decide the bill (WALM-683).
+            if (sources.length > MAX_SOURCES_PER_REQUEST) {
+              console.warn(
+                `[ingest] ${sources.length} sources in one message, processing the first ${MAX_SOURCES_PER_REQUEST}`
+              );
+              sources.length = MAX_SOURCES_PER_REQUEST;
+            }
 
             for (const source of sources) {
               const label =

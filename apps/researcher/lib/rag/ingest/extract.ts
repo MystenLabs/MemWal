@@ -3,6 +3,13 @@ import "server-only";
 import { ChatbotError } from "@/lib/errors";
 import { extractText } from "unpdf";
 
+import {
+  MAX_SOURCE_BYTES,
+  assertLooksLikePdf,
+  assertSourceFileWithinBudget,
+  readCappedText,
+} from "./limits";
+
 export const JINA_READER_URL = "https://r.jina.ai/";
 
 export async function extractFromUrl(url: string): Promise<string> {
@@ -17,7 +24,9 @@ export async function extractFromUrl(url: string): Promise<string> {
     );
   }
 
-  const text = await response.text();
+  // Jina is a third party streaming into our memory; its response is capped
+  // like any other source rather than buffered whole (WALM-683).
+  const text = await readCappedText(response, MAX_SOURCE_BYTES);
   if (!text || text.trim().length === 0) {
     throw new ChatbotError("bad_request:api", "Extracted content is empty");
   }
@@ -26,7 +35,13 @@ export async function extractFromUrl(url: string): Promise<string> {
 }
 
 export async function extractFromPdf(file: File): Promise<string> {
-  const buffer = new Uint8Array(await file.arrayBuffer());
+  // Size is checked before `arrayBuffer()`, so an oversized upload is refused
+  // rather than buffered and then refused. The magic-byte check after it is
+  // what makes this a PDF check at all — the caller only ever saw a filename.
+  const buffer = new Uint8Array(
+    await assertSourceFileWithinBudget(file).arrayBuffer()
+  );
+  assertLooksLikePdf(buffer);
   const result = await extractText(buffer, { mergePages: true });
 
   const text = String(result.text);
