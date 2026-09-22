@@ -22,10 +22,24 @@ tracing = "0.1"
 # Checkpoint-ingestion framework: reads static checkpoint files from a public bucket,
 # not the fullnode event API (testnet disabled ledger-history indexing). Same resolved
 # graph dopamint-arena uses (diesel-async 0.9 -> diesel 2.3). Pin the exact
-# testnet-v1.75.1 commit so a mutable branch update cannot change the build.
-sui-indexer-alt-framework = { git = "https://github.com/MystenLabs/sui.git", rev = "623521008f1c3afa3a1adbb6c3c44c39c46c5e17" }
-move-core-types = { git = "https://github.com/MystenLabs/sui.git", rev = "623521008f1c3afa3a1adbb6c3c44c39c46c5e17" }
+# testnet-v1.80.0 commit so a mutable branch update cannot change the build.
+#
+# The pin must not trail the network: these types decode whole checkpoints, so a
+# transaction field the pinned types don't know is a hard decode failure, not a
+# skipped field. testnet-v1.79.0 added `TransactionExpiration::Validity` as variant
+# index 3, and the previous testnet-v1.75.1 pin (variants 0..=2) failed every
+# checkpoint carrying one with `invalid value: integer 3, expected variant index
+# 0 <= i < 3`, stalling `accounts_v1` behind a growing watermark backlog (WALM-668).
+# tests/ guards that variant and decodes an affected checkpoint; run them after any bump.
+sui-indexer-alt-framework = { git = "https://github.com/MystenLabs/sui.git", rev = "ceaaff1cc84c1ba2f12c4e7928914ece81fbdd0f" }
+move-core-types = { git = "https://github.com/MystenLabs/sui.git", rev = "ceaaff1cc84c1ba2f12c4e7928914ece81fbdd0f" }
 diesel = { version = "2.3", features = ["postgres"] }
 diesel-async = { version = "0.9", features = ["bb8", "postgres"] }
 diesel_migrations = "2.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[dev-dependencies]
+# Serves tests/fixtures as a local checkpoint store, so the affected-checkpoint
+# regression runs the real `StoreIngestionClient` path offline. Same version the
+# framework already resolves.
+object_store = "0.13"
