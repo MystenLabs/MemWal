@@ -66,7 +66,7 @@ const SDK_INSTALLS = {
 } as const
 
 type SdkKind = keyof typeof SDK_INSTALLS
-const CONSOLE_HREF = 'https://console.wal.app'
+const CONSOLE_HREF = 'https://console.walrus.xyz/'
 
 function CursorMark() {
     return (

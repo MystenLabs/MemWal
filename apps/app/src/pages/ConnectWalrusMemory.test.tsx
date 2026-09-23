@@ -36,9 +36,9 @@ describe('ConnectWalrusMemory', () => {
             />,
         )
 
-        expect(screen.getByRole('link', { name: /view your memory in walrus console/i })).toHaveAttribute('href', 'https://console.wal.app')
+        expect(screen.getByRole('link', { name: /view your memory in walrus console/i })).toHaveAttribute('href', 'https://console.walrus.xyz/')
         expect(screen.getByRole('heading', { name: 'View your memories' })).toBeInTheDocument()
-        expect(screen.getByRole('link', { name: /open walrus console/i })).toHaveAttribute('href', 'https://console.wal.app')
+        expect(screen.getByRole('link', { name: /open walrus console/i })).toHaveAttribute('href', 'https://console.walrus.xyz/')
     })
 
     it('copies the Claude Code slash commands without a plain-text label', async () => {
