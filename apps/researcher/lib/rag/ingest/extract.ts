@@ -11,6 +11,7 @@ import {
   discardBody,
   readCappedText,
 } from "./limits";
+import { assertPdfDecompressionWithinBudget } from "./pdf-guard";
 
 export const JINA_READER_URL = "https://r.jina.ai/";
 
@@ -47,6 +48,12 @@ export async function extractFromPdf(file: File): Promise<string> {
     await assertSourceFileWithinBudget(file).arrayBuffer()
   );
   assertLooksLikePdf(buffer);
+
+  // Before pdf.js touches it: pdf.js inflates each stream in full with no
+  // ceiling, so a small file can expand to gigabytes before any cap below runs.
+  // This measures every compressed stream first and refuses the file if any of
+  // them would expand past the budget.
+  await assertPdfDecompressionWithinBudget(buffer);
 
   // Page by page, stopping at the character budget, rather than extractText's
   // mergePages, which decoded every page before any cap could apply.
