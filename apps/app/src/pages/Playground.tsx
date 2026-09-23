@@ -5,7 +5,7 @@
  * that executes the call against a live server using the real SDK.
  */
 
-import { useState, useCallback, useMemo, useEffect, useRef, type ReactNode } from 'react'
+import { useState, useCallback, useMemo, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { LayoutDashboard, LogOut, TriangleAlert } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -182,6 +182,10 @@ export default function Playground() {
 
     const address = currentAccount?.address || ''
     const [navSolid, setNavSolid] = useState(false)
+
+    useLayoutEffect(() => {
+        window.scrollTo(0, 0)
+    }, [])
 
     useEffect(() => {
         const onScroll = () => setNavSolid(window.scrollY > 220)

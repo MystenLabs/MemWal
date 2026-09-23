@@ -12519,11 +12519,11 @@ h1, h2, h3 {
   min-width: 148px;
   border-color: #54575a;
   background: transparent;
-  font-family: var(--font-mono);
+  font-family: "Google Sans Flex", sans-serif;
   font-size: 16px;
   font-weight: 400;
-  letter-spacing: 0.64px;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .dashboard-nav .lp-nav-cta:hover:not(:disabled) {
@@ -12871,10 +12871,11 @@ h1, h2, h3 {
   border: 1px solid #54575a;
   border-radius: 26px;
   background: transparent;
-  font-family: var(--font-mono);
+  font-family: "Google Sans Flex", sans-serif;
   font-size: 16px;
   font-weight: 400;
-  letter-spacing: 0.64px;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .dash-page .connect-wm-console:hover {
@@ -12919,8 +12920,8 @@ h1, h2, h3 {
   font-family: var(--font-mono);
   font-size: 15px;
   font-weight: 300;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
   text-decoration-thickness: 1px;
   text-underline-offset: 6px;
 }
@@ -13017,9 +13018,9 @@ h1, h2, h3 {
   font-family: var(--font-mono);
   font-size: 15px;
   font-weight: 300;
-  letter-spacing: 0.6px;
+  letter-spacing: 0;
   line-height: 1;
-  text-transform: uppercase;
+  text-transform: none;
   box-shadow: none;
 }
 
@@ -13048,11 +13049,11 @@ h1, h2, h3 {
   background: transparent;
   color: #faf8f5 !important;
   -webkit-text-fill-color: #faf8f5;
-  font-family: var(--font-mono);
+  font-family: "Google Sans Flex", sans-serif;
   font-size: 16px;
   font-weight: 400;
-  letter-spacing: 0.64px;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
   box-shadow: none;
 }
 
@@ -13077,11 +13078,11 @@ h1, h2, h3 {
   border-color: #54575a;
   background: transparent;
   color: #faf8f5;
-  font-family: var(--font-mono);
+  font-family: "Google Sans Flex", sans-serif;
   font-size: 16px;
   font-weight: 400;
-  letter-spacing: 0.64px;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .dash-page .dashboard-keys-add:hover:not(:disabled) {
@@ -13100,11 +13101,11 @@ h1, h2, h3 {
   padding: 0 12px 10px 0;
   border-bottom: 1px solid #262b30;
   color: #8f9294;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 300;
-  letter-spacing: 0.4px;
-  text-transform: uppercase;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .dash-page .dashboard-key-table td {
@@ -13400,11 +13401,11 @@ h1, h2, h3 {
   border-radius: 26px;
   background: transparent;
   color: #faf8f5;
-  font-family: "Google Sans Code", "JetBrains Mono", monospace;
+  font-family: "Google Sans Flex", sans-serif;
   font-size: 16px;
   font-weight: 400;
-  letter-spacing: 0.64px;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .dash-page .dashboard-cleanup-load:hover:not(:disabled) {
@@ -13473,11 +13474,11 @@ h1, h2, h3 {
   border-radius: 26px;
   background: transparent;
   color: #faf8f5;
-  font-family: "Google Sans Code", "JetBrains Mono", monospace;
+  font-family: "Google Sans Flex", sans-serif;
   font-size: 16px;
   font-weight: 400;
-  letter-spacing: 0.64px;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
   box-shadow: none;
 }
 
@@ -13689,10 +13690,10 @@ h1, h2, h3 {
   border-radius: 999px;
   background: transparent;
   color: #faf8f5;
-  font-family: "Google Sans Code", ui-monospace, monospace;
-  font-size: 13px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 15px;
+  letter-spacing: 0;
+  text-transform: none;
   cursor: pointer;
 }
 
@@ -13884,11 +13885,11 @@ h1, h2, h3 {
   border-radius: 26px;
   background: transparent;
   color: #faf8f5;
-  font-family: "Google Sans Code", var(--font-mono);
-  font-size: 14px;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 15px;
   font-weight: 400;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
   box-shadow: none;
   transform: none;
 }
