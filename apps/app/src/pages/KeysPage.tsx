@@ -14,7 +14,8 @@
  *      mismatch. `owner` is only ever used for this comparison — it never
  *      selects an account or authorizes anything.
  *   3. Render the existing Dashboard delegate-keys card (mint/rotate/revoke),
- *      auto-scrolled into view.
+ *      auto-scrolled into view — unless there's a mismatch, so the warning
+ *      banner stays in view instead of being scrolled past.
  *   4. "Back to Console" always links to config.consoleUrl — never to a
  *      `return`/`redirect` query param (the WALM-288 class of bug).
  */
@@ -140,7 +141,7 @@ export default function KeysPage() {
                 </div>
             )}
 
-            <Dashboard autoScrollToKeys />
+            <Dashboard autoScrollToKeys={!mismatch} />
         </>
     )
 }
