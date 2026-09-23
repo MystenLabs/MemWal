@@ -43,8 +43,7 @@ import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 
-// Walrus Memory wordmark (public asset, same one the dashboard nav uses).
-const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
+
 
 /**
  * Starter system prompt handed to the user on the success screen (WALM-199).
@@ -386,28 +385,28 @@ export default function ConnectMcp() {
     }, [walletPickerOpen, currentAccount])
 
     return (
-        <div className="setup-classic">
-            <nav className="nav setup-classic-nav">
+        <div className="dash-page mcp-connect">
+            <nav className="nav playground-nav dashboard-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img className="nav-brand-logo" src={WALRUS_MEMORY_LOGO} alt="Walrus Memory" />
+                        <img className="nav-brand-logo" src="/walrus-memory-logo.svg?v=3" alt="Walrus Memory" />
                     </Link>
                 </div>
             </nav>
 
-            <main className="container setup-classic-container">
-                <div className="setup-classic-panel">
+            <main className="dash-shell">
+                <div className="mcp-connect-panel">
                     {!paramsValid && (
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title">Invalid request</h2>
                             <p className="setup-classic-description">
                                 This page must be opened by the{' '}
-                                <code style={codeStyle}>@mysten-incubation/memwal-mcp</code> package during its login flow.
+                                <code className="mcp-code">@mysten-incubation/memwal-mcp</code> package during its login flow.
                             </p>
                             <div className="card setup-classic-feature-card">
-                                <div style={detailRowStyle}>
-                                    <span style={detailLabelStyle}>Got</span>
-                                    <span style={detailValueStyle}>
+                                <div className="mcp-detail">
+                                    <span className="mcp-detail-label">Got</span>
+                                    <span className="mcp-detail-value">
                                         port={port || '(none)'} · publicKey={publicKey ? publicKey.slice(0, 12) + '…' : '(none)'}
                                     </span>
                                 </div>
@@ -468,7 +467,7 @@ export default function ConnectMcp() {
                             <div className="setup-classic-actions">
                                 <Link
                                     to="/setup"
-                                    className="lp-btn-yellow"
+                                    className="mcp-btn"
                                     onClick={() => trackEvent('cta_click', { cta: 'mcp_create_account', location: 'connect_mcp' })}
                                 >
                                     Create account and continue
@@ -480,10 +479,10 @@ export default function ConnectMcp() {
                     {paramsValid && step === 'error' && (
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title">Something went wrong</h2>
-                            <p className="setup-classic-description" style={errorTextStyle}>{errorMsg}</p>
+                            <p className="setup-classic-description mcp-error">{errorMsg}</p>
                             <div className="setup-classic-actions">
                                 <button
-                                    className="lp-btn-yellow"
+                                    className="mcp-btn"
                                     onClick={() => {
                                         trackEvent('cta_click', { cta: 'mcp_retry', location: 'connect_mcp' })
                                         setErrorMsg('')
@@ -532,44 +531,44 @@ function ConsentCard({
                 A local MCP client is requesting access
             </h2>
             <p className="setup-classic-description">
-                This local app calls itself <code style={codeStyle}>{label}</code>. This name is not verified.
+                This local app calls itself <code className="mcp-code">{label}</code>. This name is not verified.
                 Approving grants persistent access until you revoke the delegate key on-chain.
             </p>
 
             <div className="card setup-classic-feature-card">
-                <p style={cardLabelStyle}>Permissions requested</p>
-                <ul style={permListStyle}>
-                    <li>✓ Read and decrypt all your memories (<code style={codeStyle}>memwal_recall</code>)</li>
-                    <li>✓ Write new memories (<code style={codeStyle}>memwal_remember</code>)</li>
-                    <li>✓ Extract facts from text (<code style={codeStyle}>memwal_analyze</code>)</li>
-                    <li>✓ Re-index from Walrus (<code style={codeStyle}>memwal_restore</code>)</li>
+                <p className="mcp-kicker">Permissions requested</p>
+                <ul className="mcp-perms">
+                    <li>✓ Read and decrypt all your memories (<code className="mcp-code">memwal_recall</code>)</li>
+                    <li>✓ Write new memories (<code className="mcp-code">memwal_remember</code>)</li>
+                    <li>✓ Extract facts from text (<code className="mcp-code">memwal_analyze</code>)</li>
+                    <li>✓ Re-index from Walrus (<code className="mcp-code">memwal_restore</code>)</li>
                 </ul>
 
-                <div style={dividerStyle} />
+                <div className="mcp-rule" />
 
-                <p style={cardLabelStyle}>Details</p>
-                <div style={detailRowStyle}>
-                    <span style={detailLabelStyle}>Relayer</span>
-                    <span style={detailValueStyle}>{relayer}</span>
+                <p className="mcp-kicker">Details</p>
+                <div className="mcp-detail">
+                    <span className="mcp-detail-label">Relayer</span>
+                    <span className="mcp-detail-value">{relayer}</span>
                 </div>
-                <div style={detailRowStyle}>
-                    <span style={detailLabelStyle}>Delegate public key</span>
-                    <span style={{ ...detailValueStyle, overflowWrap: 'anywhere' }}>{publicKey}</span>
+                <div className="mcp-detail">
+                    <span className="mcp-detail-label">Delegate public key</span>
+                    <span className="mcp-detail-value">{publicKey}</span>
                 </div>
-                <div style={detailRowStyle}>
-                    <span style={detailLabelStyle}>Delegate address</span>
-                    <span style={{ ...detailValueStyle, overflowWrap: 'anywhere' }}>{delegateAddress}</span>
+                <div className="mcp-detail">
+                    <span className="mcp-detail-label">Delegate address</span>
+                    <span className="mcp-detail-value">{delegateAddress}</span>
                 </div>
-                <div style={detailRowStyle}>
-                    <span style={detailLabelStyle}>Connected wallet</span>
-                    <span style={detailValueStyle}>
+                <div className="mcp-detail">
+                    <span className="mcp-detail-label">Connected wallet</span>
+                    <span className="mcp-detail-value">
                         {wallet ? `${wallet.slice(0, 12)}…${wallet.slice(-6)}` : '(not connected yet)'}
                     </span>
                 </div>
             </div>
 
             <div className="setup-classic-actions">
-                <button onClick={onConnect} className="lp-btn-yellow">
+                <button onClick={onConnect} className="mcp-btn">
                     {wallet ? 'Approve in wallet' : 'Connect Sui wallet'}
                 </button>
             </div>
@@ -592,11 +591,11 @@ function SuccessCard({
             <h2 className="setup-classic-title">
                 {delivered ? (
                     <>
-                        <span style={{ color: '#22c55e' }}>✓</span> MCP client connected
+                        <span className="mcp-ok">✓</span> MCP client connected
                     </>
                 ) : (
                     <>
-                        <span style={{ color: '#e8ff75' }}>!</span> Almost there — one step
+                        <span className="mcp-warn">!</span> Almost there — one step
                         left
                     </>
                 )}
@@ -644,14 +643,14 @@ function SuccessCard({
                 </>
             )}
             <div className="card setup-classic-feature-card">
-                <div style={detailRowStyle}>
-                    <span style={detailLabelStyle}>Account</span>
-                    <span style={detailValueStyle}>{payload.accountId}</span>
+                <div className="mcp-detail">
+                    <span className="mcp-detail-label">Account</span>
+                    <span className="mcp-detail-value">{payload.accountId}</span>
                 </div>
                 {!delivered && callbackOutcome !== null && (
-                    <div style={detailRowStyle}>
-                        <span style={detailLabelStyle}>Hand-off address</span>
-                        <span style={{ ...detailValueStyle, ...codeStyle }}>
+                    <div className="mcp-detail">
+                        <span className="mcp-detail-label">Hand-off address</span>
+                        <span className="mcp-detail-value mcp-code">
                             http://127.0.0.1:{port}/callback
                         </span>
                     </div>
@@ -662,7 +661,7 @@ function SuccessCard({
             <div className="setup-classic-actions">
                 <Link
                     to="/dashboard"
-                    className="lp-btn-yellow"
+                    className="mcp-btn"
                     onClick={() => trackEvent('cta_click', { cta: 'mcp_success_dashboard', location: 'connect_mcp' })}
                 >
                     Go to dashboard
@@ -695,15 +694,15 @@ function StarterPromptCard() {
 
     return (
         <div className="card setup-classic-feature-card">
-            <p style={cardLabelStyle}>Next: make your agent use it</p>
-            <p style={promptIntroStyle}>
+            <p className="mcp-kicker">Next: make your agent use it</p>
+            <p className="mcp-prompt-intro">
                 The tools are connected, but most agents only write when told to. Paste this
                 into your agent's system prompt or rules file so it saves and recalls on its
                 own.
             </p>
-            <pre style={promptBlockStyle}>{STARTER_SYSTEM_PROMPT}</pre>
-            <div style={promptActionsStyle}>
-                <button type="button" onClick={handleCopy} style={copyButtonStyle}>
+            <pre className="mcp-prompt">{STARTER_SYSTEM_PROMPT}</pre>
+            <div className="mcp-prompt-actions">
+                <button type="button" onClick={handleCopy} className="mcp-btn">
                     {copied ? 'Copied' : 'Copy prompt'}
                 </button>
                 {config.docsUrl && (
@@ -711,7 +710,7 @@ function StarterPromptCard() {
                         href={`${config.docsUrl}/guides/system-prompt-templates`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        style={promptLinkStyle}
+                        className="mcp-link"
                         onClick={() =>
                             trackEvent('outbound_link_click', {
                                 link: 'docs',
@@ -725,114 +724,4 @@ function StarterPromptCard() {
             </div>
         </div>
     )
-}
-
-// ---------- inline styles for bits the .setup-classic design system doesn't class ----------
-// The page reuses the SetupWizard dark theme (.setup-classic, .setup-classic-*,
-// .card.setup-classic-feature-card, .lp-btn-yellow) so the MCP consent screen is
-// visually identical to the Walrus Memory setup flow. These cover the small inner
-// labels / code / detail rows inside the dark feature card.
-
-const cardLabelStyle: React.CSSProperties = {
-    margin: '0 0 10px',
-    fontFamily: 'var(--font-mono)',
-    fontSize: '0.7rem',
-    fontWeight: 600,
-    textTransform: 'uppercase',
-    letterSpacing: '0.08em',
-    color: '#8f9294',
-}
-
-const permListStyle: React.CSSProperties = {
-    listStyle: 'none',
-    padding: 0,
-    margin: 0,
-    lineHeight: 2,
-    fontSize: '0.9rem',
-    color: '#faf8f5',
-}
-
-const codeStyle: React.CSSProperties = {
-    fontFamily: 'var(--font-mono)',
-    fontSize: '0.82em',
-    color: '#cbb6ff',
-}
-
-const dividerStyle: React.CSSProperties = {
-    height: 1,
-    background: '#2a2c2e',
-    margin: '18px 0',
-}
-
-const detailRowStyle: React.CSSProperties = {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 2,
-    marginBottom: 12,
-}
-
-const detailLabelStyle: React.CSSProperties = {
-    fontFamily: 'var(--font-mono)',
-    fontSize: '0.7rem',
-    textTransform: 'uppercase',
-    letterSpacing: '0.06em',
-    color: '#8f9294',
-}
-
-const detailValueStyle: React.CSSProperties = {
-    fontFamily: 'var(--font-mono)',
-    fontSize: '0.84rem',
-    color: '#faf8f5',
-    wordBreak: 'break-all',
-}
-
-const errorTextStyle: React.CSSProperties = {
-    color: '#ff6b6b',
-}
-
-const promptIntroStyle: React.CSSProperties = {
-    margin: '0 0 12px',
-    fontSize: '0.85rem',
-    lineHeight: 1.6,
-    color: '#c9cbcd',
-}
-
-const promptBlockStyle: React.CSSProperties = {
-    margin: 0,
-    padding: '12px 14px',
-    background: '#131415',
-    border: '1px solid #2a2c2e',
-    borderRadius: 8,
-    fontFamily: 'var(--font-mono)',
-    fontSize: '0.72rem',
-    lineHeight: 1.6,
-    color: '#faf8f5',
-    whiteSpace: 'pre-wrap',
-    overflowWrap: 'anywhere',
-    maxHeight: 220,
-    overflowY: 'auto',
-}
-
-const promptActionsStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 16,
-    marginTop: 12,
-    flexWrap: 'wrap',
-}
-
-const copyButtonStyle: React.CSSProperties = {
-    padding: '6px 14px',
-    background: 'transparent',
-    border: '1px solid #3a3c3e',
-    borderRadius: 6,
-    color: '#e8ff75',
-    fontFamily: 'var(--font-mono)',
-    fontSize: '0.75rem',
-    cursor: 'pointer',
-}
-
-const promptLinkStyle: React.CSSProperties = {
-    fontSize: '0.78rem',
-    color: '#8f9294',
 }

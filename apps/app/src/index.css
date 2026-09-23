@@ -13833,3 +13833,207 @@ h1, h2, h3 {
   text-decoration: none;
   text-transform: uppercase;
 }
+
+/* MCP and Claude consent screens. Same column and type as the dashboard,
+   without the setup wizard's rounded cards. */
+.mcp-connect .mcp-connect-panel {
+  width: 100%;
+}
+
+.mcp-connect .setup-classic-intro {
+  margin-bottom: 0;
+  text-align: left;
+}
+
+.mcp-connect .setup-classic-title {
+  margin: 0 0 12px;
+  color: #faf8f5;
+  font-family: Ratch, sans-serif;
+  font-size: 44px;
+  font-weight: 400;
+  line-height: 1.05;
+  letter-spacing: 0;
+}
+
+.mcp-connect .setup-classic-description {
+  max-width: none;
+  margin: 0 0 28px;
+  color: #8f9294;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+}
+
+.mcp-connect .setup-classic-description strong,
+.mcp-connect .mcp-client-name {
+  color: #faf8f5;
+  font-weight: 500;
+}
+
+.mcp-connect .mcp-unverified {
+  color: #8f9294;
+}
+
+.mcp-connect .setup-classic-feature-card {
+  margin-bottom: 28px !important;
+  padding: 22px 22px 8px !important;
+  border: 1px solid #262b30 !important;
+  border-radius: 6px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.mcp-connect .mcp-kicker {
+  margin: 0 0 10px;
+  color: #8f9294;
+  font-family: "Google Sans Code", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mcp-connect .mcp-perms {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+  color: #faf8f5;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.mcp-connect .mcp-perms li {
+  margin: 0 0 8px;
+}
+
+.mcp-connect .mcp-code,
+.mcp-connect code {
+  color: #faf8f5;
+  font-family: "Google Sans Code", ui-monospace, monospace;
+  font-size: 0.92em;
+}
+
+.mcp-connect .mcp-rule {
+  height: 1px;
+  margin: 16px 0 18px;
+  background: #262b30;
+}
+
+.mcp-connect .mcp-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.mcp-connect .mcp-detail-label {
+  color: #8f9294;
+  font-family: "Google Sans Code", ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.mcp-connect .mcp-detail-value {
+  color: #faf8f5;
+  font-family: "Google Sans Code", ui-monospace, monospace;
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.mcp-connect .mcp-error {
+  color: #ff9aa0;
+}
+
+.mcp-connect .mcp-ok {
+  color: #b6f5c3;
+}
+
+.mcp-connect .mcp-warn {
+  color: #f4ff8a;
+}
+
+.mcp-connect .setup-classic-actions {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+}
+
+.mcp-connect .mcp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 22px;
+  border: 1px solid #faf8f5;
+  border-radius: 999px;
+  background: transparent;
+  color: #faf8f5;
+  font-family: "Google Sans Code", ui-monospace, monospace;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-decoration: none;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.mcp-connect .mcp-btn:hover {
+  background: #faf8f5;
+  color: #000000;
+}
+
+.mcp-connect .mcp-btn--ghost {
+  border-color: #54575a;
+  color: #8f9294;
+}
+
+.mcp-connect .mcp-prompt-intro {
+  margin: 0 0 14px;
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.mcp-connect .mcp-prompt {
+  margin: 0;
+  max-height: 240px;
+  padding: 16px;
+  overflow: auto;
+  border: 1px solid #3c414a;
+  border-radius: 6px;
+  background: #1c1f26;
+  color: #ffffff;
+  font-family: "Google Sans Code", ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mcp-connect .mcp-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.mcp-connect .mcp-link {
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 15px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.mcp-connect .mcp-link:hover {
+  color: #faf8f5;
+}
