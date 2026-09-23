@@ -146,7 +146,11 @@ export function canonicalPath(target) {
  * The walk keeps going past a match rather than returning, so a worktree's `.git`
  * *file* and a submodule's are found the same way a directory is.
  */
-export function enclosingProjectRoot(cwd = process.cwd(), home = homedir()) {
+export function enclosingProjectRoot(
+    cwd = process.cwd(),
+    home = homedir(),
+    { exists = existsSync } = {},
+) {
     const start = canonicalPath(cwd);
     const stop = canonicalPath(home);
     const marked = (() => {
@@ -154,10 +158,16 @@ export function enclosingProjectRoot(cwd = process.cwd(), home = homedir()) {
         let outermostRepo = null;
         let outermostPackage = null;
         while (dir !== stop) {
-            if (existsSync(join(dir, ".git"))) outermostRepo = dir;
-            if (existsSync(join(dir, "package.json"))) outermostPackage = dir;
             const parent = dirname(dir);
+            // The filesystem root is never a candidate, the same way home is not.
+            // Walking to the *outermost* marker made a stray `/package.json` or
+            // `/.git` — common in container images built with WORKDIR / — win over
+            // the real checkout below it, and a project of `/` then disables the
+            // guard entirely (see the null return below). Nearest-marker never hit
+            // this; outermost has to exclude it explicitly.
             if (parent === dir) break;
+            if (exists(join(dir, ".git"))) outermostRepo = dir;
+            if (exists(join(dir, "package.json"))) outermostPackage = dir;
             dir = parent;
         }
         return outermostRepo ?? outermostPackage;

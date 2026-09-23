@@ -571,6 +571,29 @@ test("the boundary is the same when the project is reached through a symlink", (
     );
 });
 
+test("a marker at the filesystem root does not swallow the real checkout", () => {
+    // Container images often carry /package.json or /.git (WORKDIR /). Walking to
+    // the outermost marker picked "/" over the checkout under it, and a project of
+    // "/" turns the location guard off. The root is excluded like home is.
+    const present = new Set(["/package.json", "/.git", "/srv/app/.git", "/srv/app/package.json"]);
+    const exists = (path) => present.has(path);
+
+    assert.equal(
+        enclosingProjectRoot("/srv/app/packages/web", "/home/nobody", { exists }),
+        "/srv/app",
+    );
+});
+
+test("a marker only at the filesystem root means no project, not a project of /", () => {
+    const exists = (path) => path === "/package.json" || path === "/.git";
+
+    // cwd itself becomes the project: the guard still has something to compare.
+    assert.equal(
+        enclosingProjectRoot("/srv/app", "/home/nobody", { exists }),
+        "/srv/app",
+    );
+});
+
 test("a group-writable runtime root is refused", (t) => {
     if (!POSIX) return;
     const project = makeHostileProject(t);
