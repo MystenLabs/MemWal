@@ -389,7 +389,8 @@ export function fetchPinned(
   url: URL,
   address: string,
   init: RequestInit | undefined,
-  timeoutMs: number
+  timeoutMs: number,
+  connectTimeoutMs: number = CONNECT_TIMEOUT_MS
 ): Promise<Response> {
   const secure = url.protocol === "https:";
   const send = secure ? httpsRequest : httpRequest;
@@ -462,7 +463,7 @@ export function fetchPinned(
           `Timed out connecting to ${address}`
         )
       );
-    }, CONNECT_TIMEOUT_MS);
+    }, connectTimeoutMs);
 
     req.on("socket", (socket) => {
       const onConnect = () => {
@@ -472,13 +473,27 @@ export function fetchPinned(
       if (!socket.connecting) {
         onConnect();
       } else {
+        // Node >=19 creates http(s).globalAgent with `timeout: 5000`, armed on
+        // the socket while it is still connecting. Left alone it fires before
+        // the connect deadline above and ends the attempt as a whole-fetch
+        // failure, so the next validated address is never tried. Disarm it
+        // here; `req.setTimeout` below re-arms the idle timeout once connected.
+        socket.setTimeout(0);
         socket.once("connect", onConnect);
       }
     });
 
     req.setTimeout(timeoutMs, () => {
+      // Classified by whether a connection exists, not by which timer fired:
+      // before connect, this address did not work and the next one should get
+      // its turn.
       req.destroy(
-        new ChatbotError("bad_request:api", "Timed out fetching the URL")
+        connected
+          ? new ChatbotError("bad_request:api", "Timed out fetching the URL")
+          : new PinnedConnectError(
+              "bad_request:api",
+              `Timed out connecting to ${address}`
+            )
       );
     });
 

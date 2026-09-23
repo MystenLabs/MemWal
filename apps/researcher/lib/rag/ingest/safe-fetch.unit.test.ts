@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, globalAgent } from "node:http";
 import { resolve } from "node:path";
 import test from "node:test";
 import { ChatbotError } from "@/lib/errors";
@@ -507,4 +507,66 @@ test("fetchFirstReachable reports the last failure when every address is unreach
       ),
     /unreachable 203\.0\.113\.11/
   );
+});
+
+// ── round 2 on #984: a connect that hangs, not one that is refused ────────
+
+// TEST-NET-1 (RFC 5737): never routed, so a connect to it hangs until something
+// gives up — the blackholed-AAAA case, as opposed to an immediate refusal.
+const BLACKHOLE = "192.0.2.1";
+
+async function liveServer(t: { after: (fn: () => unknown) => void }) {
+  const server = createServer((_request, response) => response.end("reached"));
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  t.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return address.port;
+}
+
+test("a blackholed first address gives way to the next one at the connect deadline", async (t) => {
+  const port = await liveServer(t);
+  const transport: PinnedTransport = (url, address, init, timeoutMs) =>
+    fetchPinned(url, address, init, timeoutMs, 300);
+
+  const started = Date.now();
+  const response = await fetchFirstReachable(
+    new URL(`http://example.com:${port}/x`),
+    [BLACKHOLE, "127.0.0.1"],
+    undefined,
+    transport
+  );
+
+  assert.equal(await response.text(), "reached");
+  assert.ok(Date.now() - started < 3000, `took ${Date.now() - started}ms`);
+});
+
+test("the global agent's socket timer cannot end a connect early as a whole-fetch failure", async (t) => {
+  // Node >=19 creates http(s).globalAgent with timeout: 5000, armed while the
+  // socket is still connecting. It used to fire first, surface as the request
+  // 'timeout', and reject with a plain ChatbotError — so the address fallback
+  // never ran and the 10s connect deadline never fired. The agent timeout is
+  // shrunk here to show the ordering without waiting five seconds.
+  // `options` is real at runtime but missing from @types/node's Agent.
+  const agentOptions = (globalAgent as unknown as { options: { timeout?: number } })
+    .options;
+  const previous = agentOptions.timeout;
+  agentOptions.timeout = 100;
+  t.after(() => {
+    agentOptions.timeout = previous;
+  });
+
+  const started = Date.now();
+  await assert.rejects(
+    () => fetchPinned(new URL("http://example.com/x"), BLACKHOLE, undefined, 30_000, 600),
+    (error) => {
+      assert.ok(
+        error instanceof PinnedConnectError,
+        `expected PinnedConnectError, got ${(error as Error)?.constructor?.name}: ${String((error as ChatbotError).cause)}`
+      );
+      return true;
+    }
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 500, `rejected at ${elapsed}ms — the agent's 100ms timer ended it, not the connect deadline`);
 });
