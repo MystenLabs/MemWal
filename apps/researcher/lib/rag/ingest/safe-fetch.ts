@@ -306,7 +306,25 @@ function headersFromNode(
 }
 
 /** Statuses the Response constructor refuses to give a body. */
-const NULL_BODY_STATUS = new Set([101, 103, 204, 205, 304]);
+const NULL_BODY_STATUS = new Set([204, 205, 304]);
+
+/**
+ * RFC 9110 reason-phrase: HTAB, SP, VCHAR, obs-text. `Response` throws a
+ * TypeError on anything else, and the phrase is only cosmetic, so a remote that
+ * sends control characters gets an empty one rather than a crash.
+ */
+function safeStatusText(raw: string | undefined): string {
+  return raw && /^[\t\x20-\x7e\x80-\xff]*$/.test(raw) ? raw : "";
+}
+
+/**
+ * A failure before the TCP connection was established. Only these move on to
+ * the next validated address: after connecting, the address worked and the
+ * problem is the server's, not the route's.
+ */
+export class PinnedConnectError extends ChatbotError {}
+
+const CONNECT_TIMEOUT_MS = 10_000;
 
 /**
  * Perform one request against a *specific* address, while keeping the request
@@ -377,24 +395,86 @@ export function fetchPinned(
   const send = secure ? httpsRequest : httpRequest;
 
   return new Promise<Response>((resolve, reject) => {
-    const req = send(
-      pinnedRequestOptions(url, address, init),
-      (res) => {
-        const status = res.statusCode ?? 502;
+    let connected = false;
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (!settled) {
+        settled = true;
+        fn();
+      }
+    };
+
+    const req = send(pinnedRequestOptions(url, address, init), (res) => {
+      // Everything here runs in an http callback, outside the promise. A throw
+      // would be an uncaughtException — the process exits by default — and the
+      // promise would never settle, because the status line is already parsed
+      // and the socket timeout no longer applies. So nothing in here may throw.
+      const status = res.statusCode ?? 0;
+
+      if (status < 200 || status > 599) {
+        res.destroy();
+        settle(() =>
+          reject(
+            new ChatbotError(
+              "bad_request:api",
+              `The URL answered with an unusable status: ${status}`
+            )
+          )
+        );
+        return;
+      }
+
+      try {
         const body =
           NULL_BODY_STATUS.has(status) || init?.method === "HEAD"
             ? null
             : (Readable.toWeb(res) as ReadableStream<Uint8Array>);
 
-        resolve(
-          new Response(body, {
-            status,
-            statusText: res.statusMessage ?? "",
-            headers: headersFromNode(res.headers),
-          })
+        const response = new Response(body, {
+          status,
+          statusText: safeStatusText(res.statusMessage),
+          headers: headersFromNode(res.headers),
+        });
+        settle(() => resolve(response));
+      } catch (error) {
+        res.destroy();
+        settle(() =>
+          reject(
+            new ChatbotError(
+              "bad_request:api",
+              `The URL sent a response that could not be read: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            )
+          )
         );
       }
-    );
+    });
+
+    // `setTimeout` on the request is an idle timeout, which starts only once a
+    // socket exists and says nothing about how long connecting may take. A
+    // separate connect deadline is what lets an unreachable address give way to
+    // the next one instead of hanging for the kernel's SYN retries.
+    const connectTimer = setTimeout(() => {
+      req.destroy(
+        new PinnedConnectError(
+          "bad_request:api",
+          `Timed out connecting to ${address}`
+        )
+      );
+    }, CONNECT_TIMEOUT_MS);
+
+    req.on("socket", (socket) => {
+      const onConnect = () => {
+        connected = true;
+        clearTimeout(connectTimer);
+      };
+      if (!socket.connecting) {
+        onConnect();
+      } else {
+        socket.once("connect", onConnect);
+      }
+    });
 
     req.setTimeout(timeoutMs, () => {
       req.destroy(
@@ -403,21 +483,31 @@ export function fetchPinned(
     });
 
     req.on("error", (error) => {
-      reject(
-        error instanceof ChatbotError
-          ? error
-          : new ChatbotError(
-              "bad_request:api",
-              `Could not fetch the URL: ${error.message}`
-            )
-      );
+      clearTimeout(connectTimer);
+      settle(() => {
+        if (error instanceof ChatbotError) {
+          reject(error);
+          return;
+        }
+        const Wrapped = connected ? ChatbotError : PinnedConnectError;
+        reject(
+          new Wrapped(
+            "bad_request:api",
+            `Could not fetch the URL: ${error.message}`
+          )
+        );
+      });
     });
+
+    req.on("close", () => clearTimeout(connectTimer));
 
     const signal = init?.signal;
     if (signal) {
       if (signal.aborted) {
         req.destroy();
-        reject(new ChatbotError("bad_request:api", "Request aborted"));
+        settle(() =>
+          reject(new ChatbotError("bad_request:api", "Request aborted"))
+        );
         return;
       }
       signal.addEventListener("abort", () => req.destroy(), { once: true });
@@ -425,6 +515,38 @@ export function fetchPinned(
 
     req.end();
   });
+}
+
+/**
+ * Try each validated address in turn until one accepts a connection.
+ *
+ * Dialling only the first answer dropped what `fetch` got for free from
+ * `autoSelectFamily`: resolvers often put AAAA first, and a container with no
+ * IPv6 egress then failed every dual-stack URL even though a public A record
+ * was already validated. The fallback stays inside the validated list — no
+ * second lookup, and the hostname never goes back into `host` — so it restores
+ * availability without reopening the rebinding window.
+ */
+export async function fetchFirstReachable(
+  url: URL,
+  addresses: string[],
+  init: RequestInit | undefined,
+  transport: PinnedTransport
+): Promise<Response> {
+  let lastError: unknown;
+
+  for (const address of addresses) {
+    try {
+      return await transport(url, address, init, REQUEST_TIMEOUT_MS);
+    } catch (error) {
+      if (!(error instanceof PinnedConnectError)) {
+        throw error;
+      }
+      lastError = error;
+    }
+  }
+
+  throw lastError;
 }
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -459,12 +581,7 @@ export async function fetchPublicUrl(
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const { url, addresses } = await assertPublicDestination(target);
-    const response = await transport(
-      url,
-      addresses[0],
-      init,
-      REQUEST_TIMEOUT_MS
-    );
+    const response = await fetchFirstReachable(url, addresses, init, transport);
     const location = response.headers.get("location");
 
     if (response.status < 300 || response.status >= 400 || !location) {

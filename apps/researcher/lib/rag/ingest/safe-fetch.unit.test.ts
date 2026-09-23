@@ -7,12 +7,15 @@ import { ChatbotError } from "@/lib/errors";
 import {
   assertPublicDestination,
   assertPublicUrl,
+  fetchFirstReachable,
   fetchPinned,
   fetchPublicUrl,
   isBlockedAddress,
+  PinnedConnectError,
   type PinnedTransport,
   pinnedRequestOptions,
 } from "./safe-fetch";
+import { createServer as createTcpServer } from "node:net";
 
 // Regression tests for issue #778: a PDF file part named a URL that the server
 // downloaded with a bare fetch, so a chat request could make the server call
@@ -362,4 +365,146 @@ test("assertPublicDestination carries the validated addresses out", async () => 
 
   assert.deepEqual(addresses, ["203.0.113.10"]);
   assert.equal(url.hostname, "203.0.113.10");
+});
+
+// ── review follow-ups on #984 ─────────────────────────────────────────────
+
+/**
+ * A raw TCP listener that writes `reply` verbatim, so a test can send status
+ * lines no well-behaved HTTP server would produce.
+ */
+async function rawServer(reply: string) {
+  const server = createTcpServer((socket) => {
+    socket.once("data", () => {
+      socket.end(reply);
+    });
+  });
+  await new Promise<void>((done) => {
+    server.listen(0, "127.0.0.1", done);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    port: address.port,
+    close: () =>
+      new Promise<void>((done) => {
+        server.close(() => done());
+      }),
+  };
+}
+
+for (const [label, reply] of [
+  ["status 600", "HTTP/1.1 600 Nope\r\nContent-Length: 0\r\n\r\n"],
+  ["status 101 without an upgrade", "HTTP/1.1 101 Switching\r\nContent-Length: 0\r\n\r\n"],
+  ["a control character in the reason phrase", "HTTP/1.1 200 O\x01K\r\nContent-Length: 2\r\n\r\nok"],
+] as const) {
+  test(`a response with ${label} settles the promise instead of crashing`, async (t) => {
+    // Response() throws on these. Thrown inside the http callback, that was an
+    // uncaughtException — the process exits by default — and the promise never
+    // settled. Either outcome is fine here as long as it is an outcome.
+    const { port, close } = await rawServer(reply);
+    t.after(close);
+
+    const crashes: unknown[] = [];
+    const onCrash = (error: unknown) => crashes.push(error);
+    process.on("uncaughtException", onCrash);
+    t.after(() => process.off("uncaughtException", onCrash));
+
+    const outcome = await Promise.race([
+      fetchPinned(
+        new URL(`http://example.com:${port}/x`),
+        "127.0.0.1",
+        undefined,
+        5000
+      ).then(
+        (response) => ({ settled: "resolved", status: response.status }),
+        (error) => ({ settled: "rejected", error })
+      ),
+      new Promise((done) => setTimeout(() => done({ settled: "hung" }), 3000)),
+    ]);
+
+    assert.deepEqual(crashes, [], "nothing may escape as an uncaughtException");
+    assert.notEqual(
+      (outcome as { settled: string }).settled,
+      "hung",
+      "the promise must settle"
+    );
+    if ((outcome as { settled: string }).settled === "rejected") {
+      assert.ok((outcome as { error: unknown }).error instanceof ChatbotError);
+    }
+  });
+}
+
+test("a refused connection is a PinnedConnectError, so the next address gets a turn", async () => {
+  // Bind and release a port so nothing is listening on it.
+  const { port, close } = await rawServer("");
+  await close();
+
+  await assert.rejects(
+    () =>
+      fetchPinned(new URL(`http://example.com:${port}/`), "127.0.0.1", undefined, 5000),
+    (error) => error instanceof PinnedConnectError
+  );
+});
+
+test("fetchFirstReachable falls through unreachable addresses in order", async () => {
+  // The resolver often lists AAAA first; with no IPv6 egress the first address
+  // fails to connect and the validated A record behind it should be used.
+  const tried: string[] = [];
+  const transport: PinnedTransport = async (_url, address) => {
+    tried.push(address);
+    if (address === "2001:db8::1") {
+      throw new PinnedConnectError("bad_request:api", "ENETUNREACH");
+    }
+    return new Response("ok");
+  };
+
+  const response = await fetchFirstReachable(
+    new URL("https://files.example.com/x.pdf"),
+    ["2001:db8::1", "203.0.113.10"],
+    undefined,
+    transport
+  );
+
+  assert.equal(await response.text(), "ok");
+  assert.deepEqual(tried, ["2001:db8::1", "203.0.113.10"]);
+});
+
+test("fetchFirstReachable does not retry once an address has connected", async () => {
+  // After a connection the address worked; a TLS or HTTP failure is the
+  // server's answer and trying a sibling address would just ask twice.
+  const tried: string[] = [];
+  const transport: PinnedTransport = async (_url, address) => {
+    tried.push(address);
+    throw new ChatbotError("bad_request:api", "certificate has expired");
+  };
+
+  await assert.rejects(
+    () =>
+      fetchFirstReachable(
+        new URL("https://files.example.com/x.pdf"),
+        ["203.0.113.10", "203.0.113.11"],
+        undefined,
+        transport
+      ),
+    /./
+  );
+  assert.deepEqual(tried, ["203.0.113.10"]);
+});
+
+test("fetchFirstReachable reports the last failure when every address is unreachable", async () => {
+  const transport: PinnedTransport = async (_url, address) => {
+    throw new PinnedConnectError("bad_request:api", `unreachable ${address}`);
+  };
+
+  await assertRejectedWith(
+    () =>
+      fetchFirstReachable(
+        new URL("https://files.example.com/x.pdf"),
+        ["203.0.113.10", "203.0.113.11"],
+        undefined,
+        transport
+      ),
+    /unreachable 203\.0\.113\.11/
+  );
 });
