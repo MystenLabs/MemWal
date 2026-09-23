@@ -271,17 +271,16 @@ export default function ConnectWalrusMemory({
                                 <div>
                                     <h3>Confirm it works</h3>
                                     <p>Ask {client.askName} to remember something, then start a new session and recall it.</p>
+                                    {consoleAvailable && (
+                                        <a className="connect-wm-console" href={CONSOLE_HREF} target="_blank" rel="noopener noreferrer">
+                                            View your memory in Walrus Console
+                                            <span aria-hidden="true">→</span>
+                                        </a>
+                                    )}
                                 </div>
                             </li>
                         </ol>
                     </div>
-
-                    {consoleAvailable && (
-                        <a className="connect-wm-console" href={CONSOLE_HREF} target="_blank" rel="noopener noreferrer">
-                            View your memory in Walrus Console
-                            <span aria-hidden="true">→</span>
-                        </a>
-                    )}
                 </div>
             ) : (
                 <div className="connect-wm-guide" ref={guideRef}>

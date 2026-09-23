@@ -7328,7 +7328,7 @@ h1, h2, h3 {
 }
 
 .connect-wm-or {
-  margin-top: 14px !important;
+  margin-top: 22px !important;
 }
 
 .connect-wm-code {
@@ -12746,7 +12746,7 @@ h1, h2, h3 {
   grid-template-columns: 71px minmax(0, 1fr);
   align-items: center;
   gap: 35px;
-  margin-bottom: 18px;
+  margin-bottom: 40px;
 }
 
 .dash-page .connect-wm-client::after {
@@ -12754,7 +12754,7 @@ h1, h2, h3 {
   position: absolute;
   left: 35px;
   top: 71px;
-  bottom: -18px;
+  bottom: -40px;
   width: 1px;
   background: #262b30;
 }
@@ -12783,6 +12783,10 @@ h1, h2, h3 {
   line-height: 1;
 }
 
+.dash-page .connect-wm-timeline {
+  gap: 56px;
+}
+
 .dash-page .connect-wm-timeline li {
   align-items: start;
   grid-template-columns: 71px minmax(0, 1fr);
@@ -12796,6 +12800,7 @@ h1, h2, h3 {
 .dash-page .connect-wm-timeline li:not(:last-child)::before {
   left: 35px;
   top: 33px;
+  bottom: -56px;
   background: #262b30;
 }
 
@@ -13531,7 +13536,12 @@ h1, h2, h3 {
 }
 
 .dash-page .connect-wm-timeline .connect-wm-console {
-  margin: 14px 0 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  margin: 28px 0 0;
+  line-height: 1;
 }
 
 .dash-page .connect-wm-sdk-tabs {
