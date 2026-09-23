@@ -246,7 +246,24 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
             async () => 1n,
             false,
             async () => {
-                throw new Error('Enoki API error (400): {"errors":[{"code":"not_found"}]}');
+                throw new Error('Enoki API error (404): {"errors":[{"code":"not_found","message":"Sponsored transaction not found"}]}');
+            },
+            1,
+        ),
+        (error: unknown) => error instanceof NoSideEffectError
+            && /not found and is not on chain; rebuild sponsorship/.test(error.message)
+            && classifyDurableSideEffectError(error, true, true)?.code === "NO_SIDE_EFFECT",
+    );
+
+    await assert.rejects(
+        executePreparedRegisterTransaction(
+            validated,
+            client,
+            () => {},
+            async () => 1n,
+            true,
+            async () => {
+                throw new Error('Enoki API error (404): {"errors":[{"code":"not_found","message":"Sponsored transaction not found"}]}');
             },
             1,
         ),
