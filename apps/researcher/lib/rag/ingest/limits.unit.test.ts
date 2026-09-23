@@ -151,3 +151,207 @@ test("capExtractedText truncates past the character budget", () => {
   const long = "a".repeat(MAX_EXTRACTED_CHARS + 500);
   assert.equal(capExtractedText(long).length, MAX_EXTRACTED_CHARS);
 });
+
+// ── review follow-ups on #985 ─────────────────────────────────────────────
+
+import { getDocumentProxy } from "unpdf";
+import { unstable_doesMiddlewareMatch } from "next/dist/experimental/testing/server/middleware-testing-utils";
+
+import {
+  collectPageText,
+  discardBody,
+  MAX_PDF_PAGES,
+  type PdfTextSource,
+  readCappedRequestBody,
+  selectSourcesWithinBudget,
+} from "./limits";
+import { config as proxyConfig } from "../../../proxy";
+
+function streamingRequest(
+  chunks: Uint8Array[],
+  headers: Record<string, string> = {}
+): { request: Request; cancelled: () => boolean; pulled: () => number } {
+  let cancelled = false;
+  let index = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index >= chunks.length) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(chunks[index++]);
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const request = new Request("http://localhost/api/research/process-source", {
+    method: "POST",
+    body,
+    headers,
+    duplex: "half",
+  } as RequestInit);
+  return { request, cancelled: () => cancelled, pulled: () => index };
+}
+
+test("an oversized upload is refused and its stream cancelled, not read to the end", async () => {
+  // The route used to call request.formData() — which buffers everything — and
+  // only then look at File.size. Here the raw stream is capped: reading stops
+  // at the budget and the rest of the body is never pulled.
+  const { request, cancelled, pulled } = streamingRequest(
+    Array.from({ length: 50 }, () => new Uint8Array(1024))
+  );
+
+  await assert.rejects(
+    () => readCappedRequestBody(request, 4 * 1024),
+    causeMatches(/larger than/)
+  );
+  assert.equal(cancelled(), true, "the upload must be cancelled");
+  assert.ok(pulled() < 50, `read ${pulled()} of 50 chunks; must stop early`);
+});
+
+test("a declared Content-Length over budget is refused before reading anything", async () => {
+  const { request, pulled } = streamingRequest([new Uint8Array(8)], {
+    "content-length": String(10 * 1024 * 1024),
+  });
+
+  await assert.rejects(
+    () => readCappedRequestBody(request, 1024),
+    causeMatches(/larger than/)
+  );
+  assert.equal(pulled(), 0);
+});
+
+test("discardBody releases a response that will not be read", async () => {
+  // Throwing on !response.ok used to leave the body streaming, so a 500 with an
+  // endless body held the socket without ever reaching the byte cap.
+  const { response, cancelled } = streamingResponse([new Uint8Array(8)]);
+  await discardBody(response);
+  assert.equal(cancelled(), true);
+});
+
+function fakeDoc(pages: string[]): PdfTextSource & { opened: () => number } {
+  let opened = 0;
+  return {
+    numPages: pages.length,
+    opened: () => opened,
+    async getPage(pageNumber: number) {
+      opened += 1;
+      return {
+        async getTextContent() {
+          return { items: [{ str: pages[pageNumber - 1] }] };
+        },
+      };
+    },
+  };
+}
+
+test("collectPageText stops opening pages once the character budget is spent", async () => {
+  // mergePages decoded every page before any cap could look at the text, so the
+  // cap bounded what was kept, not what was decoded.
+  const doc = fakeDoc(Array.from({ length: 100 }, () => "x".repeat(100)));
+
+  const text = await collectPageText(doc, 350);
+
+  assert.equal(text.length, 350);
+  assert.ok(doc.opened() <= 4, `opened ${doc.opened()} pages for a 350-char budget`);
+});
+
+test("collectPageText refuses an absurd page count before opening any page", async () => {
+  const doc = fakeDoc(Array.from({ length: MAX_PDF_PAGES + 1 }, () => "x"));
+
+  await assert.rejects(() => collectPageText(doc), causeMatches(/page limit/));
+  assert.equal(doc.opened(), 0);
+});
+
+/** A minimal text PDF with one line per page, built by hand so offsets are exact. */
+function buildPdf(pageTexts: string[]): Uint8Array {
+  const objects: string[] = [];
+  const pageIds: number[] = [];
+  const fontId = 3;
+  objects[1] = "<</Type/Catalog/Pages 2 0 R>>";
+  objects[fontId] = "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
+  let next = 4;
+  for (const text of pageTexts) {
+    const content = `BT /F1 12 Tf 10 100 Td (${text}) Tj ET`;
+    const contentId = next++;
+    const pageId = next++;
+    objects[contentId] = `<</Length ${content.length}>>stream\n${content}\nendstream`;
+    objects[pageId] = `<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents ${contentId} 0 R/Resources<</Font<</F1 ${fontId} 0 R>>>>>>`;
+    pageIds.push(pageId);
+  }
+  objects[2] = `<</Type/Pages/Kids[${pageIds.map((id) => `${id} 0 R`).join(" ")}]/Count ${pageIds.length}>>`;
+
+  let out = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (let id = 1; id < objects.length; id++) {
+    offsets[id] = out.length;
+    out += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+  }
+  const xref = out.length;
+  out += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+  for (let id = 1; id < objects.length; id++) {
+    out += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+  }
+  out += `trailer\n<</Size ${objects.length}/Root 1 0 R>>\nstartxref\n${xref}\n%%EOF`;
+  return new TextEncoder().encode(out);
+}
+
+test("a real PDF goes through pdf.js page by page and stops at the budget", async () => {
+  const pages = Array.from({ length: 30 }, (_, i) => `page-${i + 1}-${"y".repeat(40)}`);
+  const doc = await getDocumentProxy(buildPdf(pages));
+  let opened = 0;
+  const counting: PdfTextSource = {
+    numPages: doc.numPages,
+    getPage: (n) => {
+      opened += 1;
+      return doc.getPage(n);
+    },
+  };
+
+  try {
+    assert.equal(doc.numPages, 30);
+    const text = await collectPageText(counting, 120);
+    assert.match(text, /^page-1-/);
+    assert.equal(text.length, 120);
+    assert.ok(opened < 30, `decoded ${opened} of 30 pages for a 120-char budget`);
+  } finally {
+    await doc.destroy();
+  }
+});
+
+test("selectSourcesWithinBudget keeps attachments ahead of scraped URLs", () => {
+  // URLs are collected before file parts, so keeping the first five in order
+  // let five cited links silently push an uploaded PDF out.
+  const sources = [
+    ...Array.from({ length: 5 }, (_, i) => ({ type: "url", url: `https://e.com/${i}` })),
+    { type: "pdf", fileUrl: "https://blob/x.pdf", fileName: "x.pdf" },
+  ];
+
+  const { kept, dropped } = selectSourcesWithinBudget(sources, 5);
+
+  assert.equal(kept[0].type, "pdf", "the attachment must be kept");
+  assert.equal(kept.length, 5);
+  assert.equal(dropped.length, 1);
+  assert.equal(dropped[0].type, "url");
+});
+
+test("the upload route is outside the proxy, and its neighbours are not", () => {
+  // Next drains and truncates the body of every request the proxy matches, so
+  // the upload budget only holds if this one route is excluded.
+  const matches = (url: string) =>
+    unstable_doesMiddlewareMatch({ config: proxyConfig, url });
+
+  assert.equal(matches("/api/research/process-source"), false);
+  assert.equal(matches("/api/research/process-source/"), false);
+  for (const url of [
+    "/api/chat",
+    "/api/research/other",
+    "/api/research/process-sourcex",
+    "/api/sprint/save",
+    "/",
+    "/chat/abc",
+  ]) {
+    assert.equal(matches(url), true, `${url} must still go through the proxy`);
+  }
+});

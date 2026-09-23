@@ -50,13 +50,20 @@ export async function proxy(request: NextRequest) {
   return NextResponse.next();
 }
 
+// POST /api/research/process-source is deliberately NOT matched (WALM-683).
+// For every request the proxy sees, Next clones the body and drains it to EOF
+// before the route runs — even when the proxy itself returns early — and hands
+// the route a copy truncated at proxyClientMaxBodySize. That made an upload
+// budget unenforceable: the bytes were already read, and an in-budget PDF over
+// 10MB arrived cut short. The route authenticates with getSession(), which runs
+// the same jwtVerify plus a user lookup, the way /api/auth/* already does.
 export const config = {
   matcher: [
     "/",
     "/chat/:id",
-    "/api/:path*",
+    "/api/((?!research/process-source(?:/|$)).*)",
     "/login",
     "/register",
-    "/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)",
+    "/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt|api/research/process-source(?:/|$)).*)",
   ],
 };

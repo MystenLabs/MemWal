@@ -1,12 +1,14 @@
 import "server-only";
 
 import { ChatbotError } from "@/lib/errors";
-import { extractText } from "unpdf";
+import { getDocumentProxy } from "unpdf";
 
 import {
   MAX_SOURCE_BYTES,
   assertLooksLikePdf,
   assertSourceFileWithinBudget,
+  collectPageText,
+  discardBody,
   readCappedText,
 } from "./limits";
 
@@ -18,6 +20,7 @@ export async function extractFromUrl(url: string): Promise<string> {
   });
 
   if (!response.ok) {
+    await discardBody(response);
     throw new ChatbotError(
       "bad_request:api",
       `Jina Reader failed to extract content from URL: ${response.statusText}`
@@ -35,16 +38,25 @@ export async function extractFromUrl(url: string): Promise<string> {
 }
 
 export async function extractFromPdf(file: File): Promise<string> {
-  // Size is checked before `arrayBuffer()`, so an oversized upload is refused
-  // rather than buffered and then refused. The magic-byte check after it is
-  // what makes this a PDF check at all — the caller only ever saw a filename.
+  // A second check, not the byte budget: by the time a File exists its bytes are
+  // already in memory. The budget itself is enforced where the bytes arrive —
+  // the capped request read in the route, and readCappedBytes for downloads.
+  // The magic-byte check is what makes this a PDF check at all; the caller only
+  // ever saw a filename.
   const buffer = new Uint8Array(
     await assertSourceFileWithinBudget(file).arrayBuffer()
   );
   assertLooksLikePdf(buffer);
-  const result = await extractText(buffer, { mergePages: true });
 
-  const text = String(result.text);
+  // Page by page, stopping at the character budget, rather than extractText's
+  // mergePages, which decoded every page before any cap could apply.
+  const doc = await getDocumentProxy(buffer);
+  let text: string;
+  try {
+    text = await collectPageText(doc);
+  } finally {
+    await doc.destroy();
+  }
 
   if (!text || text.trim().length === 0) {
     throw new ChatbotError(

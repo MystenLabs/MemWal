@@ -19,7 +19,10 @@ import {
 } from "@/lib/ai/source-processing";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { getResearchTools, processSource } from "@/lib/rag";
-import { MAX_SOURCES_PER_REQUEST } from "@/lib/rag/ingest/limits";
+import {
+  MAX_SOURCES_PER_REQUEST,
+  selectSourcesWithinBudget,
+} from "@/lib/rag/ingest/limits";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
@@ -227,16 +230,26 @@ export async function POST(request: Request) {
             let processedCount = 0;
 
             // One message can carry any number of file parts and URLs, and each
-            // one is a full ingestion. Cap how many a single request may start
-            // rather than letting message size decide the bill (WALM-683).
-            if (sources.length > MAX_SOURCES_PER_REQUEST) {
-              console.warn(
-                `[ingest] ${sources.length} sources in one message, processing the first ${MAX_SOURCES_PER_REQUEST}`
-              );
-              sources.length = MAX_SOURCES_PER_REQUEST;
+            // one is a full ingestion, so cap how many a single request starts.
+            // Attachments are kept ahead of URLs scraped from prose, and every
+            // source that is not started is reported on the stream, not just
+            // logged — otherwise a dropped PDF simply never shows up (WALM-683).
+            const { kept, dropped } = selectSourcesWithinBudget(sources);
+            for (const source of dropped) {
+              dataStream.write({
+                type: "data-source-error",
+                data: {
+                  label:
+                    source.type === "url"
+                      ? source.url
+                      : (source as { fileName: string }).fileName,
+                  error: `Not processed: a message can add at most ${MAX_SOURCES_PER_REQUEST} sources`,
+                },
+                transient: true,
+              });
             }
 
-            for (const source of sources) {
+            for (const source of kept) {
               const label =
                 source.type === "url"
                   ? source.url

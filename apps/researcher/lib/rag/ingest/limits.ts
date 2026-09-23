@@ -53,42 +53,52 @@ export const MAX_SOURCES_PER_REQUEST = positiveIntFromEnv(
   5
 );
 
+/** Pages read from one PDF. Refused outright above this, before any page is parsed. */
+export const MAX_PDF_PAGES = positiveIntFromEnv("RESEARCH_MAX_PDF_PAGES", 500);
+
+/**
+ * Whole multipart request body. The file itself is capped at MAX_SOURCE_BYTES;
+ * this adds room for the boundaries and part headers around it.
+ */
+export const MAX_UPLOAD_BODY_BYTES = MAX_SOURCE_BYTES + 256 * 1024;
+
+/** A JSON submission is one URL; nothing legitimate comes near this. */
+export const MAX_JSON_BODY_BYTES = 16 * 1024;
+
 function describeLimit(bytes: number): string {
   return `${Math.floor(bytes / (1024 * 1024))}MB`;
 }
 
+function tooLarge(maxBytes: number): ChatbotError {
+  return new ChatbotError(
+    "bad_request:api",
+    `Source is larger than the ${describeLimit(maxBytes)} limit`
+  );
+}
+
 /**
- * Read a response body, refusing to buffer more than `maxBytes`.
+ * Read a stream, refusing to buffer more than `maxBytes`.
  *
- * Content-Length is a claim by the remote side, so it is used only as an early
- * rejection and never as the reason to stop reading: a server that omits it, or
- * lies, still cannot push more than the cap through here, because the running
- * total is what ends the loop. Cancelling the reader stops the transfer rather
- * than leaving it running after the rejection.
+ * A declared length is a claim by the other side, so it is used only as an
+ * early rejection and never as the reason to stop reading: a sender that omits
+ * it, or lies, still cannot push more than the cap through here, because the
+ * running total is what ends the loop. Cancelling the reader stops the transfer
+ * rather than leaving it running after the rejection — for a request body that
+ * destroys the socket, so an oversized upload is not read to EOF.
  */
-export async function readCappedBytes(
-  response: Response,
-  maxBytes: number = MAX_SOURCE_BYTES
+async function readCappedStream(
+  body: ReadableStream<Uint8Array> | null,
+  declaredLength: string | null,
+  maxBytes: number
 ): Promise<Uint8Array<ArrayBuffer>> {
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) {
-    await response.body?.cancel().catch(() => {});
-    throw new ChatbotError(
-      "bad_request:api",
-      `Source is larger than the ${describeLimit(maxBytes)} limit`
-    );
+  const declared = Number(declaredLength);
+  if (declaredLength !== null && Number.isFinite(declared) && declared > maxBytes) {
+    await body?.cancel().catch(() => {});
+    throw tooLarge(maxBytes);
   }
 
-  const body = response.body;
   if (!body) {
-    const buffer = new Uint8Array(await response.arrayBuffer());
-    if (buffer.byteLength > maxBytes) {
-      throw new ChatbotError(
-        "bad_request:api",
-        `Source is larger than the ${describeLimit(maxBytes)} limit`
-      );
-    }
-    return buffer;
+    return new Uint8Array(0);
   }
 
   const reader = body.getReader();
@@ -106,16 +116,13 @@ export async function readCappedBytes(
       }
       total += value.byteLength;
       if (total > maxBytes) {
-        throw new ChatbotError(
-          "bad_request:api",
-          `Source is larger than the ${describeLimit(maxBytes)} limit`
-        );
+        throw tooLarge(maxBytes);
       }
       parts.push(value);
     }
   } finally {
     // Releasing an already-finished reader is harmless; cancelling a rejected
-    // one is the point — otherwise the download keeps running after the throw.
+    // one is the point — otherwise the transfer keeps running after the throw.
     await reader.cancel().catch(() => {});
   }
 
@@ -126,6 +133,48 @@ export async function readCappedBytes(
     offset += part.byteLength;
   }
   return merged;
+}
+
+/** Read a response body under the byte budget. */
+export function readCappedBytes(
+  response: Response,
+  maxBytes: number = MAX_SOURCE_BYTES
+): Promise<Uint8Array<ArrayBuffer>> {
+  return readCappedStream(
+    response.body,
+    response.headers.get("content-length"),
+    maxBytes
+  );
+}
+
+/**
+ * Read an incoming request body under a byte budget, before any parsing.
+ *
+ * `request.formData()` and `request.json()` buffer the whole body first, so a
+ * size check on the parsed result always runs too late. Reading the raw stream
+ * here is what lets an oversized upload be refused, and its socket closed,
+ * after at most `maxBytes`.
+ */
+export function readCappedRequestBody(
+  request: Request,
+  maxBytes: number
+): Promise<Uint8Array<ArrayBuffer>> {
+  return readCappedStream(
+    request.body,
+    request.headers.get("content-length"),
+    maxBytes
+  );
+}
+
+/**
+ * Release a response body that is not going to be read.
+ *
+ * Throwing on `!response.ok` without this leaves the body streaming: a 500 with
+ * an endless body never reaches the byte cap, because nothing reads it, and it
+ * holds the socket open.
+ */
+export async function discardBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => {});
 }
 
 /** Read a response as text, under the same byte cap as a binary source. */
@@ -185,4 +234,86 @@ export function capExtractedText(text: string): string {
   return text.length > MAX_EXTRACTED_CHARS
     ? text.slice(0, MAX_EXTRACTED_CHARS)
     : text;
+}
+
+/** The part of a pdf.js document this needs; a fake one stands in for tests. */
+export type PdfTextSource = {
+  numPages: number;
+  getPage(pageNumber: number): Promise<{
+    getTextContent(): Promise<{ items: unknown[] }>;
+    cleanup?: () => void;
+  }>;
+};
+
+/**
+ * Collect a PDF's text one page at a time, stopping at the character budget.
+ *
+ * `extractText(..., { mergePages: true })` decoded every page in parallel and
+ * joined the whole string before the character cap could look at it, so the cap
+ * bounded what was *kept*, not what was *decoded*. Reading page by page lets
+ * extraction stop as soon as the budget is spent, and an absurd page count is
+ * refused before any page is parsed.
+ *
+ * This does not bound a single page's inflate: a one-page Flate bomb still
+ * decompresses inside pdf.js when that page's content stream is decoded.
+ */
+export async function collectPageText(
+  doc: PdfTextSource,
+  maxChars: number = MAX_EXTRACTED_CHARS,
+  maxPages: number = MAX_PDF_PAGES
+): Promise<string> {
+  if (doc.numPages > maxPages) {
+    throw new ChatbotError(
+      "bad_request:api",
+      `PDF has ${doc.numPages} pages, over the ${maxPages}-page limit`
+    );
+  }
+
+  const pieces: string[] = [];
+  let length = 0;
+
+  for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
+    const page = await doc.getPage(pageNumber);
+    const content = await page.getTextContent();
+    page.cleanup?.();
+
+    const text = content.items
+      .map((item) =>
+        item && typeof item === "object" && "str" in item
+          ? String((item as { str: unknown }).str)
+          : ""
+      )
+      .join(" ");
+
+    pieces.push(text);
+    length += text.length + 1;
+    if (length >= maxChars) {
+      break;
+    }
+  }
+
+  const joined = pieces.join("\n");
+  return joined.length > maxChars ? joined.slice(0, maxChars) : joined;
+}
+
+type SourceLike = { type: string };
+
+/**
+ * Pick which sources one chat message may ingest.
+ *
+ * Attached files go first: the user uploaded them on purpose, while URLs are
+ * scraped out of prose and may just be citations. Keeping the first N in
+ * insertion order did the opposite — URLs are collected before file parts — so
+ * five cited links silently pushed an attachment out. Everything not kept is
+ * returned so the caller can tell the user rather than only logging it.
+ */
+export function selectSourcesWithinBudget<T extends SourceLike>(
+  sources: T[],
+  limit: number = MAX_SOURCES_PER_REQUEST
+): { kept: T[]; dropped: T[] } {
+  const ordered = [
+    ...sources.filter((source) => source.type !== "url"),
+    ...sources.filter((source) => source.type === "url"),
+  ];
+  return { kept: ordered.slice(0, limit), dropped: ordered.slice(limit) };
 }

@@ -7,6 +7,7 @@ import { generateSourceMetadata } from "./metadata";
 import {
   MAX_CHUNKS_PER_SOURCE,
   capExtractedText,
+  discardBody,
   readCappedBytes,
 } from "./limits";
 import { fetchPublicUrl } from "./safe-fetch";
@@ -49,6 +50,7 @@ export async function processSource({
     // request body, so the destination is checked before anything is sent.
     const response = await fetchPublicUrl(source.fileUrl);
     if (!response.ok) {
+      await discardBody(response);
       throw new ChatbotError(
         "bad_request:api",
         `Failed to download PDF: ${response.statusText}`
