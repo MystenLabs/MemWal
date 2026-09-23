@@ -13582,6 +13582,11 @@ h1, h2, h3 {
   font-size: 14px;
 }
 
+.dash-page .playground-key-banner {
+  order: 0;
+  margin: 28px 0 8px !important;
+}
+
 .playground-key-banner-body {
   flex: 1;
   min-width: 0;
