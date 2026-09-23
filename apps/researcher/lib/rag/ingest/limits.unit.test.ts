@@ -154,12 +154,14 @@ test("capExtractedText truncates past the character budget", () => {
 
 // ── review follow-ups on #985 ─────────────────────────────────────────────
 
-import { getDocumentProxy } from "unpdf";
+import { extractText, getDocumentProxy } from "unpdf";
 import { unstable_doesMiddlewareMatch } from "next/dist/experimental/testing/server/middleware-testing-utils";
 
 import {
   collectPageText,
   discardBody,
+  droppedSourceEvents,
+  MAX_JSON_BODY_BYTES,
   MAX_PDF_PAGES,
   type PdfTextSource,
   readCappedRequestBody,
@@ -336,22 +338,157 @@ test("selectSourcesWithinBudget keeps attachments ahead of scraped URLs", () => 
   assert.equal(dropped[0].type, "url");
 });
 
-test("the upload route is outside the proxy, and its neighbours are not", () => {
-  // Next drains and truncates the body of every request the proxy matches, so
-  // the upload budget only holds if this one route is excluded.
+/** Every spelling of `path` with exactly one character percent-encoded, both hex cases. */
+function singleEncodings(path: string): string[] {
+  const spellings: string[] = [];
+  for (let i = 1; i < path.length; i++) {
+    const hex = path.charCodeAt(i).toString(16).padStart(2, "0");
+    for (const variant of new Set([hex.toLowerCase(), hex.toUpperCase()])) {
+      spellings.push(`${path.slice(0, i)}%${variant}${path.slice(i + 1)}`);
+    }
+  }
+  return spellings;
+}
+
+function encodeAll(path: string, upper: boolean): string {
+  return (
+    "/" +
+    Array.from(path.slice(1), (ch) => {
+      const hex = ch.charCodeAt(0).toString(16).padStart(2, "0");
+      return `%${upper ? hex.toUpperCase() : hex}`;
+    }).join("")
+  );
+}
+
+test("the upload route is outside the proxy in every single-encoded spelling", () => {
+  // Next tests the matcher against the raw pathname and percent-decodes only
+  // when routing, so /api/research/%70rocess-source reaches the route. A
+  // literal-only exclusion let every encoded spelling through the proxy, whose
+  // body clone drains and truncates the upload (Henry, round 2).
   const matches = (url: string) =>
     unstable_doesMiddlewareMatch({ config: proxyConfig, url });
+  const route = "/api/research/process-source";
 
-  assert.equal(matches("/api/research/process-source"), false);
-  assert.equal(matches("/api/research/process-source/"), false);
+  const spellings = [
+    route,
+    `${route}/`,
+    `${route}%2F`,
+    `${route}%2f`,
+    ...singleEncodings(route),
+    encodeAll(route, false),
+    encodeAll(route, true),
+    "/api/research%2Fprocess-source",
+    "/api%2fresearch%2fprocess-source",
+  ];
+  // 27 characters, a few of whose hex codes have a letter and so two cases.
+  assert.ok(spellings.length >= 40, `only ${spellings.length} spellings generated`);
+  for (const url of spellings) {
+    assert.equal(matches(url), false, `${url} must not go through the proxy`);
+  }
+
   for (const url of [
     "/api/chat",
     "/api/research/other",
     "/api/research/process-sourcex",
+    "/api/research/%70rocess-sourcex",
     "/api/sprint/save",
     "/",
     "/chat/abc",
+    "/login",
   ]) {
     assert.equal(matches(url), true, `${url} must still go through the proxy`);
   }
+});
+
+// ── round 2 on #985 ───────────────────────────────────────────────────────
+
+/** A text PDF whose pages are raw content streams, built with exact offsets. */
+function buildContentPdf(pageContents: string[]): Uint8Array {
+  const objects: string[] = [];
+  objects[1] = "<</Type/Catalog/Pages 2 0 R>>";
+  objects[3] = "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
+  objects[4] = "<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>";
+  const kids: number[] = [];
+  let next = 5;
+  for (const content of pageContents) {
+    const contentId = next++;
+    const pageId = next++;
+    objects[contentId] = `<</Length ${content.length}>>stream\n${content}\nendstream`;
+    objects[pageId] = `<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 400]/Contents ${contentId} 0 R/Resources<</Font<</F1 3 0 R/F2 4 0 R>>>>>>`;
+    kids.push(pageId);
+  }
+  objects[2] = `<</Type/Pages/Kids[${kids.map((id) => `${id} 0 R`).join(" ")}]/Count ${kids.length}>>`;
+
+  let out = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (let id = 1; id < objects.length; id++) {
+    offsets[id] = out.length;
+    out += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+  }
+  const xref = out.length;
+  out += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+  for (let id = 1; id < objects.length; id++) {
+    out += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+  }
+  out += `trailer\n<</Size ${objects.length}/Root 1 0 R>>\nstartxref\n${xref}\n%%EOF`;
+  return new TextEncoder().encode(out);
+}
+
+test("collectPageText returns exactly what extractText(mergePages) returned", async () => {
+  // The review caught that joining items with " " split kerned words ("Hel lo")
+  // and dropped hasEOL. Rather than argue about the rule, pin parity with the
+  // function this replaced, on the cases that differ: a word split into kerned
+  // TJ runs, several lines on one page, runs of whitespace, an empty page, and
+  // a page break.
+  const pdf = buildContentPdf([
+    "BT /F1 12 Tf 20 360 Td [(Hel) -30 (lo) 10 (,)] TJ ( world) Tj 0 -16 Td (second   line) Tj 0 -16 Td [(kern) -120 (ed)] TJ ET",
+    "BT ET",
+    "BT /F1 12 Tf 20 360 Td (third page) Tj 0 -16 Td (  indented) Tj 0 -16 Td (Sepa) Tj /F2 12 Tf (rate) Tj ET",
+  ]);
+
+  // pdf.js transfers the buffer it is given to its worker, detaching it, so
+  // each call gets its own copy.
+  const expected = (await extractText(pdf.slice(), { mergePages: true })).text;
+  const doc = await getDocumentProxy(pdf.slice());
+  try {
+    const actual = await collectPageText(doc);
+    assert.equal(actual, expected);
+    assert.match(actual, /Hello,/, "kerned runs must stay one word");
+    // A font change mid-word (bold, italic, a ligature font) makes pdf.js return
+    // the word as two items; joining items with " " — the previous commit's
+    // rule — gave "Sepa rate".
+    assert.match(actual, /Separate/, "a word split by a font change must stay whole");
+  } finally {
+    await doc.destroy();
+  }
+});
+
+test("a dropped source gets a processing event before its error, so the panel shows it", () => {
+  // The activity panel only builds a step from data-source-processing and then
+  // attaches a matching data-source-error; an error on its own was never shown.
+  const events = droppedSourceEvents(
+    [
+      { type: "url", url: "https://e.com/6" },
+      { type: "pdf", fileName: "report.pdf" },
+    ],
+    5
+  );
+
+  assert.deepEqual(
+    events.map((event) => [event.type, event.data.label]),
+    [
+      ["data-source-processing", "https://e.com/6"],
+      ["data-source-error", "https://e.com/6"],
+      ["data-source-processing", "report.pdf"],
+      ["data-source-error", "report.pdf"],
+    ]
+  );
+});
+
+test("a limit under a megabyte is reported in KB, not as 0MB", async () => {
+  const { request } = streamingRequest([new Uint8Array(MAX_JSON_BODY_BYTES + 1)]);
+  await assert.rejects(
+    () => readCappedRequestBody(request, MAX_JSON_BODY_BYTES),
+    causeMatches(/16KB limit/)
+  );
 });

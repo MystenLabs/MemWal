@@ -20,7 +20,7 @@ import {
 import { getLanguageModel } from "@/lib/ai/providers";
 import { getResearchTools, processSource } from "@/lib/rag";
 import {
-  MAX_SOURCES_PER_REQUEST,
+  droppedSourceEvents,
   selectSourcesWithinBudget,
 } from "@/lib/rag/ingest/limits";
 import { isProductionEnvironment } from "@/lib/constants";
@@ -235,18 +235,8 @@ export async function POST(request: Request) {
             // source that is not started is reported on the stream, not just
             // logged — otherwise a dropped PDF simply never shows up (WALM-683).
             const { kept, dropped } = selectSourcesWithinBudget(sources);
-            for (const source of dropped) {
-              dataStream.write({
-                type: "data-source-error",
-                data: {
-                  label:
-                    source.type === "url"
-                      ? source.url
-                      : (source as { fileName: string }).fileName,
-                  error: `Not processed: a message can add at most ${MAX_SOURCES_PER_REQUEST} sources`,
-                },
-                transient: true,
-              });
+            for (const event of droppedSourceEvents(dropped)) {
+              dataStream.write(event);
             }
 
             for (const source of kept) {

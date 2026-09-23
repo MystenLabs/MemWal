@@ -66,7 +66,10 @@ export const MAX_UPLOAD_BODY_BYTES = MAX_SOURCE_BYTES + 256 * 1024;
 export const MAX_JSON_BODY_BYTES = 16 * 1024;
 
 function describeLimit(bytes: number): string {
-  return `${Math.floor(bytes / (1024 * 1024))}MB`;
+  // Whole megabytes floored the 16KB JSON cap to "0MB".
+  return bytes >= 1024 * 1024
+    ? `${Math.floor(bytes / (1024 * 1024))}MB`
+    : `${Math.max(1, Math.floor(bytes / 1024))}KB`;
 }
 
 function tooLarge(maxBytes: number): ChatbotError {
@@ -269,31 +272,49 @@ export async function collectPageText(
     );
   }
 
-  const pieces: string[] = [];
-  let length = 0;
+  // Exactly the string `extractText(..., { mergePages: true })` produced, so
+  // what is capped, chunked and embedded does not change with this function:
+  // unpdf's getPageText keeps items that have `str`, appends "\n" on `hasEOL`,
+  // and joins with "" — so a word split into kerned runs stays whole — then
+  // mergePages joins pages with "\n" and collapses every whitespace run to one
+  // space. Collapsing page by page, with the boundary handled explicitly, gives
+  // the same result without re-scanning the whole string after every page.
+  let text = "";
 
   for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
     const page = await doc.getPage(pageNumber);
     const content = await page.getTextContent();
     page.cleanup?.();
 
-    const text = content.items
-      .map((item) =>
-        item && typeof item === "object" && "str" in item
-          ? String((item as { str: unknown }).str)
-          : ""
+    const pageText = content.items
+      .filter(
+        (item): item is { str: string; hasEOL?: boolean } =>
+          typeof item === "object" &&
+          item !== null &&
+          "str" in item &&
+          (item as { str: unknown }).str != null
       )
-      .join(" ");
+      .map((item) => String(item.str) + (item.hasEOL ? "\n" : ""))
+      .join("")
+      .replace(/\s+/g, " ");
 
-    pieces.push(text);
-    length += text.length + 1;
-    if (length >= maxChars) {
+    if (pageNumber === 1) {
+      text = pageText;
+    } else {
+      // "\n" + pageText, collapsed, then merged with a trailing space if any.
+      let piece = pageText.startsWith(" ") ? pageText : ` ${pageText}`;
+      if (text.endsWith(" ")) {
+        piece = piece.slice(1);
+      }
+      text += piece;
+    }
+
+    if (text.length >= maxChars) {
       break;
     }
   }
 
-  const joined = pieces.join("\n");
-  return joined.length > maxChars ? joined.slice(0, maxChars) : joined;
+  return text.length > maxChars ? text.slice(0, maxChars) : text;
 }
 
 type SourceLike = { type: string };
@@ -316,4 +337,36 @@ export function selectSourcesWithinBudget<T extends SourceLike>(
     ...sources.filter((source) => source.type === "url"),
   ];
   return { kept: ordered.slice(0, limit), dropped: ordered.slice(limit) };
+}
+
+/**
+ * The stream events that tell the user a source was not processed.
+ *
+ * The activity panel builds a source's step from its `data-source-processing`
+ * event and only then attaches a `data-source-error` with the same label; an
+ * error with no processing event before it is stored and never rendered. So a
+ * dropped source gets both, in that order, or it silently disappears.
+ */
+export function droppedSourceEvents(
+  dropped: Array<{ type: string; url?: string; fileName?: string }>,
+  limit: number = MAX_SOURCES_PER_REQUEST
+) {
+  return dropped.flatMap((source) => {
+    const label = (source.type === "url" ? source.url : source.fileName) ?? "";
+    return [
+      {
+        type: "data-source-processing" as const,
+        data: { label },
+        transient: true as const,
+      },
+      {
+        type: "data-source-error" as const,
+        data: {
+          label,
+          error: `Not processed: a message can add at most ${limit} sources`,
+        },
+        transient: true as const,
+      },
+    ];
+  });
 }

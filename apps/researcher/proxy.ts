@@ -57,13 +57,21 @@ export async function proxy(request: NextRequest) {
 // budget unenforceable: the bytes were already read, and an in-budget PDF over
 // 10MB arrived cut short. The route authenticates with getSession(), which runs
 // the same jwtVerify plus a user lookup, the way /api/auth/* already does.
+//
+// The exclusion has to cover every single percent-encoding of the path, not just
+// its literal spelling: Next tests the matcher against the raw pathname and
+// decodes it only afterwards, when routing, so `/api/research/%70rocess-source`
+// reaches this route while slipping past a literal-only lookahead — and gets
+// drained. Each character below is `c` or `%XX` in either hex case, including
+// `/` as `%2F`. Decoding happens once, so double-encoding never routes here.
+// Next requires matchers to be static string literals, hence spelled out.
 export const config = {
   matcher: [
     "/",
     "/chat/:id",
-    "/api/((?!research/process-source(?:/|$)).*)",
+    "/api/((?!(?:r|%72)(?:e|%65)(?:s|%73)(?:e|%65)(?:a|%61)(?:r|%72)(?:c|%63)(?:h|%68)(?:/|%2[fF])(?:p|%70)(?:r|%72)(?:o|%6[fF])(?:c|%63)(?:e|%65)(?:s|%73)(?:s|%73)(?:-|%2[dD])(?:s|%73)(?:o|%6[fF])(?:u|%75)(?:r|%72)(?:c|%63)(?:e|%65)(?:/|%2[fF]|$)).*)",
     "/login",
     "/register",
-    "/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt|api/research/process-source(?:/|$)).*)",
+    "/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt|(?:a|%61)(?:p|%70)(?:i|%69)(?:/|%2[fF])(?:r|%72)(?:e|%65)(?:s|%73)(?:e|%65)(?:a|%61)(?:r|%72)(?:c|%63)(?:h|%68)(?:/|%2[fF])(?:p|%70)(?:r|%72)(?:o|%6[fF])(?:c|%63)(?:e|%65)(?:s|%73)(?:s|%73)(?:-|%2[dD])(?:s|%73)(?:o|%6[fF])(?:u|%75)(?:r|%72)(?:c|%63)(?:e|%65)(?:/|%2[fF]|$)).*)",
   ],
 };
