@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Inputs, Transaction, TransactionDataBuilder } from "@mysten/sui/transactions";
 import {
@@ -1156,4 +1157,18 @@ test("the address-balance nonce is derived from the transaction, not drawn at ra
     assert.equal(maxEpoch, "9");
     assert.equal(minTimestamp, null);
     assert.equal(maxTimestamp, null);
+});
+
+test("lease and verify reads use the shared Walrus client max age", () => {
+    // A 1s override reset the client on every expiry-sweep owner. Each reset
+    // re-parsed system state synchronously and the main thread stopped
+    // accepting /health. The default is WALRUS_CLIENT_MAX_AGE_MS.
+    const src = readFileSync(new URL("../sidecar/routes/walrus-query.ts", import.meta.url), "utf8");
+    const calls = [...src.matchAll(/refreshWalrusClientIfStale\(([^)]*)\)/g)].map((match) =>
+        match[1].trim(),
+    );
+    assert.ok(calls.length >= 2);
+    for (const arg of calls) {
+        assert.equal(arg, "");
+    }
 });
