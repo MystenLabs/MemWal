@@ -33,6 +33,7 @@ import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
 import ConnectClaude from './pages/ConnectClaude'
+import KeysPage from './pages/KeysPage'
 import { useRouteAnalytics } from './hooks/useRouteAnalytics'
 
 
@@ -250,6 +251,7 @@ function RoutePending() {
  *  Shared with ConnectMcp.tsx (kept as a literal there to avoid a circular import). */
 const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
 const CLAUDE_CONNECT_STORAGE_KEY = 'memwal_claude_connect'
+const KEYS_CONNECT_STORAGE_KEY = 'memwal_keys_connect'
 
 function consumePendingConnectQuery(storageKey: string): string {
   const pending = sessionStorage.getItem(storageKey)
@@ -276,6 +278,10 @@ function PostAuthRedirect() {
 
   const mcpConnectQuery = consumePendingConnectQuery(MCP_CONNECT_STORAGE_KEY)
   if (mcpConnectQuery) return <Navigate to={`/connect/mcp?${mcpConnectQuery}`} replace />
+
+  const keysConnectQuery = consumePendingConnectQuery(KEYS_CONNECT_STORAGE_KEY)
+  if (keysConnectQuery) return <Navigate to={`/keys?${keysConnectQuery}`} replace />
+
   return <Navigate to="/dashboard" replace />
 }
 
@@ -305,6 +311,7 @@ function AppContent() {
       )} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="/connect/claude" element={<ConnectClaude />} />
+      <Route path="/keys" element={<KeysPage />} />
       <Route path="/admin" element={<AdminDashboard />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

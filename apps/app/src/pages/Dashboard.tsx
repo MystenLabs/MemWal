@@ -199,9 +199,12 @@ function DelegateKeySkeletonList() {
 export default function Dashboard({
     previewMode = false,
     previewState = 'empty',
+    autoScrollToKeys = false,
 }: {
     previewMode?: boolean
     previewState?: 'empty' | 'ready'
+    /** Scroll to the delegate keys card once its first load finishes. Used by /keys (WALM-675). */
+    autoScrollToKeys?: boolean
 }) {
     const currentAccount = useCurrentAccount()
     const navigate = useNavigate()
@@ -420,6 +423,13 @@ export default function Dashboard({
             .getElementById(DELEGATE_KEYS_SECTION_ID)
             ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }, [])
+
+    const autoScrolledToKeysRef = useRef(false)
+    useEffect(() => {
+        if (!autoScrollToKeys || autoScrolledToKeysRef.current || isKeyListLoading) return
+        autoScrolledToKeysRef.current = true
+        scrollToDelegateKeys()
+    }, [autoScrollToKeys, isKeyListLoading, scrollToDelegateKeys])
 
     useEffect(() => {
         setSelectedKeyPublicKeys((prev) => {
