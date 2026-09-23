@@ -29,41 +29,41 @@ import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 
 const walrusCodeTheme = {
     hljs: {
-        color: '#faf8f5',
-        background: '#050505',
+        color: '#ffffff',
+        background: '#1c1f26',
     },
     'hljs-keyword': {
-        color: '#cab1ff',
+        color: '#d9cbff',
     },
     'hljs-built_in': {
-        color: '#faf8f5',
+        color: '#ffffff',
     },
     'hljs-title': {
-        color: '#faf8f5',
+        color: '#ffffff',
     },
     'hljs-attr': {
-        color: '#e8ff75',
+        color: '#f4ff8a',
     },
     'hljs-property': {
-        color: '#e8ff75',
+        color: '#f4ff8a',
     },
     'hljs-variable': {
-        color: '#faf8f5',
+        color: '#ffffff',
     },
     'hljs-string': {
-        color: '#e8ff75',
+        color: '#f4ff8a',
     },
     'hljs-comment': {
-        color: '#8f9294',
+        color: '#b4b7bb',
     },
     'hljs-number': {
-        color: '#e8ff75',
+        color: '#f4ff8a',
     },
     'hljs-literal': {
-        color: '#e8ff75',
+        color: '#f4ff8a',
     },
     'hljs-params': {
-        color: '#faf8f5',
+        color: '#ffffff',
     },
 }
 
@@ -136,7 +136,7 @@ function DemoStep({
             {children}
 
             {/* Code block */}
-            <div className={hasOutput ? 'demo-code-block--spaced' : ''}>
+            <div className={hasOutput ? 'demo-code-slot demo-code-block--spaced' : 'demo-code-slot'}>
                 <SyntaxHighlighter
                     language="javascript"
                     style={walrusCodeTheme}
@@ -158,7 +158,7 @@ function DemoStep({
             {/* Error */}
             {error && (
                 <div className="demo-error-panel">
-                    <div className="demo-error-label">error</div>
+                    <div className="demo-error-label">Error</div>
                     <pre className="demo-error-pre">{error}</pre>
                 </div>
             )}
@@ -176,6 +176,14 @@ export default function Playground() {
     const { delegateKey, clearDelegateKeys, accountObjectId } = useDelegateKey()
 
     const address = currentAccount?.address || ''
+    const [navSolid, setNavSolid] = useState(false)
+
+    useEffect(() => {
+        const onScroll = () => setNavSolid(window.scrollY > 220)
+        onScroll()
+        window.addEventListener('scroll', onScroll, { passive: true })
+        return () => window.removeEventListener('scroll', onScroll)
+    }, [])
     const serverUrl = config.memwalServerUrl
     const keyStatus = delegateKey ? 'configured' : 'missing'
 
@@ -671,11 +679,11 @@ export default function Playground() {
     // ---- Render ----
 
     return (
-        <>
-            <nav className="nav playground-nav">
+        <div className="dash-page">
+            <nav className={`nav playground-nav dashboard-nav${navSolid ? ' dashboard-nav--solid' : ''}`}>
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
+                        <img className="nav-brand-logo" src="/walrus-memory-logo.svg?v=3" alt="Walrus Memory" />
                     </Link>
                     <div className="nav-user">
                         <Link to="/dashboard" className="demo-nav-back" aria-label="Dashboard">
@@ -695,7 +703,7 @@ export default function Playground() {
                 </div>
             </nav>
 
-            <div className="container dashboard playground-dashboard">
+            <main className="dash-shell playground-dashboard">
                 {/* Header */}
                 <div className="dashboard-header">
                     <h2>Developer Playground</h2>
@@ -734,8 +742,8 @@ export default function Playground() {
                 {/* Step 1: Health */}
                 <DemoStep
                     number={1}
-                    title="health check"
-                    description="verify the Walrus Memory server is running"
+                    title="Health check"
+                    description="Verify the Walrus Memory server is running"
                     code={`import { MemWal } from "@mysten-incubation/memwal"
 
 const memwal = MemWal.create({
@@ -756,8 +764,8 @@ const data = await memwal.health()
                 {/* Step 2: Remember */}
                 <DemoStep
                     number={2}
-                    title="remember"
-                    description="accept a memory job → embed → encrypt → Walrus"
+                    title="Remember"
+                    description="Accept a memory job → embed → encrypt → Walrus"
                     code={`// 1. enqueue — returns 202 with { job_id, status: "running" }
 const accepted = await memwal.rememberAsync(
   "${rememberText.slice(0, 60)}..."
@@ -781,7 +789,7 @@ while (true) {
                     loading={rememberLoading}
                 >
                     <div className="input-group">
-                        <label>memory text:</label>
+                        <label>Memory text</label>
                         <textarea
                             className="input"
                             rows={3}
@@ -794,8 +802,8 @@ while (true) {
                 {/* Step 3: Recall */}
                 <DemoStep
                     number={3}
-                    title="recall"
-                    description="semantic search → download → decrypt"
+                    title="Recall"
+                    description="Semantic search → download → decrypt"
                     code={`const result = await memwal.recall({ query: "${recallQuery}", limit: 5 })
 // Server: embed query → cosine search → download → decrypt
 // namespace: "${namespace || 'default'}" — only searches within this namespace
@@ -807,7 +815,7 @@ while (true) {
                     loading={recallLoading}
                 >
                     <div className="input-group">
-                        <label>search query:</label>
+                        <label>Search query</label>
                         <input
                             className="input"
                             value={recallQuery}
@@ -819,7 +827,7 @@ while (true) {
                 {/* Step 4: Analyze */}
                 <DemoStep
                     number={4}
-                    title="analyze"
+                    title="Analyze"
                     description="LLM extracts facts → accepts memory jobs"
                     code={`const result = await memwal.analyze(
   "${analyzeText.slice(0, 50)}..."
@@ -833,7 +841,7 @@ while (true) {
                     loading={analyzeLoading}
                 >
                     <div className="input-group">
-                        <label>conversation text to analyze:</label>
+                        <label>Conversation text to analyze</label>
                         <textarea
                             className="input"
                             rows={3}
@@ -846,8 +854,8 @@ while (true) {
                 {/* Step 5: Restore */}
                 <DemoStep
                     number={5}
-                    title="restore"
-                    description="re-index all memories from Walrus → rebuild local DB (supports zero-state restore from chain)"
+                    title="Restore"
+                    description="Re-index all memories from Walrus → rebuild local DB (supports zero-state restore from chain)"
                     code={`// Restore from Walrus: download → decrypt → re-embed → re-index
 // If DB is empty, queries Sui chain for user's Walrus Blob objects
 // with memwal_namespace metadata → zero-state restore!
@@ -866,7 +874,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                     className="demo-step"
                     leading={<div className={`demo-step-badge${askLlmKey.trim() ? ' demo-step-badge--highlight' : ''}`}>6</div>}
                     leadingRowClassName="demo-step-header-row"
-                    title="configure your LLM"
+                    title="Configure your LLM"
                     subtitle="Walrus Memory is just the memory layer — you bring your own LLM"
                     action={
                         askLlmKey.trim() && (
@@ -903,6 +911,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                         </div>
                     </div>
 
+                    <div className="demo-code-slot">
                     <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`// Walrus Memory doesn't include an LLM — you choose your own.
 // steps 7–9 use this key for:
@@ -911,6 +920,7 @@ const result = await memwal.restore("${namespace || 'default'}")
 //
 // your key is never sent to Walrus Memory servers.`}
                     </SyntaxHighlighter>
+                    </div>
                 </Card>
 
                 {/* Step 6: Ask AI — true middleware pattern */}
@@ -919,8 +929,8 @@ const result = await memwal.restore("${namespace || 'default'}")
                     style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
                     leading={<div className="demo-step-badge demo-step-badge--highlight">7</div>}
                     leadingRowClassName="demo-step-header-row"
-                    title="ask AI (with memory)"
-                    subtitle="your LLM key + Walrus Memory layer — like Supermemory"
+                    title="Ask AI (with memory)"
+                    subtitle="Your LLM key + Walrus Memory layer — like Supermemory"
                     action={
                         <button
                             className={`btn btn-primary btn-sm${askLoading ? ' demo-run-button--loading' : ''}`}
@@ -937,7 +947,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                 >
 
                     <div className="input-group">
-                        <label>your question:</label>
+                        <label>Your question</label>
                         <input
                             className="input"
                             value={askQuestion}
@@ -946,7 +956,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                         />
                     </div>
 
-                    <div className={askResult || askError || askPhase ? 'demo-code-block--spaced' : ''}>
+                    <div className={`demo-code-slot${askResult || askError || askPhase ? ' demo-code-block--spaced' : ''}`}>
                         <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`import { withMemWal } from "@mysten-incubation/memwal/ai"
 import { openai } from "@ai-sdk/openai"
@@ -1018,7 +1028,7 @@ const { text } = await generateText({
                     )}
                     {askError && (
                         <div className="demo-error-panel">
-                            <div className="demo-error-label">error</div>
+                            <div className="demo-error-label">Error</div>
                             <pre className="demo-error-pre">{askError}</pre>
                         </div>
                     )}
@@ -1037,8 +1047,8 @@ const { text } = await generateText({
                     style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
                     leading={<div className="demo-step-badge demo-step-badge--highlight">8</div>}
                     leadingRowClassName="demo-step-header-row"
-                    title="remember (hybrid)"
-                    subtitle="client: embed → SEAL encrypt → send to server → server uploads Walrus"
+                    title="Remember (hybrid)"
+                    subtitle="Client: embed → SEAL encrypt → send to server → server uploads Walrus"
                     action={
                         <button
                             className={`btn btn-primary btn-sm${fullRememberLoading ? ' demo-run-button--loading' : ''}`}
@@ -1055,7 +1065,7 @@ const { text } = await generateText({
                 >
 
                     <div className="input-group">
-                        <label>memory text:</label>
+                        <label>Memory text</label>
                         <textarea
                             className="input"
                             rows={2}
@@ -1064,7 +1074,7 @@ const { text } = await generateText({
                         />
                     </div>
 
-                    <div className={fullRememberResult || fullRememberError || fullRememberPhase ? 'demo-code-block--spaced' : ''}>
+                    <div className={`demo-code-slot${fullRememberResult || fullRememberError || fullRememberPhase ? ' demo-code-block--spaced' : ''}`}>
                         <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`import { MemWalManual } from "@mysten-incubation/memwal/manual"
 
@@ -1107,7 +1117,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                     )}
                     {fullRememberError && (
                         <div className="demo-error-panel">
-                            <div className="demo-error-label">error</div>
+                            <div className="demo-error-label">Error</div>
                             <pre className="demo-error-pre">{fullRememberError}</pre>
                         </div>
                     )}
@@ -1119,7 +1129,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                     style={{ opacity: askLlmKey.trim() ? 1 : 0.72, pointerEvents: askLlmKey.trim() ? 'auto' : 'none' }}
                     leading={<div className="demo-step-badge demo-step-badge--highlight">9</div>}
                     leadingRowClassName="demo-step-header-row"
-                    title="recall (full client-side)"
+                    title="Recall (full client-side)"
                     subtitle="SDK: embed query → search → Walrus download → SEAL decrypt"
                     action={
                         <button
@@ -1137,7 +1147,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                 >
 
                     <div className="input-group">
-                        <label>search query:</label>
+                        <label>Search query</label>
                         <input
                             className="input"
                             value={fullRecallQuery}
@@ -1145,7 +1155,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                         />
                     </div>
 
-                    <div className={fullRecallResult || fullRecallError || fullRecallPhase ? 'demo-code-block--spaced' : ''}>
+                    <div className={`demo-code-slot${fullRecallResult || fullRecallError || fullRecallPhase ? ' demo-code-block--spaced' : ''}`}>
                         <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0 }}>
 {`// client does:
 //   1. embed query via OpenAI
@@ -1174,14 +1184,14 @@ const result = await memwal.recallManual("${fullRecallQuery}", 5)
                     )}
                     {fullRecallError && (
                         <div className="demo-error-panel">
-                            <div className="demo-error-label">error</div>
+                            <div className="demo-error-label">Error</div>
                             <pre className="demo-error-pre">{fullRecallError}</pre>
                         </div>
                     )}
                 </Card>
 
 
-            </div>
-        </>
+            </main>
+        </div>
     )
 }

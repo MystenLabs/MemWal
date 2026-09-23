@@ -3,6 +3,23 @@
  */
 const DEFAULT_ANALYTICS_ALLOWED_HOSTS = 'walrus.xyz,www.walrus.xyz'
 
+/** True on the given local calendar day and after. Empty or invalid dates stay off. */
+export function isCalendarDateReached(isoDate: string, today = new Date()): boolean {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim())
+    if (!match) return false
+    const year = Number(match[1])
+    const month = Number(match[2])
+    const day = Number(match[3])
+    const target = new Date(Date.UTC(year, month - 1, day))
+    if (
+        target.getUTCFullYear() !== year
+        || target.getUTCMonth() !== month - 1
+        || target.getUTCDate() !== day
+    ) return false
+    const now = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
+    return now >= target.getTime()
+}
+
 function parseCsv(value: string | undefined, fallback = '') {
     return (value || fallback)
         .split(',')
@@ -100,6 +117,12 @@ export const config = {
     analyticsAllowedHosts: parseCsv(
         import.meta.env.VITE_ANALYTICS_ALLOWED_HOSTS as string | undefined,
         DEFAULT_ANALYTICS_ALLOWED_HOSTS,
+    ),
+    // Local calendar date when the Walrus Console promo becomes visible.
+    // Hidden until that day, and hidden when unset.
+    walrusConsoleAvailableOn: import.meta.env.VITE_WALRUS_CONSOLE_AVAILABLE_ON as string || '',
+    walrusConsoleEnabled: isCalendarDateReached(
+        import.meta.env.VITE_WALRUS_CONSOLE_AVAILABLE_ON as string || '',
     ),
     // Permanent V1 memory deletion UI. Off by default so nothing
     // is user-visible until the feature is tested and rollout is agreed.
