@@ -26,7 +26,7 @@ describe('ConnectWalrusMemory', () => {
         expect(screen.queryByRole('heading', { name: 'View your memories' })).not.toBeInTheDocument()
     })
 
-    it('shows the Walrus Console promo only after its available date', () => {
+    it('shows the Walrus Console promo only when enabled', () => {
         render(
             <ConnectWalrusMemory
                 path="agent"
