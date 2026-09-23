@@ -160,6 +160,8 @@ export default function ConnectMcp() {
      * response param state"). We still echo it back in the POST body as `state`.
      */
     const state = params.get('connectState') ?? params.get('state') ?? ''
+    // Local preview only. Production builds drop this, and it never talks to a bridge or the chain.
+    const devMock = import.meta.env.DEV && params.get('mock') === '1'
 
     const [step, setStep] = useState<Step>('verifying')
     const [errorMsg, setErrorMsg] = useState('')
@@ -195,8 +197,8 @@ export default function ConnectMcp() {
     }, [publicKey])
 
     useEffect(() => {
-        if (!paramsValid) {
-            setVerifiedBridge(null)
+        if (devMock || !paramsValid) {
+            if (!devMock) setVerifiedBridge(null)
             return
         }
         const controller = new AbortController()
@@ -239,7 +241,7 @@ export default function ConnectMcp() {
         })()
 
         return () => controller.abort()
-    }, [paramsValid, port, preflightAttempt, publicKey, relayer, state])
+    }, [devMock, paramsValid, port, preflightAttempt, publicKey, relayer, state])
 
     const postCallback = useCallback(
         async (payload: McpCallbackPayload): Promise<boolean> => {
@@ -355,10 +357,10 @@ export default function ConnectMcp() {
     ])
 
     useEffect(() => {
-        if (paramsValid || invalidRequestTrackedRef.current) return
+        if (devMock || paramsValid || invalidRequestTrackedRef.current) return
         invalidRequestTrackedRef.current = true
         trackEvent('mcp_connect_failed', { error_type: 'invalid_request' })
-    }, [paramsValid])
+    }, [devMock, paramsValid])
 
     // Persist the connect request so it survives the Google OAuth redirect.
     // Enoki's redirect_uri is pinned to the app root (App.tsx), so signing in
@@ -367,15 +369,16 @@ export default function ConnectMcp() {
     // /connect/mcp with the params restored. Keyed identically to the URL
     // params (note `connectState`, not `state`). Cleared on success below.
     useEffect(() => {
-        if (!paramsValid) return
+        if (devMock || !paramsValid) return
         sessionStorage.setItem(
             'memwal_mcp_connect',
             JSON.stringify({ port, publicKey, delegateAddress, relayer, connectState: state }),
         )
-    }, [paramsValid, port, publicKey, delegateAddress, relayer, state])
+    }, [devMock, paramsValid, port, publicKey, delegateAddress, relayer, state])
 
     // If the wallet popup completes after we asked it to open, auto-proceed.
     useEffect(() => {
+        if (devMock) return
         if (!walletPickerOpen && currentAccount && step === 'consent') {
             // user picked a wallet — kick off the connect flow.
             void handleConnect()
@@ -396,7 +399,16 @@ export default function ConnectMcp() {
 
             <main className="dash-shell">
                 <div className="mcp-connect-panel">
-                    {!paramsValid && (
+                    {devMock ? (
+                        <ConsentCard
+                            label="Claude Code"
+                            publicKey={'11'.repeat(32)}
+                            delegateAddress="0x7c30e2a1b4c89f01d2e3a4b5c6d7e8f90123456789abcdef0123456789abcd"
+                            relayer={config.memwalServerUrl}
+                            wallet={currentAccount?.address ?? null}
+                            onConnect={() => undefined}
+                        />
+                    ) : !paramsValid && (
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title">Invalid request</h2>
                             <p className="setup-classic-description">
@@ -531,7 +543,7 @@ function ConsentCard({
                 A local MCP client is requesting access
             </h2>
             <p className="setup-classic-description">
-                This local app calls itself <code className="mcp-code">{label}</code>. This name is not verified.
+                This local app calls itself <span className="mcp-client-name">{label}</span>. This name is not verified.
                 Approving grants persistent access until you revoke the delegate key on-chain.
             </p>
 
@@ -546,25 +558,29 @@ function ConsentCard({
 
                 <div className="mcp-rule" />
 
-                <p className="mcp-kicker">Details</p>
-                <div className="mcp-detail">
-                    <span className="mcp-detail-label">Relayer</span>
-                    <span className="mcp-detail-value">{relayer}</span>
-                </div>
-                <div className="mcp-detail">
-                    <span className="mcp-detail-label">Delegate public key</span>
-                    <span className="mcp-detail-value">{publicKey}</span>
-                </div>
-                <div className="mcp-detail">
-                    <span className="mcp-detail-label">Delegate address</span>
-                    <span className="mcp-detail-value">{delegateAddress}</span>
-                </div>
-                <div className="mcp-detail">
-                    <span className="mcp-detail-label">Connected wallet</span>
-                    <span className="mcp-detail-value">
-                        {wallet ? `${wallet.slice(0, 12)}…${wallet.slice(-6)}` : '(not connected yet)'}
-                    </span>
-                </div>
+                <details className="mcp-details">
+                    <summary className="mcp-kicker">Details</summary>
+                    <div className="mcp-details-body">
+                        <div className="mcp-detail">
+                            <span className="mcp-detail-label">Relayer</span>
+                            <span className="mcp-detail-value">{relayer}</span>
+                        </div>
+                        <div className="mcp-detail">
+                            <span className="mcp-detail-label">Delegate public key</span>
+                            <span className="mcp-detail-value">{publicKey}</span>
+                        </div>
+                        <div className="mcp-detail">
+                            <span className="mcp-detail-label">Delegate address</span>
+                            <span className="mcp-detail-value">{delegateAddress}</span>
+                        </div>
+                        <div className="mcp-detail">
+                            <span className="mcp-detail-label">Connected wallet</span>
+                            <span className="mcp-detail-value">
+                                {wallet ? `${wallet.slice(0, 12)}…${wallet.slice(-6)}` : '(not connected yet)'}
+                            </span>
+                        </div>
+                    </div>
+                </details>
             </div>
 
             <div className="setup-classic-actions">

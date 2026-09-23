@@ -12990,7 +12990,11 @@ h1, h2, h3 {
 .dash-page .dashboard-keys-card .card-header-actions {
   grid-area: actions;
   align-self: center;
-  margin-top: -4px;
+  margin-top: 0;
+}
+
+.dash-page .dashboard-keys-card {
+  overflow: visible;
 }
 
 .dash-page .dashboard-keys-card .card-header-actions .dashboard-keys-refresh,
@@ -13582,44 +13586,137 @@ h1, h2, h3 {
   font-size: 14px;
 }
 
-.dash-page .playground-key-banner {
+.playground-key-gate {
   order: 0;
-  margin: 28px 0 8px !important;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  margin: 36px 0 84px;
 }
 
-.playground-key-banner-body {
-  flex: 1;
-  min-width: 0;
+.playground-key-note {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 20px;
+  margin: 0;
+  padding: 24px 28px;
+  border: 1px solid rgba(232, 255, 117, 0.45);
+  border-radius: 6px;
+  background: transparent;
+  color: #e8ff75;
+}
+
+.playground-key-note-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.playground-key-note svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.playground-key-note p {
+  margin: 0;
+  color: #e8ff75;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.playground-key-form {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 14px;
+  gap: 10px;
 }
 
-.playground-key-banner .connect-wm-import {
+.playground-key-form label,
+.playground-key-form a {
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.playground-key-form a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.playground-key-form a:hover {
+  color: #faf8f5;
+}
+
+.playground-key-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
-  margin-top: 0;
 }
 
-.playground-key-banner .connect-wm-import label,
-.playground-key-banner .dash-alert-link {
-  color: #e8ff75;
+.playground-key-row input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid #262b30;
+  border-radius: 6px;
+  background: #000000;
+  color: #faf8f5;
+  font-family: "Google Sans Code", ui-monospace, monospace;
+  font-size: 14px;
 }
 
-.playground-key-banner .connect-wm-console {
+.playground-key-row input::placeholder {
+  color: #8f9294;
+}
+
+.playground-key-row input:focus {
+  outline: none;
+  border-color: #8f9294;
+}
+
+.playground-key-row button {
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 18px;
+  border: 1px solid #54575a;
+  border-radius: 999px;
+  background: transparent;
+  color: #faf8f5;
+  font-family: "Google Sans Code", ui-monospace, monospace;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.playground-key-row button:hover:not(:disabled) {
+  border-color: #faf8f5;
+}
+
+.playground-key-row button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.playground-key-error {
   margin: 0;
-  color: #e8ff75;
-  border-color: rgba(232, 255, 117, 0.55);
+  color: #ff9aa0;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 14px;
 }
 
-.playground-key-banner .connect-wm-console:hover {
-  background: #e8ff75;
-  border-color: #e8ff75;
-  color: #000000;
-}
-
-.playground-key-banner .connect-wm-import-error {
-  color: #ffffff;
+@media (max-width: 640px) {
+  .playground-key-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 .dash-page .playground-dashboard {
@@ -13878,37 +13975,43 @@ h1, h2, h3 {
    without the setup wizard's rounded cards. */
 .mcp-connect .mcp-connect-panel {
   width: 100%;
+  font-family: "Google Sans Flex", sans-serif;
+  font-weight: 400;
+  text-transform: none;
 }
 
 .mcp-connect .setup-classic-intro {
   margin-bottom: 0;
-  text-align: left;
+  text-align: center;
 }
 
 .mcp-connect .setup-classic-title {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
   color: #faf8f5;
-  font-family: Ratch, sans-serif;
-  font-size: 44px;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 40px;
   font-weight: 400;
-  line-height: 1.05;
+  line-height: 1.15;
   letter-spacing: 0;
+  text-align: center;
+  text-transform: none;
 }
 
 .mcp-connect .setup-classic-description {
-  max-width: none;
-  margin: 0 0 28px;
-  color: #8f9294;
+  max-width: 640px;
+  margin: 0 auto 36px;
+  color: #b1b4b6;
   font-family: "Google Sans Flex", sans-serif;
   font-size: 18px;
   font-weight: 400;
-  line-height: 1.45;
-  text-align: left;
+  line-height: 1.5;
+  text-align: center;
 }
 
 .mcp-connect .setup-classic-description strong,
 .mcp-connect .mcp-client-name {
   color: #faf8f5;
+  font-family: inherit;
   font-weight: 500;
 }
 
@@ -13918,21 +14021,22 @@ h1, h2, h3 {
 
 .mcp-connect .setup-classic-feature-card {
   margin-bottom: 28px !important;
-  padding: 22px 22px 8px !important;
+  padding: 24px 28px !important;
   border: 1px solid #262b30 !important;
   border-radius: 6px !important;
   background: transparent !important;
   box-shadow: none !important;
+  text-align: left;
 }
 
 .mcp-connect .mcp-kicker {
   margin: 0 0 10px;
-  color: #8f9294;
-  font-family: "Google Sans Code", ui-monospace, monospace;
-  font-size: 12px;
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 18px;
   font-weight: 400;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .mcp-connect .mcp-perms {
@@ -13941,8 +14045,9 @@ h1, h2, h3 {
   list-style: none;
   color: #faf8f5;
   font-family: "Google Sans Flex", sans-serif;
-  font-size: 16px;
-  line-height: 1.55;
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.5;
 }
 
 .mcp-connect .mcp-perms li {
@@ -13954,6 +14059,38 @@ h1, h2, h3 {
   color: #faf8f5;
   font-family: "Google Sans Code", ui-monospace, monospace;
   font-size: 0.92em;
+  font-weight: 400;
+}
+
+.mcp-connect .mcp-details summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.mcp-connect .mcp-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.mcp-connect .mcp-details summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-right: 4px;
+  border-right: 1.5px solid #8f9294;
+  border-bottom: 1.5px solid #8f9294;
+  transform: rotate(45deg) translateY(-2px);
+}
+
+.mcp-connect .mcp-details[open] summary::after {
+  transform: rotate(-135deg) translateY(-2px);
+}
+
+.mcp-connect .mcp-details-body {
+  margin-top: 14px;
 }
 
 .mcp-connect .mcp-rule {
@@ -13965,22 +14102,28 @@ h1, h2, h3 {
 .mcp-connect .mcp-detail {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-bottom: 14px;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.mcp-connect .mcp-detail:last-child {
+  margin-bottom: 0;
 }
 
 .mcp-connect .mcp-detail-label {
-  color: #8f9294;
-  font-family: "Google Sans Code", ui-monospace, monospace;
-  font-size: 12px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 15px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .mcp-connect .mcp-detail-value {
   color: #faf8f5;
   font-family: "Google Sans Code", ui-monospace, monospace;
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 400;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -14001,7 +14144,7 @@ h1, h2, h3 {
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
   gap: 12px;
 }
 
@@ -14015,12 +14158,13 @@ h1, h2, h3 {
   border-radius: 999px;
   background: transparent;
   color: #faf8f5;
-  font-family: "Google Sans Code", ui-monospace, monospace;
-  font-size: 13px;
-  letter-spacing: 0.08em;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 16px;
+  font-weight: 400;
+  letter-spacing: 0;
   line-height: 1;
   text-decoration: none;
-  text-transform: uppercase;
+  text-transform: none;
   cursor: pointer;
 }
 
@@ -14038,7 +14182,8 @@ h1, h2, h3 {
   margin: 0 0 14px;
   color: #b1b4b6;
   font-family: "Google Sans Flex", sans-serif;
-  font-size: 16px;
+  font-size: 18px;
+  font-weight: 400;
   line-height: 1.5;
 }
 
@@ -14069,7 +14214,8 @@ h1, h2, h3 {
 .mcp-connect .mcp-link {
   color: #b1b4b6;
   font-family: "Google Sans Flex", sans-serif;
-  font-size: 15px;
+  font-size: 16px;
+  font-weight: 400;
   text-decoration: underline;
   text-underline-offset: 3px;
 }

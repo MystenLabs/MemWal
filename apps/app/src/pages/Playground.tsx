@@ -789,7 +789,7 @@ export default function Playground() {
                     </p>
                 </div>
 
-                {/* Server info */}
+                {delegateKey ? (
                 <div className="demo-server-info">
                     <div className="demo-server-tag">
                         server: <span className="demo-tag-value demo-tag-value--server">{serverUrl}</span>
@@ -811,44 +811,43 @@ export default function Playground() {
                         />
                     </div>
                 </div>
-
-                {!delegateKey && (
-                    <div className="dash-alert dash-alert--info playground-key-banner" role="status">
-                        <TriangleAlert className="dash-alert-icon" size={18} strokeWidth={2.3} aria-hidden="true" />
-                        <div className="playground-key-banner-body">
-                            <p>
-                                This browser tab doesn't have a delegate key, so none of the steps below can run yet.
-                                Paste a key already registered for this wallet, or create one on the dashboard.
-                            </p>
+                ) : (
+                    <div className="playground-key-gate">
+                        <div className="playground-key-note" role="status">
+                            <div className="playground-key-note-line">
+                                <TriangleAlert size={16} strokeWidth={2.2} aria-hidden="true" />
+                                <p>This browser tab doesn't have a delegate key, so the steps below can't run yet.</p>
+                            </div>
                             <form
-                                className="connect-wm-import"
+                                className="playground-key-form"
                                 onSubmit={(event) => {
                                     event.preventDefault()
                                     void importExistingKey(existingKey)
                                 }}
                             >
                                 <label htmlFor="playground-existing-key">Already have a delegate key?</label>
-                                <textarea
-                                    id="playground-existing-key"
-                                    value={existingKey}
-                                    onChange={(event) => setExistingKey(event.target.value)}
-                                    placeholder="Paste an existing delegate key"
-                                    aria-label="existing delegate key"
-                                    spellCheck={false}
-                                    rows={2}
-                                />
+                                <div className="playground-key-row">
+                                    <input
+                                        id="playground-existing-key"
+                                        value={existingKey}
+                                        onChange={(event) => setExistingKey(event.target.value)}
+                                        placeholder="Paste an existing delegate key"
+                                        aria-label="existing delegate key"
+                                        spellCheck={false}
+                                        autoComplete="off"
+                                    />
+                                    <button
+                                        type="submit"
+                                        disabled={importingExistingKey || accountLookupPending || !existingKey.trim()}
+                                    >
+                                        {importingExistingKey ? 'Checking key...' : accountLookupPending ? 'Checking account...' : 'Use this key'}
+                                    </button>
+                                </div>
                                 {existingKeyError && (
-                                    <p className="connect-wm-import-error" role="alert">{existingKeyError}</p>
+                                    <p className="playground-key-error" role="alert">{existingKeyError}</p>
                                 )}
-                                <button
-                                    type="submit"
-                                    className="connect-wm-console"
-                                    disabled={importingExistingKey || accountLookupPending || !existingKey.trim()}
-                                >
-                                    {importingExistingKey ? 'Checking key...' : accountLookupPending ? 'Checking account...' : 'Use this key'}
-                                </button>
+                                <Link to="/dashboard#delegate-keys">Create a key on the dashboard</Link>
                             </form>
-                            <Link className="dash-alert-link" to="/dashboard#delegate-keys">Create a key on the dashboard</Link>
                         </div>
                     </div>
                 )}

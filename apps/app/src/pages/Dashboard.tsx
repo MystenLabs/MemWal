@@ -13,7 +13,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
@@ -178,6 +178,7 @@ export default function Dashboard({
 }) {
     const currentAccount = useCurrentAccount()
     const navigate = useNavigate()
+    const location = useLocation()
     const { mutateAsync: disconnect } = useDisconnectWallet()
     const { mutateAsync: signAndExecuteTx } = useSponsoredTransaction()
     const { mutateAsync: signPersonalMsg } = useSignPersonalMessage()
@@ -433,6 +434,22 @@ export default function Dashboard({
             .getElementById(DELEGATE_KEYS_SECTION_ID)
             ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }, [])
+
+    useEffect(() => {
+        const hash = location.hash || window.location.hash
+        if (hash !== `#${DELEGATE_KEYS_SECTION_ID}`) return
+        const scroll = () => {
+            const section = document.getElementById(DELEGATE_KEYS_SECTION_ID)
+            if (!section) return
+            const nav = document.querySelector('.dashboard-nav')
+            const navHeight = nav instanceof HTMLElement ? nav.getBoundingClientRect().height : 96
+            const top = section.getBoundingClientRect().top + window.scrollY - navHeight - 28
+            window.scrollTo({ top: Math.max(0, top), behavior: 'auto' })
+        }
+        scroll()
+        const later = window.setTimeout(scroll, 250)
+        return () => window.clearTimeout(later)
+    }, [location.hash])
 
     useEffect(() => {
         setSelectedKeyPublicKeys((prev) => {
