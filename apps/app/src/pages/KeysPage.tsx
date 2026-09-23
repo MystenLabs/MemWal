@@ -15,9 +15,10 @@
  *      selects an account or authorizes anything.
  *   3. Render the existing Dashboard delegate-keys card (mint/rotate/revoke),
  *      auto-scrolled into view — unless there's a mismatch, so the warning
- *      banner stays in view instead of being scrolled past.
- *   4. "Back to Console" always links to config.consoleUrl — never to a
- *      `return`/`redirect` query param (the WALM-288 class of bug).
+ *      banner stays in view instead of being scrolled past. Dashboard's own
+ *      nav carries "Back to Console" (config.consoleUrl, never a URL param —
+ *      the WALM-288 class of bug — see Dashboard.tsx), so /dashboard gets it
+ *      too, matching the 23 Sep decision that /setup ends there.
  */
 import { useEffect, useRef, useState } from 'react'
 import {
@@ -27,10 +28,9 @@ import {
     useDisconnectWallet,
 } from '@mysten/dapp-kit'
 import { Link, useSearchParams } from 'react-router-dom'
-import { ExternalLink, TriangleAlert } from 'lucide-react'
+import { TriangleAlert } from 'lucide-react'
 import { useDelegateKey } from '../App'
 import Dashboard from './Dashboard'
-import { config } from '../config'
 import { trackEvent } from '../utils/analytics'
 
 const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
@@ -130,14 +130,6 @@ export default function KeysPage() {
                             and sign in as the expected account to manage its keys.
                         </p>
                     </div>
-                </div>
-            )}
-
-            {config.consoleUrl && (
-                <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '1rem 1.5rem 0' }}>
-                    <a href={config.consoleUrl} className="btn btn-secondary btn-sm">
-                        <ExternalLink size={12} /> Back to Console
-                    </a>
                 </div>
             )}
 
