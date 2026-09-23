@@ -13,6 +13,7 @@ import {
   useAutoConnectWallet,
   useCurrentAccount,
   useDisconnectWallet,
+  useSuiClient,
   useSuiClientContext,
 } from '@mysten/dapp-kit'
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
@@ -35,6 +36,7 @@ import ConnectMcp from './pages/ConnectMcp'
 import ConnectClaude from './pages/ConnectClaude'
 import KeysPage from './pages/KeysPage'
 import { useRouteAnalytics } from './hooks/useRouteAnalytics'
+import { fetchAccountIdForOwner } from './utils/suiClientCompat'
 
 
 import '@mysten/dapp-kit/dist/index.css'
@@ -269,7 +271,8 @@ function consumePendingConnectQuery(storageKey: string): string {
 
 /** Lands here after a successful sign-in (the OAuth redirect_uri is the app
  *  root). Resume an interrupted hosted Claude or local MCP connection by
- *  restoring its saved query string; otherwise go to the dashboard. */
+ *  restoring its saved query string; otherwise resolve whether this is a
+ *  brand-new account. */
 function PostAuthRedirect() {
   const claudeConnectQuery = consumePendingConnectQuery(CLAUDE_CONNECT_STORAGE_KEY)
   if (claudeConnectQuery) {
@@ -282,7 +285,41 @@ function PostAuthRedirect() {
   const keysConnectQuery = consumePendingConnectQuery(KEYS_CONNECT_STORAGE_KEY)
   if (keysConnectQuery) return <Navigate to={`/keys?${keysConnectQuery}`} replace />
 
-  return <Navigate to="/dashboard" replace />
+  return <PostAuthAccountCheck />
+}
+
+/** COMG-1092's new-user route sends a signed-out visitor straight into
+ *  Enoki sign-in with no page of its own — so this is the first chance to
+ *  route a brand-new account (no on-chain Account object yet) to /setup
+ *  instead of /dashboard's "no keys yet, create one" prompt. An existing
+ *  account always lands on /dashboard, same as before this existed. */
+export function PostAuthAccountCheck() {
+  const currentAccount = useCurrentAccount()
+  const suiClient = useSuiClient()
+  const [target, setTarget] = useState<'/dashboard' | '/setup' | null>(null)
+
+  useEffect(() => {
+    // AppContent only reaches this component when currentAccount is already
+    // set (see the "/" route below) — this guard is defensive, not expected.
+    if (!currentAccount) return
+    let cancelled = false
+    fetchAccountIdForOwner(suiClient, config.memwalRegistryId, currentAccount.address)
+      .then((accountId) => {
+        if (!cancelled) setTarget(accountId ? '/dashboard' : '/setup')
+      })
+      .catch((err) => {
+        console.error('Failed to resolve account after sign-in:', err)
+        if (!cancelled) setTarget('/dashboard')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentAccount, suiClient])
+
+  if (!currentAccount) return <Navigate to="/dashboard" replace />
+
+  if (!target) return <RoutePending />
+  return <Navigate to={target} replace />
 }
 
 function AppContent() {
