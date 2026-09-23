@@ -28,6 +28,7 @@ import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import { apiGet } from '../utils/api'
+import { assertDelegateKeyRegistered, deriveDelegatePublicKeyHex, normalizeDelegatePrivateKey } from '../utils/delegateKeyImport'
 import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
 import ConnectWalrusMemory, { type ConnectPath } from './ConnectWalrusMemory'
 
@@ -393,8 +394,8 @@ export default function Dashboard({
     connectedAccountIdRef.current = effectiveAccountObjectId
 
     const importExistingKey = useCallback(async (rawKey: string) => {
-        const normalized = rawKey.trim().replace(/^0x/i, '').replace(/\s+/g, '').toLowerCase()
-        if (!/^[0-9a-f]{64}$/.test(normalized)) {
+        const normalized = normalizeDelegatePrivateKey(rawKey)
+        if (!normalized) {
             setExistingKeyError('Delegate key must be a 64-character hex private key.')
             trackEvent('delegate_key_import_failed', { error_type: 'invalid_input', location: 'dashboard_connect' })
             return
@@ -410,19 +411,9 @@ export default function Dashboard({
         setExistingKeyError('')
         trackEvent('delegate_key_import_start', { location: 'dashboard_connect' })
         try {
-            const ed = await import('@noble/ed25519')
-            const privateKey = Uint8Array.from(normalized.match(/.{2}/g)!.map((byte) => parseInt(byte, 16)))
-            const publicKey = await ed.getPublicKeyAsync(privateKey)
-            const publicKeyHex = Array.from(publicKey).map((byte) => byte.toString(16).padStart(2, '0')).join('')
-            const json = await fetchObjectJson(suiClient, accountId) as
-                { delegate_keys?: { public_key?: unknown }[] } | null
+            const publicKeyHex = await deriveDelegatePublicKeyHex(normalized)
+            await assertDelegateKeyRegistered(suiClient, accountId, publicKeyHex)
             if (connectedAccountIdRef.current !== accountId) return
-            const registered = (json?.delegate_keys ?? []).some((key) =>
-                publicKeyToHex(key.public_key).replace(/^0x/i, '').toLowerCase() === publicKeyHex,
-            )
-            if (!registered) {
-                throw new Error('This delegate key is not registered on-chain for the connected wallet.')
-            }
             setDelegateKeys(normalized, publicKeyHex, accountId)
             trackEvent('delegate_key_import_complete', { location: 'dashboard_connect' })
         } catch (err) {

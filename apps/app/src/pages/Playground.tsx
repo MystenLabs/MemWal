@@ -7,7 +7,7 @@
 
 import { useState, useCallback, useMemo, useEffect, useRef, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { LayoutDashboard, LogOut } from 'lucide-react'
+import { LayoutDashboard, LogOut, TriangleAlert } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 
@@ -26,6 +26,8 @@ import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import { assertDelegateKeyRegistered, deriveDelegatePublicKeyHex, normalizeDelegatePrivateKey } from '../utils/delegateKeyImport'
+import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 
 const walrusCodeTheme = {
     hljs: {
@@ -81,6 +83,7 @@ interface DemoStepProps {
     resultLabel?: string
     error: string | null
     loading: boolean
+    runDisabled?: boolean
     highlight?: boolean
     children?: ReactNode
 }
@@ -106,6 +109,7 @@ function DemoStep({
     resultLabel = 'response',
     error,
     loading,
+    runDisabled = false,
     highlight,
     children,
 }: DemoStepProps) {
@@ -121,7 +125,7 @@ function DemoStep({
                 <button
                     className={`btn btn-primary btn-sm${loading ? ' demo-run-button--loading' : ''}`}
                     onClick={onRun}
-                    disabled={loading}
+                    disabled={loading || runDisabled}
                 >
                     {loading ? (
                         <span className="spinner demo-button-spinner" />
@@ -173,7 +177,8 @@ function DemoStep({
 export default function Playground() {
     const currentAccount = useCurrentAccount()
     const { mutateAsync: disconnect } = useDisconnectWallet()
-    const { delegateKey, clearDelegateKeys, accountObjectId } = useDelegateKey()
+    const { delegateKey, clearDelegateKeys, accountObjectId, setDelegateKeys } = useDelegateKey()
+    const suiClient = useSuiClient()
 
     const address = currentAccount?.address || ''
     const [navSolid, setNavSolid] = useState(false)
@@ -186,11 +191,79 @@ export default function Playground() {
     }, [])
     const serverUrl = config.memwalServerUrl
     const keyStatus = delegateKey ? 'configured' : 'missing'
+    const [resolvedAccountId, setResolvedAccountId] = useState<string | null>(accountObjectId)
+    const [accountLookupPending, setAccountLookupPending] = useState(false)
+    const [existingKey, setExistingKey] = useState('')
+    const [existingKeyError, setExistingKeyError] = useState('')
+    const [importingExistingKey, setImportingExistingKey] = useState(false)
+    const accountIdRef = useRef(accountObjectId ?? resolvedAccountId)
+    accountIdRef.current = accountObjectId ?? resolvedAccountId
+
+    useEffect(() => {
+        if (!address) {
+            setResolvedAccountId(null)
+            setAccountLookupPending(false)
+            return
+        }
+        if (accountObjectId) {
+            setResolvedAccountId(accountObjectId)
+            setAccountLookupPending(false)
+            return
+        }
+        let cancelled = false
+        setResolvedAccountId(null)
+        setAccountLookupPending(true)
+        fetchAccountIdForOwner(suiClient, config.memwalRegistryId, address)
+            .then((accountId) => {
+                if (!cancelled) setResolvedAccountId(accountId)
+            })
+            .catch(() => {
+                if (!cancelled) setResolvedAccountId(null)
+            })
+            .finally(() => {
+                if (!cancelled) setAccountLookupPending(false)
+            })
+        return () => { cancelled = true }
+    }, [address, accountObjectId, suiClient])
+
+    const importExistingKey = useCallback(async (rawKey: string) => {
+        const normalized = normalizeDelegatePrivateKey(rawKey)
+        if (!normalized) {
+            setExistingKeyError('Delegate key must be a 64-character hex private key.')
+            trackEvent('delegate_key_import_failed', { error_type: 'invalid_input', location: 'playground' })
+            return
+        }
+        const accountId = accountObjectId ?? resolvedAccountId
+        if (!accountId) {
+            setExistingKeyError('No Walrus Memory account found for this wallet. Create a delegate key first.')
+            trackEvent('delegate_key_import_failed', { error_type: 'no_account', location: 'playground' })
+            return
+        }
+        setImportingExistingKey(true)
+        setExistingKeyError('')
+        trackEvent('delegate_key_import_start', { location: 'playground' })
+        try {
+            const publicKeyHex = await deriveDelegatePublicKeyHex(normalized)
+            await assertDelegateKeyRegistered(suiClient, accountId, publicKeyHex)
+            if (accountIdRef.current !== accountId) return
+            setDelegateKeys(normalized, publicKeyHex, accountId)
+            setExistingKey('')
+            trackEvent('delegate_key_import_complete', { location: 'playground' })
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Failed to import delegate key. Please try again.'
+            setExistingKeyError(message)
+            trackEvent('delegate_key_import_failed', {
+                error_type: getAnalyticsErrorType(err),
+                location: 'playground',
+            })
+        } finally {
+            setImportingExistingKey(false)
+        }
+    }, [accountObjectId, resolvedAccountId, setDelegateKeys, suiClient])
 
     // Wallet signing hooks (for full client-side mode)
     const { mutateAsync: signAndExecuteTransaction } = useSponsoredTransaction()
     const { mutateAsync: signPersonalMessage } = useSignPersonalMessage()
-    const suiClient = useSuiClient()
 
     // ============================================================
     // SDK Instance — created from delegate key
@@ -739,6 +812,47 @@ export default function Playground() {
                     </div>
                 </div>
 
+                {!delegateKey && (
+                    <div className="dash-alert dash-alert--info playground-key-banner" role="status">
+                        <TriangleAlert className="dash-alert-icon" size={18} strokeWidth={2.3} aria-hidden="true" />
+                        <div className="playground-key-banner-body">
+                            <p>
+                                This browser tab doesn't have a delegate key, so none of the steps below can run yet.
+                                Paste a key already registered for this wallet, or create one on the dashboard.
+                            </p>
+                            <form
+                                className="connect-wm-import"
+                                onSubmit={(event) => {
+                                    event.preventDefault()
+                                    void importExistingKey(existingKey)
+                                }}
+                            >
+                                <label htmlFor="playground-existing-key">Already have a delegate key?</label>
+                                <textarea
+                                    id="playground-existing-key"
+                                    value={existingKey}
+                                    onChange={(event) => setExistingKey(event.target.value)}
+                                    placeholder="Paste an existing delegate key"
+                                    aria-label="existing delegate key"
+                                    spellCheck={false}
+                                    rows={2}
+                                />
+                                {existingKeyError && (
+                                    <p className="connect-wm-import-error" role="alert">{existingKeyError}</p>
+                                )}
+                                <button
+                                    type="submit"
+                                    className="connect-wm-console"
+                                    disabled={importingExistingKey || accountLookupPending || !existingKey.trim()}
+                                >
+                                    {importingExistingKey ? 'Checking key...' : accountLookupPending ? 'Checking account...' : 'Use this key'}
+                                </button>
+                            </form>
+                            <Link className="dash-alert-link" to="/dashboard#delegate-keys">Create a key on the dashboard</Link>
+                        </div>
+                    </div>
+                )}
+
                 {/* Step 1: Health */}
                 <DemoStep
                     number={1}
@@ -759,6 +873,7 @@ const data = await memwal.health()
                     result={healthResult}
                     error={healthError}
                     loading={healthLoading}
+                    runDisabled={!delegateKey}
                 />
 
                 {/* Step 2: Remember */}
@@ -787,6 +902,7 @@ while (true) {
                     resultLabel="memory saved (accepted → terminal)"
                     error={rememberError}
                     loading={rememberLoading}
+                    runDisabled={!delegateKey}
                 >
                     <div className="input-group">
                         <label>Memory text</label>
@@ -813,6 +929,7 @@ while (true) {
                     resultLabel="memories found (decrypted)"
                     error={recallError}
                     loading={recallLoading}
+                    runDisabled={!delegateKey}
                 >
                     <div className="input-group">
                         <label>Search query</label>
@@ -839,6 +956,7 @@ while (true) {
                     resultLabel="fact jobs accepted"
                     error={analyzeError}
                     loading={analyzeLoading}
+                    runDisabled={!delegateKey}
                 >
                     <div className="input-group">
                         <label>Conversation text to analyze</label>
@@ -866,6 +984,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                     resultLabel="restore result"
                     error={restoreError}
                     loading={restoreLoading}
+                    runDisabled={!delegateKey}
                     highlight
                 />
 
@@ -935,7 +1054,7 @@ const result = await memwal.restore("${namespace || 'default'}")
                         <button
                             className={`btn btn-primary btn-sm${askLoading ? ' demo-run-button--loading' : ''}`}
                             onClick={runAsk}
-                            disabled={askLoading || !askLlmKey.trim()}
+                            disabled={askLoading || !askLlmKey.trim() || !delegateKey}
                         >
                             {askLoading ? (
                                 <span className="spinner demo-button-spinner" />
@@ -1053,7 +1172,7 @@ const { text } = await generateText({
                         <button
                             className={`btn btn-primary btn-sm${fullRememberLoading ? ' demo-run-button--loading' : ''}`}
                             onClick={runFullRemember}
-                            disabled={fullRememberLoading || !memwalManual}
+                            disabled={fullRememberLoading || !memwalManual || !delegateKey}
                         >
                             {fullRememberLoading ? (
                                 <span className="spinner demo-button-spinner" />
@@ -1135,7 +1254,7 @@ await memwal.rememberManual("${fullRememberText.slice(0, 40)}...")`}
                         <button
                             className={`btn btn-primary btn-sm${fullRecallLoading ? ' demo-run-button--loading' : ''}`}
                             onClick={runFullRecall}
-                            disabled={fullRecallLoading || !memwalManual}
+                            disabled={fullRecallLoading || !memwalManual || !delegateKey}
                         >
                             {fullRecallLoading ? (
                                 <span className="spinner demo-button-spinner" />

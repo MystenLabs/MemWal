@@ -13582,6 +13582,41 @@ h1, h2, h3 {
   font-size: 14px;
 }
 
+.playground-key-banner-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.playground-key-banner .connect-wm-import {
+  width: 100%;
+  margin-top: 0;
+}
+
+.playground-key-banner .connect-wm-import label,
+.playground-key-banner .dash-alert-link {
+  color: #e8ff75;
+}
+
+.playground-key-banner .connect-wm-console {
+  margin: 0;
+  color: #e8ff75;
+  border-color: rgba(232, 255, 117, 0.55);
+}
+
+.playground-key-banner .connect-wm-console:hover {
+  background: #e8ff75;
+  border-color: #e8ff75;
+  color: #000000;
+}
+
+.playground-key-banner .connect-wm-import-error {
+  color: #ffffff;
+}
+
 .dash-page .playground-dashboard {
   width: min(816px, calc(100% - 40px)) !important;
   max-width: 816px !important;
