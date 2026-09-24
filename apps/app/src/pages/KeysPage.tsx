@@ -104,11 +104,11 @@ export default function KeysPage() {
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title">Sign in to manage delegate keys</h2>
                             <p className="setup-classic-description">
-                                Connect the Sui wallet linked to your Walrus Memory account to mint or revoke delegate keys.
+                                Sign in with the same account you use for Walrus Memory to mint or revoke delegate keys.
                             </p>
                             <div className="setup-classic-actions">
                                 <button type="button" className="lp-btn-yellow" onClick={() => setWalletPickerOpen(true)}>
-                                    Connect Sui wallet
+                                    Sign in
                                 </button>
                             </div>
                         </div>
