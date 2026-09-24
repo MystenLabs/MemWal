@@ -74,6 +74,7 @@ import {
     compatibilityErrorFromStatus,
 } from "./compatibility.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { pollingDelayMs } from "./polling-delay.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -128,13 +129,6 @@ type RememberStatusResponse = RememberJobStatus | { error?: string };
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function pollingDelayMs(baseMs: number, attempt: number): number {
-    const base = Math.max(100, baseMs);
-    const capped = Math.min(10_000, base * 1.5 ** Math.min(attempt, 6));
-    const jitter = 0.75 + Math.random() * 0.5;
-    return Math.floor(capped * jitter);
 }
 
 /** Window over which the same (namespace, text) resolves to one key.
@@ -477,6 +471,7 @@ export class MemWal {
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
         let retryAfterMs = 0;
+        let sawRateLimit = false;
 
         while (Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
@@ -507,6 +502,7 @@ export class MemWal {
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    if (httpStatus === 429) sawRateLimit = true;
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
@@ -540,7 +536,10 @@ export class MemWal {
         }
 
         throw Object.assign(
-            new Error(`remember job timed out after ${timeoutMs}ms (job_id=${jobId})`),
+            new Error(
+                `remember job timed out after ${timeoutMs}ms (job_id=${jobId})` +
+                    (sawRateLimit ? "; wait hit a rate limit (429)" : ""),
+            ),
             { status: 504, jobId },
         );
     }
@@ -663,6 +662,7 @@ export class MemWal {
         const pending = new Set(jobIds);
         let attempt = 0;
         let retryAfterMs = 0;
+        let sawRateLimit = false;
 
         while (pending.size > 0 && Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
@@ -685,6 +685,7 @@ export class MemWal {
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    if (httpStatus === 429) sawRateLimit = true;
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
@@ -728,6 +729,14 @@ export class MemWal {
                                 : redactInternalUrls(status.error ?? "unknown error"),
                     };
                     pending.delete(jobId);
+                }
+            }
+        }
+
+        if (sawRateLimit) {
+            for (const result of results) {
+                if (result.status === "timeout" && result.error) {
+                    result.error = `${result.error}; wait hit a rate limit (429)`;
                 }
             }
         }
