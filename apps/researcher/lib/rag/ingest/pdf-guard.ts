@@ -384,9 +384,9 @@ type ParsedStream = {
   /** First byte of data, after the end-of-line that follows the keyword. */
   dataStart: number;
   /**
-   * Where pdf.js's data ends, when it can be known: from `/Length`, or from its
-   * own endstream search. Undefined when `/Length` is a reference this cannot
-   * resolve — then measuring runs to the end of the file instead.
+   * Where pdf.js's data ends, when it can be known: from a direct `/Length`, or
+   * from its own endstream search. Undefined when `/Length` is a reference —
+   * then measuring runs until the compressed data itself ends.
    */
   dataEnd: number | undefined;
 };
@@ -446,28 +446,29 @@ function pdfjsFindStreamEnd(bytes: Uint8Array, from: number): number {
   return -1;
 }
 
-type IntegerObjects = Map<string, number | "ambiguous">;
-
 /**
  * Where pdf.js's stream data ends (`Parser.makeStream`): it jumps to
  * `start + /Length` and takes that if the next token is `endstream`; otherwise
  * — a bad or missing length, which it reads as 0 — it searches. A `/Length`
- * given by reference is resolved against top-level integer objects; one that
- * cannot be resolved leaves the end unknown.
+ * given by reference leaves the end unknown (see below).
  */
 function streamRegion(
   bytes: Uint8Array,
   dict: Map<string, PdfValue>,
-  dataStart: number,
-  integers: IntegerObjects
+  dataStart: number
 ): { dataEnd: number | undefined; resumeAt: number } {
   const lengthValue = dict.get("Length");
   let length: number | undefined = 0;
   if (lengthValue?.kind === "number" && lengthValue.integer) {
     length = lengthValue.value;
   } else if (lengthValue?.kind === "ref") {
-    const resolved = integers.get(`${lengthValue.num} ${lengthValue.gen}`);
-    length = typeof resolved === "number" ? resolved : undefined;
+    // pdf.js resolves the reference through the xref — possibly to an object
+    // inside an object stream — which this does not read. A top-level
+    // `N G obj <integer>` in the raw bytes is not that object: a decoy one,
+    // with `endstream` planted at the matching offset, would slice a bomb
+    // there. So an indirect length is unknown, and measuring runs to where
+    // the compressed data itself ends. (Henry, round 4 on #985.)
+    length = undefined;
   }
 
   if (length !== undefined && length >= 0 && dataStart + length <= bytes.length) {
@@ -486,9 +487,9 @@ function streamRegion(
 
   const found = pdfjsFindStreamEnd(bytes, dataStart);
   if (found === -1) throw cannotCheck(`stream at ${dataStart} has no endstream`);
-  // With an unresolvable /Length, pdf.js may use a longer region than the
-  // search finds, so the end is unknown; the search still says where the
-  // structure can resume at the earliest.
+  // With an indirect /Length, pdf.js may use a longer region than the search
+  // finds, so the end is unknown; the search still says where the structure
+  // can resume at the earliest.
   return { dataEnd: length === undefined ? undefined : found, resumeAt: found };
 }
 
@@ -498,8 +499,7 @@ function streamRegion(
  */
 function parseObjectAt(
   bytes: Uint8Array,
-  at: number,
-  integers: IntegerObjects
+  at: number
 ): { stream: ParsedStream | null; resumeAt: number; value: PdfValue; num: number; gen: number } {
   const lexer = new Lexer(bytes, at, bytes.length);
   const parser = new Parser(lexer);
@@ -532,7 +532,7 @@ function parseObjectAt(
   if (parser.hasLookahead()) throw cannotCheck(`read past stream keyword at ${after.start}`);
 
   const dataStart = skipToNextLine(bytes, after.end);
-  const { dataEnd, resumeAt } = streamRegion(bytes, value.entries, dataStart, integers);
+  const { dataEnd, resumeAt } = streamRegion(bytes, value.entries, dataStart);
   return {
     stream: { dict: value.entries, keywordAt: after.start, dataStart, dataEnd },
     resumeAt,
@@ -540,36 +540,6 @@ function parseObjectAt(
     num: num.value,
     gen: gen.value,
   };
-}
-
-/** Top-level `N G obj <integer>` objects, for resolving an indirect `/Length`. */
-function integerObjects(bytes: Uint8Array, rawHeaders: number[]): IntegerObjects {
-  const integers: IntegerObjects = new Map();
-  for (const at of rawHeaders) {
-    try {
-      const lexer = new Lexer(bytes, at, bytes.length);
-      const parser = new Parser(lexer);
-      const num = parser.next();
-      const gen = parser.next();
-      if (parser.next().kind !== "keyword") continue;
-      const value = parser.next();
-      if (
-        num.kind === "number" &&
-        gen.kind === "number" &&
-        value.kind === "number" &&
-        value.integer
-      ) {
-        const key = `${num.value} ${gen.value}`;
-        const seen = integers.get(key);
-        // Two different definitions (incremental updates) mean the xref decides,
-        // which this does not read — so neither is trusted.
-        integers.set(key, seen === undefined || seen === value.value ? value.value : "ambiguous");
-      }
-    } catch {
-      // Not an integer object; nothing to record.
-    }
-  }
-  return integers;
 }
 
 /**
@@ -600,7 +570,6 @@ function parseFile(bytes: Uint8Array): {
   }
 
   const raw = scanRaw(bytes);
-  const integers = integerObjects(bytes, raw.headers);
 
   const lexer = new Lexer(bytes, 0, end);
   const parser = new Parser(lexer);
@@ -612,7 +581,7 @@ function parseFile(bytes: Uint8Array): {
     if (token.kind === "eof") break;
 
     if (token.kind === "number" && token.integer) {
-      const parsed = parseObjectAt(bytes, token.start, integers);
+      const parsed = parseObjectAt(bytes, token.start);
       headers.add(token.start);
       if (parsed.stream) streams.set(parsed.stream.keywordAt, parsed.stream);
 
@@ -680,7 +649,7 @@ function parseFile(bytes: Uint8Array): {
   const stray = raw.headers.filter((at) => !headers.has(at));
   if (stray.length > MAX_STRAY_HEADERS) throw cannotCheck("too many object headers outside the structure");
   for (const at of stray) {
-    const parsed = parseObjectAt(bytes, at, integers);
+    const parsed = parseObjectAt(bytes, at);
     headers.add(at);
     if (parsed.stream && !streams.has(parsed.stream.keywordAt)) {
       streams.set(parsed.stream.keywordAt, parsed.stream);

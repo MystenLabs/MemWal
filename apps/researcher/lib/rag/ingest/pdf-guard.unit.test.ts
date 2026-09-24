@@ -794,3 +794,41 @@ test("a trailer with no xref table before it is still read for /Encrypt", async 
     causeMatches(/Encrypted/)
   );
 });
+
+// ── round 4 on #985 ───────────────────────────────────────────────────────
+
+test("an indirect /Length is not trusted, so a decoy integer cannot slice a bomb", async () => {
+  // pdf.js resolves `/Length 8 0 R` through the xref — possibly to an object
+  // inside an object stream — not to whatever top-level `8 0 obj` the raw bytes
+  // hold. A decoy `8 0 obj 10 endobj` plus an `endstream` planted 10 bytes into
+  // the data used to cut the stream there: a stored block of three bytes was
+  // measured, and the compressed bomb behind it never was. (Henry, round 4.)
+  const deflate = createDeflate({ level: 0 });
+  const chunks: Buffer[] = [];
+  deflate.on("data", (chunk: Buffer) => chunks.push(chunk));
+  const done = new Promise((resolve) => deflate.on("end", resolve));
+  deflate.write(Buffer.from("xyz\nendstream\nendobj\n"));
+  await new Promise<void>((resolve) => deflate.flush(constants.Z_FULL_FLUSH, () => resolve()));
+  await new Promise<void>((resolve) => deflate.params(9, constants.Z_DEFAULT_STRATEGY, () => resolve()));
+  deflate.end(new Uint8Array(16 * MB));
+  await done;
+  const data = Buffer.concat(chunks);
+
+  // zlib header (2) + stored block header (5) + "xyz" (3): the keyword sits at 10.
+  assert.equal(data.indexOf("\nendstream"), 10);
+
+  const bomb = Buffer.concat([
+    Buffer.from("9 0 obj\n<</Filter/FlateDecode/Length 8 0 R>>\nstream\n", "latin1"),
+    data,
+    Buffer.from("\nendstream\nendobj\n", "latin1"),
+  ]);
+  const decoy = { dict: "", data: new Uint8Array(0) };
+  const pdf = new Uint8Array(
+    Buffer.concat([
+      Buffer.from(buildPdf(flate(TEXT), [decoy], "", Buffer.from("8 0 obj\n10\nendobj\n", "latin1"))),
+      Buffer.from("\n"),
+      bomb,
+    ])
+  );
+  await refusesAsBomb(pdf);
+});
