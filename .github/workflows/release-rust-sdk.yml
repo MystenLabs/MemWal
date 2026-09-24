@@ -1,0 +1,71 @@
+name: release-rust-sdk
+
+# Build/test gate for the Rust SDK on the release branches. Mirrors the shape of
+# release-sdk.yml / release-python-sdk.yml, but crates.io publishing is
+# intentionally DISABLED for now (WALM-48: publish is out of scope).
+
+on:
+  push:
+    branches: [main, staging, dev]
+    paths:
+      - "packages/rust-sdk/**"
+      - ".github/workflows/release-rust-sdk.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: packages/rust-sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/rust-sdk/target
+          key: cargo-rust-sdk-${{ runner.os }}-${{ hashFiles('packages/rust-sdk/Cargo.lock') }}
+          restore-keys: cargo-rust-sdk-${{ runner.os }}-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build (release)
+        run: cargo build --release --verbose
+
+      - name: Test
+        run: cargo test --verbose
+
+      - name: Package (dry-run, no publish)
+        run: cargo package --allow-dirty --no-verify
+
+      # ────────────────────────────────────────────────────────────────────
+      # crates.io publishing is intentionally DISABLED (WALM-48).
+      # To enable later:
+      #   1. add a CARGO_REGISTRY_TOKEN repository secret,
+      #   2. gate on the stable branch (github.ref == 'refs/heads/main'),
+      #   3. bump the version in Cargo.toml,
+      #   4. remove `if: ${{ false }}`.
+      # ────────────────────────────────────────────────────────────────────
+      - name: Publish to crates.io (disabled)
+        if: ${{ false }}
+        run: cargo publish --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
