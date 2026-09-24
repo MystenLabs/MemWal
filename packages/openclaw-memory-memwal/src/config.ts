@@ -50,7 +50,7 @@ function resolveEnvVar(value: string): string {
 function resolveEnvVars(raw: Record<string, unknown>): Record<string, unknown> {
   const resolved: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
-    resolved[key] = typeof value === "string" ? resolveEnvVar(value) : value;
+    resolved[key] = key === "privateKey" && typeof value === "string" ? resolveEnvVar(value) : value;
   }
   return resolved;
 }

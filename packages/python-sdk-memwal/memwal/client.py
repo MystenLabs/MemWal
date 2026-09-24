@@ -170,16 +170,55 @@ async def _sleep_ms(ms: int) -> None:
 
 
 def _polling_delay_ms(base_ms: int, attempt: int) -> int:
-    """Jittered exponential backoff matching TS ``pollingDelayMs``.
+    """Same formula as TS ``pollingDelayMs``."""
 
-    base * 1.5^min(attempt, 6), capped at 10s, with ±25% jitter so
-    concurrent clients don't synchronise.
-    """
-
+    if attempt == 0:
+        return 0
     base = max(100, base_ms)
-    capped = min(10_000, base * (1.5 ** min(attempt, 6)))
+    ceiling = max(5000, base)
+    capped = min(ceiling, base * (1.5 ** min(attempt - 1, 6)))
     jitter = 0.75 + random.random() * 0.5
     return int(capped * jitter)
+
+
+def _positive_retry_ms(raw: object) -> Optional[int]:
+    try:
+        seconds = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
+        return None
+    return int(seconds * 1000)
+
+
+def _retry_after_ms(err: "_HttpStatusError") -> int:
+    """Retry-After seconds, else JSON ``retry_after_seconds``, in ms."""
+
+    if err.retry_after:
+        header_ms = _positive_retry_ms(err.retry_after)
+        if header_ms is not None:
+            return header_ms
+    if not err.body:
+        return 0
+    try:
+        payload = json.loads(err.body)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    return _positive_retry_ms(payload.get("retry_after_seconds")) or 0
+
+
+def _clamped_retry_after_ms(err: "_HttpStatusError", deadline_ms: int) -> int:
+    """Clamp Retry-After to the time left. 0 means use the normal curve."""
+
+    delay = _retry_after_ms(err)
+    if delay <= 0:
+        return 0
+    remaining = deadline_ms - _now_ms()
+    if remaining <= 0:
+        return 0
+    return min(delay, remaining)
 
 
 def _is_transient_polling_status(status: int) -> bool:
@@ -423,17 +462,23 @@ class MemWal:
         - Accepts 200 + 404 from the status endpoint and dispatches on
           ``status`` field (404 / ``status == "not_found"`` raises).
         - Transient HTTP errors (429, 5xx, network drop) are retried until
-          the timeout, not surfaced as polling failures.
-        - Backoff is jittered exponential (1.5x cap 10s, ±25%) to avoid
-          thundering-herd at scale.
+          the timeout, not surfaced as polling failures. A 429 waits out
+          Retry-After within the timeout; the timeout error says so.
+        - First poll is immediate; later polls grow 1.5x toward 5s.
         """
 
         deadline_ms = _now_ms() + timeout_ms
         attempt = 0
+        saw_rate_limit = False
+        retry_after_ms = 0
 
         while _now_ms() < deadline_ms:
-            await _sleep_ms(_polling_delay_ms(poll_interval_ms, attempt))
-            attempt += 1
+            if retry_after_ms > 0:
+                await _sleep_ms(retry_after_ms)
+            else:
+                await _sleep_ms(_polling_delay_ms(poll_interval_ms, attempt))
+                attempt += 1
+            retry_after_ms = 0
 
             try:
                 data = await self._signed_request(
@@ -444,6 +489,9 @@ class MemWal:
                 )
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
+                    if err.status == 429:
+                        saw_rate_limit = True
+                        retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
                     continue
                 raise
 
@@ -466,7 +514,7 @@ class MemWal:
 
             # pending / running / uploaded — keep polling.
 
-        raise MemWalRememberJobTimeout(job_id=job_id, timeout_ms=timeout_ms)
+        raise _remember_job_timeout(job_id, timeout_ms, saw_rate_limit)
 
     async def remember_and_wait(
         self,
@@ -612,15 +660,24 @@ class MemWal:
         }
         pending: List[str] = list(job_ids)
         attempt = 0
+        saw_rate_limit = False
+        retry_after_ms = 0
 
         while pending and _now_ms() < deadline_ms:
-            await _sleep_ms(_polling_delay_ms(opts.poll_interval_ms, attempt))
-            attempt += 1
+            if retry_after_ms > 0:
+                await _sleep_ms(retry_after_ms)
+            else:
+                await _sleep_ms(_polling_delay_ms(opts.poll_interval_ms, attempt))
+                attempt += 1
+            retry_after_ms = 0
 
             try:
                 batch = await self.get_remember_bulk_status(pending)
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
+                    if err.status == 429:
+                        saw_rate_limit = True
+                        retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
                     continue
                 raise
 
@@ -645,6 +702,13 @@ class MemWal:
             pending = [jid for jid in pending if jid not in terminal_ids]
 
         ordered = [results[job_id] for job_id in job_ids]
+        if saw_rate_limit:
+            for item in ordered:
+                if item.status == "timeout":
+                    item.error = (
+                        f"polling timed out after {opts.timeout_ms}ms; "
+                        "wait hit a rate limit (429)"
+                    )
         succeeded = sum(1 for r in ordered if r.status == "done")
         failed = sum(1 for r in ordered if r.status == "failed")
         timed_out = sum(1 for r in ordered if r.status == "timeout")
@@ -1547,6 +1611,15 @@ class MemWalRememberJobTimeout(MemWalError):
         self.status = 504
         self.job_id = job_id
         self.timeout_ms = timeout_ms
+
+
+def _remember_job_timeout(
+    job_id: str, timeout_ms: int, saw_rate_limit: bool
+) -> MemWalRememberJobTimeout:
+    exc = MemWalRememberJobTimeout(job_id, timeout_ms)
+    if saw_rate_limit:
+        exc.args = (f"{exc.args[0]}; wait hit a rate limit (429)",)
+    return exc
 
 
 async def _discard_http_client(memwal: MemWal) -> None:
