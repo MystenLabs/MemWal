@@ -1,5 +1,11 @@
 # @mysten-incubation/oc-memwal
 
+## 0.0.7
+
+### Fixed
+
+- Only `privateKey` interpolates `${ENV_VAR}`. Other fields stay literal so a secret cannot land in `serverUrl`.
+
 ## 0.0.6
 
 ### Fixed

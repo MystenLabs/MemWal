@@ -1,5 +1,12 @@
 # memwal
 
+## 0.1.12
+
+### Fixed
+
+- Grow `wait_for_remember_job` / `wait_for_remember_jobs` poll delay 1.5× from the caller interval (floor 100ms) toward a 5s cap, with an immediate first poll. Backoff is disabled above the cap. (WALM-623)
+- A 429 during a remember-job wait is reported on the timeout. Retry-After is still clamped to the caller's remaining budget, and that remainder still buys one status read. (WALM-623)
+
 ## 0.1.11
 
 ### Added
