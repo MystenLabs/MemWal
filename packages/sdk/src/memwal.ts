@@ -265,6 +265,28 @@ function retryAfterDelayMs(err: unknown, deadline: number): number {
 }
 
 /**
+ * Thrown when a bulk wait could not read a single status, the confirming read
+ * included. The status endpoint counts against the same delegate-key budget
+ * as writes, so a batch sent near the limit can have every poll refused. The
+ * old result then read as "still uploading" even when nothing had landed
+ * (GH #967). A refusal says nothing about the jobs, so do not report it as
+ * progress.
+ */
+function bulkRateLimitedError(err: unknown, jobIds: string[]): Error {
+    const retryAfterSeconds =
+        (err as { retryAfterSeconds?: number }).retryAfterSeconds
+        ?? retryAfterSecondsFromBody((err as { cause?: unknown }).cause);
+    const wait = retryAfterSeconds ? ` after ~${Math.ceil(retryAfterSeconds)}s` : "";
+    const e = new Error(
+        `Walrus Memory rate-limited every status read for this batch, so none of its ${jobIds.length} writes ` +
+            `could be confirmed. Do not treat them as stored: check them with getRememberBulkStatus(jobIds)${wait}. ` +
+            `Status reads count against the same delegate-key budget as writes.`,
+    );
+    e.name = "MemWalRateLimited";
+    return Object.assign(e, { status: 429, jobIds, retryAfterSeconds });
+}
+
+/**
  * The relayer states the backoff in the 429 body as well as in `Retry-After`.
  * A proxy that strips the header must not cost us the hint.
  */
@@ -663,6 +685,34 @@ export class MemWal {
         const pending = new Set(jobIds);
         let attempt = 0;
         let retryAfterMs = 0;
+        const lastSeen = new Map<string, RememberBulkStatusItem>();
+        let lastRefusal: number | undefined;
+
+        const settle = (jobId: string, status: RememberBulkStatusItem) => {
+            const idx = jobIds.indexOf(jobId);
+            lastSeen.set(jobId, status);
+            if (status.status === "done") {
+                results[idx] = {
+                    id: jobId,
+                    blob_id: status.blob_id ?? "",
+                    status: "done",
+                    namespace: namespaces[idx] ?? this.namespace,
+                };
+                pending.delete(jobId);
+            } else if (status.status === "failed" || status.status === "not_found") {
+                results[idx] = {
+                    id: jobId,
+                    blob_id: "",
+                    status: "failed",
+                    namespace: namespaces[idx] ?? this.namespace,
+                    error:
+                        status.status === "not_found"
+                            ? "job not found"
+                            : redactInternalUrls(status.error ?? "unknown error"),
+                };
+                pending.delete(jobId);
+            }
+        };
 
         while (pending.size > 0 && Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
@@ -685,6 +735,7 @@ export class MemWal {
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    lastRefusal = httpStatus;
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
@@ -707,29 +758,33 @@ export class MemWal {
                     continue;
                 }
 
-                const idx = jobIds.indexOf(jobId);
-                if (status.status === "done") {
-                    results[idx] = {
-                        id: jobId,
-                        blob_id: status.blob_id ?? "",
-                        status: "done",
-                        namespace: namespaces[idx] ?? this.namespace,
-                    };
-                    pending.delete(jobId);
-                } else if (status.status === "failed" || status.status === "not_found") {
-                    results[idx] = {
-                        id: jobId,
-                        blob_id: "",
-                        status: "failed",
-                        namespace: namespaces[idx] ?? this.namespace,
-                        error:
-                            status.status === "not_found"
-                                ? "job not found"
-                                : redactInternalUrls(status.error ?? "unknown error"),
-                    };
-                    pending.delete(jobId);
-                }
+                settle(jobId, status);
             }
+        }
+
+        // Nothing settled and nothing was even seen: the polls may all have been
+        // refused rather than the jobs being slow. Confirm with one direct read,
+        // as the MCP bridge does, before reporting anything.
+        if (timeoutMs > 0 && pending.size === jobIds.length && lastSeen.size === 0) {
+            try {
+                const probed = await this.getRememberBulkStatus(jobIds);
+                for (const item of probed.results) {
+                    if (pending.has(item.job_id)) settle(item.job_id, item);
+                }
+            } catch (err) {
+                if ((err as { status?: number }).status === 429) throw bulkRateLimitedError(err, jobIds);
+                // Any other probe failure is not evidence about the jobs.
+            }
+        }
+
+        for (const jobId of pending) {
+            const idx = jobIds.indexOf(jobId);
+            const seen = lastSeen.get(jobId);
+            results[idx].error = seen
+                ? `still ${seen.status} after ${timeoutMs}ms` + (seen.error ? `: ${redactInternalUrls(seen.error)}` : "")
+                : lastRefusal !== undefined
+                  ? `no status read got through (last poll: HTTP ${lastRefusal}); this item may not be stored`
+                  : `polling timed out after ${timeoutMs}ms`;
         }
 
         const succeeded = results.filter((r) => r.status === "done").length;
