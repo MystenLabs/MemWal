@@ -15,12 +15,6 @@ import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut } from 'lucide-react'
-import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
-import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
-import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
-
-SyntaxHighlighter.registerLanguage('javascript', js)
-SyntaxHighlighter.registerLanguage('python', python)
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
 import SecurityDeleteSection from '../components/SecurityDeleteSection'
@@ -31,46 +25,6 @@ import { apiGet } from '../utils/api'
 import { assertDelegateKeyRegistered, deriveDelegatePublicKeyHex, normalizeDelegatePrivateKey } from '../utils/delegateKeyImport'
 import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
 import ConnectWalrusMemory, { type ConnectPath } from './ConnectWalrusMemory'
-
-const walrusCodeTheme = {
-    hljs: {
-        color: '#faf8f5',
-        background: '#050505',
-    },
-    'hljs-keyword': {
-        color: '#cab1ff',
-    },
-    'hljs-built_in': {
-        color: '#faf8f5',
-    },
-    'hljs-title': {
-        color: '#faf8f5',
-    },
-    'hljs-attr': {
-        color: '#e8ff75',
-    },
-    'hljs-property': {
-        color: '#e8ff75',
-    },
-    'hljs-variable': {
-        color: '#faf8f5',
-    },
-    'hljs-string': {
-        color: '#e8ff75',
-    },
-    'hljs-comment': {
-        color: '#8f9294',
-    },
-    'hljs-number': {
-        color: '#e8ff75',
-    },
-    'hljs-literal': {
-        color: '#e8ff75',
-    },
-    'hljs-params': {
-        color: '#faf8f5',
-    },
-}
 
 // ============================================================
 // Types
@@ -831,26 +785,6 @@ async def main():
 asyncio.run(main())`
 
     const sdkSnippet = quickstartLanguage === 'py' ? sdkPythonSnippet : sdkTypeScriptSnippet
-    const sdkSnippetLanguage = quickstartLanguage === 'py' ? 'python' : 'javascript'
-    const sdkCopyLabel = `sdk-${quickstartLanguage}`
-
-    const aiSnippet = `import { generateText } from "ai"
-import { withMemWal } from "@mysten-incubation/memwal/ai"
-import { openai } from "@ai-sdk/openai"
-
-const model = withMemWal(openai("gpt-4o"), {
-  key: process.env.${PRIVATE_KEY_ENV} ?? "${PRIVATE_KEY_PLACEHOLDER}",
-  accountId: process.env.${ACCOUNT_ID_ENV} ?? "${effectiveAccountObjectId ?? ACCOUNT_ID_PLACEHOLDER}",
-  serverUrl: process.env.${SERVER_URL_ENV} ?? "${sdkDefaultServerUrl}",
-})
-
-const result = await generateText({
-  model,
-  messages: [
-    { role: "user", content: "What foods should I avoid?" }
-  ]
-})
-// → LLM knows: "User is allergic to peanuts"`
     const docsHref = config.docsUrl || 'https://docs.memwal.ai'
     const githubHref = 'https://github.com/MystenLabs/memwal'
     const discordHref = 'https://discord.gg/walrusprotocol'
@@ -889,6 +823,7 @@ const result = await generateText({
                     importExistingKeyError={existingKeyError}
                     importExistingKeyUnavailable={isKeyListLoading}
                     onSdkKindChange={(kind) => setQuickstartLanguage(kind === 'python' ? 'py' : 'ts')}
+                    sdkSnippet={sdkSnippet}
                 />
 
                 {showNoBrowserKeyNotice && (
@@ -1366,52 +1301,6 @@ const result = await generateText({
                         </div>
                     )}
                 </Card>
-
-                {connectPath === 'app' && (
-                <div id="sdk-quickstart">
-                {/* Quick Start: SDK */}
-                <Card
-                    className="dashboard-quickstart-card sept-section"
-                    title="Quickstart — SDK"
-                    subtitle="Copy the setup code and start in minutes"
-                >
-                    <div className="dashboard-quickstart-codewrap">
-                        <button
-                            className="btn btn-secondary btn-sm dashboard-quickstart-copy"
-                            onClick={() => copyToClipboard(sdkSnippet, sdkCopyLabel)}
-                            aria-label="Copy SDK snippet"
-                        >
-                            <Copy size={14} />
-                            <span className="dashboard-quickstart-copy-label">{copied === sdkCopyLabel ? 'done' : 'copy'}</span>
-                        </button>
-                        <SyntaxHighlighter language={sdkSnippetLanguage} style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0, padding: 28, background: '#050505', color: '#faf8f5' }}>
-                            {sdkSnippet}
-                        </SyntaxHighlighter>
-                    </div>
-                </Card>
-
-                {/* Quick Start: AI SDK */}
-                <Card
-                    className="dashboard-quickstart-card sept-section"
-                    title="AI SDK integration"
-                    subtitle="Wrap your model with Walrus Memory using the AI SDK"
-                >
-                    <div className="dashboard-quickstart-codewrap">
-                        <button
-                            className="btn btn-secondary btn-sm dashboard-quickstart-copy"
-                            onClick={() => copyToClipboard(aiSnippet, 'ai')}
-                            aria-label="Copy AI SDK snippet"
-                        >
-                            <Copy size={14} />
-                            <span className="dashboard-quickstart-copy-label">{copied === 'ai' ? 'done' : 'copy'}</span>
-                        </button>
-                        <SyntaxHighlighter language="javascript" style={walrusCodeTheme} className="demo-code-block" customStyle={{ margin: 0, padding: 28, background: '#050505', color: '#faf8f5' }}>
-                            {aiSnippet}
-                        </SyntaxHighlighter>
-                    </div>
-                </Card>
-                </div>
-                )}
 
                 <div className="dashboard-section-head">
                     <h3>Resources</h3>

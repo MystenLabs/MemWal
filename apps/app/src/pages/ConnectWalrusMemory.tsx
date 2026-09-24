@@ -1,8 +1,29 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Copy } from 'lucide-react'
+import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
+import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
+import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
 import { config } from '../config'
 import { trackEvent } from '../utils/analytics'
+
+SyntaxHighlighter.registerLanguage('javascript', js)
+SyntaxHighlighter.registerLanguage('python', python)
+
+const quickstartTheme = {
+    hljs: { color: '#ffffff', background: 'transparent' },
+    'hljs-keyword': { color: '#d9cbff' },
+    'hljs-built_in': { color: '#ffffff' },
+    'hljs-title': { color: '#ffffff' },
+    'hljs-attr': { color: '#f4ff8a' },
+    'hljs-property': { color: '#f4ff8a' },
+    'hljs-variable': { color: '#ffffff' },
+    'hljs-string': { color: '#f4ff8a' },
+    'hljs-comment': { color: '#b4b7bb' },
+    'hljs-number': { color: '#f4ff8a' },
+    'hljs-literal': { color: '#f4ff8a' },
+    'hljs-params': { color: '#ffffff' },
+}
 
 export type ConnectPath = 'agent' | 'app'
 export type ConnectClientId = 'claude-code' | 'codex' | 'antigravity' | 'cursor'
@@ -81,7 +102,7 @@ function CursorMark() {
 
 function ClientIcon({ id }: { id: ConnectClientId }) {
     if (id === 'cursor') return <CursorMark />
-    return <img src={CLIENT_ICON[id]} alt="" />
+    return <img className={id === 'codex' ? 'connect-wm-icon--codex' : undefined} src={CLIENT_ICON[id]} alt="" />
 }
 
 const SDK_ICON = {
@@ -103,21 +124,34 @@ type ConnectWalrusMemoryProps = {
     hasDelegateKey: boolean
     consoleAvailable?: boolean
     onSdkKindChange?: (kind: SdkKind) => void
+    sdkSnippet?: string
     onImportExistingKey?: (privateKey: string) => Promise<void> | void
     importingExistingKey?: boolean
     importExistingKeyError?: string
     importExistingKeyUnavailable?: boolean
 }
 
-function CodeBlock({ text, label, copied, onCopy }: {
+function CodeBlock({ text, label, copied, onCopy, language }: {
     text: string
     label: string
     copied: string | null
     onCopy: (text: string, label: string) => void
+    language?: 'javascript' | 'python'
 }) {
     return (
-        <div className="connect-wm-code">
-            <pre><code>{text}</code></pre>
+        <div className={`connect-wm-code${language ? ' connect-wm-code--source' : ''}`}>
+            {language ? (
+                <SyntaxHighlighter
+                    language={language}
+                    style={quickstartTheme}
+                    wrapLongLines={false}
+                    customStyle={{ margin: 0, background: 'transparent', overflowX: 'auto', whiteSpace: 'pre' }}
+                >
+                    {text}
+                </SyntaxHighlighter>
+            ) : (
+                <pre><code>{text}</code></pre>
+            )}
             <button
                 type="button"
                 className="connect-wm-copy"
@@ -136,6 +170,7 @@ export default function ConnectWalrusMemory({
     hasDelegateKey,
     consoleAvailable = config.walrusConsoleEnabled,
     onSdkKindChange,
+    sdkSnippet = '',
     onImportExistingKey,
     importingExistingKey = false,
     importExistingKeyError = '',
@@ -151,7 +186,7 @@ export default function ConnectWalrusMemory({
         const guide = guideRef.current
         if (!guide) return
         const measure = () => {
-            const tab = guide.querySelector<HTMLElement>('.connect-wm-tab--active')
+            const tab = guide.querySelector<HTMLElement>('.connect-wm-tab')
             if (!tab) return
             guide.style.setProperty('--connect-line-x', `${tab.offsetLeft + tab.offsetWidth / 2}px`)
         }
@@ -160,7 +195,7 @@ export default function ConnectWalrusMemory({
         const observer = new ResizeObserver(measure)
         observer.observe(guide)
         return () => observer.disconnect()
-    }, [clientId, path, sdkKind])
+    }, [path])
     const client = CLIENTS.find((item) => item.id === clientId) ?? CLIENTS[0]
 
     const copy = async (text: string, item: string) => {
@@ -357,7 +392,15 @@ export default function ConnectWalrusMemory({
                             <div>
                                 <h3>Paste the quickstart</h3>
                                 <p>Copy the setup snippet into your app.</p>
-                                <a className="connect-wm-inline" href="#sdk-quickstart">SDK quickstart</a>
+                                {sdkSnippet && (
+                                    <CodeBlock
+                                        text={sdkSnippet}
+                                        label="SDK quickstart"
+                                        copied={copied}
+                                        onCopy={copy}
+                                        language={sdkKind === 'python' ? 'python' : 'javascript'}
+                                    />
+                                )}
                             </div>
                         </li>
                         <li>
