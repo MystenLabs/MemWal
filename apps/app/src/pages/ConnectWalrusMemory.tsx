@@ -306,12 +306,6 @@ export default function ConnectWalrusMemory({
                                 <div>
                                     <h3>Confirm it works</h3>
                                     <p>Ask {client.askName} to remember something, then start a new session and recall it.</p>
-                                    {consoleAvailable && (
-                                        <a className="connect-wm-console" href={CONSOLE_HREF} target="_blank" rel="noopener noreferrer">
-                                            View your memory in Walrus Console
-                                            <span aria-hidden="true">→</span>
-                                        </a>
-                                    )}
                                 </div>
                             </li>
                         </ol>
@@ -406,9 +400,9 @@ export default function ConnectWalrusMemory({
                         <li>
                             <span className="connect-wm-num">04</span>
                             <div>
-                                <h3>Open the playground</h3>
-                                <p>Try remember and recall in this browser. The playground uses the delegate key saved here.</p>
-                                <Link className="connect-wm-console" to="/playground">Open playground</Link>
+                                <h3>Test your setup</h3>
+                                <p>Use the developer playground to confirm the SDK can connect to your server and save and retrieve information with your delegate key.</p>
+                                <Link className="connect-wm-console" to="/playground">Test in playground</Link>
                             </div>
                         </li>
                     </ol>

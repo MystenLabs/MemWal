@@ -51,7 +51,7 @@ beforeEach(() => {
 
 it('shows the migration notice and cleanup guide in the delete module', () => {
     render(<SecurityDeleteSection accountObjectId="0x99" />)
-    expect(screen.getByText('Delete Pre-Migration Memories')).toBeInTheDocument()
+    expect(screen.getByText('Delete pre-migration memories')).toBeInTheDocument()
     expect(screen.getByText('Applies only to memories written before July 30, 2026')).toBeInTheDocument()
     expect(screen.getByText(/On July 30, 2026 all existing memories were migrated/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'here' })).toHaveAttribute(

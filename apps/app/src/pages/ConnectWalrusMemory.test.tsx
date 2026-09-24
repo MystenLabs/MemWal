@@ -36,7 +36,7 @@ describe('ConnectWalrusMemory', () => {
             />,
         )
 
-        expect(screen.getByRole('link', { name: /view your memory in walrus console/i })).toHaveAttribute('href', 'https://console.walrus.xyz/')
+        expect(screen.queryByRole('link', { name: /view your memory in walrus console/i })).not.toBeInTheDocument()
         expect(screen.getByRole('heading', { name: 'View your memories' })).toBeInTheDocument()
         expect(screen.getByRole('link', { name: /open walrus console/i })).toHaveAttribute('href', 'https://console.walrus.xyz/')
     })
@@ -88,6 +88,6 @@ describe('ConnectWalrusMemory', () => {
 
         expect(screen.getByRole('heading', { name: 'Create a delegate key' })).toBeInTheDocument()
         expect(screen.getByLabelText('existing delegate key')).toBeInTheDocument()
-        expect(screen.getByRole('link', { name: /open playground/i })).toHaveAttribute('href', '/playground')
+        expect(screen.getByRole('link', { name: /test in playground/i })).toHaveAttribute('href', '/playground')
     })
 })

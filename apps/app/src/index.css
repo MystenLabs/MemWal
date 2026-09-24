@@ -13806,6 +13806,37 @@ h1, h2, h3 {
   font-size: 14px;
 }
 
+.playground-done {
+  margin-top: 72px;
+  text-align: center;
+}
+
+.playground-done h2,
+.playground-done p,
+.playground-done a {
+  font-family: "Google Sans Flex", sans-serif;
+  font-weight: 400;
+}
+
+.playground-done h2 {
+  margin: 0 0 12px;
+  color: #faf8f5;
+  font-size: 32px;
+  line-height: 1.2;
+}
+
+.playground-done p {
+  margin: 0;
+  color: #b1b4b6;
+  font-size: 18px;
+  line-height: 1.5;
+}
+
+.playground-done a {
+  color: #faf8f5;
+  text-underline-offset: 3px;
+}
+
 .dash-page .connect-wm-import {
   width: 100%;
   min-width: 0;
@@ -14380,6 +14411,270 @@ html::-webkit-scrollbar {
   display: none;
   width: 0;
   height: 0;
+}
+
+.signin-proposed {
+  min-height: 100vh;
+  background: #000000;
+  color: #faf8f5;
+  overflow: hidden;
+}
+
+.signin-proposed-glow {
+  position: absolute;
+  top: -180px;
+  left: 50%;
+  width: 1400px;
+  height: 640px;
+  transform: translateX(-50%);
+  background: radial-gradient(closest-side, #27156f 0%, #140b37 48%, #000000 100%);
+  pointer-events: none;
+}
+
+.signin-proposed-main {
+  position: relative;
+  width: min(1440px, 100%);
+  margin: 0 auto;
+  padding: 35px 50px 64px;
+}
+
+.signin-proposed-logo {
+  display: block;
+  width: 117px;
+  height: auto;
+}
+
+.signin-proposed-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 560px) minmax(0, 1fr);
+  align-items: start;
+  margin-top: 72px;
+}
+
+.signin-proposed-copy h1 {
+  margin: 0;
+  max-width: 503px;
+  color: #faf8f5;
+  font-family: Ratch, sans-serif;
+  font-size: 72px;
+  font-weight: 400;
+  line-height: 0.95;
+}
+
+.signin-proposed-sub {
+  max-width: 503px;
+  margin: 18px 0 0;
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.signin-proposed-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(297px, 100%);
+  margin-top: 28px;
+}
+
+.signin-proposed-btn,
+.signin-proposed-wallet button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  height: 52px;
+  padding: 0 24px;
+  border: 1px solid #54575a;
+  border-radius: 26px;
+  background: transparent;
+  color: #faf8f5;
+  font-family: "Google Sans Code", ui-monospace, monospace;
+  font-size: 16px;
+  font-weight: 400;
+  letter-spacing: 0.64px;
+  line-height: 1;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.signin-proposed-btn:hover,
+.signin-proposed-wallet button:hover {
+  border-color: #faf8f5;
+}
+
+.signin-proposed-wallet button * {
+  font-family: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.signin-proposed-tos {
+  max-width: 420px;
+  margin: 18px 0 0;
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.signin-proposed-tos a {
+  color: #faf8f5;
+  text-underline-offset: 2px;
+}
+
+.signin-proposed-trusted {
+  margin-top: 48px;
+}
+
+.signin-proposed-trusted p {
+  margin: 0 0 16px;
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 18px;
+  line-height: 1.5;
+}
+
+.signin-proposed-trusted strong {
+  color: #faf8f5;
+  font-weight: 500;
+}
+
+.signin-proposed-logos {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+
+.signin-proposed-logos img {
+  height: 22px;
+  width: auto;
+  object-fit: contain;
+}
+
+.signin-proposed-hero {
+  position: relative;
+  height: 760px;
+}
+
+.signin-proposed-hero--mobile {
+  display: none;
+}
+
+.signin-proposed-hero .signin-phone {
+  position: absolute;
+  top: 20px;
+  left: 18%;
+  width: min(420px, 70%);
+  height: auto;
+  mask-image: linear-gradient(to bottom, #000 58%, transparent 92%);
+}
+
+.signin-proposed-hero .signin-tile {
+  position: absolute;
+  width: 190px;
+  height: auto;
+  pointer-events: none;
+}
+
+.signin-proposed-hero--desktop .signin-tile--back {
+  top: 0;
+  left: 8%;
+  width: 170px;
+  transform: rotate(6deg);
+  filter: blur(2px);
+  opacity: 0.85;
+}
+
+.signin-proposed-hero--desktop .signin-tile--left {
+  top: 430px;
+  left: 0;
+  width: 210px;
+  transform: rotate(-23deg);
+}
+
+.signin-proposed-hero--desktop .signin-tile--right {
+  top: 250px;
+  right: 0;
+  width: 220px;
+  transform: rotate(7deg);
+}
+
+@media (max-width: 900px) {
+  .signin-proposed {
+    overflow: auto;
+  }
+
+  .signin-proposed-main {
+    padding: 25px 24px 48px;
+  }
+
+  .signin-proposed-layout {
+    display: block;
+    margin-top: 36px;
+    text-align: center;
+  }
+
+  .signin-proposed-copy h1,
+  .signin-proposed-sub,
+  .signin-proposed-tos,
+  .signin-proposed-trusted p {
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .signin-proposed-copy h1 {
+    font-size: 44px;
+  }
+
+  .signin-proposed-sub {
+    font-size: 15px;
+  }
+
+  .signin-proposed-hero--desktop {
+    display: none;
+  }
+
+  .signin-proposed-hero--mobile {
+    display: block;
+    height: 280px;
+    margin: 8px auto 0;
+  }
+
+  .signin-proposed-hero--mobile .signin-phone {
+    left: 50%;
+    top: 0;
+    width: 190px;
+    transform: translateX(-50%);
+  }
+
+  .signin-proposed-hero--mobile .signin-tile--left {
+    top: 90px;
+    left: calc(50% - 150px);
+    width: 96px;
+    transform: rotate(-23deg);
+  }
+
+  .signin-proposed-hero--mobile .signin-tile--right {
+    top: 18px;
+    left: calc(50% + 48px);
+    width: 92px;
+    transform: rotate(4deg);
+  }
+
+  .signin-proposed-actions {
+    width: min(297px, 100%);
+    margin-right: auto;
+    margin-left: auto;
+  }
+
+  .signin-proposed-trusted {
+    display: none;
+  }
 }
 
 .dash-page .dashboard-key-selection-status {

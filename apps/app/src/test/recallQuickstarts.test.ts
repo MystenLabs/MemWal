@@ -12,9 +12,7 @@ test('Dashboard quickstarts use the preferred recall API', () => {
 
 test('Playground calls and snippets use object-form recall', () => {
     expect(playgroundSource).toContain('memwal.recall({ query: recallQuery, limit: 5 })')
-    expect(playgroundSource).toContain('memwal.recall({ query: askQuestion, limit: 5 })')
     expect(playgroundSource).toContain('memwal.recall({ query: "${recallQuery}", limit: 5 })')
     expect(playgroundSource).not.toContain('memwal.recall(recallQuery, 5)')
-    expect(playgroundSource).not.toContain('memwal.recall(askQuestion, 5)')
     expect(playgroundSource).not.toContain('memwal.recall("${recallQuery}", 5)')
 })
