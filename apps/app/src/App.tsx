@@ -254,6 +254,12 @@ function RoutePending() {
 const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
 const CLAUDE_CONNECT_STORAGE_KEY = 'memwal_claude_connect'
 const KEYS_CONNECT_STORAGE_KEY = 'memwal_keys_connect'
+/** No query to carry — /setup takes no params — so this is a plain presence
+ *  flag, not JSON like the others. Set by requireAccountForSetup below when
+ *  a signed-out visitor is bounced off /setup, so that intent survives the
+ *  sign-in redirect instead of silently landing wherever PostAuthAccountCheck
+ *  would otherwise send them (Thanos, 24 Sep — WALM-675 scope). */
+const SETUP_CONNECT_STORAGE_KEY = 'memwal_setup_connect'
 
 function consumePendingConnectQuery(storageKey: string): string {
   const pending = sessionStorage.getItem(storageKey)
@@ -269,11 +275,17 @@ function consumePendingConnectQuery(storageKey: string): string {
   }
 }
 
+function consumePendingSetupVisit(): boolean {
+  if (!sessionStorage.getItem(SETUP_CONNECT_STORAGE_KEY)) return false
+  sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
+  return true
+}
+
 /** Lands here after a successful sign-in (the OAuth redirect_uri is the app
  *  root). Resume an interrupted hosted Claude or local MCP connection by
  *  restoring its saved query string; otherwise resolve whether this is a
  *  brand-new account. */
-function PostAuthRedirect() {
+export function PostAuthRedirect() {
   const claudeConnectQuery = consumePendingConnectQuery(CLAUDE_CONNECT_STORAGE_KEY)
   if (claudeConnectQuery) {
     return <Navigate to={`/connect/claude?${claudeConnectQuery}`} replace />
@@ -284,6 +296,13 @@ function PostAuthRedirect() {
 
   const keysConnectQuery = consumePendingConnectQuery(KEYS_CONNECT_STORAGE_KEY)
   if (keysConnectQuery) return <Navigate to={`/keys?${keysConnectQuery}`} replace />
+
+  // Respects an explicit /setup visit over PostAuthAccountCheck's own
+  // account-existence guess — matters for an account that exists elsewhere
+  // (another device/browser) but has no local session here, which would
+  // otherwise get silently redirected to /dashboard against what they asked
+  // for. A genuinely new account ends up at /setup either way.
+  if (consumePendingSetupVisit()) return <Navigate to="/setup" replace />
 
   return <PostAuthAccountCheck />
 }
@@ -333,6 +352,15 @@ function AppContent() {
     return currentAccount ? element : <Navigate to="/" replace />
   }
 
+  // Same as requireAccount, but records the visit first — /setup is the one
+  // requireAccount-gated route worth resuming after sign-in (Thanos, 24 Sep).
+  const requireAccountForSetup = (element: React.ReactNode) => {
+    if (authPending) return <RoutePending />
+    if (currentAccount) return element
+    sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, '1')
+    return <Navigate to="/" replace />
+  }
+
   return (
     <Routes>
       <Route path="/" element={
@@ -340,7 +368,7 @@ function AppContent() {
         currentAccount ? <PostAuthRedirect /> : <LandingPage />
       } />
       <Route path="/dashboard" element={requireAccount(<Dashboard />)} />
-      <Route path="/setup" element={requireAccount(
+      <Route path="/setup" element={requireAccountForSetup(
         delegateKey ? <Navigate to="/dashboard" replace /> : <SetupWizard />
       )} />
       <Route path="/playground" element={requireAccount(

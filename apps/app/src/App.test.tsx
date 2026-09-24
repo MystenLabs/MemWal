@@ -27,13 +27,25 @@ vi.mock('./utils/suiClientCompat', () => ({
     ),
 }))
 
-import { PostAuthAccountCheck } from './App'
+import { PostAuthAccountCheck, PostAuthRedirect } from './App'
 
 function renderAt() {
     return render(
         <MemoryRouter initialEntries={['/']}>
             <Routes>
                 <Route path="/" element={<PostAuthAccountCheck />} />
+                <Route path="/setup" element={<div>SETUP</div>} />
+                <Route path="/dashboard" element={<div>DASHBOARD</div>} />
+            </Routes>
+        </MemoryRouter>,
+    )
+}
+
+function renderPostAuthRedirect() {
+    return render(
+        <MemoryRouter initialEntries={['/']}>
+            <Routes>
+                <Route path="/" element={<PostAuthRedirect />} />
                 <Route path="/setup" element={<div>SETUP</div>} />
                 <Route path="/dashboard" element={<div>DASHBOARD</div>} />
             </Routes>
@@ -62,6 +74,29 @@ describe('PostAuthAccountCheck', () => {
     it('falls back to /dashboard when the lookup itself fails (transport error)', async () => {
         mocks.rejectWith = new Error('connection refused')
         renderAt()
+        expect(await screen.findByText('DASHBOARD')).toBeInTheDocument()
+    })
+})
+
+describe('PostAuthRedirect — /setup breadcrumb (Thanos, WALM-675 scope)', () => {
+    const SETUP_CONNECT_STORAGE_KEY = 'memwal_setup_connect'
+
+    beforeEach(() => {
+        sessionStorage.clear()
+        mocks.accountId = '0xaccount'
+        mocks.rejectWith = null
+    })
+
+    it('resumes /setup when a signed-out visit left the breadcrumb, over the account-existence guess', async () => {
+        sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, '1')
+        renderPostAuthRedirect()
+        expect(await screen.findByText('SETUP')).toBeInTheDocument()
+        expect(sessionStorage.getItem(SETUP_CONNECT_STORAGE_KEY)).toBeNull()
+    })
+
+    it('falls through to the account-existence check with no breadcrumb', async () => {
+        mocks.accountId = '0xaccount'
+        renderPostAuthRedirect()
         expect(await screen.findByText('DASHBOARD')).toBeInTheDocument()
     })
 })
