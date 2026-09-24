@@ -89,12 +89,21 @@ export async function fetchAccountIdForOwner(
             })
         } catch (err) {
             // getDynamicField throws when the field object doesn't exist —
-            // the normal "no Account yet" case — and the SDK represents that
-            // as a plain `new Error(...)` (core.mjs's per-object result).
-            // A real transport failure throws the transport's own error
-            // class (e.g. RpcError), so this check leaves those to propagate
-            // and be handled as a genuine failure by the caller.
-            if (err instanceof Error && err.constructor === Error) return null
+            // the normal "no Account yet" case. grpc/core.mjs represents
+            // that specific case as `new Error("Object <id> not found")`
+            // (verified against the shipped @mysten/sui build) — match that
+            // shape exactly. Any other per-object failure it can throw (e.g.
+            // "Unexpected result type") is a genuine anomaly, not a missing
+            // account, and a real transport failure throws a different error
+            // class entirely (e.g. RpcError) — both must still propagate for
+            // the caller to treat as a real failure.
+            if (
+                err instanceof Error &&
+                err.constructor === Error &&
+                /^Object 0x[0-9a-f]+ not found$/.test(err.message)
+            ) {
+                return null
+            }
             throw err
         }
         const valueBytes = dynFieldRes?.dynamicField?.value?.bcs

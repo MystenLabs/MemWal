@@ -37,9 +37,12 @@ describe('gRPC Sui client compatibility', () => {
         vi.spyOn(client, 'getObject').mockResolvedValue({
             object: { json: { accounts: { id: '0xtable3' } } },
         } as never)
-        // Mirrors @mysten/sui's grpc core.mjs: getDynamicField throws a plain
-        // `new Error(...)` when the derived field object isn't found.
-        vi.spyOn(client, 'getDynamicField').mockRejectedValue(new Error('object not found'))
+        // Exact message shape verified against the shipped @mysten/sui build:
+        // grpc/core.mjs's per-object NOT_FOUND becomes
+        // `new Error("Object <id> not found")`, thrown by getDynamicField.
+        vi.spyOn(client, 'getDynamicField').mockRejectedValue(
+            new Error('Object 0xdeadbeef not found'),
+        )
 
         await expect(fetchAccountIdForOwner(client, '0xregistry3', '0x2')).resolves.toBeNull()
     })
@@ -53,5 +56,21 @@ describe('gRPC Sui client compatibility', () => {
         vi.spyOn(client, 'getDynamicField').mockRejectedValue(new RpcError('connection refused'))
 
         await expect(fetchAccountIdForOwner(client, '0xregistry4', '0x3')).rejects.toThrow('connection refused')
+    })
+
+    it('propagates a same-class SDK error that is not the not-found shape (e.g. "Unexpected result type")', async () => {
+        const client = new SuiGrpcClient({ network: 'testnet', baseUrl: 'https://provider.example/grpc' })
+        vi.spyOn(client, 'getObject').mockResolvedValue({
+            object: { json: { accounts: { id: '0xtable5' } } },
+        } as never)
+        // grpc/core.mjs throws this exact plain Error when the response
+        // oneof is neither "error" nor "object" — a genuine anomaly, not a
+        // missing field, even though it's the same `Error` constructor as
+        // the not-found case.
+        vi.spyOn(client, 'getDynamicField').mockRejectedValue(new Error('Unexpected result type'))
+
+        await expect(fetchAccountIdForOwner(client, '0xregistry5', '0x4')).rejects.toThrow(
+            'Unexpected result type',
+        )
     })
 })
