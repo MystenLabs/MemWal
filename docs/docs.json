@@ -33,6 +33,13 @@
       "github": "https://github.com/MystenLabs/MemWal"
     }
   },
+  "redirects": [
+    {
+      "source": "/prompt-templates",
+      "destination": "/guides/system-prompt-templates",
+      "permanent": true
+    }
+  ],
   "navigation": {
     "tabs": [
       {
