@@ -580,6 +580,9 @@ class TestRememberJobTimeoutDetail:
         assert "still retrying" in (exc.value.server_error or "")
         assert str(exc.value).startswith("remember job timed out after 300ms")
         assert "last status: running" in str(exc.value)
+        # Python keys are per client instance (uuid4), so only a retry on the
+        # same client reuses the job; a new client would mint a second write.
+        assert "on the same client instance" in str(exc.value)
 
     async def test_every_poll_refused_reports_unknown_state(
         self, memwal_client: MemWal

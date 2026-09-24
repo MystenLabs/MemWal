@@ -1707,7 +1707,8 @@ class MemWalRememberJobTimeout(MemWalError):
             suffix = f" ({_redact_internal_urls(server_error)})" if server_error else ""
             detail = (
                 f"last status: {last_status}{suffix}. Retry with the same idempotency key "
-                "to keep waiting on this job; remember_and_wait does this for you."
+                "to keep waiting on this job; remember_and_wait does this for you "
+                "on the same client instance."
             )
         else:
             detail = (
