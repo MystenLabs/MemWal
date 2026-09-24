@@ -562,7 +562,11 @@ export function startOrReuseLoginFlow(
      * catch below. */
     onFailure?: (err: unknown) => void,
 ): InflightLogin {
-    if (inflightLogin) return inflightLogin;
+    if (opts.freshKey) {
+        resetInflightLogin();
+    } else if (inflightLogin) {
+        return inflightLogin;
+    }
 
     let resolveUrl!: (url: string) => void;
     let rejectUrl!: (err: unknown) => void;
