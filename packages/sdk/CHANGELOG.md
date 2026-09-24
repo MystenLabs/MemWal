@@ -5,6 +5,7 @@
 ### Fixed
 
 - `rememberBulkAndWait` / `waitForRememberJobs` no longer resolve a batch they could not read as if it were still uploading. The status endpoint counts against the delegate-key budget, and a 429 on every poll used to be retried silently until the wait ran out, leaving each item as `timeout` with "polling timed out", even when nothing had been stored. When no poll got through, the wait now makes one confirming read. If that is rate-limited too, it throws `MemWalRateLimited` (`status: 429`, `jobIds`, `retryAfterSeconds`). An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)
+- A `rememberAndWait` / `waitForRememberJob` that runs out of time now raises `MemWalRememberJobTimeout` (still `status: 504`) carrying `lastStatus` and `serverError`, the last state the relayer reported. Under upload congestion the relayer keeps a job `running` for up to ~25 minutes and says so, but the 504 used to drop that, so a job that was still retrying looked dead and callers dropped their idempotency key to force a new paid write. When no poll got through, the message says the state is unknown instead. (WALM-670, #966)
 
 ## 0.1.9
 
