@@ -158,6 +158,11 @@ async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
  * own outbound client. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
+/** The one confirming read a bulk wait makes after its budget is spent. It
+ * runs past the caller's deadline by design, so it gets a short bound of its
+ * own rather than the 30s default a stalled socket would hold it for. */
+const CONFIRM_READ_TIMEOUT_MS = 5_000;
+
 /** `POST /api/restore` bounds itself at 55s server-side and answers with an
  * error rather than going quiet, so the client must outlast that or it would
  * abandon a response already on its way. */
@@ -687,6 +692,9 @@ export class MemWal {
         let retryAfterMs = 0;
         const lastSeen = new Map<string, RememberBulkStatusItem>();
         let lastRefusal: number | undefined;
+        // Whether any status read got through. An item missing from an answer
+        // was not refused, so it must not be reported as if it had been.
+        let answered = false;
 
         const settle = (jobId: string, status: RememberBulkStatusItem) => {
             const idx = jobIds.indexOf(jobId);
@@ -741,6 +749,7 @@ export class MemWal {
                 }
                 throw err;
             }
+            answered = true;
 
             const statusById = new Map<string, RememberBulkStatusItem[]>();
             for (const item of batchStatus.results) {
@@ -767,7 +776,10 @@ export class MemWal {
         // as the MCP bridge does, before reporting anything.
         if (timeoutMs > 0 && pending.size === jobIds.length && lastSeen.size === 0) {
             try {
-                const probed = await this.getRememberBulkStatus(jobIds);
+                const probed = await this.getRememberBulkStatus(jobIds, {
+                    timeoutMs: Math.min(this.requestTimeoutMs, CONFIRM_READ_TIMEOUT_MS),
+                });
+                answered = true;
                 for (const item of probed.results) {
                     if (pending.has(item.job_id)) settle(item.job_id, item);
                 }
@@ -782,9 +794,11 @@ export class MemWal {
             const seen = lastSeen.get(jobId);
             results[idx].error = seen
                 ? `still ${seen.status} after ${timeoutMs}ms` + (seen.error ? `: ${redactInternalUrls(seen.error)}` : "")
-                : lastRefusal !== undefined
-                  ? `no status read got through (last poll: HTTP ${lastRefusal}); this item may not be stored`
-                  : `polling timed out after ${timeoutMs}ms`;
+                : answered
+                  ? "not in the relayer's status answer; this item may not be stored"
+                  : lastRefusal !== undefined
+                    ? `no status read got through (last poll: HTTP ${lastRefusal}); this item may not be stored`
+                    : `polling timed out after ${timeoutMs}ms`;
         }
 
         const succeeded = results.filter((r) => r.status === "done").length;

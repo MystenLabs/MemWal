@@ -614,6 +614,9 @@ class MemWal:
         attempt = 0
         last_seen: Dict[str, RememberBulkStatusItem] = {}
         last_refusal: Optional[int] = None
+        # Whether any status read got through. An item missing from an answer
+        # was not refused, so it must not be reported as if it had been.
+        answered = False
 
         def settle(item: RememberBulkStatusItem) -> bool:
             last_seen[item.job_id] = item
@@ -646,6 +649,7 @@ class MemWal:
                     last_refusal = err.status
                     continue
                 raise
+            answered = True
 
             terminal_ids: Set[str] = {
                 item.job_id
@@ -664,6 +668,7 @@ class MemWal:
                     raise MemWalRateLimited(job_ids, err.retry_after) from err
                 # Any other probe failure is not evidence about the jobs.
             else:
+                answered = True
                 settled = {
                     item.job_id
                     for item in probed.results
@@ -676,6 +681,8 @@ class MemWal:
             if seen is not None:
                 suffix = f": {_redact_internal_urls(seen.error)}" if seen.error else ""
                 error = f"still {seen.status} after {opts.timeout_ms}ms{suffix}"
+            elif answered:
+                error = "not in the relayer's status answer; this item may not be stored"
             elif last_refusal is not None:
                 error = (
                     f"no status read got through (last poll: HTTP {last_refusal}); "

@@ -509,9 +509,9 @@ class TestBulkWaitUnderRateLimit:
             RememberBulkOptions(poll_interval_ms=1, timeout_ms=250),
         )
         assert [r.status for r in out.results] == ["done", "failed", "timeout"]
-        assert "no status read got through (last poll: HTTP 429)" in (
-            out.results[2].error or ""
-        )
+        # A read did get through; it just left job-c out, so saying no read
+        # got through would be false.
+        assert "not in the relayer's status answer" in (out.results[2].error or "")
 
     async def test_partly_settled_batch_is_returned(self, memwal_client: MemWal) -> None:
         reads = 0

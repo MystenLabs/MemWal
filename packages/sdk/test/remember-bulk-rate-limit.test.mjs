@@ -91,7 +91,9 @@ test("a refused wait settles from the confirming read when that one gets through
         ["done", "failed", "timeout"],
     );
     assert.equal(out.succeeded, 1);
-    assert.match(out.results[2].error, /no status read got through \(last poll: HTTP 429\)/);
+    // The probe DID get through; it just left job-c out, so saying no read
+    // got through would be false.
+    assert.match(out.results[2].error, /not in the relayer's status answer/);
 });
 
 test("a partly settled batch is returned, not thrown, even if the last reads are refused", async () => {
@@ -119,4 +121,32 @@ test("a partly settled batch is returned, not thrown, even if the last reads are
         ["done", "timeout"],
     );
     assert.match(out.results[1].error, /still running after 300ms: still retrying this upload/);
+});
+
+test("a stalled confirming read cannot hold the wait for the full request deadline", async () => {
+    globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/version") {
+            return Response.json({
+                apiVersion: "1.0.0",
+                relayerVersion: "1.0.0",
+                minSupportedSdk: { typescript: "0.0.4" },
+            });
+        }
+        if (path === "/api/config") return Response.json({ packageId: "0x1", network: "testnet" });
+        if (path !== "/api/remember/bulk/status") throw new Error(`unexpected request ${path}`);
+        // Every poll is refused; the probe after the deadline never answers
+        // until the SDK gives up on it.
+        if (Date.now() - start < 300) {
+            return Response.json({ error: "rate limited", retry_after_seconds: 0 }, { status: 429 });
+        }
+        return new Promise((_, reject) => {
+            init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        });
+    };
+    const start = Date.now();
+    const out = await client().waitForRememberJobs(["job-a"], [], { pollIntervalMs: 0, timeoutMs: 300 });
+    const elapsed = Date.now() - start;
+    assert.equal(out.results[0].status, "timeout");
+    assert.ok(elapsed < 8_000, `wait took ${elapsed}ms; the probe must not use the 30s request deadline`);
 });
