@@ -471,6 +471,9 @@ class MemWal:
         attempt = 0
         saw_rate_limit = False
         retry_after_ms = 0
+        last_status: Optional[str] = None
+        server_error: Optional[str] = None
+        last_refusal: Optional[int] = None
 
         while _now_ms() < deadline_ms:
             if retry_after_ms > 0:
@@ -489,6 +492,7 @@ class MemWal:
                 )
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
+                    last_refusal = err.status
                     if err.status == 429:
                         saw_rate_limit = True
                         retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
@@ -498,6 +502,8 @@ class MemWal:
             status_str = data.get("status")
             if status_str is None or status_str == "not_found":
                 raise MemWalRememberJobNotFound(job_id)
+            last_status = status_str
+            server_error = data.get("error")
 
             if status_str == "done":
                 return RememberResult(
@@ -514,7 +520,14 @@ class MemWal:
 
             # pending / running / uploaded — keep polling.
 
-        raise _remember_job_timeout(job_id, timeout_ms, saw_rate_limit)
+        raise MemWalRememberJobTimeout(
+            job_id=job_id,
+            timeout_ms=timeout_ms,
+            last_status=last_status,
+            server_error=server_error,
+            last_refusal=last_refusal,
+            saw_rate_limit=saw_rate_limit,
+        )
 
     async def remember_and_wait(
         self,
@@ -1671,24 +1684,45 @@ class MemWalRateLimited(MemWalError):
 
 
 class MemWalRememberJobTimeout(MemWalError):
-    """Polling loop exceeded the configured timeout."""
+    """Polling loop exceeded the configured timeout.
 
-    def __init__(self, job_id: str, timeout_ms: int) -> None:
+    Carries the last status the relayer reported (GH #966): under upload
+    congestion a job stays ``running`` for tens of minutes, and without it a
+    job that is still retrying looks dead.
+    """
+
+    def __init__(
+        self,
+        job_id: str,
+        timeout_ms: int,
+        last_status: Optional[str] = None,
+        server_error: Optional[str] = None,
+        last_refusal: Optional[int] = None,
+        saw_rate_limit: bool = False,
+    ) -> None:
+        # "no status read got through (last poll: HTTP 429)" already names the rate limit.
+        named = last_status is None and last_refusal == 429
+        rate_limited = "; wait hit a rate limit (429)" if saw_rate_limit and not named else ""
+        if last_status is not None:
+            suffix = f" ({_redact_internal_urls(server_error)})" if server_error else ""
+            detail = (
+                f"last status: {last_status}{suffix}. Retry with the same idempotency key "
+                "to keep waiting on this job; remember_and_wait does this for you."
+            )
+        else:
+            detail = (
+                f"no status read got through (last poll: HTTP {last_refusal or 0}), "
+                "so the job's state is unknown."
+            )
         super().__init__(
-            f"remember job timed out after {timeout_ms}ms (job_id={job_id})"
+            f"remember job timed out after {timeout_ms}ms (job_id={job_id}){rate_limited}; {detail}"
         )
         self.status = 504
         self.job_id = job_id
         self.timeout_ms = timeout_ms
-
-
-def _remember_job_timeout(
-    job_id: str, timeout_ms: int, saw_rate_limit: bool
-) -> MemWalRememberJobTimeout:
-    exc = MemWalRememberJobTimeout(job_id, timeout_ms)
-    if saw_rate_limit:
-        exc.args = (f"{exc.args[0]}; wait hit a rate limit (429)",)
-    return exc
+        self.last_status = last_status
+        self.server_error = server_error
+        self.last_refusal = last_refusal
 
 
 async def _discard_http_client(memwal: MemWal) -> None:
