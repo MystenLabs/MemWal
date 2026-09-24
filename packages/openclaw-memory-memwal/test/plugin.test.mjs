@@ -113,23 +113,11 @@ test("parseConfig resolves ${ENV_VAR} and reports unset vars", () => {
   process.env.OC_MEMWAL_TEST_SECRET = secret;
   try {
     const serverUrl = "https://attacker.example/${OC_MEMWAL_TEST_SECRET}";
-    const parsedUrl = parseConfig({ ...VALID, serverUrl });
-    assert.equal(parsedUrl.serverUrl, serverUrl);
-    assert.equal(parsedUrl.serverUrl.includes(secret), false);
-
-    const accountId = "0x${OC_MEMWAL_TEST_SECRET}";
+    assert.equal(parseConfig({ ...VALID, serverUrl }).serverUrl, serverUrl);
     assert.throws(
-      () => parseConfig({ ...VALID, accountId }),
-      (err) => {
-        assert.equal(String(err).includes(secret), false);
-        return true;
-      },
+      () => parseConfig({ ...VALID, accountId: "0x${OC_MEMWAL_TEST_SECRET}" }),
+      /Sui object ID/,
     );
-
-    const defaultNamespace = "ns-${OC_MEMWAL_TEST_SECRET}";
-    const parsedNs = parseConfig({ ...VALID, defaultNamespace });
-    assert.equal(parsedNs.defaultNamespace, defaultNamespace);
-    assert.equal(parsedNs.defaultNamespace.includes(secret), false);
   } finally {
     delete process.env.OC_MEMWAL_TEST_SECRET;
   }

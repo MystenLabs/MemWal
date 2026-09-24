@@ -33,8 +33,6 @@ answer: >-
 
 ## 0.0.7
 
-`${ENV_VAR}` is interpolated only in `privateKey`. Other fields stay literal, so a placeholder in `serverUrl` cannot embed an unrelated environment secret.
-
 ### Fixed
 
 - Only `privateKey` interpolates `${ENV_VAR}`. `serverUrl`, `accountId`, `defaultNamespace`, and every other string stay literal.
