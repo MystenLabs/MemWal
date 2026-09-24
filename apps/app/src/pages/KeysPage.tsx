@@ -53,8 +53,16 @@ export default function KeysPage() {
 
     useEffect(() => {
         if (!owner) return
+        // Only needed to survive the OAuth redirect while signed out. Once
+        // signed in, the URL's `owner` already covers the mismatch check, and
+        // leaving the entry around re-arms it on every future visit to "/" —
+        // trapping the nav logo (and any later sign-out/sign-in) on /keys.
+        if (currentAccount) {
+            sessionStorage.removeItem(KEYS_CONNECT_STORAGE_KEY)
+            return
+        }
         sessionStorage.setItem(KEYS_CONNECT_STORAGE_KEY, JSON.stringify({ owner }))
-    }, [owner])
+    }, [owner, currentAccount])
 
     const mismatch = Boolean(
         owner && currentAccount && owner.toLowerCase() !== currentAccount.address.toLowerCase(),

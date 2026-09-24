@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
     address: '0xowner',
     accountId: null as string | null,
+    rejectWith: null as Error | null,
 }))
 
 vi.mock('./config', () => ({
@@ -21,7 +22,9 @@ vi.mock('@mysten/dapp-kit', async (importOriginal) => {
     }
 })
 vi.mock('./utils/suiClientCompat', () => ({
-    fetchAccountIdForOwner: vi.fn(() => Promise.resolve(mocks.accountId)),
+    fetchAccountIdForOwner: vi.fn(() =>
+        mocks.rejectWith ? Promise.reject(mocks.rejectWith) : Promise.resolve(mocks.accountId),
+    ),
 }))
 
 import { PostAuthAccountCheck } from './App'
@@ -41,6 +44,7 @@ function renderAt() {
 describe('PostAuthAccountCheck', () => {
     beforeEach(() => {
         mocks.accountId = null
+        mocks.rejectWith = null
     })
 
     it('routes a brand-new account (no on-chain Account object) to /setup', async () => {
@@ -51,6 +55,12 @@ describe('PostAuthAccountCheck', () => {
 
     it('routes an existing account to /dashboard', async () => {
         mocks.accountId = '0xaccount'
+        renderAt()
+        expect(await screen.findByText('DASHBOARD')).toBeInTheDocument()
+    })
+
+    it('falls back to /dashboard when the lookup itself fails (transport error)', async () => {
+        mocks.rejectWith = new Error('connection refused')
         renderAt()
         expect(await screen.findByText('DASHBOARD')).toBeInTheDocument()
     })

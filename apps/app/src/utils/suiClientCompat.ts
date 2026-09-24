@@ -81,10 +81,22 @@ export async function fetchAccountIdForOwner(
     }
 
     if (isGrpcClient(suiClient)) {
-        const dynFieldRes = await suiClient.getDynamicField({
-            parentId: tableId,
-            name: { type: 'address', bcs: fromHex(normalizeSuiAddress(ownerAddress)) },
-        })
+        let dynFieldRes: Awaited<ReturnType<SuiGrpcClient['getDynamicField']>>
+        try {
+            dynFieldRes = await suiClient.getDynamicField({
+                parentId: tableId,
+                name: { type: 'address', bcs: fromHex(normalizeSuiAddress(ownerAddress)) },
+            })
+        } catch (err) {
+            // getDynamicField throws when the field object doesn't exist —
+            // the normal "no Account yet" case — and the SDK represents that
+            // as a plain `new Error(...)` (core.mjs's per-object result).
+            // A real transport failure throws the transport's own error
+            // class (e.g. RpcError), so this check leaves those to propagate
+            // and be handled as a genuine failure by the caller.
+            if (err instanceof Error && err.constructor === Error) return null
+            throw err
+        }
         const valueBytes = dynFieldRes?.dynamicField?.value?.bcs
         if (!valueBytes || valueBytes.length !== 32) return null
         return '0x' + toHex(valueBytes)

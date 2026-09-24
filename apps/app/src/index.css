@@ -7977,6 +7977,9 @@ h1, h2, h3 {
   border-radius: 24px;
   background: #000000;
   overflow: clip;
+  /* /keys auto-scrolls here (WALM-675); offset by .dashboard-nav's sticky
+     height so the card header/Add key button don't land under the nav. */
+  scroll-margin-top: 128px;
 }
 
 .dash-page .dashboard-keys-card .card-header {
@@ -8103,6 +8106,10 @@ h1, h2, h3 {
   .dashboard-nav {
     height: 92px;
     padding: 0 16px;
+  }
+
+  .dash-page .dashboard-keys-card {
+    scroll-margin-top: 92px;
   }
 
   .setup-classic-nav .nav-inner,
