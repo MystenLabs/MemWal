@@ -438,3 +438,184 @@ export async function delegateKeyToPublicKey(privateKeyHex: string): Promise<Uin
     const ed = await import("@noble/ed25519");
     return ed.getPublicKeyAsync(hexToBytes(normalizePrivateKey(privateKeyHex)));
 }
+
+// ============================================================
+// SEAL SessionKey lifecycle (WALM-162)
+// ============================================================
+
+/**
+ * How long before the cached SessionKey's usable deadline the SDK starts
+ * rebuilding it in the background.
+ *
+ * This is distinct from `SEAL_SESSION_SAFETY_MARGIN_MS` in `memwal.ts`. The
+ * safety margin is a *staleness guard*: it shortens the cache's usable window
+ * so we never ship a session a key server would already consider expired. It
+ * is entirely reactive — the request that first observes the shortened
+ * deadline is the one that pays for the rebuild.
+ *
+ * The refresh-ahead window is the *proactive* half: once the cached session
+ * enters it, a cache hit still returns immediately with the (still valid)
+ * bytes and a rebuild is kicked off out of band, so the swap happens between
+ * user-facing calls instead of inside one.
+ */
+export const SEAL_SESSION_REFRESH_AHEAD_MS = 60_000;
+
+/** Lifecycle state of a cached SEAL SessionKey at a given instant. */
+export type SealSessionCacheState =
+    /** Comfortably valid — serve from cache, do nothing else. */
+    | "fresh"
+    /** Still valid, but inside the refresh-ahead window — serve from cache AND rebuild in the background. */
+    | "refresh-ahead"
+    /** Past its usable deadline — the caller must block on a rebuild. */
+    | "expired";
+
+/**
+ * Decide what to do with a cached SEAL SessionKey.
+ *
+ * Pure so the refresh policy is unit-testable without standing up the SEAL /
+ * Sui peer dependencies that a real `SessionKey.create()` needs.
+ *
+ * @param expiresAt - Absolute epoch-millis deadline already reduced by the
+ *   safety margin (i.e. the cache entry's `expiresAt`).
+ * @param now - Current epoch millis.
+ * @param refreshAheadMs - Width of the proactive window. Values <= 0 disable
+ *   refresh-ahead and reduce this to the original lazy behaviour.
+ */
+export function sealSessionCacheState(
+    expiresAt: number,
+    now: number,
+    refreshAheadMs: number = SEAL_SESSION_REFRESH_AHEAD_MS,
+): SealSessionCacheState {
+    if (!Number.isFinite(expiresAt) || now >= expiresAt) return "expired";
+    if (refreshAheadMs > 0 && now >= expiresAt - refreshAheadMs) return "refresh-ahead";
+    return "fresh";
+}
+
+/**
+ * Markers that identify a rejected request as "the SEAL SessionKey we sent is
+ * no longer acceptable", rather than any other server-side failure.
+ *
+ * `ExpiredSessionKeyError` / "Session key has expired" are what `@mysten/seal`
+ * raises from `SessionKey.import()` and from a key server answering
+ * `InvalidCertificate`; the sidecar echoes both the message and the constructor
+ * name (`errorName`) in its failure body.
+ */
+const SEAL_SESSION_EXPIRED_MARKERS = [
+    "expiredsessionkeyerror",
+    "session key has expired",
+    "invalidcertificate",
+];
+
+/**
+ * True when a rejected response body legibly names an expired SEAL session.
+ *
+ * Deliberately body-driven rather than status-driven: a bare status match
+ * would turn every relayer 500 into a session rebuild plus retry. Note that
+ * the relayer redacts `AppError::Internal` bodies, so on a stock deployment
+ * this predicate is only reachable when the sidecar's own body survives to the
+ * client. See the WALM-162 notes in `memwal.ts` for why proactive refresh —
+ * not this recovery path — is the primary fix.
+ */
+export function isSealSessionExpiredResponse(status: number, rawBody: string): boolean {
+    if (Number(status) < 400) return false;
+    const haystack = String(rawBody ?? "").toLowerCase();
+    if (!haystack) return false;
+    return SEAL_SESSION_EXPIRED_MARKERS.some((marker) => haystack.includes(marker));
+}
+
+/** Error shape shared by the SEAL session helpers below. */
+export type SealSessionError = Error & {
+    status?: number;
+    serverCode?: string;
+    cause?: unknown;
+};
+
+/**
+ * Deterministic build failures — a missing or too-old `@mysten/sui` /
+ * `@mysten/seal`, or a relayer `/config` that cannot describe a Sui transport.
+ * These fail identically on every attempt, so they are tagged 400 to stop the
+ * documented `withRetry` helper (`docs/sdk/production-readiness.md`) from
+ * burning its budget on them.
+ *
+ * The peer deps are loaded through dynamic `import()`, so the common
+ * missing-package case never reaches the hand-written checks below — it throws
+ * out of the import itself. Those resolver messages are matched here too.
+ *
+ * A package that resolves but is too old does NOT throw from the import: the
+ * import is a namespace import, so a missing export is just `undefined`.
+ * `buildSealSessionInner()` guards `Ed25519Keypair` and `SessionKey` explicitly
+ * and produces the "not found in @mysten/..." messages above.
+ */
+const SEAL_SESSION_PERMANENT_MARKERS = [
+    "not found in @mysten/sui",
+    "ensure @mysten/sui",
+    "get /config response",
+    "get /config requires",
+    // Node ESM / CJS resolution, bundlers, and a package that resolves but no
+    // longer exports what we import.
+    "cannot find package",
+    "cannot find module",
+    "err_module_not_found",
+    "failed to resolve module specifier",
+];
+
+/** ASCII control characters, stripped from error text before it is surfaced. */
+const CONTROL_CHARS = new RegExp("[\\u0000-\\u001F\\u007F]", "g");
+
+function isPermanentSealSessionFailure(message: string): boolean {
+    const lower = message.toLowerCase();
+    return SEAL_SESSION_PERMANENT_MARKERS.some((marker) => lower.includes(marker));
+}
+
+/**
+ * Wrap whatever `buildSealSessionInner()` threw in an error that says what
+ * actually failed and carries a `.status` the documented retry helpers can
+ * classify.
+ *
+ * Without this the raw throw escapes before any `fetch`, so it never passes
+ * through `sanitizeServerError` and reaches callers with `status === undefined`
+ * — which `withRetry` treats as retryable, so an unfixable missing-peer-dep
+ * error gets retried for the full budget while telling the caller nothing
+ * about SEAL.
+ */
+export function sealSessionBuildError(cause: unknown): SealSessionError {
+    const detail =
+        cause instanceof Error ? cause.message : typeof cause === "string" ? cause : String(cause);
+    // Strip control chars and loopback URLs, matching `sanitizeServerError`.
+    const sanitized = redactInternalUrls(detail.replace(CONTROL_CHARS, " ")).trim();
+    const permanent = isPermanentSealSessionFailure(sanitized);
+    const err = new Error(
+        `Failed to build SEAL session: ${sanitized || "<no message>"}`,
+    ) as SealSessionError;
+    err.name = "MemWalSealSessionError";
+    // 400: deterministic (peer deps / relayer config) — do not retry.
+    // 503: transient (Sui RPC, key server, network) — retry with backoff.
+    err.status = permanent ? 400 : 503;
+    err.serverCode = permanent ? "SEAL_SESSION_UNAVAILABLE" : "SEAL_SESSION_BUILD_FAILED";
+    err.cause = cause;
+    return err;
+}
+
+/**
+ * Build the error surfaced when the server rejected our SEAL session as
+ * expired *and* a single rebuild-and-retry did not fix it.
+ *
+ * Tagged 400, not the server's status: the rebuild already happened and failed,
+ * so this is terminal. Leaving the wire status (typically 500) on `.status`
+ * would make the documented `withRetry` helper and `waitForRememberJob`'s
+ * `status >= 500` poll loop keep retrying a clock-skew failure that cannot
+ * resolve itself. The real response is preserved on `.cause`.
+ */
+export function sealSessionExpiredError(status: number, rawBody: string): SealSessionError {
+    const err = new Error(
+        "SEAL session expired: the relayer rejected this request's SEAL SessionKey even after " +
+            "the SDK rebuilt it. This usually means the client clock is skewed relative to the " +
+            "SEAL key servers. Check system time; see " +
+            "https://docs.wal.app/walrus-memory/troubleshooting/overview",
+    ) as SealSessionError;
+    err.name = "MemWalSealSessionError";
+    err.status = 400;
+    err.serverCode = "SEAL_SESSION_EXPIRED";
+    err.cause = { status, body: rawBody };
+    return err;
+}
