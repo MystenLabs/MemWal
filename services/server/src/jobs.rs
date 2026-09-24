@@ -1562,6 +1562,60 @@ async fn execute_upload_and_transfer(
                     None,
                 )
                 .await;
+
+                // Lock contention or lock-pool exhaustion is pipeline backlog, not
+                // a fault of the job or wallet. Re-enqueue a fresh delayed copy with
+                // budget intact rather than burning the 5 wallet upload attempts.
+                if congestion_requeues < MAX_CONGESTION_REQUEUES {
+                    let delay_secs = congestion_backoff_secs(congestion_requeues);
+                    let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
+                    let next_wallet = (wallet_index + 1) % state.key_pool.len().max(1);
+                    let jid_clone = jid.clone();
+                    let mut storage = state.wallet_storage.clone();
+                    match storage
+                        .schedule_request(
+                            wallet_job_request(WalletJob {
+                                wallet_index: next_wallet,
+                                congestion_requeues: congestion_requeues + 1,
+                                operation: WalletOperation::UploadAndTransfer {
+                                    encrypted_b64,
+                                    vector,
+                                    importance,
+                                    owner,
+                                    namespace,
+                                    package_id,
+                                    account_id,
+                                    agent_public_key,
+                                    remember_job_id,
+                                    prepare_claim_token,
+                                    epochs,
+                                },
+                            }),
+                            run_at,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::warn!(
+                                "[wallet-job:upload] job_id={} upload lock contention/timeout; requeued delay={}s requeue={}/{} next_wallet={}",
+                                jid_clone,
+                                delay_secs,
+                                congestion_requeues + 1,
+                                MAX_CONGESTION_REQUEUES,
+                                next_wallet,
+                            );
+                            return Ok(());
+                        }
+                        Err(requeue_err) => {
+                            tracing::error!(
+                                "[wallet-job:upload] job_id={} upload lock requeue failed, falling back to Apalis retry: {}",
+                                jid_clone,
+                                requeue_err,
+                            );
+                        }
+                    }
+                }
+
                 tokio::time::sleep(backoff_duration(attempt_info.current as u32)).await;
                 return Err(err);
             }

@@ -35,6 +35,8 @@ import {
     durableRegisterDirectSigningAllowed,
     executePreparedRegisterTransaction,
     readUploadBlobObject,
+    waitForCertifiedStep,
+    certifiedStep,
     type PreparedRegisterTransaction,
     validatePreparedRegisterTransaction,
 } from "../sidecar/routes/walrus-upload-journal.js";
@@ -744,6 +746,65 @@ test("upload journal retries a newly created Blob on a stale RPC replica", async
 
     assert.equal(calls, 2);
     assert.equal(result, expected);
+});
+
+test("waitForCertifiedStep retries when blob object has certified_epoch null due to replica lag", async () => {
+    const objectId = `0x${"3".repeat(64)}`;
+    const oneLe = Buffer.from(new Uint8Array([1, ...new Array(31).fill(0)]));
+    const blobId = oneLe.toString("base64url");
+    let calls = 0;
+
+    const mockClient = {
+        async getObject() {
+            calls += 1;
+            return {
+                object: {
+                    json: {
+                        blob_id: "1",
+                        id: objectId,
+                        registered_epoch: 40,
+                        // First 2 calls simulate replica lag (certified_epoch is null)
+                        certified_epoch: calls >= 3 ? 40 : null,
+                    },
+                },
+            } as never;
+        },
+    };
+
+    const result = await waitForCertifiedStep(blobId, objectId, 5, 10, mockClient);
+    assert.ok(result);
+    assert.equal(result.step, "certified");
+    assert.equal(result.blobId, blobId);
+    assert.equal(result.blobObjectId, objectId);
+    assert.equal(result.blobObject.certified_epoch, 40);
+    assert.equal(calls, 3);
+});
+
+test("waitForCertifiedStep returns null if certified_epoch remains null after maxAttempts", async () => {
+    const objectId = `0x${"4".repeat(64)}`;
+    const oneLe = Buffer.from(new Uint8Array([1, ...new Array(31).fill(0)]));
+    const blobId = oneLe.toString("base64url");
+    let calls = 0;
+
+    const mockClient = {
+        async getObject() {
+            calls += 1;
+            return {
+                object: {
+                    json: {
+                        blob_id: "1",
+                        id: objectId,
+                        registered_epoch: 40,
+                        certified_epoch: null,
+                    },
+                },
+            } as never;
+        },
+    };
+
+    const result = await waitForCertifiedStep(blobId, objectId, 3, 10, mockClient);
+    assert.equal(result, null);
+    assert.equal(calls, 3);
 });
 
 test("metadata ownership is adopted only during reconciliation", () => {

@@ -1368,12 +1368,19 @@ async fn main() {
     // to the wallet-job concurrency (+1 headroom) so every concurrent upload can
     // hold its own lock connection without touching the request-serving pool. Read
     // WALLET_JOB_CONCURRENCY here independently of the worker registration below.
-    let wallet_lock_pool_size = std::env::var("WALLET_JOB_CONCURRENCY")
+    // Generously size the advisory lock pool so that workers holding transaction
+    // locks across Walrus uploads do not starve concurrent requests or retries.
+    let wallet_lock_pool_size = std::env::var("WALLET_LOCK_POOL_SIZE")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(8)
-        .saturating_add(1)
-        .max(2);
+        .unwrap_or_else(|| {
+            std::env::var("WALLET_JOB_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(8)
+                .saturating_mul(4)
+                .max(32)
+        });
     let wallet_lock_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(wallet_lock_pool_size)
         .connect(&config.database_url)

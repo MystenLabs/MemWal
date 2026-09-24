@@ -118,11 +118,12 @@ export async function readUploadBlobObject(
     );
 }
 
-async function certifiedStep(
+export async function certifiedStep(
     blobId: string,
     blobObjectId: string,
+    client: Pick<typeof suiClient, "getObject"> = suiClient,
 ): Promise<WriteBlobStepCertified | null> {
-    const response = await readUploadBlobObject(blobObjectId, { json: true });
+    const response = await readUploadBlobObject(blobObjectId, { json: true }, client);
     const json = response.object.json as any;
     if (!json) throw new DurableSideEffectVerifyError(`Blob ${blobObjectId} has no JSON fields`);
     const chainBlobId = chainBlobIdFromRaw(json.blob_id ?? json.blobId);
@@ -135,6 +136,25 @@ async function certifiedStep(
     if (certifiedEpoch === null) return null;
     const blobObject = { ...json, id: blobObjectId, certified_epoch: certifiedEpoch };
     return { step: "certified", blobId, blobObjectId, blobObject };
+}
+
+export async function waitForCertifiedStep(
+    blobId: string,
+    blobObjectId: string,
+    maxAttempts = 8,
+    initialDelayMs = 500,
+    client: Pick<typeof suiClient, "getObject"> = suiClient,
+): Promise<WriteBlobStepCertified | null> {
+    let delay = initialDelayMs;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const certified = await certifiedStep(blobId, blobObjectId, client);
+        if (certified) return certified;
+        if (attempt < maxAttempts - 1) {
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            delay = Math.min(Math.round(delay * 1.5), 3000);
+        }
+    }
+    return null;
 }
 
 export function durableRegisterDirectSigningAllowed(
@@ -905,7 +925,7 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                             result,
                             `certification transaction ${digest}`,
                         );
-                        const certified = await certifiedStep(resume.blobId, resume.blobObjectId);
+                        const certified = await waitForCertifiedStep(resume.blobId, resume.blobObjectId);
                         if (!certified) throw new Error(`certified Blob ${resume.blobObjectId} is not certified on chain`);
                         step = certified;
                     }
