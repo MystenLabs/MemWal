@@ -22,7 +22,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { LogOut, Copy, TriangleAlert } from 'lucide-react'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
-import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
+import { fetchObjectJson, findCreatedAccountId, pollAccountIdForOwner, publicKeyToHex } from '../utils/suiClientCompat'
 
 type Step = 'intro' | 'import-key' | 'generating' | 'show-key' | 'onchain' | 'done' | 'error'
 
@@ -77,11 +77,30 @@ function hexToBytes(hex: string): Uint8Array {
 
 async function getAccountObjectId(suiClient: ReturnType<typeof useSuiClient>, ownerAddress: string): Promise<string | null> {
     try {
-        return await fetchAccountIdForOwner(suiClient, config.memwalRegistryId, ownerAddress)
+        return await pollAccountIdForOwner(suiClient, config.memwalRegistryId, ownerAddress, { attempts: 3 })
     } catch (err) {
         console.warn('[getAccountObjectId] lookup failed, treating as no-account', err)
         return null
     }
+}
+
+async function accountIdAfterCreate(
+    suiClient: ReturnType<typeof useSuiClient>,
+    ownerAddress: string,
+    digest: string,
+): Promise<string | null> {
+    try {
+        const waited = await suiClient.waitForTransaction({
+            digest,
+            include: { events: true, effects: true, objectTypes: true },
+            options: { showEvents: true, showObjectChanges: true },
+        } as Parameters<typeof suiClient.waitForTransaction>[0])
+        const fromTx = findCreatedAccountId(waited)
+        if (fromTx) return fromTx
+    } catch {
+        await suiClient.waitForTransaction({ digest })
+    }
+    return pollAccountIdForOwner(suiClient, config.memwalRegistryId, ownerAddress)
 }
 
 type AccountJson = { delegate_keys?: { public_key?: unknown }[] }
@@ -191,15 +210,10 @@ export default function SetupWizard() {
                 ],
             })
             const createResult = await signAndExecute({ transaction: tx })
-            await suiClient.waitForTransaction({ digest: createResult.digest })
-
-            // Resolve through AccountRegistry after finality. This works for
-            // both the app-wide gRPC client and the local JSON-RPC E2E client;
-            // getTransactionBlock() is JSON-RPC-only.
-            knownAccountId = await getAccountObjectId(suiClient, ownerAddress)
+            knownAccountId = await accountIdAfterCreate(suiClient, ownerAddress, createResult.digest)
 
             if (!knownAccountId) {
-                throw new Error('Account created but object ID was not found in the registry. Please try again.')
+                throw new Error('Account created but the object is not readable yet. Please try again.')
             }
 
             setTxStatus('adding delegate key...')
