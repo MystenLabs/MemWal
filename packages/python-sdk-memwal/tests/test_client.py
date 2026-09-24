@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
@@ -22,7 +23,9 @@ from memwal.client import (
     MemWalClockDriftError,
     MemWalCompatibilityError,
     MemWalError,
+    MemWalRateLimited,
     MemWalSync,
+    _HttpStatusError,
 )
 from memwal.types import (
     RecallManualOptions,
@@ -460,6 +463,85 @@ class TestRememberBulkAsync:
         )
 
         assert [item.status for item in result.results] == ["done", "done"]
+
+
+class TestBulkWaitUnderRateLimit:
+    async def test_every_read_refused_raises_rate_limited(
+        self, memwal_client: MemWal
+    ) -> None:
+        ids = [f"job-{i}" for i in range(12)]
+
+        async def refused(job_ids: Sequence[str]) -> RememberBulkStatusResult:
+            raise _HttpStatusError(429, '{"error":"rate limited"}', retry_after="30")
+
+        memwal_client.get_remember_bulk_status = refused  # type: ignore[method-assign]
+        with pytest.raises(MemWalRateLimited) as exc:
+            await memwal_client.wait_for_remember_jobs(
+                ids, RememberBulkOptions(poll_interval_ms=1, timeout_ms=300)
+            )
+        assert exc.value.status == 429
+        assert exc.value.job_ids == ids
+        assert exc.value.retry_after == "30"
+        assert "none of its 12 writes could be confirmed" in str(exc.value)
+
+    async def test_confirming_read_settles_a_refused_wait(
+        self, memwal_client: MemWal
+    ) -> None:
+        start = time.monotonic()
+
+        async def probe_answers(job_ids: Sequence[str]) -> RememberBulkStatusResult:
+            # Refused for the whole 250ms wait; the read after the deadline is
+            # the probe. Time-based because jitter varies the poll count.
+            if time.monotonic() - start < 0.25:
+                raise _HttpStatusError(429, "{}")
+            return RememberBulkStatusResult(
+                results=[
+                    RememberBulkStatusItem(job_id="job-a", status="done", blob_id="blob-a"),
+                    RememberBulkStatusItem(
+                        job_id="job-b", status="failed", error="walrus upload failed"
+                    ),
+                ]
+            )
+
+        memwal_client.get_remember_bulk_status = probe_answers  # type: ignore[method-assign]
+        out = await memwal_client.wait_for_remember_jobs(
+            ["job-a", "job-b", "job-c"],
+            RememberBulkOptions(poll_interval_ms=1, timeout_ms=250),
+        )
+        assert [r.status for r in out.results] == ["done", "failed", "timeout"]
+        assert "no status read got through (last poll: HTTP 429)" in (
+            out.results[2].error or ""
+        )
+
+    async def test_partly_settled_batch_is_returned(self, memwal_client: MemWal) -> None:
+        reads = 0
+
+        async def then_refused(job_ids: Sequence[str]) -> RememberBulkStatusResult:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return RememberBulkStatusResult(
+                    results=[
+                        RememberBulkStatusItem(
+                            job_id="job-a", status="done", blob_id="blob-a"
+                        ),
+                        RememberBulkStatusItem(
+                            job_id="job-b",
+                            status="running",
+                            error="still retrying this upload",
+                        ),
+                    ]
+                )
+            raise _HttpStatusError(429, "{}")
+
+        memwal_client.get_remember_bulk_status = then_refused  # type: ignore[method-assign]
+        out = await memwal_client.wait_for_remember_jobs(
+            ["job-a", "job-b"], RememberBulkOptions(poll_interval_ms=1, timeout_ms=300)
+        )
+        assert [r.status for r in out.results] == ["done", "timeout"]
+        assert "still running after 300ms: still retrying this upload" in (
+            out.results[1].error or ""
+        )
 
 
 # ============================================================

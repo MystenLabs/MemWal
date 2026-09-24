@@ -1,5 +1,11 @@
 # memwal
 
+## Unreleased
+
+### Fixed
+
+- `wait_for_remember_jobs` / `remember_bulk_and_wait` no longer return a batch they could not read as if it were still uploading. When every status poll is rate-limited, the wait makes one confirming read and raises `MemWalRateLimited` (`status` 429, `job_ids`, `retry_after`) if that is refused too. An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)
+
 ## 0.1.11
 
 ### Added

@@ -612,6 +612,28 @@ class MemWal:
         }
         pending: List[str] = list(job_ids)
         attempt = 0
+        last_seen: Dict[str, RememberBulkStatusItem] = {}
+        last_refusal: Optional[int] = None
+
+        def settle(item: RememberBulkStatusItem) -> bool:
+            last_seen[item.job_id] = item
+            if item.status == "done":
+                results[item.job_id] = RememberBulkItemResult(
+                    id=item.job_id,
+                    blob_id=item.blob_id or "",
+                    status="done",
+                    error=None,
+                )
+                return True
+            if item.status in ("failed", "not_found"):
+                results[item.job_id] = RememberBulkItemResult(
+                    id=item.job_id,
+                    blob_id=item.blob_id or "",
+                    status="failed",
+                    error=item.error,
+                )
+                return True
+            return False
 
         while pending and _now_ms() < deadline_ms:
             await _sleep_ms(_polling_delay_ms(opts.poll_interval_ms, attempt))
@@ -621,28 +643,49 @@ class MemWal:
                 batch = await self.get_remember_bulk_status(pending)
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
+                    last_refusal = err.status
                     continue
                 raise
 
-            terminal_ids: Set[str] = set()
-            for item in batch.results:
-                if item.status == "done":
-                    results[item.job_id] = RememberBulkItemResult(
-                        id=item.job_id,
-                        blob_id=item.blob_id or "",
-                        status="done",
-                        error=None,
-                    )
-                    terminal_ids.add(item.job_id)
-                elif item.status in ("failed", "not_found"):
-                    results[item.job_id] = RememberBulkItemResult(
-                        id=item.job_id,
-                        blob_id=item.blob_id or "",
-                        status="failed",
-                        error=item.error,
-                    )
-                    terminal_ids.add(item.job_id)
+            terminal_ids: Set[str] = {
+                item.job_id
+                for item in batch.results
+                if item.job_id in pending and settle(item)
+            }
             pending = [jid for jid in pending if jid not in terminal_ids]
+
+        if opts.timeout_ms > 0 and len(pending) == len(job_ids) and not last_seen:
+            # Nothing settled and nothing was seen: the polls may all have been
+            # refused. Confirm with one direct read before reporting anything.
+            try:
+                probed = await self.get_remember_bulk_status(list(job_ids))
+            except _HttpStatusError as err:
+                if err.status == 429:
+                    raise MemWalRateLimited(job_ids, err.retry_after) from err
+                # Any other probe failure is not evidence about the jobs.
+            else:
+                settled = {
+                    item.job_id
+                    for item in probed.results
+                    if item.job_id in pending and settle(item)
+                }
+                pending = [jid for jid in pending if jid not in settled]
+
+        for job_id in pending:
+            seen = last_seen.get(job_id)
+            if seen is not None:
+                suffix = f": {_redact_internal_urls(seen.error)}" if seen.error else ""
+                error = f"still {seen.status} after {opts.timeout_ms}ms{suffix}"
+            elif last_refusal is not None:
+                error = (
+                    f"no status read got through (last poll: HTTP {last_refusal}); "
+                    "this item may not be stored"
+                )
+            else:
+                error = f"polling timed out after {opts.timeout_ms}ms"
+            results[job_id] = RememberBulkItemResult(
+                id=job_id, blob_id="", status="timeout", error=error
+            )
 
         ordered = [results[job_id] for job_id in job_ids]
         succeeded = sum(1 for r in ordered if r.status == "done")
@@ -1535,6 +1578,24 @@ class MemWalRememberJobFailed(MemWalError):
         self.status = 500
         self.job_id = job_id
         self.error = error
+
+
+class MemWalRateLimited(MemWalError):
+    """Every status read for a bulk wait was rate-limited, the confirming read
+    included, so none of its writes could be confirmed (GH #967). Status reads
+    count against the same delegate-key budget as writes."""
+
+    def __init__(self, job_ids: Sequence[str], retry_after: Optional[str] = None) -> None:
+        wait = f" after ~{retry_after}s" if retry_after else ""
+        super().__init__(
+            f"Walrus Memory rate-limited every status read for this batch, so none of its "
+            f"{len(job_ids)} writes could be confirmed. Do not treat them as stored: check them "
+            f"with get_remember_bulk_status(job_ids){wait}. Status reads count against the same "
+            "delegate-key budget as writes."
+        )
+        self.status = 429
+        self.job_ids = list(job_ids)
+        self.retry_after = retry_after
 
 
 class MemWalRememberJobTimeout(MemWalError):
