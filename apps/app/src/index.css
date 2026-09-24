@@ -12573,6 +12573,7 @@ h1, h2, h3 {
 .dash-page .connect-wm-paths {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 28px;
+  margin-top: 28px;
 }
 
 .dash-page .connect-wm-path {
@@ -12721,9 +12722,18 @@ h1, h2, h3 {
   object-fit: contain;
 }
 
+.dash-page .connect-wm-tab-mark:has(.connect-wm-icon--codex) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
 .dash-page .connect-wm-tab-mark img.connect-wm-icon--codex {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
+  transform: none;
 }
 
 .dash-page .connect-wm-guide:has(.connect-wm-client) {
