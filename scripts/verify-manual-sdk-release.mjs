@@ -37,7 +37,7 @@ const releases = [
     },
     {
         name: "OpenClaw plugin",
-        version: "0.0.6",
+        version: "0.0.7",
         manifests: [["packages/openclaw-memory-memwal/package.json", "version"]],
         changelogs: [
             "packages/openclaw-memory-memwal/CHANGELOG.md",
