@@ -511,6 +511,87 @@ test("a credential split across two bulk entries is still caught", () => {
     }
 });
 
+// The passage path (`memwal_analyze`) splits on lines and used to screen each
+// one alone, so the same split the batch test above catches was stored
+// verbatim (WALM-687). `sanitizePassage` now reuses `sanitizeFactBatch`.
+
+test("a credential split across two passage lines is still caught", () => {
+    const SEED = "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+    const label = "my delegate private key for the mainnet account";
+    const out = sanitizePassage(`${label}\n${SEED}`);
+    assert.equal(out.refusal, undefined, "the label line is a fact and should survive");
+    assert.equal(out.changed, true);
+    assert.ok(out.count >= 1);
+    assert.ok(!out.text.includes(SEED), "the delegate private key survived being split across lines");
+    assert.ok(out.text.includes(label), "the label line was dropped with the key");
+    assert.ok(
+        out.kinds.includes("labelled-key-material"),
+        `expected labelled-key-material, got ${out.kinds}`,
+    );
+    assert.ok(out.dropped.some((d) => d.reason === "credential-only"));
+    assert.ok(!JSON.stringify(out.dropped).includes(SEED), "dropped echoed the key");
+    assert.ok(!droppedSpanNotice(out.dropped, out.segments).includes(SEED));
+});
+
+test("a non-hex opaque credential split across passage lines is removed", () => {
+    const token = "zQ8vK2mNp4RsT6uWxY1aB3cD5eF7gH9jL0nP2q";
+    const out = sanitizePassage(
+        `the api key for the staging bucket is\n${token}\nkeep it safe`,
+    );
+    assert.equal(out.refusal, undefined);
+    assert.equal(out.changed, true);
+    assert.ok(out.count >= 1);
+    assert.ok(!out.text.includes(token), "the opaque token survived the line break");
+    assert.ok(out.text.includes("the api key for the staging bucket is"));
+    assert.ok(out.text.includes("keep it safe"));
+    assert.ok(
+        out.kinds.includes("labelled-key-material"),
+        `expected labelled-key-material, got ${out.kinds}`,
+    );
+    assert.ok(!JSON.stringify(out.dropped).includes(token));
+});
+
+test("a delegatePrivateKey value on the next JSON line is removed", () => {
+    const SEED = "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+    const out = sanitizePassage(
+        [
+            "Notes from the credentials file on this laptop:",
+            '"delegatePrivateKey":',
+            `"${SEED}"`,
+            "I use the work namespace there.",
+        ].join("\n"),
+    );
+    assert.equal(out.refusal, undefined);
+    assert.equal(out.changed, true);
+    assert.ok(out.count >= 1);
+    assert.ok(!out.text.includes(SEED), "the JSON value on its own line was stored");
+    assert.ok(out.text.includes("delegatePrivateKey"), "the label line was dropped with the key");
+    assert.ok(out.text.includes("work namespace"));
+    assert.ok(
+        out.kinds.includes("labelled-key-material"),
+        `expected labelled-key-material, got ${out.kinds}`,
+    );
+    assert.ok(!JSON.stringify(out.dropped).includes(SEED));
+});
+
+test("a passage of identifiers with no credential label is unchanged", () => {
+    // Same gate as the batch screen: widening passage screening to neighbouring
+    // lines must not start eating digests, package ids or blob ids.
+    const lines = [
+        "The release digest is 4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b",
+        "My Sui package id is 0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437",
+        "The blob landed as blob_id=Xj9vKq2mP7nR4tW8yB1cE5gH0dF3sA6uZ2xN8qL4kM7",
+        "I always use pnpm",
+    ];
+    const passage = lines.join("\n");
+    const out = sanitizePassage(passage);
+    assert.equal(out.text, passage);
+    assert.equal(out.changed, false);
+    assert.equal(out.count, 0);
+    assert.deepEqual(out.kinds, []);
+    assert.deepEqual(out.dropped, []);
+});
+
 test("the batch screen does not fire without a label anywhere in it", () => {
     // Cross-entry awareness widens what counts as adjacent, which is exactly
     // the kind of change that starts eating identifiers. The gate is still the
