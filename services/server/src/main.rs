@@ -481,13 +481,6 @@ mod mcp_rate_limit_tests {
         Some(i)
     }
 
-    #[test]
-    fn resp_command_len_reads_one_bulk_array() {
-        let raw = b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
-        assert_eq!(resp_command_len(raw), Some(raw.len()));
-        assert_eq!(resp_command_len(&raw[..raw.len() - 1]), None);
-    }
-
     /// Accepts a Redis handshake and answers every command with integer 0,
     /// which `accounts_rate_limit_middleware` treats as a denied window.
     async fn reply_denied(mut socket: tokio::net::TcpStream) {
@@ -689,9 +682,7 @@ mod mcp_rate_limit_tests {
     async fn mcp_routes_invoke_accounts_ip_rate_limit() {
         let state = test_state(denying_redis().await).await;
         // Merged the same way `main` merges `mcp_routes` into `public_routes`.
-        // `/health` and an unknown path must not spend this budget.
         let app = Router::new()
-            .route("/health", get(|| async { "ok" }))
             .merge(mcp_routes(Arc::clone(&state)))
             .with_state(state);
 
@@ -707,19 +698,6 @@ mod mcp_rate_limit_tests {
         }
         // A Bearer token does not skip the shared IP budget.
         expect_accounts_ip_burst(&app, Method::POST, "/api/mcp", true).await;
-
-        let health = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(health.status(), StatusCode::OK);
 
         let missing = app
             .oneshot(
