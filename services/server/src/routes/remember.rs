@@ -800,123 +800,17 @@ pub async fn remember(
                     ));
                 }
             }
-            // A previous attempt under this key permanently failed. Idempotency
-            // should suppress duplicate *successes*, not pin *failures* — BUT only
-            // restart a failure that never minted a paid blob. A `failed` row that
-            // still carries a `blob_id` was marked failed *after* a successful
-            // mint (a recovery-handoff failure or the stale sweeper); restarting
-            // it would clear + re-upload and DISCARD the paid blob. So: reset only
-            // when there's no blob; otherwise leave the row (preserve the mint for
-            // recovery) and return it as-is.
-            if existing_status == "failed" && existing_blob_id.is_none() {
-                let claimed = claim_remember_preparation(state.db.pool(), &existing_id).await?;
-                if let Some(token) = claimed {
-                    spawn_persisted_remember_preparation(
-                        Arc::clone(&state),
-                        existing_id.clone(),
-                        token,
-                        text,
-                        owner_owned,
-                        auth.account_id.clone(),
-                        namespace_owned,
-                        auth.public_key.clone(),
-                    );
-                    return Ok((
-                        StatusCode::ACCEPTED,
-                        Json(RememberAcceptedResponse {
-                            job_id: existing_id,
-                            status: "pending".to_string(),
-                        }),
-                    ));
-                }
-
-                // Losing the claim now means a concurrent retry took it, not
-                // that the TTL blocked us — `failed` rows are re-claimable
-                // immediately. Report whatever that winner left behind rather
-                // than asserting "pending" on its behalf: answering with a
-                // state we did not reach is what told callers a dead job was
-                // queued.
-                let actual: String = sqlx::query_scalar(
-                    "SELECT status FROM remember_jobs WHERE id = $1",
-                )
-                .bind(&existing_id)
-                .fetch_optional(state.db.pool())
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to re-read job status: {}", e)))?
-                .unwrap_or_else(|| existing_status.clone());
-
-                return Ok((
-                    StatusCode::ACCEPTED,
-                    Json(RememberAcceptedResponse {
-                        job_id: existing_id,
-                        status: actual,
-                    }),
-                ));
-            }
-
-            if existing_status == "pending" && existing_blob_id.is_none() {
-                if let Some(token) =
-                    claim_remember_preparation(state.db.pool(), &existing_id).await?
-                {
-                    spawn_persisted_remember_preparation(
-                        Arc::clone(&state),
-                        existing_id.clone(),
-                        token,
-                        text,
-                        owner_owned,
-                        auth.account_id.clone(),
-                        namespace_owned,
-                        auth.public_key.clone(),
-                    );
-                }
-                return Ok((
-                    StatusCode::ACCEPTED,
-                    Json(RememberAcceptedResponse {
-                        job_id: existing_id,
-                        status: "pending".to_string(),
-                    }),
-                ));
-            }
-
-            if matches!(existing_status.as_str(), "failed" | "uploaded")
-                && existing_blob_id.is_some()
-            {
-                // Claim first, enqueue second, publish `uploaded` last. If the
-                // process dies before enqueue, the lease expires and a later
-                // retry reclaims it; no durable state falsely says recovered.
-                if let Some(token) = claim_paid_recovery(state.db.pool(), &existing_id).await? {
-                    enqueue_persisted_paid_recovery(&state, &existing_id, owner, namespace).await?;
-                    sqlx::query(
-                        "UPDATE remember_jobs SET status = 'uploaded', error_msg = NULL, updated_at = NOW() WHERE id = $1 AND recovery_claim_token = $2 AND blob_id IS NOT NULL AND status IN ('failed', 'uploaded')",
-                    )
-                    .bind(&existing_id)
-                    .bind(&token)
-                    .execute(state.db.pool())
-                    .await
-                    .map_err(|e| AppError::Internal(format!("Failed to publish paid recovery: {}", e)))?;
-                }
-                return Ok((
-                    StatusCode::ACCEPTED,
-                    Json(RememberAcceptedResponse {
-                        job_id: existing_id,
-                        status: "uploaded".to_string(),
-                    }),
-                ));
-            }
-            tracing::info!(
-                "remember idempotent hit: job_id={} owner={} ns={} status={}",
+            return collapse_onto_existing_job(
+                &state,
+                &auth,
                 existing_id,
-                owner,
-                namespace,
                 existing_status,
-            );
-            return Ok((
-                StatusCode::ACCEPTED,
-                Json(RememberAcceptedResponse {
-                    job_id: existing_id,
-                    status: existing_status,
-                }),
-            ));
+                existing_blob_id.is_some(),
+                text,
+                owner_owned,
+                namespace_owned,
+            )
+            .await;
         }
     }
 
@@ -957,7 +851,7 @@ pub async fn remember(
     // job rather than spawning a duplicate write.
     if inserted.rows_affected() == 0 {
         if let Some(key) = body.idempotency_key.as_deref() {
-            if let Some((existing_id, existing_status, _blob_id, existing_fingerprint)) =
+            if let Some((existing_id, existing_status, existing_blob_id, existing_fingerprint)) =
                 find_remember_job_by_key(state.db.pool(), owner, key).await?
             {
                 // Lost the race to a concurrent same-key request with DIFFERENT
@@ -976,29 +870,17 @@ pub async fn remember(
                     owner,
                     namespace,
                 );
-                if existing_status == "pending" {
-                    if let Some(token) =
-                        claim_remember_preparation(state.db.pool(), &existing_id).await?
-                    {
-                        spawn_persisted_remember_preparation(
-                            Arc::clone(&state),
-                            existing_id.clone(),
-                            token,
-                            text,
-                            owner_owned,
-                            auth.account_id.clone(),
-                            namespace_owned,
-                            auth.public_key.clone(),
-                        );
-                    }
-                }
-                return Ok((
-                    StatusCode::ACCEPTED,
-                    Json(RememberAcceptedResponse {
-                        job_id: existing_id,
-                        status: existing_status,
-                    }),
-                ));
+                return collapse_onto_existing_job(
+                    &state,
+                    &auth,
+                    existing_id,
+                    existing_status,
+                    existing_blob_id.is_some(),
+                    text,
+                    owner_owned,
+                    namespace_owned,
+                )
+                .await;
             }
         }
         return Err(AppError::Internal(
@@ -1034,6 +916,131 @@ pub async fn remember(
             status: "running".to_string(),
         }),
     ))
+}
+
+/// What a same-key POST does with the row already bound to that key. Shared by
+/// the pre-insert lookup and the insert-race loser, so a request that loses the
+/// race to a row that has already failed still restarts or recovers it.
+#[derive(Debug, PartialEq, Eq)]
+enum ExistingJobAction {
+    /// Failed before minting: restart in place under the same job id.
+    RestartFailed,
+    /// Pending with no blob: re-drive preparation if nothing holds the claim.
+    RedrivePending,
+    /// A paid blob exists: re-drive metadata/transfer, never re-upload.
+    RecoverPaidBlob,
+    /// In flight or done: hand back the job as it is.
+    ReturnAsIs,
+}
+
+fn existing_job_action(status: &str, has_blob: bool) -> ExistingJobAction {
+    match (status, has_blob) {
+        ("failed", false) => ExistingJobAction::RestartFailed,
+        ("pending", false) => ExistingJobAction::RedrivePending,
+        ("failed" | "uploaded", true) => ExistingJobAction::RecoverPaidBlob,
+        _ => ExistingJobAction::ReturnAsIs,
+    }
+}
+
+/// Answer a same-key POST from the row already bound to the key.
+#[allow(clippy::too_many_arguments)]
+async fn collapse_onto_existing_job(
+    state: &Arc<AppState>,
+    auth: &AuthInfo,
+    existing_id: String,
+    existing_status: String,
+    has_blob: bool,
+    text: String,
+    owner: String,
+    namespace: String,
+) -> Result<(StatusCode, Json<RememberAcceptedResponse>), AppError> {
+    let accepted = |job_id: String, status: String| {
+        Ok((
+            StatusCode::ACCEPTED,
+            Json(RememberAcceptedResponse { job_id, status }),
+        ))
+    };
+    match existing_job_action(&existing_status, has_blob) {
+        ExistingJobAction::RestartFailed => {
+            // A previous attempt under this key permanently failed. Idempotency
+            // should suppress duplicate *successes*, not pin *failures* — BUT only
+            // restart a failure that never minted a paid blob. A `failed` row that
+            // still carries a `blob_id` was marked failed *after* a successful
+            // mint (a recovery-handoff failure or the stale sweeper); restarting
+            // it would clear + re-upload and DISCARD the paid blob. So: reset only
+            // when there's no blob; otherwise leave the row (preserve the mint for
+            // recovery) and return it as-is.
+            if let Some(token) = claim_remember_preparation(state.db.pool(), &existing_id).await? {
+                spawn_persisted_remember_preparation(
+                    Arc::clone(state),
+                    existing_id.clone(),
+                    token,
+                    text,
+                    owner,
+                    auth.account_id.clone(),
+                    namespace,
+                    auth.public_key.clone(),
+                );
+                return accepted(existing_id, "pending".to_string());
+            }
+
+            // Losing the claim now means a concurrent retry took it, not
+            // that the TTL blocked us — `failed` rows are re-claimable
+            // immediately. Report whatever that winner left behind rather
+            // than asserting "pending" on its behalf: answering with a
+            // state we did not reach is what told callers a dead job was
+            // queued.
+            let actual = read_job_status(state.db.pool(), &existing_id, &existing_status).await?;
+            accepted(existing_id, actual)
+        }
+        ExistingJobAction::RedrivePending => {
+            if let Some(token) = claim_remember_preparation(state.db.pool(), &existing_id).await? {
+                spawn_persisted_remember_preparation(
+                    Arc::clone(state),
+                    existing_id.clone(),
+                    token,
+                    text,
+                    owner,
+                    auth.account_id.clone(),
+                    namespace,
+                    auth.public_key.clone(),
+                );
+            }
+            accepted(existing_id, "pending".to_string())
+        }
+        ExistingJobAction::RecoverPaidBlob => {
+            // The claim flips the row to `uploaded` in the same statement, so a
+            // concurrent same-key POST sees the recovery as taken and cannot
+            // enqueue a second one. If enqueue then fails, hand the row back
+            // (`failed`, lease cleared) so the next retry can claim it at once.
+            if let Some(token) = claim_paid_recovery(state.db.pool(), &existing_id).await? {
+                if let Err(e) =
+                    enqueue_persisted_paid_recovery(state, &existing_id, &owner, &namespace).await
+                {
+                    release_paid_recovery(state.db.pool(), &existing_id, &token, &e.to_string())
+                        .await;
+                    return Err(e);
+                }
+                return accepted(existing_id, "uploaded".to_string());
+            }
+
+            // No claim: another request holds a live recovery, or the row
+            // moved on (e.g. to `done`). Report what is actually there
+            // rather than asserting `uploaded` on nobody's behalf.
+            let actual = read_job_status(state.db.pool(), &existing_id, &existing_status).await?;
+            accepted(existing_id, actual)
+        }
+        ExistingJobAction::ReturnAsIs => {
+            tracing::info!(
+                "remember idempotent hit: job_id={} owner={} ns={} status={}",
+                existing_id,
+                owner,
+                namespace,
+                existing_status,
+            );
+            accepted(existing_id, existing_status)
+        }
+    }
 }
 
 /// Whether to spawn a fresh background write after attempting to reset a failed
@@ -1118,13 +1125,37 @@ fn paid_recovery_operation(
     })
 }
 
+/// Re-read a job's status after losing a claim, falling back to what the
+/// caller already saw if the row is gone.
+async fn read_job_status(
+    pool: &sqlx::PgPool,
+    job_id: &str,
+    fallback: &str,
+) -> Result<String, AppError> {
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM remember_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to re-read job status: {}", e)))?;
+    Ok(status.unwrap_or_else(|| fallback.to_string()))
+}
+
+/// Claim recovery of a paid blob and publish it as `uploaded` in one statement.
+///
+/// A `failed` row is claimable at once, whatever its lease says: the recovery
+/// that held the lease is over (the wallet job marked it failed, or enqueue
+/// failed), so fencing it only turns the retry the caller was told to make into
+/// a no-op. An `uploaded` row is fenced for `PREPARE_CLAIM_TTL_SECS`, since a
+/// recovery may still be running for it; if the process died between claim and
+/// enqueue, the lease expiring is what lets a later retry take it over.
 async fn claim_paid_recovery(
     pool: &sqlx::PgPool,
     job_id: &str,
 ) -> Result<Option<String>, AppError> {
     let token = uuid::Uuid::new_v4().to_string();
     let claimed: Option<String> = sqlx::query_scalar(
-        "UPDATE remember_jobs SET recovery_claimed_at = NOW(), recovery_claim_token = $3, updated_at = NOW() WHERE id = $1 AND status IN ('failed', 'uploaded') AND blob_id IS NOT NULL AND (recovery_claimed_at IS NULL OR recovery_claimed_at < NOW() - make_interval(secs => $2)) RETURNING recovery_claim_token",
+        "UPDATE remember_jobs SET status = 'uploaded', error_msg = NULL, recovery_claimed_at = NOW(), recovery_claim_token = $3, updated_at = NOW() WHERE id = $1 AND blob_id IS NOT NULL AND (status = 'failed' OR (status = 'uploaded' AND (recovery_claimed_at IS NULL OR recovery_claimed_at < NOW() - make_interval(secs => $2)))) RETURNING recovery_claim_token",
     )
     .bind(job_id)
     .bind(PREPARE_CLAIM_TTL_SECS)
@@ -1133,6 +1164,27 @@ async fn claim_paid_recovery(
     .await
     .map_err(|e| AppError::Internal(format!("Failed to claim paid recovery: {}", e)))?;
     Ok(claimed)
+}
+
+/// Undo a paid-recovery claim whose enqueue failed: back to `failed`, lease
+/// cleared, so the next same-key POST reclaims immediately. Only the holder of
+/// `token` can release, and only while the row still says `uploaded`.
+async fn release_paid_recovery(pool: &sqlx::PgPool, job_id: &str, token: &str, msg: &str) {
+    let released = sqlx::query(
+        "UPDATE remember_jobs SET status = 'failed', error_msg = $3, recovery_claimed_at = NULL, recovery_claim_token = NULL, updated_at = NOW() WHERE id = $1 AND recovery_claim_token = $2 AND status = 'uploaded'",
+    )
+    .bind(job_id)
+    .bind(token)
+    .bind(format!("paid recovery could not be queued: {}", msg))
+    .execute(pool)
+    .await;
+    if let Err(e) = released {
+        tracing::warn!(
+            "failed to release paid recovery claim for job {}: {}",
+            job_id,
+            e
+        );
+    }
 }
 
 async fn enqueue_persisted_paid_recovery(
@@ -1623,10 +1675,11 @@ pub async fn remember_manual(
 #[cfg(test)]
 mod tests {
     use super::{
-        batch_summary_inputs, build_bulk_status_results, claim_remember_preparation,
-        find_remember_job_by_key, paid_recovery_operation, redact_hex_addresses,
+        batch_summary_inputs, build_bulk_status_results, claim_paid_recovery,
+        claim_remember_preparation, existing_job_action, find_remember_job_by_key,
+        paid_recovery_operation, read_job_status, redact_hex_addresses, release_paid_recovery,
         request_fingerprint, sanitize_job_error_for_client, should_spawn_after_reset,
-        split_text_chunks, summarize_for_embedding, validate_idempotency_key,
+        split_text_chunks, summarize_for_embedding, validate_idempotency_key, ExistingJobAction,
         INFRA_JOB_ERROR_MESSAGE, INFRA_JOB_RETRYING_MESSAGE, MAX_IDEMPOTENCY_KEY_BYTES,
         MAX_REMEMBER_TEXT_BYTES, SUMMARIZE_BATCH_INPUT_BYTES, SUMMARIZE_CHUNK_BYTES,
     };
@@ -1638,32 +1691,113 @@ mod tests {
 
     // ── Idempotency key (GH #477) ────────────────────────────────
 
-    #[tokio::test]
-    async fn paid_recovery_publish_never_regresses_done() {
-        let pool = idem_test_pool().await;
+    async fn insert_paid_row(
+        pool: &sqlx::PgPool,
+        status: &str,
+        claimed_secs_ago: Option<i64>,
+    ) -> String {
         let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
         sqlx::query(
-            "INSERT INTO remember_jobs (id, owner, namespace, status, blob_id, recovery_claim_token) VALUES ($1, '0xowner', 'ns', 'done', 'blob-1', 'claim-1')",
+            "INSERT INTO remember_jobs (id, owner, namespace, status, blob_id, error_msg, recovery_claimed_at, recovery_claim_token)
+             VALUES ($1, '0xowner', 'ns', $2, 'blob-1', 'earlier failure',
+                     CASE WHEN $3::BIGINT IS NULL THEN NULL ELSE NOW() - make_interval(secs => $3::BIGINT) END,
+                     CASE WHEN $3::BIGINT IS NULL THEN NULL ELSE 'old-claim' END)",
         )
         .bind(&job_id)
-        .execute(&pool)
+        .bind(status)
+        .bind(claimed_secs_ago)
+        .execute(pool)
         .await
         .unwrap();
-        let published = sqlx::query(
-            "UPDATE remember_jobs SET status = 'uploaded', error_msg = NULL, updated_at = NOW() WHERE id = $1 AND recovery_claim_token = $2 AND blob_id IS NOT NULL AND status IN ('failed', 'uploaded')",
+        job_id
+    }
+
+    async fn status_of(
+        pool: &sqlx::PgPool,
+        job_id: &str,
+    ) -> (String, Option<String>, Option<String>) {
+        sqlx::query_as(
+            "SELECT status, error_msg, recovery_claim_token FROM remember_jobs WHERE id = $1",
         )
-        .bind(&job_id)
-        .bind("claim-1")
-        .execute(&pool)
+        .bind(job_id)
+        .fetch_one(pool)
         .await
-        .unwrap();
-        assert_eq!(published.rows_affected(), 0);
-        let status: String = sqlx::query_scalar("SELECT status FROM remember_jobs WHERE id = $1")
-            .bind(&job_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(status, "done");
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn paid_recovery_claim_never_regresses_done() {
+        let pool = idem_test_pool().await;
+        let job_id = insert_paid_row(&pool, "done", None).await;
+        assert!(claim_paid_recovery(&pool, &job_id).await.unwrap().is_none());
+        assert_eq!(status_of(&pool, &job_id).await.0, "done");
+        // The route reports the row as it is, not `uploaded`.
+        assert_eq!(
+            read_job_status(&pool, &job_id, "failed").await.unwrap(),
+            "done"
+        );
+    }
+
+    /// A recovery that failed (wallet job or enqueue) leaves its lease behind.
+    /// That lease must not fence the retry: the failed recovery is over.
+    #[tokio::test]
+    async fn a_failed_paid_job_is_reclaimable_despite_a_fresh_lease() {
+        let pool = idem_test_pool().await;
+        let job_id = insert_paid_row(&pool, "failed", Some(1)).await;
+        let token = claim_paid_recovery(&pool, &job_id).await.unwrap();
+        assert!(
+            token.is_some(),
+            "a failed paid job must be re-claimable at once"
+        );
+        let (status, error_msg, stored) = status_of(&pool, &job_id).await;
+        assert_eq!(status, "uploaded", "the claim publishes the recovery");
+        assert_eq!(error_msg, None);
+        assert_eq!(stored, token);
+    }
+
+    /// Two same-key POSTs racing on one failed paid row enqueue one recovery.
+    #[tokio::test]
+    async fn a_live_paid_recovery_is_fenced() {
+        let pool = idem_test_pool().await;
+        let job_id = insert_paid_row(&pool, "failed", None).await;
+        assert!(claim_paid_recovery(&pool, &job_id).await.unwrap().is_some());
+        assert!(
+            claim_paid_recovery(&pool, &job_id).await.unwrap().is_none(),
+            "the second request must see the recovery as taken",
+        );
+        assert_eq!(
+            read_job_status(&pool, &job_id, "failed").await.unwrap(),
+            "uploaded"
+        );
+    }
+
+    /// A claim whose process died before enqueue is taken over once the lease runs out.
+    #[tokio::test]
+    async fn an_expired_paid_recovery_lease_is_reclaimable() {
+        let pool = idem_test_pool().await;
+        let job_id = insert_paid_row(&pool, "uploaded", Some(61)).await;
+        assert!(claim_paid_recovery(&pool, &job_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_released_paid_recovery_is_failed_and_reclaimable_at_once() {
+        let pool = idem_test_pool().await;
+        let job_id = insert_paid_row(&pool, "failed", None).await;
+        let token = claim_paid_recovery(&pool, &job_id).await.unwrap().unwrap();
+
+        // A stale holder cannot release someone else's claim.
+        release_paid_recovery(&pool, &job_id, "not-the-token", "boom").await;
+        assert_eq!(status_of(&pool, &job_id).await.0, "uploaded");
+
+        release_paid_recovery(&pool, &job_id, &token, "queue full").await;
+        let (status, error_msg, stored) = status_of(&pool, &job_id).await;
+        assert_eq!(status, "failed");
+        assert_eq!(
+            error_msg.as_deref(),
+            Some("paid recovery could not be queued: queue full")
+        );
+        assert_eq!(stored, None);
+        assert!(claim_paid_recovery(&pool, &job_id).await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -2131,19 +2265,31 @@ mod tests {
             .await;
     }
 
-    // GH #477 RC-5: a same-key retry of a FAILED job restarts it in place rather
-    // than pinning `failed` forever. This pins the reset SQL: it flips only a
-    // `failed` row (guarded by AND status='failed'), clearing blob columns/error.
+    #[test]
+    fn same_key_action_matches_row_state() {
+        use ExistingJobAction::*;
+        assert_eq!(existing_job_action("failed", false), RestartFailed);
+        assert_eq!(existing_job_action("pending", false), RedrivePending);
+        assert_eq!(existing_job_action("failed", true), RecoverPaidBlob);
+        assert_eq!(existing_job_action("uploaded", true), RecoverPaidBlob);
+        assert_eq!(existing_job_action("running", false), ReturnAsIs);
+        assert_eq!(existing_job_action("running", true), ReturnAsIs);
+        assert_eq!(existing_job_action("done", true), ReturnAsIs);
+        assert_eq!(existing_job_action("uploaded", false), ReturnAsIs);
+    }
+
+    // GH #966: a sequential same-key retry after a terminal failure restarts the
+    // SAME job instead of pinning it, and a retry while that restart is in
+    // flight collapses onto it without a second row.
     #[tokio::test]
-    async fn failed_job_reset_flips_only_failed_no_blob_and_clears_state() {
+    async fn sequential_retry_after_terminal_failure_restarts_the_same_job() {
         let pool = idem_test_pool().await;
         let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
         let key = "retry-key";
         let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
-
-        // A failed job with NO blob (genuine pre-mint failure) + an error message.
         sqlx::query(
-            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, error_msg) VALUES ($1, $2, 'ns', 'failed', $3, 'boom')",
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, error_msg, prepare_claimed_at, prepare_claim_token)
+             VALUES ($1, $2, 'ns', 'failed', $3, 'walrus upload failed: exhausted', NOW(), 'dead-token')",
         )
         .bind(&job_id)
         .bind(&owner)
@@ -2152,19 +2298,21 @@ mod tests {
         .await
         .unwrap();
 
-        // The handler's reset SQL: only a failed row with NO blob is restarted.
-        let reset = sqlx::query(
-            "UPDATE remember_jobs SET status = 'running', blob_object_id = NULL, error_msg = NULL, updated_at = NOW() WHERE id = $1 AND status = 'failed' AND blob_id IS NULL",
-        )
-        .bind(&job_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        // Retry #1 after the terminal failure: the key resolves to the failed
+        // row, which is restartable now, not after the TTL.
+        let (found_id, status, blob, _) = find_remember_job_by_key(&pool, &owner, key)
+            .await
+            .unwrap()
+            .expect("row bound to key");
+        assert_eq!(found_id, job_id);
         assert_eq!(
-            reset.rows_affected(),
-            1,
-            "a failed no-blob row must be reset"
+            existing_job_action(&status, blob.is_some()),
+            ExistingJobAction::RestartFailed
         );
+        assert!(claim_remember_preparation(&pool, &job_id)
+            .await
+            .unwrap()
+            .is_some());
 
         let row: (String, Option<String>) =
             sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
@@ -2172,22 +2320,41 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(row.0, "running");
-        assert_eq!(row.1, None, "error_msg cleared");
+        assert_eq!(
+            row,
+            ("pending".to_string(), None),
+            "restarted in place, error cleared"
+        );
 
-        // Re-running on the now-`running` row is a no-op → no double-spawn.
-        let again = sqlx::query(
-            "UPDATE remember_jobs SET status = 'running' WHERE id = $1 AND status = 'failed' AND blob_id IS NULL",
+        // Retry #2 while that restart is in flight: same row, no new claim, and
+        // the insert path cannot mint a second job for the key.
+        let (again_id, again_status, again_blob, _) = find_remember_job_by_key(&pool, &owner, key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(again_id, job_id);
+        assert_eq!(
+            existing_job_action(&again_status, again_blob.is_some()),
+            ExistingJobAction::RedrivePending
+        );
+        assert!(
+            claim_remember_preparation(&pool, &job_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a live restart keeps its claim"
+        );
+        let dup = sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key) VALUES ($1, $2, 'ns', 'pending', $3)
+             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
         )
-        .bind(&job_id)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&owner)
+        .bind(key)
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(
-            again.rows_affected(),
-            0,
-            "reset must not re-fire on a live row"
-        );
+        assert_eq!(dup.rows_affected(), 0, "no second paid job under the key");
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
             .bind(&owner)

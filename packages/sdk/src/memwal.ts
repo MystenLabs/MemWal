@@ -236,6 +236,37 @@ function requestTimeoutError(method: string, path: string, ms: number): Error {
     return err;
 }
 
+/**
+ * The 504 a remember wait raises when its budget runs out.
+ *
+ * Under upload congestion the relayer keeps a job `running` for tens of
+ * minutes, far past a 60s wait, and says so in the job's `error`. Carrying the
+ * last status the relayer reported is what lets a caller tell "still retrying,
+ * wait on the same job" from "we never got an answer" (GH #966). The wait
+ * only times out on a job that is still pending/running/uploaded (a `failed`
+ * job throws), so the advice is always to keep waiting on the job id.
+ */
+function rememberJobTimeoutError(
+    jobId: string,
+    timeoutMs: number,
+    lastSeen: RememberJobStatus | undefined,
+    lastRefusal: number | undefined,
+    sawRateLimit: boolean,
+): Error {
+    const serverError = lastSeen?.error ? redactInternalUrls(lastSeen.error) : undefined;
+    // "no status read got through (last poll: HTTP 429)" already names the rate limit.
+    const rateLimited = sawRateLimit && (lastSeen || lastRefusal !== 429) ? "; wait hit a rate limit (429)" : "";
+    const detail = lastSeen
+        ? `last status: ${lastSeen.status}${serverError ? ` (${serverError})` : ""}. ` +
+          `The job is still in progress: call waitForRememberJob("${jobId}") to keep waiting on it. ` +
+          `Sending the text again under a new idempotency key stores it twice; a key you passed ` +
+          `as idempotencyKey is not remembered by the client, so pass it again on any retry.`
+        : `no status read got through (last poll: HTTP ${lastRefusal ?? 0}), so the job's state is unknown.`;
+    const err = new Error(`remember job timed out after ${timeoutMs}ms (job_id=${jobId})${rateLimited}; ${detail}`);
+    err.name = "MemWalRememberJobTimeout";
+    return Object.assign(err, { status: 504, jobId, lastStatus: lastSeen?.status, serverError });
+}
+
 function isTransientPollingStatus(status: number): boolean {
     return status === 0 || status === 429 || status >= 500;
 }
@@ -499,6 +530,8 @@ export class MemWal {
         let attempt = 0;
         let retryAfterMs = 0;
         let sawRateLimit = false;
+        let lastSeen: RememberJobStatus | undefined;
+        let lastRefusal: number | undefined;
 
         while (Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
@@ -529,6 +562,7 @@ export class MemWal {
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    lastRefusal = httpStatus;
                     if (httpStatus === 429) sawRateLimit = true;
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
@@ -542,6 +576,7 @@ export class MemWal {
                     jobId,
                 });
             }
+            lastSeen = status;
 
             if (status.status === "done") {
                 return {
@@ -562,13 +597,7 @@ export class MemWal {
             }
         }
 
-        throw Object.assign(
-            new Error(
-                `remember job timed out after ${timeoutMs}ms (job_id=${jobId})` +
-                    (sawRateLimit ? "; wait hit a rate limit (429)" : ""),
-            ),
-            { status: 504, jobId },
-        );
+        throw rememberJobTimeoutError(jobId, timeoutMs, lastSeen, lastRefusal, sawRateLimit);
     }
 
     /**
