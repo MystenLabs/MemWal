@@ -462,6 +462,66 @@ export interface ListNamespacesOptions {
     limit?: number;
 }
 
+/** One memory in a `listMemories()` page. Mirrors the relayer wire shape. */
+export interface MemorySummary {
+    memory_id: string;
+    /** The namespace name (the same string passed to `remember()` / `recall()`). */
+    namespace_id: string;
+    blob_id: string;
+    created_at: string;
+    /** The row's `updated_at` — the value the keyset cursor is built from. */
+    updated_at: string;
+    /** Encrypted blob size in bytes. */
+    size: number;
+    agent_id: string | null;
+    package_id: string | null;
+    status: string;
+    end_epoch: number | null;
+    expires_at: string | null;
+    importance: number | null;
+}
+
+/** A memory removed since the cursor. Never mixed into `memories`. */
+export interface DeletedMemorySummary {
+    memory_id: string;
+    namespace_id: string;
+    deleted_at: string;
+}
+
+/** Result from listMemories() */
+export interface MemoriesResult {
+    memories: MemorySummary[];
+    /** Watermark to hand back as `cursor` on the next call. */
+    next_cursor: string | null;
+    /**
+     * Authoritative "keep paginating" signal. Do NOT infer this from page
+     * length: the server clamps `limit`, and a `namespace` filter can leave a
+     * page short or empty while more pages remain.
+     */
+    has_more: boolean;
+    snapshot_version: number;
+    /** Tombstones since the cursor, for incremental sync. */
+    deleted: DeletedMemorySummary[];
+    /**
+     * True when the cursor is too old for the relayer to know what was
+     * deleted since; restart the walk without a cursor.
+     */
+    must_resync: boolean;
+}
+
+/** Options for listMemories() */
+export interface ListMemoriesOptions {
+    /** Previous page's `next_cursor`, to continue a walk or poll incrementally. */
+    cursor?: string;
+    /** Page size, counted before any `namespace` filter. Server defaults to 100 and clamps to 500. */
+    limit?: number;
+    /**
+     * Keep only this namespace. Applied client-side: the relayer lists every
+     * namespace, so a filtered page can be empty while `has_more` is true.
+     */
+    namespace?: string;
+}
+
 /** Result from restore() */
 export interface RestoreResult {
     restored: number;

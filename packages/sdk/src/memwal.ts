@@ -47,6 +47,8 @@ import type {
     RestoreResult,
     NamespacesResult,
     ListNamespacesOptions,
+    MemoriesResult,
+    ListMemoriesOptions,
     RememberBulkItem,
     RememberBulkOptions,
     RememberBulkResult,
@@ -1231,6 +1233,60 @@ export class MemWal {
         return this.signedRequest<NamespacesResult>("GET", path, {}, [200], {
             includeDelegateKey: false,
         });
+    }
+
+    /**
+     * List the memories this account holds, without a semantic query.
+     *
+     * Recall is similarity-ranked and limit-bounded, so it cannot confirm a
+     * write or count a namespace. This walks the full inventory instead.
+     * Returns metadata only — no blob fetch, no decryption; use `recall()`
+     * for content.
+     *
+     * `namespace` is filtered client-side: the relayer lists every namespace,
+     * so a filtered page can be short or empty while `has_more` is true.
+     * Paginate with `has_more`, NOT page length.
+     *
+     * ```ts
+     * let cursor: string | undefined;
+     * let more = true;
+     * let count = 0;
+     * while (more) {
+     *     const page = await memwal.listMemories({ cursor, namespace: "work" });
+     *     count += page.memories.length;
+     *     cursor = page.next_cursor ?? undefined;
+     *     more = page.has_more;
+     * }
+     * ```
+     */
+    async listMemories(options: ListMemoriesOptions = {}): Promise<MemoriesResult> {
+        const owner = await this.resolveOwner();
+
+        const params = new URLSearchParams();
+        if (options.cursor !== undefined) params.set("updated_after", options.cursor);
+        if (options.limit !== undefined) params.set("limit", String(options.limit));
+        const query = params.toString();
+
+        // Query string must be part of the signed path (see listNamespaces).
+        const path = `/v1/owners/${owner}/memories${query ? `?${query}` : ""}`;
+
+        const raw = await this.signedRequest<MemoriesResult>("GET", path, {}, [200], {
+            includeDelegateKey: false,
+        });
+        // Relayers older than WALM-363 omit the tombstone fields.
+        const page: MemoriesResult = {
+            ...raw,
+            deleted: raw.deleted ?? [],
+            must_resync: raw.must_resync ?? false,
+        };
+        if (options.namespace === undefined) return page;
+
+        const namespace = options.namespace;
+        return {
+            ...page,
+            memories: page.memories.filter((m) => m.namespace_id === namespace),
+            deleted: page.deleted.filter((d) => d.namespace_id === namespace),
+        };
     }
 
     /**
