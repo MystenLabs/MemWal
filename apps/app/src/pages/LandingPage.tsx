@@ -47,8 +47,8 @@ function SignInHero({ stage }: { stage: 'desktop' | 'mobile' }) {
                     <img src="/signin/phone.png" alt="" />
                     <div className="signin-phone-fade" />
                 </div>
-                <img className="signin-tile signin-tile--left" src="/signin/tile-left.png?v=light2" alt="" />
-                <img className="signin-tile signin-tile--right" src="/signin/tile-right.png?v=light2" alt="" />
+                <img className="signin-tile signin-tile--left" src="/signin/tile-left.png?v=glass3" alt="" />
+                <img className="signin-tile signin-tile--right" src="/signin/tile-right.png?v=glass3" alt="" />
             </div>
         )
     }

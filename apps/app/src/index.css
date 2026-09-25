@@ -14805,14 +14805,14 @@ body:has(.signin-proposed) {
 
 .signin-stage--desktop h1 {
   left: 100px;
-  top: 197px;
+  top: 229px;
   width: 503px;
   font-size: 72px;
 }
 
 .signin-stage--mobile h1 {
   left: 20px;
-  top: 117px;
+  top: 149px;
   width: 335px;
   font-size: 44px;
   text-align: center;
@@ -14831,14 +14831,14 @@ body:has(.signin-proposed) {
 
 .signin-stage--desktop .signin-sub {
   left: 100px;
-  top: 355px;
+  top: 387px;
   width: 503px;
   font-size: 18px;
 }
 
 .signin-stage--mobile .signin-sub {
   left: 31px;
-  top: 498px;
+  top: 530px;
   width: 313px;
   font-size: 15px;
   text-align: center;
@@ -14884,9 +14884,16 @@ body:has(.signin-proposed) {
   max-width: 297px !important;
 }
 
+.signin-btn,
+.signin-wallet button {
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
 .signin-btn:hover,
 .signin-wallet button:hover {
   border-color: #faf8f5 !important;
+  background: #faf8f5 !important;
+  color: #000000 !important;
 }
 
 .signin-btn svg {
@@ -14905,34 +14912,34 @@ body:has(.signin-proposed) {
 
 .signin-stage--desktop .signin-btn--google {
   left: 100px;
-  top: 411px;
+  top: 443px;
 }
 
 .signin-stage--desktop .signin-wallet {
   left: 100px;
-  top: 473px;
+  top: 505px;
 }
 
 .signin-stage--mobile .signin-btn--google {
   left: 39px;
-  top: 569px;
+  top: 601px;
 }
 
 .signin-stage--mobile .signin-wallet {
   left: 39px;
-  top: 631px;
+  top: 663px;
 }
 
 .signin-stage--desktop .signin-tos {
   left: 100px;
-  top: 555px;
+  top: 587px;
   width: 503px;
   font-size: 12px;
 }
 
 .signin-stage--mobile .signin-tos {
   left: 51px;
-  top: 710px;
+  top: 742px;
   width: 273px;
   font-size: 11px;
   text-align: center;
@@ -14946,7 +14953,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--desktop .signin-trusted {
   left: 100px;
-  top: 660px;
+  top: 692px;
   width: 503px;
   font-size: 18px;
 }
@@ -14964,7 +14971,7 @@ body:has(.signin-proposed) {
 
 .signin-allium {
   left: 99px;
-  top: 712px;
+  top: 744px;
   width: 97.41px;
   height: 28.51px;
   overflow: hidden;
@@ -14981,21 +14988,21 @@ body:has(.signin-proposed) {
 
 .signin-partner--inflectiv {
   left: 224.79px;
-  top: 714.38px;
+  top: 746.38px;
   width: 110.73px;
   height: 23.76px;
 }
 
 .signin-partner--talus {
   left: 364px;
-  top: 718.53px;
+  top: 750.53px;
   width: 85.64px;
   height: 14.85px;
 }
 
 .signin-partner--tatum {
   left: 479.29px;
-  top: 714.38px;
+  top: 746.38px;
   width: 96.82px;
   height: 19.6px;
 }
@@ -15027,7 +15034,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--desktop .signin-phone {
   left: 811.42px;
-  top: 113.62px;
+  top: 145.62px;
   width: 396.52px;
   height: 742.3px;
   z-index: 2;
@@ -15046,7 +15053,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--mobile .signin-phone {
   left: 83px;
-  top: 222px;
+  top: 254px;
   width: 209px;
   height: 330px;
   z-index: 2;
@@ -15065,7 +15072,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--desktop .signin-tile--back {
   left: 766.15px;
-  top: 66.17px;
+  top: 98.17px;
   width: 206.5px;
   height: 199px;
   z-index: 1;
@@ -15073,7 +15080,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--desktop .signin-tile--left {
   left: 694.3px;
-  top: 575.97px;
+  top: 607.97px;
   width: 284.5px;
   height: 286.5px;
   z-index: 3;
@@ -15081,7 +15088,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--mobile .signin-tile--left {
   left: 17.14px;
-  top: 355.21px;
+  top: 387.21px;
   width: 132px;
   height: 133px;
   z-index: 3;
@@ -15089,7 +15096,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--desktop .signin-tile--right {
   left: 1118.17px;
-  top: 358.66px;
+  top: 390.66px;
   width: 263px;
   height: 294px;
   z-index: 4;
@@ -15097,7 +15104,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--mobile .signin-tile--right {
   left: 240.44px;
-  top: 245.23px;
+  top: 277.23px;
   width: 114px;
   height: 128px;
   z-index: 4;
