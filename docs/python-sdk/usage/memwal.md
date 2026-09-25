@@ -113,5 +113,6 @@ Use these when you already have a vector or SEAL-encrypted bytes. See [Manual me
 | `MemWalRememberJobNotFound` | A polled `job_id` is unknown or not owned by the caller |
 | `MemWalRememberJobFailed` | An async remember job reached terminal `status=failed` |
 | `MemWalRememberJobTimeout` | A polling loop exceeded its `timeout_ms` budget |
+| `MemWalRateLimited` | A bulk wait could not read any job status because every read, including one confirming read at the end, was rate-limited (`.job_ids`, `.retry_after`). The writes may or may not have landed |
 
-Transient statuses (connection drop, `429`, `5xx`) are retried inside the polling loops rather than surfaced.
+Transient statuses (connection drop, `429`, `5xx`) are retried inside the polling loops rather than surfaced. The one exception: if no bulk status read gets through before the deadline, `wait_for_remember_jobs` makes one confirming read and raises `MemWalRateLimited` when that is rate-limited too. Status reads count against the same delegate-key budget as writes.

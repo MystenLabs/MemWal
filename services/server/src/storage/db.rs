@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use std::sync::atomic::AtomicBool;
 
 use crate::alerts::AlertManager;
 use crate::types::{AppError, SearchHit};
@@ -154,10 +155,73 @@ async fn run_migrations_on(
     }
     Ok(())
 }
+/// The recall query. `search_similar` is the hottest read in the service and
+/// the `ORDER BY embedding <=> $1 LIMIT $4` shape is what lets the planner
+/// drive off the HNSW index (`idx_vector_entries_embedding`, migration 001).
+const SEARCH_SIMILAR_SQL: &str =
+    "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
+             FROM vector_entries
+             WHERE owner = $2 AND namespace = $3
+             ORDER BY embedding <=> $1
+             LIMIT $4";
+
+/// `SEARCH_SIMILAR_SQL` with the memories the security-delete subsystem has
+/// already claimed hidden (WALM-592).
+///
+/// Anti-join rather than a soft-delete column: migration 020 keeps deletion
+/// state out of `vector_entries` on purpose. `delete_blobs_tracking`'s primary
+/// key is `(owner, blob_id)` — the anti-join key — so the HNSW scan still
+/// drives the plan and no new index is needed.
+///
+/// Only the three states where the Walrus Blob object is gone or going are
+/// filtered. `expired` in particular must stay visible: `terminal_state`
+/// applies `EXPIRY_MARGIN_EPOCHS` ahead of the real lapse, so filtering it
+/// would retire live memories early. The state list is pinned against the
+/// store's own constants by
+/// `pending_delete_filter_matches_the_security_delete_store`.
+const SEARCH_SIMILAR_EXCLUDING_PENDING_DELETES_SQL: &str =
+    "SELECT v.blob_id, (v.embedding <=> $1)::float8 AS distance, v.created_at, v.importance
+             FROM vector_entries v
+             WHERE v.owner = $2 AND v.namespace = $3
+               AND NOT EXISTS (
+                     SELECT 1 FROM delete_blobs_tracking t
+                     WHERE t.owner = v.owner
+                       AND t.blob_id = v.blob_id
+                       AND t.state IN ('deleting', 'deleted', 'deleted_external')
+                   )
+             ORDER BY v.embedding <=> $1
+             LIMIT $4";
+
+/// One `vector_entries` row queued for an all-or-nothing batch insert.
+///
+/// Mirrors the argument list of [`VectorDb::insert_vector`]; see that method
+/// for the meaning of each field. Used by [`VectorDb::insert_vectors_atomic`]
+/// so callers that persist a whole batch (namespace restore) can hand over
+/// every row up front instead of issuing one autocommitted INSERT per row.
+pub struct VectorInsert<'a> {
+    pub id: &'a str,
+    pub owner: &'a str,
+    pub namespace: &'a str,
+    pub blob_id: &'a str,
+    pub vector: &'a [f32],
+    pub blob_size_bytes: i64,
+    pub importance: f32,
+    pub agent_id: Option<&'a str>,
+    pub package_id: Option<&'a str>,
+    pub end_epoch: Option<i32>,
+}
 
 pub struct VectorDb {
     pool: PgPool,
     storage_alerts: Option<(Arc<AlertManager>, String)>,
+    /// Whether this database carries the security-delete subsystem's
+    /// `delete_blobs_tracking` table, and recall therefore has to hide the
+    /// memories it has claimed for deletion (WALM-592). Interior mutability
+    /// because that table is created by `migrations_legacy` — applied by
+    /// `LegacyDb` *after* `VectorDb::new()` has already run — so the answer
+    /// can change once, from `false` to `true`, during boot. See
+    /// `refresh_pending_delete_filter`.
+    pending_delete_filter: AtomicBool,
 }
 
 /// Serialises `VectorDb::new()` across the test binary.
@@ -195,6 +259,7 @@ impl VectorDb {
         Self {
             pool,
             storage_alerts: None,
+            pending_delete_filter: AtomicBool::new(false),
         }
     }
 }
@@ -206,7 +271,7 @@ mod tests {
 
     use sqlx::postgres::PgPoolOptions;
 
-    use super::{oauth_rows, VectorDb};
+    use super::{oauth_rows, VectorDb, VectorInsert};
 
     static VECTOR_SCHEMA_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -412,10 +477,15 @@ mod tests {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
 
-        Some(VectorDb {
+        let db = VectorDb {
             pool,
             storage_alerts: None,
-        })
+            pending_delete_filter: std::sync::atomic::AtomicBool::new(false),
+        };
+        // Mirror `VectorDb::new()`: whether recall filters pending security
+        // deletes is decided by probing the database, not by the constructor.
+        db.refresh_pending_delete_filter().await;
+        Some(db)
     }
 
     /// Regression test for the migration-order fixes: batched Rust
@@ -1227,6 +1297,211 @@ mod tests {
             .unwrap();
     }
 
+    // ── Restore persists its batch atomically (GH #566 / WALM-591) ──
+
+    /// Build one restore-shaped batch row. Passing a `vector` of the wrong
+    /// length plants a row the `vector(1536)` column will reject, which is how
+    /// the rollback test forces a failure partway through the batch.
+    fn restore_row<'a>(
+        id: &'a str,
+        owner: &'a str,
+        namespace: &'a str,
+        blob_id: &'a str,
+        vector: &'a [f32],
+    ) -> VectorInsert<'a> {
+        VectorInsert {
+            id,
+            owner,
+            namespace,
+            blob_id,
+            vector,
+            blob_size_bytes: 1,
+            importance: 0.5,
+            agent_id: None,
+            package_id: None,
+            end_epoch: None,
+        }
+    }
+
+    async fn rows_for_owner(db: &VectorDb, owner: &str, namespace: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM vector_entries WHERE owner = $1 AND namespace = $2",
+        )
+        .bind(owner)
+        .bind(namespace)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+    }
+
+    async fn delete_rows_for_owner(db: &VectorDb, owner: &str) {
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    /// A row that fails partway through must not leave earlier rows committed.
+    #[tokio::test]
+    async fn restore_batch_insert_rolls_back_every_row_when_one_fails() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrestore-rollback-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let ids: Vec<String> = (0..3)
+            .map(|i| format!("restore-rollback-{i}-{suffix}"))
+            .collect();
+        let blob_ids: Vec<String> = (0..3)
+            .map(|i| format!("blob-rollback-{i}-{suffix}"))
+            .collect();
+        let good = vec![0.1_f32; 1536];
+        // The middle row's embedding has the wrong dimension, so Postgres
+        // rejects it *after* the first row has already been written inside the
+        // transaction. Before the fix that first row stayed committed.
+        let bad = vec![0.1_f32; 8];
+
+        let batch = vec![
+            restore_row(&ids[0], &owner, &namespace, &blob_ids[0], &good),
+            restore_row(&ids[1], &owner, &namespace, &blob_ids[1], &bad),
+            restore_row(&ids[2], &owner, &namespace, &blob_ids[2], &good),
+        ];
+
+        let result = db.insert_vectors_atomic(&batch).await;
+        assert!(
+            result.is_err(),
+            "a batch containing an invalid row must report an explicit error"
+        );
+
+        let landed = rows_for_owner(&db, &owner, &namespace).await;
+        delete_rows_for_owner(&db, &owner).await;
+        assert_eq!(
+            landed, 0,
+            "a failed restore batch must leave zero rows, not a partial index"
+        );
+    }
+
+    /// The success path still has to commit the whole batch — the rollback fix
+    /// must not turn restore into a no-op.
+    #[tokio::test]
+    async fn restore_batch_insert_commits_every_row_on_success() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrestore-commit-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let ids: Vec<String> = (0..3)
+            .map(|i| format!("restore-commit-{i}-{suffix}"))
+            .collect();
+        let blob_ids: Vec<String> = (0..3)
+            .map(|i| format!("blob-commit-{i}-{suffix}"))
+            .collect();
+        let vector = vec![0.1_f32; 1536];
+
+        let batch: Vec<VectorInsert<'_>> = ids
+            .iter()
+            .zip(blob_ids.iter())
+            .map(|(id, blob_id)| restore_row(id, &owner, &namespace, blob_id, &vector))
+            .collect();
+
+        db.insert_vectors_atomic(&batch)
+            .await
+            .expect("a valid restore batch must commit");
+
+        let landed = rows_for_owner(&db, &owner, &namespace).await;
+        delete_rows_for_owner(&db, &owner).await;
+        assert_eq!(landed, 3, "every row in a successful batch must be visible");
+    }
+
+    /// The original bug's actual trigger: `POST /api/restore` wraps the restore
+    /// future in `tokio::time::timeout(55s, ..)`, so a slow batch had its future
+    /// DROPPED mid-loop and left every already-inserted row committed.
+    ///
+    /// With one transaction, dropping the future rolls it back — SQLx queues a
+    /// ROLLBACK when the dropped transaction hands its connection back to the
+    /// pool. To make sure the cancellation really lands *mid-batch* (a 1ms
+    /// deadline would just abort before the first row and pass trivially), the
+    /// test first times an uncancelled batch of the same shape and then cancels
+    /// the second one at half that duration.
+    ///
+    /// The assertion is "none or all", not "always none": if the batch wins the
+    /// race and commits before the deadline that is a correct outcome too. What
+    /// must never happen — and did before the fix — is a partial count.
+    #[tokio::test]
+    async fn restore_batch_insert_is_all_or_nothing_when_the_future_is_cancelled() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let namespace = format!("ns-{suffix}");
+        let batch_size: i64 = 40;
+        let vector = vec![0.1_f32; 1536];
+
+        let build = |owner: &str, tag: &str| {
+            let ids: Vec<String> = (0..batch_size)
+                .map(|i| format!("restore-{tag}-{i}-{suffix}"))
+                .collect();
+            let blob_ids: Vec<String> = (0..batch_size)
+                .map(|i| format!("blob-{tag}-{i}-{suffix}"))
+                .collect();
+            (owner.to_string(), ids, blob_ids)
+        };
+
+        // Warm-up run: how long does a full batch of this shape take?
+        let (timed_owner, timed_ids, timed_blob_ids) = build(&format!("0xtimed-{suffix}"), "timed");
+        let timed_batch: Vec<VectorInsert<'_>> = timed_ids
+            .iter()
+            .zip(timed_blob_ids.iter())
+            .map(|(id, blob_id)| restore_row(id, &timed_owner, &namespace, blob_id, &vector))
+            .collect();
+        let started = std::time::Instant::now();
+        db.insert_vectors_atomic(&timed_batch)
+            .await
+            .expect("warm-up batch must commit");
+        let full_batch_time = started.elapsed();
+        delete_rows_for_owner(&db, &timed_owner).await;
+
+        // Cancel the real run halfway through that measured duration, so the
+        // drop lands while rows are still being written.
+        let (owner, ids, blob_ids) = build(&format!("0xcancel-{suffix}"), "cancel");
+        let batch: Vec<VectorInsert<'_>> = ids
+            .iter()
+            .zip(blob_ids.iter())
+            .map(|(id, blob_id)| restore_row(id, &owner, &namespace, blob_id, &vector))
+            .collect();
+        // Floored at 5ms: on a fast pool half a sub-millisecond warm-up
+        // cancels before `BEGIN` is even sent, and `landed == 0` would then
+        // pass without the rollback ever being exercised. If the floor lets the
+        // batch finish instead, the `Ok(Ok(()))` arm asserts a full commit — a
+        // real check either way.
+        let deadline = (full_batch_time / 2).max(Duration::from_millis(5));
+        let cancelled = tokio::time::timeout(deadline, db.insert_vectors_atomic(&batch)).await;
+
+        let landed = rows_for_owner(&db, &owner, &namespace).await;
+        delete_rows_for_owner(&db, &owner).await;
+
+        match cancelled {
+            // Timed out: the future was dropped. Postgres may still have
+            // committed if the drop landed after COMMIT was flushed, so accept
+            // the full batch — but never a partial one.
+            Err(_) => assert!(
+                landed == 0 || landed == batch_size,
+                "a cancelled restore batch must be all-or-nothing, saw {landed} of {batch_size} rows"
+            ),
+            Ok(Ok(())) => assert_eq!(
+                landed, batch_size,
+                "a batch that finished before the deadline must be fully committed"
+            ),
+            Ok(Err(error)) => panic!("restore batch failed unexpectedly: {error:?}"),
+        }
+    }
+
     async fn remember_jobs_test_db() -> Option<VectorDb> {
         let db = test_db().await?;
         for migration in [
@@ -1415,6 +1690,285 @@ mod tests {
             .execute(db.pool())
             .await
             .unwrap();
+    }
+
+    /// The pending-delete filter names `delete_blobs_tracking` states as SQL
+    /// literals (the planner needs them inline). This is the tripwire that
+    /// keeps those literals honest against the store's own constants — and,
+    /// just as importantly, that keeps the *live* states out of the list: a
+    /// stray `'deletable'` there would make every tracked memory in a
+    /// security-delete deployment silently unrecallable.
+    #[test]
+    fn pending_delete_filter_matches_the_security_delete_store() {
+        use crate::storage::security_delete_store as store;
+
+        for state in [
+            store::BLOB_DELETING,
+            store::BLOB_DELETED,
+            store::BLOB_DELETED_EXTERNAL,
+        ] {
+            assert!(
+                super::SEARCH_SIMILAR_EXCLUDING_PENDING_DELETES_SQL.contains(&format!("'{state}'")),
+                "recall must hide memories in the '{state}' tracking state"
+            );
+        }
+        for state in [
+            store::BLOB_DELETABLE,
+            store::BLOB_NOT_OWNER,
+            store::BLOB_EXPIRED,
+        ] {
+            assert!(
+                !super::SEARCH_SIMILAR_EXCLUDING_PENDING_DELETES_SQL
+                    .contains(&format!("'{state}'")),
+                "'{state}' is a live, readable blob — recall must still return it"
+            );
+        }
+    }
+
+    /// `test_db()` plus the security-delete subsystem's
+    /// `delete_blobs_tracking` table.
+    ///
+    /// That table is defined in `migrations_legacy`, which `LegacyDb` applies
+    /// to `LEGACY_DB_URL` only when security deletion is enabled — so it is
+    /// absent from the schema `test_db()` builds, exactly as it is absent
+    /// from a default deployment. The columns the filter reads are recreated
+    /// here rather than `include_str!`-ed because that file is a sqlx
+    /// migration: it is not idempotent (bare `CREATE TABLE`), it hard-fails
+    /// unless `vector_entries` predates it, and it installs an `AFTER INSERT`
+    /// trigger that rejects any owner which is not a canonical 32-byte Sui
+    /// address — which every synthetic `0x…-{uuid}` test owner is not.
+    async fn security_delete_test_db() -> Option<VectorDb> {
+        let db = test_db().await?;
+        {
+            let _guard = VECTOR_SCHEMA_SETUP_LOCK
+                .get_or_init(|| tokio::sync::Mutex::new(()))
+                .lock()
+                .await;
+            sqlx::raw_sql(
+                "CREATE TABLE IF NOT EXISTS delete_blobs_tracking (
+                    owner TEXT NOT NULL,
+                    blob_id TEXT NOT NULL,
+                    object_id TEXT,
+                    state TEXT NOT NULL DEFAULT 'deletable' CHECK (state IN
+                        ('deletable','deleting','deleted','deleted_external',
+                         'not_owner','expired')),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (owner, blob_id)
+                )",
+            )
+            .execute(db.pool())
+            .await
+            .expect("security-delete tracking table must be creatable on the test database");
+        }
+        assert!(
+            db.refresh_pending_delete_filter().await,
+            "the filter must switch on once delete_blobs_tracking exists"
+        );
+        Some(db)
+    }
+
+    /// A probe that errors must not turn off a filter a previous probe
+    /// enabled. `main` re-probes after `LegacyDb::new()`; a transient failure
+    /// there used to disable the filter for the life of the process.
+    #[tokio::test]
+    async fn a_failed_probe_keeps_the_pending_delete_filter_it_already_had() {
+        let Some(db) = security_delete_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        assert!(
+            db.pending_delete_filter_enabled(),
+            "security_delete_test_db must hand back a db with the filter on"
+        );
+
+        // Closing the pool makes the next probe fail the way a transient
+        // connection error would.
+        db.pool().close().await;
+
+        assert!(
+            db.refresh_pending_delete_filter().await,
+            "a failed probe must keep the filter that was already enabled"
+        );
+        assert!(db.pending_delete_filter_enabled());
+    }
+
+    /// WALM-592 / GH #591. The dashboard delete claims a memory by flipping
+    /// its tracking row to `deleting`; the `vector_entries` row then survives
+    /// until the Sui transaction confirms and `finalize_batch_deleted` runs
+    /// (inline on submit, or up to a 30s reconciler tick later). Recall must
+    /// not serve the memory during that window.
+    #[tokio::test]
+    async fn search_similar_hides_memories_claimed_by_a_pending_security_delete() {
+        let Some(db) = security_delete_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xpending-delete-{suffix}");
+        let live_blob = format!("blob-live-{suffix}");
+        let tracked_blob = format!("blob-tracked-{suffix}");
+
+        // Identical embeddings: whichever row recall drops, it drops because
+        // of the filter and not because it lost on cosine distance.
+        for (id, blob_id) in [
+            (format!("live-{suffix}"), &live_blob),
+            (format!("tracked-{suffix}"), &tracked_blob),
+        ] {
+            db.insert_vector(
+                &id,
+                &owner,
+                "notes",
+                blob_id,
+                &[0.1_f32; 1536],
+                1,
+                0.5,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO delete_blobs_tracking (owner, blob_id, state) VALUES ($1, $2, $3)",
+        )
+        .bind(&owner)
+        .bind(&tracked_blob)
+        .bind("deletable")
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let mut both = vec![live_blob.clone(), tracked_blob.clone()];
+        both.sort();
+
+        let mut outcomes = Vec::new();
+        for state in [
+            "deletable",
+            "not_owner",
+            "expired",
+            "deleting",
+            "deleted",
+            "deleted_external",
+        ] {
+            sqlx::query(
+                "UPDATE delete_blobs_tracking SET state = $3 WHERE owner = $1 AND blob_id = $2",
+            )
+            .bind(&owner)
+            .bind(&tracked_blob)
+            .bind(state)
+            .execute(db.pool())
+            .await
+            .unwrap();
+            let mut recalled: Vec<String> = db
+                .search_similar(&[0.1_f32; 1536], &owner, "notes", 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.blob_id)
+                .collect();
+            recalled.sort();
+            outcomes.push((state, recalled));
+        }
+
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM delete_blobs_tracking WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcomes,
+            vec![
+                // ── Blob object still on chain: recall must keep serving it.
+                // Ordinary live memory that merely *could* be deleted.
+                ("deletable", both.clone()),
+                // The relayer cannot delete it on chain; still readable.
+                ("not_owner", both.clone()),
+                // A look-ahead by EXPIRY_MARGIN_EPOCHS, not an actual lapse.
+                ("expired", both),
+                // ── Blob object gone or going: recall must hide it.
+                // Claimed by an in-flight batch — the reported stale window.
+                ("deleting", vec![live_blob.clone()]),
+                ("deleted", vec![live_blob.clone()]),
+                ("deleted_external", vec![live_blob]),
+            ]
+        );
+    }
+
+    /// The acceptance criterion straight from the ticket: forget, then recall
+    /// in the same turn, must not return the forgotten fact. `/api/forget`
+    /// already deletes and tombstones in one transaction, so this pins that
+    /// there is no read-your-writes gap on this path — and that forget stays
+    /// scoped to the namespace it was asked for.
+    #[tokio::test]
+    async fn forget_then_immediate_recall_returns_nothing() {
+        let Some(db) = remember_jobs_test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xforget-recall-{suffix}");
+
+        for (id, namespace, blob_id) in [
+            (format!("forget-a-{suffix}"), "notes", "blob-forget-a"),
+            (format!("forget-b-{suffix}"), "notes", "blob-forget-b"),
+            (format!("keep-{suffix}"), "keep", "blob-keep"),
+        ] {
+            db.insert_vector(
+                &id,
+                &owner,
+                namespace,
+                blob_id,
+                &[0.1_f32; 1536],
+                1,
+                0.5,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(db.delete_by_namespace(&owner, "notes").await.unwrap(), 2);
+
+        // No sleep, no retry: the very next read after forget returns.
+        let forgotten = db
+            .search_similar(&[0.1_f32; 1536], &owner, "notes", 10)
+            .await
+            .unwrap();
+        let kept: Vec<String> = db
+            .search_similar(&[0.1_f32; 1536], &owner, "keep", 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.blob_id)
+            .collect();
+
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM memory_tombstones WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert!(
+            forgotten.is_empty(),
+            "forget must be visible to the next recall in the same turn, got {:?}",
+            forgotten.iter().map(|hit| &hit.blob_id).collect::<Vec<_>>()
+        );
+        assert_eq!(kept, vec!["blob-keep".to_string()]);
     }
 }
 
@@ -1850,10 +2404,64 @@ impl VectorDb {
 
         tracing::info!("database connected and migrations applied");
 
-        Ok(Self {
+        let db = Self {
             pool,
             storage_alerts: None,
-        })
+            pending_delete_filter: AtomicBool::new(false),
+        };
+        db.refresh_pending_delete_filter().await;
+
+        Ok(db)
+    }
+
+    /// Re-probe for the security-delete subsystem's `delete_blobs_tracking`
+    /// table and cache the answer for `search_similar`. Returns whether the
+    /// pending-delete filter is now active.
+    ///
+    /// Called once at the end of `new()`, and again from `main` right after
+    /// `LegacyDb::new()` — the legacy migrations *create* that table, and
+    /// they run after `VectorDb::new()`, so without the second probe the
+    /// first boot that turns security deletion on would keep serving
+    /// pending-delete rows until the next restart.
+    ///
+    /// The flag starts `false`, so a table that is genuinely absent can never
+    /// turn recall into an `undefined_table` 500. A probe that *errors* is not
+    /// evidence of absence, though: it leaves the current setting alone, or a
+    /// transient failure on the `main` re-probe would disable a working filter
+    /// for the life of the process.
+    pub async fn refresh_pending_delete_filter(&self) -> bool {
+        let present: bool =
+            match sqlx::query_scalar("SELECT to_regclass('delete_blobs_tracking') IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await
+            {
+                Ok(present) => present,
+                Err(e) => {
+                    let current = self.pending_delete_filter_enabled();
+                    tracing::warn!(
+                        enabled = current,
+                        "could not probe for delete_blobs_tracking; keeping the current \
+                         recall pending-security-delete filter setting: {}",
+                        e
+                    );
+                    return current;
+                }
+            };
+        let previous = self
+            .pending_delete_filter
+            .swap(present, std::sync::atomic::Ordering::Relaxed);
+        if previous != present {
+            tracing::info!(
+                enabled = present,
+                "recall pending-security-delete filter toggled"
+            );
+        }
+        present
+    }
+
+    fn pending_delete_filter_enabled(&self) -> bool {
+        self.pending_delete_filter
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Expose a reference to the underlying `PgPool` so job handlers
@@ -1884,14 +2492,81 @@ impl VectorDb {
         package_id: Option<&str>,
         end_epoch: Option<i32>,
     ) -> Result<(), AppError> {
-        let embedding = Vector::from(vector.to_vec());
-
-        let started = std::time::Instant::now();
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| AppError::Internal(format!("Failed to begin insert tx: {}", e)))?;
+        self.insert_vector_in_tx(
+            &mut tx,
+            &VectorInsert {
+                id,
+                owner,
+                namespace,
+                blob_id,
+                vector,
+                blob_size_bytes,
+                importance,
+                agent_id,
+                package_id,
+                end_epoch,
+            },
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to commit insert tx: {}", e)))?;
+        Ok(())
+    }
+
+    /// Persist a whole batch of vector rows in ONE transaction: either every
+    /// row lands or none of them do.
+    ///
+    /// One transaction, so neither a mid-batch `?` nor a dropped future can
+    /// commit a prefix: restore runs under `tokio::time::timeout(55s, ..)`, and
+    /// a prefix is a half-written index (GH #566 / WALM-591). SQLx queues a
+    /// `ROLLBACK` when a dropped `Transaction` returns its connection to the
+    /// pool — the property `jobs::JobUploadLock` also relies on — so a drop
+    /// before Postgres has processed `COMMIT` leaves zero rows. A drop after
+    /// that lands the whole batch; either way it is never partial.
+    ///
+    /// Callers must keep the batch bounded. Restore clamps its page to 100 rows
+    /// (`clamp_restore_limit`), so this stays short-lived.
+    pub async fn insert_vectors_atomic(&self, rows: &[VectorInsert<'_>]) -> Result<(), AppError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut tx =
+            self.pool.begin().await.map_err(|e| {
+                AppError::Internal(format!("Failed to begin batch insert tx: {}", e))
+            })?;
+        for row in rows {
+            // Deliberately no explicit `tx.rollback()` here: `?` drops `tx`,
+            // and SQLx's Drop impl rolls the transaction back before the
+            // connection is reused. That is also what makes a dropped future
+            // (the restore timeout) safe.
+            self.insert_vector_in_tx(&mut tx, row).await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to commit batch insert tx: {}", e)))?;
+
+        tracing::debug!("inserted {} vector rows atomically", rows.len());
+        Ok(())
+    }
+
+    /// Shared statement pair behind [`Self::insert_vector`] and
+    /// [`Self::insert_vectors_atomic`]: upsert the row, then clear any
+    /// tombstone for the same memory id. Runs on the caller's transaction so a
+    /// batch can span many rows without an intermediate commit.
+    async fn insert_vector_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        row: &VectorInsert<'_>,
+    ) -> Result<(), AppError> {
+        let embedding = Vector::from(row.vector.to_vec());
+
+        let started = std::time::Instant::now();
         let result = sqlx::query(
             "INSERT INTO vector_entries (id, owner, namespace, blob_id, embedding, blob_size_bytes, importance, agent_id, package_id, end_epoch)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -1907,44 +2582,40 @@ impl VectorDb {
                 end_epoch = EXCLUDED.end_epoch,
                 updated_at = NOW()",
         )
-        .bind(id)
-        .bind(owner)
-        .bind(namespace)
-        .bind(blob_id)
+        .bind(row.id)
+        .bind(row.owner)
+        .bind(row.namespace)
+        .bind(row.blob_id)
         .bind(embedding)
-        .bind(blob_size_bytes)
-        .bind(importance)
-        .bind(agent_id)
-        .bind(package_id)
-        .bind(end_epoch)
-        .execute(&mut *tx)
+        .bind(row.blob_size_bytes)
+        .bind(row.importance)
+        .bind(row.agent_id)
+        .bind(row.package_id)
+        .bind(row.end_epoch)
+        .execute(&mut **tx)
         .await;
-        if let Err(e) = result {
-            drop(tx);
-            self.maybe_alert_storage_exhausted(&e).await;
-            crate::observability::observe_db("vector.insert", "error", started.elapsed());
-            return Err(AppError::Internal(format!(
-                "Failed to insert vector: {}",
-                e
-            )));
+        // A Postgres storage-exhaustion failure is a write outage, not a user
+        // error, so it pages before it is mapped to a generic 500 (WALM-612).
+        // Reached from the batch path too, unlike the pre-batch code.
+        if let Err(e) = &result {
+            self.maybe_alert_storage_exhausted(e).await;
         }
-        crate::observability::observe_db("vector.insert", "ok", started.elapsed());
+        let result = result.map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
+        crate::observability::observe_db("vector.insert", db_status(&result), started.elapsed());
+        result?;
         sqlx::query("DELETE FROM memory_tombstones WHERE memory_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
+            .bind(row.id)
+            .execute(&mut **tx)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to clear tombstone: {}", e)))?;
-        tx.commit()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to commit insert tx: {}", e)))?;
 
         tracing::debug!(
             "inserted vector: id={}, blob_id={}, owner={}, ns={}, size={}B",
-            id,
-            blob_id,
-            owner,
-            namespace,
-            blob_size_bytes
+            row.id,
+            row.blob_id,
+            row.owner,
+            row.namespace,
+            row.blob_size_bytes
         );
         Ok(())
     }
@@ -2077,25 +2748,27 @@ impl VectorDb {
         // without a second round-trip. Both NOT NULL (migration 001 for
         // created_at, 009 for importance) so the row tuple types are
         // non-Option.
+        //
+        // The pending-delete variant is chosen here, not stitched together
+        // per call, so the hot path costs one branch rather than a `format!`.
+        let sql = if self.pending_delete_filter_enabled() {
+            SEARCH_SIMILAR_EXCLUDING_PENDING_DELETES_SQL
+        } else {
+            SEARCH_SIMILAR_SQL
+        };
         let started = std::time::Instant::now();
         #[allow(clippy::type_complexity)]
         let result: Result<
             Vec<(String, f64, chrono::DateTime<chrono::Utc>, f32)>,
             AppError,
-        > = sqlx::query_as(
-            "SELECT blob_id, (embedding <=> $1)::float8 AS distance, created_at, importance
-             FROM vector_entries
-             WHERE owner = $2 AND namespace = $3
-             ORDER BY embedding <=> $1
-             LIMIT $4",
-        )
-        .bind(embedding)
-        .bind(owner)
-        .bind(namespace)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
+        > = sqlx::query_as(sql)
+            .bind(embedding)
+            .bind(owner)
+            .bind(namespace)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
         crate::observability::observe_db(
             "vector.search_similar",
             db_status(&result),

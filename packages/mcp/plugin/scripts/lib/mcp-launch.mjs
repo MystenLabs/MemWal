@@ -129,22 +129,48 @@ export function canonicalPath(target) {
  * not usefully inside one (the home directory and the filesystem root are not
  * projects — treating them as such would refuse the default runtime root).
  *
- * "Project" is the nearest ancestor carrying a `.git` or a `package.json`, and the
- * working directory itself when neither is found: a runtime root under either is a
- * root a repository could have shipped.
+ * "Project" is the *outermost* ancestor carrying a `.git`, else the outermost
+ * carrying a `package.json`, and the working directory itself when neither is
+ * found: a runtime root under any of those is a root a repository could have
+ * shipped.
+ *
+ * Outermost, not nearest. Stopping at the first marker made a nested package its
+ * own trust boundary, so in a monorepo a client started in `apps/web` treated
+ * `apps/web` as the whole project and `assertRuntimeRootLocation` would accept an
+ * override pointing at a sibling — `<repo>/.memwal-runtime`, say — as "outside the
+ * project", even though the same repository controls it. `.git` is preferred over
+ * `package.json` because it marks the checkout boundary rather than a workspace
+ * member; a bare `package.json` tree still counts when there is no repository
+ * around it at all (WALM-684).
+ *
+ * The walk keeps going past a match rather than returning, so a worktree's `.git`
+ * *file* and a submodule's are found the same way a directory is.
  */
-export function enclosingProjectRoot(cwd = process.cwd(), home = homedir()) {
+export function enclosingProjectRoot(
+    cwd = process.cwd(),
+    home = homedir(),
+    { exists = existsSync } = {},
+) {
     const start = canonicalPath(cwd);
     const stop = canonicalPath(home);
     const marked = (() => {
         let dir = start;
+        let outermostRepo = null;
+        let outermostPackage = null;
         while (dir !== stop) {
-            if (existsSync(join(dir, ".git")) || existsSync(join(dir, "package.json"))) return dir;
             const parent = dirname(dir);
-            if (parent === dir) return null;
+            // The filesystem root is never a candidate, the same way home is not.
+            // Walking to the *outermost* marker made a stray `/package.json` or
+            // `/.git` — common in container images built with WORKDIR / — win over
+            // the real checkout below it, and a project of `/` then disables the
+            // guard entirely (see the null return below). Nearest-marker never hit
+            // this; outermost has to exclude it explicitly.
+            if (parent === dir) break;
+            if (exists(join(dir, ".git"))) outermostRepo = dir;
+            if (exists(join(dir, "package.json"))) outermostPackage = dir;
             dir = parent;
         }
-        return null;
+        return outermostRepo ?? outermostPackage;
     })();
     const project = marked ?? start;
     if (project === stop || project === dirname(project)) return null;
