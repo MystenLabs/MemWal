@@ -14,7 +14,7 @@ import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useNavigate } from 'react-router-dom'
-import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle, ChevronLeft, ChevronRight } from 'lucide-react'
+import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
@@ -202,9 +202,20 @@ function DelegateKeySkeletonList() {
 export default function Dashboard({
     previewMode = false,
     previewState = 'empty',
+    autoScrollToKeys = false,
+    fromKeys = false,
 }: {
     previewMode?: boolean
     previewState?: 'empty' | 'ready'
+    /** Scroll to the delegate keys card once its first load finishes. Used by /keys (WALM-675). */
+    autoScrollToKeys?: boolean
+    /** Rendered from /keys (WALM-675) — separate from autoScrollToKeys, which
+     *  is false on an owner mismatch. Gates the "Back to Console" link next
+     *  to "Continue" on the delegate-key-ready block: that's where a Console
+     *  user actually finishes, after copying the key, per the 25 Sep decision
+     *  (Nikola/ducnmm) — the new-user /setup → /dashboard path keeps only the
+     *  nav link since COMG-1093 handles that return on the Console side. */
+    fromKeys?: boolean
 }) {
     const currentAccount = useCurrentAccount()
     const navigate = useNavigate()
@@ -425,6 +436,13 @@ export default function Dashboard({
             .getElementById(DELEGATE_KEYS_SECTION_ID)
             ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }, [])
+
+    const autoScrolledToKeysRef = useRef(false)
+    useEffect(() => {
+        if (!autoScrollToKeys || autoScrolledToKeysRef.current || isKeyListLoading) return
+        autoScrolledToKeysRef.current = true
+        scrollToDelegateKeys()
+    }, [autoScrollToKeys, isKeyListLoading, scrollToDelegateKeys])
 
     useEffect(() => {
         setSelectedKeyPublicKeys((prev) => {
@@ -860,6 +878,11 @@ const result = await generateText({
                         <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
                     </Link>
                     <div className="nav-user">
+                        {config.consoleUrl && (
+                            <a href={config.consoleUrl} className="btn btn-secondary btn-sm">
+                                <ExternalLink size={12} /> Open Console
+                            </a>
+                        )}
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
@@ -1331,6 +1354,11 @@ const result = await generateText({
                                     >
                                         Continue
                                     </button>
+                                    {fromKeys && config.consoleUrl && (
+                                        <a href={config.consoleUrl} className="btn btn-secondary btn-sm">
+                                            <ExternalLink size={12} /> Back to Console
+                                        </a>
+                                    )}
                                 </div>
                             </div>
                         </div>

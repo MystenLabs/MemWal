@@ -7977,6 +7977,9 @@ h1, h2, h3 {
   border-radius: 24px;
   background: #000000;
   overflow: clip;
+  /* /keys auto-scrolls here (WALM-675); offset by .dashboard-nav's sticky
+     height so the card header/Add key button don't land under the nav. */
+  scroll-margin-top: 128px;
 }
 
 .dash-page .dashboard-keys-card .card-header {
@@ -8103,6 +8106,10 @@ h1, h2, h3 {
   .dashboard-nav {
     height: 92px;
     padding: 0 16px;
+  }
+
+  .dash-page .dashboard-keys-card {
+    scroll-margin-top: 92px;
   }
 
   .setup-classic-nav .nav-inner,
@@ -8971,6 +8978,75 @@ h1, h2, h3 {
   color: #000000;
   font-family: var(--font-mono);
   font-size: 0.95em;
+}
+
+/* /keys (WALM-675) — same look as .dashboard-credentials-alert above, but
+   unscoped: this banner renders outside Dashboard's own .dash-page root
+   (KeysPage wraps it, not Dashboard), and that class's min-height: 100vh
+   would otherwise double the page height if reused here. */
+.keys-mismatch-alert {
+  margin: 24px 24px 0;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 22px;
+  border: 0;
+  border-radius: 4px;
+  background: #e8ff75;
+  color: #000000;
+}
+
+.keys-mismatch-alert-icon {
+  flex: 0 0 auto;
+  color: #000000;
+}
+
+.keys-mismatch-alert p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0;
+  color: #000000;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.keys-mismatch-alert p + p {
+  margin-top: 8px;
+  color: #000000;
+}
+
+.keys-mismatch-alert strong {
+  color: #000000;
+  font-weight: 700;
+}
+
+.keys-mismatch-alert code {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.08);
+  color: #000000;
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+
+.keys-mismatch-alert-signout {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: #000000;
+  cursor: pointer;
+  text-decoration-line: underline;
+  text-decoration-thickness: from-font;
+  text-underline-position: from-font;
+}
+
+.keys-mismatch-alert-signout:hover {
+  opacity: 0.7;
 }
 
 .dash-page .dashboard-credentials-panel {

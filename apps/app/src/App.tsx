@@ -13,6 +13,7 @@ import {
   useAutoConnectWallet,
   useCurrentAccount,
   useDisconnectWallet,
+  useSuiClient,
   useSuiClientContext,
 } from '@mysten/dapp-kit'
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
@@ -33,7 +34,9 @@ import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
 import ConnectClaude from './pages/ConnectClaude'
+import KeysPage from './pages/KeysPage'
 import { useRouteAnalytics } from './hooks/useRouteAnalytics'
+import { fetchAccountIdForOwner } from './utils/suiClientCompat'
 
 
 import '@mysten/dapp-kit/dist/index.css'
@@ -250,6 +253,13 @@ function RoutePending() {
  *  Shared with ConnectMcp.tsx (kept as a literal there to avoid a circular import). */
 const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
 const CLAUDE_CONNECT_STORAGE_KEY = 'memwal_claude_connect'
+const KEYS_CONNECT_STORAGE_KEY = 'memwal_keys_connect'
+/** No query to carry — /setup takes no params — so this is a plain presence
+ *  flag, not JSON like the others. Set by requireAccountForSetup below when
+ *  a signed-out visitor is bounced off /setup, so that intent survives the
+ *  sign-in redirect instead of silently landing wherever PostAuthAccountCheck
+ *  would otherwise send them (Thanos, 24 Sep — WALM-675 scope). */
+const SETUP_CONNECT_STORAGE_KEY = 'memwal_setup_connect'
 
 function consumePendingConnectQuery(storageKey: string): string {
   const pending = sessionStorage.getItem(storageKey)
@@ -265,10 +275,17 @@ function consumePendingConnectQuery(storageKey: string): string {
   }
 }
 
+function consumePendingSetupVisit(): boolean {
+  if (!sessionStorage.getItem(SETUP_CONNECT_STORAGE_KEY)) return false
+  sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
+  return true
+}
+
 /** Lands here after a successful sign-in (the OAuth redirect_uri is the app
  *  root). Resume an interrupted hosted Claude or local MCP connection by
- *  restoring its saved query string; otherwise go to the dashboard. */
-function PostAuthRedirect() {
+ *  restoring its saved query string; otherwise resolve whether this is a
+ *  brand-new account. */
+export function PostAuthRedirect() {
   const claudeConnectQuery = consumePendingConnectQuery(CLAUDE_CONNECT_STORAGE_KEY)
   if (claudeConnectQuery) {
     return <Navigate to={`/connect/claude?${claudeConnectQuery}`} replace />
@@ -276,7 +293,52 @@ function PostAuthRedirect() {
 
   const mcpConnectQuery = consumePendingConnectQuery(MCP_CONNECT_STORAGE_KEY)
   if (mcpConnectQuery) return <Navigate to={`/connect/mcp?${mcpConnectQuery}`} replace />
-  return <Navigate to="/dashboard" replace />
+
+  const keysConnectQuery = consumePendingConnectQuery(KEYS_CONNECT_STORAGE_KEY)
+  if (keysConnectQuery) return <Navigate to={`/keys?${keysConnectQuery}`} replace />
+
+  // Respects an explicit /setup visit over PostAuthAccountCheck's own
+  // account-existence guess — matters for an account that exists elsewhere
+  // (another device/browser) but has no local session here, which would
+  // otherwise get silently redirected to /dashboard against what they asked
+  // for. A genuinely new account ends up at /setup either way.
+  if (consumePendingSetupVisit()) return <Navigate to="/setup" replace />
+
+  return <PostAuthAccountCheck />
+}
+
+/** COMG-1092's new-user route sends a signed-out visitor straight into
+ *  Enoki sign-in with no page of its own — so this is the first chance to
+ *  route a brand-new account (no on-chain Account object yet) to /setup
+ *  instead of /dashboard's "no keys yet, create one" prompt. An existing
+ *  account always lands on /dashboard, same as before this existed. */
+export function PostAuthAccountCheck() {
+  const currentAccount = useCurrentAccount()
+  const suiClient = useSuiClient()
+  const [target, setTarget] = useState<'/dashboard' | '/setup' | null>(null)
+
+  useEffect(() => {
+    // AppContent only reaches this component when currentAccount is already
+    // set (see the "/" route below) — this guard is defensive, not expected.
+    if (!currentAccount) return
+    let cancelled = false
+    fetchAccountIdForOwner(suiClient, config.memwalRegistryId, currentAccount.address)
+      .then((accountId) => {
+        if (!cancelled) setTarget(accountId ? '/dashboard' : '/setup')
+      })
+      .catch((err) => {
+        console.error('Failed to resolve account after sign-in:', err)
+        if (!cancelled) setTarget('/dashboard')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentAccount, suiClient])
+
+  if (!currentAccount) return <Navigate to="/dashboard" replace />
+
+  if (!target) return <RoutePending />
+  return <Navigate to={target} replace />
 }
 
 function AppContent() {
@@ -290,6 +352,15 @@ function AppContent() {
     return currentAccount ? element : <Navigate to="/" replace />
   }
 
+  // Same as requireAccount, but records the visit first — /setup is the one
+  // requireAccount-gated route worth resuming after sign-in (Thanos, 24 Sep).
+  const requireAccountForSetup = (element: React.ReactNode) => {
+    if (authPending) return <RoutePending />
+    if (currentAccount) return element
+    sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, '1')
+    return <Navigate to="/" replace />
+  }
+
   return (
     <Routes>
       <Route path="/" element={
@@ -297,7 +368,7 @@ function AppContent() {
         currentAccount ? <PostAuthRedirect /> : <LandingPage />
       } />
       <Route path="/dashboard" element={requireAccount(<Dashboard />)} />
-      <Route path="/setup" element={requireAccount(
+      <Route path="/setup" element={requireAccountForSetup(
         delegateKey ? <Navigate to="/dashboard" replace /> : <SetupWizard />
       )} />
       <Route path="/playground" element={requireAccount(
@@ -305,6 +376,7 @@ function AppContent() {
       )} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="/connect/claude" element={<ConnectClaude />} />
+      <Route path="/keys" element={<KeysPage />} />
       <Route path="/admin" element={<AdminDashboard />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
