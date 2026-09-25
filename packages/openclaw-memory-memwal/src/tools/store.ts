@@ -9,6 +9,7 @@
 import type { MemWal } from "@mysten-incubation/memwal";
 import { Type } from "@sinclair/typebox";
 import { looksLikeInjection } from "../capture.js";
+import { resolveToolNamespace } from "../config.js";
 import { toolError, withTimeout } from "../format.js";
 import type { PluginConfig } from "../types.js";
 import { MIN_STORE_TEXT_LENGTH, MAX_FACT_PREVIEW_COUNT, MAX_TEXT_PREVIEW_LENGTH } from "../constants.js";
@@ -16,21 +17,22 @@ import { MIN_STORE_TEXT_LENGTH, MAX_FACT_PREVIEW_COUNT, MAX_TEXT_PREVIEW_LENGTH 
 /** Register the memory_store agent tool. */
 export function registerStoreTool(api: any, client: MemWal, config: PluginConfig): void {
   api.registerTool(
-    {
+    (ctx?: { sessionKey?: string }) => ({
       name: "memory_store",
       label: "Memory Store",
       description:
         "Save important information to encrypted long-term memory. " +
         "Use when the user asks to remember something or when you " +
         "identify important facts worth preserving. " +
-        "Pass the namespace parameter to store in the current agent's memory.",
+        "The write is pinned to the calling agent's namespace.",
       parameters: Type.Object({
         text: Type.String({
           description: "Information to store in memory",
         }),
         namespace: Type.Optional(
           Type.String({
-            description: "Memory namespace to store in (use the namespace from system context)",
+            description:
+              "Calling agent's namespace. Omit to use it. Any other namespace is rejected.",
           }),
         ),
         occurredAt: Type.Optional(
@@ -52,7 +54,13 @@ export function registerStoreTool(api: any, client: MemWal, config: PluginConfig
       }),
       async execute(_id: string, params: any) {
         const { text, namespace, occurredAt } = params;
-        const ns = namespace || config.defaultNamespace;
+        const ns = resolveToolNamespace(config.defaultNamespace, ctx?.sessionKey, namespace);
+        if (!ns) {
+          return {
+            content: [{ type: "text", text: "Namespace is pinned to the calling agent." }],
+            details: { error: "namespace_rejected" },
+          };
+        }
 
         // Defence in depth: reject injection on write, not just on read.
         // The recall hook filters on retrieval, but polluted data could
@@ -115,7 +123,7 @@ export function registerStoreTool(api: any, client: MemWal, config: PluginConfig
           return toolError("Failed to store memory", err);
         }
       },
-    },
+    }),
     { name: "memory_store" },
   );
 }
