@@ -68,6 +68,11 @@ import {
     redactInternalUrls,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
+    sealSessionCacheState,
+    isSealSessionExpiredResponse,
+    sealSessionBuildError,
+    sealSessionExpiredError,
+    SEAL_SESSION_REFRESH_AHEAD_MS,
 } from "./utils.js";
 import {
     assertCompatibleRelayer,
@@ -115,6 +120,16 @@ const SEAL_SESSION_TTL_MIN = 5;
 // the client thinks the session is valid but a just-received request hits
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
+
+/**
+ * Hard cap on one SessionKey build (`GET /config` + `SessionKey.create` →
+ * `getObject`). Generous, because it bounds a failure mode rather than a
+ * latency target: the point is that a build which stops settling releases the
+ * single-flight slot so the next caller can start a fresh attempt. Shorter
+ * than the 5-minute TTL it is refreshing, so the cache is never left with no
+ * attempt in flight past expiry.
+ */
+const SEAL_SESSION_BUILD_TIMEOUT_MS = 60_000;
 
 /** Per-call knobs for `signedRequest`. `timeoutMs` overrides the client-wide
  * deadline for one endpoint; `signal` is the caller's own cancellation and is
@@ -364,6 +379,16 @@ export class MemWal {
     private relayerVersionMetadata: RelayerVersionMetadata | null = null;
     /** Single-flight guard so concurrent requests share one SessionKey build. */
     private sessionBuildPromise: Promise<string> | null = null;
+    /**
+     * Cancels the in-flight SessionKey build. A build reaches
+     * `SessionKey.create()` → `suiClient.core.getObject`, which `@mysten/sui`
+     * leaves unbounded unless a signal is passed, so without this a build that
+     * stops settling would hold `sessionBuildPromise` forever: every caller
+     * past `expiresAt` joins the stuck attempt instead of opening a new one,
+     * and the open socket keeps the process alive. Aborted by `destroy()` and
+     * by the build's own deadline.
+     */
+    private sessionBuildAbort: AbortController | null = null;
     /** Single-flight guard so concurrent requests share one compatibility probe. */
     private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
     /** Resolved owner address for this account. See `resolveOwner()`. */
@@ -421,7 +446,12 @@ export class MemWal {
             this.publicKey.fill(0);
         }
         // ENG-1697: drop cached session material too — once destroyed the
-        // instance must not leak authorization tokens either.
+        // instance must not leak authorization tokens either. Nulling the
+        // promise alone would leave an in-flight `getObject` running and its
+        // waiters blocked, so abort the build as well (WALM-162).
+        this.sessionBuildAbort?.abort();
+        this.sessionBuildAbort = null;
+        this.sessionBuildPromise = null;
         this.sessionCache = null;
         this.serverConfig = null;
         this.relayerVersionMetadata = null;
@@ -1483,6 +1513,17 @@ export class MemWal {
             );
         }
 
+        // A present-but-too-old @mysten/seal resolves, so the import above does
+        // not throw; `SessionKey` is just undefined and the failure would
+        // surface as a TypeError from `.create()` and be retried as transient.
+        // Name it here so it classifies as permanent alongside Ed25519Keypair.
+        if (typeof SessionKey !== "function") {
+            throw new Error(
+                "Required SessionKey export not found in @mysten/seal. " +
+                "Ensure @mysten/sui >=2.5.0 and @mysten/seal >=1.1.0 are installed."
+            );
+        }
+
         const keypair = Ed25519Keypair.fromSecretKey(this.privateKey);
 
         // SessionKey accepts either transport through the shared core client
@@ -1540,28 +1581,130 @@ export class MemWal {
                 ? btoa(jsonStr)
                 : Buffer.from(jsonStr, "utf8").toString("base64");
 
-        this.sessionCache = {
-            bytes,
-            expiresAt:
-                Date.now() +
-                SEAL_SESSION_TTL_MIN * 60_000 -
-                SEAL_SESSION_SAFETY_MARGIN_MS,
-        };
         return bytes;
     }
 
-    private async buildSealSession(): Promise<string> {
-        // Fast path: cached session still fresh.
-        if (this.sessionCache && Date.now() < this.sessionCache.expiresAt) {
-            return this.sessionCache.bytes;
-        }
-        // Single-flight: concurrent requests share one build.
+    /**
+     * Start (or join) a SessionKey build and publish the result to the cache.
+     *
+     * Keeps the pre-existing single-flight guarantee: concurrent callers — a
+     * blocking one that has no usable session and a background refresh-ahead
+     * one — share a single in-flight build.
+     */
+    private startSealSessionBuild(): Promise<string> {
         if (this.sessionBuildPromise) return this.sessionBuildPromise;
 
-        this.sessionBuildPromise = this.buildSealSessionInner().finally(() => {
-            this.sessionBuildPromise = null;
+        // `SessionKey.create()` → `suiClient.core.getObject` takes no
+        // AbortSignal, and @mysten/sui imposes no deadline of its own, so a
+        // gRPC candidate that stops settling never falls through to the
+        // JSON-RPC one. Race the build against a deadline (and `destroy()`)
+        // so the slot below is always released: the `.catch` on the
+        // refresh-ahead path swallows the rejection, `.finally` clears the
+        // slot, and the next caller past `expiresAt` opens a *new* attempt
+        // against a possibly-recovered endpoint instead of joining the stuck
+        // one (WALM-162).
+        const abort = new AbortController();
+        const deadline = deadlineSignal(SEAL_SESSION_BUILD_TIMEOUT_MS, abort.signal);
+        this.sessionBuildAbort = abort;
+
+        const bounded = new Promise<string>((resolve, reject) => {
+            deadline.signal.addEventListener(
+                "abort",
+                () =>
+                    reject(
+                        deadline.timedOut()
+                            ? new Error(
+                                  `SEAL session build timed out after ${SEAL_SESSION_BUILD_TIMEOUT_MS}ms`,
+                              )
+                            : new Error("SEAL session build was cancelled"),
+                    ),
+                { once: true },
+            );
+            this.buildSealSessionInner().then(resolve, reject);
         });
-        return this.sessionBuildPromise;
+
+        const build = bounded
+            .then((bytes) => {
+                // Never re-arm the cache of a destroyed client.
+                if (!this.destroyed) {
+                    this.sessionCache = {
+                        bytes,
+                        expiresAt:
+                            Date.now() +
+                            SEAL_SESSION_TTL_MIN * 60_000 -
+                            SEAL_SESSION_SAFETY_MARGIN_MS,
+                    };
+                }
+                return bytes;
+            })
+            .catch((err) => {
+                // A raw throw here never reaches `fetch`, so it would escape
+                // without a `.status` and be misclassified by the documented
+                // retry helpers. Tag it before it leaves the SDK.
+                throw sealSessionBuildError(err);
+            })
+            .finally(() => {
+                deadline.dispose();
+                // Only clear the slot if it still points at this build; a
+                // newer one may already have replaced it.
+                if (this.sessionBuildPromise === build) this.sessionBuildPromise = null;
+                if (this.sessionBuildAbort === abort) this.sessionBuildAbort = null;
+            });
+
+        this.sessionBuildPromise = build;
+        return build;
+    }
+
+    /**
+     * Kick off a refresh without blocking the caller (WALM-162).
+     *
+     * Deliberately timer-free. A `setInterval`/`setTimeout` refresher would
+     * hold a Node event-loop handle for the lifetime of the client — keeping
+     * short-lived processes alive and leaking if the client is dropped without
+     * an explicit disposal call — for a benefit that refresh-ahead-on-use
+     * already delivers: the only moment a fresh session matters is when a
+     * request is about to be made.
+     *
+     * The rejection is swallowed here on purpose. The cached session is still
+     * valid, so a failed background refresh must not surface to the caller nor
+     * raise an unhandled rejection; the next call re-attempts, and once the
+     * cache truly expires the failure is surfaced synchronously instead.
+     */
+    private refreshSealSessionInBackground(): void {
+        if (this.destroyed) return;
+        this.startSealSessionBuild().catch(() => {
+            /* still serving a valid cached session — retried on next use */
+        });
+    }
+
+    private async buildSealSession(): Promise<string> {
+        const cached = this.sessionCache;
+        if (cached) {
+            const state = sealSessionCacheState(
+                cached.expiresAt,
+                Date.now(),
+                SEAL_SESSION_REFRESH_AHEAD_MS,
+            );
+            if (state !== "expired") {
+                // Proactive half: still valid, but close enough to the
+                // deadline that the *next* call would likely block. Hand back
+                // the current bytes now and rebuild out of band.
+                if (state === "refresh-ahead") this.refreshSealSessionInBackground();
+                return cached.bytes;
+            }
+        }
+        return this.startSealSessionBuild();
+    }
+
+    /**
+     * Drop a cached SessionKey the server has rejected as expired.
+     *
+     * Scoped to the exact bytes that were rejected so a refresh that landed
+     * concurrently with the failing request is not thrown away.
+     */
+    private invalidateSealSession(rejectedBytes: string | undefined): void {
+        if (!rejectedBytes) return;
+        if (this.sessionCache?.bytes === rejectedBytes) this.sessionCache = null;
     }
 
     /**
@@ -1649,8 +1792,16 @@ export class MemWal {
             : acceptedStatusesOrOptions;
         await this.ensureCompatibleRelayer();
         const ed = await getEd();
+        const publicKey = await this.getPublicKey();
+        const url = `${this.serverUrl}${path}`;
+        const carriesSealSession = options.includeDelegateKey !== false;
 
-        const timestamp = Math.floor(Date.now() / 1000).toString();
+        // WALM-162: a request that carries a SEAL session gets exactly one
+        // rebuild-and-retry if the server rejects that session as expired.
+        // Bounded at two attempts so a persistently-rejected session (a badly
+        // skewed clock, say) fails fast instead of looping.
+        const maxAttempts = carriesSealSession ? 2 : 1;
+
         // Canonical body used for both: (a) the HTTP wire body and
         // (b) the SHA-256 digest inside the signed message. GET requests
         // carry no body, so the server will hash an EMPTY byte string —
@@ -1658,96 +1809,113 @@ export class MemWal {
         const bodyStr = method === "GET" ? "" : JSON.stringify(body);
         const bodySha256 = await sha256hex(bodyStr);
 
-        // MED-1 fix: Generate per-request nonce (UUID v4) for replay protection
-        const nonce = crypto.randomUUID();
+        for (let attempt = 1; ; attempt += 1) {
+            // Everything below is re-derived per attempt: the timestamp must
+            // stay inside the relayer's clock-drift window and the nonce must
+            // be fresh, because MED-1 replay protection rejects a reused one.
+            const timestamp = Math.floor(Date.now() / 1000).toString();
 
-        // LOW-23: Build message to sign — now includes nonce AND account id
-        const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
-        const msgBytes = new TextEncoder().encode(message);
+            // MED-1 fix: Generate per-request nonce (UUID v4) for replay protection
+            const nonce = crypto.randomUUID();
 
-        if (this.destroyed) {
-            throw new Error(
-                "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
-            );
-        }
-        // Sign with Ed25519
-        const signature = await ed.signAsync(msgBytes, this.privateKey);
-        const publicKey = await this.getPublicKey();
+            // LOW-23: Build message to sign — now includes nonce AND account id
+            const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
+            const msgBytes = new TextEncoder().encode(message);
 
-        // Make HTTP request
-        const url = `${this.serverUrl}${path}`;
-        const headers: Record<string, string> = {
-            "Content-Type": "application/json",
-            "x-public-key": bytesToHex(publicKey),
-            "x-signature": bytesToHex(signature),
-            "x-timestamp": timestamp,
-            "x-nonce": nonce,           // MED-1: replay protection
-            "x-account-id": this.accountId,
-        };
-        // ENG-1696 / ENG-1697: attach a SEAL credential only on Relayer-
-        // mode routes where the server needs it for server-side SEAL
-        // decrypt. Manual-mode methods (rememberManual, recallManual) opt
-        // out and transmit no decrypt credential at all.
-        if (options.includeDelegateKey !== false) {
-            headers["x-seal-session"] = await this.buildSealSession();
-        }
-        // Bound the request. `fetch` never times out on its own, so this is the
-        // only thing standing between a stalled socket and a call that hangs
-        // for as long as the connection stays open.
-        const deadlineMs = options.timeoutMs ?? this.requestTimeoutMs;
-        const deadline = deadlineSignal(deadlineMs, options.signal);
-        try {
-            const res = await fetch(url, {
-                method,
-                headers,
-                body: method === "GET" ? undefined : bodyStr,
-                signal: deadline.signal,
-            });
-
-            if (!acceptedStatuses.includes(res.status)) {
-                // LOW-26: sanitize server error bodies before surfacing to callers.
-                const raw = await res.text();
-                const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
-                if (compatibilityError) throw compatibilityError;
-
-                // A stale/future-dated signature is rejected with 401 + a machine-
-                // readable reason header. Surface it as an actionable clock-drift
-                // error rather than an opaque 401 so the caller can fix node time.
-                const clockDriftError = clockDriftErrorFromResponse(res);
-                if (clockDriftError) throw clockDriftError;
-
-                const { message, serverCode } = sanitizeServerError(
-                    res.status,
-                    raw,
-                    res.headers.get("x-auth-error"),
+            if (this.destroyed) {
+                throw new Error(
+                    "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
                 );
-                const err = new Error(message) as Error & {
-                    status?: number;
-                    serverCode?: string;
-                    retryAfterSeconds?: number;
-                    cause?: string;
-                };
-                err.status = res.status;
-                if (serverCode) err.serverCode = serverCode;
-                const retryAfter = Number(res.headers.get("retry-after"));
-                if (Number.isFinite(retryAfter) && retryAfter > 0) {
-                    err.retryAfterSeconds = retryAfter;
-                }
-                // Preserve raw body on `cause` for in-process debugging only.
-                err.cause = raw;
-                throw err;
+            }
+            // Sign with Ed25519
+            const signature = await ed.signAsync(msgBytes, this.privateKey);
+
+            // Make HTTP request
+            const headers: Record<string, string> = {
+                "Content-Type": "application/json",
+                "x-public-key": bytesToHex(publicKey),
+                "x-signature": bytesToHex(signature),
+                "x-timestamp": timestamp,
+                "x-nonce": nonce,           // MED-1: replay protection
+                "x-account-id": this.accountId,
+            };
+            // ENG-1696 / ENG-1697: attach a SEAL credential only on Relayer-
+            // mode routes where the server needs it for server-side SEAL
+            // decrypt. Manual-mode methods (rememberManual, recallManual) opt
+            // out and transmit no decrypt credential at all.
+            let sentSealSession: string | undefined;
+            if (carriesSealSession) {
+                sentSealSession = await this.buildSealSession();
+                headers["x-seal-session"] = sentSealSession;
             }
 
-            return (await res.json()) as T;
-        } catch (err) {
-            // Translate our own expiry into something a caller can classify.
-            // An abort the CALLER asked for is theirs and propagates untouched.
-            if (deadline.timedOut() && (err as { status?: number }).status === undefined) {
-                throw requestTimeoutError(method, path, deadlineMs);
+            // Bound the request. `fetch` never times out on its own, so this is the
+            // only thing standing between a stalled socket and a call that hangs
+            // for as long as the connection stays open.
+            const deadlineMs = options.timeoutMs ?? this.requestTimeoutMs;
+            const deadline = deadlineSignal(deadlineMs, options.signal);
+            try {
+                const res = await fetch(url, {
+                    method,
+                    headers,
+                    body: method === "GET" ? undefined : bodyStr,
+                    signal: deadline.signal,
+                });
+
+                if (!acceptedStatuses.includes(res.status)) {
+                    // LOW-26: sanitize server error bodies before surfacing to callers.
+                    const raw = await res.text();
+                    const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+                    if (compatibilityError) throw compatibilityError;
+
+                    // A stale/future-dated signature is rejected with 401 + a machine-
+                    // readable reason header. Surface it as an actionable clock-drift
+                    // error rather than an opaque 401 so the caller can fix node time.
+                    const clockDriftError = clockDriftErrorFromResponse(res);
+                    if (clockDriftError) throw clockDriftError;
+
+                    const { message, serverCode } = sanitizeServerError(
+                        res.status,
+                        raw,
+                        res.headers.get("x-auth-error"),
+                    );
+                    const err = new Error(message) as Error & {
+                        status?: number;
+                        serverCode?: string;
+                        retryAfterSeconds?: number;
+                        cause?: string;
+                    };
+                    err.status = res.status;
+                    if (serverCode) err.serverCode = serverCode;
+                    const retryAfter = Number(res.headers.get("retry-after"));
+                    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+                        err.retryAfterSeconds = retryAfter;
+                    }
+                    // Preserve raw body on `cause` for in-process debugging only.
+                    err.cause = raw;
+
+                    if (carriesSealSession && attempt < maxAttempts && isSealSessionExpiredResponse(res.status, raw)) {
+                        this.invalidateSealSession(sentSealSession);
+                        continue;
+                    }
+                    if (isSealSessionExpiredResponse(res.status, raw)) {
+                        this.invalidateSealSession(sentSealSession);
+                        throw sealSessionExpiredError(res.status, raw);
+                    }
+                    throw err;
+                }
+
+                return (await res.json()) as T;
+            } catch (err) {
+                // Translate our own expiry into something a caller can classify.
+                // An abort the CALLER asked for is theirs and propagates untouched.
+                if (deadline.timedOut() && (err as { status?: number }).status === undefined) {
+                    throw requestTimeoutError(method, path, deadlineMs);
+                }
+                throw err;
+            } finally {
+                deadline.dispose();
             }
-            throw err;
-        } finally {
-            deadline.dispose();
         }
     }
 }
