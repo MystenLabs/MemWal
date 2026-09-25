@@ -128,6 +128,7 @@ Search for memories matching a natural language query, scoped to `owner + namesp
     created_at?: string; // RFC3339 write-time; absent on older relayers
   }>;
   total: number;
+  dropped_count?: number; // Matches that could not be returned; absent when 0
 }
 ```
 
@@ -136,6 +137,8 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 MCP `memwal_recall` displays `score = 1 - distance` (higher = more similar). Do not apply an SDK `maxDistance` threshold to those scores. The polarities are inverted.
 
 `created_at` is when the fact was **written**, not any date its text describes.
+
+`dropped_count` counts matches the relayer found but could not return, because the Walrus download or the SEAL decrypt failed. Those memories are missing from `results` entirely, so a short list is not proof that little was stored. The relayer omits the field when nothing was dropped, so read it as `result.dropped_count ?? 0`.
 
 #### Ordering
 
