@@ -287,7 +287,9 @@ test("waitForRememberJobs timeout keeps the last observed blob id and status", a
     assert.equal(item.status, "timeout");
     assert.equal(item.id, "slow-job");
     assert.equal(item.namespace, "notes");
-    assert.match(item.error, /polling timed out/);
+    // dev (WALM-671) reports the last state it actually saw instead of a bare
+    // "polling timed out", which is the same guarantee this test exists for.
+    assert.match(item.error, /still uploaded after \d+ms/);
     // Previously "" — the blob id was observed and then thrown away.
     assert.equal(item.blob_id, "blob-slow");
     assert.equal(item.last_status, "uploaded");
