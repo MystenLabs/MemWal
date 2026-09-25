@@ -97,6 +97,8 @@ export const config = {
     ),
     posthogHost: import.meta.env.VITE_POSTHOG_HOST as string || 'https://t.walrus.xyz',
     posthogUiHost: import.meta.env.VITE_POSTHOG_UI_HOST as string || 'https://us.posthog.com',
+    // Client SDK key. Blank disables Statsig. This is not a server secret.
+    statsigClientKey: import.meta.env.VITE_STATSIG_CLIENT_KEY as string || '',
     analyticsAllowedHosts: parseCsv(
         import.meta.env.VITE_ANALYTICS_ALLOWED_HOSTS as string | undefined,
         DEFAULT_ANALYTICS_ALLOWED_HOSTS,
