@@ -179,6 +179,96 @@ test("a second login for the same relayer reuses the stranded keypair", async (t
     );
 });
 
+/**
+ * WALM-645 — `memwal-mcp login` is the escape hatch when a stranded record
+ * can never be reclaimed (a relayer without `/api/whoami` leaves recovery in
+ * `unavailable` on every start, so the record survives its full 24h TTL while
+ * the wallet step keeps aborting with `EDelegateKeyAlreadyExists`). Forcing a
+ * login has to mint a new key rather than hand the browser the stuck one.
+ */
+test("a forced login mints a fresh key instead of reusing the pending record", async (t) => {
+    const home = freshHome();
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+
+    mkdirSync(join(home, ".memwal"), { recursive: true });
+    const stranded = {
+        delegatePrivateKey: "a".repeat(64),
+        delegatePublicKeyHex: "b".repeat(64),
+        delegateAddress: `0x${"c".repeat(64)}`,
+        relayerUrl: RELAYER,
+        label: "Stranded",
+        createdAt: new Date().toISOString(),
+        version: 1,
+    };
+    writeFileSync(pendingPath(home), JSON.stringify(stranded), { mode: 0o600 });
+
+    const { flow, url } = await startLogin({ freshKey: true });
+    flow.catch(() => {});
+
+    const minted = url.searchParams.get("publicKey")?.toLowerCase();
+    assert.notEqual(
+        minted,
+        stranded.delegatePublicKeyHex,
+        "a forced login must not send the browser the key that is already stuck",
+    );
+
+    const after = JSON.parse(readFileSync(pendingPath(home), "utf8"));
+    assert.equal(
+        after.delegatePublicKeyHex.toLowerCase(),
+        minted,
+        "the write-ahead record must hold the key the browser was actually given",
+    );
+    assert.notEqual(after.delegatePrivateKey, stranded.delegatePrivateKey);
+});
+
+/**
+ * WALM-645 — minting over the record destroys the only copy of a key the
+ * browser may already have paid to register. Nothing else will ever name it
+ * again: recovery reads that same record, and it is gone. So the flow has to
+ * say which registration it is orphaning, while it still can.
+ */
+test("a forced login names the pending key it is about to discard", async (t) => {
+    const home = freshHome();
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+
+    mkdirSync(join(home, ".memwal"), { recursive: true });
+    const stranded = {
+        delegatePrivateKey: "d".repeat(64),
+        delegatePublicKeyHex: "e".repeat(64),
+        delegateAddress: `0x${"f".repeat(64)}`,
+        relayerUrl: RELAYER,
+        label: "Stranded",
+        createdAt: new Date().toISOString(),
+        version: 1,
+    };
+    writeFileSync(pendingPath(home), JSON.stringify(stranded), { mode: 0o600 });
+
+    const realWrite = process.stderr.write.bind(process.stderr);
+    const captured = [];
+    process.stderr.write = (chunk, ...rest) => {
+        captured.push(String(chunk));
+        return realWrite(chunk, ...rest);
+    };
+    t.after(() => {
+        process.stderr.write = realWrite;
+    });
+
+    const { flow } = await startLogin({ freshKey: true });
+    flow.catch(() => {});
+
+    const stderr = captured.join("");
+    assert.match(
+        stderr,
+        new RegExp(stranded.delegatePublicKeyHex),
+        "the discarded key's public half must be reported so it can be found in the dashboard",
+    );
+    assert.match(
+        stderr,
+        new RegExp(stranded.delegateAddress),
+        "the discarded key's address must be reported too",
+    );
+});
+
 test("a login against a different relayer does not reuse the record", async (t) => {
     // A key registered against one relayer's account proves nothing to
     // another, and recovery must never repoint a record at a new relayer.

@@ -204,8 +204,7 @@ export async function recoverPendingLogin(): Promise<RecoveryResult> {
         // again, after removing the key from the dashboard if it was already
         // registered — is worth giving. During a transient upstream
         // failure that advice is worse than silence: the key is still good, and
-        // `unavailable` correctly says the next start retries it with no action
-        // from the user.
+        // `unavailable` correctly says the next start retries it.
         //
         // So only 401/403 is a denial. A 503 carrying
         // `x-auth-error: AUTH_UPSTREAM_UNAVAILABLE` is Sui RPC being down, and
@@ -285,7 +284,11 @@ export function formatStrandedLoginNotice(result: RecoveryResult): string | null
     } else if (result.outcome === "unavailable") {
         lines.push(
             `The relayer could not be reached to check. This will be retried on the`,
-            `next start — no action needed yet.`,
+            `next start. If sign-in keeps failing, run`,
+            `\`npx -y @mysten-incubation/memwal-mcp login\`, or call \`memwal_login\` with`,
+            `\`freshKey: true\`: both mint a new key instead of waiting on this one.`,
+            `That abandons the key above, so if you approved it on-chain, remove it`,
+            `from the dashboard — nothing will use it again.`,
         );
     } else {
         lines.push(

@@ -75,3 +75,36 @@ test("onFailure runs once when a concurrent call joins the in-flight flow", asyn
     await Promise.allSettled([first.result, second.result]);
     assert.equal(failures, 1);
 });
+
+test("freshKey: true bypasses the in-flight flow and starts a new one", async (t) => {
+    const home = mkdtempSync(join(tmpdir(), "memwal-test-"));
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    resetInflightLogin();
+
+    t.after(() => {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = prevProfile;
+        resetInflightLogin();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    const opts = {
+        openBrowser: false,
+        timeoutMs: 1500,
+        webUrl: "http://127.0.0.1:9",
+        relayerUrl: "http://127.0.0.1:9",
+        label: "singleflight-fresh-test",
+    };
+    const first = startOrReuseLoginFlow(opts);
+    const second = startOrReuseLoginFlow({ ...opts, freshKey: true });
+    const [urlA, urlB] = await Promise.all([first.url, second.url]);
+    assert.notEqual(urlA, urlB);
+    assert.match(urlA, /\/connect\/mcp\?/);
+    assert.match(urlB, /\/connect\/mcp\?/);
+    await Promise.allSettled([first.result, second.result]);
+});
