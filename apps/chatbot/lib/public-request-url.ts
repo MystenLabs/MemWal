@@ -59,20 +59,19 @@ export function isSafeRedirectUrl(
   redirectUrl: string,
   request: Request
 ): boolean {
-  if (redirectUrl.startsWith("/") && !redirectUrl.startsWith("//")) {
-    return true;
-  }
-
   try {
-    const redirect = new URL(redirectUrl);
     const publicUrl = publicRequestUrl(request);
+    const redirect = new URL(redirectUrl, publicUrl);
+    if (redirect.origin !== publicUrl.origin) {
+      return false;
+    }
     if (
       isBindHostname(redirect.hostname) ||
       isBindHostname(publicUrl.hostname)
     ) {
-      return false;
+      return redirectUrl.startsWith("/") && !redirectUrl.startsWith("//");
     }
-    return redirect.origin === publicUrl.origin;
+    return true;
   } catch {
     return false;
   }
