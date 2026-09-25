@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 import { MemWal } from "../dist/memwal.js";
 import { fetchWithDeadline, isTimeoutError, DEFAULT_RECALL_TIMEOUT_MS } from "../dist/utils.js";
 
+// The shipped deadline contract (WALM-648): name `MemWalRequestTimeout`, status
+// 504 so `isTransientPollingStatus` retries one stalled poll, plus the `phase`
+// WALM-598 adds so the stalled round-trip is named.
+const isRequestTimeout = (err) =>
+    err instanceof Error && err.name === "MemWalRequestTimeout" && typeof err.phase === "string";
+
 // WALM-598 / GH #438.
 //
 // `recall()` used to arm a single 15s AbortController *before* calling
@@ -132,7 +138,7 @@ test("recall honours a per-call timeoutMs", async () => {
     await assert.rejects(
         client().recall({ query: "food allergies", timeoutMs: 30 }),
         (err) => {
-            assert.ok(isTimeoutError(err), `expected a TimeoutError, got ${err?.name}`);
+            assert.ok(isRequestTimeout(err), `expected a MemWalRequestTimeout, got ${err?.name}`);
             assert.equal(err.timeoutMs, 30);
             return true;
         },
@@ -143,7 +149,7 @@ test("recall honours a client-level recallTimeoutMs", async () => {
     stubServer({ recallDelayMs: 5_000 });
 
     await assert.rejects(client({ recallTimeoutMs: 30 }).recall({ query: "q" }), (err) => {
-        assert.ok(isTimeoutError(err));
+        assert.ok(isRequestTimeout(err));
         assert.equal(err.timeoutMs, 30);
         return true;
     });
@@ -182,7 +188,7 @@ test("a preflight timeout names the preflight as the phase", async () => {
     await assert.rejects(
         client({ preflightTimeoutMs: 30, recallTimeoutMs: 5_000 }).recall({ query: "q" }),
         (err) => {
-            assert.ok(isTimeoutError(err));
+            assert.ok(isRequestTimeout(err));
             assert.equal(err.phase, "preflight GET /version");
             assert.equal(err.timeoutMs, 30);
             return true;
@@ -197,7 +203,7 @@ test("health() is bounded by the preflight budget", async () => {
     };
 
     await assert.rejects(client({ preflightTimeoutMs: 30 }).health(), (err) => {
-        assert.ok(isTimeoutError(err));
+        assert.ok(isRequestTimeout(err));
         assert.equal(err.phase, "GET /health");
         return true;
     });
@@ -227,6 +233,9 @@ test("the deadline covers the response body, not just the headers", async () => 
         25,
         "POST /api/recall",
     );
+    // `utils.fetchWithDeadline` is the standalone helper (used by manual.ts);
+    // it raises utils' own phase-tagged `TimeoutError`, not the client's
+    // `MemWalRequestTimeout`. Both carry `phase`/`timeoutMs`.
     await assert.rejects(res.json(), (err) => {
         assert.ok(isTimeoutError(err));
         assert.equal(err.phase, "POST /api/recall");
