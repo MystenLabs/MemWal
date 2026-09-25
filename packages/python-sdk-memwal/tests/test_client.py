@@ -580,9 +580,29 @@ class TestRememberJobTimeoutDetail:
         assert "still retrying" in (exc.value.server_error or "")
         assert str(exc.value).startswith("remember job timed out after 300ms")
         assert "last status: running" in str(exc.value)
-        # Python keys are per client instance (uuid4), so only a retry on the
-        # same client reuses the job; a new client would mint a second write.
-        assert "on the same client instance" in str(exc.value)
+        # The job is still live, so the advice is to wait on its id, not to
+        # POST again: `remember` drops its key once accepted, so a re-send
+        # would mint a new key and a second paid write.
+        assert "call wait_for_remember_job('slow-job')" in str(exc.value)
+        assert "idempotency_key is not remembered" in str(exc.value)
+
+    async def test_timeout_attribute_carries_the_redacted_server_error(
+        self, memwal_client: MemWal
+    ) -> None:
+        async def running(*_args: Any, **_kwargs: Any) -> dict:
+            return {
+                "job_id": "slow-job",
+                "status": "running",
+                "error": "sidecar http://localhost:9000/upload unreachable",
+            }
+
+        memwal_client._signed_request = running  # type: ignore[method-assign]
+        with pytest.raises(MemWalRememberJobTimeout) as exc:
+            await memwal_client.wait_for_remember_job(
+                "slow-job", poll_interval_ms=0, timeout_ms=300
+            )
+        assert exc.value.server_error == "sidecar [internal] unreachable"
+        assert "localhost" not in str(exc.value)
 
     async def test_every_poll_refused_reports_unknown_state(
         self, memwal_client: MemWal

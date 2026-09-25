@@ -1703,12 +1703,18 @@ class MemWalRememberJobTimeout(MemWalError):
         # "no status read got through (last poll: HTTP 429)" already names the rate limit.
         named = last_status is None and last_refusal == 429
         rate_limited = "; wait hit a rate limit (429)" if saw_rate_limit and not named else ""
+        # Redacted once, for both the message and the attribute.
+        server_error = _redact_internal_urls(server_error) if server_error else None
         if last_status is not None:
-            suffix = f" ({_redact_internal_urls(server_error)})" if server_error else ""
+            # The wait only times out on a job still pending/running/uploaded
+            # (a failed job raises), so the advice is to keep waiting on it.
+            suffix = f" ({server_error})" if server_error else ""
             detail = (
-                f"last status: {last_status}{suffix}. Retry with the same idempotency key "
-                "to keep waiting on this job; remember_and_wait does this for you "
-                "on the same client instance."
+                f"last status: {last_status}{suffix}. The job is still in progress: "
+                f"call wait_for_remember_job({job_id!r}) to keep waiting on it. Sending "
+                "the text again under a new idempotency key stores it twice; a key you "
+                "passed as idempotency_key is not remembered by the client, so pass it "
+                "again on any retry."
             )
         else:
             detail = (

@@ -108,6 +108,9 @@ test("a timed-out wait reports the job's last status and the relayer's message",
             assert.match(err.serverError, /still retrying/);
             assert.match(err.message, /^remember job timed out after 300ms/);
             assert.match(err.message, /last status: running/);
+            // Still live: wait on the job id rather than POSTing again.
+            assert.match(err.message, /call waitForRememberJob\("slow-job"\)/);
+            assert.match(err.message, /idempotencyKey is not remembered/);
             return true;
         },
     );
