@@ -1,5 +1,8 @@
 import { lookup } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { Readable } from "node:stream";
 
 import { ChatbotError } from "@/lib/errors";
 
@@ -204,11 +207,28 @@ export function isBlockedAddress(address: string): boolean {
 }
 
 /**
+ * A destination that passed validation, together with the addresses it was
+ * validated against.
+ *
+ * The addresses are the point. Validating a hostname and then handing the
+ * *name* to an HTTP client means the client resolves it a second time, and
+ * nothing requires the second answer to match the first — so the check and the
+ * connection can land on different hosts (DNS rebinding). Carrying the
+ * validated addresses out of the check lets the connection be pinned to one.
+ */
+export type PublicDestination = {
+  url: URL;
+  addresses: string[];
+};
+
+/**
  * Parse a user-supplied URL and confirm it names a public HTTP(S) destination.
  * Hostnames are resolved and every returned address has to be public, so a name
  * pointing at 127.0.0.1 is rejected as surely as the literal is.
  */
-export async function assertPublicUrl(rawUrl: string): Promise<URL> {
+export async function assertPublicDestination(
+  rawUrl: string
+): Promise<PublicDestination> {
   let url: URL;
 
   try {
@@ -235,7 +255,8 @@ export async function assertPublicUrl(rawUrl: string): Promise<URL> {
       );
     }
 
-    return url;
+    // A literal needs no resolution, so there is no second answer to differ.
+    return { url, addresses: [host] };
   }
 
   let addresses: { address: string }[];
@@ -259,32 +280,331 @@ export async function assertPublicUrl(rawUrl: string): Promise<URL> {
     );
   }
 
+  return { url, addresses: addresses.map((entry) => entry.address) };
+}
+
+/** Back-compat wrapper: the validated URL without the addresses. */
+export async function assertPublicUrl(rawUrl: string): Promise<URL> {
+  const { url } = await assertPublicDestination(rawUrl);
   return url;
 }
 
+function headersFromNode(
+  raw: NodeJS.Dict<string | string[]>
+): Headers {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(raw)) {
+    if (value === undefined) {
+      continue;
+    }
+    // set-cookie arrives as an array and must stay one header per value.
+    for (const entry of Array.isArray(value) ? value : [value]) {
+      headers.append(name, entry);
+    }
+  }
+  return headers;
+}
+
+/** Statuses the Response constructor refuses to give a body. */
+const NULL_BODY_STATUS = new Set([204, 205, 304]);
+
+/**
+ * RFC 9110 reason-phrase: HTAB, SP, VCHAR, obs-text. `Response` throws a
+ * TypeError on anything else, and the phrase is only cosmetic, so a remote that
+ * sends control characters gets an empty one rather than a crash.
+ */
+function safeStatusText(raw: string | undefined): string {
+  return raw && /^[\t\x20-\x7e\x80-\xff]*$/.test(raw) ? raw : "";
+}
+
+/**
+ * A failure before the TCP connection was established. Only these move on to
+ * the next validated address: after connecting, the address worked and the
+ * problem is the server's, not the route's.
+ */
+export class PinnedConnectError extends ChatbotError {}
+
+const CONNECT_TIMEOUT_MS = 10_000;
+
+/**
+ * Perform one request against a *specific* address, while keeping the request
+ * addressed to the original host.
+ *
+ * `fetch` cannot express this: it takes a URL and resolves the name itself. The
+ * node client takes the connect address and the TLS identity separately, so we
+ * can dial the address that was validated while `Host` and SNI — and therefore
+ * certificate verification — stay bound to the hostname the user asked for. An
+ * attacker who flips their DNS between the check and the connection now changes
+ * nothing, because the second answer is never consulted.
+ */
+export type PinnedRequestOptions = {
+  host: string;
+  port: number;
+  path: string;
+  method: string;
+  headers: Record<string, string>;
+  servername?: string;
+  rejectUnauthorized: boolean;
+};
+
+/**
+ * Build the request options that separate *where we connect* from *who we are
+ * talking to*. Exported because this split is the whole fix, and it is worth
+ * asserting directly rather than inferring from a live connection.
+ */
+export function pinnedRequestOptions(
+  url: URL,
+  address: string,
+  init?: RequestInit
+): PinnedRequestOptions {
+  const secure = url.protocol === "https:";
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+
+  const headers = new Headers(init?.headers);
+  // Name-based virtual hosts still need to know which site was asked for, and
+  // the port belongs here when it is not the default.
+  headers.set("host", url.host);
+
+  const outgoing: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    outgoing[name] = value;
+  });
+
+  return {
+    // Where the socket actually goes: the validated address, never the name.
+    host: address,
+    port: url.port ? Number(url.port) : secure ? 443 : 80,
+    path: `${url.pathname}${url.search}`,
+    method: init?.method ?? "GET",
+    headers: outgoing,
+    // Certificates are checked against the hostname, not the address we
+    // dialled — so pinning does not weaken TLS. SNI is meaningless for an IP
+    // literal, where the certificate has to carry the address itself.
+    ...(secure && !isIP(hostname) ? { servername: hostname } : {}),
+    rejectUnauthorized: true,
+  };
+}
+
+export function fetchPinned(
+  url: URL,
+  address: string,
+  init: RequestInit | undefined,
+  timeoutMs: number,
+  connectTimeoutMs: number = CONNECT_TIMEOUT_MS
+): Promise<Response> {
+  const secure = url.protocol === "https:";
+  const send = secure ? httpsRequest : httpRequest;
+
+  return new Promise<Response>((resolve, reject) => {
+    let connected = false;
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (!settled) {
+        settled = true;
+        fn();
+      }
+    };
+
+    const req = send(pinnedRequestOptions(url, address, init), (res) => {
+      // Everything here runs in an http callback, outside the promise. A throw
+      // would be an uncaughtException — the process exits by default — and the
+      // promise would never settle, because the status line is already parsed
+      // and the socket timeout no longer applies. So nothing in here may throw.
+      const status = res.statusCode ?? 0;
+
+      if (status < 200 || status > 599) {
+        res.destroy();
+        settle(() =>
+          reject(
+            new ChatbotError(
+              "bad_request:api",
+              `The URL answered with an unusable status: ${status}`
+            )
+          )
+        );
+        return;
+      }
+
+      try {
+        const body =
+          NULL_BODY_STATUS.has(status) || init?.method === "HEAD"
+            ? null
+            : (Readable.toWeb(res) as ReadableStream<Uint8Array>);
+
+        const response = new Response(body, {
+          status,
+          statusText: safeStatusText(res.statusMessage),
+          headers: headersFromNode(res.headers),
+        });
+        settle(() => resolve(response));
+      } catch (error) {
+        res.destroy();
+        settle(() =>
+          reject(
+            new ChatbotError(
+              "bad_request:api",
+              `The URL sent a response that could not be read: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            )
+          )
+        );
+      }
+    });
+
+    // `setTimeout` on the request is an idle timeout, which starts only once a
+    // socket exists and says nothing about how long connecting may take. A
+    // separate connect deadline is what lets an unreachable address give way to
+    // the next one instead of hanging for the kernel's SYN retries.
+    const connectTimer = setTimeout(() => {
+      req.destroy(
+        new PinnedConnectError(
+          "bad_request:api",
+          `Timed out connecting to ${address}`
+        )
+      );
+    }, connectTimeoutMs);
+
+    req.on("socket", (socket) => {
+      const onConnect = () => {
+        connected = true;
+        clearTimeout(connectTimer);
+      };
+      if (!socket.connecting) {
+        onConnect();
+      } else {
+        // Node >=19 creates http(s).globalAgent with `timeout: 5000`, armed on
+        // the socket while it is still connecting. Left alone it fires before
+        // the connect deadline above and ends the attempt as a whole-fetch
+        // failure, so the next validated address is never tried. Disarm it
+        // here; `req.setTimeout` below re-arms the idle timeout once connected.
+        socket.setTimeout(0);
+        socket.once("connect", onConnect);
+      }
+    });
+
+    req.setTimeout(timeoutMs, () => {
+      // Classified by whether a connection exists, not by which timer fired:
+      // before connect, this address did not work and the next one should get
+      // its turn.
+      req.destroy(
+        connected
+          ? new ChatbotError("bad_request:api", "Timed out fetching the URL")
+          : new PinnedConnectError(
+              "bad_request:api",
+              `Timed out connecting to ${address}`
+            )
+      );
+    });
+
+    req.on("error", (error) => {
+      clearTimeout(connectTimer);
+      settle(() => {
+        if (error instanceof ChatbotError) {
+          reject(error);
+          return;
+        }
+        const Wrapped = connected ? ChatbotError : PinnedConnectError;
+        reject(
+          new Wrapped(
+            "bad_request:api",
+            `Could not fetch the URL: ${error.message}`
+          )
+        );
+      });
+    });
+
+    req.on("close", () => clearTimeout(connectTimer));
+
+    const signal = init?.signal;
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy();
+        settle(() =>
+          reject(new ChatbotError("bad_request:api", "Request aborted"))
+        );
+        return;
+      }
+      signal.addEventListener("abort", () => req.destroy(), { once: true });
+    }
+
+    req.end();
+  });
+}
+
+/**
+ * Try each validated address in turn until one accepts a connection.
+ *
+ * Dialling only the first answer dropped what `fetch` got for free from
+ * `autoSelectFamily`: resolvers often put AAAA first, and a container with no
+ * IPv6 egress then failed every dual-stack URL even though a public A record
+ * was already validated. The fallback stays inside the validated list — no
+ * second lookup, and the hostname never goes back into `host` — so it restores
+ * availability without reopening the rebinding window.
+ */
+export async function fetchFirstReachable(
+  url: URL,
+  addresses: string[],
+  init: RequestInit | undefined,
+  transport: PinnedTransport
+): Promise<Response> {
+  let lastError: unknown;
+
+  for (const address of addresses) {
+    try {
+      return await transport(url, address, init, REQUEST_TIMEOUT_MS);
+    } catch (error) {
+      if (!(error instanceof PinnedConnectError)) {
+        throw error;
+      }
+      lastError = error;
+    }
+  }
+
+  throw lastError;
+}
+
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * How one hop is actually sent. Injectable so a test can stage a public first
+ * hop without reaching the network — the redirect rules are worth exercising on
+ * the real loop, and there is no public address a unit test may dial.
+ */
+export type PinnedTransport = (
+  url: URL,
+  address: string,
+  init: RequestInit | undefined,
+  timeoutMs: number
+) => Promise<Response>;
+
 /**
  * fetch for user-supplied URLs, with the destination checked before the request
- * leaves and again at every redirect. Redirects are followed by hand because
- * fetch's own following would skip the check on each new target.
+ * leaves and again at every redirect, and the connection pinned to the address
+ * that was checked.
  *
- * A host that answers with a public address and then a private one on the next
- * resolution (DNS rebinding) is not covered; that needs the connection pinned to
- * the address that was checked, which fetch does not expose.
+ * Redirects are followed by hand because the client's own following would skip
+ * both the check and the pin on each new target — a 302 into 169.254.169.254 is
+ * the same attack one hop later.
  */
 export async function fetchPublicUrl(
   rawUrl: string,
-  init?: RequestInit
+  init?: RequestInit,
+  transport: PinnedTransport = fetchPinned
 ): Promise<Response> {
   let target = rawUrl;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const url = await assertPublicUrl(target);
-    const response = await fetch(url, { ...init, redirect: "manual" });
+    const { url, addresses } = await assertPublicDestination(target);
+    const response = await fetchFirstReachable(url, addresses, init, transport);
     const location = response.headers.get("location");
 
     if (response.status < 300 || response.status >= 400 || !location) {
       return response;
     }
+
+    // The redirect body is of no interest and would otherwise keep streaming.
+    await response.body?.cancel().catch(() => {});
 
     try {
       target = new URL(location, url).toString();

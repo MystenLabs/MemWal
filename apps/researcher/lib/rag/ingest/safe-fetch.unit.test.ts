@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, globalAgent } from "node:http";
 import { resolve } from "node:path";
 import test from "node:test";
 import { ChatbotError } from "@/lib/errors";
-import { assertPublicUrl, fetchPublicUrl, isBlockedAddress } from "./safe-fetch";
+import {
+  assertPublicDestination,
+  assertPublicUrl,
+  fetchFirstReachable,
+  fetchPinned,
+  fetchPublicUrl,
+  isBlockedAddress,
+  PinnedConnectError,
+  type PinnedTransport,
+  pinnedRequestOptions,
+} from "./safe-fetch";
+import { createServer as createTcpServer } from "node:net";
 
 // Regression tests for issue #778: a PDF file part named a URL that the server
 // downloaded with a bare fetch, so a chat request could make the server call
@@ -212,56 +223,350 @@ test("ingest downloads the PDF through the guard rather than bare fetch", () => 
 });
 
 test("fetchPublicUrl refuses a redirect into a blocked range", async () => {
-  // fetch would follow a redirect itself, skipping the check on the new target,
-  // so fetchPublicUrl follows by hand and re-checks each hop. Stubbing fetch is
-  // the only way to stage a public first hop from a test.
-  const originalFetch = globalThis.fetch;
+  // A client that followed redirects itself would skip the check on the new
+  // target, so fetchPublicUrl follows by hand and re-checks each hop. The
+  // transport is injected to stage a public first hop: there is no public
+  // address a unit test may actually dial.
   const requested: string[] = [];
 
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    requested.push(String(input));
+  const transport: PinnedTransport = async (url, address) => {
+    requested.push(`${url.toString()} via ${address}`);
 
     return new Response(null, {
       status: 302,
       headers: { location: "http://169.254.169.254/latest/meta-data/" },
     });
-  }) as typeof fetch;
+  };
 
-  try {
-    await assertRejectedWith(
-      () => fetchPublicUrl("https://8.8.8.8/file.pdf"),
-      /private or reserved address/
-    );
-    // Only the first, allowed hop was ever requested.
-    assert.deepEqual(requested, ["https://8.8.8.8/file.pdf"]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  await assertRejectedWith(
+    () => fetchPublicUrl("https://8.8.8.8/file.pdf", undefined, transport),
+    /private or reserved address/
+  );
+  // Only the first, allowed hop was ever sent — and it was pinned to the
+  // address that hop validated to.
+  assert.deepEqual(requested, ["https://8.8.8.8/file.pdf via 8.8.8.8"]);
 });
 
 test("fetchPublicUrl maps a malformed redirect Location to ChatbotError", async () => {
   // new URL(location, url) throws TypeError on a broken Location. Without a
   // catch, chat's generic handler turns that into offline:chat (503) instead
   // of the same 400 assertPublicUrl uses for a bad user-supplied URL.
-  const originalFetch = globalThis.fetch;
   const requested: string[] = [];
 
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    requested.push(String(input));
+  const transport: PinnedTransport = async (url) => {
+    requested.push(url.toString());
 
     return new Response(null, {
       status: 302,
       headers: { location: "http://[" },
     });
-  }) as typeof fetch;
+  };
 
-  try {
-    await assertRejectedWith(
-      () => fetchPublicUrl("https://8.8.8.8/file.pdf"),
-      /Invalid URL format/
+  await assertRejectedWith(
+    () => fetchPublicUrl("https://8.8.8.8/file.pdf", undefined, transport),
+    /Invalid URL format/
+  );
+  assert.deepEqual(requested, ["https://8.8.8.8/file.pdf"]);
+});
+
+// ── WALM-682: the connection is pinned to the address that was validated ──
+//
+// The checks above all stop at "was this destination allowed?". They cannot see
+// the gap the report named: assertPublicUrl resolved the host, approved the
+// answer, and then handed the *name* back to a client that resolved it a second
+// time. Nothing tied the two answers together, so a host could return a public
+// address to the check and a private one to the connection.
+
+test("the connection goes to the pinned address, not to a re-resolved name", async (t) => {
+  // The URL names example.com — a host that really does resolve, to a real
+  // public address. The pinned address is this loopback server. If the client
+  // re-resolved the name, the request would leave the machine and never arrive
+  // here, so the handler running at all is the proof that the pin held.
+  let seenHost: string | undefined;
+  let seenPath: string | undefined;
+
+  const server = createServer((request, response) => {
+    seenHost = request.headers.host;
+    seenPath = request.url ?? "";
+    response.end("pinned");
+  });
+  await new Promise<void>((done) => {
+    server.listen(0, "127.0.0.1", done);
+  });
+  t.after(
+    () =>
+      new Promise<void>((done) => {
+        server.close(() => done());
+      })
+  );
+
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  const response = await fetchPinned(
+    new URL(`http://example.com:${address.port}/doc.pdf?x=1`),
+    "127.0.0.1",
+    undefined,
+    5000
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "pinned");
+  assert.equal(seenPath, "/doc.pdf?x=1");
+  // Pinned by address, still addressed to the original host: name-based virtual
+  // hosts and TLS identity both depend on this staying the hostname.
+  assert.equal(seenHost, `example.com:${address.port}`);
+});
+
+test("pinnedRequestOptions separates where we connect from who we talk to", () => {
+  const options = pinnedRequestOptions(
+    new URL("https://files.example.com/a/b.pdf?q=1"),
+    "203.0.113.10"
+  );
+
+  assert.equal(options.host, "203.0.113.10", "dials the validated address");
+  assert.equal(options.port, 443);
+  assert.equal(options.path, "/a/b.pdf?q=1");
+  assert.equal(options.headers.host, "files.example.com");
+  // Certificates are still verified against the hostname, so pinning the
+  // address does not buy SSRF protection at the cost of TLS.
+  assert.equal(options.servername, "files.example.com");
+  assert.equal(options.rejectUnauthorized, true);
+});
+
+test("a non-default port travels in the Host header", () => {
+  const options = pinnedRequestOptions(
+    new URL("https://files.example.com:8443/x"),
+    "203.0.113.10"
+  );
+
+  assert.equal(options.port, 8443);
+  assert.equal(options.headers.host, "files.example.com:8443");
+});
+
+test("an IP literal gets no SNI but still verifies its certificate", () => {
+  // SNI is a hostname extension; for a literal the certificate has to carry the
+  // address itself, and rejectUnauthorized is what enforces that.
+  const options = pinnedRequestOptions(
+    new URL("https://203.0.113.10/x"),
+    "203.0.113.10"
+  );
+
+  assert.equal(options.servername, undefined);
+  assert.equal(options.rejectUnauthorized, true);
+});
+
+test("assertPublicDestination carries the validated addresses out", async () => {
+  // assertPublicUrl threw the addresses away; that is what made pinning
+  // impossible for the caller.
+  const { addresses, url } = await assertPublicDestination(
+    "https://203.0.113.10/x.pdf"
+  );
+
+  assert.deepEqual(addresses, ["203.0.113.10"]);
+  assert.equal(url.hostname, "203.0.113.10");
+});
+
+// ── review follow-ups on #984 ─────────────────────────────────────────────
+
+/**
+ * A raw TCP listener that writes `reply` verbatim, so a test can send status
+ * lines no well-behaved HTTP server would produce.
+ */
+async function rawServer(reply: string) {
+  const server = createTcpServer((socket) => {
+    socket.once("data", () => {
+      socket.end(reply);
+    });
+  });
+  await new Promise<void>((done) => {
+    server.listen(0, "127.0.0.1", done);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    port: address.port,
+    close: () =>
+      new Promise<void>((done) => {
+        server.close(() => done());
+      }),
+  };
+}
+
+for (const [label, reply] of [
+  ["status 600", "HTTP/1.1 600 Nope\r\nContent-Length: 0\r\n\r\n"],
+  ["status 101 without an upgrade", "HTTP/1.1 101 Switching\r\nContent-Length: 0\r\n\r\n"],
+  ["a control character in the reason phrase", "HTTP/1.1 200 O\x01K\r\nContent-Length: 2\r\n\r\nok"],
+] as const) {
+  test(`a response with ${label} settles the promise instead of crashing`, async (t) => {
+    // Response() throws on these. Thrown inside the http callback, that was an
+    // uncaughtException — the process exits by default — and the promise never
+    // settled. Either outcome is fine here as long as it is an outcome.
+    const { port, close } = await rawServer(reply);
+    t.after(close);
+
+    const crashes: unknown[] = [];
+    const onCrash = (error: unknown) => crashes.push(error);
+    process.on("uncaughtException", onCrash);
+    t.after(() => process.off("uncaughtException", onCrash));
+
+    const outcome = await Promise.race([
+      fetchPinned(
+        new URL(`http://example.com:${port}/x`),
+        "127.0.0.1",
+        undefined,
+        5000
+      ).then(
+        (response) => ({ settled: "resolved", status: response.status }),
+        (error) => ({ settled: "rejected", error })
+      ),
+      new Promise((done) => setTimeout(() => done({ settled: "hung" }), 3000)),
+    ]);
+
+    assert.deepEqual(crashes, [], "nothing may escape as an uncaughtException");
+    assert.notEqual(
+      (outcome as { settled: string }).settled,
+      "hung",
+      "the promise must settle"
     );
-    assert.deepEqual(requested, ["https://8.8.8.8/file.pdf"]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+    if ((outcome as { settled: string }).settled === "rejected") {
+      assert.ok((outcome as { error: unknown }).error instanceof ChatbotError);
+    }
+  });
+}
+
+test("a refused connection is a PinnedConnectError, so the next address gets a turn", async () => {
+  // Bind and release a port so nothing is listening on it.
+  const { port, close } = await rawServer("");
+  await close();
+
+  await assert.rejects(
+    () =>
+      fetchPinned(new URL(`http://example.com:${port}/`), "127.0.0.1", undefined, 5000),
+    (error) => error instanceof PinnedConnectError
+  );
+});
+
+test("fetchFirstReachable falls through unreachable addresses in order", async () => {
+  // The resolver often lists AAAA first; with no IPv6 egress the first address
+  // fails to connect and the validated A record behind it should be used.
+  const tried: string[] = [];
+  const transport: PinnedTransport = async (_url, address) => {
+    tried.push(address);
+    if (address === "2001:db8::1") {
+      throw new PinnedConnectError("bad_request:api", "ENETUNREACH");
+    }
+    return new Response("ok");
+  };
+
+  const response = await fetchFirstReachable(
+    new URL("https://files.example.com/x.pdf"),
+    ["2001:db8::1", "203.0.113.10"],
+    undefined,
+    transport
+  );
+
+  assert.equal(await response.text(), "ok");
+  assert.deepEqual(tried, ["2001:db8::1", "203.0.113.10"]);
+});
+
+test("fetchFirstReachable does not retry once an address has connected", async () => {
+  // After a connection the address worked; a TLS or HTTP failure is the
+  // server's answer and trying a sibling address would just ask twice.
+  const tried: string[] = [];
+  const transport: PinnedTransport = async (_url, address) => {
+    tried.push(address);
+    throw new ChatbotError("bad_request:api", "certificate has expired");
+  };
+
+  await assert.rejects(
+    () =>
+      fetchFirstReachable(
+        new URL("https://files.example.com/x.pdf"),
+        ["203.0.113.10", "203.0.113.11"],
+        undefined,
+        transport
+      ),
+    /./
+  );
+  assert.deepEqual(tried, ["203.0.113.10"]);
+});
+
+test("fetchFirstReachable reports the last failure when every address is unreachable", async () => {
+  const transport: PinnedTransport = async (_url, address) => {
+    throw new PinnedConnectError("bad_request:api", `unreachable ${address}`);
+  };
+
+  await assertRejectedWith(
+    () =>
+      fetchFirstReachable(
+        new URL("https://files.example.com/x.pdf"),
+        ["203.0.113.10", "203.0.113.11"],
+        undefined,
+        transport
+      ),
+    /unreachable 203\.0\.113\.11/
+  );
+});
+
+// ── round 2 on #984: a connect that hangs, not one that is refused ────────
+
+// TEST-NET-1 (RFC 5737): never routed, so a connect to it hangs until something
+// gives up — the blackholed-AAAA case, as opposed to an immediate refusal.
+const BLACKHOLE = "192.0.2.1";
+
+async function liveServer(t: { after: (fn: () => unknown) => void }) {
+  const server = createServer((_request, response) => response.end("reached"));
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  t.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return address.port;
+}
+
+test("a blackholed first address gives way to the next one at the connect deadline", async (t) => {
+  const port = await liveServer(t);
+  const transport: PinnedTransport = (url, address, init, timeoutMs) =>
+    fetchPinned(url, address, init, timeoutMs, 300);
+
+  const started = Date.now();
+  const response = await fetchFirstReachable(
+    new URL(`http://example.com:${port}/x`),
+    [BLACKHOLE, "127.0.0.1"],
+    undefined,
+    transport
+  );
+
+  assert.equal(await response.text(), "reached");
+  assert.ok(Date.now() - started < 3000, `took ${Date.now() - started}ms`);
+});
+
+test("the global agent's socket timer cannot end a connect early as a whole-fetch failure", async (t) => {
+  // Node >=19 creates http(s).globalAgent with timeout: 5000, armed while the
+  // socket is still connecting. It used to fire first, surface as the request
+  // 'timeout', and reject with a plain ChatbotError — so the address fallback
+  // never ran and the 10s connect deadline never fired. The agent timeout is
+  // shrunk here to show the ordering without waiting five seconds.
+  // `options` is real at runtime but missing from @types/node's Agent.
+  const agentOptions = (globalAgent as unknown as { options: { timeout?: number } })
+    .options;
+  const previous = agentOptions.timeout;
+  agentOptions.timeout = 100;
+  t.after(() => {
+    agentOptions.timeout = previous;
+  });
+
+  const started = Date.now();
+  await assert.rejects(
+    () => fetchPinned(new URL("http://example.com/x"), BLACKHOLE, undefined, 30_000, 600),
+    (error) => {
+      assert.ok(
+        error instanceof PinnedConnectError,
+        `expected PinnedConnectError, got ${(error as Error)?.constructor?.name}: ${String((error as ChatbotError).cause)}`
+      );
+      return true;
+    }
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 500, `rejected at ${elapsed}ms — the agent's 100ms timer ended it, not the connect deadline`);
 });
