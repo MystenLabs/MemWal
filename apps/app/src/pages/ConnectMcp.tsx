@@ -14,9 +14,10 @@
  *   1. Verify the exact state/public-key tuple against the localhost MCP
  *      bridge. A copied/emailed URL has no matching bridge and fails closed.
  *   2. Render consent screen — show requested permissions + the full delegate
- *      public key/address returned by the verified bridge.
- *   3. User clicks "Connect Sui Wallet" → standard dApp Kit wallet popup.
- *   4. Build + sign `add_delegate_key(account, registry, publicKey, label, clock)`
+ *      public key/address returned by the verified bridge. A wallet that is
+ *      already connected does not skip this screen.
+ *   3. User clicks through consent → standard dApp Kit wallet popup if needed.
+ *   4. Re-check the local bridge, then sign `add_delegate_key`
  *      via useSponsoredTransaction (matches SetupWizard pattern).
  *   5. POST result {accountId, walletAddress, packageId, txDigest, label}
  *      to http://localhost:<port>/callback — the MCP package's listener.
@@ -137,6 +138,34 @@ function isVerifiedBridge(
     )
 }
 
+function sameRelayer(a: string, b: string): boolean {
+    const norm = (value: string) => value.trim().replace(/\/+$/, '').toLowerCase()
+    return norm(a) === norm(b)
+}
+
+/** Ask the local bridge again. Network and abort errors propagate to the caller. */
+async function confirmLocalBridge(
+    port: string,
+    state: string,
+    publicKey: string,
+    relayer: string,
+    signal?: AbortSignal,
+): Promise<VerifiedBridge | null> {
+    const response = await fetch(`http://127.0.0.1:${port}/preflight`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ state, publicKey, relayer }),
+        signal,
+    })
+    const body: unknown = await response.json().catch(() => null)
+    if (!response.ok || !isVerifiedBridge(body, publicKey, relayer)) return null
+    return {
+        publicKey: body.publicKey,
+        label: body.label,
+        relayer: body.relayer,
+    }
+}
+
 export default function ConnectMcp() {
     const [params] = useSearchParams()
     const currentAccount = useCurrentAccount()
@@ -170,6 +199,9 @@ export default function ConnectMcp() {
     const [verifiedBridge, setVerifiedBridge] = useState<VerifiedBridge | null>(null)
     const [preflightAttempt, setPreflightAttempt] = useState(0)
     const invalidRequestTrackedRef = useRef(false)
+    // Set only after the user clicks consent. A wallet that hydrates on its
+    // own must not start add_delegate_key (#368).
+    const initiatedRef = useRef(false)
 
     // Validate query string up-front.
     const paramsValid = useMemo(() => {
@@ -207,21 +239,17 @@ export default function ConnectMcp() {
 
         void (async () => {
             try {
-                const response = await fetch(`http://127.0.0.1:${port}/preflight`, {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    body: JSON.stringify({ state, publicKey, relayer }),
-                    signal: controller.signal,
-                })
-                const body: unknown = await response.json().catch(() => null)
-                if (!response.ok || !isVerifiedBridge(body, publicKey, relayer)) {
+                const confirmed = await confirmLocalBridge(
+                    port,
+                    state,
+                    publicKey,
+                    relayer,
+                    controller.signal,
+                )
+                if (!confirmed) {
                     throw new Error('The local MCP bridge did not verify this connection request.')
                 }
-                setVerifiedBridge({
-                    publicKey: body.publicKey,
-                    label: body.label,
-                    relayer: body.relayer,
-                })
+                setVerifiedBridge(confirmed)
                 setStep('consent')
             } catch (error) {
                 if (controller.signal.aborted) return
@@ -261,6 +289,7 @@ export default function ConnectMcp() {
     )
 
     const handleConnect = useCallback(async () => {
+        initiatedRef.current = true
         if (!paramsValid || !verifiedBridge) {
             trackEvent('mcp_connect_failed', { error_type: 'invalid_request' })
             setErrorMsg('This request was not verified by the local MCP client.')
@@ -274,6 +303,28 @@ export default function ConnectMcp() {
         }
 
         trackEvent('mcp_connect_start', { wallet_connected: true })
+        let bridge: VerifiedBridge
+        try {
+            const confirmed = await confirmLocalBridge(port, state, publicKey, relayer)
+            if (!confirmed) {
+                throw new Error('The local MCP bridge did not verify this connection request.')
+            }
+            bridge = confirmed
+        } catch (error) {
+            if (error instanceof DOMException && error.name === 'AbortError') return
+            trackEvent('mcp_connect_failed', { error_type: 'bridge_preflight_failed' })
+            setVerifiedBridge(null)
+            setErrorMsg(
+                error instanceof TypeError
+                    ? 'Nothing answered on your computer. Sign-in links stop working after five minutes, so most often the link was simply opened too late.'
+                    : error instanceof Error
+                      ? error.message
+                      : 'Could not verify the local MCP bridge.',
+            )
+            setStep('error')
+            return
+        }
+        setVerifiedBridge(bridge)
         setStep('signing')
         try {
             // Resolve the user's Walrus Memory account object.
@@ -291,9 +342,9 @@ export default function ConnectMcp() {
                 arguments: [
                     tx.object(accountId),
                     tx.object(config.memwalRegistryId),
-                    tx.pure('vector<u8>', hexToBytes(verifiedBridge.publicKey)),
+                    tx.pure('vector<u8>', hexToBytes(bridge.publicKey)),
                     // v1_new derives the Sui address on-chain — no address arg.
-                    tx.pure('string', verifiedBridge.label),
+                    tx.pure('string', bridge.label),
                     tx.object('0x6'),
                 ],
             })
@@ -329,7 +380,7 @@ export default function ConnectMcp() {
                 walletAddress: currentAccount.address,
                 packageId: config.memwalPackageId,
                 txDigest: result.digest,
-                label: verifiedBridge.label,
+                label: bridge.label,
                 state,
             }
             setCallbackPayload(payload)
@@ -351,6 +402,9 @@ export default function ConnectMcp() {
         suiClient,
         signAndExecute,
         verifiedBridge,
+        port,
+        publicKey,
+        relayer,
         state,
         postCallback,
     ])
@@ -375,10 +429,11 @@ export default function ConnectMcp() {
         )
     }, [paramsValid, port, publicKey, delegateAddress, relayer, state])
 
-    // If the wallet popup completes after we asked it to open, auto-proceed.
+    // If the wallet popup completes after the user clicked consent, continue.
+    // A wallet that was already connected, or that hydrates on its own, must
+    // not skip the disclosure (#368).
     useEffect(() => {
-        if (!walletPickerOpen && currentAccount && step === 'consent') {
-            // user picked a wallet — kick off the connect flow.
+        if (initiatedRef.current && !walletPickerOpen && currentAccount && step === 'consent') {
             void handleConnect()
         }
         // we only want this to fire on wallet→connected transition.
@@ -430,6 +485,7 @@ export default function ConnectMcp() {
                             publicKey={verifiedBridge.publicKey}
                             delegateAddress={delegateAddress}
                             relayer={verifiedBridge.relayer}
+                            relayerIsDefault={sameRelayer(verifiedBridge.relayer, config.memwalServerUrl)}
                             wallet={currentAccount?.address ?? null}
                             onConnect={handleConnect}
                         />
@@ -516,6 +572,7 @@ function ConsentCard({
     publicKey,
     delegateAddress,
     relayer,
+    relayerIsDefault,
     wallet,
     onConnect,
 }: {
@@ -523,6 +580,7 @@ function ConsentCard({
     publicKey: string
     delegateAddress: string
     relayer: string
+    relayerIsDefault: boolean
     wallet: string | null
     onConnect: () => void
 }) {
@@ -551,6 +609,11 @@ function ConsentCard({
                 <div style={detailRowStyle}>
                     <span style={detailLabelStyle}>Relayer</span>
                     <span style={detailValueStyle}>{relayer}</span>
+                    {!relayerIsDefault && (
+                        <span style={relayerWarnStyle}>
+                            Non-default relayer. Memories would be served through this host. Continue only if you chose it.
+                        </span>
+                    )}
                 </div>
                 <div style={detailRowStyle}>
                     <span style={detailLabelStyle}>Delegate public key</span>
@@ -788,6 +851,14 @@ const detailValueStyle: React.CSSProperties = {
 
 const errorTextStyle: React.CSSProperties = {
     color: '#ff6b6b',
+}
+
+const relayerWarnStyle: React.CSSProperties = {
+    display: 'block',
+    marginTop: 4,
+    fontSize: '0.78rem',
+    lineHeight: 1.45,
+    color: '#f0a3a3',
 }
 
 const promptIntroStyle: React.CSSProperties = {
