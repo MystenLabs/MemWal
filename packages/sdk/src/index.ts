@@ -45,6 +45,7 @@ export type {
     MemWalConfig,
     RememberAcceptedResult,
     RememberJobStatus,
+    RememberJobTimeoutError,
     RememberResult,
     RecallResult,
     RecallMemory,

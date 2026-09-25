@@ -96,11 +96,19 @@ An autonomous agent should not make a decision that assumes a write persisted un
 const accepted = await memwal.rememberBulkAsync(items);
 const settled = await memwal.waitForRememberJobs(accepted.job_ids);
 
-if (settled.failed > 0) {
-  const bad = settled.results.filter((r) => r.status !== "done");
-  throw new Error(`${settled.failed} writes did not persist: ${bad.map((b) => b.status).join(", ")}`);
+const bad = settled.results.filter((r) => r.status !== "done");
+if (bad.length > 0) {
+  throw new Error(`${bad.length} writes did not persist: ${bad.map((b) => b.status).join(", ")}`);
 }
 ```
+
+`settled.failed` counts only jobs the relayer itself reported as failed. A job
+that still ran when the poll deadline expired is counted in `settled.timedOut`
+instead, because its outcome is unknown rather than known-bad. It might still
+complete server-side. Gate on `failed + timedOut`, or, as above, on every result
+that is not `done`. `failed > 0` alone would treat a timed-out batch as
+persisted. A timed-out item carries `last_status` and, once the job reached
+`uploaded`, `blob_id`, so you can poll it again instead of rewriting it.
 
 <Warning>
 A job reaching `done` confirms that the relayer stored the memory, but the vector index can briefly lag behind that signal, so a `recall` fired in the same instant might not return the memory yet. For read-after-write critical paths, tolerate a short delay or re-query rather than treating an empty first result as a missing memory.
