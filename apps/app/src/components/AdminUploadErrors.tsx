@@ -76,7 +76,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   if (isLoading) {
     return (
-      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card sept-section admin-errors-card">
         <div className="admin-loading">Loading error data...</div>
       </Card>
     )
@@ -84,7 +84,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   if (error) {
     return (
-      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card sept-section admin-errors-card">
         <div className="admin-error">
           {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load errors'}
         </div>
@@ -94,7 +94,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   if (!data) {
     return (
-      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card sept-section admin-errors-card">
         <div className="admin-error">No data available</div>
       </Card>
     )
@@ -105,7 +105,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   return (
     <>
-      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card sept-section admin-errors-card">
         <div className="admin-errors-controls">
           <label htmlFor="error-limit" className="admin-limit-label">
             Show:

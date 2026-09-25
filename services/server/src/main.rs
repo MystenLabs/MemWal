@@ -475,6 +475,12 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
     loop {
         interval.tick().await;
 
+        let mut uploader_totals = routes::admin_activity::UploaderSpendable {
+            wal_frost: None,
+            sui_mist: None,
+        };
+        let mut sponsor_sui_mist: Option<i64> = None;
+
         // Fetch uploader pool balance from sidecar
         let sidecar_url = &state.config.sidecar_url;
         let wallet_metrics_url = format!("{}/internal/wallet-balances", sidecar_url);
@@ -610,6 +616,7 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                                 "balance_monitor: sidecar wallet metrics missing perWallet"
                             );
                         }
+                        uploader_totals = routes::admin_activity::uploader_spendable_totals(&data);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -642,6 +649,12 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                     if let Some(sui_client) = &state.security_delete_background_sui {
                         match sui_client.address_balance(&sponsor_address).await {
                             Ok(sponsor_balance) => {
+                                sponsor_sui_mist = i64::try_from(sponsor_balance).ok();
+                                if sponsor_sui_mist.is_none() {
+                                    tracing::warn!(
+                                        "balance_monitor: sponsor balance does not fit in a signed sample"
+                                    );
+                                }
                                 if sponsor_balance < state.config.sponsor_balance_low_threshold_sui
                                 {
                                     tracing::warn!(
@@ -685,6 +698,22 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
                 Err(e) => {
                     tracing::warn!("balance_monitor: failed to derive sponsor address: {}", e);
                 }
+            }
+        }
+
+        if uploader_totals.wal_frost.is_some()
+            || uploader_totals.sui_mist.is_some()
+            || sponsor_sui_mist.is_some()
+        {
+            if let Err(err) = routes::admin_activity::record_balance_sample(
+                state.db.pool(),
+                uploader_totals.wal_frost,
+                uploader_totals.sui_mist,
+                sponsor_sui_mist,
+            )
+            .await
+            {
+                tracing::warn!("balance_monitor: failed to record balance sample: {err}");
             }
         }
     }
@@ -2207,6 +2236,10 @@ async fn main() {
         .route(
             "/api/admin/config",
             get(routes::admin_dashboard::get_admin_config).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/activity",
+            get(routes::admin_activity::get_admin_activity).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .layer(middleware::from_fn(auth::verify_admin_key));
 

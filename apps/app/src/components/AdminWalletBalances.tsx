@@ -37,7 +37,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
 
   if (isLoading) {
     return (
-      <Card title="Wallet Balances" className="dashboard-keys-card admin-wallets-card">
+      <Card title="Wallet Balances" className="dashboard-keys-card sept-section admin-wallets-card">
         <div className="admin-loading">Loading wallet data...</div>
       </Card>
     )
@@ -45,7 +45,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
 
   if (error) {
     return (
-      <Card title="Wallet Balances" className="dashboard-keys-card admin-wallets-card">
+      <Card title="Wallet Balances" className="dashboard-keys-card sept-section admin-wallets-card">
         <div className="admin-error">
           {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load wallets'}
         </div>
@@ -59,7 +59,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
     <div className="admin-wallets-section">
       <Card
         title="Uploader Pool Wallets"
-        className="dashboard-keys-card admin-wallets-card"
+        className="dashboard-keys-card sept-section admin-wallets-card"
         action={
           <div className="card-header-actions">
             <button
@@ -68,8 +68,8 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
               title="Refresh wallet data"
               disabled={isFetching}
             >
-              <RefreshCw size={12} />
-              Refresh
+              <span>Refresh</span>
+              <RefreshCw size={12} aria-hidden="true" />
             </button>
           </div>
         }
@@ -131,7 +131,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
         </div>
       </Card>
 
-      <Card title="Sponsor Wallet" className="dashboard-keys-card admin-sponsor-card">
+      <Card title="Sponsor Wallet" className="dashboard-keys-card sept-section admin-sponsor-card">
         <div className="admin-sponsor-content">
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">Address</span>
