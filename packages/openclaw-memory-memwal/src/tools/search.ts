@@ -2,14 +2,14 @@
  * memory_search tool — semantic recall.
  *
  * Requires tools.allow config to be visible to the LLM.
- * Accepts an optional namespace parameter; the before_prompt_build hook
- * injects the current agent's namespace into the system prompt, guiding
- * the LLM to pass the correct value.
+ * Registered as a factory so the search is pinned to ctx.sessionKey.
+ * An omitted namespace uses that agent. Any other namespace is rejected.
  */
 
 import type { MemWal } from "@mysten-incubation/memwal";
 import { Type } from "@sinclair/typebox";
 import { looksLikeInjection } from "../capture.js";
+import { resolveToolNamespace } from "../config.js";
 import { escapeForPrompt, relevancePercent, relevanceRatio, toolError, withTimeout } from "../format.js";
 import type { PluginConfig } from "../types.js";
 import { DEFAULT_SEARCH_LIMIT } from "../constants.js";
@@ -17,13 +17,13 @@ import { DEFAULT_SEARCH_LIMIT } from "../constants.js";
 /** Register the memory_search agent tool. */
 export function registerSearchTool(api: any, client: MemWal, config: PluginConfig): void {
   api.registerTool(
-    {
+    (ctx?: { sessionKey?: string }) => ({
       name: "memory_search",
       label: "Memory Search",
       description:
         "Search long-term memory for relevant past information, facts, " +
         "preferences, and decisions. Returns memories ranked by relevance. " +
-        "Pass the namespace parameter to scope the search to the current agent's memory.",
+        "The search is pinned to the calling agent's namespace.",
       parameters: Type.Object({
         query: Type.String({ description: "Search query" }),
         limit: Type.Optional(
@@ -31,14 +31,20 @@ export function registerSearchTool(api: any, client: MemWal, config: PluginConfi
         ),
         namespace: Type.Optional(
           Type.String({
-            description: "Memory namespace to search (use the namespace from system context)",
+            description:
+              "Calling agent's namespace. Omit to use it. Any other namespace is rejected.",
           }),
         ),
       }),
       async execute(_id: string, params: any) {
         const { query, limit = DEFAULT_SEARCH_LIMIT, namespace } = params;
-        // LLM may omit namespace (e.g. tools.allow set but hooks disabled) — fall back safely
-        const ns = namespace || config.defaultNamespace;
+        const ns = resolveToolNamespace(config.defaultNamespace, ctx?.sessionKey, namespace);
+        if (!ns) {
+          return {
+            content: [{ type: "text", text: "Namespace is pinned to the calling agent." }],
+            details: { error: "namespace_rejected" },
+          };
+        }
 
         try {
           const result = await withTimeout(
@@ -101,7 +107,7 @@ export function registerSearchTool(api: any, client: MemWal, config: PluginConfi
           return toolError("Memory search failed", err);
         }
       },
-    },
+    }),
     { name: "memory_search" },
   );
 }
