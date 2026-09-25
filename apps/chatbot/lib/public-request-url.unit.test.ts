@@ -84,6 +84,8 @@ describe("isSafeRedirectUrl", () => {
 
     expect(isSafeRedirectUrl("https://evil.example", request)).toBe(false);
     expect(isSafeRedirectUrl("//evil.example", request)).toBe(false);
+    expect(isSafeRedirectUrl("/\\evil.com", request)).toBe(false);
+    expect(isSafeRedirectUrl("\\/evil.example", request)).toBe(false);
   });
 
   it("allows same-origin absolute URLs against the public origin", () => {
