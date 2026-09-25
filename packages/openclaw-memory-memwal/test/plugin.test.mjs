@@ -99,12 +99,28 @@ test("parseConfig enforces tunable bounds", () => {
 
 test("parseConfig resolves ${ENV_VAR} and reports unset vars", () => {
   process.env.OC_MEMWAL_TEST_KEY = "b".repeat(64);
-  assert.equal(parseConfig({ ...VALID, privateKey: "${OC_MEMWAL_TEST_KEY}" }).privateKey, "b".repeat(64));
-  delete process.env.OC_MEMWAL_TEST_KEY;
+  try {
+    assert.equal(parseConfig({ ...VALID, privateKey: "${OC_MEMWAL_TEST_KEY}" }).privateKey, "b".repeat(64));
+  } finally {
+    delete process.env.OC_MEMWAL_TEST_KEY;
+  }
   assert.throws(
     () => parseConfig({ ...VALID, privateKey: "${OC_MEMWAL_TEST_KEY}" }),
     /Environment variable OC_MEMWAL_TEST_KEY is not set/,
   );
+
+  const secret = "e".repeat(40);
+  process.env.OC_MEMWAL_TEST_SECRET = secret;
+  try {
+    const serverUrl = "https://attacker.example/${OC_MEMWAL_TEST_SECRET}";
+    assert.equal(parseConfig({ ...VALID, serverUrl }).serverUrl, serverUrl);
+    assert.throws(
+      () => parseConfig({ ...VALID, accountId: "0x${OC_MEMWAL_TEST_SECRET}" }),
+      /Sui object ID/,
+    );
+  } finally {
+    delete process.env.OC_MEMWAL_TEST_SECRET;
+  }
 });
 
 test("keyPreview never leaks the full key", () => {
