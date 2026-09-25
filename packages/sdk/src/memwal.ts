@@ -231,14 +231,23 @@ function deadlineSignal(
  * `status: 504` is load-bearing, not decoration: `isTransientPollingStatus`
  * treats it as retryable, so one stalled poll inside a wait loop is abandoned
  * and retried against the remaining budget instead of failing the whole wait.
+ *
+ * `phase` names the round-trip that actually stalled — `"preflight GET
+ * /version"`, `"POST /api/recall"` — so WALM-598's diagnostic question ("which
+ * step ate the budget?") is answerable from the error alone. The name stays
+ * `MemWalRequestTimeout`: that is the shipped contract callers and
+ * `isTransientPollingStatus` already key off (WALM-648).
  */
-function requestTimeoutError(method: string, path: string, ms: number): Error {
+function requestTimeoutError(method: string, path: string, ms: number, phase?: string): Error {
+    const stage = phase ?? `${method} ${path}`;
     const err = new Error(
-        `Walrus Memory request timed out after ${ms}ms (${method} ${path}). The relayer ` +
+        `Walrus Memory request timed out after ${ms}ms during ${stage}. The relayer ` +
             `accepted the connection but did not answer in time.`,
     );
     err.name = "MemWalRequestTimeout";
-    (err as Error & { status?: number }).status = 504;
+    (err as Error & { status?: number; phase?: string; timeoutMs?: number }).status = 504;
+    (err as Error & { phase?: string }).phase = stage;
+    (err as Error & { timeoutMs?: number }).timeoutMs = ms;
     return err;
 }
 
@@ -1249,6 +1258,7 @@ export class MemWal {
             `${this.serverUrl}/health`,
             {},
             this.preflightTimeoutMs,
+            "GET /health",
         );
         if (!res.ok) {
             throw new Error(`Health check failed: ${res.status}`);
@@ -1302,6 +1312,7 @@ export class MemWal {
             `${this.serverUrl}/version`,
             { method: "GET" },
             this.preflightTimeoutMs,
+            "preflight GET /version",
         );
         let body: Partial<RelayerVersionMetadata>;
 
@@ -1312,6 +1323,7 @@ export class MemWal {
                 `${this.serverUrl}/health`,
                 { method: "GET" },
                 this.preflightTimeoutMs,
+                "preflight GET /health",
             );
             if (!healthRes.ok) {
                 throw new Error(
@@ -1361,6 +1373,7 @@ export class MemWal {
             `${this.serverUrl}/config`,
             { method: "GET" },
             this.preflightTimeoutMs,
+            "preflight GET /config",
         );
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
@@ -1592,6 +1605,7 @@ export class MemWal {
         url: string,
         init: RequestInit = {},
         timeoutMs?: number,
+        phase?: string,
     ): Promise<{ ok: boolean; status: number; body: T | undefined }> {
         const ms = timeoutMs ?? this.requestTimeoutMs;
         const deadline = deadlineSignal(ms);
@@ -1604,7 +1618,7 @@ export class MemWal {
             };
         } catch (err) {
             if (deadline.timedOut()) {
-                throw requestTimeoutError(init.method ?? "GET", url, ms);
+                throw requestTimeoutError(init.method ?? "GET", url, ms, phase);
             }
             throw err;
         } finally {
