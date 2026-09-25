@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Inputs, Transaction, TransactionDataBuilder } from "@mysten/sui/transactions";
 import {
@@ -34,6 +35,8 @@ import {
     durableRegisterDirectSigningAllowed,
     executePreparedRegisterTransaction,
     readUploadBlobObject,
+    waitForCertifiedStep,
+    certifiedStep,
     type PreparedRegisterTransaction,
     validatePreparedRegisterTransaction,
 } from "../sidecar/routes/walrus-upload-journal.js";
@@ -246,7 +249,24 @@ test("sponsored registration keeps WAL on the sender while assigning gas to the 
             async () => 1n,
             false,
             async () => {
-                throw new Error('Enoki API error (400): {"errors":[{"code":"not_found"}]}');
+                throw new Error('Enoki API error (404): {"errors":[{"code":"not_found","message":"Sponsored transaction not found"}]}');
+            },
+            1,
+        ),
+        (error: unknown) => error instanceof NoSideEffectError
+            && /not found and is not on chain; rebuild sponsorship/.test(error.message)
+            && classifyDurableSideEffectError(error, true, true)?.code === "NO_SIDE_EFFECT",
+    );
+
+    await assert.rejects(
+        executePreparedRegisterTransaction(
+            validated,
+            client,
+            () => {},
+            async () => 1n,
+            true,
+            async () => {
+                throw new Error('Enoki API error (404): {"errors":[{"code":"not_found","message":"Sponsored transaction not found"}]}');
             },
             1,
         ),
@@ -728,6 +748,65 @@ test("upload journal retries a newly created Blob on a stale RPC replica", async
     assert.equal(result, expected);
 });
 
+test("waitForCertifiedStep retries when blob object has certified_epoch null due to replica lag", async () => {
+    const objectId = `0x${"3".repeat(64)}`;
+    const oneLe = Buffer.from(new Uint8Array([1, ...new Array(31).fill(0)]));
+    const blobId = oneLe.toString("base64url");
+    let calls = 0;
+
+    const mockClient = {
+        async getObject() {
+            calls += 1;
+            return {
+                object: {
+                    json: {
+                        blob_id: "1",
+                        id: objectId,
+                        registered_epoch: 40,
+                        // First 2 calls simulate replica lag (certified_epoch is null)
+                        certified_epoch: calls >= 3 ? 40 : null,
+                    },
+                },
+            } as never;
+        },
+    };
+
+    const result = await waitForCertifiedStep(blobId, objectId, 5, 10, mockClient);
+    assert.ok(result);
+    assert.equal(result.step, "certified");
+    assert.equal(result.blobId, blobId);
+    assert.equal(result.blobObjectId, objectId);
+    assert.equal(result.blobObject.certified_epoch, 40);
+    assert.equal(calls, 3);
+});
+
+test("waitForCertifiedStep returns null if certified_epoch remains null after maxAttempts", async () => {
+    const objectId = `0x${"4".repeat(64)}`;
+    const oneLe = Buffer.from(new Uint8Array([1, ...new Array(31).fill(0)]));
+    const blobId = oneLe.toString("base64url");
+    let calls = 0;
+
+    const mockClient = {
+        async getObject() {
+            calls += 1;
+            return {
+                object: {
+                    json: {
+                        blob_id: "1",
+                        id: objectId,
+                        registered_epoch: 40,
+                        certified_epoch: null,
+                    },
+                },
+            } as never;
+        },
+    };
+
+    const result = await waitForCertifiedStep(blobId, objectId, 3, 10, mockClient);
+    assert.equal(result, null);
+    assert.equal(calls, 3);
+});
+
 test("metadata ownership is adopted only during reconciliation", () => {
     const owner = `0x${"1".repeat(64)}`;
     const currentOwner = { AddressOwner: owner };
@@ -1139,4 +1218,18 @@ test("the address-balance nonce is derived from the transaction, not drawn at ra
     assert.equal(maxEpoch, "9");
     assert.equal(minTimestamp, null);
     assert.equal(maxTimestamp, null);
+});
+
+test("lease and verify reads use the shared Walrus client max age", () => {
+    // A 1s override reset the client on every expiry-sweep owner. Each reset
+    // re-parsed system state synchronously and the main thread stopped
+    // accepting /health. The default is WALRUS_CLIENT_MAX_AGE_MS.
+    const src = readFileSync(new URL("../sidecar/routes/walrus-query.ts", import.meta.url), "utf8");
+    const calls = [...src.matchAll(/refreshWalrusClientIfStale\(([^)]*)\)/g)].map((match) =>
+        match[1].trim(),
+    );
+    assert.ok(calls.length >= 2);
+    for (const arg of calls) {
+        assert.equal(arg, "");
+    }
 });

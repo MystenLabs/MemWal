@@ -588,7 +588,9 @@ export function registerWalrusQueryRoute(app: Express): void {
         }
 
         try {
-            refreshWalrusClientIfStale(1_000);
+            // Epoch only. A shorter max age resets the shared client and
+            // re-parses system state on the main thread, which stalls /health.
+            refreshWalrusClientIfStale();
             const systemState = await withRpcRetry("[verify-blob] Walrus systemState", () =>
                 getWalrusClient().systemState()
             );
@@ -673,9 +675,11 @@ export function registerWalrusQueryRoute(app: Express): void {
                     owner,
                     requestIdFor(req)
                 );
-                // Expiry is a terminal migration decision. Do not use the
-                // upload client's normal 30-minute metadata cache here.
-                refreshWalrusClientIfStale(1_000);
+                // Epoch only. Do not pass a sub-minute max age: that resets the
+                // shared Walrus client, and the expiry sweep then re-parses
+                // system state on the main thread until /health stops answering.
+                // A stale epoch delays expiry; it does not expire a blob early.
+                refreshWalrusClientIfStale();
                 const systemState = await withRpcRetry("[query-blobs] Walrus systemState", () =>
                     getWalrusClient().systemState()
                 );
