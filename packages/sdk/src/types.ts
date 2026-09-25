@@ -33,6 +33,23 @@ export interface MemWalConfig {
      * Raise it only for a genuinely slow link; it is a backstop, not a budget.
      */
     requestTimeoutMs?: number;
+    /**
+     * Deadline for the `/api/recall` request itself, in milliseconds
+     * (default: 15000). Per-call `RecallOptions.timeoutMs` overrides it.
+     *
+     * This budget covers only the recall round-trip. The preflights that
+     * precede it (`/version`, `/config`, the SEAL session build) are bounded
+     * separately by `preflightTimeoutMs`, so a slow relayer preflight can no
+     * longer consume recall's budget and surface as a spurious abort.
+     */
+    recallTimeoutMs?: number;
+    /**
+     * Deadline for each unauthenticated preflight fetch — `GET /version`,
+     * `GET /health`, `GET /config` — in milliseconds (default: 5000).
+     *
+     * Applied per round-trip, not to the preflight phase as a whole.
+     */
+    preflightTimeoutMs?: number;
 }
 
 // ============================================================
@@ -198,6 +215,19 @@ export interface RecallOptions {
      * Setting `sort` at all makes the relayer ignore `scoringWeights`.
      */
     sort?: "relevance" | "recent";
+    /**
+     * Deadline for the `/api/recall` request, in milliseconds. Defaults to
+     * `MemWalConfig.recallTimeoutMs`, itself 15000.
+     *
+     * The clock starts once the preflights (`/version`, `/config`, the SEAL
+     * session build) have completed, so this is a budget for recall alone.
+     * Pass `0` (or `Infinity`) to opt out of the deadline entirely.
+     *
+     * On expiry recall throws a `TimeoutError` whose `phase` is
+     * `"POST /api/recall"`; a preflight that blows its own budget throws one
+     * naming that preflight instead.
+     */
+    timeoutMs?: number;
 }
 
 /** Recommended object-style recall input — preferred over positional args. */
@@ -577,6 +607,12 @@ export interface MemWalManualConfig {
     walrusPublisherUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
+    /**
+     * Deadline for the unauthenticated compatibility preflight (`GET /version`,
+     * falling back to `GET /health`), in milliseconds (default: 5000).
+     * Applied per round-trip.
+     */
+    preflightTimeoutMs?: number;
 }
 
 /**
