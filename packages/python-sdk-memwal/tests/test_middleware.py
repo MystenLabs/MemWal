@@ -1099,3 +1099,49 @@ class TestConfirmableSaves:
         assert result.total == 1
         assert result.succeeded == 1
         assert result.results[0].blob_id == "blob-abc"
+
+    @respx.mock
+    async def test_wait_confirms_more_jobs_than_the_relayer_bulk_cap(self) -> None:
+        """21 tracked jobs must confirm, not 400-loop.
+
+        `/api/remember/bulk/status` rejects more than `MAX_BULK_ITEMS` (20)
+        ids with a 400. 400 is not transient, so an unchunked poll raised,
+        the ids were restored for the retry, and every retry hit the same
+        400 — a wait that could never confirm. `save_mode="remember"` is one
+        job per turn, so 21 turns reach this.
+        """
+        _mock_seal_session_prereqs()
+        job_ids = [f"job-{i}" for i in range(21)]
+        seen_chunk_sizes: list[int] = []
+
+        def _status(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            ids = body["job_ids"]
+            seen_chunk_sizes.append(len(ids))
+            if len(ids) > 20:
+                return httpx.Response(
+                    400, json={"error": "job_ids exceeds MAX_BULK_ITEMS"}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"job_id": jid, "status": "done", "blob_id": f"blob-{jid}"}
+                        for jid in ids
+                    ]
+                },
+            )
+
+        respx.post(_BULK_STATUS_URL).mock(side_effect=_status)
+
+        client = MemWal.create(key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER)
+        result = await client.wait_for_remember_jobs(
+            job_ids, RememberBulkOptions(poll_interval_ms=1, timeout_ms=5000)
+        )
+
+        assert max(seen_chunk_sizes) <= 20, seen_chunk_sizes
+        assert result.total == 21
+        assert result.succeeded == 21
+        assert result.timed_out == 0
+        # Order still follows the caller's input, chunking notwithstanding.
+        assert [r.id for r in result.results] == job_ids
