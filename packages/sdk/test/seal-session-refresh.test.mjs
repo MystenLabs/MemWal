@@ -448,3 +448,61 @@ test("Manual-mode routes send no session and never enter the expiry retry path",
     assert.equal(calls, 1);
     assert.equal(inner.calls, 0);
 });
+
+test("a background refresh that never settles does not wedge the next caller", async () => {
+    // The refresh-ahead path shares one `sessionBuildPromise`. When the build
+    // hangs — `SessionKey.create()` -> `getObject` takes no AbortSignal, so a
+    // wedged gRPC endpoint never even falls through to JSON-RPC — the promise
+    // never settles, and every caller past `expiresAt` used to join that stuck
+    // attempt instead of starting a fresh one against a recovered endpoint.
+    const c = client();
+    let calls = 0;
+    let releaseSecond;
+    c.buildSealSessionInner = async () => {
+        calls += 1;
+        if (calls === 1) return new Promise(() => {}); // never settles
+        return new Promise((resolve) => {
+            releaseSecond = () => resolve("session-2");
+        });
+    };
+
+    await withoutUnhandledRejections(async () => {
+        // Prime the cache so the *next* call takes the refresh-ahead branch.
+        c.sessionCache = { bytes: "cached", expiresAt: Date.now() + 1_000 };
+        assert.equal(await c.buildSealSession(), "cached");
+        await settle();
+        assert.equal(calls, 1, "refresh-ahead started the build that hangs");
+
+        // The build is still in flight. Expire the cache and cancel it the way
+        // the deadline would, then assert the next caller opens a NEW attempt
+        // rather than awaiting the wedged one forever.
+        c.sessionCache = { bytes: "cached", expiresAt: Date.now() - 1 };
+        c.sessionBuildAbort.abort();
+        await settle();
+
+        const next = c.buildSealSession();
+        await settle();
+        assert.equal(calls, 2, "a new build was started, not the stuck one joined");
+        releaseSecond();
+        assert.equal(await next, "session-2");
+    });
+});
+
+test("destroy() releases a caller blocked on an in-flight session build", async () => {
+    // `destroy()` nulled the slot but left the RPC running, so anyone already
+    // awaiting the build stayed blocked for as long as the socket did.
+    const c = client();
+    c.buildSealSessionInner = async () => new Promise(() => {});
+
+    await withoutUnhandledRejections(async () => {
+        const blocked = c.buildSealSession();
+        await settle();
+
+        c.destroy();
+
+        await assert.rejects(blocked, (err) => {
+            assert.match(String(err.message), /cancelled|SEAL session build/i);
+            return true;
+        });
+    });
+});

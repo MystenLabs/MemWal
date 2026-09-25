@@ -121,6 +121,16 @@ const SEAL_SESSION_TTL_MIN = 5;
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
 
+/**
+ * Hard cap on one SessionKey build (`GET /config` + `SessionKey.create` →
+ * `getObject`). Generous, because it bounds a failure mode rather than a
+ * latency target: the point is that a build which stops settling releases the
+ * single-flight slot so the next caller can start a fresh attempt. Shorter
+ * than the 5-minute TTL it is refreshing, so the cache is never left with no
+ * attempt in flight past expiry.
+ */
+const SEAL_SESSION_BUILD_TIMEOUT_MS = 60_000;
+
 /** Per-call knobs for `signedRequest`. `timeoutMs` overrides the client-wide
  * deadline for one endpoint; `signal` is the caller's own cancellation and is
  * honoured alongside it, never replaced by it. */
@@ -369,6 +379,16 @@ export class MemWal {
     private relayerVersionMetadata: RelayerVersionMetadata | null = null;
     /** Single-flight guard so concurrent requests share one SessionKey build. */
     private sessionBuildPromise: Promise<string> | null = null;
+    /**
+     * Cancels the in-flight SessionKey build. A build reaches
+     * `SessionKey.create()` → `suiClient.core.getObject`, which `@mysten/sui`
+     * leaves unbounded unless a signal is passed, so without this a build that
+     * stops settling would hold `sessionBuildPromise` forever: every caller
+     * past `expiresAt` joins the stuck attempt instead of opening a new one,
+     * and the open socket keeps the process alive. Aborted by `destroy()` and
+     * by the build's own deadline.
+     */
+    private sessionBuildAbort: AbortController | null = null;
     /** Single-flight guard so concurrent requests share one compatibility probe. */
     private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
     /** Resolved owner address for this account. See `resolveOwner()`. */
@@ -426,7 +446,11 @@ export class MemWal {
             this.publicKey.fill(0);
         }
         // ENG-1697: drop cached session material too — once destroyed the
-        // instance must not leak authorization tokens either.
+        // instance must not leak authorization tokens either. Nulling the
+        // promise alone would leave an in-flight `getObject` running and its
+        // waiters blocked, so abort the build as well (WALM-162).
+        this.sessionBuildAbort?.abort();
+        this.sessionBuildAbort = null;
         this.sessionBuildPromise = null;
         this.sessionCache = null;
         this.serverConfig = null;
@@ -1570,7 +1594,36 @@ export class MemWal {
     private startSealSessionBuild(): Promise<string> {
         if (this.sessionBuildPromise) return this.sessionBuildPromise;
 
-        const build = this.buildSealSessionInner()
+        // `SessionKey.create()` → `suiClient.core.getObject` takes no
+        // AbortSignal, and @mysten/sui imposes no deadline of its own, so a
+        // gRPC candidate that stops settling never falls through to the
+        // JSON-RPC one. Race the build against a deadline (and `destroy()`)
+        // so the slot below is always released: the `.catch` on the
+        // refresh-ahead path swallows the rejection, `.finally` clears the
+        // slot, and the next caller past `expiresAt` opens a *new* attempt
+        // against a possibly-recovered endpoint instead of joining the stuck
+        // one (WALM-162).
+        const abort = new AbortController();
+        const deadline = deadlineSignal(SEAL_SESSION_BUILD_TIMEOUT_MS, abort.signal);
+        this.sessionBuildAbort = abort;
+
+        const bounded = new Promise<string>((resolve, reject) => {
+            deadline.signal.addEventListener(
+                "abort",
+                () =>
+                    reject(
+                        deadline.timedOut()
+                            ? new Error(
+                                  `SEAL session build timed out after ${SEAL_SESSION_BUILD_TIMEOUT_MS}ms`,
+                              )
+                            : new Error("SEAL session build was cancelled"),
+                    ),
+                { once: true },
+            );
+            this.buildSealSessionInner().then(resolve, reject);
+        });
+
+        const build = bounded
             .then((bytes) => {
                 // Never re-arm the cache of a destroyed client.
                 if (!this.destroyed) {
@@ -1591,9 +1644,11 @@ export class MemWal {
                 throw sealSessionBuildError(err);
             })
             .finally(() => {
+                deadline.dispose();
                 // Only clear the slot if it still points at this build; a
                 // newer one may already have replaced it.
                 if (this.sessionBuildPromise === build) this.sessionBuildPromise = null;
+                if (this.sessionBuildAbort === abort) this.sessionBuildAbort = null;
             });
 
         this.sessionBuildPromise = build;

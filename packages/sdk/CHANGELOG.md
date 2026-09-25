@@ -5,6 +5,9 @@
 ### Fixed
 
 - `rememberBulkAndWait` / `waitForRememberJobs` no longer resolve a batch they could not read as if it were still uploading. The status endpoint counts against the delegate-key budget, and a 429 on every poll used to be retried silently until the wait ran out, leaving each item as `timeout` with "polling timed out", even when nothing had been stored. When no poll got through, the wait now makes one confirming read. If that is rate-limited too, it throws `MemWalRateLimited` (`status: 429`, `jobIds`, `retryAfterSeconds`). An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)
+- Refresh the SEAL SessionKey ahead of its 5-minute TTL, so a request that arrives near expiry is served from cache while the rebuild runs out of band instead of blocking on it. The refresh is on-use, not on a timer, so it holds no event-loop handle. (WALM-162)
+- A SessionKey build is bounded and cancellable. `SessionKey.create()` reaches `getObject` with no AbortSignal, so a wedged Sui endpoint left the single-flight build unsettled: every caller past the cache expiry joined that stuck attempt instead of opening a new one against a recovered endpoint, and `destroy()` left them blocked. The build now carries its own deadline and is aborted by `destroy()`. (WALM-162)
+- Invalidate the cached SessionKey and retry once when a relayer response carries a SEAL session-expiry marker (`ExpiredSessionKeyError`, `Session key has expired`, `InvalidCertificate`) at any status ≥ 400. Invalidation is scoped to the exact bytes that were rejected, so a refresh that landed concurrently is kept. Once the single retry is exhausted the SDK throws `SEAL_SESSION_EXPIRED` with the wire status on `.cause`. (WALM-162)
 
 ## 0.1.9
 
@@ -12,8 +15,6 @@
 
 - Grow `waitForRememberJob` / `waitForRememberJobs` poll delay 1.5× from the caller interval (floor 100ms) toward a 5s cap, with an immediate first poll. Backoff is disabled above the cap. (WALM-623)
 - A 429 during a remember-job wait is reported on the timeout. Retry-After is still clamped to the caller's remaining budget, and that remainder still buys one status read. (WALM-623)
-- Proactively refresh the SEAL SessionKey before its 5-minute TTL expires, so requests are not delayed by in-flight key regeneration. (WALM-162)
-- Invalidate the cached SessionKey and retry once when the relayer returns 400 with SEAL_SESSION_EXPIRED. (WALM-162)
 
 ## 0.1.8
 
