@@ -97,10 +97,15 @@ export const config = {
     ),
     posthogHost: import.meta.env.VITE_POSTHOG_HOST as string || 'https://t.walrus.xyz',
     posthogUiHost: import.meta.env.VITE_POSTHOG_UI_HOST as string || 'https://us.posthog.com',
+    // Client SDK key. Blank disables Statsig. This is not a server secret.
+    statsigClientKey: import.meta.env.VITE_STATSIG_CLIENT_KEY as string || '',
     analyticsAllowedHosts: parseCsv(
         import.meta.env.VITE_ANALYTICS_ALLOWED_HOSTS as string | undefined,
         DEFAULT_ANALYTICS_ALLOWED_HOSTS,
     ),
+    // Dashboard Walrus Console button and "View your memories" card.
+    // Off unless explicitly enabled.
+    walrusConsoleEnabled: (import.meta.env.VITE_WALRUS_CONSOLE_ENABLED as string || '') === 'true',
     // Permanent V1 memory deletion UI. Off by default so nothing
     // is user-visible until the feature is tested and rollout is agreed.
     // Must be enabled together with the relayer's ENABLE_MEMORY_DELETION.

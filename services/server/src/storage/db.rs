@@ -117,6 +117,8 @@ const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
     // Partial index for /health recent_write_outcomes. CONCURRENTLY, own
     // file — see 022's header.
     migration!("022_remember_jobs_recent_outcomes.sql"),
+    // Balance samples and sponsored-transaction log for the admin spend view.
+    migration!("023_admin_activity.sql"),
 ];
 
 /// Every migration the pipeline applies, in the order it applies them.

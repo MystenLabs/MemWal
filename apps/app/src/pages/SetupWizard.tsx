@@ -151,8 +151,9 @@ export default function SetupWizard() {
     const registerOnchain = useCallback(async (
         ownerAddress: string,
         pubKeyHex: string,
-    ): Promise<string> => {
+    ): Promise<{ accountId: string; transactionDigest: string }> => {
         let knownAccountId = await getAccountObjectId(suiClient, ownerAddress)
+        let transactionDigest = ''
 
         const pubKeyBytes = Array.from(
             { length: pubKeyHex.length / 2 },
@@ -179,6 +180,7 @@ export default function SetupWizard() {
                 ],
             })
             const result = await signAndExecute({ transaction: tx })
+            transactionDigest = result.digest
             await suiClient.waitForTransaction({ digest: result.digest })
         } else {
             setTxStatus('creating account...')
@@ -216,10 +218,11 @@ export default function SetupWizard() {
                 ],
             })
             const addResult = await signAndExecute({ transaction: tx2 })
+            transactionDigest = addResult.digest
             await suiClient.waitForTransaction({ digest: addResult.digest })
         }
 
-        return knownAccountId!
+        return { accountId: knownAccountId!, transactionDigest }
     }, [suiClient, signAndExecute])
 
     // ── "Generate delegate key" button handler ──
@@ -303,7 +306,7 @@ export default function SetupWizard() {
         setTxStatus('checking existing account...')
 
         try {
-            const accountId = await registerOnchain(address, publicKeyHex)
+            const { accountId, transactionDigest } = await registerOnchain(address, publicKeyHex)
             setTxStatus('delegate key registered onchain!')
             setDelegateKeys(privateKeyHex, publicKeyHex, accountId)
             setPrivateKeyHex('')
@@ -311,6 +314,8 @@ export default function SetupWizard() {
             trackEvent('delegate_key_register_complete', {
                 auth_method: isEnoki ? 'enoki' : 'wallet',
                 location: 'setup',
+                delegate_public_key: publicKeyHex,
+                transaction_digest: transactionDigest,
             })
         } catch (err: unknown) {
             console.error('Onchain operation failed:', err)

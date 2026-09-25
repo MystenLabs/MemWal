@@ -300,9 +300,7 @@ function AppContent() {
       <Route path="/setup" element={requireAccount(
         delegateKey ? <Navigate to="/dashboard" replace /> : <SetupWizard />
       )} />
-      <Route path="/playground" element={requireAccount(
-        delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
-      )} />
+      <Route path="/playground" element={requireAccount(<Playground />)} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="/connect/claude" element={<ConnectClaude />} />
       <Route path="/admin" element={<AdminDashboard />} />

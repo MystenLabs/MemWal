@@ -213,6 +213,178 @@ export async function fetchAdminErrors(
   }
 }
 
+export type SpendPace = 'faster' | 'slower' | 'same' | 'unknown'
+
+export function spendPace(
+  comparable: boolean,
+  outflow: bigint,
+  priorOutflow: bigint,
+): SpendPace {
+  if (!comparable) return 'unknown'
+  if (outflow > priorOutflow) return 'faster'
+  if (outflow < priorOutflow) return 'slower'
+  return 'same'
+}
+
+export interface ActivitySeriesPoint {
+  at: string
+  balance: bigint
+}
+
+export interface ActivityTokenWindow {
+  samples: number
+  comparable: boolean
+  latest: bigint | null
+  latestAt: string | null
+  outflow: bigint
+  priorOutflow: bigint
+  net: bigint
+  series: ActivitySeriesPoint[]
+}
+
+export interface SponsoredKindCount {
+  kind: string
+  count: number
+  priorCount: number
+}
+
+export interface ActivityTopOwner {
+  owner: string
+  uploadsCompleted: number
+}
+
+export interface MemoryDay {
+  day: string
+  count: number
+}
+
+export interface AdminActivity {
+  generatedAt: string
+  windowHours: number
+  balanceMonitorIntervalSecs: number
+  uploaderWal: ActivityTokenWindow
+  uploaderSui: ActivityTokenWindow
+  sponsorSui: ActivityTokenWindow
+  actions: {
+    uploadsCompleted: number
+    uploadsCompletedPrior: number
+    uploadsFailed: number
+    uploadsFailedPrior: number
+    uploadsInFlight: number
+    memoryDeletes: number
+    memoryDeletesPrior: number
+    securityDeleteBatches: number | null
+    securityDeleteBatchesPrior: number | null
+    securityDeleteBlobs: number | null
+    securityDeleteBlobsPrior: number | null
+    sponsored: SponsoredKindCount[]
+    topOwners: ActivityTopOwner[]
+    memoriesByDay: MemoryDay[]
+  }
+}
+
+interface RawSeriesPoint {
+  at: string
+  balance: string
+}
+
+interface RawTokenWindow {
+  samples: number
+  comparable: boolean
+  latest: string | null
+  latest_at: string | null
+  outflow: string
+  prior_outflow: string
+  net: string
+  series: RawSeriesPoint[]
+}
+
+interface RawActivityResponse {
+  generated_at: string
+  window_hours: number
+  balance_monitor_interval_secs: number
+  uploader_wal: RawTokenWindow
+  uploader_sui: RawTokenWindow
+  sponsor_sui: RawTokenWindow
+  actions: {
+    uploads_completed: number
+    uploads_completed_prior: number
+    uploads_failed: number
+    uploads_failed_prior: number
+    uploads_in_flight: number
+    memory_deletes: number
+    memory_deletes_prior: number
+    security_delete_batches: number | null
+    security_delete_batches_prior: number | null
+    security_delete_blobs: number | null
+    security_delete_blobs_prior: number | null
+    sponsored: Array<{ kind: string; count: number; prior_count: number }>
+    top_owners: Array<{ owner: string; uploads_completed: number }>
+    memories_by_day?: Array<{ day: string; count: number }>
+  }
+}
+
+function mapTokenWindow(raw: RawTokenWindow): ActivityTokenWindow {
+  return {
+    samples: raw.samples,
+    comparable: raw.comparable,
+    latest: raw.latest == null ? null : BigInt(raw.latest),
+    latestAt: raw.latest_at,
+    outflow: BigInt(raw.outflow),
+    priorOutflow: BigInt(raw.prior_outflow),
+    net: BigInt(raw.net),
+    series: raw.series.map((point) => ({
+      at: point.at,
+      balance: BigInt(point.balance),
+    })),
+  }
+}
+
+export async function fetchAdminActivity(
+  adminKey: string,
+  hours: number,
+): Promise<AdminActivity> {
+  const utcOffsetMinutes = -new Date().getTimezoneOffset()
+  const raw = (await makeAdminRequest(
+    `/activity?hours=${hours}&utc_offset_minutes=${utcOffsetMinutes}`,
+    adminKey,
+  )) as RawActivityResponse
+  return {
+    generatedAt: raw.generated_at,
+    windowHours: raw.window_hours,
+    balanceMonitorIntervalSecs: raw.balance_monitor_interval_secs,
+    uploaderWal: mapTokenWindow(raw.uploader_wal),
+    uploaderSui: mapTokenWindow(raw.uploader_sui),
+    sponsorSui: mapTokenWindow(raw.sponsor_sui),
+    actions: {
+      uploadsCompleted: raw.actions.uploads_completed,
+      uploadsCompletedPrior: raw.actions.uploads_completed_prior,
+      uploadsFailed: raw.actions.uploads_failed,
+      uploadsFailedPrior: raw.actions.uploads_failed_prior,
+      uploadsInFlight: raw.actions.uploads_in_flight,
+      memoryDeletes: raw.actions.memory_deletes,
+      memoryDeletesPrior: raw.actions.memory_deletes_prior,
+      securityDeleteBatches: raw.actions.security_delete_batches,
+      securityDeleteBatchesPrior: raw.actions.security_delete_batches_prior,
+      securityDeleteBlobs: raw.actions.security_delete_blobs,
+      securityDeleteBlobsPrior: raw.actions.security_delete_blobs_prior,
+      sponsored: raw.actions.sponsored.map((row) => ({
+        kind: row.kind,
+        count: row.count,
+        priorCount: row.prior_count,
+      })),
+      topOwners: raw.actions.top_owners.map((row) => ({
+        owner: row.owner,
+        uploadsCompleted: row.uploads_completed,
+      })),
+      memoriesByDay: (raw.actions.memories_by_day ?? []).map((row) => ({
+        day: row.day,
+        count: row.count,
+      })),
+    },
+  }
+}
+
 export async function fetchAdminConfig(
   adminKey: string,
 ): Promise<AdminConfig> {
