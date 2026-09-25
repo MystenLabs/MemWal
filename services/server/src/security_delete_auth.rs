@@ -398,6 +398,58 @@ mod tests {
             .is_err());
     }
 
+    /// WALM-668 follow-up: `verify_transaction` BCS-decodes a full `Transaction`
+    /// (see ~line 153). `sui-sdk-types` 0.3.x stops at `ValidDuring` (variant 2),
+    /// so a Validity-bearing tx (variant 3, testnet-v1.59+) fails decode. Pin
+    /// 0.4.0+ and keep this guard so a downgrade cannot silently regress.
+    #[test]
+    fn security_delete_auth_bcs_decodes_validity_expiration_transaction() {
+        use sui_sdk_types::{
+            Digest, GasPayment, ProgrammableTransaction, Transaction,
+            TransactionExpiration, TransactionKind,
+        };
+
+        let expiration = TransactionExpiration::Validity {
+            min_epoch: Some(42),
+            max_epoch: Some(42),
+            min_timestamp: None,
+            max_timestamp: None,
+            chain: Digest::new([0x11; 32]),
+            nonce: 7,
+            allowed_proposers: None,
+        };
+        let exp_bytes = bcs::to_bytes(&expiration).expect("Validity should serialize");
+        assert_eq!(
+            exp_bytes.first(),
+            Some(&3u8),
+            "Validity must stay at BCS variant index 3"
+        );
+
+        let tx = Transaction {
+            kind: TransactionKind::ProgrammableTransaction(ProgrammableTransaction {
+                inputs: vec![],
+                commands: vec![],
+            }),
+            sender: Address::ZERO,
+            gas_payment: GasPayment {
+                objects: vec![],
+                owner: Address::ZERO,
+                price: 1_000,
+                budget: 1_000_000,
+            },
+            expiration,
+        };
+        let bytes = bcs::to_bytes(&tx).expect("Transaction should serialize");
+        // Same decode `NativeWalletSignatureVerifier::verify_transaction` performs.
+        let decoded: Transaction = bcs::from_bytes(&bytes).expect(
+            "Validity-bearing Transaction must BCS-decode; sui-sdk-types <0.4.0 fails here",
+        );
+        assert!(matches!(
+            decoded.expiration,
+            TransactionExpiration::Validity { .. }
+        ));
+    }
+
     #[tokio::test]
     #[ignore]
     async fn security_delete_auth_redis_nonce_is_single_use() {
