@@ -69,12 +69,7 @@ export function isSafeRedirectUrl(
       isBindHostname(redirect.hostname) ||
       isBindHostname(publicUrl.hostname)
     ) {
-      // Path-only values inherit request.url's bind host; absolute ones do not.
-      return (
-        redirectUrl.startsWith("/") &&
-        !redirectUrl.startsWith("//") &&
-        !redirectUrl.includes("\\")
-      );
+      return redirectUrl.startsWith("/") && !redirectUrl.startsWith("//");
     }
     return true;
   } catch {
