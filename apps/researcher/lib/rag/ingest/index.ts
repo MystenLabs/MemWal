@@ -4,6 +4,12 @@ import { chunkDocument, estimateTokens } from "./chunking";
 import { batchEmbed } from "./embeddings";
 import { extractFromUrl, extractFromPdf } from "./extract";
 import { generateSourceMetadata } from "./metadata";
+import {
+  MAX_CHUNKS_PER_SOURCE,
+  capExtractedText,
+  discardBody,
+  readCappedBytes,
+} from "./limits";
 import { fetchPublicUrl } from "./safe-fetch";
 import { createSource, createSourceChunks } from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
@@ -44,17 +50,25 @@ export async function processSource({
     // request body, so the destination is checked before anything is sent.
     const response = await fetchPublicUrl(source.fileUrl);
     if (!response.ok) {
+      await discardBody(response);
       throw new ChatbotError(
         "bad_request:api",
         `Failed to download PDF: ${response.statusText}`
       );
     }
-    const blob = await response.blob();
-    const file = new File([blob], source.fileName, {
+    // Capped while streaming: a remote that omits or lies about Content-Length
+    // still cannot push more than the budget into memory (WALM-683).
+    const bytes = await readCappedBytes(response);
+    const file = new File([bytes], source.fileName, {
       type: "application/pdf",
     });
     rawText = await extractFromPdf(file);
   }
+
+  // One cap covering every branch above, because what follows — metadata
+  // generation, chunking, and one embedding call per batch with no ceiling on
+  // the batch count — all scale with this length.
+  rawText = capExtractedText(rawText);
 
   console.log(`[ingest] Starting ingestion — type=${type}, text length=${rawText.length} chars`);
 
@@ -65,6 +79,16 @@ export async function processSource({
   ]);
 
   console.log(`[ingest] Chunking complete — ${chunks.length} chunks, title="${metadata.title}"`);
+
+  // The character cap already bounds this, but chunk size varies with document
+  // structure, so bound the embedding work directly too: `batchEmbed` limits a
+  // batch to 100 entries and does not limit how many batches it runs.
+  if (chunks.length > MAX_CHUNKS_PER_SOURCE) {
+    throw new ChatbotError(
+      "bad_request:api",
+      `Source produced ${chunks.length} chunks, over the ${MAX_CHUNKS_PER_SOURCE} limit for one source. Split it into smaller documents.`
+    );
+  }
 
   // Embed all chunks
   const chunkTexts = chunks.map((c) => `${c.section}\n\n${c.content}`);

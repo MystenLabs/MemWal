@@ -19,6 +19,10 @@ import {
 } from "@/lib/ai/source-processing";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { getResearchTools, processSource } from "@/lib/rag";
+import {
+  droppedSourceEvents,
+  selectSourcesWithinBudget,
+} from "@/lib/rag/ingest/limits";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
@@ -225,7 +229,17 @@ export async function POST(request: Request) {
           if (sources.length > 0) {
             let processedCount = 0;
 
-            for (const source of sources) {
+            // One message can carry any number of file parts and URLs, and each
+            // one is a full ingestion, so cap how many a single request starts.
+            // Attachments are kept ahead of URLs scraped from prose, and every
+            // source that is not started is reported on the stream, not just
+            // logged — otherwise a dropped PDF simply never shows up (WALM-683).
+            const { kept, dropped } = selectSourcesWithinBudget(sources);
+            for (const event of droppedSourceEvents(dropped)) {
+              dataStream.write(event);
+            }
+
+            for (const source of kept) {
               const label =
                 source.type === "url"
                   ? source.url
