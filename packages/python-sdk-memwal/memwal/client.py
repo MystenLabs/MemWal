@@ -722,7 +722,11 @@ class MemWal:
                 probed = await self.get_remember_bulk_status(list(job_ids))
             except _HttpStatusError as err:
                 if err.status == 429:
-                    raise MemWalRateLimited(job_ids, err.retry_after) from err
+                    # Header first, else the body's retry_after_seconds, so a
+                    # proxy that strips Retry-After does not lose the hint.
+                    wait_ms = _retry_after_ms(err)
+                    retry_after = f"{wait_ms / 1000:g}" if wait_ms else None
+                    raise MemWalRateLimited(job_ids, retry_after) from err
                 # Any other probe failure is not evidence about the jobs.
             else:
                 answered = True

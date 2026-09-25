@@ -484,6 +484,20 @@ class TestBulkWaitUnderRateLimit:
         assert exc.value.retry_after == "30"
         assert "none of its 12 writes could be confirmed" in str(exc.value)
 
+    async def test_rate_limited_reads_the_body_when_the_header_is_stripped(
+        self, memwal_client: MemWal
+    ) -> None:
+        async def refused(job_ids: Sequence[str]) -> RememberBulkStatusResult:
+            raise _HttpStatusError(429, '{"retry_after_seconds":45}')
+
+        memwal_client.get_remember_bulk_status = refused  # type: ignore[method-assign]
+        with pytest.raises(MemWalRateLimited) as exc:
+            await memwal_client.wait_for_remember_jobs(
+                ["job-1"], RememberBulkOptions(poll_interval_ms=1, timeout_ms=300)
+            )
+        assert exc.value.retry_after == "45"
+        assert "after ~45s" in str(exc.value)
+
     async def test_confirming_read_settles_a_refused_wait(
         self, memwal_client: MemWal
     ) -> None:
