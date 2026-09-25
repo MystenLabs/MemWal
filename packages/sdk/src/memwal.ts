@@ -152,6 +152,11 @@ async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
  * own outbound client. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
+/** The one confirming read a bulk wait makes after its budget is spent. It
+ * runs past the caller's deadline by design, so it gets a short bound of its
+ * own rather than the 30s default a stalled socket would hold it for. */
+const CONFIRM_READ_TIMEOUT_MS = 5_000;
+
 /** `POST /api/restore` bounds itself at 55s server-side and answers with an
  * error rather than going quiet, so the client must outlast that or it would
  * abandon a response already on its way. */
@@ -256,6 +261,28 @@ function retryAfterDelayMs(err: unknown, deadline: number): number {
         ?? retryAfterSecondsFromBody((err as { cause?: unknown }).cause);
     if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) return 0;
     return Math.max(0, Math.min(seconds * 1000, deadline - Date.now()));
+}
+
+/**
+ * Thrown when a bulk wait could not read a single status, the confirming read
+ * included. The status endpoint counts against the same delegate-key budget
+ * as writes, so a batch sent near the limit can have every poll refused. The
+ * old result then read as "still uploading" even when nothing had landed
+ * (GH #967). A refusal says nothing about the jobs, so do not report it as
+ * progress.
+ */
+function bulkRateLimitedError(err: unknown, jobIds: string[]): Error {
+    const retryAfterSeconds =
+        (err as { retryAfterSeconds?: number }).retryAfterSeconds
+        ?? retryAfterSecondsFromBody((err as { cause?: unknown }).cause);
+    const wait = retryAfterSeconds ? ` after ~${Math.ceil(retryAfterSeconds)}s` : "";
+    const e = new Error(
+        `Walrus Memory rate-limited every status read for this batch, so none of its ${jobIds.length} writes ` +
+            `could be confirmed. Do not treat them as stored: check them with getRememberBulkStatus(jobIds)${wait}. ` +
+            `Status reads count against the same delegate-key budget as writes.`,
+    );
+    e.name = "MemWalRateLimited";
+    return Object.assign(e, { status: 429, jobIds, retryAfterSeconds });
 }
 
 /**
@@ -663,6 +690,37 @@ export class MemWal {
         let attempt = 0;
         let retryAfterMs = 0;
         let sawRateLimit = false;
+        const lastSeen = new Map<string, RememberBulkStatusItem>();
+        let lastRefusal: number | undefined;
+        // Whether any status read got through. An item missing from an answer
+        // was not refused, so it must not be reported as if it had been.
+        let answered = false;
+
+        const settle = (jobId: string, status: RememberBulkStatusItem) => {
+            const idx = jobIds.indexOf(jobId);
+            lastSeen.set(jobId, status);
+            if (status.status === "done") {
+                results[idx] = {
+                    id: jobId,
+                    blob_id: status.blob_id ?? "",
+                    status: "done",
+                    namespace: namespaces[idx] ?? this.namespace,
+                };
+                pending.delete(jobId);
+            } else if (status.status === "failed" || status.status === "not_found") {
+                results[idx] = {
+                    id: jobId,
+                    blob_id: "",
+                    status: "failed",
+                    namespace: namespaces[idx] ?? this.namespace,
+                    error:
+                        status.status === "not_found"
+                            ? "job not found"
+                            : redactInternalUrls(status.error ?? "unknown error"),
+                };
+                pending.delete(jobId);
+            }
+        };
 
         while (pending.size > 0 && Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
@@ -685,12 +743,14 @@ export class MemWal {
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    lastRefusal = httpStatus;
                     if (httpStatus === 429) sawRateLimit = true;
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
                 throw err;
             }
+            answered = true;
 
             const statusById = new Map<string, RememberBulkStatusItem[]>();
             for (const item of batchStatus.results) {
@@ -708,36 +768,42 @@ export class MemWal {
                     continue;
                 }
 
-                const idx = jobIds.indexOf(jobId);
-                if (status.status === "done") {
-                    results[idx] = {
-                        id: jobId,
-                        blob_id: status.blob_id ?? "",
-                        status: "done",
-                        namespace: namespaces[idx] ?? this.namespace,
-                    };
-                    pending.delete(jobId);
-                } else if (status.status === "failed" || status.status === "not_found") {
-                    results[idx] = {
-                        id: jobId,
-                        blob_id: "",
-                        status: "failed",
-                        namespace: namespaces[idx] ?? this.namespace,
-                        error:
-                            status.status === "not_found"
-                                ? "job not found"
-                                : redactInternalUrls(status.error ?? "unknown error"),
-                    };
-                    pending.delete(jobId);
-                }
+                settle(jobId, status);
             }
         }
 
-        if (sawRateLimit) {
-            for (const result of results) {
-                if (result.status === "timeout" && result.error) {
-                    result.error = `${result.error}; wait hit a rate limit (429)`;
+        // Nothing settled and nothing was even seen: the polls may all have been
+        // refused rather than the jobs being slow. Confirm with one direct read,
+        // as the MCP bridge does, before reporting anything.
+        if (timeoutMs > 0 && pending.size === jobIds.length && lastSeen.size === 0) {
+            try {
+                const probed = await this.getRememberBulkStatus(jobIds, {
+                    timeoutMs: Math.min(this.requestTimeoutMs, CONFIRM_READ_TIMEOUT_MS),
+                });
+                answered = true;
+                for (const item of probed.results) {
+                    if (pending.has(item.job_id)) settle(item.job_id, item);
                 }
+            } catch (err) {
+                if ((err as { status?: number }).status === 429) throw bulkRateLimitedError(err, jobIds);
+                // Any other probe failure is not evidence about the jobs.
+            }
+        }
+
+        for (const jobId of pending) {
+            const idx = jobIds.indexOf(jobId);
+            const seen = lastSeen.get(jobId);
+            results[idx].error = seen
+                ? `still ${seen.status} after ${timeoutMs}ms` + (seen.error ? `: ${redactInternalUrls(seen.error)}` : "")
+                : answered
+                  ? "not in the relayer's status answer; this item may not be stored"
+                  : lastRefusal !== undefined
+                    ? `no status read got through (last poll: HTTP ${lastRefusal}); this item may not be stored`
+                    : `polling timed out after ${timeoutMs}ms`;
+            // Only the "no status read got through" message already names the 429.
+            const namesRateLimit = !seen && !answered && lastRefusal === 429;
+            if (sawRateLimit && !namesRateLimit) {
+                results[idx].error += "; wait hit a rate limit (429)";
             }
         }
 
