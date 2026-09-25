@@ -504,6 +504,37 @@ fn wallet_index_for_upload_attempt(
     Some(start.wrapping_add(offset) % pool_size)
 }
 
+/// Whether this journal already names the signer that owns the blob.
+///
+/// `encoded` is a local checkpoint, and a prepared register has not been
+/// submitted. `registered` and later refer to a blob object that signer owns.
+fn upload_journal_signer_committed(journal: &UploadJournal) -> bool {
+    matches!(
+        journal
+            .resume_step
+            .as_ref()
+            .and_then(|step| step.get("step"))
+            .and_then(serde_json::Value::as_str),
+        Some("registered" | "uploaded" | "certified")
+    )
+}
+
+/// Move an uncommitted journal onto `free_wallet`.
+///
+/// Returns whether the caller must persist the journal. A prepared register
+/// signed by the old wallet is dropped so the sidecar rebuilds it. The
+/// journaled address is cleared so the new key is not rejected as a mapping
+/// mismatch. A committed journal is left untouched.
+fn steer_uncommitted_upload_wallet(journal: &mut UploadJournal, free_wallet: usize) -> bool {
+    if upload_journal_signer_committed(journal) || journal.wallet_index == free_wallet {
+        return false;
+    }
+    journal.wallet_index = free_wallet;
+    journal.wallet_address = None;
+    journal.register_transaction = None;
+    true
+}
+
 // ============================================================
 // execute_wallet_job — dispatcher for WalletJob
 // ============================================================
@@ -538,7 +569,7 @@ pub(crate) async fn execute_wallet_job(
             prepare_claim_token,
             epochs,
         } => {
-            let wallet_index = match wallet_index_for_upload_attempt(
+            let mut wallet_index = match wallet_index_for_upload_attempt(
                 enqueued_wallet_index,
                 attempt_info.current,
                 state.key_pool.len(),
@@ -552,6 +583,33 @@ pub(crate) async fn execute_wallet_job(
                     .into_apalis_error());
                 }
             };
+            // The attempt index is only the fallback. Once a durable journal
+            // exists, the sidecar queues on that signer, so the busy-count has
+            // to name the same wallet or least-loaded keeps feeding the one
+            // that is actually full. Before register is submitted the journal
+            // can move onto a wallet that is free right now.
+            if let Some(job_id) = remember_job_id.as_deref() {
+                let mut journal = load_upload_journal(state.db.pool(), job_id, wallet_index)
+                    .await
+                    .map_err(WalletJobError::into_apalis_error)?;
+                if upload_journal_signer_committed(&journal) {
+                    wallet_index = journal.wallet_index;
+                } else if let Some(free) = state.key_pool.least_loaded_index() {
+                    let from = journal.wallet_index;
+                    if steer_uncommitted_upload_wallet(&mut journal, free) {
+                        persist_upload_journal(state.db.pool(), job_id, &journal)
+                            .await
+                            .map_err(WalletJobError::into_apalis_error)?;
+                        tracing::info!(
+                            "[wallet-job:upload] job_id={} moved uncommitted upload off wallet {} onto {}",
+                            job_id,
+                            from,
+                            journal.wallet_index,
+                        );
+                    }
+                    wallet_index = journal.wallet_index;
+                }
+            }
             // Mark this wallet busy for the rest of the attempt, so a
             // concurrently-enqueued job picks an idle wallet instead of
             // queueing behind this upload. Held by guard rather than paired
@@ -3082,7 +3140,8 @@ mod tests {
         is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
         mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
         persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
-        update_remember_job_after_wallet_error, upload_resume_disposition, upload_retry_backoff,
+        steer_uncommitted_upload_wallet, update_remember_job_after_wallet_error,
+        upload_journal_signer_committed, upload_resume_disposition, upload_retry_backoff,
         wallet_index_for_upload_attempt, wallet_job_request, JobUploadLock, LockOutcome,
         UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
         MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
@@ -3130,7 +3189,10 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             assert!(spent.retries_exhausted(&err), "{}", err.kind());
         }
 
-        let mid = WalletJobAttemptInfo { current: 1, max: MAX_ATTEMPTS as usize };
+        let mid = WalletJobAttemptInfo {
+            current: 1,
+            max: MAX_ATTEMPTS as usize,
+        };
         assert!(!mid.retries_exhausted(&low));
         let permanent = WalletJobError::Permanent("registerTransaction digest mismatch".into());
         assert!(!spent.retries_exhausted(&permanent) && permanent.aborts_retries());
@@ -3666,6 +3728,59 @@ the checkpoint it replied about",
             .map(|attempt| wallet_index_for_upload_attempt(3, attempt, 4).unwrap())
             .collect();
         assert_eq!(picked, vec![3, 0, 1, 2, 3]);
+    }
+
+    fn empty_journal(wallet_index: usize) -> UploadJournal {
+        UploadJournal {
+            wallet_index,
+            wallet_address: None,
+            execution_identity: None,
+            resume_step: None,
+            register_transaction: None,
+        }
+    }
+
+    fn prepared_register() -> PreparedRegisterTransaction {
+        PreparedRegisterTransaction {
+            transaction_bytes: "aa".into(),
+            signature: "bb".into(),
+            digest: "cc".into(),
+            sponsor_digest: None,
+        }
+    }
+
+    #[test]
+    fn uncommitted_upload_moves_onto_a_free_wallet() {
+        let mut encoded = empty_journal(4);
+        encoded.wallet_address = Some("0xold".into());
+        encoded.resume_step = Some(serde_json::json!({
+            "step": "encoded",
+            "blobId": "blob",
+            "rootHash": "root",
+            "unencodedSize": 4
+        }));
+        encoded.register_transaction = Some(prepared_register());
+        assert!(!upload_journal_signer_committed(&encoded));
+        assert!(steer_uncommitted_upload_wallet(&mut encoded, 12));
+        assert_eq!(encoded.wallet_index, 12);
+        assert!(encoded.wallet_address.is_none());
+        assert!(encoded.register_transaction.is_none());
+        assert!(encoded.resume_step.is_some());
+        // Already there: keep a prepared register signed by this wallet.
+        encoded.register_transaction = Some(prepared_register());
+        assert!(!steer_uncommitted_upload_wallet(&mut encoded, 12));
+        assert!(encoded.register_transaction.is_some());
+    }
+
+    #[test]
+    fn committed_upload_stays_on_its_signer() {
+        for step in ["registered", "uploaded", "certified"] {
+            let mut journal = empty_journal(5);
+            journal.resume_step = Some(serde_json::json!({ "step": step }));
+            assert!(upload_journal_signer_committed(&journal));
+            assert!(!steer_uncommitted_upload_wallet(&mut journal, 14));
+            assert_eq!(journal.wallet_index, 5);
+        }
     }
 
     #[test]
