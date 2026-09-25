@@ -141,7 +141,7 @@ export default function KeysPage() {
                 </div>
             )}
 
-            <Dashboard autoScrollToKeys={!mismatch} />
+            <Dashboard autoScrollToKeys={!mismatch} fromKeys />
         </>
     )
 }

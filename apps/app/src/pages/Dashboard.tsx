@@ -203,11 +203,19 @@ export default function Dashboard({
     previewMode = false,
     previewState = 'empty',
     autoScrollToKeys = false,
+    fromKeys = false,
 }: {
     previewMode?: boolean
     previewState?: 'empty' | 'ready'
     /** Scroll to the delegate keys card once its first load finishes. Used by /keys (WALM-675). */
     autoScrollToKeys?: boolean
+    /** Rendered from /keys (WALM-675) — separate from autoScrollToKeys, which
+     *  is false on an owner mismatch. Gates the "Back to Console" link next
+     *  to "Continue" on the delegate-key-ready block: that's where a Console
+     *  user actually finishes, after copying the key, per the 25 Sep decision
+     *  (Nikola/ducnmm) — the new-user /setup → /dashboard path keeps only the
+     *  nav link since COMG-1093 handles that return on the Console side. */
+    fromKeys?: boolean
 }) {
     const currentAccount = useCurrentAccount()
     const navigate = useNavigate()
@@ -872,7 +880,7 @@ const result = await generateText({
                     <div className="nav-user">
                         {config.consoleUrl && (
                             <a href={config.consoleUrl} className="btn btn-secondary btn-sm">
-                                <ExternalLink size={12} /> Back to Console
+                                <ExternalLink size={12} /> Open Console
                             </a>
                         )}
                         <span className="nav-address">
@@ -1346,6 +1354,11 @@ const result = await generateText({
                                     >
                                         Continue
                                     </button>
+                                    {fromKeys && config.consoleUrl && (
+                                        <a href={config.consoleUrl} className="btn btn-secondary btn-sm">
+                                            <ExternalLink size={12} /> Back to Console
+                                        </a>
+                                    )}
                                 </div>
                             </div>
                         </div>
