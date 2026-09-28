@@ -288,14 +288,23 @@ function consumePendingSetupVisit(): boolean {
 export function PostAuthRedirect() {
   const claudeConnectQuery = consumePendingConnectQuery(CLAUDE_CONNECT_STORAGE_KEY)
   if (claudeConnectQuery) {
+    // A stray /setup breadcrumb from an unrelated earlier render must not
+    // hijack this sign-in once a real pending connect wins (ducnmm review).
+    sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
     return <Navigate to={`/connect/claude?${claudeConnectQuery}`} replace />
   }
 
   const mcpConnectQuery = consumePendingConnectQuery(MCP_CONNECT_STORAGE_KEY)
-  if (mcpConnectQuery) return <Navigate to={`/connect/mcp?${mcpConnectQuery}`} replace />
+  if (mcpConnectQuery) {
+    sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
+    return <Navigate to={`/connect/mcp?${mcpConnectQuery}`} replace />
+  }
 
   const keysConnectQuery = consumePendingConnectQuery(KEYS_CONNECT_STORAGE_KEY)
-  if (keysConnectQuery) return <Navigate to={`/keys?${keysConnectQuery}`} replace />
+  if (keysConnectQuery) {
+    sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
+    return <Navigate to={`/keys?${keysConnectQuery}`} replace />
+  }
 
   // Respects an explicit /setup visit over PostAuthAccountCheck's own
   // account-existence guess — matters for an account that exists elsewhere
@@ -341,6 +350,29 @@ export function PostAuthAccountCheck() {
   return <Navigate to={target} replace />
 }
 
+/** The /setup route's element. A component, not a function invoked while
+ *  AppContent builds its route table — <Routes> evaluates every element
+ *  prop on every render regardless of the active path, so the old
+ *  requireAccountForSetup(...) helper wrote the breadcrumb on every
+ *  signed-out render of the whole app, not only on an actual /setup visit
+ *  (ducnmm review, WALM-675). Scoping the write to this component's effect
+ *  means it only runs once React Router actually mounts it. */
+function RequireAccountForSetup({ children }: { children: React.ReactNode }) {
+  const currentAccount = useCurrentAccount()
+  const autoConnectStatus = useAutoConnectWallet()
+  const authPending = autoConnectStatus === 'idle'
+
+  useEffect(() => {
+    if (!authPending && !currentAccount) {
+      sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, '1')
+    }
+  }, [authPending, currentAccount])
+
+  if (authPending) return <RoutePending />
+  if (currentAccount) return <>{children}</>
+  return <Navigate to="/" replace />
+}
+
 function AppContent() {
   const currentAccount = useCurrentAccount()
   const autoConnectStatus = useAutoConnectWallet()
@@ -352,15 +384,6 @@ function AppContent() {
     return currentAccount ? element : <Navigate to="/" replace />
   }
 
-  // Same as requireAccount, but records the visit first — /setup is the one
-  // requireAccount-gated route worth resuming after sign-in (Thanos, 24 Sep).
-  const requireAccountForSetup = (element: React.ReactNode) => {
-    if (authPending) return <RoutePending />
-    if (currentAccount) return element
-    sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, '1')
-    return <Navigate to="/" replace />
-  }
-
   return (
     <Routes>
       <Route path="/" element={
@@ -368,9 +391,11 @@ function AppContent() {
         currentAccount ? <PostAuthRedirect /> : <LandingPage />
       } />
       <Route path="/dashboard" element={requireAccount(<Dashboard />)} />
-      <Route path="/setup" element={requireAccountForSetup(
-        delegateKey ? <Navigate to="/dashboard" replace /> : <SetupWizard />
-      )} />
+      <Route path="/setup" element={
+        <RequireAccountForSetup>
+          {delegateKey ? <Navigate to="/dashboard" replace /> : <SetupWizard />}
+        </RequireAccountForSetup>
+      } />
       <Route path="/playground" element={requireAccount(
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       )} />

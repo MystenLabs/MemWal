@@ -15,10 +15,11 @@
  *      selects an account or authorizes anything.
  *   3. Render the existing Dashboard delegate-keys card (mint/rotate/revoke),
  *      auto-scrolled into view — unless there's a mismatch, so the warning
- *      banner stays in view instead of being scrolled past. Dashboard's own
- *      nav carries "Back to Console" (config.consoleUrl, never a URL param —
- *      the WALM-288 class of bug — see Dashboard.tsx), so /dashboard gets it
- *      too, matching the 23 Sep decision that /setup ends there.
+ *      banner stays in view instead of being scrolled past. Dashboard's nav
+ *      shows "Open Console" (config.consoleUrl, never a URL param — the
+ *      WALM-288 class of bug — see Dashboard.tsx) on every signed-in render;
+ *      "Back to Console" is the fromKeys-only return prompt that appears once
+ *      a key is ready here, not a nav-wide link.
  */
 import { useEffect, useRef, useState } from 'react'
 import {
