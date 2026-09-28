@@ -55,24 +55,33 @@ export function guestReturnPath(request: Request): string {
   return path.startsWith("/") && !path.startsWith("//") ? path : "/";
 }
 
-export function isSafeRedirectUrl(
+export function safeRedirectPath(
   redirectUrl: string,
   request: Request
-): boolean {
+): string | null {
   try {
     const publicUrl = publicRequestUrl(request);
     const redirect = new URL(redirectUrl, publicUrl);
     if (redirect.origin !== publicUrl.origin) {
-      return false;
+      return null;
     }
     if (
       isBindHostname(redirect.hostname) ||
       isBindHostname(publicUrl.hostname)
     ) {
-      return redirectUrl.startsWith("/") && !redirectUrl.startsWith("//");
+      if (!(redirectUrl.startsWith("/") && !redirectUrl.startsWith("//"))) {
+        return null;
+      }
     }
-    return true;
+    return `${redirect.pathname}${redirect.search}${redirect.hash}`;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function isSafeRedirectUrl(
+  redirectUrl: string,
+  request: Request
+): boolean {
+  return safeRedirectPath(redirectUrl, request) !== null;
 }
