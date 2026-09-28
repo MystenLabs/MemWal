@@ -437,6 +437,281 @@ mod cors_tests {
     }
 }
 
+#[cfg(test)]
+mod mcp_rate_limit_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    /// Bytes consumed by one RESP command, or `None` if `buf` is incomplete.
+    fn resp_command_len(buf: &[u8]) -> Option<usize> {
+        if *buf.first()? != b'*' {
+            return None;
+        }
+        let header_end = buf.iter().position(|b| *b == b'\n')?;
+        if header_end == 0 || buf[header_end - 1] != b'\r' {
+            return None;
+        }
+        let n: usize = std::str::from_utf8(&buf[1..header_end - 1])
+            .ok()?
+            .parse()
+            .ok()?;
+        let mut i = header_end + 1;
+        for _ in 0..n {
+            if *buf.get(i)? != b'$' {
+                return None;
+            }
+            let rel = buf[i + 1..].iter().position(|b| *b == b'\n')?;
+            let line_end = i + 1 + rel;
+            if buf[line_end - 1] != b'\r' {
+                return None;
+            }
+            let len: usize = std::str::from_utf8(&buf[i + 1..line_end - 1])
+                .ok()?
+                .parse()
+                .ok()?;
+            let next = line_end.checked_add(1)?.checked_add(len)?.checked_add(2)?;
+            if buf.len() < next || buf[next - 2] != b'\r' || buf[next - 1] != b'\n' {
+                return None;
+            }
+            i = next;
+        }
+        Some(i)
+    }
+
+    /// Accepts a Redis handshake and answers every command with integer 0,
+    /// which `accounts_rate_limit_middleware` treats as a denied window.
+    async fn reply_denied(mut socket: tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = socket.set_nodelay(true);
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 8192];
+        loop {
+            match socket.read(&mut tmp).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    while let Some(consumed) = resp_command_len(&buf) {
+                        buf.drain(..consumed);
+                        if socket.write_all(b":0\r\n").await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn denying_redis() -> redis::aio::ConnectionManager {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(reply_denied(socket));
+            }
+        });
+        let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
+        let config = redis::aio::ConnectionManagerConfig::new()
+            .set_number_of_retries(1)
+            .set_factor(1)
+            .set_exponent_base(1)
+            .set_max_delay(50)
+            .set_connection_timeout(std::time::Duration::from_secs(2))
+            .set_response_timeout(std::time::Duration::from_secs(2));
+        client
+            .get_connection_manager_with_config(config)
+            .await
+            .expect("stub redis accepts the handshake")
+    }
+
+    fn rate_limit_test_config() -> Config {
+        Config {
+            port: 8000,
+            database_url: "postgres://memwal@127.0.0.1/memwal".to_string(),
+            sui_rpc_url: "http://127.0.0.1:9".to_string(),
+            sui_grpc_url: None,
+            sui_network: "testnet".to_string(),
+            memwal_account_id: None,
+            openai_api_key: None,
+            openai_api_base: "http://127.0.0.1:9".to_string(),
+            walrus_publisher_url: "http://127.0.0.1:9".to_string(),
+            walrus_aggregator_url: "http://127.0.0.1:9".to_string(),
+            walrus_storage_epochs: 3,
+            walrus_aggregator_urls: vec!["http://127.0.0.1:9".to_string()],
+            walrus_skip_consistency_check: false,
+            walrus_aggregator_race_after_ms: types::DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS,
+            sui_private_key: None,
+            sui_private_keys: vec![],
+            package_id: "0xpackage".to_string(),
+            seal_policy_package_id: "0xpackage".to_string(),
+            registry_id: "0xregistry".to_string(),
+            registry_scan_max_pages: types::DEFAULT_REGISTRY_SCAN_MAX_PAGES,
+            sidecar_url: "http://127.0.0.1:9".to_string(),
+            sidecar_secret: None,
+            seal_expected_committee_identity: None,
+            rate_limit: rate_limit::RateLimitConfig::default(),
+            sponsor_rate_limit: types::SponsorRateLimitConfig::default(),
+            read_api_rate_limit: types::ReadApiRateLimitConfig::default(),
+            accounts_rate_limit: types::AccountsRateLimitConfig::default(),
+            trusted_proxy_hops: 0,
+            allowed_origins: String::new(),
+            benchmark_mode: false,
+            writes_paused: false,
+            enable_memory_deletion: false,
+            enable_security_delete: false,
+            legacy_db_url: None,
+            deletion_reconciler_enabled: false,
+            deletion_object_resolver_enabled: false,
+            delete_batch_max: 900,
+            max_active_batches_per_owner: 16,
+            security_delete_auth_requests_per_minute: 20,
+            security_delete_prepare_requests_per_minute: 10,
+            sui_rpc_requests_per_window: 3_000,
+            sui_rpc_window: std::time::Duration::from_secs(10),
+            sui_rpc_attempt_timeout: std::time::Duration::from_secs(5),
+            sui_rpc_max_in_flight: 64,
+            security_delete_execute_max_in_flight: 1,
+            security_delete_crash_test_secret: None,
+            sponsor_private_key: None,
+            sponsor_min_balance_alert: 0,
+            claim_ttl_secs: 600,
+            exec_grace_secs: 60,
+            deletion_token_secret: None,
+            deletion_token_ttl_secs: 2700,
+            expiry_margin_epochs: 1,
+            walrus_package_id: String::new(),
+            walrus_system_object_id: String::new(),
+            walrus_staking_pool_id: String::new(),
+            owner_token_secret: "owner-token-test-secret".to_string(),
+            owner_token_service_credential: "owner-token-test-credential".to_string(),
+            owner_token_ttl_secs: 900,
+            owner_token_rate_limit: types::OwnerTokenRateLimitConfig::default(),
+            restore_requests_per_owner_per_minute: 10,
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 50_000_000_000,
+            wallet_balance_low_threshold_sui: 5_000_000_000,
+            sponsor_balance_low_threshold_sui: 5_000_000_000,
+            mcp_oauth: None,
+            auth_max_clock_drift_secs: types::DEFAULT_AUTH_CLOCK_DRIFT_SECS,
+        }
+    }
+
+    async fn test_state(redis: redis::aio::ConnectionManager) -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPool::connect_lazy("postgres://memwal@127.0.0.1/memwal")
+            .expect("lazy pool");
+        let db = Arc::new(VectorDb::from_pool(pool.clone()));
+        let http_client = reqwest::Client::new();
+        let config = Arc::new(rate_limit_test_config());
+        Arc::new(AppState {
+            db: Arc::clone(&db),
+            wallet_lock_pool: pool.clone(),
+            legacy_db: None,
+            security_delete_nonce_store: Arc::new(security_delete_auth::RedisNonceStore::new(
+                redis.clone(),
+            )),
+            security_delete_wallet_verifier: Arc::new(
+                security_delete_auth::NativeWalletSignatureVerifier,
+            ),
+            security_delete_sui: None,
+            security_delete_background_sui: None,
+            walrus_sui_client: None,
+            security_delete_execution_gate: Arc::new(types::SecurityDeleteExecutionGate::new(1)),
+            config: Arc::clone(&config),
+            http_client: http_client.clone(),
+            sui_grpc_client: None,
+            delegate_keys_cache: storage::sui::new_delegate_keys_cache(),
+            delegate_verify_cache: storage::sui::new_delegate_verify_cache(),
+            delegate_reject_cache: storage::sui::new_delegate_reject_cache(),
+            mcp_connect_episodes: observability::new_mcp_connect_episodes(),
+            alerts: Arc::new(AlertManager::from_env(http_client.clone())),
+            key_pool: Arc::new(KeyPool::new(Vec::new())),
+            engine: Arc::new(PlaintextEngine::new(db)),
+            embedder: Arc::new(OpenAiEmbedder::new(
+                http_client.clone(),
+                Arc::clone(&config),
+            )),
+            extractor: Arc::new(LlmExtractor::new(http_client, config)),
+            ranker: Arc::new(CompositeRanker),
+            redis,
+            fallback_rate_limit: tokio::sync::Mutex::new(rate_limit::InMemoryFallback::default()),
+            registry_scan_semaphore: tokio::sync::Semaphore::new(
+                types::REGISTRY_SCAN_MAX_CONCURRENT,
+            ),
+            remember_job_storage: PostgresStorage::new(pool.clone()),
+            wallet_storage: PostgresStorage::new(pool.clone()),
+            bulk_job_storage: PostgresStorage::new(pool),
+            blob_cache_ttl: std::time::Duration::from_secs(DEFAULT_BLOB_CACHE_TTL_SECS),
+            blob_cache_max_bytes: DEFAULT_BLOB_CACHE_MAX_BYTES,
+            embedding_cache_ttl: std::time::Duration::from_secs(DEFAULT_EMBEDDING_CACHE_TTL_SECS),
+        })
+    }
+
+    async fn expect_accounts_ip_burst(app: &Router, method: Method, uri: &str, bearer: bool) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if bearer {
+            builder = builder.header(header::AUTHORIZATION, "Bearer not-a-delegate-key");
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{uri} bearer={bearer} body={json}"
+        );
+        assert_eq!(
+            json["layer"], "accounts_ip_burst",
+            "{uri} must be the accounts IP bucket, not a new limiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_routes_invoke_accounts_ip_rate_limit() {
+        let state = test_state(denying_redis().await).await;
+        // Merged the same way `main` merges `mcp_routes` into `public_routes`.
+        let app = Router::new()
+            .merge(mcp_routes(Arc::clone(&state)))
+            .with_state(state);
+
+        for (method, uri) in [
+            (Method::GET, "/api/mcp/sse"),
+            (Method::POST, "/api/mcp/messages"),
+            (Method::GET, "/api/mcp"),
+            (Method::POST, "/api/mcp"),
+            (Method::DELETE, "/api/mcp"),
+            (Method::OPTIONS, "/api/mcp"),
+        ] {
+            expect_accounts_ip_burst(&app, method, uri, false).await;
+        }
+        // A Bearer token does not skip the shared IP budget.
+        expect_accounts_ip_burst(&app, Method::POST, "/api/mcp", true).await;
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/not-mcp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+}
+
 fn parse_env_u64(name: &str, fallback: u64, min: u64, max: u64) -> u64 {
     let Ok(raw) = std::env::var(name) else {
         return fallback;
@@ -828,6 +1103,47 @@ async fn apalis_schema_ready(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
     )
     .fetch_one(pool)
     .await
+}
+
+/// MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
+///
+/// No signed-request auth here: MCP clients ship a single Bearer at SSE
+/// open and the sidecar parses it as the Ed25519 delegate key. Body limit
+/// is generous on the POST route (JSON-RPC envelopes can carry analyze
+/// text up to a few hundred KiB) and irrelevant on the GET SSE route.
+///
+/// The router shares `accounts_rate_limit_middleware`'s IP budget with
+/// `GET /api/accounts/{owner}/exists` (WALM-700). Bearer tokens are not
+/// exempt. `reset_fallback` drops the fallback `Router::layer` also wraps;
+/// without it, `merge` would rate-limit every unmatched path.
+fn mcp_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/mcp/sse", get(mcp_proxy::sse_proxy))
+        .route(
+            "/api/mcp/messages",
+            post(mcp_proxy::messages_proxy).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
+        // Streamable HTTP transport (MCP 2025-06). Single URL that
+        // handles GET (open SSE), POST (JSON-RPC with optional SSE
+        // upgrade), and DELETE (close session). Lets users add the
+        // server via `claude mcp add --transport http memwal <URL>`
+        // without any package install.
+        .route(
+            "/api/mcp",
+            get(mcp_proxy::streamable_proxy)
+                .post(mcp_proxy::streamable_proxy)
+                .delete(mcp_proxy::streamable_proxy)
+                .options(mcp_proxy::streamable_proxy)
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::accounts_rate_limit_middleware,
+        ))
+        // `Router::layer` also wraps this router's fallback. Merging that
+        // fallback into `public_routes` would run this budget on every
+        // unmatched path. Put a plain 404 back before the merge.
+        .reset_fallback()
 }
 
 #[tokio::main]
@@ -2177,30 +2493,7 @@ async fn main() {
     let owner_token_probe_routes =
         Router::new().route("/v1/owners/{owner}/_token_probe", get(routes::token_probe));
 
-    // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
-    // No signed-request auth here: MCP clients ship a single Bearer at SSE
-    // open and the sidecar parses it as the Ed25519 delegate key. Body limit
-    // is generous on the POST route (JSON-RPC envelopes can carry analyze
-    // text up to a few hundred KiB) and irrelevant on the GET SSE route.
-    let mcp_routes = Router::new()
-        .route("/api/mcp/sse", get(mcp_proxy::sse_proxy))
-        .route(
-            "/api/mcp/messages",
-            post(mcp_proxy::messages_proxy).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
-        )
-        // Streamable HTTP transport (MCP 2025-06). Single URL that
-        // handles GET (open SSE), POST (JSON-RPC with optional SSE
-        // upgrade), and DELETE (close session). Lets users add the
-        // server via `claude mcp add --transport http memwal <URL>`
-        // without any package install.
-        .route(
-            "/api/mcp",
-            get(mcp_proxy::streamable_proxy)
-                .post(mcp_proxy::streamable_proxy)
-                .delete(mcp_proxy::streamable_proxy)
-                .options(mcp_proxy::streamable_proxy)
-                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
-        );
+    let mcp_routes = mcp_routes(state.clone());
 
     // Admin dashboard routes (requires ADMIN_API_KEY)
     let admin_dashboard_routes = Router::new()
