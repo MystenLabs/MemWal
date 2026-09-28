@@ -592,6 +592,41 @@ test("a passage of identifiers with no credential label is unchanged", () => {
     assert.deepEqual(out.dropped, []);
 });
 
+test("a lone identifier far from a credential label survives a passage", () => {
+    // A distant label must not make every bare blob id / SHA in the passage
+    // count as labelled key material (passage bareScope is neighbours-only).
+    const lines = [
+        "user: I rotated my delegate key yesterday, all good now.",
+        ...Array.from({ length: 10 }, (_, i) => `assistant: step ${i} done`),
+        "Xj9vKq2mP7nR4tW8yB1cE5gH0dF3sA6uZ2xN8qL4kM7",
+        "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b",
+    ];
+    const out = sanitizePassage(lines.join("\n"));
+    assert.deepEqual(out.dropped, []);
+    assert.ok(out.text.includes("Xj9vKq2mP7nR4tW8yB1cE5gH0dF3sA6uZ2xN8qL4kM7"));
+    assert.ok(out.text.includes("4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b"));
+});
+
+test("a credential separated by a blank line is still caught in a passage", () => {
+    // Blank lines are omitted from the batch screen so label and value stay
+    // neighbours even with an empty line between them.
+    const SEED = "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+    const label = "my delegate private key for mainnet:";
+    const out = sanitizePassage(`${label}\n\n${SEED}\n\nthanks`);
+    assert.equal(out.refusal, undefined);
+    assert.equal(out.changed, true);
+    assert.ok(out.count >= 1);
+    assert.ok(!out.text.includes(SEED), "the seed survived a blank line between label and value");
+    assert.ok(out.text.includes(label));
+    assert.ok(out.text.includes("thanks"));
+    assert.ok(
+        out.kinds.includes("labelled-key-material"),
+        `expected labelled-key-material, got ${out.kinds}`,
+    );
+    assert.ok(out.dropped.some((d) => d.reason === "credential-only"));
+    assert.ok(!JSON.stringify(out.dropped).includes(SEED));
+});
+
 test("the batch screen does not fire without a label anywhere in it", () => {
     // Cross-entry awareness widens what counts as adjacent, which is exactly
     // the kind of change that starts eating identifiers. The gate is still the
