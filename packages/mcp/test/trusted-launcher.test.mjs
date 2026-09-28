@@ -37,6 +37,7 @@ import {
     MCP_REGISTRY,
     assertRuntimeRootLocation,
     canonicalPath,
+    enclosingProjectRoot,
     expectedEntryPath,
     installArguments,
     installDir,
@@ -462,6 +463,134 @@ test("assertRuntimeRootLocation accepts a root outside the project and rejects o
     assert.throws(
         () => assertRuntimeRootLocation(dirname(repo), { cwd: repo }),
         /inside the project tree/,
+    );
+});
+
+/**
+ * A monorepo: `.git` and a workspace manifest at the root, a member package with
+ * its own `package.json` underneath. The client is started in the member.
+ */
+function makeMonorepo(t) {
+    const root = mkdtempSync(join(tmpdir(), "memwal-monorepo-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({ name: "monorepo", workspaces: ["apps/*"] }),
+    );
+    const member = join(root, "apps", "web");
+    mkdirSync(member, { recursive: true });
+    writeFileSync(join(member, "package.json"), JSON.stringify({ name: "web", version: "1.0.0" }));
+    return { root, member };
+}
+
+test("a nested package does not become its own trust boundary", (t) => {
+    // WALM-684: enclosingProjectRoot() stopped at the first ancestor carrying a
+    // marker, so a client started in apps/web treated apps/web as the whole
+    // project. The repository that controls apps/web was then "outside" it.
+    const { root, member } = makeMonorepo(t);
+
+    assert.equal(canonicalPath(enclosingProjectRoot(member)), canonicalPath(root));
+    assert.equal(canonicalPath(enclosingProjectRoot(root)), canonicalPath(root));
+});
+
+test("a runtime override elsewhere in the repository is refused from a nested package", (t) => {
+    const { root, member } = makeMonorepo(t);
+
+    // The sibling that used to pass: inside the repo, outside the nested package.
+    for (const cwd of [member, root]) {
+        assert.throws(
+            () => assertRuntimeRootLocation(join(root, ".memwal-runtime"), { cwd }),
+            /inside the project tree/,
+            `<repo>/.memwal-runtime must be refused when launching from ${cwd}`,
+        );
+        assert.throws(
+            () => assertRuntimeRootLocation(join(root, "apps", "other", "runtime"), { cwd }),
+            /inside the project tree/,
+            `a sibling package's runtime dir must be refused when launching from ${cwd}`,
+        );
+    }
+});
+
+test("a legitimate runtime outside the repository still works from a nested package", (t) => {
+    const { member } = makeMonorepo(t);
+    const outside = mkdtempSync(join(tmpdir(), "memwal-outside-nested-"));
+    t.after(() => rmSync(outside, { recursive: true, force: true }));
+
+    assert.equal(assertRuntimeRootLocation(outside, { cwd: member }), resolve(outside));
+});
+
+test("a worktree .git file marks the boundary the same way a directory does", (t) => {
+    // `git worktree add` and submodules write `.git` as a *file* containing a
+    // gitdir: pointer. existsSync covers both, but the walk has to keep going past
+    // the nested package to reach it.
+    const root = mkdtempSync(join(tmpdir(), "memwal-worktree-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(join(root, ".git"), "gitdir: /elsewhere/.git/worktrees/wt\n");
+    const member = join(root, "packages", "inner");
+    mkdirSync(member, { recursive: true });
+    writeFileSync(join(member, "package.json"), JSON.stringify({ name: "inner" }));
+
+    assert.equal(canonicalPath(enclosingProjectRoot(member)), canonicalPath(root));
+    assert.throws(
+        () => assertRuntimeRootLocation(join(root, ".memwal-runtime"), { cwd: member }),
+        /inside the project tree/,
+    );
+});
+
+test("a package tree with no repository around it is still a boundary", (t) => {
+    // No .git anywhere: fall back to the outermost package.json rather than
+    // treating the innermost one as the project.
+    const root = mkdtempSync(join(tmpdir(), "memwal-nogit-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "outer" }));
+    const member = join(root, "packages", "inner");
+    mkdirSync(member, { recursive: true });
+    writeFileSync(join(member, "package.json"), JSON.stringify({ name: "inner" }));
+
+    assert.equal(canonicalPath(enclosingProjectRoot(member)), canonicalPath(root));
+    assert.throws(
+        () => assertRuntimeRootLocation(join(root, "runtime"), { cwd: member }),
+        /inside the project tree/,
+    );
+});
+
+test("the boundary is the same when the project is reached through a symlink", (t) => {
+    if (!POSIX) return;
+    const { root, member } = makeMonorepo(t);
+    const link = mkdtempSync(join(tmpdir(), "memwal-symlink-"));
+    t.after(() => rmSync(link, { recursive: true, force: true }));
+    const aliased = join(link, "alias");
+    symlinkSync(member, aliased);
+
+    // Reaching apps/web by another spelling must not change which tree owns it.
+    assert.equal(canonicalPath(enclosingProjectRoot(aliased)), canonicalPath(root));
+    assert.throws(
+        () => assertRuntimeRootLocation(join(root, ".memwal-runtime"), { cwd: aliased }),
+        /inside the project tree/,
+    );
+});
+
+test("a marker at the filesystem root does not swallow the real checkout", () => {
+    // Container images often carry /package.json or /.git (WORKDIR /). Walking to
+    // the outermost marker picked "/" over the checkout under it, and a project of
+    // "/" turns the location guard off. The root is excluded like home is.
+    const present = new Set(["/package.json", "/.git", "/srv/app/.git", "/srv/app/package.json"]);
+    const exists = (path) => present.has(path);
+
+    assert.equal(
+        enclosingProjectRoot("/srv/app/packages/web", "/home/nobody", { exists }),
+        "/srv/app",
+    );
+});
+
+test("a marker only at the filesystem root means no project, not a project of /", () => {
+    const exists = (path) => path === "/package.json" || path === "/.git";
+
+    // cwd itself becomes the project: the guard still has something to compare.
+    assert.equal(
+        enclosingProjectRoot("/srv/app", "/home/nobody", { exists }),
+        "/srv/app",
     );
 });
 

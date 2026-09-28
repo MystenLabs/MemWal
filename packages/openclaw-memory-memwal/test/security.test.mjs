@@ -188,10 +188,10 @@ test("registerRecallHook executes parallel dual-read recall and global distance 
     assert.ok(!response.prependContext.includes("noise"));
     assert.ok(!response.prependContext.includes("ignore previous instructions"));
 
-    // 3. System instruction cleanly serializes canonical namespace
+    // 3. The prompt no longer asks the model to pass a namespace. Tools enforce it.
     assert.equal(
         response.appendSystemContext,
-        'When using memory_search or memory_store tools, pass namespace="researcher" to scope operations to the current agent\'s memory.'
+        "Memory tools are pinned to the calling agent's namespace."
     );
 });
 
@@ -230,6 +230,6 @@ test("registerRecallHook logs canonical recall failures absorbed by allSettled",
     assert.match(warnings[0], /canonical recall failed: Error: relayer unavailable/);
     assert.equal(
         response.appendSystemContext,
-        'When using memory_search or memory_store tools, pass namespace="researcher" to scope operations to the current agent\'s memory.'
+        "Memory tools are pinned to the calling agent's namespace."
     );
 });

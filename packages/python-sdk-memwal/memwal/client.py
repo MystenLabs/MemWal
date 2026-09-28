@@ -170,16 +170,55 @@ async def _sleep_ms(ms: int) -> None:
 
 
 def _polling_delay_ms(base_ms: int, attempt: int) -> int:
-    """Jittered exponential backoff matching TS ``pollingDelayMs``.
+    """Same formula as TS ``pollingDelayMs``."""
 
-    base * 1.5^min(attempt, 6), capped at 10s, with ±25% jitter so
-    concurrent clients don't synchronise.
-    """
-
+    if attempt == 0:
+        return 0
     base = max(100, base_ms)
-    capped = min(10_000, base * (1.5 ** min(attempt, 6)))
+    ceiling = max(5000, base)
+    capped = min(ceiling, base * (1.5 ** min(attempt - 1, 6)))
     jitter = 0.75 + random.random() * 0.5
     return int(capped * jitter)
+
+
+def _positive_retry_ms(raw: object) -> Optional[int]:
+    try:
+        seconds = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
+        return None
+    return int(seconds * 1000)
+
+
+def _retry_after_ms(err: "_HttpStatusError") -> int:
+    """Retry-After seconds, else JSON ``retry_after_seconds``, in ms."""
+
+    if err.retry_after:
+        header_ms = _positive_retry_ms(err.retry_after)
+        if header_ms is not None:
+            return header_ms
+    if not err.body:
+        return 0
+    try:
+        payload = json.loads(err.body)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    return _positive_retry_ms(payload.get("retry_after_seconds")) or 0
+
+
+def _clamped_retry_after_ms(err: "_HttpStatusError", deadline_ms: int) -> int:
+    """Clamp Retry-After to the time left. 0 means use the normal curve."""
+
+    delay = _retry_after_ms(err)
+    if delay <= 0:
+        return 0
+    remaining = deadline_ms - _now_ms()
+    if remaining <= 0:
+        return 0
+    return min(delay, remaining)
 
 
 def _is_transient_polling_status(status: int) -> bool:
@@ -423,17 +462,23 @@ class MemWal:
         - Accepts 200 + 404 from the status endpoint and dispatches on
           ``status`` field (404 / ``status == "not_found"`` raises).
         - Transient HTTP errors (429, 5xx, network drop) are retried until
-          the timeout, not surfaced as polling failures.
-        - Backoff is jittered exponential (1.5x cap 10s, ±25%) to avoid
-          thundering-herd at scale.
+          the timeout, not surfaced as polling failures. A 429 waits out
+          Retry-After within the timeout; the timeout error says so.
+        - First poll is immediate; later polls grow 1.5x toward 5s.
         """
 
         deadline_ms = _now_ms() + timeout_ms
         attempt = 0
+        saw_rate_limit = False
+        retry_after_ms = 0
 
         while _now_ms() < deadline_ms:
-            await _sleep_ms(_polling_delay_ms(poll_interval_ms, attempt))
-            attempt += 1
+            if retry_after_ms > 0:
+                await _sleep_ms(retry_after_ms)
+            else:
+                await _sleep_ms(_polling_delay_ms(poll_interval_ms, attempt))
+                attempt += 1
+            retry_after_ms = 0
 
             try:
                 data = await self._signed_request(
@@ -444,6 +489,9 @@ class MemWal:
                 )
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
+                    if err.status == 429:
+                        saw_rate_limit = True
+                        retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
                     continue
                 raise
 
@@ -466,7 +514,7 @@ class MemWal:
 
             # pending / running / uploaded — keep polling.
 
-        raise MemWalRememberJobTimeout(job_id=job_id, timeout_ms=timeout_ms)
+        raise _remember_job_timeout(job_id, timeout_ms, saw_rate_limit)
 
     async def remember_and_wait(
         self,
@@ -612,37 +660,104 @@ class MemWal:
         }
         pending: List[str] = list(job_ids)
         attempt = 0
+        saw_rate_limit = False
+        retry_after_ms = 0
+        last_seen: Dict[str, RememberBulkStatusItem] = {}
+        last_refusal: Optional[int] = None
+        # Whether any status read got through. An item missing from an answer
+        # was not refused, so it must not be reported as if it had been.
+        answered = False
+
+        def settle(item: RememberBulkStatusItem) -> bool:
+            last_seen[item.job_id] = item
+            if item.status == "done":
+                results[item.job_id] = RememberBulkItemResult(
+                    id=item.job_id,
+                    blob_id=item.blob_id or "",
+                    status="done",
+                    error=None,
+                )
+                return True
+            if item.status in ("failed", "not_found"):
+                results[item.job_id] = RememberBulkItemResult(
+                    id=item.job_id,
+                    blob_id=item.blob_id or "",
+                    status="failed",
+                    error=item.error,
+                )
+                return True
+            return False
 
         while pending and _now_ms() < deadline_ms:
-            await _sleep_ms(_polling_delay_ms(opts.poll_interval_ms, attempt))
-            attempt += 1
+            if retry_after_ms > 0:
+                await _sleep_ms(retry_after_ms)
+            else:
+                await _sleep_ms(_polling_delay_ms(opts.poll_interval_ms, attempt))
+                attempt += 1
+            retry_after_ms = 0
 
             try:
                 batch = await self.get_remember_bulk_status(pending)
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
+                    last_refusal = err.status
+                    if err.status == 429:
+                        saw_rate_limit = True
+                        retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
                     continue
                 raise
+            answered = True
 
-            terminal_ids: Set[str] = set()
-            for item in batch.results:
-                if item.status == "done":
-                    results[item.job_id] = RememberBulkItemResult(
-                        id=item.job_id,
-                        blob_id=item.blob_id or "",
-                        status="done",
-                        error=None,
-                    )
-                    terminal_ids.add(item.job_id)
-                elif item.status in ("failed", "not_found"):
-                    results[item.job_id] = RememberBulkItemResult(
-                        id=item.job_id,
-                        blob_id=item.blob_id or "",
-                        status="failed",
-                        error=item.error,
-                    )
-                    terminal_ids.add(item.job_id)
+            terminal_ids: Set[str] = {
+                item.job_id
+                for item in batch.results
+                if item.job_id in pending and settle(item)
+            }
             pending = [jid for jid in pending if jid not in terminal_ids]
+
+        if opts.timeout_ms > 0 and len(pending) == len(job_ids) and not last_seen:
+            # Nothing settled and nothing was seen: the polls may all have been
+            # refused. Confirm with one direct read before reporting anything.
+            try:
+                probed = await self.get_remember_bulk_status(list(job_ids))
+            except _HttpStatusError as err:
+                if err.status == 429:
+                    # Header first, else the body's retry_after_seconds, so a
+                    # proxy that strips Retry-After does not lose the hint.
+                    wait_ms = _retry_after_ms(err)
+                    retry_after = f"{wait_ms / 1000:g}" if wait_ms else None
+                    raise MemWalRateLimited(job_ids, retry_after) from err
+                # Any other probe failure is not evidence about the jobs.
+            else:
+                answered = True
+                settled = {
+                    item.job_id
+                    for item in probed.results
+                    if item.job_id in pending and settle(item)
+                }
+                pending = [jid for jid in pending if jid not in settled]
+
+        for job_id in pending:
+            seen = last_seen.get(job_id)
+            if seen is not None:
+                suffix = f": {_redact_internal_urls(seen.error)}" if seen.error else ""
+                error = f"still {seen.status} after {opts.timeout_ms}ms{suffix}"
+            elif answered:
+                error = "not in the relayer's status answer; this item may not be stored"
+            elif last_refusal is not None:
+                error = (
+                    f"no status read got through (last poll: HTTP {last_refusal}); "
+                    "this item may not be stored"
+                )
+            else:
+                error = f"polling timed out after {opts.timeout_ms}ms"
+            # Only the "no status read got through" message already names the 429.
+            names_rate_limit = seen is None and not answered and last_refusal == 429
+            if saw_rate_limit and not names_rate_limit:
+                error += "; wait hit a rate limit (429)"
+            results[job_id] = RememberBulkItemResult(
+                id=job_id, blob_id="", status="timeout", error=error
+            )
 
         ordered = [results[job_id] for job_id in job_ids]
         succeeded = sum(1 for r in ordered if r.status == "done")
@@ -1537,6 +1652,24 @@ class MemWalRememberJobFailed(MemWalError):
         self.error = error
 
 
+class MemWalRateLimited(MemWalError):
+    """Every status read for a bulk wait was rate-limited, the confirming read
+    included, so none of its writes could be confirmed (GH #967). Status reads
+    count against the same delegate-key budget as writes."""
+
+    def __init__(self, job_ids: Sequence[str], retry_after: Optional[str] = None) -> None:
+        wait = f" after ~{retry_after}s" if retry_after else ""
+        super().__init__(
+            f"Walrus Memory rate-limited every status read for this batch, so none of its "
+            f"{len(job_ids)} writes could be confirmed. Do not treat them as stored: check them "
+            f"with get_remember_bulk_status(job_ids){wait}. Status reads count against the same "
+            "delegate-key budget as writes."
+        )
+        self.status = 429
+        self.job_ids = list(job_ids)
+        self.retry_after = retry_after
+
+
 class MemWalRememberJobTimeout(MemWalError):
     """Polling loop exceeded the configured timeout."""
 
@@ -1547,6 +1680,15 @@ class MemWalRememberJobTimeout(MemWalError):
         self.status = 504
         self.job_id = job_id
         self.timeout_ms = timeout_ms
+
+
+def _remember_job_timeout(
+    job_id: str, timeout_ms: int, saw_rate_limit: bool
+) -> MemWalRememberJobTimeout:
+    exc = MemWalRememberJobTimeout(job_id, timeout_ms)
+    if saw_rate_limit:
+        exc.args = (f"{exc.args[0]}; wait hit a rate limit (429)",)
+    return exc
 
 
 async def _discard_http_client(memwal: MemWal) -> None:

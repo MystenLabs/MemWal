@@ -54,7 +54,7 @@ async def main():
     print(result.blob_id)
 
     # Recall memories
-    matches = await memwal.recall(RecallParams(query="food allergies", limit=10, max_distance=0.7))
+    matches = await memwal.recall(RecallParams(query="food allergies", limit=10, max_distance=0.8))
     for memory in matches.results:
         print(f"{memory.text} (relevance: {1 - memory.distance:.2f})")
 
@@ -67,6 +67,10 @@ async def main():
 
 asyncio.run(main())
 ```
+
+`0.8` is a starting point for the distance cutoff. Calibrate `max_distance`
+against your own memories and query phrasing: lower values reduce noise, while
+higher values preserve more relevant matches.
 
 ### Sync
 

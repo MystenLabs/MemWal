@@ -161,9 +161,9 @@ The `before_prompt_build` hook fires before the prompt is assembled for the LLM:
 3. **Search Walrus Memory** — `recall(prompt, maxResults, namespace)` returns memories ranked by vector distance
 4. **Filter results** — drop memories below the relevance threshold and any that match prompt injection patterns
 5. **HTML-escape** — prevent stored text containing `<system>` or similar tags from altering prompt structure
-6. **Inject into prompt** — return `prependContext` (the memories) and `appendSystemContext` (namespace instruction for tools)
+6. **Inject into prompt** — return `prependContext` (the memories) and `appendSystemContext` (a note that memory tools are pinned to this agent)
 
-The namespace instruction is injected in **all code paths** — even when no memories are found or recall fails. This ensures that if the LLM calls tools, they scope to the correct agent's memory space.
+`memory_search` and `memory_store` are pinned to the calling agent's namespace inside the plugin. The note is not what enforces isolation. An omitted namespace uses that agent. A supplied namespace is rejected unless it is that namespace or the agent's legacy namespace.
 
 ## Auto-Capture in Detail
 
