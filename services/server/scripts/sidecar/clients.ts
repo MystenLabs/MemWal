@@ -49,13 +49,46 @@ export const suiGraphqlClient = new SuiGraphQLClient({
     fetch: archivalFetch,
 });
 
-export function createSealClient(): SealClient {
+export function createSealClient(options?: { verifyKeyServers?: boolean }): SealClient {
     return new SealClient({
         suiClient: suiClient as any,
         serverConfigs: SEAL_SERVER_CONFIGS,
-        verifyKeyServers: true,
+        verifyKeyServers: options?.verifyKeyServers ?? true,
         timeout: SEAL_KEY_SERVER_TIMEOUT_MS,
     });
+}
+
+// PoP checks hit every key server and the SDK says to run them rarely. Doing
+// them on every decrypt waits out a slow server (the 25s key timeout) before
+// fetchKeys even starts, which is how a busy sidecar misses the recall deadline.
+const KEY_SERVER_TRUST_TTL_MS = 5 * 60 * 1000;
+let keyServersTrustedUntilMs = 0;
+let keyServerTrust: Promise<void> | null = null;
+
+export function resetSealKeyServerTrustForTests(): void {
+    keyServersTrustedUntilMs = 0;
+    keyServerTrust = null;
+}
+
+// Fresh client per decrypt: the derived-key cache is not scoped to the
+// SessionKey. Trust in the key-server set is process-wide and refreshed on
+// the TTL, so a request does not repeat the PoP round trip.
+export async function createDecryptSealClient(): Promise<SealClient> {
+    if (Date.now() >= keyServersTrustedUntilMs) {
+        if (!keyServerTrust) {
+            const verifier = createSealClient({ verifyKeyServers: true });
+            keyServerTrust = verifier.getKeyServers().then(() => {
+                keyServersTrustedUntilMs = Date.now() + KEY_SERVER_TRUST_TTL_MS;
+            });
+        }
+        const pending = keyServerTrust;
+        try {
+            await pending;
+        } finally {
+            if (keyServerTrust === pending) keyServerTrust = null;
+        }
+    }
+    return createSealClient({ verifyKeyServers: false });
 }
 
 // Encryption caches public key-server metadata only. Decrypt routes must use a

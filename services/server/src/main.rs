@@ -830,6 +830,90 @@ async fn apalis_schema_ready(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
     .await
 }
 
+async fn wait_for_local_health(client: &reqwest::Client, url: &str, label: &str) -> bool {
+    for attempt in 1..=30 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("  {}: ready (attempt {})", label, attempt);
+                return true;
+            }
+            _ => {
+                if attempt % 5 == 0 {
+                    tracing::debug!("  {}: waiting... (attempt {})", label, attempt);
+                }
+            }
+        }
+    }
+    false
+}
+
+async fn health_ok(client: &reqwest::Client, url: &str, timeout: std::time::Duration) -> bool {
+    match client.get(url).timeout(timeout).send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(unix)]
+const SIDECAR_SIGTERM: i32 = 15;
+#[cfg(unix)]
+const SIDECAR_SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// Signal every process in the sidecar group. The leader pid is the group id
+/// because the child is spawned with `process_group(0)`. `npx` is not the
+/// Node process, and this image has no `kill` binary, so a shell-out cannot
+/// reach the seal worker.
+#[cfg(unix)]
+fn signal_sidecar_group(pid: u32, sig: i32) -> bool {
+    let delivered = unsafe { kill(-(pid as i32), sig) == 0 };
+    if !delivered {
+        let err = std::io::Error::last_os_error();
+        // ESRCH: the group is already gone.
+        if err.raw_os_error() != Some(3) {
+            tracing::error!("signal {sig} to sidecar process group {pid} failed: {err}");
+        }
+    }
+    delivered
+}
+
+#[cfg(unix)]
+fn terminate_sidecar_group(pid: u32) {
+    signal_sidecar_group(pid, SIDECAR_SIGTERM);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    signal_sidecar_group(pid, SIDECAR_SIGKILL);
+}
+
+async fn stop_sidecar_child(child: &mut tokio::process::Child) {
+    let Some(pid) = child.id() else {
+        return;
+    };
+    #[cfg(unix)]
+    {
+        signal_sidecar_group(pid, SIDECAR_SIGTERM);
+        match tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await {
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        // The leader can exit and leave the seal worker in the group.
+        signal_sidecar_group(pid, SIDECAR_SIGKILL);
+        if child.id().is_some() {
+            let _ = child.wait().await;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        child.kill().await.ok();
+        let _ = child.wait().await;
+        let _ = pid;
+    }
+}
+
 #[tokio::main]
 async fn main() {
     #[cfg(all(feature = "ci-offline-onchain", debug_assertions))]
@@ -950,12 +1034,27 @@ async fn main() {
         .env("MEMWAL_RELAYER_URL", &relayer_urls.dial)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
+    // One group for npx, tsx, the sidecar, and the forked seal worker.
+    // Signaling the group does not depend on /bin/kill or on Node's handler.
+    #[cfg(unix)]
+    sidecar_command.process_group(0);
     if let Some(public_relayer_url) = &relayer_urls.public {
         sidecar_command.env("MEMWAL_PUBLIC_RELAYER_URL", public_relayer_url);
+    }
+    let seal_url = config.seal_sidecar_url.clone();
+    let seal_plan = crate::types::plan_seal_deployment_from_env(&config.sidecar_url);
+    if let Some((seal_host, seal_port)) = seal_plan.bind {
+        sidecar_command.env("SIDECAR_SEAL_HOST", &seal_host);
+        sidecar_command.env("SIDECAR_SEAL_PORT", seal_port.to_string());
+        sidecar_command.env("SIDECAR_SEAL_LISTENER", "1");
+        tracing::info!("  seal listener: {}", seal_url);
+    } else {
+        sidecar_command.env("SIDECAR_SEAL_LISTENER", "0");
     }
     let mut sidecar_child = sidecar_command
         .spawn()
         .expect("Failed to start TS sidecar. Is Node.js installed?");
+    let sidecar_group = sidecar_child.id();
 
     // Wait for sidecar to be ready (health check with retry)
     // Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
@@ -964,25 +1063,20 @@ async fn main() {
         .build()
         .expect("Failed to build HTTP client");
     let health_url = format!("{}/health", sidecar_url);
-    let mut ready = false;
-    for attempt in 1..=30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        match http_client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("  sidecar: ready (attempt {})", attempt);
-                ready = true;
-                break;
-            }
-            _ => {
-                if attempt % 5 == 0 {
-                    tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
-                }
-            }
-        }
-    }
-    if !ready {
-        sidecar_child.kill().await.ok();
+    if !wait_for_local_health(&http_client, &health_url, "sidecar").await {
+        stop_sidecar_child(&mut sidecar_child).await;
         panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
+    }
+    let seal_health_url = if seal_url.trim_end_matches('/') != sidecar_url.trim_end_matches('/') {
+        Some(format!("{}/health", seal_url.trim_end_matches('/')))
+    } else {
+        None
+    };
+    if let Some(seal_health) = &seal_health_url {
+        if !wait_for_local_health(&http_client, seal_health, "seal listener").await {
+            stop_sidecar_child(&mut sidecar_child).await;
+            panic!("Seal listener failed to start after 15s. Recall would block behind uploads.");
+        }
     }
 
     // Keep a cheap heartbeat in the Rust logs so operators can distinguish
@@ -1000,49 +1094,48 @@ async fn main() {
     );
     let sidecar_watch_client = http_client.clone();
     let sidecar_watch_url = health_url.clone();
+    let seal_watch_url = seal_health_url.clone();
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(sidecar_watch_interval_secs));
         let mut consecutive_failures = 0u32;
+        let timeout = std::time::Duration::from_secs(sidecar_watch_timeout_secs);
         loop {
             interval.tick().await;
-            match sidecar_watch_client
-                .get(&sidecar_watch_url)
-                .timeout(std::time::Duration::from_secs(sidecar_watch_timeout_secs))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    if consecutive_failures > 0 {
-                        tracing::info!(
-                            "  sidecar: health recovered after {} failed check(s)",
-                            consecutive_failures
-                        );
-                    }
-                    consecutive_failures = 0;
-                }
-                Ok(resp) => {
-                    consecutive_failures += 1;
-                    tracing::error!(
-                        "  sidecar: health check failed status={} consecutive_failures={}",
-                        resp.status(),
+            let upload_ok =
+                health_ok(&sidecar_watch_client, &sidecar_watch_url, timeout).await;
+            let seal_ok = match &seal_watch_url {
+                Some(url) => health_ok(&sidecar_watch_client, url, timeout).await,
+                None => true,
+            };
+            if upload_ok && seal_ok {
+                if consecutive_failures > 0 {
+                    tracing::info!(
+                        "  sidecar: health recovered after {} failed check(s)",
                         consecutive_failures
                     );
                 }
-                Err(e) => {
-                    consecutive_failures += 1;
-                    tracing::error!(
-                        "  sidecar: health check error consecutive_failures={} error={}",
-                        consecutive_failures,
-                        e
-                    );
-                }
+                consecutive_failures = 0;
+            } else {
+                consecutive_failures += 1;
+                tracing::error!(
+                    "  sidecar: health check failed upload_ok={} seal_ok={} consecutive_failures={}",
+                    upload_ok,
+                    seal_ok,
+                    consecutive_failures
+                );
             }
             if consecutive_failures >= sidecar_watch_max_failures {
                 tracing::error!(
                     "  sidecar: unhealthy for {} consecutive check(s); exiting relayer for supervisor restart",
                     consecutive_failures
                 );
+                if let Some(pid) = sidecar_group {
+                    #[cfg(unix)]
+                    terminate_sidecar_group(pid);
+                    #[cfg(not(unix))]
+                    let _ = pid;
+                }
                 std::process::exit(1);
             }
         }
@@ -2392,8 +2485,9 @@ async fn main() {
     .await
     .expect("Server failed");
 
-    // Cleanup sidecar after shutdown
-    sidecar_child.kill().await.ok();
+    // Cleanup sidecar after shutdown. SIGTERM lets it stop the seal child;
+    // SIGKILL would leave that child listening.
+    stop_sidecar_child(&mut sidecar_child).await;
     tracing::info!("sidecar stopped");
     telemetry.shutdown();
 }

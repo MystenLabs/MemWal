@@ -204,7 +204,7 @@ fn spawn_prepare_remember_job(
                 let embed_fut = state.embedder.embed(&embed_input);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
-                    &state.config.sidecar_url,
+                    &state.config.seal_sidecar_url,
                     state.config.sidecar_secret.as_deref(),
                     text.as_bytes(),
                     &owner,
@@ -362,7 +362,7 @@ fn spawn_prepare_bulk_remember_job(
                             let embed_fut = state.embedder.embed(&embed_input);
                             let encrypt_fut = crate::storage::seal::seal_encrypt(
                                 &state.http_client,
-                                &state.config.sidecar_url,
+                                &state.config.seal_sidecar_url,
                                 state.config.sidecar_secret.as_deref(),
                                 item.text.as_bytes(),
                                 &owner,
@@ -2359,6 +2359,7 @@ mod tests {
             registry_id: "0xregistry".to_string(),
             registry_scan_max_pages: crate::types::DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9003".to_string(),
+            seal_sidecar_url: "http://localhost:9004".to_string(),
             sidecar_secret: None,
             seal_expected_committee_identity: None,
             rate_limit: crate::rate_limit::RateLimitConfig::default(),

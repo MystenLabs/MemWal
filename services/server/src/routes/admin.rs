@@ -1099,7 +1099,7 @@ async fn restore_unbounded(
     let decrypt_results: Vec<RestoreDecrypt> = stream::iter(downloaded)
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
+            let sidecar_url = state.config.seal_sidecar_url.clone();
             let sidecar_secret = state.config.sidecar_secret.clone();
             let credential = credential.clone();
             let package_id = state.config.package_id.clone();

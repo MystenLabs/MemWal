@@ -30,7 +30,7 @@ import {
   SIDECAR_ENABLE_MIGRATION_SEAL_ROUTE,
 } from "../config.js";
 import { sealCommitteeIdentityMatches, type SealCommitteeIdentity } from "../../seal-config.js";
-import { createSealClient, sealEncryptClient, suiClient } from "../clients.js";
+import { createDecryptSealClient, sealEncryptClient, suiClient } from "../clients.js";
 import { buildSealEncryptId, fetchSealEncryptIdentity, type SealEncryptPurpose } from "../seal-identity.js";
 import {
   buildSealApproveTx,
@@ -330,7 +330,7 @@ export function registerSealRoutes(app: Express, policy = DEFAULT_SEAL_ROUTE_POL
             ]);
 
         phase = "fetch_keys";
-            const sealClient = createSealClient();
+            const sealClient = await createDecryptSealClient();
         // Fetch keys from key servers
         await sealClient.fetchKeys({
           ids: [fullId],
@@ -419,7 +419,7 @@ export function registerSealRoutes(app: Express, policy = DEFAULT_SEAL_ROUTE_POL
         );
 
         phase = "fetch_keys";
-            const sealClient = createSealClient();
+            const sealClient = await createDecryptSealClient();
         // ONE fetchKeys call for ALL IDs
         try {
           await sealClient.fetchKeys({

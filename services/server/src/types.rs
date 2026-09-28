@@ -484,8 +484,11 @@ pub struct Config {
     /// Bounds the RPC fan-out an unknown delegate key can trigger; clients
     /// past the cap must send the x-account-id hint instead.
     pub registry_scan_max_pages: u32,
-    /// URL of the SEAL/Walrus TS sidecar HTTP server
+    /// URL of the Walrus upload sidecar. Upload work stays here.
     pub sidecar_url: String,
+    /// Seal encrypt/decrypt. A different port from `sidecar_url` so recall
+    /// does not wait on the upload process event loop.
+    pub seal_sidecar_url: String,
     /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
     pub sidecar_secret: Option<String>,
     /// Reviewed SEAL committee identity pinned on every encryption request.
@@ -611,6 +614,364 @@ pub struct Config {
     pub auth_max_clock_drift_secs: i64,
 }
 
+/// Where recall dials seal, and whether this process should fork a listener.
+/// `bind` is a literal address. The name `localhost` is never used: on some
+/// hosts it resolves only to `::1`, so a dialer using `127.0.0.1` is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealDeployment {
+    pub dial_url: String,
+    pub bind: Option<(String, u16)>,
+}
+
+pub fn plan_seal_deployment(
+    sidecar_url: &str,
+    explicit: Option<&str>,
+    bind_host_env: Option<&str>,
+    listener_disabled: bool,
+    writer_only: bool,
+) -> SealDeployment {
+    let mut planned = plan_seal_deployment_raw(
+        sidecar_url,
+        explicit,
+        bind_host_env,
+        listener_disabled,
+        writer_only,
+    );
+    if let Some(url) = normalize_parsed_url(&planned.dial_url) {
+        planned.dial_url = canonical_dial_url(&url);
+    }
+    planned
+}
+
+fn plan_seal_deployment_raw(
+    sidecar_url: &str,
+    explicit: Option<&str>,
+    bind_host_env: Option<&str>,
+    listener_disabled: bool,
+    writer_only: bool,
+) -> SealDeployment {
+    if let Some(raw) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        if normalize_parsed_url(raw).is_none() {
+            panic!("SIDECAR_SEAL_URL is not a valid absolute URL: {raw}");
+        }
+    }
+    let fallback = SealDeployment {
+        dial_url: canonical_dial(sidecar_url),
+        bind: None,
+    };
+    if writer_only || listener_disabled {
+        if let Some(raw) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(url) = normalize_parsed_url(raw) {
+                return SealDeployment {
+                    dial_url: canonical_dial_url(&url),
+                    bind: None,
+                };
+            }
+        }
+        return fallback;
+    }
+    if let Some(raw) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        let url = normalize_parsed_url(raw).expect("SIDECAR_SEAL_URL checked above");
+        return deployment_for_url(&url, bind_host_env, sidecar_url);
+    }
+    let Some(url) = normalize_parsed_url(sidecar_url) else {
+        return fallback;
+    };
+    if !is_loopback_host(url.host_str().unwrap_or("")) {
+        return SealDeployment {
+            dial_url: base_url_string(&url),
+            bind: None,
+        };
+    }
+    let Some(port) = url.port() else {
+        return SealDeployment {
+            dial_url: base_url_string(&url),
+            bind: None,
+        };
+    };
+    let next = port.saturating_add(1);
+    if next == port {
+        return SealDeployment {
+            dial_url: base_url_string(&url),
+            bind: None,
+        };
+    }
+    let host = canonical_bind_host(url.host_str().unwrap_or(""), bind_host_env);
+    let dial_host = dial_host_for(&host);
+    SealDeployment {
+        dial_url: origin(url.scheme(), &dial_host, next),
+        bind: Some((host, next)),
+    }
+}
+
+pub fn plan_seal_deployment_from_env(sidecar_url: &str) -> SealDeployment {
+    let explicit = std::env::var("SIDECAR_SEAL_URL").ok();
+    let bind_host = std::env::var("SIDECAR_HOST").ok();
+    let listener_disabled = std::env::var("SIDECAR_SEAL_LISTENER").ok().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    });
+    let writer_only = std::env::var("SIDECAR_ROUTE_MODE")
+        .ok()
+        .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("writer"));
+    plan_seal_deployment(
+        sidecar_url,
+        explicit.as_deref(),
+        bind_host.as_deref(),
+        listener_disabled,
+        writer_only,
+    )
+}
+
+fn deployment_for_url(
+    url: &url::Url,
+    bind_host_env: Option<&str>,
+    sidecar_url: &str,
+) -> SealDeployment {
+    let dial_fallback = base_url_string(url);
+    let Some(host) = url.host_str() else {
+        return SealDeployment {
+            dial_url: dial_fallback,
+            bind: None,
+        };
+    };
+    if !is_loopback_host(host) {
+        return SealDeployment {
+            dial_url: dial_fallback,
+            bind: None,
+        };
+    }
+    let Some(port) = url.port() else {
+        return SealDeployment {
+            dial_url: dial_fallback,
+            bind: None,
+        };
+    };
+    if let Some(sidecar) = normalize_parsed_url(sidecar_url) {
+        if sidecar.port() == Some(port) && sidecar.host_str().is_some_and(|item| is_loopback_host(item))
+        {
+            return SealDeployment {
+                dial_url: dial_fallback,
+                bind: None,
+            };
+        }
+    }
+    let bind_host = canonical_bind_host(host, bind_host_env);
+    let dial_host = dial_host_for(&bind_host);
+    SealDeployment {
+        dial_url: origin(url.scheme(), &dial_host, port),
+        bind: Some((bind_host, port)),
+    }
+}
+
+fn dial_host_for(bind_host: &str) -> String {
+    // Unspecified addresses accept a local dial but are not dial targets.
+    // `localhost` is only ::1 on some hosts, so a 127.0.0.1 dial is refused.
+    match bind_host {
+        "localhost" | "0.0.0.0" => "127.0.0.1".to_string(),
+        "::" | "[::]" => "::1".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn canonical_dial(raw: &str) -> String {
+    match normalize_parsed_url(raw) {
+        Some(url) => canonical_dial_url(&url),
+        None => raw.trim().trim_end_matches('/').to_string(),
+    }
+}
+
+fn canonical_dial_url(url: &url::Url) -> String {
+    let Some(host) = url.host_str() else {
+        return base_url_string(url);
+    };
+    let dial_host = dial_host_for(host);
+    match url.port_or_known_default() {
+        Some(port) if url.port().is_some() => origin(url.scheme(), &dial_host, port),
+        _ => {
+            let mut copy = url.clone();
+            if copy.set_host(Some(&dial_host)).is_err() {
+                return base_url_string(url);
+            }
+            base_url_string(&copy)
+        }
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn canonical_bind_host(url_host: &str, env_host: Option<&str>) -> String {
+    if let Some(env_host) = env_host.map(str::trim).filter(|value| !value.is_empty()) {
+        if env_host != "localhost" {
+            return env_host.to_string();
+        }
+    }
+    if url_host == "::1" || url_host == "[::1]" {
+        return "::1".to_string();
+    }
+    "127.0.0.1".to_string()
+}
+
+fn origin(scheme: &str, host: &str, port: u16) -> String {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.contains(':') {
+        format!("{scheme}://[{host}]:{port}")
+    } else {
+        format!("{scheme}://{host}:{port}")
+    }
+}
+
+fn normalize_parsed_url(raw: &str) -> Option<url::Url> {
+    url::Url::parse(raw.trim()).ok()
+}
+
+fn normalize_base_url(raw: &str) -> Option<String> {
+    normalize_parsed_url(raw).map(|url| base_url_string(&url))
+}
+
+fn base_url_string(url: &url::Url) -> String {
+    let mut copy = url.clone();
+    copy.set_path("");
+    copy.set_query(None);
+    copy.set_fragment(None);
+    copy.to_string().trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod seal_sidecar_url_tests {
+    use super::{plan_seal_deployment, SealDeployment};
+
+    fn plan(
+        sidecar: &str,
+        explicit: Option<&str>,
+        bind_host: Option<&str>,
+        listener_disabled: bool,
+        writer_only: bool,
+    ) -> SealDeployment {
+        plan_seal_deployment(
+            sidecar,
+            explicit,
+            bind_host,
+            listener_disabled,
+            writer_only,
+        )
+    }
+
+    #[test]
+    fn localhost_upload_url_binds_ipv4_loopback_on_the_next_port() {
+        assert_eq!(
+            plan("http://localhost:9000", None, None, false, false),
+            SealDeployment {
+                dial_url: "http://127.0.0.1:9001".into(),
+                bind: Some(("127.0.0.1".into(), 9001)),
+            }
+        );
+        assert_eq!(
+            plan("http://127.0.0.1:9000/", None, None, false, false).dial_url,
+            "http://127.0.0.1:9001"
+        );
+    }
+
+    #[test]
+    fn an_explicit_remote_url_is_dialed_and_not_bound() {
+        assert_eq!(
+            plan(
+                "http://127.0.0.1:9000",
+                Some("http://seal.internal:9100/"),
+                None,
+                false,
+                false,
+            ),
+            SealDeployment {
+                dial_url: "http://seal.internal:9100".into(),
+                bind: None,
+            }
+        );
+    }
+
+    #[test]
+    fn disabling_the_listener_or_writer_mode_does_not_fork() {
+        assert_eq!(
+            plan("http://localhost:9000", None, None, true, false),
+            SealDeployment {
+                dial_url: "http://127.0.0.1:9000".into(),
+                bind: None,
+            }
+        );
+        assert_eq!(
+            plan(
+                "http://127.0.0.1:9000",
+                Some("http://localhost:9100"),
+                None,
+                true,
+                false,
+            ),
+            SealDeployment {
+                dial_url: "http://127.0.0.1:9100".into(),
+                bind: None,
+            }
+        );
+        assert_eq!(
+            plan(
+                "http://127.0.0.1:9000",
+                Some("http://0.0.0.0:9100"),
+                None,
+                false,
+                true,
+            )
+            .dial_url,
+            "http://127.0.0.1:9100"
+        );
+        assert_eq!(
+            plan(
+                "http://127.0.0.1:9000",
+                Some("http://127.0.0.1:9100"),
+                None,
+                false,
+                true,
+            ),
+            SealDeployment {
+                dial_url: "http://127.0.0.1:9100".into(),
+                bind: None,
+            }
+        );
+    }
+
+    #[test]
+    fn ipv6_upload_url_moves_the_seal_port() {
+        assert_eq!(
+            plan("http://[::1]:9000", None, None, false, false),
+            SealDeployment {
+                dial_url: "http://[::1]:9001".into(),
+                bind: Some(("::1".into(), 9001)),
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "SIDECAR_SEAL_URL is not a valid absolute URL")]
+    fn an_unparseable_seal_url_refuses_to_boot() {
+        plan("http://127.0.0.1:9000", Some("not a url"), None, false, false);
+    }
+
+    #[test]
+    fn a_portless_origin_stays_put() {
+        assert_eq!(
+            plan("http://sidecar.internal", None, None, false, false).dial_url,
+            "http://sidecar.internal"
+        );
+        assert!(
+            plan("http://sidecar.internal", None, None, false, false)
+                .bind
+                .is_none()
+        );
+    }
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let network = std::env::var("SUI_NETWORK")
@@ -650,6 +1011,10 @@ impl Config {
                 "SEAL_EXPECTED_COMMITTEE_IDENTITY must be set when SEAL_REQUIRE_COMMITTEE_IDENTITY=true"
             );
         }
+
+        let sidecar_url = std::env::var("SIDECAR_URL")
+            .unwrap_or_else(|_| "http://localhost:9000".to_string());
+        let seal_sidecar_url = plan_seal_deployment_from_env(&sidecar_url).dial_url;
 
         Self {
             port: std::env::var("PORT")
@@ -702,8 +1067,8 @@ impl Config {
                 // clamp to at least one page.
                 .map(|v| v.max(1))
                 .unwrap_or(DEFAULT_REGISTRY_SCAN_MAX_PAGES),
-            sidecar_url: std::env::var("SIDECAR_URL")
-                .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+            sidecar_url,
+            seal_sidecar_url,
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             seal_expected_committee_identity,
             rate_limit: RateLimitConfig::from_env(),
@@ -2605,6 +2970,7 @@ mod tests {
             registry_id: "0x2".into(),
             registry_scan_max_pages: DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9000".into(),
+            seal_sidecar_url: "http://localhost:9001".into(),
             sidecar_secret: None,
             seal_expected_committee_identity: None,
             rate_limit: RateLimitConfig::default(),
