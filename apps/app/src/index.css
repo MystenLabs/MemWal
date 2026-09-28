@@ -10114,34 +10114,36 @@ h1, h2, h3 {
 }
 
 .dash-page .dashboard-confirm-dialog {
-  width: min(440px, 100%);
-  padding: 28px;
+  width: min(480px, 100%);
+  padding: 28px 28px 24px;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 24px;
-  border: 1px solid rgba(250, 248, 245, 0.1);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.08);
+  gap: 22px;
+  border: 1px solid #262b30;
+  border-radius: 6px;
+  background: #000000;
   color: #faf8f5;
-  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.55);
+  box-shadow: none;
   animation: dashboardConfirmDialogIn 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .dash-page .dashboard-confirm-copy h3 {
   margin: 0;
   color: #faf8f5;
-  font-size: 24px;
-  font-weight: 600;
-  line-height: 1.12;
+  font-family: Ratch, sans-serif;
+  font-size: 32px;
+  font-weight: 400;
+  line-height: 0.95;
   letter-spacing: 0;
 }
 
 .dash-page .dashboard-confirm-copy p {
-  margin: 10px 0 0;
-  color: #b8bbbe;
-  font-size: 18px;
+  margin: 14px 0 0;
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 16px;
   font-weight: 400;
-  line-height: 1.35;
+  line-height: 1.5;
 }
 
 .dash-page .dashboard-confirm-actions {
@@ -10150,36 +10152,61 @@ h1, h2, h3 {
   gap: 12px;
 }
 
+.dash-page .dashboard-confirm-actions .btn,
 .dash-page .dashboard-confirm-cancel,
 .dash-page .dashboard-confirm-remove {
-  min-height: 48px;
-  padding: 0 22px;
-  border-radius: 24px;
-  font-size: 16px;
-  font-weight: 500;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid #54575a;
+  border-radius: 26px;
+  background: transparent;
+  color: #faf8f5;
+  font-family: "Google Sans Code", var(--font-mono);
+  font-size: 14px;
+  font-weight: 400;
   line-height: 1;
-  letter-spacing: 0;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  box-shadow: none;
 }
 
-.dash-page .dashboard-confirm-cancel {
-  min-width: 104px;
+.dash-page .dashboard-confirm-actions .btn:hover:not(:disabled),
+.dash-page .dashboard-confirm-cancel:hover:not(:disabled) {
+  border-color: #faf8f5;
+  background: #faf8f5;
+  color: #000000;
 }
 
+.dash-page .dashboard-confirm-actions .btn-danger,
 .dash-page .dashboard-confirm-remove {
-  min-width: 112px;
-  border-color: #ff6b6b;
-  background: #ff6b6b;
-  color: #fff;
+  border-color: #ff9aa0;
+  background: transparent;
+  color: #ff9aa0;
 }
 
+.dash-page .dashboard-confirm-actions .btn-danger:hover:not(:disabled),
 .dash-page .dashboard-confirm-remove:hover:not(:disabled) {
-  border-color: #ff8f8f;
-  background: #ff8f8f;
-  color: #fff;
+  border-color: #ff9aa0;
+  background: #ff9aa0;
+  color: #000000;
 }
 
-.dash-page .dashboard-confirm-remove:disabled {
-  color: rgba(255, 255, 255, 0.72);
+.dash-page .dashboard-confirm-remove:disabled,
+.dash-page .dashboard-confirm-actions .btn:disabled {
+  color: #8f9294;
+}
+
+.dash-page .sd-preview-content {
+  margin-top: 16px;
+  padding: 16px 18px;
+  border: 1px solid #262b30;
+  border-radius: 6px;
+  background: #000000;
+  color: #faf8f5;
+  font-family: "Google Sans Code", var(--font-mono);
+  font-size: 14px;
+  font-weight: 300;
+  line-height: 1.5;
 }
 
 @keyframes dashboardConfirmBackdropIn {
@@ -10218,7 +10245,7 @@ h1, h2, h3 {
   }
 
   .dash-page .dashboard-confirm-copy h3 {
-    font-size: 24px;
+    font-size: 28px;
   }
 
   .dash-page .dashboard-confirm-copy p {
@@ -10230,6 +10257,7 @@ h1, h2, h3 {
     margin-top: 4px;
   }
 
+  .dash-page .dashboard-confirm-actions .btn,
   .dash-page .dashboard-confirm-cancel,
   .dash-page .dashboard-confirm-remove {
     width: 100%;
