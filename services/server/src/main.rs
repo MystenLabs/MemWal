@@ -552,6 +552,7 @@ mod mcp_rate_limit_tests {
             registry_id: "0xregistry".to_string(),
             registry_scan_max_pages: types::DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://127.0.0.1:9".to_string(),
+            seal_sidecar_url: "http://127.0.0.1:10".to_string(),
             sidecar_secret: None,
             seal_expected_committee_identity: None,
             rate_limit: rate_limit::RateLimitConfig::default(),
