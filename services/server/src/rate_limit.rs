@@ -401,6 +401,21 @@ fn rate_limiter_unavailable_response() -> Response {
 // Rate Limit Middleware
 // ============================================================
 
+/// One mainnet owner used for a local write benchmark. Request-rate buckets
+/// skip this address only. Storage quota still applies.
+const UNMETERED_OWNER_HEX: &str =
+    "158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7";
+
+pub(crate) fn owner_is_unmetered(owner: &str) -> bool {
+    let trimmed = owner.trim();
+    let hex = if trimmed.len() >= 2 && trimmed.as_bytes()[..2].eq_ignore_ascii_case(b"0x") {
+        &trimmed[2..]
+    } else {
+        trimmed
+    };
+    hex.eq_ignore_ascii_case(UNMETERED_OWNER_HEX)
+}
+
 /// Multi-layer rate limiting middleware for the write-path authenticated
 /// routes (`/api/*`, mounted on `protected_routes` in `main.rs`).
 ///
@@ -447,6 +462,9 @@ pub async fn rate_limit_middleware(
             return next.run(request).await;
         }
     };
+    if owner_is_unmetered(&auth.owner) {
+        return next.run(request).await;
+    }
 
     let config = &state.config.rate_limit;
     let mut redis = state.redis.clone();
@@ -684,6 +702,9 @@ pub async fn read_api_rate_limit_middleware(
             return next.run(request).await;
         }
     };
+    if owner_is_unmetered(&auth.owner) {
+        return next.run(request).await;
+    }
 
     let config = &state.config.read_api_rate_limit;
     let mut redis = state.redis.clone();
@@ -936,7 +957,7 @@ pub(crate) async fn check_restore_call_rate_limit(
     owner: &str,
 ) -> Result<(), AppError> {
     let limit = state.config.restore_requests_per_owner_per_minute;
-    if limit == 0 {
+    if limit == 0 || owner_is_unmetered(owner) {
         return Ok(());
     }
 
@@ -1085,7 +1106,7 @@ pub async fn charge_explicit_weight(
     weight: i64,
     _path: &str,
 ) -> Result<(), AppError> {
-    if weight <= 0 {
+    if weight <= 0 || owner_is_unmetered(&auth.owner) {
         return Ok(());
     }
 
@@ -1742,6 +1763,9 @@ pub async fn check_owner_token_owner_rate_limit(
     per_minute: i64,
     per_hour: i64,
 ) -> Result<SponsorRlResult, ()> {
+    if owner_is_unmetered(owner) {
+        return Ok(SponsorRlResult::Allowed);
+    }
     let now = chrono::Utc::now().timestamp_millis() as f64;
     let mut redis = state.redis.clone();
 
@@ -1810,6 +1834,20 @@ pub async fn check_owner_token_owner_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_owner_skips_rate_limits() {
+        assert!(owner_is_unmetered(
+            "0x158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7"
+        ));
+        assert!(owner_is_unmetered(
+            "158A78F06E4A85CDEF1A1F10BC30C41E4860C1A19F3B049A05098ACA588593E7"
+        ));
+        assert!(!owner_is_unmetered(
+            "0x158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e8"
+        ));
+        assert!(!owner_is_unmetered("0x158a78f0"));
+    }
 
     // ---- Path normalization ----
 
