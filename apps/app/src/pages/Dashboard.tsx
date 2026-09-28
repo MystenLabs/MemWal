@@ -14,7 +14,7 @@ import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useNavigate } from 'react-router-dom'
-import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react'
+import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
@@ -210,11 +210,11 @@ export default function Dashboard({
     /** Scroll to the delegate keys card once its first load finishes. Used by /keys (WALM-675). */
     autoScrollToKeys?: boolean
     /** Rendered from /keys (WALM-675) — separate from autoScrollToKeys, which
-     *  is false on an owner mismatch. Gates the "Back to Console" link next
-     *  to "Continue" on the delegate-key-ready block: that's where a Console
-     *  user actually finishes, after copying the key, per the 25 Sep decision
-     *  (Nikola/ducnmm) — the new-user /setup → /dashboard path keeps only the
-     *  nav link since COMG-1093 handles that return on the Console side. */
+     *  is false on an owner mismatch. Gates the account-ready dialog's "Back
+     *  to Console" button: that's where a Console user actually finishes,
+     *  after copying the key. The nav no longer carries its own Console
+     *  link, so the new-user /setup → /dashboard path has no return prompt
+     *  — COMG-1093 was expected to handle that return on the Console side. */
     fromKeys?: boolean
 }) {
     const currentAccount = useCurrentAccount()
@@ -451,8 +451,7 @@ export default function Dashboard({
     }, [newPrivateKey])
     const showAccountReadyDialog = Boolean(fromKeys && newPrivateKey && config.consoleUrl && !accountReadyDismissed)
     // Console reads `from=wm` to detect a return trip and refresh its link
-    // status (see console/frontend MemoryTabPanel.tsx) — only stamp it on
-    // the round-trip link, not the always-visible nav "Open Console" link.
+    // status (see console/frontend MemoryTabPanel.tsx).
     const consoleReturnUrl = config.consoleUrl
         ? `${config.consoleUrl}${config.consoleUrl.includes('?') ? '&' : '?'}from=wm`
         : ''
@@ -902,11 +901,6 @@ const result = await generateText({
                         <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
                     </Link>
                     <div className="nav-user">
-                        {config.consoleUrl && (
-                            <a href={config.consoleUrl} className="btn btn-secondary btn-sm">
-                                <ExternalLink size={12} /> Open Console
-                            </a>
-                        )}
                         <span className="nav-address">
                             {address.slice(0, 6)}...{address.slice(-4)}
                         </span>
