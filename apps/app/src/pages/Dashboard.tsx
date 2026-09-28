@@ -283,6 +283,7 @@ export default function Dashboard({
     const [keyError, setKeyError] = useState('')
     const [newPrivateKey, setNewPrivateKey] = useState<string | null>(null)
     const addKeyFormCloseTimerRef = useRef<number | null>(null)
+    const [accountReadyDismissed, setAccountReadyDismissed] = useState(false)
 
     // WalletSigner adapter — wraps dapp-kit hooks into SDK's WalletSigner interface
     const walletSigner = useMemo<WalletSigner | null>(() => {
@@ -443,6 +444,29 @@ export default function Dashboard({
         autoScrolledToKeysRef.current = true
         scrollToDelegateKeys()
     }, [autoScrollToKeys, isKeyListLoading, scrollToDelegateKeys])
+
+    // Re-arm the account-ready prompt for each freshly created key.
+    useEffect(() => {
+        if (newPrivateKey) setAccountReadyDismissed(false)
+    }, [newPrivateKey])
+    const showAccountReadyDialog = Boolean(fromKeys && newPrivateKey && config.consoleUrl && !accountReadyDismissed)
+    // Console reads `from=wm` to detect a return trip and refresh its link
+    // status (see console/frontend MemoryTabPanel.tsx) — only stamp it on
+    // the round-trip link, not the always-visible nav "Open Console" link.
+    const consoleReturnUrl = config.consoleUrl
+        ? `${config.consoleUrl}${config.consoleUrl.includes('?') ? '&' : '?'}from=wm`
+        : ''
+
+    useEffect(() => {
+        if (!showAccountReadyDialog) return undefined
+
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setAccountReadyDismissed(true)
+        }
+
+        window.addEventListener('keydown', closeOnEscape)
+        return () => window.removeEventListener('keydown', closeOnEscape)
+    }, [showAccountReadyDialog])
 
     useEffect(() => {
         setSelectedKeyPublicKeys((prev) => {
@@ -1354,11 +1378,6 @@ const result = await generateText({
                                     >
                                         Continue
                                     </button>
-                                    {fromKeys && config.consoleUrl && (
-                                        <a href={config.consoleUrl} className="btn btn-secondary btn-sm">
-                                            <ExternalLink size={12} /> Back to Console
-                                        </a>
-                                    )}
                                 </div>
                             </div>
                         </div>
@@ -1670,6 +1689,41 @@ const result = await generateText({
                                 >
                                     {removeConfirmBusy ? 'Removing...' : 'Remove'}
                                 </button>
+                            </div>
+                        </section>
+                    </div>
+                )}
+
+                {showAccountReadyDialog && (
+                    <div
+                        className="dashboard-confirm-backdrop"
+                        onMouseDown={(event) => {
+                            if (event.target === event.currentTarget) setAccountReadyDismissed(true)
+                        }}
+                    >
+                        <section
+                            className="dashboard-confirm-dialog dashboard-account-ready-dialog"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="dashboard-account-ready-title"
+                            aria-describedby="dashboard-account-ready-description"
+                        >
+                            <div className="dashboard-confirm-copy dashboard-account-ready-body">
+                                <h3 id="dashboard-account-ready-title">Your account is ready</h3>
+                                <p id="dashboard-account-ready-description">Finish connecting your account in Walrus Console.</p>
+                            </div>
+                            <div className="dashboard-confirm-actions dashboard-account-ready-actions">
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary dashboard-confirm-cancel"
+                                    onClick={() => setAccountReadyDismissed(true)}
+                                    autoFocus
+                                >
+                                    Cancel
+                                </button>
+                                <a href={consoleReturnUrl} className="btn btn-primary dashboard-account-ready-console">
+                                    Back to Console
+                                </a>
                             </div>
                         </section>
                     </div>
