@@ -13,7 +13,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, Github, MessageCircle, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
@@ -219,6 +219,7 @@ export default function Dashboard({
 }) {
     const currentAccount = useCurrentAccount()
     const navigate = useNavigate()
+    const location = useLocation()
     const { mutateAsync: disconnect } = useDisconnectWallet()
     const { mutateAsync: signAndExecuteTx } = useSponsoredTransaction()
     const { mutateAsync: signPersonalMsg } = useSignPersonalMessage()
@@ -284,6 +285,17 @@ export default function Dashboard({
     const [newPrivateKey, setNewPrivateKey] = useState<string | null>(null)
     const addKeyFormCloseTimerRef = useRef<number | null>(null)
     const [accountReadyDismissed, setAccountReadyDismissed] = useState(false)
+    // One-shot signal from SetupWizard's navigate() state — set only when the
+    // /setup visit carried Console's "Set up" (COMG-1081) `from` marker. Read
+    // once; a later re-render of this same mount must not re-trigger it.
+    const [fromConsoleSetup] = useState(() => Boolean(
+        (location.state as { fromConsoleSetup?: boolean } | null)?.fromConsoleSetup
+    ))
+    // Mint sets newPrivateKey (a fresh string each time, so the dismissal-
+    // reset effect below always re-fires). Revoke has no equivalent
+    // naturally-changing value, hence this separate flag, reset to false
+    // whenever the dialog is dismissed so a later revoke can re-trigger it.
+    const [justRemovedKeys, setJustRemovedKeys] = useState(false)
 
     // WalletSigner adapter — wraps dapp-kit hooks into SDK's WalletSigner interface
     const walletSigner = useMemo<WalletSigner | null>(() => {
@@ -449,7 +461,14 @@ export default function Dashboard({
     useEffect(() => {
         if (newPrivateKey) setAccountReadyDismissed(false)
     }, [newPrivateKey])
-    const showAccountReadyDialog = Boolean(fromKeys && newPrivateKey && config.consoleUrl && !accountReadyDismissed)
+    // Two distinct Console arrivals gate the same dialog: a key action
+    // (mint or revoke) from /keys (fromKeys), or a brand-new account that
+    // just finished /setup after coming from Console's "Set up"
+    // (fromConsoleSetup, 28 Sep update).
+    const showAccountReadyDialog = Boolean(
+        config.consoleUrl && !accountReadyDismissed &&
+        ((fromKeys && (newPrivateKey || justRemovedKeys)) || fromConsoleSetup)
+    )
     // Console reads `from=wm` to detect a return trip and refresh its link
     // status (see console/frontend MemoryTabPanel.tsx).
     const consoleReturnUrl = config.consoleUrl
@@ -727,6 +746,12 @@ export default function Dashboard({
             )
             await fetchOnChainKeys()
             trackEvent('delegate_key_remove_complete', removeEventPayload)
+            // Direct reset, not an effect keyed on justRemovedKeys — the flag
+            // can already be true from an earlier dismissed dialog, in which
+            // case setting it to true again wouldn't change the dependency
+            // and an effect-based reset would silently no-op.
+            setJustRemovedKeys(true)
+            setAccountReadyDismissed(false)
         } catch (err: unknown) {
             const msg = err instanceof Error
                 ? err.message

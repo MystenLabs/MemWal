@@ -18,7 +18,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { useDelegateKey } from '../App'
 import { SecretValueInput } from '../components/SecretValueInput'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { LogOut, Copy, TriangleAlert } from 'lucide-react'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
@@ -121,16 +121,22 @@ export default function SetupWizard() {
     const setupRunningRef = useRef(false)
     const address = currentAccount?.address || ''
     const isEnoki = getPersistedAuthMethod() === 'enoki'
+    // Console's "Set up" (COMG-1081) marks its outbound link this way, mirroring
+    // `from=wm` on the way back — see Dashboard.tsx's account-ready dialog.
+    const [searchParams] = useSearchParams()
+    const fromConsole = searchParams.get('from') === 'console'
 
     // ── Done: redirect to dashboard ──
     useEffect(() => {
         if (step === 'done') {
             sessionStorage.removeItem(AUTH_METHOD_KEY)
             const returnTo = consumePendingConnectPath()
-            const timer = setTimeout(() => navigate(returnTo || '/dashboard'), 1500)
+            const timer = setTimeout(() => navigate(returnTo || '/dashboard', {
+                state: !returnTo && fromConsole ? { fromConsoleSetup: true } : undefined,
+            }), 1500)
             return () => clearTimeout(timer)
         }
-    }, [step, navigate])
+    }, [step, navigate, fromConsole])
 
     const deriveDelegateKey = useCallback(async (privateKeyHexValue: string) => {
         const ed = await import('@noble/ed25519')

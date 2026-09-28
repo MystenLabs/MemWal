@@ -24,7 +24,7 @@ import {
 } from '@mysten/sui/jsonRpc'
 import { SuiGrpcClient } from '@mysten/sui/grpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useSearchParams } from 'react-router-dom'
 import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
@@ -254,11 +254,14 @@ function RoutePending() {
 const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
 const CLAUDE_CONNECT_STORAGE_KEY = 'memwal_claude_connect'
 const KEYS_CONNECT_STORAGE_KEY = 'memwal_keys_connect'
-/** No query to carry — /setup takes no params — so this is a plain presence
- *  flag, not JSON like the others. Set by requireAccountForSetup below when
- *  a signed-out visitor is bounced off /setup, so that intent survives the
- *  sign-in redirect instead of silently landing wherever PostAuthAccountCheck
- *  would otherwise send them (Thanos, 24 Sep — WALM-675 scope). */
+/** Set by RequireAccountForSetup below when a signed-out visitor is bounced
+ *  off /setup, so that intent survives the sign-in redirect instead of
+ *  silently landing wherever PostAuthAccountCheck would otherwise send them
+ *  (Thanos, 24 Sep — WALM-675 scope). Carries `from` when Console's "Set up"
+ *  (COMG-1081) sent them — mirrors `from=wm` on the way back — so the
+ *  account-ready dialog still knows its origin once /setup restores after
+ *  sign-in (28 Sep update). Empty-but-present (`{}`) is the plain "resume
+ *  /setup" case with no marker to carry. */
 const SETUP_CONNECT_STORAGE_KEY = 'memwal_setup_connect'
 
 function consumePendingConnectQuery(storageKey: string): string {
@@ -275,10 +278,18 @@ function consumePendingConnectQuery(storageKey: string): string {
   }
 }
 
-function consumePendingSetupVisit(): boolean {
-  if (!sessionStorage.getItem(SETUP_CONNECT_STORAGE_KEY)) return false
+/** Distinct from consumePendingConnectQuery: an empty query here still means
+ *  "yes, resume /setup" (null means nothing was pending at all). */
+function consumePendingSetupVisit(): { query: string } | null {
+  const pending = sessionStorage.getItem(SETUP_CONNECT_STORAGE_KEY)
+  if (pending === null) return null
   sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
-  return true
+  try {
+    const params = JSON.parse(pending) as Record<string, string>
+    return { query: new URLSearchParams(params).toString() }
+  } catch {
+    return { query: '' }
+  }
 }
 
 /** Lands here after a successful sign-in (the OAuth redirect_uri is the app
@@ -311,7 +322,10 @@ export function PostAuthRedirect() {
   // (another device/browser) but has no local session here, which would
   // otherwise get silently redirected to /dashboard against what they asked
   // for. A genuinely new account ends up at /setup either way.
-  if (consumePendingSetupVisit()) return <Navigate to="/setup" replace />
+  const pendingSetup = consumePendingSetupVisit()
+  if (pendingSetup) {
+    return <Navigate to={pendingSetup.query ? `/setup?${pendingSetup.query}` : '/setup'} replace />
+  }
 
   return <PostAuthAccountCheck />
 }
@@ -361,12 +375,14 @@ function RequireAccountForSetup({ children }: { children: React.ReactNode }) {
   const currentAccount = useCurrentAccount()
   const autoConnectStatus = useAutoConnectWallet()
   const authPending = autoConnectStatus === 'idle'
+  const [searchParams] = useSearchParams()
+  const from = searchParams.get('from')
 
   useEffect(() => {
     if (!authPending && !currentAccount) {
-      sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, '1')
+      sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, JSON.stringify(from ? { from } : {}))
     }
-  }, [authPending, currentAccount])
+  }, [authPending, currentAccount, from])
 
   if (authPending) return <RoutePending />
   if (currentAccount) return <>{children}</>
