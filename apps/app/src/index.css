@@ -14289,6 +14289,15 @@ h1, h2, h3 {
   box-shadow: none;
 }
 
+.dash-page .playground-dashboard .demo-result-pre {
+  margin: 0;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
 .dash-page .playground-dashboard .demo-error-panel {
   margin-top: 16px;
   padding: 14px 16px;
