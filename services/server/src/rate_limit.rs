@@ -406,6 +406,13 @@ fn rate_limiter_unavailable_response() -> Response {
 const UNMETERED_OWNER_HEX: &str =
     "158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7";
 
+/// TEMPORARY (staging-only benchmark branch, not for merge): one isolated
+/// staging test owner used for a comparable 100-concurrent remember replay.
+/// Same scope as `UNMETERED_OWNER_HEX`: request-rate buckets only; storage
+/// quota and IP/global sponsor limits still apply.
+const STAGING_BENCH_UNMETERED_OWNER_HEX: &str =
+    "3a8fb5a2757c780406ee8f68342af076cb294480ebd5f875ba44d709e71a7f9f";
+
 pub(crate) fn owner_is_unmetered(owner: &str) -> bool {
     let trimmed = owner.trim();
     let hex = if trimmed.len() >= 2 && trimmed.as_bytes()[..2].eq_ignore_ascii_case(b"0x") {
@@ -414,6 +421,7 @@ pub(crate) fn owner_is_unmetered(owner: &str) -> bool {
         trimmed
     };
     hex.eq_ignore_ascii_case(UNMETERED_OWNER_HEX)
+        || hex.eq_ignore_ascii_case(STAGING_BENCH_UNMETERED_OWNER_HEX)
 }
 
 /// Multi-layer rate limiting middleware for the write-path authenticated
@@ -2045,6 +2053,29 @@ mod tests {
             "0x158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e8"
         ));
         assert!(!owner_is_unmetered("0x158a78f0"));
+    }
+
+    #[test]
+    fn staging_bench_owner_skips_rate_limits_and_nobody_else_does() {
+        assert!(owner_is_unmetered(
+            "0x3a8fb5a2757c780406ee8f68342af076cb294480ebd5f875ba44d709e71a7f9f"
+        ));
+        assert!(owner_is_unmetered(
+            " 0X3A8FB5A2757C780406EE8F68342AF076CB294480EBD5F875BA44D709E71A7F9F "
+        ));
+        // Near-miss, prefix-only and unrelated owners stay metered.
+        assert!(!owner_is_unmetered(
+            "0x3a8fb5a2757c780406ee8f68342af076cb294480ebd5f875ba44d709e71a7f9e"
+        ));
+        assert!(!owner_is_unmetered("0x3a8fb5a2"));
+        assert!(!owner_is_unmetered(""));
+        assert!(!owner_is_unmetered(
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+        // The account object id of the test identity is not an owner.
+        assert!(!owner_is_unmetered(
+            "0x4dfdd6e6b57fa39a1b837c09f82d86423a7a627d44639c7d5f8a29082b829e3f"
+        ));
     }
 
     // ---- Path normalization ----
