@@ -1531,10 +1531,15 @@ async fn main() {
     // Single Apalis queue for all WalletJob signing operations. Workers select
     // a key from the configured pool when they execute an upload job, so
     // retries can rotate away from a wallet whose sponsored tx expired.
+    //
+    // Buffer is 1, not the default 10. A worker that locks a batch of uploads
+    // marks them Running, so a later metadata or finalize job cannot pass
+    // them. One locked job per worker leaves the rest Pending, and get_jobs
+    // already orders priority 2, then 1, then 0.
     const WALLET_QUEUE_NAME: &str = "wallet_jobs";
     let wallet_storage: WalletJobStorage = PostgresStorage::new_with_config(
         apalis_pool.clone(),
-        apalis_sql::Config::new(WALLET_QUEUE_NAME),
+        apalis_sql::Config::new(WALLET_QUEUE_NAME).set_buffer_size(1),
     );
     tracing::info!(
         "  Apalis: job queue ready (table=apalis_jobs, queue={})",
