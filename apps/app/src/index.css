@@ -14875,7 +14875,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--mobile .signin-sub {
   left: 31px;
-  top: 530px;
+  top: 591px;
   width: 313px;
   font-size: 15px;
   text-align: center;
@@ -14959,12 +14959,12 @@ body:has(.signin-proposed) {
 
 .signin-stage--mobile .signin-btn--google {
   left: 39px;
-  top: 601px;
+  top: 662px;
 }
 
 .signin-stage--mobile .signin-wallet {
   left: 39px;
-  top: 663px;
+  top: 724px;
 }
 
 .signin-stage--desktop .signin-tos {
@@ -14976,7 +14976,7 @@ body:has(.signin-proposed) {
 
 .signin-stage--mobile .signin-tos {
   left: 51px;
-  top: 742px;
+  top: 803px;
   width: 273px;
   font-size: 11px;
   text-align: center;
@@ -15090,11 +15090,11 @@ body:has(.signin-proposed) {
 }
 
 .signin-stage--mobile .signin-screen {
-  left: 18.31px;
-  top: 267.43px;
-  width: 339.69px;
-  height: 211.21px;
-  border-radius: 9.55px;
+  left: 4.07px;
+  top: 292px;
+  width: 366.87px;
+  height: 228.11px;
+  border-radius: 10.31px;
   z-index: 2;
 }
 
@@ -15126,10 +15126,10 @@ body:has(.signin-proposed) {
 }
 
 .signin-stage--mobile .signin-tile--left {
-  left: 65px;
-  top: 224px;
-  width: 91.74px;
-  height: 92.46px;
+  left: 54.49px;
+  top: 245.1px;
+  width: 99.08px;
+  height: 99.86px;
   z-index: 1;
 }
 
@@ -15142,10 +15142,10 @@ body:has(.signin-proposed) {
 }
 
 .signin-stage--mobile .signin-tile--right {
-  left: 217.41px;
-  top: 426.05px;
-  width: 85.92px;
-  height: 96.06px;
+  left: 219.1px;
+  top: 463.31px;
+  width: 92.79px;
+  height: 103.74px;
   z-index: 4;
 }
 
