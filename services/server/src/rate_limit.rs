@@ -379,6 +379,23 @@ fn rate_limiter_unavailable_response() -> Response {
 // Rate Limit Middleware
 // ============================================================
 
+/// TEMPORARY staging benchmark owner (not for merge). The request-rate
+/// buckets in `rate_limit_middleware` skip this one address only. Storage
+/// quota, sponsor and accounts limits still apply, and every other owner is
+/// metered exactly as before.
+const STAGING_BENCH_UNMETERED_OWNER_HEX: &str =
+    "3a8fb5a2757c780406ee8f68342af076cb294480ebd5f875ba44d709e71a7f9f";
+
+pub(crate) fn owner_is_staging_bench_unmetered(owner: &str) -> bool {
+    let trimmed = owner.trim();
+    let hex = if trimmed.len() >= 2 && trimmed.as_bytes()[..2].eq_ignore_ascii_case(b"0x") {
+        &trimmed[2..]
+    } else {
+        trimmed
+    };
+    hex.eq_ignore_ascii_case(STAGING_BENCH_UNMETERED_OWNER_HEX)
+}
+
 /// Multi-layer rate limiting middleware for authenticated routes.
 ///
 /// Checks 3 layers (all must pass):
@@ -418,6 +435,9 @@ pub async fn rate_limit_middleware(
             return next.run(request).await;
         }
     };
+    if owner_is_staging_bench_unmetered(&auth.owner) {
+        return next.run(request).await;
+    }
 
     let config = &state.config.rate_limit;
     let mut redis = state.redis.clone();
@@ -1294,6 +1314,34 @@ pub async fn accounts_rate_limit_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staging_bench_owner_skips_rate_limits_and_nobody_else_does() {
+        let owner = "0x3a8fb5a2757c780406ee8f68342af076cb294480ebd5f875ba44d709e71a7f9f";
+        assert!(owner_is_staging_bench_unmetered(owner));
+        assert!(owner_is_staging_bench_unmetered(
+            &owner.to_uppercase().replacen("0X", "0x", 1)
+        ));
+        assert!(owner_is_staging_bench_unmetered(&format!("  {owner} ")));
+        assert!(owner_is_staging_bench_unmetered(&owner[2..]));
+        // Near-miss (last nibble changed), prefix, empty, zero address.
+        assert!(!owner_is_staging_bench_unmetered(
+            "0x3a8fb5a2757c780406ee8f68342af076cb294480ebd5f875ba44d709e71a7f9e"
+        ));
+        assert!(!owner_is_staging_bench_unmetered("0x3a8fb5a2"));
+        assert!(!owner_is_staging_bench_unmetered(""));
+        assert!(!owner_is_staging_bench_unmetered("0x"));
+        assert!(!owner_is_staging_bench_unmetered(
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+        // Henry's bench owner and the test account object id are NOT exempt here.
+        assert!(!owner_is_staging_bench_unmetered(
+            "0x158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7"
+        ));
+        assert!(!owner_is_staging_bench_unmetered(
+            "0x4dfdd6e6b57fa39a1b837c09f82d86423a7a627d44639c7d5f8a29082b829e3f"
+        ));
+    }
 
     // ---- Path normalization ----
 
