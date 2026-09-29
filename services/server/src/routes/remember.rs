@@ -2374,6 +2374,7 @@ mod tests {
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             read_api_rate_limit: crate::types::ReadApiRateLimitConfig::default(),
             accounts_rate_limit: crate::types::AccountsRateLimitConfig::default(),
+            mcp_rate_limit: crate::types::McpRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -2505,6 +2506,28 @@ mod tests {
             "full address must not survive: {}",
             out
         );
+    }
+
+    #[test]
+    fn a_failed_metadata_dry_run_is_the_enoki_error_not_the_sweep_sentence() {
+        let raw = "wallet job error (transient): Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Error checking transaction input objects: Could not find the referenced object 0xa2cf3a6d91952320d2f8262826e9f56b9520829934b8405e90ccb1963103a472 at version Some(SequenceNumber(1025755045))\"}]}";
+        for status in ["failed", "uploaded"] {
+            let out = sanitize_job_error_for_client(status, Some(raw.to_string()))
+                .expect("metadata failure keeps an error");
+            assert!(out.contains("dry_run_failed"), "{status}: {out}");
+            assert!(
+                out.contains("Could not find the referenced object"),
+                "{status}: {out}"
+            );
+            assert_ne!(out, INFRA_JOB_ERROR_MESSAGE, "{status}");
+            assert_ne!(out, INFRA_JOB_RETRYING_MESSAGE, "{status}");
+            assert!(!out.contains("stale/orphaned"), "{status}: {out}");
+            assert!(out.contains("0xa2cf3a6d…[redacted]"), "{status}: {out}");
+            assert!(
+                !out.contains("9520829934b8405e90ccb1963103a472"),
+                "{status}: {out}"
+            );
+        }
     }
 
     #[test]

@@ -4990,6 +4990,42 @@ mod stale_sweep_tests {
         assert_eq!(status_of(&db, &plain).await, "failed");
     }
 
+    /// A metadata retry writes the Enoki text while the row stays `uploaded`.
+    /// If that retry then goes quiet, the sweep may fail the row, but it must
+    /// keep the Enoki sentence. `COALESCE` only fills an empty `error_msg`.
+    #[tokio::test]
+    async fn an_uploaded_metadata_error_survives_the_stale_sweep() {
+        let db = test_db().await;
+        let owner = unique_owner("metadata-enoki");
+        let id = seed_job(&db, &owner, "uploaded", true, None, 900).await;
+        let enoki = "wallet job error (transient): Enoki API error (400): dry_run_failed Could not find the referenced object at version Some(SequenceNumber(1025755045))";
+        sqlx::query("UPDATE remember_jobs SET error_msg = $2 WHERE id = $1")
+            .bind(&id)
+            .bind(enoki)
+            .execute(&db.pool)
+            .await
+            .expect("stamp enoki error");
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "failed");
+        let msg = row.1.unwrap_or_default();
+        assert!(msg.contains("dry_run_failed"), "{msg}");
+        assert!(
+            msg.contains("Could not find the referenced object"),
+            "{msg}"
+        );
+        assert!(!msg.contains("stale/orphaned"), "{msg}");
+    }
+
     /// The pre-existing sweep is unchanged.
     #[tokio::test]
     async fn a_stalled_worker_claim_still_fails() {
