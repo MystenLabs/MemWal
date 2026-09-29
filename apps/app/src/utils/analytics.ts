@@ -51,6 +51,12 @@ const GTM_SCRIPT_ID = 'memwal-gtm-script'
 const POSTHOG_SCRIPT_ID = 'memwal-posthog-script'
 const STATSIG_SCRIPT_ID = 'memwal-statsig-script'
 const STATSIG_SCRIPT_SRC = 'https://cdn.jsdelivr.net/npm/@statsig/js-client@3.33.5/build/statsig-js-client.min.js'
+// Subresource integrity for exactly that file. The script runs in the same
+// origin that keeps the delegate key and the admin API key in sessionStorage,
+// so a changed CDN response must not execute. Checked against jsDelivr's own
+// published hash for 3.33.5. Bumping the version means recomputing this:
+//   curl -sL <src> | openssl dgst -sha384 -binary | openssl base64 -A
+const STATSIG_SCRIPT_INTEGRITY = 'sha384-7qruGDfkOFQkUBVMV2NVuQW0wVZ5vvvFzTt5iGPZVO4bXwb+4DqbsRa40UXMJqP9'
 const SENSITIVE_ANALYTICS_SELECTOR = '[data-analytics-sensitive], [data-analytics-redact]'
 const MAX_ANALYTICS_STRING_LENGTH = 160
 const SENSITIVE_PARAM_NAME_RE = /(?:private|secret|password|token|authorization|credential)/i
@@ -114,9 +120,20 @@ function hostMatchesAllowed(currentHost: string, allowedHost: string): boolean {
     return currentHost === normalizedAllowedHost
 }
 
+/**
+ * No third-party analytics on the admin page: it holds the admin API key in
+ * sessionStorage, and nothing there needs measuring. Checked when analytics
+ * initialises and on every event, so opening /admin directly never loads GTM,
+ * PostHog or Statsig.
+ */
+export function pathAllowsAnalytics(pathname: string): boolean {
+    return !(pathname === '/admin' || pathname.startsWith('/admin/'))
+}
+
 function analyticsHostAllowed(): boolean {
     if (typeof window === 'undefined') return false
     if (!config.analyticsAllowedHosts.length) return false
+    if (!pathAllowsAnalytics(window.location.pathname)) return false
 
     const currentHost = window.location.hostname.toLowerCase()
     return config.analyticsAllowedHosts.some(host => hostMatchesAllowed(currentHost, host))
@@ -349,6 +366,7 @@ function loadStatsigScript(): Promise<void> {
         script.id = STATSIG_SCRIPT_ID
         script.async = true
         script.crossOrigin = 'anonymous'
+        script.integrity = STATSIG_SCRIPT_INTEGRITY
         script.src = STATSIG_SCRIPT_SRC
         script.onload = finish
         script.onerror = () => reject(new Error('Statsig script failed'))
