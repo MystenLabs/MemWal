@@ -9,7 +9,7 @@ import { ChatbotError } from "@/lib/errors";
 
 import { collectPageText } from "./limits";
 import { assertPdfDecompressionWithinBudget } from "./pdf-guard";
-import { extractPdfTextIsolated } from "./pdf-text-host";
+import { acquireReaderSlot, extractPdfTextIsolated } from "./pdf-text-host";
 
 // WALM-683 follow-up. The decompression guard bounds how far each stream
 // inflates, not how many times pdf.js decodes it. These files pass the guard,
@@ -157,12 +157,68 @@ test("the worker returns exactly what in-process extraction returned, on every f
   }
 });
 
-test("the caller's buffer is left intact", async () => {
+test("the caller's buffer is left intact, including a Node Buffer", async () => {
   const [first] = readdirSync(FIXTURES).filter((name) => name.endsWith(".pdf"));
-  const bytes = new Uint8Array(readFileSync(join(FIXTURES, first)));
-  const length = bytes.byteLength;
-  await extractPdfTextIsolated(bytes);
-  assert.equal(bytes.byteLength, length, "the buffer was transferred away");
+  // A Buffer's slice() shares memory, so transferring it emptied the caller's
+  // buffer; a small pooled Buffer could not be transferred at all.
+  const inputs = [
+    new Uint8Array(readFileSync(join(FIXTURES, first))),
+    readFileSync(join(FIXTURES, first)),
+  ];
+  const texts: string[] = [];
+  for (const bytes of inputs) {
+    const length = bytes.byteLength;
+    texts.push(await extractPdfTextIsolated(bytes));
+    assert.equal(bytes.byteLength, length, "the buffer was transferred away");
+  }
+  assert.equal(texts[0], texts[1]);
+});
+
+test("readers beyond the limit wait, and past the queue are turned away as busy", async () => {
+  const first = await acquireReaderSlot(1000, 2, 1);
+  const second = await acquireReaderSlot(1000, 2, 1);
+
+  let thirdAdmitted = false;
+  const third = acquireReaderSlot(1000, 2, 1).then((release) => {
+    thirdAdmitted = true;
+    return release;
+  });
+  // The queue holds one; the next is refused without waiting.
+  await assert.rejects(() => acquireReaderSlot(1000, 2, 1), (error) => {
+    assert.ok(error instanceof ChatbotError);
+    assert.equal(error.statusCode, 429);
+    return true;
+  });
+
+  await new Promise((done) => setTimeout(done, 20));
+  assert.equal(thirdAdmitted, false, "admitted while both readers were busy");
+  first();
+  first(); // releasing twice must not free a second slot
+  const releaseThird = await third;
+  assert.equal(thirdAdmitted, true);
+
+  // Both slots are taken again (second + third): a waiter gives up after waitMs.
+  const started = Date.now();
+  await assert.rejects(() => acquireReaderSlot(100, 2, 1), causeMatches(/Too many PDFs/));
+  assert.ok(Date.now() - started >= 90, "gave up before its wait expired");
+
+  second();
+  releaseThird();
+});
+
+test("concurrent attack uploads are queued or turned away, not all run at once", async () => {
+  const pdf = repeatedFormPdf(400, 8);
+  const heavy = Array.from({ length: 5 }, () =>
+    extractPdfTextIsolated(pdf, { deadlineMs: 800 }).then(
+      () => "done",
+      (error: ChatbotError) => String(error.cause)
+    )
+  );
+  // With the default limit of 2 and waits bounded by the same 800ms, five at
+  // once end as two "too long" readers, then either more readers or "busy".
+  const outcomes = await Promise.all(heavy);
+  assert.ok(outcomes.every((o) => /too long|Too many PDFs/.test(o)), outcomes.join(" | "));
+  assert.ok(outcomes.some((o) => /Too many PDFs/.test(o)), "nobody was queued or turned away");
 });
 
 test("a file pdf.js cannot open is a ChatbotError, not a crash or a hang", async () => {

@@ -68,6 +68,22 @@ export const MAX_PDF_EXTRACT_MS = positiveIntFromEnv(
 );
 
 /**
+ * PDF readers running at once, and how many uploads may wait for one. Each
+ * reader is a worker thread with its own heap that can keep a core busy for the
+ * whole deadline; with no cap, 20 in-flight uploads from one IP (all inside the
+ * hourly limit) got the container OOM-killed at 512MB within 2s. Past the queue,
+ * or after waiting a full deadline, an upload is turned away as busy.
+ */
+export const MAX_PDF_WORKERS = positiveIntFromEnv("RESEARCH_MAX_PDF_WORKERS", 2);
+export const MAX_PDF_QUEUE = positiveIntFromEnv("RESEARCH_MAX_PDF_QUEUE", 8);
+
+/** Old-generation heap for one reader, in MB. */
+export const MAX_PDF_WORKER_HEAP_MB = positiveIntFromEnv(
+  "RESEARCH_MAX_PDF_WORKER_HEAP_MB",
+  256
+);
+
+/**
  * Whole multipart request body. The file itself is capped at MAX_SOURCE_BYTES;
  * this adds room for the boundaries and part headers around it.
  */

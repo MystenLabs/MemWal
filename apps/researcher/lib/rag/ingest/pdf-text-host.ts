@@ -2,7 +2,14 @@ import { Worker } from "node:worker_threads";
 
 import { ChatbotError } from "@/lib/errors";
 
-import { MAX_PDF_EXTRACT_MS, type PdfTextSource, collectPageText } from "./limits";
+import {
+  MAX_PDF_EXTRACT_MS,
+  MAX_PDF_QUEUE,
+  MAX_PDF_WORKER_HEAP_MB,
+  MAX_PDF_WORKERS,
+  type PdfTextSource,
+  collectPageText,
+} from "./limits";
 
 function tooSlow(): ChatbotError {
   return new ChatbotError(
@@ -11,8 +18,74 @@ function tooSlow(): ChatbotError {
   );
 }
 
-function unreadable(message: string): ChatbotError {
-  return new ChatbotError("bad_request:api", `Could not read this PDF: ${message}`);
+/**
+ * The detail goes to the log, not the client: a worker failure can carry a
+ * server path (a chunk that failed to load), and pdf.js's own messages are
+ * implementation detail.
+ */
+function unreadable(detail: string): ChatbotError {
+  console.error(`[ingest] PDF reader failed: ${detail}`);
+  return new ChatbotError(
+    "bad_request:api",
+    "Could not read this PDF. Please use a text-based PDF or submit the source as a URL."
+  );
+}
+
+function busy(): ChatbotError {
+  return new ChatbotError(
+    "rate_limit:api",
+    "Too many PDFs are being read right now. Please try again in a minute."
+  );
+}
+
+// ── concurrency ──────────────────────────────────────────────────────────
+// Process-wide: at most `limit` readers at once, at most `queue` uploads
+// waiting, and none waiting longer than `waitMs`.
+
+let activeReaders = 0;
+const waitingReaders: Array<() => void> = [];
+
+function releaseReader(): void {
+  activeReaders--;
+  waitingReaders.shift()?.();
+}
+
+export async function acquireReaderSlot(
+  waitMs: number,
+  limit: number = MAX_PDF_WORKERS,
+  queue: number = MAX_PDF_QUEUE
+): Promise<() => void> {
+  let released = false;
+  const release = () => {
+    if (!released) {
+      released = true;
+      releaseReader();
+    }
+  };
+
+  if (activeReaders < limit) {
+    activeReaders++;
+    return release;
+  }
+  if (waitingReaders.length >= queue) {
+    throw busy();
+  }
+
+  return new Promise<() => void>((resolve, reject) => {
+    const admit = () => {
+      clearTimeout(timer);
+      activeReaders++;
+      resolve(release);
+    };
+    const timer = setTimeout(() => {
+      const index = waitingReaders.indexOf(admit);
+      if (index !== -1) {
+        waitingReaders.splice(index, 1);
+      }
+      reject(busy());
+    }, waitMs);
+    waitingReaders.push(admit);
+  });
 }
 
 type Pending = {
@@ -40,8 +113,20 @@ export async function extractPdfTextIsolated(
   options: { deadlineMs?: number } = {}
 ): Promise<string> {
   const deadlineMs = options.deadlineMs ?? MAX_PDF_EXTRACT_MS;
-  // A copy the worker can own, so the caller's buffer is left alone.
-  const owned = bytes.slice();
+  // Waiting for a reader is bounded by one deadline too, so an upload spends at
+  // most two deadlines here in total.
+  const release = await acquireReaderSlot(deadlineMs);
+  try {
+    return await readInWorker(bytes, deadlineMs);
+  } finally {
+    release();
+  }
+}
+
+async function readInWorker(bytes: Uint8Array, deadlineMs: number): Promise<string> {
+  // A real copy the worker can own. `bytes.slice()` would share memory when a
+  // Node Buffer is passed, and transferring it would empty the caller's buffer.
+  const owned = new Uint8Array(bytes);
   // Keep this exact shape. Turbopack recognises `new Worker(new URL(...,
   // import.meta.url))` and bundles the worker, with unpdf, into its own chunk;
   // a computed path makes it trace the whole project and fail the build. tsx
@@ -49,6 +134,9 @@ export async function extractPdfTextIsolated(
   const worker = new Worker(new URL("./pdf-text-worker.ts", import.meta.url), {
     workerData: { bytes: owned },
     transferList: [owned.buffer],
+    // Bounds the JS heap only; decoded stream buffers live outside it, which is
+    // why the reader count above is the main memory control.
+    resourceLimits: { maxOldGenerationSizeMb: MAX_PDF_WORKER_HEAP_MB },
   });
 
   let failure: unknown = null;
