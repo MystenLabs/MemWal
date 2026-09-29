@@ -453,6 +453,11 @@ export default function Dashboard({
     const selectedKeySet = useMemo(() => new Set(selectedKeyPublicKeys), [selectedKeyPublicKeys])
     const selectedKeyCount = selectedKeyPublicKeys.length
     const keyRemovalBusy = removingSelectedKeys || Boolean(removingKey)
+    // A revoke wipes newPrivateKey at its start too (executeRemoveKeys), so
+    // starting one while a mint's key is still uncopied would lose it the
+    // same way a second mint could — block the action outright rather than
+    // only fixing when the dialog is allowed to open (ducnmm re-review).
+    const keyActionBlockedByUncopiedKey = Boolean(newPrivateKey)
     const showKeySelectionControls = Boolean(effectiveAccountObjectId) && selectedKeyCount > 0 && !accountLookupPending
 
     const scrollToDelegateKeys = useCallback(() => {
@@ -682,10 +687,13 @@ export default function Dashboard({
             setDelegateKeys(delegate.privateKey, delegatePublicKeyHex, effectiveAccountObjectId!)
             closeAddKeyForm()
             setNewKeyLabel('New key')
-            setJustMintedKey(true)
             // Only the latest key action picks the dialog's copy.
             setJustRemovedKeys(false)
-            setAccountReadyDismissed(false)
+            // justMintedKey/accountReadyDismissed arm on Continue (below),
+            // not here — arming them on mint success let a second mint or a
+            // revoke started while this key was still uncopied wipe
+            // newPrivateKey and open the dialog early (ducnmm re-review,
+            // WALM-675).
 
             trackEvent('delegate_key_add_complete', { location: 'dashboard' })
             void navigator.clipboard.writeText(delegate.privateKey).catch(() => undefined)
@@ -1364,7 +1372,7 @@ const result = await generateText({
                                     trackEvent('cta_click', { cta: 'show_add_delegate_key_form', location: 'dashboard' })
                                     openAddKeyForm()
                                 }}
-                                disabled={showAddForm || addingKey || accountLookupPending || !effectiveAccountObjectId || hasMaxDelegateKeys}
+                                disabled={showAddForm || addingKey || accountLookupPending || !effectiveAccountObjectId || hasMaxDelegateKeys || keyActionBlockedByUncopiedKey}
                             >
                                 Add key <Plus size={18} strokeWidth={2.5} aria-hidden="true" />
                             </button>
@@ -1411,7 +1419,11 @@ const result = await generateText({
                                     </button>
                                     <button
                                         className="btn btn-secondary btn-sm"
-                                        onClick={() => setNewPrivateKey(null)}
+                                        onClick={() => {
+                                            setNewPrivateKey(null)
+                                            setJustMintedKey(true)
+                                            setAccountReadyDismissed(false)
+                                        }}
                                     >
                                         Continue
                                     </button>
@@ -1481,7 +1493,7 @@ const result = await generateText({
                                     type="button"
                                     className="btn btn-danger btn-sm dashboard-key-remove-selected"
                                     onClick={handleRemoveSelectedKeys}
-                                    disabled={keyRemovalBusy}
+                                    disabled={keyRemovalBusy || keyActionBlockedByUncopiedKey}
                                 >
                                     <Trash2 size={12} />
                                     {removingSelectedKeys ? 'Removing...' : 'Remove selected'}
@@ -1573,7 +1585,7 @@ const result = await generateText({
                                                         <button
                                                             className="btn btn-danger btn-sm dashboard-key-icon-action"
                                                             onClick={() => handleRemoveKey(k.publicKey)}
-                                                            disabled={keyRemovalBusy}
+                                                            disabled={keyRemovalBusy || keyActionBlockedByUncopiedKey}
                                                             aria-busy={isRemoving}
                                                             aria-label={isRemoving ? 'Removing delegate key' : 'Remove delegate key'}
                                                             title={isRemoving ? 'Removing' : 'Remove delegate key'}
