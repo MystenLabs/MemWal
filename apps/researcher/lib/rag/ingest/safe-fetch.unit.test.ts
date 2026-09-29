@@ -207,7 +207,8 @@ test("fetchPublicUrl sends nothing to a loopback listener", async () => {
 test("ingest downloads the PDF through the guard rather than bare fetch", () => {
   const ingest = readFileSync(resolve("lib/rag/ingest/index.ts"), "utf8");
 
-  assert.match(ingest, /await fetchPublicUrl\(source\.fileUrl\)/);
+  // A second argument (the deadline signal) is fine; the URL must go through it.
+  assert.match(ingest, /await fetchPublicUrl\(source\.fileUrl[,)]/);
   assert.doesNotMatch(ingest, /await fetch\(/);
 });
 

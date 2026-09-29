@@ -14,9 +14,13 @@ import { extractPdfTextIsolated } from "./pdf-text-host";
 
 export const JINA_READER_URL = "https://r.jina.ai/";
 
-export async function extractFromUrl(url: string): Promise<string> {
+export async function extractFromUrl(
+  url: string,
+  options: { signal?: AbortSignal } = {}
+): Promise<string> {
   const response = await fetch(`${JINA_READER_URL}${url}`, {
     headers: { Accept: "text/markdown" },
+    signal: options.signal,
   });
 
   if (!response.ok) {
@@ -37,7 +41,10 @@ export async function extractFromUrl(url: string): Promise<string> {
   return text;
 }
 
-export async function extractFromPdf(file: File): Promise<string> {
+export async function extractFromPdf(
+  file: File,
+  options: { deadlineAt?: number } = {}
+): Promise<string> {
   // A second check, not the byte budget: by the time a File exists its bytes are
   // already in memory. The budget itself is enforced where the bytes arrive —
   // the capped request read in the route, and readCappedBytes for downloads.
@@ -59,7 +66,9 @@ export async function extractFromPdf(file: File): Promise<string> {
   // runs in a worker under a deadline: the guard bounds how far a stream
   // inflates, not how many times pdf.js decodes it (shared or repeated content
   // streams, Form XObjects drawn many times), and that decoding is synchronous.
-  const text = await extractPdfTextIsolated(buffer);
+  const text = await extractPdfTextIsolated(buffer, {
+    deadlineAt: options.deadlineAt,
+  });
 
   if (!text || text.trim().length === 0) {
     throw new ChatbotError(

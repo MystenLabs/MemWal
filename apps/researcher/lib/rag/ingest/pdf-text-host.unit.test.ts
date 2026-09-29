@@ -228,3 +228,26 @@ test("a file pdf.js cannot open is a ChatbotError, not a crash or a hang", async
     causeMatches(/Could not read this PDF/)
   );
 });
+
+test("a deadline already passed refuses at once, without starting a reader", async () => {
+  const [first] = readdirSync(FIXTURES).filter((name) => name.endsWith(".pdf"));
+  const bytes = new Uint8Array(readFileSync(join(FIXTURES, first)));
+  const started = Date.now();
+  await assert.rejects(
+    () => extractPdfTextIsolated(bytes, { deadlineAt: Date.now() - 1 }),
+    causeMatches(/too long/)
+  );
+  assert.ok(Date.now() - started < 50, "a reader was started anyway");
+});
+
+test("the caller's deadline cuts a read short even when the reader's own is longer", async () => {
+  const pdf = repeatedFormPdf(400, 8);
+  const started = Date.now();
+  await assert.rejects(
+    () => extractPdfTextIsolated(pdf, { deadlineMs: 30_000, deadlineAt: Date.now() + 1000 }),
+    causeMatches(/too long/)
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 3000, `ran ${elapsed}ms against a 1000ms caller deadline`);
+});
+

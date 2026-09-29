@@ -19,10 +19,8 @@ import {
 } from "@/lib/ai/source-processing";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { getResearchTools, processSource } from "@/lib/rag";
-import {
-  droppedSourceEvents,
-  selectSourcesWithinBudget,
-} from "@/lib/rag/ingest/limits";
+import { ingestDeadline } from "@/lib/rag/ingest/limits";
+import { ingestMessageSources } from "@/lib/rag/ingest/message-sources";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
@@ -56,6 +54,9 @@ function getStreamContext() {
 export { getStreamContext };
 
 export async function POST(request: Request) {
+  // The route's clock starts here; source ingestion has to leave room for the
+  // answer inside maxDuration (WALM-683).
+  const startedAt = Date.now();
   let requestBody: PostRequestBody;
 
   try {
@@ -227,65 +228,15 @@ export async function POST(request: Request) {
           }
 
           if (sources.length > 0) {
-            let processedCount = 0;
-
-            // One message can carry any number of file parts and URLs, and each
-            // one is a full ingestion, so cap how many a single request starts.
-            // Attachments are kept ahead of URLs scraped from prose, and every
-            // source that is not started is reported on the stream, not just
-            // logged — otherwise a dropped PDF simply never shows up (WALM-683).
-            const { kept, dropped } = selectSourcesWithinBudget(sources);
-            for (const event of droppedSourceEvents(dropped)) {
-              dataStream.write(event);
-            }
-
-            for (const source of kept) {
-              const label =
-                source.type === "url"
-                  ? source.url
-                  : (source as { fileName: string }).fileName;
-
-              dataStream.write({
-                type: "data-source-processing",
-                data: { label },
-                transient: true,
-              });
-
-              try {
-                const result = await processSource({
-                  source,
-                  userId: session.user.id,
-                });
-                dataStream.write({
-                  type: "data-source-processed",
-                  data: {
-                    title: result.title,
-                    chunkCount: result.chunkCount,
-                    sourceId: result.sourceId,
-                  },
-                  transient: true,
-                });
-                processedCount++;
-              } catch (error) {
-                console.error("Source processing error:", error);
-                dataStream.write({
-                  type: "data-source-error",
-                  data: {
-                    label,
-                    error:
-                      error instanceof Error
-                        ? error.message
-                        : "Failed to process source",
-                  },
-                  transient: true,
-                });
-              }
-            }
-
-            dataStream.write({
-              type: "data-sources-done",
-              data: { count: processedCount },
-              transient: true,
+            // Sources are ingested one after another, each with the time the
+            // route has left; once it runs short the rest are reported as not
+            // processed instead of being cut off mid-ingest.
+            await ingestMessageSources({
+              sources,
+              deadlineAt: ingestDeadline(startedAt, maxDuration),
+              ingest: (source, deadlineAt) =>
+                processSource({ source, userId: session.user.id, deadlineAt }),
+              write: (event) => dataStream.write(event),
             });
           }
         }

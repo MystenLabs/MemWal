@@ -77,6 +77,45 @@ export const MAX_PDF_EXTRACT_MS = positiveIntFromEnv(
 export const MAX_PDF_WORKERS = positiveIntFromEnv("RESEARCH_MAX_PDF_WORKERS", 2);
 export const MAX_PDF_QUEUE = positiveIntFromEnv("RESEARCH_MAX_PDF_QUEUE", 8);
 
+/**
+ * Time the chat route keeps back from its maxDuration for streaming the answer
+ * once ingestion is done. Ingestion for one message has to fit in the rest.
+ */
+export const CHAT_ANSWER_RESERVE_MS = positiveIntFromEnv(
+  "RESEARCH_CHAT_ANSWER_RESERVE_MS",
+  30_000
+);
+
+/**
+ * A source is not started with less than this left before the ingest deadline:
+ * it could not finish, and starting it would only get it cut off.
+ */
+export const MIN_SOURCE_TIME_MS = positiveIntFromEnv(
+  "RESEARCH_MIN_SOURCE_TIME_MS",
+  15_000
+);
+
+/** Shown for a source that was not started, or not finished, in time. */
+export const OUT_OF_TIME_REASON =
+  "Not processed: this message ran out of time. Send it again in a new message.";
+
+/** When ingestion for a request has to be done, given the route's budget. */
+export function ingestDeadline(
+  startedAt: number,
+  maxDurationSeconds: number,
+  reserveMs: number = CHAT_ANSWER_RESERVE_MS
+): number {
+  return startedAt + maxDurationSeconds * 1000 - reserveMs;
+}
+
+/** Milliseconds left before `deadlineAt`; unbounded when there is none. */
+export function timeLeft(
+  deadlineAt: number | undefined,
+  now: number = Date.now()
+): number {
+  return deadlineAt === undefined ? Number.POSITIVE_INFINITY : deadlineAt - now;
+}
+
 /** Old-generation heap for one reader, in MB. */
 export const MAX_PDF_WORKER_HEAP_MB = positiveIntFromEnv(
   "RESEARCH_MAX_PDF_WORKER_HEAP_MB",
@@ -371,14 +410,14 @@ export function selectSourcesWithinBudget<T extends SourceLike>(
  *
  * The activity panel builds a source's step from its `data-source-processing`
  * event and only then attaches a `data-source-error` with the same label; an
- * error with no processing event before it is stored and never rendered. So a
- * dropped source gets both, in that order, or it silently disappears.
+ * error with no processing event before it is stored and never rendered. So an
+ * unprocessed source gets both, in that order, or it silently disappears.
  */
-export function droppedSourceEvents(
-  dropped: Array<{ type: string; url?: string; fileName?: string }>,
-  limit: number = MAX_SOURCES_PER_REQUEST
+export function unprocessedSourceEvents(
+  sources: Array<{ type: string; url?: string; fileName?: string }>,
+  reason: string
 ) {
-  return dropped.flatMap((source) => {
+  return sources.flatMap((source) => {
     const label = (source.type === "url" ? source.url : source.fileName) ?? "";
     return [
       {
@@ -388,12 +427,20 @@ export function droppedSourceEvents(
       },
       {
         type: "data-source-error" as const,
-        data: {
-          label,
-          error: `Not processed: a message can add at most ${limit} sources`,
-        },
+        data: { label, error: reason },
         transient: true as const,
       },
     ];
   });
+}
+
+/** Sources past the per-message cap. */
+export function droppedSourceEvents(
+  dropped: Array<{ type: string; url?: string; fileName?: string }>,
+  limit: number = MAX_SOURCES_PER_REQUEST
+) {
+  return unprocessedSourceEvents(
+    dropped,
+    `Not processed: a message can add at most ${limit} sources`
+  );
 }

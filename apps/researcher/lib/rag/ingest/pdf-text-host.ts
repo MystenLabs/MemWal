@@ -9,6 +9,7 @@ import {
   MAX_PDF_WORKERS,
   type PdfTextSource,
   collectPageText,
+  timeLeft,
 } from "./limits";
 
 function tooSlow(): ChatbotError {
@@ -110,14 +111,24 @@ type Pending = {
  */
 export async function extractPdfTextIsolated(
   bytes: Uint8Array,
-  options: { deadlineMs?: number } = {}
+  options: { deadlineMs?: number; deadlineAt?: number } = {}
 ): Promise<string> {
   const deadlineMs = options.deadlineMs ?? MAX_PDF_EXTRACT_MS;
+  // `deadlineAt` is the caller's own budget (the chat route's time left). Both
+  // the wait for a reader and the read itself stop at whichever comes first.
+  const budget = () => Math.min(deadlineMs, timeLeft(options.deadlineAt));
+  if (budget() <= 0) {
+    throw tooSlow();
+  }
   // Waiting for a reader is bounded by one deadline too, so an upload spends at
   // most two deadlines here in total.
-  const release = await acquireReaderSlot(deadlineMs);
+  const release = await acquireReaderSlot(budget());
   try {
-    return await readInWorker(bytes, deadlineMs);
+    const remaining = budget();
+    if (remaining <= 0) {
+      throw tooSlow();
+    }
+    return await readInWorker(bytes, remaining);
   } finally {
     release();
   }
