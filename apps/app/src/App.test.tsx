@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { StrictMode } from 'react'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
@@ -41,16 +42,23 @@ function renderAt() {
     )
 }
 
-function renderPostAuthRedirect() {
-    return render(
+function KeysRoute() {
+    const location = useLocation()
+    return <div>KEYS {location.search}</div>
+}
+
+function renderPostAuthRedirect({ strict = false } = {}) {
+    const tree = (
         <MemoryRouter initialEntries={['/']}>
             <Routes>
                 <Route path="/" element={<PostAuthRedirect />} />
                 <Route path="/setup" element={<div>SETUP</div>} />
                 <Route path="/dashboard" element={<div>DASHBOARD</div>} />
+                <Route path="/keys" element={<KeysRoute />} />
             </Routes>
-        </MemoryRouter>,
+        </MemoryRouter>
     )
+    return render(strict ? <StrictMode>{tree}</StrictMode> : tree)
 }
 
 describe('PostAuthAccountCheck', () => {
@@ -91,6 +99,16 @@ describe('PostAuthRedirect — /setup breadcrumb (Thanos, WALM-675 scope)', () =
         sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, '1')
         renderPostAuthRedirect()
         expect(await screen.findByText('SETUP')).toBeInTheDocument()
+        expect(sessionStorage.getItem(SETUP_CONNECT_STORAGE_KEY)).toBeNull()
+    })
+
+    it('resumes a pending /keys connect under StrictMode, then consumes it', async () => {
+        const KEYS_CONNECT_STORAGE_KEY = 'memwal_keys_connect'
+        sessionStorage.setItem(KEYS_CONNECT_STORAGE_KEY, JSON.stringify({ owner: '0xowner' }))
+        sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, '{}')
+        renderPostAuthRedirect({ strict: true })
+        expect(await screen.findByText('KEYS ?owner=0xowner')).toBeInTheDocument()
+        expect(sessionStorage.getItem(KEYS_CONNECT_STORAGE_KEY)).toBeNull()
         expect(sessionStorage.getItem(SETUP_CONNECT_STORAGE_KEY)).toBeNull()
     })
 

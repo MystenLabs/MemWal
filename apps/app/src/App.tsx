@@ -264,12 +264,18 @@ const KEYS_CONNECT_STORAGE_KEY = 'memwal_keys_connect'
  *  /setup" case with no marker to carry. */
 const SETUP_CONNECT_STORAGE_KEY = 'memwal_setup_connect'
 
-function consumePendingConnectQuery(storageKey: string): string {
+const PENDING_CONNECTS = [
+  [CLAUDE_CONNECT_STORAGE_KEY, '/connect/claude'],
+  [MCP_CONNECT_STORAGE_KEY, '/connect/mcp'],
+  [KEYS_CONNECT_STORAGE_KEY, '/keys'],
+] as const
+
+// Read-only: PostAuthRedirect removes the entries after commit, not during
+// render. StrictMode renders twice in dev, and removing here left the second
+// render with nothing, dropping the pending query (ducnmm review).
+function readPendingConnectQuery(storageKey: string): string {
   const pending = sessionStorage.getItem(storageKey)
   if (!pending) return ''
-
-  // Consume once — prevents a redirect loop on later visits to `/`.
-  sessionStorage.removeItem(storageKey)
   try {
     const params = JSON.parse(pending) as Record<string, string>
     return new URLSearchParams(params).toString()
@@ -278,12 +284,11 @@ function consumePendingConnectQuery(storageKey: string): string {
   }
 }
 
-/** Distinct from consumePendingConnectQuery: an empty query here still means
+/** Distinct from readPendingConnectQuery: an empty query here still means
  *  "yes, resume /setup" (null means nothing was pending at all). */
-function consumePendingSetupVisit(): { query: string } | null {
+function readPendingSetupVisit(): { query: string } | null {
   const pending = sessionStorage.getItem(SETUP_CONNECT_STORAGE_KEY)
   if (pending === null) return null
-  sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
   try {
     const params = JSON.parse(pending) as Record<string, string>
     return { query: new URLSearchParams(params).toString() }
@@ -292,35 +297,49 @@ function consumePendingSetupVisit(): { query: string } | null {
   }
 }
 
-/** Lands here after a successful sign-in (the OAuth redirect_uri is the app
- *  root). Resume an interrupted hosted Claude or local MCP connection by
- *  restoring its saved query string; otherwise resolve whether this is a
- *  brand-new account. */
-export function PostAuthRedirect() {
-  for (const [storageKey, path] of [
-    [CLAUDE_CONNECT_STORAGE_KEY, '/connect/claude'],
-    [MCP_CONNECT_STORAGE_KEY, '/connect/mcp'],
-    [KEYS_CONNECT_STORAGE_KEY, '/keys'],
-  ] as const) {
-    const query = consumePendingConnectQuery(storageKey)
-    if (query) {
-      // A stray /setup breadcrumb from an unrelated earlier render must not
-      // hijack this sign-in once a real pending connect wins (ducnmm review).
-      sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
-      return <Navigate to={`${path}?${query}`} replace />
-    }
+/** Where a pending connect or /setup visit resumes, and how many
+ *  PENDING_CONNECTS entries were checked to decide it (all of them when
+ *  none won). */
+function resolvePostAuthResume(): { to: string | null; connectsChecked: number } {
+  for (const [index, [storageKey, path]] of PENDING_CONNECTS.entries()) {
+    const query = readPendingConnectQuery(storageKey)
+    if (query) return { to: `${path}?${query}`, connectsChecked: index + 1 }
   }
-
   // Respects an explicit /setup visit over PostAuthAccountCheck's own
   // account-existence guess — matters for an account that exists elsewhere
   // (another device/browser) but has no local session here, which would
   // otherwise get silently redirected to /dashboard against what they asked
   // for. A genuinely new account ends up at /setup either way.
-  const pendingSetup = consumePendingSetupVisit()
+  const pendingSetup = readPendingSetupVisit()
   if (pendingSetup) {
-    return <Navigate to={pendingSetup.query ? `/setup?${pendingSetup.query}` : '/setup'} replace />
+    return {
+      to: pendingSetup.query ? `/setup?${pendingSetup.query}` : '/setup',
+      connectsChecked: PENDING_CONNECTS.length,
+    }
   }
+  return { to: null, connectsChecked: PENDING_CONNECTS.length }
+}
 
+/** Lands here after a successful sign-in (the OAuth redirect_uri is the app
+ *  root). Resume an interrupted hosted Claude or local MCP connection by
+ *  restoring its saved query string; otherwise resolve whether this is a
+ *  brand-new account. */
+export function PostAuthRedirect() {
+  const { to, connectsChecked } = resolvePostAuthResume()
+
+  // Consume once, after commit — prevents a redirect loop on later visits to
+  // `/`. Removes every entry checked (a present-but-unparsable one included)
+  // and the /setup breadcrumb, which is either the one resuming now or a
+  // stray from an unrelated earlier render that must not hijack a later
+  // sign-in once a real pending connect wins (ducnmm review).
+  useEffect(() => {
+    for (const [storageKey] of PENDING_CONNECTS.slice(0, connectsChecked)) {
+      sessionStorage.removeItem(storageKey)
+    }
+    sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
+  }, [connectsChecked])
+
+  if (to) return <Navigate to={to} replace />
   return <PostAuthAccountCheck />
 }
 
