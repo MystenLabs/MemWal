@@ -297,24 +297,18 @@ function consumePendingSetupVisit(): { query: string } | null {
  *  restoring its saved query string; otherwise resolve whether this is a
  *  brand-new account. */
 export function PostAuthRedirect() {
-  const claudeConnectQuery = consumePendingConnectQuery(CLAUDE_CONNECT_STORAGE_KEY)
-  if (claudeConnectQuery) {
-    // A stray /setup breadcrumb from an unrelated earlier render must not
-    // hijack this sign-in once a real pending connect wins (ducnmm review).
-    sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
-    return <Navigate to={`/connect/claude?${claudeConnectQuery}`} replace />
-  }
-
-  const mcpConnectQuery = consumePendingConnectQuery(MCP_CONNECT_STORAGE_KEY)
-  if (mcpConnectQuery) {
-    sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
-    return <Navigate to={`/connect/mcp?${mcpConnectQuery}`} replace />
-  }
-
-  const keysConnectQuery = consumePendingConnectQuery(KEYS_CONNECT_STORAGE_KEY)
-  if (keysConnectQuery) {
-    sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
-    return <Navigate to={`/keys?${keysConnectQuery}`} replace />
+  for (const [storageKey, path] of [
+    [CLAUDE_CONNECT_STORAGE_KEY, '/connect/claude'],
+    [MCP_CONNECT_STORAGE_KEY, '/connect/mcp'],
+    [KEYS_CONNECT_STORAGE_KEY, '/keys'],
+  ] as const) {
+    const query = consumePendingConnectQuery(storageKey)
+    if (query) {
+      // A stray /setup breadcrumb from an unrelated earlier render must not
+      // hijack this sign-in once a real pending connect wins (ducnmm review).
+      sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
+      return <Navigate to={`${path}?${query}`} replace />
+    }
   }
 
   // Respects an explicit /setup visit over PostAuthAccountCheck's own

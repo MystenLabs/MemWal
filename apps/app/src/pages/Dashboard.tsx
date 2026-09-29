@@ -286,9 +286,12 @@ export default function Dashboard({
     const addKeyFormCloseTimerRef = useRef<number | null>(null)
     const [accountReadyDismissed, setAccountReadyDismissed] = useState(false)
     // One-shot signal from SetupWizard's navigate() state — set only when the
-    // /setup visit carried Console's "Set up" (COMG-1081) `from` marker. Read
-    // once; a later re-render of this same mount must not re-trigger it.
-    const [fromConsoleSetup] = useState(() => Boolean(
+    // /setup visit carried Console's "Set up" (COMG-1081) `from` marker.
+    // Mutable (not read-once-and-frozen): it must be consumed to false on
+    // dismiss, otherwise the mint re-arm effect below — which resets
+    // accountReadyDismissed for ANY fromKeys mint — would resurrect this
+    // dialog for an unrelated key minted later on the plain /dashboard.
+    const [fromConsoleSetup, setFromConsoleSetup] = useState(() => Boolean(
         (location.state as { fromConsoleSetup?: boolean } | null)?.fromConsoleSetup
     ))
     // Mint sets newPrivateKey (a fresh string each time, so the dismissal-
@@ -466,9 +469,13 @@ export default function Dashboard({
     // just finished /setup after coming from Console's "Set up"
     // (fromConsoleSetup, 28 Sep update).
     const showAccountReadyDialog = Boolean(
-        config.consoleUrl && !accountReadyDismissed &&
+        config.consoleUrl && !accountReadyDismissed && !removeKeysConfirm &&
         ((fromKeys && (newPrivateKey || justRemovedKeys)) || fromConsoleSetup)
     )
+    const dismissAccountReadyDialog = useCallback(() => {
+        setAccountReadyDismissed(true)
+        setFromConsoleSetup(false)
+    }, [])
     // Console reads `from=wm` to detect a return trip and refresh its link
     // status (see console/frontend MemoryTabPanel.tsx).
     const consoleReturnUrl = config.consoleUrl
@@ -479,12 +486,12 @@ export default function Dashboard({
         if (!showAccountReadyDialog) return undefined
 
         const closeOnEscape = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') setAccountReadyDismissed(true)
+            if (event.key === 'Escape') dismissAccountReadyDialog()
         }
 
         window.addEventListener('keydown', closeOnEscape)
         return () => window.removeEventListener('keydown', closeOnEscape)
-    }, [showAccountReadyDialog])
+    }, [showAccountReadyDialog, dismissAccountReadyDialog])
 
     useEffect(() => {
         setSelectedKeyPublicKeys((prev) => {
@@ -1717,7 +1724,7 @@ const result = await generateText({
                     <div
                         className="dashboard-confirm-backdrop"
                         onMouseDown={(event) => {
-                            if (event.target === event.currentTarget) setAccountReadyDismissed(true)
+                            if (event.target === event.currentTarget) dismissAccountReadyDialog()
                         }}
                     >
                         <section
@@ -1735,7 +1742,7 @@ const result = await generateText({
                                 <button
                                     type="button"
                                     className="btn btn-secondary dashboard-confirm-cancel"
-                                    onClick={() => setAccountReadyDismissed(true)}
+                                    onClick={dismissAccountReadyDialog}
                                     autoFocus
                                 >
                                     Cancel
