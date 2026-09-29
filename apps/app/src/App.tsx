@@ -13,6 +13,7 @@ import {
   useAutoConnectWallet,
   useCurrentAccount,
   useDisconnectWallet,
+  useSuiClient,
   useSuiClientContext,
 } from '@mysten/dapp-kit'
 import { isEnokiNetwork, registerEnokiWallets } from '@mysten/enoki'
@@ -23,7 +24,7 @@ import {
 } from '@mysten/sui/jsonRpc'
 import { SuiGrpcClient } from '@mysten/sui/grpc'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useSearchParams } from 'react-router-dom'
 import { config } from './config'
 
 import LandingPage from './pages/LandingPage'
@@ -33,7 +34,9 @@ import SetupWizard from './pages/SetupWizard'
 import Playground from './pages/Playground'
 import ConnectMcp from './pages/ConnectMcp'
 import ConnectClaude from './pages/ConnectClaude'
+import KeysPage from './pages/KeysPage'
 import { useRouteAnalytics } from './hooks/useRouteAnalytics'
+import { fetchAccountIdForOwner } from './utils/suiClientCompat'
 
 
 import '@mysten/dapp-kit/dist/index.css'
@@ -250,13 +253,29 @@ function RoutePending() {
  *  Shared with ConnectMcp.tsx (kept as a literal there to avoid a circular import). */
 const MCP_CONNECT_STORAGE_KEY = 'memwal_mcp_connect'
 const CLAUDE_CONNECT_STORAGE_KEY = 'memwal_claude_connect'
+const KEYS_CONNECT_STORAGE_KEY = 'memwal_keys_connect'
+/** Set by RequireAccountForSetup below when a signed-out visitor is bounced
+ *  off /setup, so that intent survives the sign-in redirect instead of
+ *  silently landing wherever PostAuthAccountCheck would otherwise send them
+ *  (Thanos, 24 Sep — WALM-675 scope). Carries `from` when Console's "Set up"
+ *  (COMG-1081) sent them — mirrors `from=wm` on the way back — so the
+ *  account-ready dialog still knows its origin once /setup restores after
+ *  sign-in (28 Sep update). Empty-but-present (`{}`) is the plain "resume
+ *  /setup" case with no marker to carry. */
+const SETUP_CONNECT_STORAGE_KEY = 'memwal_setup_connect'
 
-function consumePendingConnectQuery(storageKey: string): string {
+const PENDING_CONNECTS = [
+  [CLAUDE_CONNECT_STORAGE_KEY, '/connect/claude'],
+  [MCP_CONNECT_STORAGE_KEY, '/connect/mcp'],
+  [KEYS_CONNECT_STORAGE_KEY, '/keys'],
+] as const
+
+// Read-only: PostAuthRedirect removes the entries after commit, not during
+// render. StrictMode renders twice in dev, and removing here left the second
+// render with nothing, dropping the pending query (ducnmm review).
+function readPendingConnectQuery(storageKey: string): string {
   const pending = sessionStorage.getItem(storageKey)
   if (!pending) return ''
-
-  // Consume once — prevents a redirect loop on later visits to `/`.
-  sessionStorage.removeItem(storageKey)
   try {
     const params = JSON.parse(pending) as Record<string, string>
     return new URLSearchParams(params).toString()
@@ -265,18 +284,131 @@ function consumePendingConnectQuery(storageKey: string): string {
   }
 }
 
+/** Distinct from readPendingConnectQuery: an empty query here still means
+ *  "yes, resume /setup" (null means nothing was pending at all). */
+function readPendingSetupVisit(): { query: string } | null {
+  const pending = sessionStorage.getItem(SETUP_CONNECT_STORAGE_KEY)
+  if (pending === null) return null
+  try {
+    const params = JSON.parse(pending) as Record<string, string>
+    return { query: new URLSearchParams(params).toString() }
+  } catch {
+    return { query: '' }
+  }
+}
+
+/** Where a pending connect or /setup visit resumes, and how many
+ *  PENDING_CONNECTS entries were checked to decide it (all of them when
+ *  none won). */
+function resolvePostAuthResume(): { to: string | null; connectsChecked: number } {
+  for (const [index, [storageKey, path]] of PENDING_CONNECTS.entries()) {
+    const query = readPendingConnectQuery(storageKey)
+    if (query) return { to: `${path}?${query}`, connectsChecked: index + 1 }
+  }
+  // Respects an explicit /setup visit over PostAuthAccountCheck's own
+  // account-existence guess — matters for an account that exists elsewhere
+  // (another device/browser) but has no local session here, which would
+  // otherwise get silently redirected to /dashboard against what they asked
+  // for. A genuinely new account ends up at /setup either way.
+  const pendingSetup = readPendingSetupVisit()
+  if (pendingSetup) {
+    return {
+      to: pendingSetup.query ? `/setup?${pendingSetup.query}` : '/setup',
+      connectsChecked: PENDING_CONNECTS.length,
+    }
+  }
+  return { to: null, connectsChecked: PENDING_CONNECTS.length }
+}
+
 /** Lands here after a successful sign-in (the OAuth redirect_uri is the app
  *  root). Resume an interrupted hosted Claude or local MCP connection by
- *  restoring its saved query string; otherwise go to the dashboard. */
-function PostAuthRedirect() {
-  const claudeConnectQuery = consumePendingConnectQuery(CLAUDE_CONNECT_STORAGE_KEY)
-  if (claudeConnectQuery) {
-    return <Navigate to={`/connect/claude?${claudeConnectQuery}`} replace />
-  }
+ *  restoring its saved query string; otherwise resolve whether this is a
+ *  brand-new account. */
+export function PostAuthRedirect() {
+  const { to, connectsChecked } = resolvePostAuthResume()
 
-  const mcpConnectQuery = consumePendingConnectQuery(MCP_CONNECT_STORAGE_KEY)
-  if (mcpConnectQuery) return <Navigate to={`/connect/mcp?${mcpConnectQuery}`} replace />
-  return <Navigate to="/dashboard" replace />
+  // Consume once, after commit — prevents a redirect loop on later visits to
+  // `/`. Removes every entry checked (a present-but-unparsable one included)
+  // and the /setup breadcrumb, which is either the one resuming now or a
+  // stray from an unrelated earlier render that must not hijack a later
+  // sign-in once a real pending connect wins (ducnmm review).
+  useEffect(() => {
+    for (const [storageKey] of PENDING_CONNECTS.slice(0, connectsChecked)) {
+      sessionStorage.removeItem(storageKey)
+    }
+    sessionStorage.removeItem(SETUP_CONNECT_STORAGE_KEY)
+  }, [connectsChecked])
+
+  if (to) return <Navigate to={to} replace />
+  return <PostAuthAccountCheck />
+}
+
+/** COMG-1092's new-user route sends a signed-out visitor straight into
+ *  Enoki sign-in with no page of its own — so this is the first chance to
+ *  route a brand-new account (no on-chain Account object yet) to /setup
+ *  instead of /dashboard's "no keys yet, create one" prompt. An existing
+ *  account always lands on /dashboard, same as before this existed. */
+export function PostAuthAccountCheck() {
+  const currentAccount = useCurrentAccount()
+  const suiClient = useSuiClient()
+  const [target, setTarget] = useState<'/dashboard' | '/setup' | null>(null)
+
+  useEffect(() => {
+    // AppContent only reaches this component when currentAccount is already
+    // set (see the "/" route below) — this guard is defensive, not expected.
+    if (!currentAccount) return
+    let cancelled = false
+    fetchAccountIdForOwner(suiClient, config.memwalRegistryId, currentAccount.address)
+      .then((accountId) => {
+        if (!cancelled) setTarget(accountId ? '/dashboard' : '/setup')
+      })
+      .catch((err) => {
+        console.error('Failed to resolve account after sign-in:', err)
+        if (!cancelled) setTarget('/dashboard')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentAccount, suiClient])
+
+  if (!currentAccount) return <Navigate to="/dashboard" replace />
+
+  if (!target) return <RoutePending />
+  return <Navigate to={target} replace />
+}
+
+/** The /setup route's element. A component, not a function invoked while
+ *  AppContent builds its route table — <Routes> evaluates every element
+ *  prop on every render regardless of the active path, so the old
+ *  requireAccountForSetup(...) helper wrote the breadcrumb on every
+ *  signed-out render of the whole app, not only on an actual /setup visit
+ *  (ducnmm review, WALM-675). Scoping the write to this component's effect
+ *  means it only runs once React Router actually mounts it. */
+function RequireAccountForSetup() {
+  const currentAccount = useCurrentAccount()
+  const autoConnectStatus = useAutoConnectWallet()
+  const authPending = autoConnectStatus === 'idle'
+  const { delegateKey } = useDelegateKey()
+  const [searchParams] = useSearchParams()
+  const from = searchParams.get('from')
+
+  useEffect(() => {
+    if (!authPending && !currentAccount) {
+      sessionStorage.setItem(SETUP_CONNECT_STORAGE_KEY, JSON.stringify(from ? { from } : {}))
+    }
+  }, [authPending, currentAccount, from])
+
+  if (authPending) return <RoutePending />
+  if (!currentAccount) return <Navigate to="/" replace />
+  // SetupWizard calls setDelegateKeys() (updating this same context) before
+  // setStep('done'), so this branch flips true and unmounts SetupWizard on
+  // the very next render — before its own done-step effect's timer fires.
+  // The `fromConsoleSetup` signal has to live on THIS navigate, the one that
+  // actually wins the race, not on SetupWizard's (ducnmm review, WALM-675).
+  if (delegateKey) {
+    return <Navigate to="/dashboard" replace state={from === 'console' ? { fromConsoleSetup: true } : undefined} />
+  }
+  return <SetupWizard />
 }
 
 function AppContent() {
@@ -297,14 +429,13 @@ function AppContent() {
         currentAccount ? <PostAuthRedirect /> : <LandingPage />
       } />
       <Route path="/dashboard" element={requireAccount(<Dashboard />)} />
-      <Route path="/setup" element={requireAccount(
-        delegateKey ? <Navigate to="/dashboard" replace /> : <SetupWizard />
-      )} />
+      <Route path="/setup" element={<RequireAccountForSetup />} />
       <Route path="/playground" element={requireAccount(
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       )} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="/connect/claude" element={<ConnectClaude />} />
+      <Route path="/keys" element={<KeysPage />} />
       <Route path="/admin" element={<AdminDashboard />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
