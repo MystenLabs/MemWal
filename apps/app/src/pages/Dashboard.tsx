@@ -294,10 +294,18 @@ export default function Dashboard({
     const [fromConsoleSetup, setFromConsoleSetup] = useState(() => Boolean(
         (location.state as { fromConsoleSetup?: boolean } | null)?.fromConsoleSetup
     ))
-    // Mint sets newPrivateKey (a fresh string each time, so the dismissal-
-    // reset effect below always re-fires). Revoke has no equivalent
-    // naturally-changing value, hence this separate flag, reset to false
-    // whenever the dialog is dismissed so a later revoke can re-trigger it.
+    // Set on a successful mint, alongside a direct accountReadyDismissed
+    // reset (not an effect keyed on newPrivateKey — same reasoning as
+    // justRemovedKeys below: the flag can already be true from a prior
+    // dismissed dialog, and setting an unchanged value wouldn't re-fire an
+    // effect). Combined with `!newPrivateKey` in showAccountReadyDialog so
+    // the dialog only opens once the one-time key block has been dismissed
+    // via Continue — opening it earlier, with Back to Console as the primary
+    // button, let a user leave before copying an unrecoverable private key
+    // (nikola0x0 + ducnmm review).
+    const [justMintedKey, setJustMintedKey] = useState(false)
+    // Revoke has no one-time secret to protect, so its dialog can open
+    // immediately — same direct-reset reasoning as justMintedKey above.
     const [justRemovedKeys, setJustRemovedKeys] = useState(false)
 
     // WalletSigner adapter — wraps dapp-kit hooks into SDK's WalletSigner interface
@@ -460,17 +468,15 @@ export default function Dashboard({
         scrollToDelegateKeys()
     }, [autoScrollToKeys, isKeyListLoading, scrollToDelegateKeys])
 
-    // Re-arm the account-ready prompt for each freshly created key.
-    useEffect(() => {
-        if (newPrivateKey) setAccountReadyDismissed(false)
-    }, [newPrivateKey])
     // Two distinct Console arrivals gate the same dialog: a key action
     // (mint or revoke) from /keys (fromKeys), or a brand-new account that
     // just finished /setup after coming from Console's "Set up"
-    // (fromConsoleSetup, 28 Sep update).
+    // (fromConsoleSetup, 28 Sep update). The mint branch additionally
+    // requires !newPrivateKey — the one-time key block is still showing
+    // otherwise, and this dialog's primary button navigates away.
     const showAccountReadyDialog = Boolean(
         config.consoleUrl && !accountReadyDismissed && !removeKeysConfirm &&
-        ((fromKeys && (newPrivateKey || justRemovedKeys)) || fromConsoleSetup)
+        ((fromKeys && ((justMintedKey && !newPrivateKey) || justRemovedKeys)) || fromConsoleSetup)
     )
     const dismissAccountReadyDialog = useCallback(() => {
         setAccountReadyDismissed(true)
@@ -676,6 +682,8 @@ export default function Dashboard({
             setDelegateKeys(delegate.privateKey, delegatePublicKeyHex, effectiveAccountObjectId!)
             closeAddKeyForm()
             setNewKeyLabel('New key')
+            setJustMintedKey(true)
+            setAccountReadyDismissed(false)
 
             trackEvent('delegate_key_add_complete', { location: 'dashboard' })
             void navigator.clipboard.writeText(delegate.privateKey).catch(() => undefined)
