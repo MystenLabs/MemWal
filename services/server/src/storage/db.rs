@@ -289,6 +289,40 @@ mod tests {
             .unwrap_or_else(|| panic!("migration {name} is not wired into the pipeline"))
     }
 
+    fn is_pg_deadlock(error: &sqlx::Error) -> bool {
+        error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .is_some_and(|code| code.as_ref() == "40P01")
+    }
+
+    /// Replays an idempotent migration while other tests are writing.
+    ///
+    /// A multi-statement file holds every lock until it commits. Migration
+    /// 020 locks `memory_tombstones` and then `vector_entries`.
+    /// `insert_vector` locks those tables in the opposite order, so Postgres
+    /// aborts one side with `40P01`. Each statement is idempotent, so the
+    /// aborted setup is safe to run again.
+    async fn execute_idempotent_migration(pool: &sqlx::PgPool, sql: &str) {
+        let mut conn = pool.acquire().await.expect("test database connection");
+        let mut last_err = None;
+        for attempt in 0..5 {
+            match sqlx::raw_sql(sql).execute(&mut *conn).await {
+                Ok(_) => return,
+                Err(err) if is_pg_deadlock(&err) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(25 * (attempt as u64 + 1))).await;
+                }
+                Err(err) => panic!("test migration failed: {err}"),
+            }
+        }
+        panic!(
+            "test migration deadlocked after retries: {}",
+            last_err.expect("deadlock error")
+        );
+    }
+
     /// Every `.sql` file in `services/server/migrations` must be wired
     /// into the pipeline.
     #[test]
@@ -449,7 +483,7 @@ mod tests {
             migration_sql("010_restore_failed_blobs.sql"),
             migration_sql("014_memory_read_api_columns.sql"),
         ] {
-            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+            execute_idempotent_migration(&pool, migration).await;
         }
 
         // Mirrors the ordering in VectorDb::new(): batched Rust backfill
@@ -458,10 +492,11 @@ mod tests {
         // CONCURRENTLY IF NOT EXISTS.
         super::backfill_updated_at(&pool).await.unwrap();
 
-        sqlx::raw_sql(migration_sql("015_memory_read_api_updated_at_not_null.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        execute_idempotent_migration(
+            &pool,
+            migration_sql("015_memory_read_api_updated_at_not_null.sql"),
+        )
+        .await;
 
         super::recover_invalid_concurrent_indexes(&pool)
             .await
@@ -474,7 +509,7 @@ mod tests {
             migration_sql("019_memory_read_api_updated_at_set_not_null.sql"),
             migration_sql("020_read_api_followups.sql"),
         ] {
-            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+            execute_idempotent_migration(&pool, migration).await;
         }
 
         let db = VectorDb {
@@ -1509,7 +1544,7 @@ mod tests {
             migration_sql("012_remember_write_idempotency.sql"),
             migration_sql("013_remember_write_idempotency_index.sql"),
         ] {
-            sqlx::raw_sql(migration).execute(db.pool()).await.unwrap();
+            execute_idempotent_migration(db.pool(), migration).await;
         }
         Some(db)
     }
