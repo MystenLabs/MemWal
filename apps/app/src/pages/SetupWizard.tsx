@@ -312,7 +312,7 @@ export default function SetupWizard() {
         setTxStatus('checking existing account...')
 
         try {
-            const { accountId, transactionDigest } = await registerOnchain(address, publicKeyHex)
+            const { accountId } = await registerOnchain(address, publicKeyHex)
             setTxStatus('delegate key registered onchain!')
             setDelegateKeys(privateKeyHex, publicKeyHex, accountId)
             setPrivateKeyHex('')
@@ -320,8 +320,6 @@ export default function SetupWizard() {
             trackEvent('delegate_key_register_complete', {
                 auth_method: isEnoki ? 'enoki' : 'wallet',
                 location: 'setup',
-                delegate_public_key: publicKeyHex,
-                transaction_digest: transactionDigest,
             })
         } catch (err: unknown) {
             console.error('Onchain operation failed:', err)

@@ -149,16 +149,10 @@ function analyticsEnabled(): boolean {
 function redactStringForAnalytics(key: string, value: string): string {
     const normalized = value.replace(/\s+/g, ' ').trim()
     if (!normalized) return ''
-    // A delegate public key is 32 bytes, the same width as a seed, so the
-    // blanket hex rule would delete the only id Statsig can join to chain data.
-    if (key === 'delegate_public_key') {
-        return /^(?:0x)?[0-9a-f]{64}$/i.test(normalized)
-            ? normalized.toLowerCase().replace(/^0x/, '')
-            : '[redacted]'
-    }
-    if (key === 'transaction_digest') {
-        return /^[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(normalized) ? normalized : '[redacted]'
-    }
+    // No per-key exemptions. A 32-byte public key has the same shape as a
+    // seed, so letting one key name through lets a private key through under
+    // that name; and a transaction digest resolves on-chain to the sender's
+    // wallet, which would tie every analytics profile to an address.
     if (SENSITIVE_PARAM_NAME_RE.test(key)) return '[redacted]'
     if (SENSITIVE_VALUE_PATTERNS.some(pattern => pattern.test(normalized))) return '[redacted]'
     if (normalized.length > MAX_ANALYTICS_STRING_LENGTH) {

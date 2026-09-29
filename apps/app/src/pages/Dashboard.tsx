@@ -687,11 +687,7 @@ export default function Dashboard({
             // newPrivateKey and open the dialog early (ducnmm re-review,
             // WALM-675).
 
-            trackEvent('delegate_key_add_complete', {
-                location: 'dashboard',
-                delegate_public_key: delegatePublicKeyHex,
-                transaction_digest: result.digest,
-            })
+            trackEvent('delegate_key_add_complete', { location: 'dashboard' })
             void navigator.clipboard.writeText(delegate.privateKey).catch(() => undefined)
             void fetchOnChainKeys()
         } catch (err: unknown) {

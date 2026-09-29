@@ -1,29 +1,33 @@
+import { readFileSync } from 'node:fs'
+
 import { analyticsEventProperties } from './analytics'
 
 const PUBLIC_KEY = 'ab'.repeat(32)
 const PRIVATE_KEY = 'cd'.repeat(32)
-const DIGEST = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijk'
 
-test('keeps the delegate public key and transaction digest used to join chain activity', () => {
+// A 32-byte hex value is redacted whatever the property is called. A key-name
+// exemption once let a real 64-hex private key through as delegate_public_key.
+test('redacts any 64-hex value, including under a public-key name', () => {
     const params = analyticsEventProperties({
-        delegate_public_key: `0x${PUBLIC_KEY.toUpperCase()}`,
-        transaction_digest: DIGEST,
+        delegate_public_key: PRIVATE_KEY,
+        public_key: `0x${PUBLIC_KEY}`,
+        note: `seed ${PRIVATE_KEY}`,
         location: 'setup',
     })
 
-    expect(params.delegate_public_key).toBe(PUBLIC_KEY)
-    expect(params.transaction_digest).toBe(DIGEST)
+    expect(params.delegate_public_key).toBe('[redacted]')
+    expect(params.public_key).toBe('[redacted]')
+    expect(params.note).toBe('[redacted]')
     expect(params.location).toBe('setup')
 })
 
-test('still redacts a private key even when it is passed as a public key or digest', () => {
-    const params = analyticsEventProperties({
-        delegate_public_key: PRIVATE_KEY.slice(0, 63),
-        transaction_digest: PRIVATE_KEY,
-        note: `seed ${PRIVATE_KEY}`,
-    })
-
-    expect(params.delegate_public_key).toBe('[redacted]')
-    expect(params.transaction_digest).toBe('[redacted]')
-    expect(params.note).toBe('[redacted]')
+// A transaction digest is not secret, but it resolves on-chain to the sender's
+// wallet, so sending one ties the analytics profile to an address. The key
+// events must not carry chain ids at all.
+test('delegate key events do not send the public key or a transaction digest', () => {
+    for (const file of ['../pages/SetupWizard.tsx', '../pages/Dashboard.tsx']) {
+        const source = readFileSync(new URL(file, import.meta.url), 'utf8')
+        expect(source, file).not.toMatch(/delegate_public_key\s*:/)
+        expect(source, file).not.toMatch(/transaction_digest\s*:/)
+    }
 })
