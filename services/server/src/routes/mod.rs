@@ -51,7 +51,7 @@ pub use sponsor::{sponsor_execute_proxy, sponsor_proxy};
 
 use futures::stream::{self, StreamExt};
 
-use crate::jobs::{wallet_job_request, WalletJob, WalletOperation};
+use crate::jobs::{wallet_job_queue, wallet_job_request, WalletJob, WalletOperation};
 use crate::storage::db::VectorDb;
 use crate::types::*;
 
@@ -61,7 +61,9 @@ use apalis::prelude::Storage as _;
 // Wallet-job enqueue (used by remember + analyze)
 // ============================================================
 
-/// Enqueue a WalletJob to the single Apalis wallet queue.
+/// Enqueue a WalletJob. Uploads stay on the prefetch queue. Metadata and
+/// finalize go to the followup queue, whose workers are not already holding
+/// a batch of uploads.
 ///
 /// `wallet_index` is preserved in the job payload for audit/logging. Upload
 /// workers select a fresh round-robin key at execution time so Apalis retries
@@ -71,15 +73,13 @@ pub async fn enqueue_wallet_job(
     wallet_index: usize,
     operation: WalletOperation,
 ) -> Result<usize, AppError> {
-    let mut storage = state.wallet_storage.clone();
-    match storage
-        .push_request(wallet_job_request(WalletJob {
-            wallet_index,
-            congestion_requeues: 0,
-            operation,
-        }))
-        .await
-    {
+    let job = WalletJob {
+        wallet_index,
+        congestion_requeues: 0,
+        operation,
+    };
+    let mut storage = wallet_job_queue(state, &job.operation);
+    match storage.push_request(wallet_job_request(job)).await {
         Ok(_) => Ok(wallet_index),
         Err(e) => {
             crate::alerts::maybe_alert_sqlx_postgres_storage_exhausted(
