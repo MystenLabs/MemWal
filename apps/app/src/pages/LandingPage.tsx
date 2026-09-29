@@ -43,9 +43,9 @@ function SignInHero({ stage }: { stage: 'desktop' | 'mobile' }) {
         return (
             <div className="signin-hero" aria-hidden="true">
                 <img className="signin-tile signin-tile--back" src="/signin/tile-back.png?v=light2" alt="" />
-                <div className="signin-phone">
-                    <img src="/signin/phone.png" alt="" />
-                    <div className="signin-phone-fade" />
+                <div className="signin-screen">
+                    <img src="/signin/screen.png?v=laptop1" alt="" />
+                    <div className="signin-screen-fade" />
                 </div>
                 <img className="signin-tile signin-tile--left" src="/signin/tile-left.png?v=glass3" alt="" />
                 <img className="signin-tile signin-tile--right" src="/signin/tile-right.png?v=glass3" alt="" />
@@ -54,9 +54,9 @@ function SignInHero({ stage }: { stage: 'desktop' | 'mobile' }) {
     }
     return (
         <div className="signin-hero" aria-hidden="true">
-            <div className="signin-phone">
-                <img src="/signin/phone-mobile.png" alt="" />
-                <div className="signin-phone-fade" />
+            <div className="signin-screen">
+                <img src="/signin/screen.png?v=laptop1" alt="" />
+                <div className="signin-screen-fade" />
             </div>
             <img className="signin-tile signin-tile--left" src="/signin/tile-left-mobile.png?v=light2" alt="" />
             <img className="signin-tile signin-tile--right" src="/signin/tile-right-mobile.png?v=light2" alt="" />
