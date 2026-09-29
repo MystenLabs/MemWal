@@ -174,10 +174,9 @@ fn resolve_sidecar_relayer_urls(
 ) -> SidecarRelayerUrls {
     // Loopback unless an operator explicitly asked for something else. This is
     // the behaviour change: `MEMWAL_RELAYER_URL` no longer steers the dial.
-    let dial =
-        dial_override_env
-            .clone()
-            .unwrap_or_else(|| format!("http://127.0.0.1:{}", port));
+    let dial = dial_override_env
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", port));
 
     // An explicit public origin wins; `MEMWAL_RELAYER_URL` remains the fallback
     // so `memwal_health` names exactly what it names today on every deployment.
@@ -268,8 +267,12 @@ mod sidecar_relayer_url_tests {
 
     #[test]
     fn an_explicit_loopback_override_is_not_warned_about() {
-        let urls =
-            resolve_sidecar_relayer_urls(Some("http://localhost:9000".to_string()), None, None, 8000);
+        let urls = resolve_sidecar_relayer_urls(
+            Some("http://localhost:9000".to_string()),
+            None,
+            None,
+            8000,
+        );
         assert_eq!(urls.dial, "http://localhost:9000");
         assert!(urls.warnings.is_empty());
     }
@@ -309,7 +312,10 @@ mod sidecar_relayer_url_tests {
             "http://100.64.0.1:8000",
             "not a url",
         ] {
-            assert!(!is_loopback_relayer_url(url), "{url} should not be loopback");
+            assert!(
+                !is_loopback_relayer_url(url),
+                "{url} should not be loopback"
+            );
         }
     }
 }
@@ -482,7 +488,7 @@ mod mcp_rate_limit_tests {
     }
 
     /// Accepts a Redis handshake and answers every command with integer 0,
-    /// which `accounts_rate_limit_middleware` treats as a denied window.
+    /// which the sliding-window script treats as a denied window.
     async fn reply_denied(mut socket: tokio::net::TcpStream) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let _ = socket.set_nodelay(true);
@@ -559,6 +565,7 @@ mod mcp_rate_limit_tests {
             sponsor_rate_limit: types::SponsorRateLimitConfig::default(),
             read_api_rate_limit: types::ReadApiRateLimitConfig::default(),
             accounts_rate_limit: types::AccountsRateLimitConfig::default(),
+            mcp_rate_limit: types::McpRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -652,7 +659,7 @@ mod mcp_rate_limit_tests {
         })
     }
 
-    async fn expect_accounts_ip_burst(app: &Router, method: Method, uri: &str, bearer: bool) {
+    async fn expect_mcp_ip_burst(app: &Router, method: Method, uri: &str, bearer: bool) {
         let mut builder = Request::builder().method(method).uri(uri);
         if bearer {
             builder = builder.header(header::AUTHORIZATION, "Bearer not-a-delegate-key");
@@ -673,14 +680,20 @@ mod mcp_rate_limit_tests {
             StatusCode::TOO_MANY_REQUESTS,
             "{uri} bearer={bearer} body={json}"
         );
+        // Missing ConnectInfo is 0.0.0.0. Every IP shares one MCP ceiling,
+        // and that ceiling is not the accounts-exists oracle budget.
         assert_eq!(
-            json["layer"], "accounts_ip_burst",
-            "{uri} must be the accounts IP bucket, not a new limiter"
+            json["layer"], "mcp_ip_burst",
+            "{uri} must use the MCP IP bucket, not accounts_ip_burst"
+        );
+        assert_eq!(
+            json["limit"], "2000 weighted-requests/min",
+            "{uri} body={json}"
         );
     }
 
     #[tokio::test]
-    async fn mcp_routes_invoke_accounts_ip_rate_limit() {
+    async fn mcp_rate_limit_routes_use_their_own_ip_bucket() {
         let state = test_state(denying_redis().await).await;
         // Merged the same way `main` merges `mcp_routes` into `public_routes`.
         let app = Router::new()
@@ -695,10 +708,10 @@ mod mcp_rate_limit_tests {
             (Method::DELETE, "/api/mcp"),
             (Method::OPTIONS, "/api/mcp"),
         ] {
-            expect_accounts_ip_burst(&app, method, uri, false).await;
+            expect_mcp_ip_burst(&app, method, uri, false).await;
         }
-        // A Bearer token does not skip the shared IP budget.
-        expect_accounts_ip_burst(&app, Method::POST, "/api/mcp", true).await;
+        // A Bearer token does not skip the MCP IP budget.
+        expect_mcp_ip_burst(&app, Method::POST, "/api/mcp", true).await;
 
         let missing = app
             .oneshot(
@@ -1197,10 +1210,10 @@ async fn stop_sidecar_child(child: &mut tokio::process::Child) {
 /// is generous on the POST route (JSON-RPC envelopes can carry analyze
 /// text up to a few hundred KiB) and irrelevant on the GET SSE route.
 ///
-/// The router shares `accounts_rate_limit_middleware`'s IP budget with
-/// `GET /api/accounts/{owner}/exists` (WALM-700). Bearer tokens are not
-/// exempt. `reset_fallback` drops the fallback `Router::layer` also wraps;
-/// without it, `merge` would rate-limit every unmatched path.
+/// The router uses `mcp_rate_limit_middleware`, not the accounts-exists
+/// budget. Bearer tokens are not exempt. `reset_fallback` drops the
+/// fallback `Router::layer` also wraps; without it, `merge` would
+/// rate-limit every unmatched path.
 fn mcp_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/mcp/sse", get(mcp_proxy::sse_proxy))
@@ -1223,7 +1236,7 @@ fn mcp_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            rate_limit::accounts_rate_limit_middleware,
+            rate_limit::mcp_rate_limit_middleware,
         ))
         // `Router::layer` also wraps this router's fallback. Merging that
         // fallback into `public_routes` would run this budget on every
@@ -1286,6 +1299,13 @@ async fn main() {
         config.accounts_rate_limit.per_hour,
         config.accounts_rate_limit.global_per_minute,
         config.accounts_rate_limit.global_per_hour,
+    );
+    tracing::info!(
+        "  mcp rate limit: {}/min, {}/hr per IP; {}/min, {}/hr global",
+        config.mcp_rate_limit.per_minute,
+        config.mcp_rate_limit.per_hour,
+        config.mcp_rate_limit.global_per_minute,
+        config.mcp_rate_limit.global_per_hour,
     );
     tracing::info!(
         "  owner-token issuance: {} (ttl={}s); rate limit {}/min, {}/hr per credential; {}/min, {}/hr per owner",
@@ -1419,8 +1439,7 @@ async fn main() {
         let timeout = std::time::Duration::from_secs(sidecar_watch_timeout_secs);
         loop {
             interval.tick().await;
-            let upload_ok =
-                health_ok(&sidecar_watch_client, &sidecar_watch_url, timeout).await;
+            let upload_ok = health_ok(&sidecar_watch_client, &sidecar_watch_url, timeout).await;
             let seal_ok = match &seal_watch_url {
                 Some(url) => health_ok(&sidecar_watch_client, url, timeout).await,
                 None => true,
@@ -2154,8 +2173,7 @@ async fn main() {
                 .write()
                 .await;
             let before = reject_cache.len();
-            reject_cache
-                .retain(|_, rejected_at| storage::sui::reject_entry_is_fresh(*rejected_at));
+            reject_cache.retain(|_, rejected_at| storage::sui::reject_entry_is_fresh(*rejected_at));
             let evicted = before - reject_cache.len();
             drop(reject_cache);
             if evicted > 0 {
