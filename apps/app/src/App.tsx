@@ -371,10 +371,11 @@ export function PostAuthAccountCheck() {
  *  signed-out render of the whole app, not only on an actual /setup visit
  *  (ducnmm review, WALM-675). Scoping the write to this component's effect
  *  means it only runs once React Router actually mounts it. */
-function RequireAccountForSetup({ children }: { children: React.ReactNode }) {
+function RequireAccountForSetup() {
   const currentAccount = useCurrentAccount()
   const autoConnectStatus = useAutoConnectWallet()
   const authPending = autoConnectStatus === 'idle'
+  const { delegateKey } = useDelegateKey()
   const [searchParams] = useSearchParams()
   const from = searchParams.get('from')
 
@@ -385,8 +386,16 @@ function RequireAccountForSetup({ children }: { children: React.ReactNode }) {
   }, [authPending, currentAccount, from])
 
   if (authPending) return <RoutePending />
-  if (currentAccount) return <>{children}</>
-  return <Navigate to="/" replace />
+  if (!currentAccount) return <Navigate to="/" replace />
+  // SetupWizard calls setDelegateKeys() (updating this same context) before
+  // setStep('done'), so this branch flips true and unmounts SetupWizard on
+  // the very next render — before its own done-step effect's timer fires.
+  // The `fromConsoleSetup` signal has to live on THIS navigate, the one that
+  // actually wins the race, not on SetupWizard's (ducnmm review, WALM-675).
+  if (delegateKey) {
+    return <Navigate to="/dashboard" replace state={from === 'console' ? { fromConsoleSetup: true } : undefined} />
+  }
+  return <SetupWizard />
 }
 
 function AppContent() {
@@ -407,11 +416,7 @@ function AppContent() {
         currentAccount ? <PostAuthRedirect /> : <LandingPage />
       } />
       <Route path="/dashboard" element={requireAccount(<Dashboard />)} />
-      <Route path="/setup" element={
-        <RequireAccountForSetup>
-          {delegateKey ? <Navigate to="/dashboard" replace /> : <SetupWizard />}
-        </RequireAccountForSetup>
-      } />
+      <Route path="/setup" element={<RequireAccountForSetup />} />
       <Route path="/playground" element={requireAccount(
         delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
       )} />
