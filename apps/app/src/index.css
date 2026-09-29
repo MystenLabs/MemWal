@@ -15687,3 +15687,245 @@ body:has(.signin-proposed) {
     justify-self: start;
   }
 }
+
+/* ── Copy button with status feedback (admin) ───────────────────────── */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-shrink: 0;
+  border: 1px solid #262b30;
+  border-radius: 6px;
+  background: transparent;
+  color: #b1b4b6;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease;
+}
+.copy-btn--icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+.copy-btn:hover {
+  border-color: #faf8f5;
+  color: #faf8f5;
+}
+.copy-btn:focus-visible {
+  outline: 2px solid #e8ff75;
+  outline-offset: 2px;
+}
+.copy-btn--done,
+.copy-btn--done:hover {
+  border-color: rgba(134, 239, 172, 0.6);
+  background: rgba(134, 239, 172, 0.08);
+  color: #86efac;
+}
+.copy-btn--error,
+.copy-btn--error:hover {
+  border-color: rgba(255, 154, 160, 0.6);
+  background: rgba(255, 154, 160, 0.08);
+  color: #ff9aa0;
+}
+.copy-btn-icon {
+  display: inline-flex;
+}
+.copy-btn--done .copy-btn-icon,
+.copy-btn--error .copy-btn-icon {
+  animation: copy-btn-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.copy-btn-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+@keyframes copy-btn-pop {
+  0% { transform: scale(0.4) rotate(-12deg); opacity: 0; }
+  100% { transform: scale(1) rotate(0); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .copy-btn--done .copy-btn-icon,
+  .copy-btn--error .copy-btn-icon {
+    animation: none;
+  }
+}
+
+
+/* ── Error details modal ─────────────────────────────────────────────── */
+.admin-dashboard-page .admin-error-details {
+  display: grid;
+  gap: 0;
+  margin: 0 0 20px;
+}
+.admin-dashboard-page .admin-error-detail-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #1c1f26;
+}
+.admin-dashboard-page .admin-error-detail-row dt {
+  color: #8f9294;
+  font-family: "Google Sans Code", var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+.admin-dashboard-page .admin-error-detail-row dd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  color: #faf8f5;
+  font-size: 14px;
+}
+.admin-dashboard-page .admin-detail-mono {
+  font-family: "Google Sans Code", var(--font-mono);
+  font-size: 13px;
+}
+.admin-dashboard-page .admin-detail-muted {
+  color: #8f9294;
+}
+.admin-dashboard-page .admin-detail-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #262b30;
+  border-radius: 6px;
+  color: #b1b4b6;
+}
+.admin-dashboard-page .admin-detail-link:hover {
+  border-color: #faf8f5;
+  color: #faf8f5;
+}
+.admin-dashboard-page .admin-error-detail-message-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: #8f9294;
+  font-family: "Google Sans Code", var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+.admin-dashboard-page .admin-error-modal-message--empty {
+  color: #b1b4b6;
+  font-family: "Google Sans Flex", sans-serif;
+  font-size: 14px;
+  white-space: normal;
+}
+.admin-dashboard-page .admin-copy-full-btn.copy-btn {
+  min-height: 44px;
+  padding: 0 20px;
+  border-radius: 26px;
+}
+/* A flex child only scrolls once it may shrink below its content. */
+.admin-error-modal-content {
+  min-height: 0;
+}
+
+/* ── Click-to-copy text (admin) ─────────────────────────────────────── */
+.copy-text {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: copy;
+  transition: color 160ms ease, background-color 160ms ease;
+}
+.copy-text:hover {
+  color: #faf8f5;
+  background: rgba(250, 248, 245, 0.06);
+}
+.copy-text:focus-visible {
+  outline: 2px solid #e8ff75;
+  outline-offset: 1px;
+}
+.copy-text-value {
+  min-width: 0;
+  white-space: nowrap;
+}
+.copy-text--wrap .copy-text-value {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.copy-text-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: #8f9294;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.copy-text:hover .copy-text-icon,
+.copy-text:focus-visible .copy-text-icon,
+.copy-text--done .copy-text-icon,
+.copy-text--error .copy-text-icon {
+  opacity: 1;
+}
+.copy-text--done,
+.copy-text--done:hover {
+  color: #86efac;
+}
+.copy-text--done .copy-text-icon {
+  color: #86efac;
+  animation: copy-btn-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.copy-text--error,
+.copy-text--error:hover {
+  color: #ff9aa0;
+}
+.copy-text--error .copy-text-icon {
+  color: #ff9aa0;
+  animation: copy-btn-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.copy-text-chip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  padding: 2px 8px;
+  border: 1px solid rgba(134, 239, 172, 0.45);
+  border-radius: 999px;
+  background: #0a0a0a;
+  color: #86efac;
+  font-family: "Google Sans Code", var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: copy-text-chip 1600ms ease forwards;
+}
+.copy-text--error .copy-text-chip {
+  border-color: rgba(255, 154, 160, 0.5);
+  color: #ff9aa0;
+}
+@keyframes copy-text-chip {
+  0% { opacity: 0; transform: translate(-50%, 4px); }
+  12% { opacity: 1; transform: translate(-50%, 0); }
+  75% { opacity: 1; transform: translate(-50%, 0); }
+  100% { opacity: 0; transform: translate(-50%, -4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .copy-text-icon,
+  .copy-text-chip {
+    animation: none !important;
+    transition: none;
+  }
+}

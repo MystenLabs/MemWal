@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Card } from './Card'
+import { CopyableText } from './CopyableText'
 import {
   fetchAdminActivity,
   formatTokenAmount,
@@ -126,48 +127,75 @@ function formatChartDay(day: string): string {
   })
 }
 
-function MemoryChart({ days }: { days: { day: string; count: number }[] }) {
-  if (days.length === 0) {
+type MemoryBucket = { key: string; label: string; detail: string; count: number }
+
+// `YYYY-MM-DDTHH:00` is already on the viewer's clock, so no Date parsing.
+function formatChartHour(hour: string): string {
+  const [day, time] = hour.split('T')
+  if (!day || !time) return hour
+  // A 24h window spans two dates, and "00:00" at both ends reads the same.
+  // Name the date at midnight instead.
+  return time === '00:00' ? formatChartDay(day) : time
+}
+
+function describeChartHour(hour: string): string {
+  const [day, time] = hour.split('T')
+  return day && time ? `${formatChartDay(day)} ${time}` : hour
+}
+
+function MemoryChart({
+  days,
+  hours,
+}: {
+  days: { day: string; count: number }[]
+  hours: { hour: string; count: number }[] | null
+}) {
+  const hourly = hours != null && hours.length > 0
+  const buckets: MemoryBucket[] = hourly
+    ? hours.map((h) => ({
+        key: h.hour,
+        label: formatChartHour(h.hour),
+        detail: describeChartHour(h.hour),
+        count: h.count,
+      }))
+    : days.map((d) => {
+        const label = formatChartDay(d.day)
+        return { key: d.day, label, detail: label, count: d.count }
+      })
+  if (buckets.length === 0) {
     return <p className="admin-memory-summary">No memories written in this window</p>
   }
-  const total = days.reduce((sum, day) => sum + day.count, 0)
-  const peak = days.reduce((best, day) => (day.count > best.count ? day : best), days[0])
-  const max = Math.max(1, ...days.map((day) => day.count))
-  const labelStep = days.length > 16 ? 5 : days.length > 8 ? 2 : 1
+  const unit = hourly ? 'hour' : 'day'
+  const total = buckets.reduce((sum, b) => sum + b.count, 0)
+  const peak = buckets.reduce((best, b) => (b.count > best.count ? b : best), buckets[0])
+  const max = Math.max(1, ...buckets.map((b) => b.count))
+  const labelStep = hourly ? 3 : buckets.length > 16 ? 5 : buckets.length > 8 ? 2 : 1
+  const summary =
+    total === 0
+      ? 'No memories written in this window'
+      : `${total} ${total === 1 ? 'memory' : 'memories'} · busiest ${unit} ${peak.detail} with ${peak.count}`
   return (
-    <div className="admin-memory-chart">
-      <p className="admin-memory-summary">
-        {total === 0
-          ? 'No memories written in this window'
-          : `${total} ${total === 1 ? 'memory' : 'memories'} · busiest ${formatChartDay(peak.day)} with ${peak.count}`}
-      </p>
-      <div
-        className="admin-memory-bars"
-        role="img"
-        aria-label={
-          total === 0
-            ? 'No memories written in this window'
-            : `${total} memories written. Busiest day ${formatChartDay(peak.day)} with ${peak.count}.`
-        }
-      >
-        {days.map((day, index) => (
-          <div className="admin-memory-bar" key={day.day} title={`${formatChartDay(day.day)}: ${day.count}`}>
+    <div className={`admin-memory-chart${hourly ? ' admin-memory-chart--hourly' : ''}`}>
+      <p className="admin-memory-summary">{summary}</p>
+      <div className="admin-memory-bars" role="img" aria-label={summary}>
+        {buckets.map((b, index) => (
+          <div className="admin-memory-bar" key={b.key} title={`${b.detail}: ${b.count}`}>
             <div
-              className={`admin-memory-bar-fill${day.count === 0 ? ' admin-memory-bar-fill--zero' : ''}${index === days.length - 1 ? ' admin-memory-bar-fill--latest' : ''}`}
-              style={{ height: `${(day.count / max) * 100}%` }}
+              className={`admin-memory-bar-fill${b.count === 0 ? ' admin-memory-bar-fill--zero' : ''}${index === buckets.length - 1 ? ' admin-memory-bar-fill--latest' : ''}`}
+              style={{ height: `${(b.count / max) * 100}%` }}
             >
-              {day.count > 0 && <span className="admin-memory-bar-count">{day.count}</span>}
+              {b.count > 0 && !hourly && <span className="admin-memory-bar-count">{b.count}</span>}
             </div>
           </div>
         ))}
       </div>
       <div className="admin-memory-axis" aria-hidden="true">
-        {days.map((day, index) => {
-          const show = index % labelStep === 0 || index === days.length - 1
+        {buckets.map((b, index) => {
+          const show = index % labelStep === 0 || index === buckets.length - 1
           if (!show) return null
           return (
-            <span key={day.day} style={{ left: `${((index + 0.5) / days.length) * 100}%` }}>
-              {formatChartDay(day.day)}
+            <span key={b.key} style={{ left: `${((index + 0.5) / buckets.length) * 100}%` }}>
+              {b.label}
             </span>
           )
         })}
@@ -257,6 +285,7 @@ const PREVIEW_ACTIVITY: AdminActivity = {
       day: new Date(Date.UTC(2026, 8, 17 + index)).toISOString().slice(0, 10),
       count,
     })),
+    memoriesByHour: null,
   },
 }
 
@@ -301,10 +330,14 @@ function ActivityBody({ data, hours, onHours }: {
 
       <Card
         title="Memories written"
-        subtitle="Completed remember jobs on each calendar day in this window. The first and last days can be partial."
+        subtitle={
+          actions.memoriesByHour
+            ? 'Completed remember jobs in each hour of this window, on your clock. The first and last hours can be partial.'
+            : 'Completed remember jobs on each calendar day in this window. The first and last days can be partial.'
+        }
         className="dashboard-keys-card sept-section admin-activity-card"
       >
-        <MemoryChart days={actions.memoriesByDay} />
+        <MemoryChart days={actions.memoriesByDay} hours={actions.memoriesByHour} />
       </Card>
 
       <Card
@@ -366,8 +399,12 @@ function ActivityBody({ data, hours, onHours }: {
               ) : (
                 actions.topOwners.map((owner) => (
                   <tr key={owner.owner} className="admin-table-row">
-                    <td className="admin-table-monospace" title={owner.owner}>
-                      {abbreviateAddress(owner.owner)}
+                    <td className="admin-table-monospace">
+                      <CopyableText
+                        value={owner.owner}
+                        display={abbreviateAddress(owner.owner)}
+                        label="Copy owner address"
+                      />
                     </td>
                     <td className="admin-table-monospace" style={{ textAlign: 'right' }}>
                       {owner.uploadsCompleted}

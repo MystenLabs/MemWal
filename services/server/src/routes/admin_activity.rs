@@ -105,6 +105,11 @@ pub struct ActionWindow {
     /// so the chart stays continuous. The day boundary follows the caller's
     /// UTC offset, and the first and last days can be partial.
     pub memories_by_day: Vec<MemoryDay>,
+    /// Completed remember jobs per clock hour, only for windows of a day or
+    /// less, where one bar per day would be a single bar. Hours with none are
+    /// included, and the first and last hours can be partial. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memories_by_hour: Option<Vec<MemoryHour>>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -112,6 +117,16 @@ pub struct MemoryDay {
     pub day: String,
     pub count: i64,
 }
+
+/// One clock hour on the viewer's calendar, as `YYYY-MM-DDTHH:00`.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct MemoryHour {
+    pub hour: String,
+    pub count: i64,
+}
+
+/// Windows up to this long are also bucketed by hour.
+pub const HOURLY_WINDOW_MAX_HOURS: i64 = 24;
 
 #[derive(Debug, Serialize)]
 pub struct SponsoredKindCount {
@@ -398,7 +413,8 @@ pub async fn get_admin_activity(
     let uploader_sui_points = column_points(&samples, |row| row.uploader_sui_mist);
     let sponsor_points = column_points(&samples, |row| row.sponsor_sui_mist);
 
-    let actions = load_actions(&state, prior_start, current_start, now, utc_offset_minutes).await?;
+    let actions =
+        load_actions(&state, prior_start, current_start, now, utc_offset_minutes, hours).await?;
 
     Ok(Json(ActivityResponse {
         generated_at: stamp(now),
@@ -469,12 +485,45 @@ async fn load_samples(
     .map_err(|error| AppError::Internal(format!("Failed to load balance samples: {error}")))
 }
 
+/// Hour buckets from the one holding `start` to the one holding `end`, in the
+/// viewer's wall clock, with zero for hours that had no completed jobs.
+pub fn fill_memory_hours(
+    counts: &[(String, i64)],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    utc_offset_minutes: i32,
+) -> Vec<MemoryHour> {
+    let shift = i64::from(utc_offset_minutes) * 60;
+    let first = (start.timestamp() + shift).div_euclid(3600);
+    let last = (end.timestamp() + shift).div_euclid(3600);
+    // A window is at most HOURLY_WINDOW_MAX_HOURS long, so this stays at 25
+    // buckets; the cap only guards against a caller passing a longer one.
+    if last < first || last - first > HOURLY_WINDOW_MAX_HOURS * 31 {
+        return Vec::new();
+    }
+    let counts: std::collections::HashMap<&str, i64> = counts
+        .iter()
+        .map(|(hour, count)| (hour.as_str(), *count))
+        .collect();
+    (first..=last)
+        .filter_map(|bucket| DateTime::<Utc>::from_timestamp(bucket * 3600, 0))
+        .map(|at| {
+            let hour = at.format("%Y-%m-%dT%H:00").to_string();
+            MemoryHour {
+                count: counts.get(hour.as_str()).copied().unwrap_or(0),
+                hour,
+            }
+        })
+        .collect()
+}
+
 async fn load_actions(
     state: &AppState,
     prior_start: DateTime<Utc>,
     current_start: DateTime<Utc>,
     now: DateTime<Utc>,
     utc_offset_minutes: i32,
+    window_hours: i64,
 ) -> Result<ActionWindow, AppError> {
     let pool = state.db.pool();
     let (uploads_completed, uploads_failed) = job_counts(pool, current_start, now).await?;
@@ -493,6 +542,11 @@ async fn load_actions(
     let top_owners = top_owners(pool, current_start, now).await?;
     let memories_by_day =
         load_memories_by_day(pool, current_start, now, utc_offset_minutes).await?;
+    let memories_by_hour = if window_hours <= HOURLY_WINDOW_MAX_HOURS {
+        Some(load_memories_by_hour(pool, current_start, now, utc_offset_minutes).await?)
+    } else {
+        None
+    };
     let (security_now, security_prior) =
         security_delete_counts(state, current_start, prior_start, now).await;
 
@@ -511,6 +565,7 @@ async fn load_actions(
         sponsored: merge_sponsored(&sponsored_now, &sponsored_prior),
         top_owners,
         memories_by_day,
+        memories_by_hour,
     })
 }
 
@@ -544,6 +599,36 @@ async fn load_memories_by_day(
     .await
     .map_err(|error| AppError::Internal(format!("Failed to count memories by day: {error}")))?;
     Ok(fill_memory_days(&rows, start, end, utc_offset_minutes))
+}
+
+async fn load_memories_by_hour(
+    pool: &PgPool,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    utc_offset_minutes: i32,
+) -> Result<Vec<MemoryHour>, AppError> {
+    // Same shift as the daily query, truncated to the hour instead.
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT to_char(
+             date_trunc(
+                 'hour',
+                 updated_at AT TIME ZONE 'UTC' + ($3::int * interval '1 minute')
+             ),
+             'YYYY-MM-DD\"T\"HH24:00'
+         ),
+         COUNT(*)::bigint
+         FROM remember_jobs
+         WHERE status = 'done' AND updated_at > $1 AND updated_at <= $2
+         GROUP BY 1
+         ORDER BY 1",
+    )
+    .bind(start)
+    .bind(end)
+    .bind(utc_offset_minutes)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| AppError::Internal(format!("Failed to count memories by hour: {error}")))?;
+    Ok(fill_memory_hours(&rows, start, end, utc_offset_minutes))
 }
 
 async fn job_counts(
@@ -817,5 +902,51 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn memory_hours_cover_a_day_window_on_the_viewer_clock() {
+        // 24h ending 16:30 UTC, seen from UTC+7: 23:30 local on the 24th to
+        // 23:30 local on the 25th.
+        let start = DateTime::parse_from_rfc3339("2026-09-24T16:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2026-09-25T16:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let hours = fill_memory_hours(
+            &[
+                ("2026-09-24T23:00".to_string(), 3),
+                ("2026-09-25T14:00".to_string(), 9),
+            ],
+            start,
+            end,
+            420,
+        );
+        // Partial first and last hours: 25 buckets for a 24h window.
+        assert_eq!(hours.len(), 25);
+        assert_eq!(hours[0].hour, "2026-09-24T23:00");
+        assert_eq!(hours[0].count, 3);
+        assert_eq!(hours[24].hour, "2026-09-25T23:00");
+        let peak = hours.iter().find(|h| h.hour == "2026-09-25T14:00").unwrap();
+        assert_eq!(peak.count, 9);
+        assert_eq!(hours.iter().map(|h| h.count).sum::<i64>(), 12);
+    }
+
+    #[test]
+    fn memory_hours_handle_negative_offsets_and_empty_windows() {
+        let at = DateTime::parse_from_rfc3339("2026-09-25T02:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // UTC-5: 02:10Z is 21:10 on the previous local day.
+        let hours = fill_memory_hours(&[], at, at, -300);
+        assert_eq!(
+            hours,
+            vec![MemoryHour {
+                hour: "2026-09-24T21:00".to_string(),
+                count: 0
+            }]
+        );
+        assert!(fill_memory_hours(&[], at, at - Duration::hours(1), 0).is_empty());
     }
 }

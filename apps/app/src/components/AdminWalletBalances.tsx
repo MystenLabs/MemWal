@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { Card } from './Card'
+import { CopyableText } from './CopyableText'
 import { fetchAdminWallets, formatTokenAmount, type AdminWalletsResponse } from '../utils/admin-api'
 
 interface AdminWalletBalancesProps {
@@ -93,8 +94,12 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
                 </tr>
               ) : response.uploaderPoolWallets.map((wallet) => (
                 <tr key={wallet.address} className="admin-table-row">
-                  <td title={wallet.address} className="admin-table-monospace">
-                    {abbreviateAddress(wallet.address)}
+                  <td className="admin-table-monospace">
+                    <CopyableText
+                      value={wallet.address}
+                      display={abbreviateAddress(wallet.address)}
+                      label="Copy wallet address"
+                    />
                   </td>
                   <td
                     style={{ textAlign: 'right' }}
@@ -135,9 +140,17 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
         <div className="admin-sponsor-content">
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">Address</span>
-            <code className="admin-sponsor-value" title={response.sponsorWallet.address}>
-              {abbreviateAddress(response.sponsorWallet.address)}
-            </code>
+            <span className="admin-sponsor-value">
+              {response.sponsorWallet.address.startsWith('0x') ? (
+                <CopyableText
+                  value={response.sponsorWallet.address}
+                  display={abbreviateAddress(response.sponsorWallet.address)}
+                  label="Copy sponsor wallet address"
+                />
+              ) : (
+                response.sponsorWallet.address
+              )}
+            </span>
           </div>
 
           <div className="admin-sponsor-item">

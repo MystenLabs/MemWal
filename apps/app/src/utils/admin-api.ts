@@ -18,10 +18,26 @@ export interface SponsorWallet {
 
 export interface UploadError {
   id: string
+  /** When the job failed (last update). */
   timestamp: string
+  /** When the job was queued. */
+  createdAt: string
   owner: string
   namespace: string
+  status: string
+  /** The server's message, or null when it recorded none. */
+  rawErrorMessage: string | null
   errorMessage: string
+}
+
+/** `0x5c3a...907e`: enough of both ends to tell addresses apart. */
+export function shortAddress(address: string): string {
+  return address.length > 14 ? `${address.slice(0, 6)}...${address.slice(-4)}` : address
+}
+
+/** The account page for an address on this deployment's Sui network. */
+export function suiExplorerAccountUrl(address: string): string {
+  return `https://suiscan.xyz/${config.suiNetwork}/account/${address}`
 }
 
 export interface AdminConfig {
@@ -203,8 +219,11 @@ export async function fetchAdminErrors(
     errors: raw.results.map((job) => ({
       id: job.id,
       timestamp: job.updated_at,
+      createdAt: job.created_at,
       owner: job.owner,
       namespace: job.namespace,
+      status: job.status,
+      rawErrorMessage: job.error_msg,
       errorMessage: job.error_msg ?? '(no error message)',
     })),
     total: raw.total,
@@ -253,6 +272,12 @@ export interface ActivityTopOwner {
   uploadsCompleted: number
 }
 
+export interface MemoryHour {
+  /** Local clock hour, `YYYY-MM-DDTHH:00`. */
+  hour: string
+  count: number
+}
+
 export interface MemoryDay {
   day: string
   count: number
@@ -280,6 +305,8 @@ export interface AdminActivity {
     sponsored: SponsoredKindCount[]
     topOwners: ActivityTopOwner[]
     memoriesByDay: MemoryDay[]
+    /** Present only for windows of 24 hours or less. */
+    memoriesByHour: MemoryHour[] | null
   }
 }
 
@@ -321,6 +348,7 @@ interface RawActivityResponse {
     sponsored: Array<{ kind: string; count: number; prior_count: number }>
     top_owners: Array<{ owner: string; uploads_completed: number }>
     memories_by_day?: Array<{ day: string; count: number }>
+    memories_by_hour?: Array<{ hour: string; count: number }>
   }
 }
 
@@ -381,6 +409,9 @@ export async function fetchAdminActivity(
         day: row.day,
         count: row.count,
       })),
+      memoriesByHour: raw.actions.memories_by_hour
+        ? raw.actions.memories_by_hour.map((row) => ({ hour: row.hour, count: row.count }))
+        : null,
     },
   }
 }
