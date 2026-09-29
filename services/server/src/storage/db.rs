@@ -2600,7 +2600,8 @@ impl VectorDb {
         if let Err(e) = &result {
             self.maybe_alert_storage_exhausted(e).await;
         }
-        let result = result.map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
+        let result =
+            result.map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
         crate::observability::observe_db("vector.insert", db_status(&result), started.elapsed());
         result?;
         sqlx::query("DELETE FROM memory_tombstones WHERE memory_id = $1")
@@ -3197,15 +3198,28 @@ impl VectorDb {
         stale_after: std::time::Duration,
     ) -> Result<u64, AppError> {
         let stale_after_secs = stale_after.as_secs().min(i64::MAX as u64) as i64;
+        // A congestion requeue parks the row on `running` for minutes while
+        // the next attempt is already scheduled. The normal 10-minute sweep
+        // would mark that wait failed and the client would send the fact
+        // again. Only a prefix that has not been refreshed for 45 minutes is
+        // a lost job.
+        let congestion_wait_stale_secs: i64 = 45 * 60;
         let result = sqlx::query(
             "UPDATE remember_jobs
              SET status = 'failed',
                  error_msg = COALESCE(error_msg, 'stale/orphaned remember job'),
                  updated_at = NOW()
              WHERE status IN ('running', 'uploaded')
-               AND updated_at < NOW() - ($1 * INTERVAL '1 second')",
+               AND updated_at < NOW() - ($1 * INTERVAL '1 second')
+               AND (
+                    error_msg IS NULL
+                    OR error_msg NOT LIKE ($2 || '%')
+                    OR updated_at < NOW() - ($3 * INTERVAL '1 second')
+               )",
         )
         .bind(stale_after_secs)
+        .bind(crate::jobs::CONGESTION_WAIT_ERROR_PREFIX)
+        .bind(congestion_wait_stale_secs)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to fail stale remember jobs: {}", e)))?;
@@ -4942,6 +4956,38 @@ mod stale_sweep_tests {
             0,
             "a late preparation must be fenced out, or it would queue a paid write for a dead job",
         );
+    }
+
+    /// A congestion requeue leaves the row `running` with a prefixed
+    /// error while the next attempt is already scheduled. The 10-minute
+    /// sweep must not fail that wait. 45 minutes without a refresh is the
+    /// lost-job backstop.
+    #[tokio::test]
+    async fn a_congestion_wait_survives_the_normal_sweep_and_dies_when_abandoned() {
+        let db = test_db().await;
+        let owner = unique_owner("congestion-wait");
+        let waiting = seed_job(&db, &owner, "running", true, Some("claim-1"), 20 * 60).await;
+        let abandoned = seed_job(&db, &owner, "running", true, Some("claim-2"), 50 * 60).await;
+        let plain = seed_job(&db, &owner, "running", true, None, 20 * 60).await;
+        let prefix = crate::jobs::CONGESTION_WAIT_ERROR_PREFIX;
+        for id in [&waiting, &abandoned] {
+            sqlx::query("UPDATE remember_jobs SET error_msg = $2 WHERE id = $1")
+                .bind(id)
+                .bind(format!(
+                    "{prefix}timed out waiting for wallet 1 upload slot"
+                ))
+                .execute(&db.pool)
+                .await
+                .expect("stamp congestion wait");
+        }
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &waiting).await, "running");
+        assert_eq!(status_of(&db, &abandoned).await, "failed");
+        assert_eq!(status_of(&db, &plain).await, "failed");
     }
 
     /// The pre-existing sweep is unchanged.

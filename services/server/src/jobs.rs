@@ -391,6 +391,114 @@ const WAL_BALANCE_LOW_THRESHOLD_MIST: u64 = 2_000_000_000;
 /// retries" alert.
 const MAX_CONGESTION_REQUEUES: u32 = 6;
 
+/// Stored on `remember_jobs.error_msg` while a congestion requeue is waiting.
+/// The 10-minute stale sweep must not fail that row: the continuation is
+/// already scheduled, and a false `failed` makes the client resubmit.
+/// `fail_stale_remember_jobs` only sweeps this prefix after 45 minutes, which
+/// is a lost-job backstop rather than a wait budget.
+pub const CONGESTION_WAIT_ERROR_PREFIX: &str = "upload congestion, waiting to retry: ";
+
+fn congestion_wait_message(msg: &str) -> String {
+    format!("{CONGESTION_WAIT_ERROR_PREFIX}{msg}")
+}
+
+/// A dropped upload connection is the same journal, not a fresh upload.
+/// Rotating the wallet starts a second blob while the first step is still
+/// running on the sidecar. Slot-timeout congestion can still move, because
+/// that request never started.
+fn congestion_resume_wallet(current: usize, pool: usize, transport: bool) -> usize {
+    if transport || pool == 0 {
+        current
+    } else {
+        (current + 1) % pool
+    }
+}
+
+/// How many times one worker re-posts the same journal after the connection
+/// drops. The sidecar single-flights that key, so the retry waits for the
+/// step already running instead of taking another slot. Past this, the job
+/// parks on the congestion requeue and frees the worker.
+const SAME_JOURNAL_ATTACHES: u32 = 3;
+
+fn wallet_upload_gates(pool_len: usize) -> &'static Vec<tokio::sync::Semaphore> {
+    use std::sync::OnceLock;
+    static GATES: OnceLock<Vec<tokio::sync::Semaphore>> = OnceLock::new();
+    GATES.get_or_init(|| {
+        (0..pool_len.max(1))
+            .map(|_| tokio::sync::Semaphore::new(1))
+            .collect()
+    })
+}
+
+/// One permit per wallet. A job for a busy key waits on that key only, so an
+/// idle wallet is not stuck behind it. The wait is capped under the 10-minute
+/// stale sweep: this function runs after `error_msg` was cleared.
+async fn admit_wallet_upload(
+    wallet_index: usize,
+    pool_len: usize,
+) -> Result<tokio::sync::SemaphorePermit<'static>, WalletJobError> {
+    let gates = wallet_upload_gates(pool_len);
+    let index = wallet_index % gates.len();
+    match tokio::time::timeout(std::time::Duration::from_secs(8 * 60), gates[index].acquire()).await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(WalletJobError::UploadSlotCongestion(format!(
+            "timed out waiting for wallet {wallet_index} upload slot"
+        ))),
+        Err(_) => Err(WalletJobError::UploadSlotCongestion(format!(
+            "timed out waiting for wallet {wallet_index} upload slot"
+        ))),
+    }
+}
+
+/// The storage reservation is admitted at enqueue and expires after 15
+/// minutes. A congestion wait can outlive that. Refresh it so a burst cannot
+/// take the bytes this job is still going to write. If the row was already
+/// swept, admit it again; a rejection is logged and the upload still retries.
+async fn keep_upload_storage_reservation(
+    state: &AppState,
+    job_id: &str,
+    owner: &str,
+    encrypted_b64: &str,
+) {
+    let ttl_secs = crate::rate_limit::STORAGE_RESERVATION_TTL.as_secs() as i64;
+    let extended = sqlx::query(
+        "UPDATE storage_reservations
+         SET expires_at = GREATEST(expires_at, NOW() + ($2 * INTERVAL '1 second'))
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .bind(ttl_secs)
+    .execute(state.db.pool())
+    .await;
+    match extended {
+        Ok(result) if result.rows_affected() > 0 => return,
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                "[wallet-job:upload] job_id={} could not extend storage reservation: {}",
+                job_id,
+                e
+            );
+            return;
+        }
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encrypted_b64)
+        .map(|raw| raw.len() as i64)
+        .unwrap_or(encrypted_b64.len() as i64)
+        .max(1);
+    if let Err(e) =
+        crate::rate_limit::reserve_storage_quota_one(state, owner, job_id.to_string(), bytes).await
+    {
+        tracing::warn!(
+            "[wallet-job:upload] job_id={} storage reservation was gone and could not be renewed: {}",
+            job_id,
+            e
+        );
+    }
+}
+
 /// Backoff before re-running a congestion-requeued upload: 30s, 60s, 120s,
 /// 240s, 480s, then capped at 600s. Deliberately minutes-scale — the 2-16s
 /// `backoff_duration` style is useless against a backlog that takes minutes
@@ -519,6 +627,17 @@ fn upload_journal_signer_committed(journal: &UploadJournal) -> bool {
     )
 }
 
+/// A congestion resume must keep the journaled signer. A prepared register
+/// may already have been submitted, and steering would drop those bytes and
+/// mint a second blob.
+fn pin_journal_wallet(journal: &UploadJournal, congestion_requeues: u32) -> bool {
+    upload_journal_signer_committed(journal)
+        || (congestion_requeues > 0
+            && (journal.resume_step.is_some()
+                || journal.register_transaction.is_some()
+                || journal.wallet_address.is_some()))
+}
+
 /// Move an uncommitted journal onto `free_wallet`.
 ///
 /// Returns whether the caller must persist the journal. A prepared register
@@ -569,45 +688,64 @@ pub(crate) async fn execute_wallet_job(
             prepare_claim_token,
             epochs,
         } => {
-            let mut wallet_index = match wallet_index_for_upload_attempt(
-                enqueued_wallet_index,
-                attempt_info.current,
-                state.key_pool.len(),
-            ) {
-                Some(index) => index,
-                None => {
-                    return Err(WalletJobError::Permanent(
-                        "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
-                            .into(),
-                    )
-                    .into_apalis_error());
+            let mut wallet_index = if congestion_requeues > 0 {
+                // The requeue already chose the signer. Do not walk the attempt
+                // cursor; that is what pairs a cached prepare with another key.
+                enqueued_wallet_index % state.key_pool.len().max(1)
+            } else {
+                match wallet_index_for_upload_attempt(
+                    enqueued_wallet_index,
+                    attempt_info.current,
+                    state.key_pool.len(),
+                ) {
+                    Some(index) => index,
+                    None => {
+                        return Err(WalletJobError::Permanent(
+                            "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                                .into(),
+                        )
+                        .into_apalis_error());
+                    }
                 }
             };
             // The attempt index is only the fallback. Once a durable journal
             // exists, the sidecar queues on that signer, so the busy-count has
             // to name the same wallet or least-loaded keeps feeding the one
             // that is actually full. Before register is submitted the journal
-            // can move onto a wallet that is free right now.
+            // can move onto a wallet that is free right now. A congestion
+            // resume must not: the prepared bytes may already be in flight.
             if let Some(job_id) = remember_job_id.as_deref() {
                 let mut journal = load_upload_journal(state.db.pool(), job_id, wallet_index)
                     .await
                     .map_err(WalletJobError::into_apalis_error)?;
-                if upload_journal_signer_committed(&journal) {
+                if pin_journal_wallet(&journal, congestion_requeues) {
                     wallet_index = journal.wallet_index;
-                } else if let Some(free) = state.key_pool.least_loaded_index() {
-                    let from = journal.wallet_index;
-                    if steer_uncommitted_upload_wallet(&mut journal, free) {
+                } else if congestion_requeues > 0 {
+                    // Nothing has been submitted, but a stored index would
+                    // otherwise keep signing while admission follows the
+                    // rotated payload. Write the payload wallet through.
+                    if journal.wallet_index != wallet_index {
+                        journal.wallet_index = wallet_index;
+                        journal.wallet_address = None;
+                        journal.register_transaction = None;
                         persist_upload_journal(state.db.pool(), job_id, &journal)
                             .await
                             .map_err(WalletJobError::into_apalis_error)?;
-                        tracing::info!(
-                            "[wallet-job:upload] job_id={} moved uncommitted upload off wallet {} onto {}",
-                            job_id,
-                            from,
-                            journal.wallet_index,
-                        );
                     }
-                    wallet_index = journal.wallet_index;
+                } else if let Some(free) = state.key_pool.least_loaded_index() {
+                        let from = journal.wallet_index;
+                        if steer_uncommitted_upload_wallet(&mut journal, free) {
+                            persist_upload_journal(state.db.pool(), job_id, &journal)
+                                .await
+                                .map_err(WalletJobError::into_apalis_error)?;
+                            tracing::info!(
+                                "[wallet-job:upload] job_id={} moved uncommitted upload off wallet {} onto {}",
+                                job_id,
+                                from,
+                                journal.wallet_index,
+                            );
+                        }
+                        wallet_index = journal.wallet_index;
                 }
             }
             // Mark this wallet busy for the rest of the attempt, so a
@@ -1480,24 +1618,56 @@ async fn execute_durable_upload(
 ) -> Result<(), WalletJobError> {
     let mut journal =
         load_upload_journal(state.db.pool(), remember_job_id, fallback_wallet_index).await?;
+    // Admit the signer the sidecar will use, not a separate fallback index.
+    let _admission = admit_wallet_upload(journal.wallet_index, state.key_pool.len()).await?;
 
     // Each sidecar call advances one checkpointable step. Persist the returned
     // checkpoint before asking the sidecar to perform the next side effect.
     for _ in 0..6 {
-        let advanced = crate::storage::walrus::advance_durable_upload(
-            &state.http_client,
-            &state.config.sidecar_url,
-            state.config.sidecar_secret.as_deref(),
-            encrypted,
-            epochs as u64,
-            owner,
-            namespace,
-            package_id,
-            remember_job_id,
-            journal,
-        )
-        .await
-        .map_err(|e| WalletJobError::classify_sidecar_error(&e.to_string()))?;
+        let mut attaches = 0u32;
+        let advanced = loop {
+            let _ = sqlx::query(
+                "UPDATE remember_jobs SET updated_at = NOW() WHERE id = $1 AND status = 'running'",
+            )
+            .bind(remember_job_id)
+            .execute(state.db.pool())
+            .await;
+            match crate::storage::walrus::advance_durable_upload(
+                &state.http_client,
+                &state.config.sidecar_url,
+                state.config.sidecar_secret.as_deref(),
+                encrypted,
+                epochs as u64,
+                owner,
+                namespace,
+                package_id,
+                remember_job_id,
+                journal.clone(),
+            )
+            .await
+            .map_err(|e| WalletJobError::classify_sidecar_error(&e.to_string()))
+            {
+                Ok(advanced) => break advanced,
+                Err(err)
+                    if attaches < SAME_JOURNAL_ATTACHES
+                        && matches!(
+                            &err,
+                            WalletJobError::UploadSlotCongestion(msg)
+                                if WalletJobError::is_sidecar_upload_transport_error(msg)
+                        ) =>
+                {
+                    attaches += 1;
+                    tracing::info!(
+                        "[wallet-job:upload] job_id={} dropped upload connection; reattaching same journal ({}/{})",
+                        remember_job_id,
+                        attaches,
+                        SAME_JOURNAL_ATTACHES,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        };
 
         match advanced {
             DurableUploadAdvance::Prepared(next) => {
@@ -1629,6 +1799,15 @@ async fn execute_upload_and_transfer(
                     let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
                     let next_wallet = (wallet_index + 1) % state.key_pool.len().max(1);
                     let jid_clone = jid.clone();
+                    update_remember_job_after_wallet_error(
+                        state.db.pool(),
+                        Some(jid.as_str()),
+                        &err,
+                        &congestion_wait_message(err.message()),
+                        None,
+                    )
+                    .await;
+                    keep_upload_storage_reservation(state, jid, &owner, &encrypted_b64).await;
                     let mut storage = state.wallet_storage.clone();
                     match storage
                         .schedule_request(
@@ -1919,6 +2098,75 @@ async fn execute_upload_and_transfer_locked(
                 // reclassifying its display text would incorrectly make it
                 // retryable and leave the polling row running.
                 let msg = err.message().to_string();
+                // Park on the congestion budget instead of the 5-attempt one.
+                if matches!(err, WalletJobError::UploadSlotCongestion(_))
+                    && congestion_requeues < MAX_CONGESTION_REQUEUES
+                {
+                    update_remember_job_after_wallet_error(
+                        state.db.pool(),
+                        Some(jid.as_str()),
+                        &err,
+                        &congestion_wait_message(&msg),
+                        None,
+                    )
+                    .await;
+                    keep_upload_storage_reservation(state, jid, &owner, &encrypted_b64).await;
+                    let delay_secs = congestion_backoff_secs(congestion_requeues);
+                    let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
+                    let next_wallet = congestion_resume_wallet(
+                        wallet_index,
+                        state.key_pool.len(),
+                        WalletJobError::is_sidecar_upload_transport_error(&msg),
+                    );
+                    let job_id_for_log = jid.clone();
+                    let mut storage = state.wallet_storage.clone();
+                    match storage
+                        .schedule_request(
+                            wallet_job_request(WalletJob {
+                                wallet_index: next_wallet,
+                                congestion_requeues: congestion_requeues + 1,
+                                operation: WalletOperation::UploadAndTransfer {
+                                    encrypted_b64,
+                                    vector,
+                                    importance,
+                                    owner,
+                                    namespace,
+                                    package_id,
+                                    account_id,
+                                    agent_public_key,
+                                    remember_job_id,
+                                    prepare_claim_token,
+                                    epochs,
+                                },
+                            }),
+                            run_at,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::warn!(
+                                "[wallet-job:upload] job_id={} durable upload congested; requeued delay={}s requeue={}/{} next_wallet={}",
+                                job_id_for_log,
+                                delay_secs,
+                                congestion_requeues + 1,
+                                MAX_CONGESTION_REQUEUES,
+                                next_wallet,
+                            );
+                            return Ok(());
+                        }
+                        Err(requeue_err) => {
+                            tracing::error!(
+                                "[wallet-job:upload] job_id={} durable congestion requeue failed, falling back to Apalis retry: {}",
+                                job_id_for_log,
+                                requeue_err,
+                            );
+                            return Err(WalletJobError::Transient(format!(
+                                "{}; congestion requeue failed: {}",
+                                msg, requeue_err
+                            )));
+                        }
+                    }
+                }
                 maybe_alert_walrus_upload_exhausted(
                     state,
                     &err,
@@ -2084,10 +2332,13 @@ async fn execute_upload_and_transfer_locked(
                     state.db.pool(),
                     remember_job_id.as_deref(),
                     &classified,
-                    &msg,
+                    &congestion_wait_message(&msg),
                     None,
                 )
                 .await;
+                if let Some(job_id) = remember_job_id.as_deref() {
+                    keep_upload_storage_reservation(state, job_id, &owner, &encrypted_b64).await;
+                }
 
                 let delay_secs = congestion_backoff_secs(congestion_requeues);
                 let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
@@ -2736,6 +2987,22 @@ impl WalletJobError {
         lower.contains("timed out waiting for") && lower.contains("upload slot")
     }
 
+    /// The relayer's HTTP client lost the upload sidecar while a step was
+    /// queued or in flight (`error sending request for url (.../walrus/upload...)`).
+    /// The sidecar often still finishes that step. It is the same backlog as
+    /// an acquire timeout, not a bad blob, so it must take the congestion
+    /// requeue instead of the 5-attempt wallet budget.
+    pub fn is_sidecar_upload_transport_error(msg: &str) -> bool {
+        let lower = msg.to_ascii_lowercase();
+        if !lower.contains("walrus/upload") {
+            return false;
+        }
+        lower.contains("error sending request for url")
+            || lower.contains("error decoding response body")
+            || lower.contains("request or response body error")
+            || lower.contains("durable walrus upload response failed")
+    }
+
     /// True if `msg` is one of the sidecar's register-transaction journal
     /// assertions (`validatePreparedRegisterTransaction` and friends in
     /// scripts/sidecar/routes/walrus-upload-journal.ts).
@@ -2803,8 +3070,10 @@ impl WalletJobError {
     /// error replacement; each arm matches on substrings only, with no
     /// alert-threshold coupling.
     pub fn is_infrastructure_funding_error(msg: &str) -> bool {
-        Self::is_gas_pool_budget_error(msg)
+        msg.starts_with(CONGESTION_WAIT_ERROR_PREFIX)
+            || Self::is_gas_pool_budget_error(msg)
             || Self::is_upload_slot_congestion_error(msg)
+            || Self::is_sidecar_upload_transport_error(msg)
             || Self::is_walrus_wal_shortfall(msg)
     }
 
@@ -2830,7 +3099,9 @@ impl WalletJobError {
             return WalletJobError::Permanent(msg.to_string());
         }
         // Sidecar upload limiter saturated — see UploadSlotCongestion docs.
-        if Self::is_upload_slot_congestion_error(msg) {
+        if Self::is_upload_slot_congestion_error(msg)
+            || Self::is_sidecar_upload_transport_error(msg)
+        {
             return WalletJobError::UploadSlotCongestion(msg.to_string());
         }
         // Enoki sponsored dry-run aborts in 0x2::balance::split with ENotEnough
@@ -3135,8 +3406,9 @@ mod tests {
 
     use super::{
         backoff_duration, build_resume_transfer_job, classify_wallet_remember_handoff_failure,
-        congestion_backoff_secs, consume_preparation_claim, durable_step_field,
-        escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
+        congestion_backoff_secs, congestion_resume_wallet, congestion_wait_message,
+        consume_preparation_claim, pin_journal_wallet,
+        durable_step_field, escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
         is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
         mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
         persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
@@ -3388,6 +3660,96 @@ the checkpoint it replied about",
             WalletJobError::classify_sidecar_error(
                 "walrus upload failed: timed out waiting for global upload slot"
             ),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+    }
+
+    #[test]
+    fn classify_dropped_upload_sidecar_connection_as_congestion() {
+        let transport = "Internal Error: durable Walrus upload request failed: \
+            error sending request for url (http://localhost:9000/walrus/upload-step-v3)";
+        let classified = WalletJobError::classify_sidecar_error(transport);
+        assert!(
+            matches!(classified, WalletJobError::UploadSlotCongestion(_)),
+            "a dropped upload-step connection is congestion, got {}",
+            classified.kind()
+        );
+        assert!(!classified.aborts_retries());
+
+        let slot = "Internal Error: durable Walrus upload failed (503 Service Unavailable): \
+            {\"error\":\"timed out waiting for wallet 1 upload slot\",\"code\":\"NO_SIDE_EFFECT\"}";
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(slot),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+
+        // A transport error that is not the upload sidecar stays on the
+        // normal retry track.
+        assert!(!matches!(
+            WalletJobError::classify_sidecar_error(
+                "error sending request for url (https://example.com/other)"
+            ),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+
+        // The source chain is appended after Display. It must stay congestion,
+        // and both the raw failure and the waiting prefix are infrastructure
+        // so a poller never sees the localhost URL.
+        let with_source = format!("{transport}: connection reset by peer");
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(&with_source),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+        assert!(WalletJobError::is_infrastructure_funding_error(
+            &with_source
+        ));
+        assert!(WalletJobError::is_infrastructure_funding_error(
+            &congestion_wait_message(&with_source)
+        ));
+        assert!(!WalletJobError::is_infrastructure_funding_error(
+            "error sending request for url (https://example.com/other)"
+        ));
+    }
+
+    #[test]
+    fn a_dropped_upload_connection_resumes_the_same_wallet() {
+        assert_eq!(congestion_resume_wallet(4, 16, true), 4);
+        assert_eq!(congestion_resume_wallet(15, 16, false), 0);
+        assert_eq!(congestion_resume_wallet(0, 0, false), 0);
+    }
+
+    #[test]
+    fn a_congestion_resume_keeps_a_prepared_register_signer() {
+        let prepared = UploadJournal {
+            wallet_index: 4,
+            wallet_address: Some("0xabc".into()),
+            execution_identity: None,
+            resume_step: Some(serde_json::json!({"step": "encoded"})),
+            register_transaction: Some(PreparedRegisterTransaction {
+                transaction_bytes: "aa".into(),
+                signature: "bb".into(),
+                digest: "cc".into(),
+                sponsor_digest: None,
+            }),
+        };
+        assert!(pin_journal_wallet(&prepared, 1));
+        assert!(!upload_journal_signer_committed(&prepared));
+        let fresh = UploadJournal {
+            wallet_index: 4,
+            wallet_address: None,
+            execution_identity: None,
+            resume_step: None,
+            register_transaction: None,
+        };
+        assert!(!pin_journal_wallet(&fresh, 0));
+    }
+
+    #[test]
+    fn a_lost_upload_response_body_is_the_same_transport_error() {
+        let msg = "Internal Error: durable Walrus upload response failed for http://localhost:9000/walrus/upload-step-v3: error decoding response body";
+        assert!(WalletJobError::is_sidecar_upload_transport_error(msg));
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(msg),
             WalletJobError::UploadSlotCongestion(_)
         ));
     }

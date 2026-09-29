@@ -39,7 +39,11 @@ import {
     refreshWalrusClientIfStale,
     suiClient,
 } from "../clients.js";
-import { acquireWalrusUploadSlots } from "../concurrency.js";
+import {
+    acquireWalrusUploadSlots,
+    WalrusUploadCancelledError,
+    type UploadSlotRelease,
+} from "../concurrency.js";
 import { requestIdFor, sanitizeRequestId, sidecarLog } from "../log.js";
 import {
     classifyDurableSideEffectError,
@@ -674,16 +678,97 @@ export async function executePreparedRegisterTransaction(
     return assertExpectedDigest(result);
 }
 
+const UPLOAD_STEP_FLIGHT_TTL_MS = 60_000;
+
+export type UploadStepFlightResult = { status: number; body: unknown };
+
+type UploadStepFlight = {
+    promise: Promise<UploadStepFlightResult>;
+    resolve: (result: UploadStepFlightResult) => void;
+    settled: boolean;
+};
+
+const uploadStepFlights = new Map<string, UploadStepFlight>();
+
+/** Same job and same checkpoint share one sidecar step. A dropped client retries this key instead of starting a second upload. */
+export function uploadStepFlightKey(
+    jobId: string,
+    resumeStep: string | undefined,
+    blobId: string | undefined,
+    preparedDigest: string | undefined,
+): string {
+    return [jobId, resumeStep ?? "start", blobId ?? "", preparedDigest ?? ""].join("|");
+}
+
+export function beginOrJoinUploadStepFlight(key: string): { leader: boolean; flight: UploadStepFlight } {
+    const existing = uploadStepFlights.get(key);
+    if (existing) return { leader: false, flight: existing };
+    let resolve!: (result: UploadStepFlightResult) => void;
+    const promise = new Promise<UploadStepFlightResult>((done) => {
+        resolve = done;
+    });
+    const flight: UploadStepFlight = { promise, resolve, settled: false };
+    uploadStepFlights.set(key, flight);
+    return { leader: true, flight };
+}
+
+export function settleUploadStepFlight(
+    key: string,
+    flight: UploadStepFlight,
+    result: UploadStepFlightResult,
+): void {
+    if (flight.settled) return;
+    flight.settled = true;
+    flight.resolve(result);
+    // Keep a success long enough for the relayer to reconnect and persist it.
+    // Drop an error quickly so the same journal can try the step again.
+    const ttl = result.status >= 400 ? 2_000 : UPLOAD_STEP_FLIGHT_TTL_MS;
+    const drop = setTimeout(() => {
+        if (uploadStepFlights.get(key) === flight) uploadStepFlights.delete(key);
+    }, ttl);
+    drop.unref?.();
+}
+
+export function resetUploadStepFlightsForTests(): void {
+    uploadStepFlights.clear();
+}
+
 export function registerWalrusUploadJournalRoute(app: Express): void {
     app.post(
         "/walrus/upload-step-v3",
         express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }),
         async (req, res) => {
             const traceId = requestIdFor(req);
+            // `close` also fires after a normal end(). `writableEnded` is set
+            // by res.json, so this aborts only when the client leaves first.
+            const clientDisconnect = new AbortController();
+            const abortIfDropped = () => {
+                if (!res.writableEnded) clientDisconnect.abort();
+            };
+            res.on("close", abortIfDropped);
             let phase = "request";
-            let releaseWalrusUploadSlots: (() => void) | undefined;
+            let releaseWalrusUploadSlots: UploadSlotRelease | undefined;
+            let keepJobSlot = false;
             let phaseCanSubmitSideEffect = false;
             let submissionStarted = false;
+            let encodeMs: number | undefined;
+            let flightKey: string | undefined;
+            let flight: UploadStepFlight | undefined;
+            const settleFlight = (status: number, body: unknown) => {
+                if (!flightKey || !flight) return;
+                settleUploadStepFlight(flightKey, flight, { status, body });
+            };
+            const deliver = (body: unknown, keep: boolean) => {
+                settleFlight(200, body);
+                if (keep) keepJobSlot = true;
+                if (clientDisconnect.signal.aborted || res.writableEnded || res.destroyed) return;
+                res.json(body);
+            };
+            const reply = (status: number, body: unknown) => {
+                settleFlight(status, body);
+                if (clientDisconnect.signal.aborted || res.writableEnded || res.destroyed) return;
+                res.status(status).json(body);
+            };
             try {
                 const {
                     data,
@@ -775,7 +860,6 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                     return res.status(400).json({ error: "Invalid uploadExecutionIdentity" });
                 }
                 if (uploadExecutionIdentity) await assertUploadExecutionIdentity(uploadExecutionIdentity);
-                releaseWalrusUploadSlots = await acquireWalrusUploadSlots(keySlot, traceId, jobId);
                 if (signerAddress !== journaledWalletAddress) {
                     return res.status(409).json({
                         error: "keyIndex no longer maps to the journaled wallet",
@@ -791,12 +875,42 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                     blob: blobData,
                     ...(resume ? { resume } : {}),
                 });
+                // Encode stays after the slot acquire: its WASM step blocks the
+                // process, so it has to stay inside the same concurrency limit.
+                const encodeFlow = async () => {
+                    if (encodeMs !== undefined) return flow.encode();
+                    const started = Date.now();
+                    const encoded = await flow.encode();
+                    encodeMs = Date.now() - started;
+                    return encoded;
+                };
+                flightKey = uploadStepFlightKey(
+                    jobId,
+                    resume?.step,
+                    resume && "blobId" in resume ? resume.blobId : undefined,
+                    preparedRegisterTransaction?.digest,
+                );
+                const joined = beginOrJoinUploadStepFlight(flightKey);
+                if (!joined.leader) {
+                    const outcome = await joined.flight.promise;
+                    if (!res.writableEnded && !res.destroyed) {
+                        res.status(outcome.status).json(outcome.body);
+                    }
+                    return;
+                }
+                flight = joined.flight;
+                // Do not cancel this step when the caller disconnects. The
+                // retry joins the same flight and needs the result. Cancelling
+                // here is what turned one dropped connection into a new upload.
+                releaseWalrusUploadSlots = await acquireWalrusUploadSlots(keySlot, traceId, jobId, {
+                    holdForJob: true,
+                });
 
                 let step: WriteBlobStep;
                 if (!resume) {
-                    step = await flow.encode();
+                    step = await encodeFlow();
                 } else if (resume.step === "encoded") {
-                    const encoded = await flow.encode();
+                    const encoded = await encodeFlow();
                     if (preparedRegisterTransaction) {
                         let validated: ValidatedPreparedRegisterTransaction;
                         try {
@@ -805,11 +919,12 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                                 journaledWalletAddress,
                             );
                         } catch (validationError: unknown) {
-                            return res.status(409).json({
+                            reply(409, {
                                 error: errorMessage(validationError),
                                 code: "INVALID_PREPARED_REGISTER_TRANSACTION",
                                 jobId,
                             });
+                            return;
                         }
                         phaseCanSubmitSideEffect = true;
                         // A persisted *_started marker means an earlier request
@@ -833,12 +948,13 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                         step = registeredStep(encoded, blobObjectId, validated.digest);
                     } else {
                         if (reconcileOnly) {
-                            return res.status(409).json({
+                            reply(409, {
                                 error: "register reconciliation requires the journaled signed transaction",
                                 code: "MISSING_PREPARED_REGISTER_TRANSACTION",
                                 jobId,
                                 blobId: encoded.blobId,
                             });
+                            return;
                         }
                         const registerTx = flow.register({
                             epochs,
@@ -871,20 +987,22 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                             blobId: encoded.blobId,
                             digest: registerTransaction.digest,
                             sponsored: !!registerTransaction.sponsorDigest,
+                            encodeMs,
                         })}`);
-                        return res.json({
+                        deliver({
                             registerTransaction,
                             resumeStep: encoded,
                             walletAddress: signerAddress,
                             uploadExecutionIdentity: await executionIdentity(),
-                        });
+                        }, true);
+                        return;
                     }
                 } else if (resume.step === "registered") {
                     const alreadyCertified = await certifiedStep(resume.blobId, resume.blobObjectId);
                     if (alreadyCertified) {
                         step = alreadyCertified;
                     } else {
-                        await flow.encode();
+                        await encodeFlow();
                         step = await uploadWalrusBlobWithEffectsRetry(flow, resume.txDigest, {
                             traceId,
                             jobId,
@@ -896,13 +1014,14 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                     if (alreadyCertified) {
                         step = alreadyCertified;
                     } else if (reconcileOnly) {
-                        return res.status(409).json({
+                        reply(409, {
                             error: "Blob is not certified after an ambiguous certify phase",
                             code: "AMBIGUOUS_CERTIFY_NOT_FOUND",
                             jobId,
                             blobId: resume.blobId,
                             objectId: resume.blobObjectId,
                         });
+                        return;
                     } else {
                         const digest = await submitRebuildableWalletTransaction(
                             "certify_sponsor",
@@ -939,10 +1058,20 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                     step: step.step,
                     blobId: step.blobId,
                     reconcileOnly: !!reconcileOnly,
+                    encodeMs,
                 })}`);
                 await delayInjectedResponseOnce(submissionStarted, jobId);
-                return res.json({ step });
+                deliver({ step }, step.step !== "certified");
+                return;
             } catch (error: unknown) {
+                if (error instanceof WalrusUploadCancelledError) {
+                    reply(499, {
+                        error: error.message,
+                        code: "CLIENT_DISCONNECTED",
+                        traceId,
+                    });
+                    return;
+                }
                 const message = errorMessage(error);
                 sidecarLog("error", "walrus_upload_step_failed", {
                     requestId: traceId,
@@ -956,14 +1085,22 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                 );
                 if (durableError) {
                     const status = durableError.code === "DURABLE_SIDE_EFFECT_VERIFY_FAILED" ? 422 : 503;
-                    return res.status(status).json({
+                    reply(status, {
                         error: message,
                         ...durableError,
                         traceId,
                     });
+                    return;
                 }
-                return res.status(500).json({ error: message, traceId });
+                reply(500, { error: message, traceId });
+                return;
             } finally {
+                settleFlight(500, { error: "upload step ended without a result", traceId });
+                res.off("close", abortIfDropped);
+                // A continuable checkpoint keeps the permit for the next step.
+                // Anything else — error, disconnect, certified — frees it here,
+                // including when res.json never reached the client.
+                if (!keepJobSlot) releaseWalrusUploadSlots?.finishJob();
                 releaseWalrusUploadSlots?.();
             }
         },

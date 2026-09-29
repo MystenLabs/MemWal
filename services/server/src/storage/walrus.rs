@@ -4,6 +4,26 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use std::time::Duration;
 
 const SIDECAR_WALRUS_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// `Display` for `reqwest::Error` stops at "error sending request for url".
+/// Append the source chain so a dropped upload says reset, refused, or timed out.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = err.source();
+    while let Some(next) = source {
+        let text = next.to_string();
+        if parts.last().is_some_and(|prev| prev == &text) {
+            break;
+        }
+        parts.push(text);
+        if parts.len() == 4 {
+            break;
+        }
+        source = next.source();
+    }
+    parts.join(": ")
+}
+
 const WALRUS_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const DURABLE_UPLOAD_PROTOCOL_VERSION: u32 = 3;
 
@@ -586,9 +606,22 @@ pub async fn advance_durable_upload(
         .timeout(SIDECAR_WALRUS_TIMEOUT)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("durable Walrus upload request failed: {}", e)))?;
+        .map_err(|e| {
+            // reqwest's Display is only "error sending request for url (...)".
+            // The reset, refusal, or timeout is on the source chain, and that
+            // is what an exhausted-retry alert has to show.
+            AppError::Internal(format!(
+                "durable Walrus upload request failed: {}",
+                error_chain(&e)
+            ))
+        })?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.text().await.map_err(|e| {
+        AppError::Internal(format!(
+            "durable Walrus upload response failed for {url}: {}",
+            error_chain(&e)
+        ))
+    })?;
     if !status.is_success() {
         let error_code = serde_json::from_str::<DurableUploadErrorResponse>(&body)
             .ok()
@@ -1239,7 +1272,7 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_download_errors, is_valid_blob_id, register_transaction_for_resume,
+        aggregate_download_errors, error_chain, is_valid_blob_id, register_transaction_for_resume,
         should_reset_prepared_register, PreparedRegisterTransaction, QueryBlobsResponse,
         WalrusUploadErrorResponse,
     };
@@ -1251,6 +1284,38 @@ mod tests {
     // declare the field, so serde silently dropped it despite the
     // sidecar sending it. This pins the deserialize directly against the
     // sidecar's real response shape, without needing a live sidecar.
+    #[test]
+    fn error_chain_keeps_the_source_reqwest_hides() {
+        #[derive(Debug)]
+        struct Leaf;
+        impl std::fmt::Display for Leaf {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("connection reset by peer")
+            }
+        }
+        impl std::error::Error for Leaf {}
+
+        #[derive(Debug)]
+        struct Wrap(Leaf);
+        impl std::fmt::Display for Wrap {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "error sending request for url (http://localhost:9000/walrus/upload-step-v3)",
+                )
+            }
+        }
+        impl std::error::Error for Wrap {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        assert_eq!(
+            error_chain(&Wrap(Leaf)),
+            "error sending request for url (http://localhost:9000/walrus/upload-step-v3): connection reset by peer"
+        );
+    }
+
     #[test]
     fn walrus_upload_error_response_captures_end_epoch() {
         let body = r#"{

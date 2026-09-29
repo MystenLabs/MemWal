@@ -836,14 +836,15 @@ pub async fn remember(
                 // than asserting "pending" on its behalf: answering with a
                 // state we did not reach is what told callers a dead job was
                 // queued.
-                let actual: String = sqlx::query_scalar(
-                    "SELECT status FROM remember_jobs WHERE id = $1",
-                )
-                .bind(&existing_id)
-                .fetch_optional(state.db.pool())
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to re-read job status: {}", e)))?
-                .unwrap_or_else(|| existing_status.clone());
+                let actual: String =
+                    sqlx::query_scalar("SELECT status FROM remember_jobs WHERE id = $1")
+                        .bind(&existing_id)
+                        .fetch_optional(state.db.pool())
+                        .await
+                        .map_err(|e| {
+                            AppError::Internal(format!("Failed to re-read job status: {}", e))
+                        })?
+                        .unwrap_or_else(|| existing_status.clone());
 
                 return Ok((
                     StatusCode::ACCEPTED,
@@ -1705,7 +1706,11 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(straggler.rows_affected(), 0, "the old claim must be fenced out");
+        assert_eq!(
+            straggler.rows_affected(),
+            0,
+            "the old claim must be fenced out"
+        );
     }
 
     /// The TTL still does its real job: a claim on a job that is genuinely
@@ -1724,7 +1729,10 @@ mod tests {
         .unwrap();
 
         assert!(
-            claim_remember_preparation(&pool, &job_id).await.unwrap().is_none(),
+            claim_remember_preparation(&pool, &job_id)
+                .await
+                .unwrap()
+                .is_none(),
             "a preparation still running must keep its claim",
         );
     }
@@ -2527,6 +2535,21 @@ mod tests {
             assert!(!out.contains("Insufficient balance"));
             assert!(!out.contains("::wal::WAL"));
         }
+    }
+
+    #[test]
+    fn dropped_upload_connection_is_infra_and_hides_the_sidecar_url() {
+        let raw = "Internal Error: durable Walrus upload request failed: error sending request for url (http://localhost:9000/walrus/upload-step-v3): connection reset by peer";
+        let waiting = format!("{}{}", crate::jobs::CONGESTION_WAIT_ERROR_PREFIX, raw);
+        let failed = sanitize_job_error_for_client("failed", Some(raw.to_string()))
+            .expect("failed job keeps an error");
+        assert_eq!(failed, INFRA_JOB_ERROR_MESSAGE);
+        assert!(!failed.contains("localhost"));
+        let running = sanitize_job_error_for_client("running", Some(waiting))
+            .expect("waiting job keeps an error");
+        assert_eq!(running, INFRA_JOB_RETRYING_MESSAGE);
+        assert!(!running.contains("localhost"));
+        assert!(!running.contains("was not stored"));
     }
 
     #[test]
