@@ -244,17 +244,13 @@ pub struct AppState {
     /// fail unfenced rows closed and surface them for reconciliation.
     #[allow(dead_code)]
     pub remember_job_storage: RememberJobStorage,
-    /// Apalis storage for upload WalletJobs. Workers prefetch a batch from
-    /// this queue. Routing dimension was previously a Vec<WalletJobStorage>
-    /// keyed by wallet_index; that existed to side-step Sui coin-object
-    /// equivocation locks. Per Will Bradley (Mysten, 2026-05-12 Slack
-    /// callout): Sui no longer permanently locks coin objects on equivocation,
-    /// so one upload queue + concurrent workers + retry handler is sufficient.
-    /// See `plans/simplify-walrus-wallet-queues/reports/` for context.
+    /// Single Apalis storage for WalletJob. Routing dimension was previously a
+    /// Vec<WalletJobStorage> keyed by wallet_index; that existed to side-step
+    /// Sui coin-object equivocation locks. Per Will Bradley (Mysten, 2026-05-12
+    /// Slack callout): Sui no longer permanently locks coin objects on
+    /// equivocation, so one wallet + concurrent workers + retry handler is
+    /// sufficient. See `plans/simplify-walrus-wallet-queues/reports/` for context.
     pub wallet_storage: WalletJobStorage,
-    /// Metadata and finalize. Separate from `wallet_storage` so a certified
-    /// blob is not stuck behind uploads a worker already prefetched.
-    pub wallet_followup_storage: WalletJobStorage,
     /// Apalis storage for BulkRememberJob.
     pub bulk_job_storage: BulkRememberJobStorage,
     /// Redis TTL for Walrus blob ciphertext cache entries.

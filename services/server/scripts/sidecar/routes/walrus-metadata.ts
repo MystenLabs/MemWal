@@ -14,7 +14,7 @@ import {
     SERVER_SUI_PRIVATE_KEYS,
     SIDECAR_ENABLE_LEGACY_SEAL_ABI,
 } from "../config.js";
-import { acquireWalrusUploadSlots } from "../concurrency.js";
+import { acquireWalrusUploadSlots, WalrusUploadLimitError } from "../concurrency.js";
 import { requestIdFor, sanitizeRequestId, sidecarLog } from "../log.js";
 import { classifyDurableSideEffectError, withRpcRetry } from "../retry/rpc.js";
 import { delayInjectedResponseOnce, errorMessage, parseWalrusKeySlot } from "../util.js";
@@ -42,6 +42,7 @@ export function metadataReceiptAlreadyApplied(
 function registerWalrusMetadataBatchRoute(app: Express): void {
     app.post("/walrus/set-metadata-batch", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), async (req, res) => {
         const traceId = requestIdFor(req);
+        let releaseWalrusUploadSlots: (() => void) | undefined;
         try {
             const { blobs, owner, packageId, policyPackageId, registryId, accountId, sealAbi, agentId, keyIndex } =
                 req.body;
@@ -99,9 +100,11 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
                 };
             });
 
-            // Do not take an upload slot. Gas comes from the address balance,
-            // and the next blob on this key must be able to register while
-            // this transfer is still signing.
+            // This submits a paid wallet transaction, so it must hold the same
+            // per-wallet/global slots as the durable routes: an unslotted
+            // submission racing /walrus/set-metadata or /walrus/upload-step-v3 on
+            // the same keyIndex can equivocate the wallet's owned objects.
+            releaseWalrusUploadSlots = await acquireWalrusUploadSlots(keySlot, traceId);
             const { secretKey } = decodeSuiPrivateKey(privateKey);
             const signer = Ed25519Keypair.fromSecretKey(secretKey);
             const digest = await setMetadataAndTransferBlobs(
@@ -117,6 +120,10 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
             res.json({ transferred: normalized.length, digest });
         } catch (err: any) {
             const message = errorMessage(err);
+            if (err instanceof WalrusUploadLimitError) {
+                console.warn(`[walrus/set-metadata-batch] [${traceId}] limit_timeout ${message}`);
+                return res.status(503).json({ error: message, traceId });
+            }
             if (err instanceof InvalidSealPersistenceFenceError) {
                 return res.status(400).json({ error: message, traceId });
             }
@@ -125,6 +132,8 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
                 error: message,
             });
             res.status(500).json({ error: message, traceId });
+        } finally {
+            releaseWalrusUploadSlots?.();
         }
     });
 }
@@ -204,9 +213,6 @@ export function registerWalrusMetadataRoute(app: Express, requireDurableIdentity
             if (uploadExecutionIdentity) {
                 await assertUploadExecutionIdentity(uploadExecutionIdentity);
             }
-            // Remember uses the batch route and must not take this slot.
-            // Migration calls this route while upload-step may still hold the
-            // same key, so the transfer stays behind that permit.
             releaseWalrusUploadSlots = await acquireWalrusUploadSlots(keySlot, traceId, durableJobId);
             const { secretKey } = decodeSuiPrivateKey(privateKey);
             const signer = Ed25519Keypair.fromSecretKey(secretKey);
