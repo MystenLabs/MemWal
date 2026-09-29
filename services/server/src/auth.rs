@@ -424,6 +424,28 @@ pub async fn verify_signature(
     Ok(next.run(request).await)
 }
 
+/// Whether the cached row for a delegate key may answer *this* request.
+///
+/// `delegate_key_cache.public_key` is the primary key, so the cache holds one
+/// account per delegate key: whichever resolved last. A key can be registered
+/// on several accounts, so that row is not necessarily the account the caller
+/// asked for.
+///
+/// `x-account-id` is covered by the signed canonical message, so when it is
+/// present it is the caller's unforgeable statement of which account this
+/// request is for — it selects the account, it does not merely hint at one. A
+/// row naming a different account must not answer, or the request runs against
+/// an account the caller never asked for (WALM-681).
+///
+/// With no signed account id there is nothing to contradict: legacy discovery
+/// keeps its existing behaviour.
+fn cached_row_answers_request(cached_account_id: &str, requested_account_id: Option<&str>) -> bool {
+    match requested_account_id {
+        Some(requested) => requested == cached_account_id,
+        None => true,
+    }
+}
+
 /// Resolve a delegate key to its account using multiple strategies:
 /// 1. PostgreSQL cache (fastest)
 /// 2. Signed header hint or config fallback (single-object verification)
@@ -437,10 +459,40 @@ async fn resolve_account(
     pk_bytes: &[u8; 32],
     account_id_hint: Option<String>,
 ) -> Result<(String, String), AccountResolveError> {
-    // Strategy 1: Check PostgreSQL cache
-    if let Ok(Some((cached_account_id, _cached_owner))) =
-        state.db.get_cached_account(public_key_hex).await
-    {
+    // Strategy 1: Check PostgreSQL cache.
+    //
+    // The cache is keyed by delegate key alone (`delegate_key_cache.public_key`
+    // is the primary key), so it holds exactly one account per key: whichever
+    // one resolved last. A key may be registered on several accounts, and
+    // `x-account-id` is part of the signed canonical message, so the caller has
+    // told us — unforgeably — which of those accounts this request is for.
+    // Answering from a row that names a *different* account would run the
+    // request against an account the caller did not ask for, and the write
+    // routes take their owner and account id from this result: B's data would
+    // land in A (WALM-681).
+    //
+    // So a mismatched row is not a hit. Fall through to Strategy 2, which
+    // verifies the requested account directly and then overwrites this row.
+    // The extra work is one delegate verify, which the in-memory verify cache
+    // absorbs within its TTL. Requests with no signed hint keep the old
+    // behaviour: legacy account discovery is a separate path, unchanged here.
+    let cached_mapping = match state.db.get_cached_account(public_key_hex).await {
+        Ok(Some((cached_account_id, cached_owner))) => {
+            if cached_row_answers_request(&cached_account_id, account_id_hint.as_deref()) {
+                Some((cached_account_id, cached_owner))
+            } else {
+                tracing::debug!(
+                    "cached account {} does not match the signed x-account-id; \
+                     verifying the requested account instead of answering from cache",
+                    cached_account_id
+                );
+                None
+            }
+        }
+        _ => None,
+    };
+
+    if let Some((cached_account_id, _cached_owner)) = cached_mapping {
         // Re-verify the cached mapping, through the in-memory verify cache.
         // A hit inside `DELEGATE_VERIFY_CACHE_TTL` answers without touching
         // Sui at all — including during an outage — so the fail-closed rule
@@ -1008,6 +1060,66 @@ mod tests {
             action,
             CacheReverifyAction::UnavailableKeepCache { .. }
         ));
+    }
+
+    // ── signed x-account-id selects the account, cache cannot override ──
+
+    #[test]
+    fn cached_row_answers_request_when_signed_account_matches() {
+        assert!(cached_row_answers_request(
+            "0xaccount_a",
+            Some("0xaccount_a")
+        ));
+    }
+
+    #[test]
+    fn cached_row_is_ignored_when_signed_account_differs() {
+        // WALM-681: one delegate key may be registered on several accounts, but
+        // the cache holds only the one that resolved last. Answering from it
+        // would run a request signed for B against A, and the write routes take
+        // their owner/account id from this result — B's memory would be stored
+        // under A. A mismatched row is not a hit; Strategy 2 verifies the
+        // account that was actually requested.
+        assert!(!cached_row_answers_request(
+            "0xaccount_a",
+            Some("0xaccount_b")
+        ));
+    }
+
+    #[test]
+    fn cached_row_answers_request_when_no_account_was_signed() {
+        // Legacy clients that send no x-account-id keep the old behaviour:
+        // there is no signed statement to contradict the cached row.
+        assert!(cached_row_answers_request("0xaccount_a", None));
+    }
+
+    #[test]
+    fn cached_row_match_is_exact_not_prefix() {
+        // Account ids are compared whole. A longer id that merely starts with a
+        // cached one is a different object.
+        assert!(!cached_row_answers_request(
+            "0xaccount",
+            Some("0xaccount_b")
+        ));
+        assert!(!cached_row_answers_request(
+            "0xaccount_b",
+            Some("0xaccount")
+        ));
+    }
+
+    #[test]
+    fn alternating_accounts_each_resolve_to_the_requested_one() {
+        // The account switch the ticket asks to cover: with the cache warm on A,
+        // a request for B must not be answered from it, and once the row has
+        // been overwritten with B, a request for A must not be answered either.
+        // Neither direction may inherit the other's account.
+        let warm_on_a = "0xaccount_a";
+        assert!(cached_row_answers_request(warm_on_a, Some("0xaccount_a")));
+        assert!(!cached_row_answers_request(warm_on_a, Some("0xaccount_b")));
+
+        let warm_on_b = "0xaccount_b";
+        assert!(cached_row_answers_request(warm_on_b, Some("0xaccount_b")));
+        assert!(!cached_row_answers_request(warm_on_b, Some("0xaccount_a")));
     }
 
     #[test]

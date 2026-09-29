@@ -5,6 +5,7 @@
 ### Fixed
 
 - Only `privateKey` interpolates `${ENV_VAR}`. Other fields stay literal so a secret cannot land in `serverUrl`.
+- `memory_search` and `memory_store` are pinned to the calling agent's namespace. An omitted namespace uses that agent, not the main namespace, and a model-supplied namespace is rejected unless it is the agent's namespace or its legacy namespace.
 
 ## 0.0.6
 

@@ -88,6 +88,10 @@ export const config = {
         'https://docs.wal.app/docs/legal/walrus_general_tos',
     privacyPolicyUrl: import.meta.env.VITE_PRIVACY_POLICY_URL as string ||
         'https://docs.wal.app/docs/legal/privacy',
+    // "Back to Console" target on /keys (WALM-675). Per-deployment like the
+    // package/registry ids above — never read from a URL query param, since
+    // that's exactly the trust model WALM-288 broke. Empty hides the link.
+    consoleUrl: import.meta.env.VITE_CONSOLE_URL as string || '',
     gtmContainerId: import.meta.env.VITE_GTM_CONTAINER_ID as string || '',
     gaMeasurementId: import.meta.env.VITE_GA_MEASUREMENT_ID as string || '',
     posthogProjectApiKey: (

@@ -123,6 +123,12 @@ export default function SetupWizard() {
     const isEnoki = getPersistedAuthMethod() === 'enoki'
 
     // ── Done: redirect to dashboard ──
+    // Note: setDelegateKeys() (called just before setStep('done')) makes
+    // AppContent's /setup route re-render as <Navigate to="/dashboard" />
+    // before this effect's timer fires, so this navigate() only actually
+    // runs for a pending mcp/claude returnTo — the Console-arrival signal
+    // for the plain /dashboard case is attached at that earlier redirect
+    // instead (App.tsx's RequireAccountForSetup, ducnmm review).
     useEffect(() => {
         if (step === 'done') {
             sessionStorage.removeItem(AUTH_METHOD_KEY)

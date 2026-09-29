@@ -129,9 +129,20 @@ function DelegateKeySkeletonList() {
 export default function Dashboard({
     previewMode = false,
     previewState = 'empty',
+    autoScrollToKeys = false,
+    fromKeys = false,
 }: {
     previewMode?: boolean
     previewState?: 'empty' | 'ready'
+    /** Scroll to the delegate keys card once its first load finishes. Used by /keys (WALM-675). */
+    autoScrollToKeys?: boolean
+    /** Rendered from /keys (WALM-675) — separate from autoScrollToKeys, which
+     *  is false on an owner mismatch. Gates the account-ready dialog's "Back
+     *  to Console" button: that's where a Console user actually finishes,
+     *  after copying the key. The nav no longer carries its own Console
+     *  link, so the new-user /setup → /dashboard path has no return prompt
+     *  — COMG-1093 was expected to handle that return on the Console side. */
+    fromKeys?: boolean
 }) {
     const currentAccount = useCurrentAccount()
     const navigate = useNavigate()
@@ -210,6 +221,29 @@ export default function Dashboard({
     const [importingExistingKey, setImportingExistingKey] = useState(false)
     const [newPrivateKey, setNewPrivateKey] = useState<string | null>(null)
     const addKeyFormCloseTimerRef = useRef<number | null>(null)
+    const [accountReadyDismissed, setAccountReadyDismissed] = useState(false)
+    // One-shot signal from SetupWizard's navigate() state — set only when the
+    // /setup visit carried Console's "Set up" (COMG-1081) `from` marker.
+    // Mutable (not read-once-and-frozen): it must be consumed to false on
+    // dismiss, otherwise the mint re-arm effect below — which resets
+    // accountReadyDismissed for ANY fromKeys mint — would resurrect this
+    // dialog for an unrelated key minted later on the plain /dashboard.
+    const [fromConsoleSetup, setFromConsoleSetup] = useState(() => Boolean(
+        (location.state as { fromConsoleSetup?: boolean } | null)?.fromConsoleSetup
+    ))
+    // Set on a successful mint, alongside a direct accountReadyDismissed
+    // reset (not an effect keyed on newPrivateKey — same reasoning as
+    // justRemovedKeys below: the flag can already be true from a prior
+    // dismissed dialog, and setting an unchanged value wouldn't re-fire an
+    // effect). Combined with `!newPrivateKey` in showAccountReadyDialog so
+    // the dialog only opens once the one-time key block has been dismissed
+    // via Continue — opening it earlier, with Back to Console as the primary
+    // button, let a user leave before copying an unrecoverable private key
+    // (nikola0x0 + ducnmm review).
+    const [justMintedKey, setJustMintedKey] = useState(false)
+    // Revoke has no one-time secret to protect, so its dialog can open
+    // immediately — same direct-reset reasoning as justMintedKey above.
+    const [justRemovedKeys, setJustRemovedKeys] = useState(false)
 
     // WalletSigner adapter — wraps dapp-kit hooks into SDK's WalletSigner interface
     const walletSigner = useMemo<WalletSigner | null>(() => {
@@ -348,6 +382,11 @@ export default function Dashboard({
     const selectedKeySet = useMemo(() => new Set(selectedKeyPublicKeys), [selectedKeyPublicKeys])
     const selectedKeyCount = selectedKeyPublicKeys.length
     const keyRemovalBusy = removingSelectedKeys || Boolean(removingKey)
+    // A revoke wipes newPrivateKey at its start too (executeRemoveKeys), so
+    // starting one while a mint's key is still uncopied would lose it the
+    // same way a second mint could — block the action outright rather than
+    // only fixing when the dialog is allowed to open (ducnmm re-review).
+    const keyActionBlockedByUncopiedKey = Boolean(newPrivateKey)
     const showKeySelectionControls = Boolean(effectiveAccountObjectId) && selectedKeyCount > 0 && !accountLookupPending
 
     const connectedAccountIdRef = useRef(effectiveAccountObjectId)
@@ -393,6 +432,44 @@ export default function Dashboard({
             .getElementById(DELEGATE_KEYS_SECTION_ID)
             ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }, [])
+
+    const autoScrolledToKeysRef = useRef(false)
+    useEffect(() => {
+        if (!autoScrollToKeys || autoScrolledToKeysRef.current || isKeyListLoading) return
+        autoScrolledToKeysRef.current = true
+        scrollToDelegateKeys()
+    }, [autoScrollToKeys, isKeyListLoading, scrollToDelegateKeys])
+
+    // Two distinct Console arrivals gate the same dialog: a key action
+    // (mint or revoke) from /keys (fromKeys), or a brand-new account that
+    // just finished /setup after coming from Console's "Set up"
+    // (fromConsoleSetup, 28 Sep update). The mint branch additionally
+    // requires !newPrivateKey — the one-time key block is still showing
+    // otherwise, and this dialog's primary button navigates away.
+    const showAccountReadyDialog = Boolean(
+        config.consoleUrl && !accountReadyDismissed && !removeKeysConfirm &&
+        ((fromKeys && ((justMintedKey && !newPrivateKey) || justRemovedKeys)) || fromConsoleSetup)
+    )
+    const dismissAccountReadyDialog = useCallback(() => {
+        setAccountReadyDismissed(true)
+        setFromConsoleSetup(false)
+    }, [])
+    // Console reads `from=wm` to detect a return trip and refresh its link
+    // status (see console/frontend MemoryTabPanel.tsx).
+    const consoleReturnUrl = config.consoleUrl
+        ? `${config.consoleUrl}${config.consoleUrl.includes('?') ? '&' : '?'}from=wm`
+        : ''
+
+    useEffect(() => {
+        if (!showAccountReadyDialog) return undefined
+
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') dismissAccountReadyDialog()
+        }
+
+        window.addEventListener('keydown', closeOnEscape)
+        return () => window.removeEventListener('keydown', closeOnEscape)
+    }, [showAccountReadyDialog, dismissAccountReadyDialog])
 
     useEffect(() => {
         const hash = location.hash || window.location.hash
@@ -602,6 +679,13 @@ export default function Dashboard({
             setDelegateKeys(delegate.privateKey, delegatePublicKeyHex, effectiveAccountObjectId!)
             closeAddKeyForm()
             setNewKeyLabel('New key')
+            // Only the latest key action picks the dialog's copy.
+            setJustRemovedKeys(false)
+            // justMintedKey/accountReadyDismissed arm on Continue (below),
+            // not here — arming them on mint success let a second mint or a
+            // revoke started while this key was still uncopied wipe
+            // newPrivateKey and open the dialog early (ducnmm re-review,
+            // WALM-675).
 
             trackEvent('delegate_key_add_complete', {
                 location: 'dashboard',
@@ -683,6 +767,13 @@ export default function Dashboard({
             )
             await fetchOnChainKeys()
             trackEvent('delegate_key_remove_complete', removeEventPayload)
+            // Direct reset, not an effect keyed on justRemovedKeys — the flag
+            // can already be true from an earlier dismissed dialog, in which
+            // case setting it to true again wouldn't change the dependency
+            // and an effect-based reset would silently no-op.
+            setJustRemovedKeys(true)
+            setJustMintedKey(false)
+            setAccountReadyDismissed(false)
         } catch (err: unknown) {
             const msg = err instanceof Error
                 ? err.message
@@ -1161,7 +1252,7 @@ asyncio.run(main())`
                                     trackEvent('cta_click', { cta: 'show_add_delegate_key_form', location: 'dashboard' })
                                     openAddKeyForm()
                                 }}
-                                disabled={showAddForm || addingKey || accountLookupPending || !effectiveAccountObjectId || hasMaxDelegateKeys}
+                                disabled={showAddForm || addingKey || accountLookupPending || !effectiveAccountObjectId || hasMaxDelegateKeys || keyActionBlockedByUncopiedKey}
                             >
                                 Add key <Plus size={18} strokeWidth={2.5} aria-hidden="true" />
                             </button>
@@ -1208,7 +1299,11 @@ asyncio.run(main())`
                                     </button>
                                     <button
                                         className="btn btn-secondary btn-sm"
-                                        onClick={() => setNewPrivateKey(null)}
+                                        onClick={() => {
+                                            setNewPrivateKey(null)
+                                            setJustMintedKey(true)
+                                            setAccountReadyDismissed(false)
+                                        }}
                                     >
                                         Continue
                                     </button>
@@ -1278,7 +1373,7 @@ asyncio.run(main())`
                                     type="button"
                                     className="btn btn-danger btn-sm dashboard-key-remove-selected"
                                     onClick={handleRemoveSelectedKeys}
-                                    disabled={keyRemovalBusy}
+                                    disabled={keyRemovalBusy || keyActionBlockedByUncopiedKey}
                                 >
                                     <Trash2 size={12} />
                                     {removingSelectedKeys ? 'Removing...' : 'Remove selected'}
@@ -1370,7 +1465,7 @@ asyncio.run(main())`
                                                         <button
                                                             className="btn btn-danger btn-sm dashboard-key-icon-action"
                                                             onClick={() => handleRemoveKey(k.publicKey)}
-                                                            disabled={keyRemovalBusy}
+                                                            disabled={keyRemovalBusy || keyActionBlockedByUncopiedKey}
                                                             aria-busy={isRemoving}
                                                             aria-label={isRemoving ? 'Removing delegate key' : 'Remove delegate key'}
                                                             title={isRemoving ? 'Removing' : 'Remove delegate key'}
@@ -1484,6 +1579,48 @@ asyncio.run(main())`
                                 >
                                     {removeConfirmBusy ? 'Removing...' : 'Remove'}
                                 </button>
+                            </div>
+                        </section>
+                    </div>
+                )}
+
+                {showAccountReadyDialog && (
+                    <div
+                        className="dashboard-confirm-backdrop"
+                        onMouseDown={(event) => {
+                            if (event.target === event.currentTarget) dismissAccountReadyDialog()
+                        }}
+                    >
+                        <section
+                            className="dashboard-confirm-dialog dashboard-account-ready-dialog"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="dashboard-account-ready-title"
+                            aria-describedby="dashboard-account-ready-description"
+                        >
+                            <div className="dashboard-confirm-copy dashboard-account-ready-body">
+                                {/* "Your account is ready" reads oddly after a revoke. */}
+                                <h3 id="dashboard-account-ready-title">
+                                    {justRemovedKeys ? 'Your keys are updated' : 'Your account is ready'}
+                                </h3>
+                                <p id="dashboard-account-ready-description">
+                                    {justRemovedKeys
+                                        ? 'Head back to Walrus Console to see the change.'
+                                        : 'Finish connecting your account in Walrus Console.'}
+                                </p>
+                            </div>
+                            <div className="dashboard-confirm-actions dashboard-account-ready-actions">
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary dashboard-confirm-cancel"
+                                    onClick={dismissAccountReadyDialog}
+                                    autoFocus
+                                >
+                                    Cancel
+                                </button>
+                                <a href={consoleReturnUrl} className="btn btn-primary dashboard-account-ready-console">
+                                    Back to Console
+                                </a>
                             </div>
                         </section>
                     </div>
