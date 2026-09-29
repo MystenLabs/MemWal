@@ -683,6 +683,8 @@ export default function Dashboard({
             closeAddKeyForm()
             setNewKeyLabel('New key')
             setJustMintedKey(true)
+            // Only the latest key action picks the dialog's copy.
+            setJustRemovedKeys(false)
             setAccountReadyDismissed(false)
 
             trackEvent('delegate_key_add_complete', { location: 'dashboard' })
@@ -766,6 +768,7 @@ export default function Dashboard({
             // case setting it to true again wouldn't change the dependency
             // and an effect-based reset would silently no-op.
             setJustRemovedKeys(true)
+            setJustMintedKey(false)
             setAccountReadyDismissed(false)
         } catch (err: unknown) {
             const msg = err instanceof Error
@@ -1743,8 +1746,15 @@ const result = await generateText({
                             aria-describedby="dashboard-account-ready-description"
                         >
                             <div className="dashboard-confirm-copy dashboard-account-ready-body">
-                                <h3 id="dashboard-account-ready-title">Your account is ready</h3>
-                                <p id="dashboard-account-ready-description">Finish connecting your account in Walrus Console.</p>
+                                {/* "Your account is ready" reads oddly after a revoke. */}
+                                <h3 id="dashboard-account-ready-title">
+                                    {justRemovedKeys ? 'Your keys are updated' : 'Your account is ready'}
+                                </h3>
+                                <p id="dashboard-account-ready-description">
+                                    {justRemovedKeys
+                                        ? 'Head back to Walrus Console to see the change.'
+                                        : 'Finish connecting your account in Walrus Console.'}
+                                </p>
                             </div>
                             <div className="dashboard-confirm-actions dashboard-account-ready-actions">
                                 <button

@@ -141,7 +141,9 @@ export default function KeysPage() {
                 </div>
             )}
 
-            <Dashboard autoScrollToKeys={!mismatch} fromKeys />
+            {/* A mismatched wallet shouldn't be pushed back to Console after a
+                key action: the key belongs to a different address than Console expects. */}
+            <Dashboard autoScrollToKeys={!mismatch} fromKeys={!mismatch} />
         </>
     )
 }
