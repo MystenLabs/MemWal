@@ -797,11 +797,23 @@ fn upload_retry_backoff(
     Some(backoff_duration(attempt_info.current as u32))
 }
 
+/// Apalis runs a larger value first. A transferred blob only needs a database
+/// write, and a certified blob only needs metadata. Both finish before a new
+/// upload starts. Equal priorities stay first-come.
+fn wallet_job_priority(operation: &WalletOperation) -> i32 {
+    match operation {
+        WalletOperation::FinalizeUploadedBlob { .. } => 2,
+        WalletOperation::SetMetadataAndTransfer { .. } => 1,
+        WalletOperation::UploadAndTransfer { .. } => 0,
+    }
+}
+
 pub(crate) fn wallet_job_request(
     job: WalletJob,
 ) -> Request<WalletJob, apalis_sql::context::SqlContext> {
     let mut context = apalis_sql::context::SqlContext::new();
     context.set_max_attempts(MAX_ATTEMPTS as i32);
+    context.set_priority(wallet_job_priority(&job.operation));
     Request::new_with_ctx(job, context)
 }
 
@@ -4666,6 +4678,70 @@ the checkpoint it replied about",
         });
 
         assert_eq!(req.parts.context.max_attempts(), MAX_ATTEMPTS as i32);
+        assert_eq!(*req.parts.context.priority(), 2);
+    }
+
+    #[test]
+    fn wallet_job_priority_finishes_certified_work_before_a_new_upload() {
+        let upload = wallet_job_request(WalletJob {
+            wallet_index: 1,
+            congestion_requeues: 0,
+            operation: WalletOperation::UploadAndTransfer {
+                encrypted_b64: String::new(),
+                vector: vec![],
+                importance: 0.0,
+                owner: String::new(),
+                namespace: String::new(),
+                package_id: String::new(),
+                account_id: String::new(),
+                agent_public_key: None,
+                remember_job_id: None,
+                prepare_claim_token: None,
+                epochs: 1,
+            },
+        });
+        let metadata = wallet_job_request(metadata_congestion_retry_job(
+            4,
+            2,
+            "0xblob",
+            "0xowner",
+            "ns",
+            None,
+            None,
+            Some("job"),
+            Some("blob"),
+            None,
+            Some(1),
+            0.5,
+            None,
+            None,
+            None,
+            None,
+        ));
+        let finalize = wallet_job_request(WalletJob {
+            wallet_index: 4,
+            congestion_requeues: 0,
+            operation: WalletOperation::FinalizeUploadedBlob {
+                owner: "0xowner".into(),
+                namespace: "ns".into(),
+                remember_job_id: Some("job".into()),
+                blob_id: "blob".into(),
+                vector: vec![0.1],
+                blob_size_bytes: 1,
+                importance: 0.5,
+                agent_id: None,
+                package_id: None,
+                end_epoch: None,
+            },
+        });
+
+        assert_eq!(*upload.parts.context.priority(), 0);
+        assert_eq!(*metadata.parts.context.priority(), 1);
+        assert_eq!(*finalize.parts.context.priority(), 2);
+        assert!(
+            *finalize.parts.context.priority() > *metadata.parts.context.priority()
+                && *metadata.parts.context.priority() > *upload.parts.context.priority()
+        );
     }
 
     async fn insert_job_full(
