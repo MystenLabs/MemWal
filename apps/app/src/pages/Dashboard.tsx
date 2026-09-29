@@ -392,18 +392,20 @@ export default function Dashboard({
     const connectedAccountIdRef = useRef(effectiveAccountObjectId)
     connectedAccountIdRef.current = effectiveAccountObjectId
 
-    const importExistingKey = useCallback(async (rawKey: string) => {
+    // Resolves true once the key is stored, so the form can clear the pasted
+    // private key instead of leaving it on screen.
+    const importExistingKey = useCallback(async (rawKey: string): Promise<boolean> => {
         const normalized = normalizeDelegatePrivateKey(rawKey)
         if (!normalized) {
             setExistingKeyError('Delegate key must be a 64-character hex private key.')
             trackEvent('delegate_key_import_failed', { error_type: 'invalid_input', location: 'dashboard_connect' })
-            return
+            return false
         }
         const accountId = effectiveAccountObjectId
         if (!accountId) {
             setExistingKeyError('No Walrus Memory account found for this wallet. Create a delegate key first.')
             trackEvent('delegate_key_import_failed', { error_type: 'no_account', location: 'dashboard_connect' })
-            return
+            return false
         }
 
         setImportingExistingKey(true)
@@ -412,9 +414,10 @@ export default function Dashboard({
         try {
             const publicKeyHex = await deriveDelegatePublicKeyHex(normalized)
             await assertDelegateKeyRegistered(suiClient, accountId, publicKeyHex)
-            if (connectedAccountIdRef.current !== accountId) return
+            if (connectedAccountIdRef.current !== accountId) return false
             setDelegateKeys(normalized, publicKeyHex, accountId)
             trackEvent('delegate_key_import_complete', { location: 'dashboard_connect' })
+            return true
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Failed to import delegate key. Please try again.'
             setExistingKeyError(message)
@@ -422,6 +425,7 @@ export default function Dashboard({
                 error_type: getAnalyticsErrorType(err),
                 location: 'dashboard_connect',
             })
+            return false
         } finally {
             setImportingExistingKey(false)
         }

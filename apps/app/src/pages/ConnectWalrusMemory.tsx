@@ -125,7 +125,8 @@ type ConnectWalrusMemoryProps = {
     consoleAvailable?: boolean
     onSdkKindChange?: (kind: SdkKind) => void
     sdkSnippet?: string
-    onImportExistingKey?: (privateKey: string) => Promise<void> | void
+    /** Resolves true once the key is stored; the pasted key is then cleared. */
+    onImportExistingKey?: (privateKey: string) => Promise<boolean | void> | boolean | void
     importingExistingKey?: boolean
     importExistingKeyError?: string
     importExistingKeyUnavailable?: boolean
@@ -353,9 +354,11 @@ export default function ConnectWalrusMemory({
                                 <a className="connect-wm-inline" href="#delegate-keys">Delegate keys</a>
                                 <form
                                     className="connect-wm-import"
-                                    onSubmit={(event) => {
+                                    onSubmit={async (event) => {
                                         event.preventDefault()
-                                        void onImportExistingKey?.(existingKey)
+                                        const stored = await onImportExistingKey?.(existingKey)
+                                        // A private key should not stay on screen once it is stored.
+                                        if (stored === true) setExistingKey('')
                                     }}
                                 >
                                     <label htmlFor="existing-delegate-key">Already have a delegate key?</label>
@@ -365,6 +368,11 @@ export default function ConnectWalrusMemory({
                                         onChange={(event) => setExistingKey(event.target.value)}
                                         placeholder="Paste an existing delegate key"
                                         aria-label="existing delegate key"
+                                        autoComplete="off"
+                                        autoCorrect="off"
+                                        autoCapitalize="off"
+                                        data-analytics-redact
+                                        className="connect-wm-secret"
                                         spellCheck={false}
                                         rows={2}
                                     />

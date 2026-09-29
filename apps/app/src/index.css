@@ -16068,3 +16068,8 @@ body:has(.signin-proposed) {
     transition: none;
   }
 }
+
+/* A pasted delegate private key is masked like a password field. */
+.connect-wm-secret {
+  -webkit-text-security: disc;
+}

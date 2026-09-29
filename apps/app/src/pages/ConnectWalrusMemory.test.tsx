@@ -90,4 +90,33 @@ describe('ConnectWalrusMemory', () => {
         expect(screen.getByLabelText('existing delegate key')).toBeInTheDocument()
         expect(screen.getByRole('link', { name: /test in playground/i })).toHaveAttribute('href', '/playground')
     })
+
+    it('clears a pasted private key once it is stored, and keeps it when the import fails', async () => {
+        const user = userEvent.setup()
+        const key = 'ab'.repeat(32)
+        const onImport = vi.fn<(privateKey: string) => Promise<boolean>>()
+        render(
+            <MemoryRouter>
+                <ConnectWalrusMemory
+                    path="app"
+                    onPathChange={() => {}}
+                    hasDelegateKey={false}
+                    onImportExistingKey={onImport}
+                />
+            </MemoryRouter>,
+        )
+        const field = screen.getByLabelText('existing delegate key') as HTMLTextAreaElement
+        expect(field).toHaveAttribute('autocomplete', 'off')
+        expect(field).toHaveAttribute('data-analytics-redact')
+
+        onImport.mockResolvedValueOnce(false)
+        await user.type(field, key)
+        await user.click(screen.getByRole('button', { name: 'Use this key' }))
+        expect(onImport).toHaveBeenLastCalledWith(key)
+        expect(field.value).toBe(key)
+
+        onImport.mockResolvedValueOnce(true)
+        await user.click(screen.getByRole('button', { name: 'Use this key' }))
+        expect(field.value).toBe('')
+    })
 })
