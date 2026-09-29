@@ -57,6 +57,17 @@ export const MAX_SOURCES_PER_REQUEST = positiveIntFromEnv(
 export const MAX_PDF_PAGES = positiveIntFromEnv("RESEARCH_MAX_PDF_PAGES", 500);
 
 /**
+ * Wall-clock time for reading one PDF's text, after the decompression guard.
+ * The guard bounds how far each stream inflates, not how many times pdf.js
+ * decodes it, so this is the ceiling on the work itself; the reader runs in a
+ * worker that is terminated when it expires.
+ */
+export const MAX_PDF_EXTRACT_MS = positiveIntFromEnv(
+  "RESEARCH_MAX_PDF_EXTRACT_MS",
+  30_000
+);
+
+/**
  * Whole multipart request body. The file itself is capped at MAX_SOURCE_BYTES;
  * this adds room for the boundaries and part headers around it.
  */

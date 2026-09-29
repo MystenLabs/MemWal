@@ -1,17 +1,16 @@
 import "server-only";
 
 import { ChatbotError } from "@/lib/errors";
-import { getDocumentProxy } from "unpdf";
 
 import {
   MAX_SOURCE_BYTES,
   assertLooksLikePdf,
   assertSourceFileWithinBudget,
-  collectPageText,
   discardBody,
   readCappedText,
 } from "./limits";
 import { assertPdfDecompressionWithinBudget } from "./pdf-guard";
+import { extractPdfTextIsolated } from "./pdf-text-host";
 
 export const JINA_READER_URL = "https://r.jina.ai/";
 
@@ -56,14 +55,11 @@ export async function extractFromPdf(file: File): Promise<string> {
   await assertPdfDecompressionWithinBudget(buffer);
 
   // Page by page, stopping at the character budget, rather than extractText's
-  // mergePages, which decoded every page before any cap could apply.
-  const doc = await getDocumentProxy(buffer);
-  let text: string;
-  try {
-    text = await collectPageText(doc);
-  } finally {
-    await doc.destroy();
-  }
+  // mergePages, which decoded every page before any cap could apply. pdf.js
+  // runs in a worker under a deadline: the guard bounds how far a stream
+  // inflates, not how many times pdf.js decodes it (shared or repeated content
+  // streams, Form XObjects drawn many times), and that decoding is synchronous.
+  const text = await extractPdfTextIsolated(buffer);
 
   if (!text || text.trim().length === 0) {
     throw new ChatbotError(
