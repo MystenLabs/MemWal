@@ -471,7 +471,17 @@ export function fetchPinned(
         clearTimeout(connectTimer);
       };
       if (!socket.connecting) {
-        onConnect();
+        // Not connecting has two meanings. A kept-alive socket from the agent's
+        // pool is open, so the address worked. But a connect that failed
+        // synchronously is not connecting either: libuv returns ENETUNREACH,
+        // EHOSTUNREACH, EACCES and EPERM from connect() itself (only
+        // ECONNREFUSED is deferred), and net destroys the socket before this
+        // event fires. Counting that as connected turned an unreachable IPv6
+        // address into a whole-fetch failure, so the validated IPv4 address
+        // behind it was never tried.
+        if (!socket.destroyed) {
+          onConnect();
+        }
       } else {
         // Node >=19 creates http(s).globalAgent with `timeout: 5000`, armed on
         // the socket while it is still connecting. Left alone it fires before

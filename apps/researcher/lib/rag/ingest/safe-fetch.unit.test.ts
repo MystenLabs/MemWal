@@ -570,3 +570,43 @@ test("the global agent's socket timer cannot end a connect early as a whole-fetc
   const elapsed = Date.now() - started;
   assert.ok(elapsed >= 500, `rejected at ${elapsed}ms — the agent's 100ms timer ended it, not the connect deadline`);
 });
+
+// ── a connect that fails synchronously ────────────────────────────────────
+
+// libuv returns everything but ECONNREFUSED from connect() itself, so net
+// destroys the socket before the request's 'socket' event, and the socket
+// arrives there not connecting. That used to read as an open pooled socket:
+// the error was classed as post-connect and the next address never got a turn.
+// ENETUNREACH on an IPv6 address from a container with no IPv6 route is the
+// real case. A TCP connect to the limited broadcast address fails the same way
+// on Linux (ENETUNREACH, synchronously) without depending on the host's IPv6.
+const SYNC_UNREACHABLE = "255.255.255.255";
+
+test("a connect that fails synchronously is a PinnedConnectError", async () => {
+  await assert.rejects(
+    () =>
+      fetchPinned(new URL("http://example.com/x"), SYNC_UNREACHABLE, undefined, 5000, 2000),
+    (error) => {
+      assert.ok(
+        error instanceof PinnedConnectError,
+        `expected PinnedConnectError, got ${(error as Error)?.constructor?.name}: ${String((error as ChatbotError).cause)}`
+      );
+      return true;
+    }
+  );
+});
+
+test("an address that fails synchronously gives way to the next one", async (t) => {
+  const port = await liveServer(t);
+  const transport: PinnedTransport = (url, address, init, timeoutMs) =>
+    fetchPinned(url, address, init, timeoutMs, 2000);
+
+  const response = await fetchFirstReachable(
+    new URL(`http://example.com:${port}/x`),
+    [SYNC_UNREACHABLE, "127.0.0.1"],
+    undefined,
+    transport
+  );
+
+  assert.equal(await response.text(), "reached");
+});
