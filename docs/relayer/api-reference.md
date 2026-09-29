@@ -70,7 +70,7 @@ The signed message is:
 {timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}
 ```
 
-For `GET` requests, `body_sha256` is the SHA-256 of an empty byte string. If a raw client omits `x-account-id`, it must sign the empty string in the final `account_id` position. Official SDKs send `x-account-id`.
+For `GET` requests, `body_sha256` is the SHA-256 of an empty byte string. If a raw client omits `x-account-id`, it must sign the empty string in the final `account_id` position. Official SDKs send `x-account-id`. A cold delegate key with no account id is rejected with `401`. The relayer does not search `AccountRegistry`. A key already in the relayer's delegate-key cache, or a server with `MEMWAL_ACCOUNT_ID` set, can still authenticate without the header.
 
 The relayer verifies the Ed25519 signature, then resolves the owner by looking up the public key in onchain `MemWalAccount.delegate_keys`.
 
@@ -181,7 +181,7 @@ The motivating use is rebuilding local credentials: a client that holds a workin
 }
 ```
 
-**Mainnet only, when the caller cannot send `x-account-id`.** Recovering a lost account id is the one case where the client has no id to send, so authentication has to find it by scanning the `AccountRegistry` for the delegate key. That scan runs over Sui JSON-RPC, which Testnet no longer serves, so Testnet requires the `x-account-id` hint for delegate-key authentication and rejects the request with `401` when it is absent, including this one. A caller that already knows its account id can use this route on either network; a caller recovering one cannot use it on Testnet.
+The caller sends `x-account-id` on every network. Authentication does not scan `AccountRegistry` to discover it. A request with no account id returns `401` unless that delegate key is already in the relayer's cache or the server has `MEMWAL_ACCOUNT_ID` set. A client that has lost its account id cannot recover it from this route.
 
 ### `POST /api/remember`
 

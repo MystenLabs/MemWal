@@ -288,8 +288,7 @@ pub const DELEGATE_VERIFY_CACHE_TTL: std::time::Duration = std::time::Duration::
 /// stays 30s whenever the chain answers, and stretches to 10 minutes only
 /// while the chain cannot be read at all — a window in which the relayer
 /// could not have observed the revoke anyway.
-pub const DELEGATE_VERIFY_STALE_GRACE: std::time::Duration =
-    std::time::Duration::from_secs(600);
+pub const DELEGATE_VERIFY_STALE_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
 
 #[derive(Clone)]
 pub struct TimedVerifiedOwner {
@@ -1084,244 +1083,6 @@ async fn list_delegate_keys_onchain_grpc(
     Ok(out)
 }
 
-/// Scan the AccountRegistry to find which account holds a given delegate key.
-///
-/// Flow:
-/// 1. Fetch the AccountRegistry object to get the Table's inner object ID
-/// 2. Use `suix_getDynamicFields` on the Table's inner ID to enumerate accounts
-/// 3. For each account, fetch it and check delegate_keys
-///
-/// The scan is capped at `max_pages` pages (50 accounts per page, one
-/// `sui_getObject` per candidate account) so an unknown key can't walk the
-/// entire registry — this runs from the auth middleware, before rate
-/// limiting. Past the cap, `Err(ScanCapExceeded)` tells the caller the
-/// client should send the x-account-id hint instead.
-///
-/// Returns `Ok((account_object_id, owner))` if found.
-pub async fn find_account_by_delegate_key(
-    http_client: &reqwest::Client,
-    rpc_url: &str,
-    registry_id: &str,
-    public_key_bytes: &[u8],
-    expected_type_origin_package_id: &str,
-    max_pages: u32,
-) -> Result<(String, String), OnchainVerifyError> {
-    // Step 1: Fetch registry to get the Table's inner object ID
-    let registry_body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "sui_getObject",
-        "params": [registry_id, { "showContent": true }]
-    });
-
-    let request = http_client
-        .post(rpc_url)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .json(&registry_body);
-    let request = crate::observability::apply_request_id_header(request);
-    let started = std::time::Instant::now();
-    let registry_resp = request.send().await.map_err(|e| {
-        crate::observability::observe_external(
-            "sui_rpc",
-            "sui_getObject_registry",
-            "transport_error",
-            started.elapsed(),
-        );
-        OnchainVerifyError::RpcError(format!("Failed to fetch registry: {}", e))
-    })?;
-    let status_label = registry_resp.status().as_u16().to_string();
-    crate::observability::observe_external(
-        "sui_rpc",
-        "sui_getObject_registry",
-        &status_label,
-        started.elapsed(),
-    );
-
-    let registry_json: serde_json::Value =
-        parse_json_rpc_response(registry_resp, "sui_getObject registry").await?;
-
-    // Extract Table inner ID: result.data.content.fields.accounts.fields.id.id
-    let table_id = registry_json
-        .pointer("/result/data/content/fields/accounts/fields/id/id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            OnchainVerifyError::RpcError("Failed to extract accounts table ID from registry".into())
-        })?
-        .to_string();
-
-    tracing::debug!("registry accounts table inner ID: {}", table_id);
-
-    // Step 2: Scan dynamic fields on the Table's inner ID
-    let mut cursor: Option<String> = None;
-    let mut pages_scanned: u32 = 0;
-
-    loop {
-        if pages_scanned >= max_pages {
-            return Err(OnchainVerifyError::ScanCapExceeded(format!(
-                "registry scan stopped after {} pages (~{} accounts) without finding the \
-                 delegate key; client must send the x-account-id header hint",
-                max_pages,
-                u64::from(max_pages) * 50
-            )));
-        }
-        pages_scanned += 1;
-
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "suix_getDynamicFields",
-            "params": [table_id, cursor, 50]
-        });
-
-        let request = http_client
-            .post(rpc_url)
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .json(&body);
-        let request = crate::observability::apply_request_id_header(request);
-        let started = std::time::Instant::now();
-        let response = request.send().await.map_err(|e| {
-            crate::observability::observe_external(
-                "sui_rpc",
-                "suix_getDynamicFields",
-                "transport_error",
-                started.elapsed(),
-            );
-            OnchainVerifyError::RpcError(format!("HTTP request failed: {}", e))
-        })?;
-        let status_label = response.status().as_u16().to_string();
-        crate::observability::observe_external(
-            "sui_rpc",
-            "suix_getDynamicFields",
-            &status_label,
-            started.elapsed(),
-        );
-
-        let resp_json: serde_json::Value =
-            parse_json_rpc_response(response, "suix_getDynamicFields").await?;
-
-        if let Some(error) = resp_json.get("error") {
-            return Err(OnchainVerifyError::RpcError(format!(
-                "RPC error: {}",
-                error
-            )));
-        }
-
-        let result = resp_json
-            .get("result")
-            .ok_or_else(|| OnchainVerifyError::RpcError("No result in response".into()))?;
-
-        let data = result
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| OnchainVerifyError::RpcError("No data array in response".into()))?;
-
-        // Each entry is a dynamic field wrapping (address → ID)
-        for field_info in data {
-            let field_obj_id = field_info
-                .get("objectId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    OnchainVerifyError::RpcError("Missing objectId in dynamic field".into())
-                })?;
-
-            // Fetch the dynamic field to get the account object ID
-            let field_body = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "sui_getObject",
-                "params": [field_obj_id, { "showContent": true }]
-            });
-
-            let request = http_client
-                .post(rpc_url)
-                .header(reqwest::header::ACCEPT_ENCODING, "identity")
-                .json(&field_body);
-            let request = crate::observability::apply_request_id_header(request);
-            let started = std::time::Instant::now();
-            let field_resp = request.send().await.map_err(|e| {
-                crate::observability::observe_external(
-                    "sui_rpc",
-                    "sui_getObject_dynamic_field",
-                    "transport_error",
-                    started.elapsed(),
-                );
-                OnchainVerifyError::RpcError(format!("Failed to fetch field: {}", e))
-            })?;
-            let status_label = field_resp.status().as_u16().to_string();
-            crate::observability::observe_external(
-                "sui_rpc",
-                "sui_getObject_dynamic_field",
-                &status_label,
-                started.elapsed(),
-            );
-
-            let field_json: serde_json::Value =
-                parse_json_rpc_response(field_resp, "sui_getObject dynamic field").await?;
-
-            // Extract the account ID from the dynamic field value
-            let account_id = field_json
-                .pointer("/result/data/content/fields/value")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-
-            if account_id.is_empty() {
-                continue;
-            }
-
-            // Fetch the actual MemWalAccount to check delegate_keys.
-            // Registry-scan fallback stays JSON-RPC-only for now: gRPC has no
-            // single-key dynamic-field lookup (only paginated
-            // ListDynamicFields), and this path only runs when the SDK sent
-            // no x-account-id hint, which modern SDKs always do — see
-            // Strategy 2 in resolve_account (auth.rs).
-            match verify_delegate_key_onchain(
-                http_client,
-                rpc_url,
-                None,
-                account_id,
-                public_key_bytes,
-                expected_type_origin_package_id,
-                GET_OBJECT_ATTEMPTS,
-            )
-            .await
-            {
-                Ok(owner) => {
-                    tracing::info!(
-                        "found account for delegate key via registry scan: {}",
-                        account_id
-                    );
-                    return Ok((account_id.to_string(), owner));
-                }
-                Err(OnchainVerifyError::KeyNotFound(_) | OnchainVerifyError::NotFound(_)) => {
-                    continue;
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-
-        // Check for next page
-        let next_cursor = result
-            .get("nextCursor")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let has_next = result
-            .get("hasNextPage")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        if !has_next || next_cursor.is_none() {
-            break;
-        }
-        cursor = next_cursor;
-    }
-
-    Err(OnchainVerifyError::KeyNotFound(
-        "Delegate key not found in any account in the registry".into(),
-    ))
-}
-
 // ============================================================
 // Types for JSON-RPC response parsing
 // ============================================================
@@ -1426,9 +1187,9 @@ pub enum OnchainVerifyError {
     /// The named object is not `{package}::account::MemWalAccount` — a foreign
     /// or lookalike object was supplied. Blocks owner spoofing (#398).
     WrongObjectType(String),
-    /// The registry fallback scan hit its page cap without finding the key
-    /// (MEMWAL_REGISTRY_SCAN_MAX_PAGES). The client should send the
-    /// x-account-id header hint so auth verifies the account directly.
+    /// A registry walk stopped at its page cap. Auth no longer scans.
+    /// Still "unavailable", not a definitive miss, so a caller must not
+    /// treat it as a revoke.
     ScanCapExceeded(String),
 }
 
@@ -2481,8 +2242,8 @@ mod tests {
         let rejects = new_delegate_reject_cache();
         {
             let mut map = rejects.write().await;
-            let dead = std::time::Instant::now() - (DELEGATE_REJECT_CACHE_TTL
-                + std::time::Duration::from_secs(1));
+            let dead = std::time::Instant::now()
+                - (DELEGATE_REJECT_CACHE_TTL + std::time::Duration::from_secs(1));
             for i in 0..DELEGATE_REJECT_CACHE_MAX_ENTRIES {
                 map.insert((format!("0xspam-{i}"), sample_pk()), dead);
             }

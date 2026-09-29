@@ -110,17 +110,6 @@ impl SecurityDeleteExecutionGate {
     }
 }
 
-/// Default cap on AccountRegistry pages walked by the auth fallback scan
-/// (Strategy 3 in `auth::resolve_account`). 50 accounts per page → 1000
-/// accounts. Override via MEMWAL_REGISTRY_SCAN_MAX_PAGES.
-pub const DEFAULT_REGISTRY_SCAN_MAX_PAGES: u32 = 20;
-
-/// Max concurrent AccountRegistry fallback scans. Auth runs BEFORE the
-/// rate limiter, so unauthenticated unknown-key traffic could otherwise
-/// stack unbounded full-registry scans (each page fans out one
-/// `sui_getObject` per candidate account).
-pub const REGISTRY_SCAN_MAX_CONCURRENT: usize = 2;
-
 /// Default accepted clock drift (seconds, each direction) between a client's
 /// signed timestamp and the relayer's clock. A request is fresh when
 /// `|now - timestamp| <= this`.
@@ -251,12 +240,6 @@ pub struct AppState {
     pub redis: redis::aio::ConnectionManager,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
-    /// Bounds concurrent AccountRegistry fallback scans (auth Strategy 3).
-    /// Auth runs before the rate limiter, so this — plus the per-scan page
-    /// cap (`Config::registry_scan_max_pages`) — is what stops unknown-key
-    /// floods from stacking unbounded registry walks. `try_acquire` only:
-    /// saturation rejects the request rather than queueing.
-    pub registry_scan_semaphore: tokio::sync::Semaphore,
     /// Apalis storage for legacy RememberJob payloads. Kept so the worker can
     /// fail unfenced rows closed and surface them for reconciliation.
     #[allow(dead_code)]
@@ -479,11 +462,6 @@ pub struct Config {
     /// package after an upgrade without changing the ciphertext namespace.
     pub seal_policy_package_id: String,
     pub registry_id: String,
-    /// Max AccountRegistry pages (50 accounts each) the auth fallback scan
-    /// walks before giving up (MEMWAL_REGISTRY_SCAN_MAX_PAGES, default 20).
-    /// Bounds the RPC fan-out an unknown delegate key can trigger; clients
-    /// past the cap must send the x-account-id hint instead.
-    pub registry_scan_max_pages: u32,
     /// URL of the Walrus upload sidecar. Upload work stays here.
     pub sidecar_url: String,
     /// Seal encrypt/decrypt. A different port from `sidecar_url` so recall
@@ -1066,13 +1044,6 @@ impl Config {
             package_id,
             seal_policy_package_id,
             registry_id: normalize_object_id_env("MEMWAL_REGISTRY_ID"),
-            registry_scan_max_pages: std::env::var("MEMWAL_REGISTRY_SCAN_MAX_PAGES")
-                .ok()
-                .and_then(|v| v.trim().parse::<u32>().ok())
-                // 0 would silently disable the Strategy 3 fallback scan;
-                // clamp to at least one page.
-                .map(|v| v.max(1))
-                .unwrap_or(DEFAULT_REGISTRY_SCAN_MAX_PAGES),
             sidecar_url,
             seal_sidecar_url,
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
@@ -2480,8 +2451,8 @@ pub struct AccountExistsResponse {
 ///
 /// Exists so a client that holds a delegate key but lost the surrounding
 /// metadata can rebuild `credentials.json` (WALM-332). All three fields are
-/// required for that: `account_id` and `owner` come from the registry scan,
-/// `package_id` from server config.
+/// required for that: `account_id` and `owner` come from auth (the signed
+/// account id, or the delegate-key cache), `package_id` from server config.
 #[derive(Debug, Serialize)]
 pub struct WhoamiResponse {
     pub account_id: String,
@@ -3074,7 +3045,6 @@ mod tests {
             package_id: "0x1".into(),
             seal_policy_package_id: "0x1".into(),
             registry_id: "0x2".into(),
-            registry_scan_max_pages: DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9000".into(),
             seal_sidecar_url: "http://localhost:9001".into(),
             sidecar_secret: None,

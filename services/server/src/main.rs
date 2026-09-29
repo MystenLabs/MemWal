@@ -37,8 +37,7 @@ use sqlx::postgres::PgPoolOptions;
 use alerts::AlertManager;
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
 use jobs::{
-    execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
-    WalletJobStorage,
+    execute_bulk_remember, BulkRememberJob, MetaTransferJob, RememberJob, WalletJobStorage,
 };
 use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
@@ -556,7 +555,6 @@ mod mcp_rate_limit_tests {
             package_id: "0xpackage".to_string(),
             seal_policy_package_id: "0xpackage".to_string(),
             registry_id: "0xregistry".to_string(),
-            registry_scan_max_pages: types::DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://127.0.0.1:9".to_string(),
             seal_sidecar_url: "http://127.0.0.1:10".to_string(),
             sidecar_secret: None,
@@ -647,9 +645,6 @@ mod mcp_rate_limit_tests {
             ranker: Arc::new(CompositeRanker),
             redis,
             fallback_rate_limit: tokio::sync::Mutex::new(rate_limit::InMemoryFallback::default()),
-            registry_scan_semaphore: tokio::sync::Semaphore::new(
-                types::REGISTRY_SCAN_MAX_CONCURRENT,
-            ),
             remember_job_storage: PostgresStorage::new(pool.clone()),
             wallet_storage: PostgresStorage::new(pool.clone()),
             bulk_job_storage: PostgresStorage::new(pool),
@@ -1532,9 +1527,9 @@ async fn main() {
     let bulk_job_storage: PostgresStorage<BulkRememberJob> =
         PostgresStorage::new(apalis_pool.clone());
 
-    // Single Apalis queue for all WalletJob signing operations. Workers select
-    // a key from the configured pool when they execute an upload job, so
-    // retries can rotate away from a wallet whose sponsored tx expired.
+    // Single durable queue for every wallet job. The dispatcher claims a row
+    // only when a key that can sign it is free. An Apalis monitor must not
+    // also consume this queue: it would lock rows before a key is free.
     const WALLET_QUEUE_NAME: &str = "wallet_jobs";
     let wallet_storage: WalletJobStorage = PostgresStorage::new_with_config(
         apalis_pool.clone(),
@@ -1849,9 +1844,6 @@ async fn main() {
         ranker,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
-        registry_scan_semaphore: tokio::sync::Semaphore::new(
-            crate::types::REGISTRY_SCAN_MAX_CONCURRENT,
-        ),
         remember_job_storage: remember_job_storage.clone(),
         wallet_storage: wallet_storage.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
@@ -2054,38 +2046,31 @@ async fn main() {
         tracing::info!("  Apalis: worker 'bulk-remember' spawned (concurrency=2)");
     }
 
-    // Worker 4: WalletJob — single worker, single queue.
-    //
-    // Concurrency = WALLET_JOB_CONCURRENCY (default 8). Multiple jobs can be
-    // dispatched simultaneously against the same wallet; transient Sui/RPC
-    // conflicts are classified by `WalletJobError` and retried by Apalis.
+    // Wallet jobs stay in the one `wallet_jobs` queue until a key that can
+    // sign them is free. Concurrency caps how many of those claims run at
+    // once (default 8). Finalize does not take a signing slot.
     let wallet_concurrency: usize = std::env::var("WALLET_JOB_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(8);
     {
         let worker_state = state.clone();
-        let storage = wallet_storage.clone();
         tokio::spawn(async move {
             loop {
-                let worker = WorkerBuilder::new("wallet_jobs")
-                    .data(worker_state.clone())
-                    .backend(storage.clone())
-                    .build_fn(execute_wallet_job);
-
-                #[allow(deprecated)]
-                if let Err(e) = Monitor::new()
-                    .register_with_count(wallet_concurrency, worker)
-                    .run()
-                    .await
-                {
-                    tracing::error!("Apalis wallet worker exited: {}", e);
+                let worker_state = worker_state.clone();
+                let exited = tokio::spawn(async move {
+                    jobs::run_wallet_dispatcher(worker_state, wallet_concurrency).await;
+                })
+                .await;
+                match exited {
+                    Ok(()) => tracing::error!("wallet dispatcher stopped; restarting"),
+                    Err(err) => tracing::error!("wallet dispatcher panicked: {err}"),
                 }
                 tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
             }
         });
         tracing::info!(
-            "  Apalis: worker 'wallet_jobs' spawned (concurrency={})",
+            "  wallet dispatcher spawned (concurrency={})",
             wallet_concurrency
         );
     }

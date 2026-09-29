@@ -9,13 +9,16 @@
 ///
 /// Retry policy: up to MAX_ATTEMPTS attempts with exponential back-off.
 /// Failed jobs are visible in the `apalis_jobs` table.
+use std::cell::RefCell;
 use std::io;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use apalis::prelude::*;
 use apalis_sql::postgres::PostgresStorage;
 use base64::Engine as _;
 use redis::AsyncCommands;
+use sqlx::Row;
 
 use serde::{Deserialize, Serialize};
 
@@ -675,39 +678,265 @@ fn congestion_resume_wallet(current: usize, pool: usize, transport: bool) -> usi
 /// parks on the congestion requeue and frees the worker.
 const SAME_JOURNAL_ATTACHES: u32 = 3;
 
-fn wallet_upload_gates(pool_len: usize) -> &'static Vec<tokio::sync::Semaphore> {
-    use std::sync::OnceLock;
-    static GATES: OnceLock<Vec<tokio::sync::Semaphore>> = OnceLock::new();
-    GATES.get_or_init(|| {
-        (0..pool_len.max(1))
-            .map(|_| tokio::sync::Semaphore::new(1))
-            .collect()
-    })
+/// Single-queue order. A larger value is claimed first when a wallet that can
+/// sign the job is free. This does not build a second queue at the wallet.
+const UPLOAD_ADMISSION_PRIORITY: i32 = 0;
+const METADATA_ADMISSION_PRIORITY: i32 = 1;
+const FINALIZE_ADMISSION_PRIORITY: i32 = 2;
+const WALLET_QUEUE_NAME: &str = "wallet_jobs";
+const WALLET_DISPATCH_LOCK: &str = "wallet-dispatch";
+
+/// What the single queue needs before a job may leave `Pending`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalletNeed {
+    /// Database work only. Does not take a signing slot.
+    None,
+    /// The blob object already belongs to this key.
+    Pinned(usize),
+    /// Register has not been submitted, so any free key can sign.
+    AnyFree,
 }
 
-/// One permit per wallet. A job for a busy key waits on that key only, so an
-/// idle wallet is not stuck behind it. The wait is 8 minutes, inside the
-/// 10-minute stale sweep, so the caller refreshes `updated_at` first.
+#[derive(Debug, Clone, Copy)]
+struct QueueCandidate {
+    /// Position in the fetched batch. Not the Apalis id.
+    index: usize,
+    priority: i32,
+    ready_at_ms: i64,
+    need: WalletNeed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueueAssignment {
+    index: usize,
+    wallet: Option<usize>,
+}
+
+/// Claim from one ordered queue. `free` is preference order, most preferred
+/// first. A pinned job stays in the queue while its key is missing from
+/// `free`. An unpinned upload takes the next preferred free key and is not
+/// parked on a busy one.
+fn plan_dispatch(
+    candidates: &[QueueCandidate],
+    mut free: Vec<usize>,
+    max_wallet_jobs: usize,
+    max_finalizes: usize,
+) -> Vec<QueueAssignment> {
+    let mut ordered: Vec<&QueueCandidate> = candidates.iter().collect();
+    ordered.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then(left.ready_at_ms.cmp(&right.ready_at_ms))
+            .then(left.index.cmp(&right.index))
+    });
+    let mut wallet_jobs = 0usize;
+    let mut finalizes = 0usize;
+    let mut planned = Vec::new();
+    for candidate in ordered {
+        match candidate.need {
+            WalletNeed::None => {
+                if finalizes >= max_finalizes {
+                    continue;
+                }
+                finalizes += 1;
+                planned.push(QueueAssignment {
+                    index: candidate.index,
+                    wallet: None,
+                });
+            }
+            WalletNeed::Pinned(wallet) => {
+                if wallet_jobs >= max_wallet_jobs {
+                    continue;
+                }
+                let Some(pos) = free.iter().position(|free_wallet| *free_wallet == wallet) else {
+                    continue;
+                };
+                free.remove(pos);
+                wallet_jobs += 1;
+                planned.push(QueueAssignment {
+                    index: candidate.index,
+                    wallet: Some(wallet),
+                });
+            }
+            WalletNeed::AnyFree => {
+                if wallet_jobs >= max_wallet_jobs {
+                    continue;
+                }
+                let Some(wallet) = free.first().copied() else {
+                    continue;
+                };
+                free.remove(0);
+                wallet_jobs += 1;
+                planned.push(QueueAssignment {
+                    index: candidate.index,
+                    wallet: Some(wallet),
+                });
+            }
+        }
+    }
+    planned
+}
+
+fn upload_wallet_need(
+    payload_wallet: usize,
+    congestion_requeues: u32,
+    journal_wallet: Option<usize>,
+    resume_step: Option<&str>,
+    has_register: bool,
+    has_address: bool,
+) -> WalletNeed {
+    let committed = matches!(resume_step, Some("registered" | "uploaded" | "certified"));
+    let journal_started = resume_step.is_some() || has_register || has_address;
+    if committed || (congestion_requeues > 0 && journal_started) {
+        WalletNeed::Pinned(journal_wallet.unwrap_or(payload_wallet))
+    } else if congestion_requeues > 0 {
+        WalletNeed::Pinned(payload_wallet)
+    } else {
+        WalletNeed::AnyFree
+    }
+}
+
+struct WalletSlots {
+    /// `true` while no job holds that key's signing slot.
+    free: Mutex<Vec<bool>>,
+    finalize_inflight: AtomicUsize,
+    notify: tokio::sync::Notify,
+    /// Next idle tie starts here. A raw lowest index would resign wallet 0
+    /// on every retry, and gas escalation would call that a dead pool.
+    rotation: AtomicUsize,
+}
+
+/// Held for the chain call. Dropping it frees the key; it does not hand the
+/// slot to a job that was already waiting, because nothing waits here.
+struct WalletUploadPermit {
+    slots: Arc<WalletSlots>,
+    index: usize,
+}
+
+impl Drop for WalletUploadPermit {
+    fn drop(&mut self) {
+        self.slots.release(self.index);
+    }
+}
+
+impl WalletSlots {
+    fn new(pool_len: usize) -> Self {
+        Self {
+            free: Mutex::new(vec![true; pool_len.max(1)]),
+            finalize_inflight: AtomicUsize::new(0),
+            notify: tokio::sync::Notify::new(),
+            rotation: AtomicUsize::new(0),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<bool>> {
+        self.free.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    fn try_acquire(self: &Arc<Self>, index: usize) -> Option<WalletUploadPermit> {
+        let mut free = self.lock();
+        let slot = free.get_mut(index)?;
+        if !*slot {
+            return None;
+        }
+        *slot = false;
+        Some(WalletUploadPermit {
+            slots: Arc::clone(self),
+            index,
+        })
+    }
+
+    fn release(&self, index: usize) {
+        if let Some(slot) = self.lock().get_mut(index) {
+            *slot = true;
+        }
+        self.wake();
+    }
+
+    fn wake(&self) {
+        self.notify.notify_waiters();
+    }
+
+    /// Free keys, least loaded first. Equal load continues from `rotation`
+    /// instead of index 0, so retries are not all signed by wallet 0.
+    fn free_wallets_preferred(&self, inflight: &[usize]) -> Vec<usize> {
+        let free = self.lock();
+        let len = free.len().max(1);
+        let origin = self.rotation.load(Ordering::Relaxed) % len;
+        let mut wallets: Vec<usize> = free
+            .iter()
+            .enumerate()
+            .filter_map(|(index, is_free)| is_free.then_some(index))
+            .collect();
+        drop(free);
+        wallets.sort_by_key(|index| {
+            let load = inflight.get(*index).copied().unwrap_or(0);
+            let turn = (index + len - origin) % len;
+            (load, turn)
+        });
+        wallets
+    }
+
+    fn advance_rotation(&self, steps: usize) {
+        if steps > 0 {
+            self.rotation.fetch_add(steps, Ordering::Relaxed);
+        }
+    }
+
+    fn busy_count(&self) -> usize {
+        self.lock().iter().filter(|is_free| !**is_free).count()
+    }
+}
+
+fn wallet_slots(pool_len: usize) -> Arc<WalletSlots> {
+    use std::sync::OnceLock;
+    static SLOTS: OnceLock<Arc<WalletSlots>> = OnceLock::new();
+    Arc::clone(SLOTS.get_or_init(|| Arc::new(WalletSlots::new(pool_len))))
+}
+
+tokio::task_local! {
+    static PREASSIGNED_WALLET: RefCell<Option<WalletUploadPermit>>;
+}
+
+fn preassigned_wallet_index() -> Option<usize> {
+    PREASSIGNED_WALLET
+        .try_with(|slot| slot.borrow().as_ref().map(|permit| permit.index))
+        .ok()
+        .flatten()
+}
+
+fn take_preassigned_permit(index: usize) -> Option<WalletUploadPermit> {
+    PREASSIGNED_WALLET
+        .try_with(|slot| {
+            let matches = slot.borrow().as_ref().map(|permit| permit.index) == Some(index);
+            if matches {
+                slot.borrow_mut().take()
+            } else {
+                None
+            }
+        })
+        .ok()
+        .flatten()
+}
+
+/// Take the signing slot the dispatcher reserved for this task. There is no
+/// waiter list: a job whose key is busy stays `Pending` in the one queue.
 async fn admit_wallet_upload(
     wallet_index: usize,
     pool_len: usize,
-) -> Result<tokio::sync::SemaphorePermit<'static>, WalletJobError> {
-    let gates = wallet_upload_gates(pool_len);
-    let index = wallet_index % gates.len();
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(8 * 60),
-        gates[index].acquire(),
-    )
-    .await
-    {
-        Ok(Ok(permit)) => Ok(permit),
-        Ok(Err(_)) => Err(WalletJobError::UploadSlotCongestion(format!(
-            "timed out waiting for wallet {wallet_index} upload slot"
-        ))),
-        Err(_) => Err(WalletJobError::UploadSlotCongestion(format!(
-            "timed out waiting for wallet {wallet_index} upload slot"
-        ))),
+) -> Result<WalletUploadPermit, WalletJobError> {
+    let slots = wallet_slots(pool_len);
+    let len = slots.lock().len().max(1);
+    let index = wallet_index % len;
+    if let Some(permit) = take_preassigned_permit(index) {
+        return Ok(permit);
     }
+    slots.try_acquire(index).ok_or_else(|| {
+        WalletJobError::UploadSlotCongestion(format!(
+            "timed out waiting for wallet {wallet_index} upload slot"
+        ))
+    })
 }
 
 /// The storage reservation is admitted at enqueue and expires after 15
@@ -802,9 +1031,9 @@ fn upload_retry_backoff(
 /// upload starts. Equal priorities stay first-come.
 fn wallet_job_priority(operation: &WalletOperation) -> i32 {
     match operation {
-        WalletOperation::FinalizeUploadedBlob { .. } => 2,
-        WalletOperation::SetMetadataAndTransfer { .. } => 1,
-        WalletOperation::UploadAndTransfer { .. } => 0,
+        WalletOperation::FinalizeUploadedBlob { .. } => FINALIZE_ADMISSION_PRIORITY,
+        WalletOperation::SetMetadataAndTransfer { .. } => METADATA_ADMISSION_PRIORITY,
+        WalletOperation::UploadAndTransfer { .. } => UPLOAD_ADMISSION_PRIORITY,
     }
 }
 
@@ -815,6 +1044,618 @@ pub(crate) fn wallet_job_request(
     context.set_max_attempts(MAX_ATTEMPTS as i32);
     context.set_priority(wallet_job_priority(&job.operation));
     Request::new_with_ctx(job, context)
+}
+
+fn wallet_need_for_loaded_job(
+    job: &WalletJob,
+    journal_wallet: Option<i32>,
+    resume_step: Option<&str>,
+    has_register: bool,
+    has_address: bool,
+) -> WalletNeed {
+    match &job.operation {
+        WalletOperation::FinalizeUploadedBlob { .. } => WalletNeed::None,
+        WalletOperation::SetMetadataAndTransfer { .. } => WalletNeed::Pinned(job.wallet_index),
+        WalletOperation::UploadAndTransfer { .. } => upload_wallet_need(
+            job.wallet_index,
+            job.congestion_requeues,
+            journal_wallet.and_then(|wallet| usize::try_from(wallet).ok()),
+            resume_step,
+            has_register,
+            has_address,
+        ),
+    }
+}
+
+const WALLET_DUE_PAGE: i64 = 128;
+const WALLET_DUE_PAGES: usize = 8;
+const WALLET_LOCK_STALE_SECS: i64 = 120;
+
+/// Own the `wallet_jobs` queue. Apalis still stores the rows. This loop is the
+/// only consumer: a job stays `Pending` until a key that can sign it is free,
+/// then exactly that job is claimed. Workers do not keep a private buffer.
+pub(crate) async fn run_wallet_dispatcher(state: Arc<AppState>, concurrency: usize) {
+    let pool_len = state.key_pool.len();
+    if pool_len == 0 {
+        tracing::error!("wallet dispatcher has no signing keys; wallet jobs will not run");
+        std::future::pending::<()>().await;
+        return;
+    }
+    let concurrency = if concurrency == 0 {
+        pool_len
+    } else {
+        concurrency
+    };
+    let slots = wallet_slots(pool_len);
+    let pool = state.wallet_storage.pool().clone();
+    let worker_id = format!("{WALLET_DISPATCH_LOCK}-{}", uuid::Uuid::new_v4());
+    tracing::info!(
+        "wallet dispatcher started (concurrency={}, wallets={}, worker={})",
+        concurrency,
+        pool_len,
+        worker_id
+    );
+    let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
+        Ok(mut listener) => match listener.listen("apalis::job").await {
+            Ok(()) => Some(listener),
+            Err(err) => {
+                tracing::warn!(
+                    "wallet dispatcher could not listen for job inserts: {}",
+                    err
+                );
+                None
+            }
+        },
+        Err(err) => {
+            tracing::warn!(
+                "wallet dispatcher could not open a postgres listener: {}",
+                err
+            );
+            None
+        }
+    };
+    // Reap once before the first claim so a restarted process does not wait
+    // a full interval to pick up rows whose previous worker is already dead.
+    let mut next_reap = tokio::time::Instant::now();
+    loop {
+        if tokio::time::Instant::now() >= next_reap {
+            if let Err(err) = ensure_dispatch_worker(&pool, &worker_id).await {
+                tracing::error!(
+                    "wallet dispatcher could not register its worker row: {}",
+                    err
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+            if let Err(err) = abandon_stale_wallet_jobs(&pool, &worker_id).await {
+                tracing::warn!("wallet dispatcher reap failed: {}", err);
+            }
+            next_reap = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        }
+        if let Err(err) = fill_wallet_queue(&state, &slots, concurrency, &worker_id).await {
+            tracing::warn!("wallet dispatcher fill failed: {}", err);
+        }
+        tokio::select! {
+            biased;
+            _ = slots.notify.notified() => {}
+            listen_ok = wait_for_job_insert(listener.as_mut()) => {
+                if !listen_ok {
+                    tracing::warn!(
+                        "wallet dispatcher stopped listening for job inserts; polling instead"
+                    );
+                    listener = None;
+                }
+            }
+            _ = tokio::time::sleep_until(next_reap) => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
+    }
+}
+
+/// `false` means the listener failed and the caller should stop using it.
+/// Inserts are still noticed by the 100ms poll.
+async fn wait_for_job_insert(listener: Option<&mut sqlx::postgres::PgListener>) -> bool {
+    match listener {
+        Some(listener) => listener.recv().await.is_ok(),
+        None => {
+            std::future::pending::<()>().await;
+            false
+        }
+    }
+}
+
+/// `lock_by` is a foreign key to `apalis.workers`. Register this process
+/// before claiming, and refresh `last_seen` so a dead process can be told
+/// apart from one that is still signing.
+async fn ensure_dispatch_worker(pool: &sqlx::PgPool, worker_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO apalis.workers (id, worker_type, storage_name, layers, last_seen)
+         VALUES ($1, $2, $3, '', now())
+         ON CONFLICT (id) DO UPDATE
+            SET last_seen = now(), worker_type = EXCLUDED.worker_type",
+    )
+    .bind(worker_id)
+    .bind(WALLET_QUEUE_NAME)
+    .bind("memwal-wallet-dispatcher")
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Put abandoned `Running` rows back to `Pending` without burning an attempt.
+///
+/// A live claim refreshes `lock_at`. Apalis workers do not, so a row they
+/// still hold is abandoned only once that worker's `last_seen` is stale too.
+/// A task that died in this process is the exception: `lock_by` is ours and
+/// `lock_at` has stopped, while this worker row is still alive.
+async fn abandon_stale_wallet_jobs(
+    pool: &sqlx::PgPool,
+    worker_id: &str,
+) -> Result<(), sqlx::Error> {
+    let abandoned = sqlx::query(
+        "UPDATE apalis.jobs AS j
+         SET status = 'Pending',
+             done_at = NULL,
+             lock_by = NULL,
+             lock_at = NULL,
+             last_error = 'Job was abandoned'
+         WHERE j.job_type = $1
+           AND j.status = 'Running'
+           AND (
+                j.lock_at IS NULL
+                OR j.lock_at < now() - ($2 * INTERVAL '1 second')
+           )
+           AND (
+                j.lock_by = $3
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM apalis.workers AS w
+                    WHERE w.id = j.lock_by
+                      AND w.last_seen >= now() - ($2 * INTERVAL '1 second')
+                )
+           )",
+    )
+    .bind(WALLET_QUEUE_NAME)
+    .bind(WALLET_LOCK_STALE_SECS)
+    .bind(worker_id)
+    .execute(pool)
+    .await?;
+    if abandoned.rows_affected() > 0 {
+        tracing::warn!(
+            "wallet dispatcher requeued {} abandoned job(s)",
+            abandoned.rows_affected()
+        );
+    }
+    Ok(())
+}
+
+/// Moves the idle-tie cursor to the key after the one an unpinned claim
+/// received, including when fill returns early. Pinned work does not.
+struct UnpinnedRotation<'a> {
+    slots: &'a WalletSlots,
+    steps: usize,
+    origin: usize,
+    len: usize,
+}
+
+impl<'a> UnpinnedRotation<'a> {
+    fn new(slots: &'a WalletSlots) -> Self {
+        let len = slots.lock().len().max(1);
+        let origin = slots.rotation.load(Ordering::Relaxed) % len;
+        Self {
+            slots,
+            steps: 0,
+            origin,
+            len,
+        }
+    }
+
+    fn note(&mut self, wallet: usize) {
+        let desired = (wallet + 1) % self.len;
+        let delta = (desired + self.len - self.origin) % self.len;
+        self.steps += delta;
+        self.origin = desired;
+    }
+}
+
+impl Drop for UnpinnedRotation<'_> {
+    fn drop(&mut self) {
+        self.slots.advance_rotation(self.steps);
+    }
+}
+
+async fn fill_wallet_queue(
+    state: &Arc<AppState>,
+    slots: &Arc<WalletSlots>,
+    concurrency: usize,
+    worker_id: &str,
+) -> Result<(), sqlx::Error> {
+    let mut wallet_left = concurrency.saturating_sub(slots.busy_count());
+    let mut finalize_left =
+        concurrency.saturating_sub(slots.finalize_inflight.load(Ordering::Relaxed));
+    if wallet_left == 0 && finalize_left == 0 {
+        return Ok(());
+    }
+    // While every signing slot is taken, only finalize rows can start. They
+    // sort first, so there is no need to walk the upload backlog behind them.
+    let finalizes_only = wallet_left == 0;
+    let mut cursor = None;
+    // Applied on drop, so an early return still moves the cursor.
+    let mut unpinned = UnpinnedRotation::new(slots.as_ref());
+    for _ in 0..WALLET_DUE_PAGES {
+        if wallet_left == 0 && finalize_left == 0 {
+            break;
+        }
+        let page = load_due_wallet_jobs(
+            state.wallet_storage.pool(),
+            cursor.as_ref(),
+            WALLET_DUE_PAGE,
+            finalizes_only,
+        )
+        .await?;
+        if page.scanned == 0 {
+            break;
+        }
+        if !page.jobs.is_empty() {
+            let candidates: Vec<QueueCandidate> = page
+                .jobs
+                .iter()
+                .enumerate()
+                .map(|(index, job)| QueueCandidate {
+                    index,
+                    priority: wallet_job_priority(&job.job.operation),
+                    ready_at_ms: job.ready_at_ms,
+                    need: job.need,
+                })
+                .collect();
+            let free = if wallet_left == 0 {
+                Vec::new()
+            } else {
+                slots.free_wallets_preferred(&state.key_pool.inflight_snapshot())
+            };
+            let planned = plan_dispatch(&candidates, free, wallet_left, finalize_left);
+            for assignment in planned {
+                let Some(due_job) = page.jobs.get(assignment.index) else {
+                    continue;
+                };
+                let permit = match assignment.wallet {
+                    Some(wallet) => match slots.try_acquire(wallet) {
+                        Some(permit) => Some(permit),
+                        None => continue,
+                    },
+                    None => {
+                        slots.finalize_inflight.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
+                };
+                let claim_token = uuid::Uuid::new_v4().to_string();
+                let claimed = match claim_due_wallet_job(
+                    state.wallet_storage.pool(),
+                    &due_job.id,
+                    worker_id,
+                    &claim_token,
+                )
+                .await
+                {
+                    Ok(claimed) => claimed,
+                    Err(err) => {
+                        drop(permit);
+                        if assignment.wallet.is_none() {
+                            release_finalize_slot(slots);
+                        }
+                        return Err(err);
+                    }
+                };
+                if !claimed {
+                    drop(permit);
+                    if assignment.wallet.is_none() {
+                        release_finalize_slot(slots);
+                    }
+                    continue;
+                }
+                if let Some(wallet) = assignment.wallet {
+                    wallet_left = wallet_left.saturating_sub(1);
+                    if matches!(due_job.need, WalletNeed::AnyFree) {
+                        unpinned.note(wallet);
+                    }
+                } else {
+                    finalize_left = finalize_left.saturating_sub(1);
+                }
+                let mut job = due_job.job.clone();
+                if let Some(wallet) = assignment.wallet {
+                    job.wallet_index = wallet;
+                }
+                let attempt = usize::try_from(due_job.attempts.max(0)).unwrap_or(0) + 1;
+                let max_attempts = if due_job.max_attempts <= 0 {
+                    MAX_ATTEMPTS as usize
+                } else {
+                    usize::try_from(due_job.max_attempts).unwrap_or(MAX_ATTEMPTS as usize)
+                };
+                let state = Arc::clone(state);
+                let slots = Arc::clone(slots);
+                let job_id = due_job.id.clone();
+                let pool = state.wallet_storage.pool().clone();
+                let task_worker = worker_id.to_string();
+                let finalize = permit.is_none();
+                tokio::spawn(async move {
+                    let _finalize_guard = finalize.then(|| FinalizeInflight(Arc::clone(&slots)));
+                    let _heartbeat = AbortOnDrop(spawn_wallet_job_heartbeat(
+                        pool.clone(),
+                        job_id.clone(),
+                        task_worker.clone(),
+                        claim_token.clone(),
+                    ));
+                    let attempt_info = WalletJobAttemptInfo {
+                        current: attempt,
+                        max: max_attempts,
+                    };
+                    let result = match permit {
+                        Some(permit) => {
+                            PREASSIGNED_WALLET
+                                .scope(RefCell::new(Some(permit)), async move {
+                                    execute_wallet_job(job, Data::new(state), attempt_info).await
+                                })
+                                .await
+                        }
+                        None => execute_wallet_job(job, Data::new(state), attempt_info).await,
+                    };
+                    if let Err(err) = ack_wallet_job(
+                        &pool,
+                        &job_id,
+                        &task_worker,
+                        &claim_token,
+                        attempt,
+                        max_attempts,
+                        &result,
+                    )
+                    .await
+                    {
+                        tracing::error!("wallet job {} ack failed: {}", job_id, err);
+                    }
+                });
+            }
+        }
+        if (page.scanned as i64) < WALLET_DUE_PAGE {
+            break;
+        }
+        let Some(next) = page.cursor else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    Ok(())
+}
+
+fn release_finalize_slot(slots: &WalletSlots) {
+    slots
+        .finalize_inflight
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_sub(1))
+        })
+        .ok();
+    slots.wake();
+}
+
+struct FinalizeInflight(Arc<WalletSlots>);
+
+impl Drop for FinalizeInflight {
+    fn drop(&mut self) {
+        release_finalize_slot(&self.0);
+    }
+}
+
+/// Aborting the handle stops the heartbeat. Dropping a `JoinHandle` does not.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_wallet_job_heartbeat(
+    pool: sqlx::PgPool,
+    job_id: String,
+    worker_id: String,
+    claim_token: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if let Err(err) = sqlx::query(
+                "UPDATE apalis.jobs
+                 SET lock_at = now()
+                 WHERE id = $1 AND status = 'Running' AND lock_by = $2 AND last_error = $3",
+            )
+            .bind(&job_id)
+            .bind(&worker_id)
+            .bind(&claim_token)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!("wallet job {} heartbeat failed: {}", job_id, err);
+            }
+        }
+    })
+}
+
+struct DueCursor {
+    priority: i32,
+    run_at: chrono::DateTime<chrono::Utc>,
+    id: String,
+}
+
+struct LoadedDueJob {
+    id: String,
+    job: WalletJob,
+    attempts: i32,
+    max_attempts: i32,
+    ready_at_ms: i64,
+    need: WalletNeed,
+}
+
+struct DuePage {
+    jobs: Vec<LoadedDueJob>,
+    scanned: usize,
+    cursor: Option<DueCursor>,
+}
+
+async fn load_due_wallet_jobs(
+    pool: &sqlx::PgPool,
+    cursor: Option<&DueCursor>,
+    limit: i64,
+    finalizes_only: bool,
+) -> Result<DuePage, sqlx::Error> {
+    let (has_cursor, priority, run_at, cursor_id) = match cursor {
+        Some(cursor) => (true, cursor.priority, cursor.run_at, cursor.id.clone()),
+        None => (
+            false,
+            0,
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            String::new(),
+        ),
+    };
+    let rows = sqlx::query(
+        "SELECT j.id, j.job::text AS job_json, j.attempts, j.max_attempts, j.priority, j.run_at,
+                r.upload_wallet_index,
+                r.upload_resume_step->>'step' AS resume_step,
+                COALESCE(r.upload_register_transaction IS NOT NULL, false) AS has_register,
+                COALESCE(r.upload_wallet_address IS NOT NULL, false) AS has_address
+         FROM apalis.jobs j
+         LEFT JOIN remember_jobs r
+           ON r.id = j.job->'operation'->>'remember_job_id'
+         WHERE j.job_type = $1
+           AND (j.status = 'Pending' OR (j.status = 'Failed' AND j.attempts < j.max_attempts))
+           AND j.run_at < now()
+           AND (
+                $2::bool = false
+                OR j.priority < $3
+                OR (j.priority = $3 AND j.run_at > $4)
+                OR (j.priority = $3 AND j.run_at = $4 AND j.id > $5)
+           )
+           AND ($7::bool = false OR j.priority >= $8)
+         ORDER BY j.priority DESC, j.run_at ASC, j.id ASC
+         LIMIT $6",
+    )
+    .bind(WALLET_QUEUE_NAME)
+    .bind(has_cursor)
+    .bind(priority)
+    .bind(run_at)
+    .bind(cursor_id)
+    .bind(limit)
+    .bind(finalizes_only)
+    .bind(FINALIZE_ADMISSION_PRIORITY)
+    .fetch_all(pool)
+    .await?;
+    let mut jobs = Vec::with_capacity(rows.len());
+    let mut page_cursor = None;
+    for row in &rows {
+        let id: String = row.try_get("id")?;
+        let row_priority: i32 = row.try_get("priority")?;
+        let run_at: chrono::DateTime<chrono::Utc> = row.try_get("run_at")?;
+        page_cursor = Some(DueCursor {
+            priority: row_priority,
+            run_at,
+            id: id.clone(),
+        });
+        let payload: String = row.try_get("job_json")?;
+        let Ok(job) = serde_json::from_str::<WalletJob>(&payload) else {
+            tracing::warn!("wallet dispatcher skipped undecodable job {}", id);
+            continue;
+        };
+        let attempts: i32 = row.try_get("attempts")?;
+        let max_attempts: i32 = row.try_get("max_attempts")?;
+        let journal_wallet: Option<i32> = row.try_get("upload_wallet_index")?;
+        let resume_step: Option<String> = row.try_get("resume_step")?;
+        let has_register: bool = row.try_get("has_register")?;
+        let has_address: bool = row.try_get("has_address")?;
+        let need = wallet_need_for_loaded_job(
+            &job,
+            journal_wallet,
+            resume_step.as_deref(),
+            has_register,
+            has_address,
+        );
+        jobs.push(LoadedDueJob {
+            id,
+            job,
+            attempts,
+            max_attempts,
+            ready_at_ms: run_at.timestamp_millis(),
+            need,
+        });
+    }
+    Ok(DuePage {
+        scanned: rows.len(),
+        jobs,
+        cursor: page_cursor,
+    })
+}
+
+async fn claim_due_wallet_job(
+    pool: &sqlx::PgPool,
+    id: &str,
+    worker_id: &str,
+    claim_token: &str,
+) -> Result<bool, sqlx::Error> {
+    let claimed = sqlx::query(
+        "UPDATE apalis.jobs
+         SET status = 'Running', lock_by = $2, lock_at = now(), last_error = $4
+         WHERE id = $1
+           AND job_type = $3
+           AND (status = 'Pending' OR (status = 'Failed' AND attempts < max_attempts))
+           AND run_at < now()",
+    )
+    .bind(id)
+    .bind(worker_id)
+    .bind(WALLET_QUEUE_NAME)
+    .bind(claim_token)
+    .execute(pool)
+    .await?;
+    Ok(claimed.rows_affected() == 1)
+}
+
+async fn ack_wallet_job(
+    pool: &sqlx::PgPool,
+    id: &str,
+    worker_id: &str,
+    claim_token: &str,
+    attempt: usize,
+    max_attempts: usize,
+    result: &Result<(), Error>,
+) -> Result<(), sqlx::Error> {
+    let status = match result {
+        Ok(()) => "Done",
+        Err(Error::Abort(_)) => "Killed",
+        Err(Error::Failed(_)) if attempt >= max_attempts => "Killed",
+        Err(_) => "Failed",
+    };
+    let last_error =
+        serde_json::to_string(&result.as_ref().map(|_| ()).map_err(|err| err.to_string()))
+            .unwrap_or_else(|_| "\"ack encode failed\"".to_string());
+    let updated = sqlx::query(
+        "UPDATE apalis.jobs
+         SET status = $1, attempts = $2, done_at = now(), last_error = $3
+         WHERE id = $4 AND status = 'Running' AND lock_by = $5 AND last_error = $6",
+    )
+    .bind(status)
+    .bind(i32::try_from(attempt).unwrap_or(i32::MAX))
+    .bind(last_error)
+    .bind(id)
+    .bind(worker_id)
+    .bind(claim_token)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() == 0 {
+        tracing::warn!(
+            "wallet job {} finished but its row was no longer the claimed run",
+            id
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -929,13 +1770,14 @@ fn steer_uncommitted_upload_wallet(journal: &mut UploadJournal, free_wallet: usi
 // execute_wallet_job — dispatcher for WalletJob
 // ============================================================
 
-/// Apalis worker handler for WalletJob.
+/// Runs one wallet job claimed by `run_wallet_dispatcher`.
 ///
-/// Multiple concurrent invocations of this handler share the `wallet_jobs`
-/// queue. Upload jobs derive the execution wallet from the enqueued starting
-/// wallet and current attempt; legacy metadata-transfer jobs keep their pinned
-/// wallet because the blob object is owned by the wallet that
-/// registered/certified it.
+/// Apalis still stores the row. Its monitor must not poll this queue, because
+/// `get_jobs` would lock a job before a free key exists. The dispatcher passes
+/// `attempt_info` itself (stored attempts plus one), which is the increment
+/// Apalis used to apply before calling the handler. Upload jobs use the key
+/// reserved for this claim; a congestion requeue keeps the signer already
+/// chosen. Metadata stays on the key that owns the blob.
 pub(crate) async fn execute_wallet_job(
     job: WalletJob,
     ctx: Data<Arc<AppState>>,
@@ -959,9 +1801,11 @@ pub(crate) async fn execute_wallet_job(
             prepare_claim_token,
             epochs,
         } => {
-            let mut wallet_index = if congestion_requeues > 0 {
-                // The requeue already chose the signer. Do not walk the attempt
-                // cursor; that is what pairs a cached prepare with another key.
+            let preassigned = preassigned_wallet_index();
+            let mut wallet_index = if preassigned.is_some() || congestion_requeues > 0 {
+                // The dispatcher already picked a free key, or a congestion
+                // requeue already chose the signer. Do not walk the attempt
+                // cursor; that pairs a cached prepare with another key.
                 enqueued_wallet_index % state.key_pool.len().max(1)
             } else {
                 match wallet_index_for_upload_attempt(
@@ -991,7 +1835,7 @@ pub(crate) async fn execute_wallet_job(
                     .map_err(WalletJobError::into_apalis_error)?;
                 if pin_journal_wallet(&journal, congestion_requeues) {
                     wallet_index = journal.wallet_index;
-                } else if congestion_requeues > 0 {
+                } else if congestion_requeues > 0 || preassigned.is_some() {
                     // Nothing has been submitted, but a stored index would
                     // otherwise keep signing while admission follows the
                     // rotated payload. Write the payload wallet through.
@@ -2071,9 +2915,9 @@ async fn execute_upload_and_transfer(
 ) -> Result<(), WalletJobError> {
     // ── Per-job upload mutex ───────────────────────────────────
     // Guard-read + mint + persist must be atomic per job: the wallet queue runs
-    // up to WALLET_JOB_CONCURRENCY workers, and Apalis's orphan-reenqueue can
-    // re-dispatch a still-Running job (stale worker heartbeat) so two attempts of
-    // the SAME job can run at once — both would read `running`/NULL and both mint.
+    // up to WALLET_JOB_CONCURRENCY claims, and a stale lock can be requeued while
+    // a slow attempt is still inside this function, so two attempts of the SAME
+    // job can run at once — both would read `running`/NULL and both mint.
     // A per-job advisory lock serializes them; the loser bails without uploading.
     let mut upload_lock = if let Some(ref jid) = remember_job_id {
         let acquired = JobUploadLock::try_acquire(&state.wallet_lock_pool, jid).await;
@@ -3722,7 +4566,7 @@ pub async fn execute_bulk_remember(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
 
     use sqlx::postgres::PgPoolOptions;
@@ -3734,13 +4578,14 @@ mod tests {
         gas_pool_exhaustion_threshold, is_walrus_package_version_mismatch, load_upload_journal,
         lock_outcome, mark_remember_job_failed, metadata_congestion_retry_job,
         parse_locked_object_info, parse_wal_balance_alert_info, persist_upload_journal,
-        persist_uploaded_state, pin_journal_wallet, record_uploaded_metadata_error,
+        persist_uploaded_state, pin_journal_wallet, plan_dispatch, record_uploaded_metadata_error,
         recovery_seal_persistence, steer_uncommitted_upload_wallet, touch_uploaded_remember_job,
         update_remember_job_after_wallet_error, upload_journal_signer_committed,
-        upload_resume_disposition, upload_retry_backoff, wallet_index_for_upload_attempt,
-        wallet_job_request, JobUploadLock, LockOutcome, UploadResume, WalletJob,
-        WalletJobAttemptInfo, WalletJobError, WalletOperation, CONGESTION_WAIT_ERROR_PREFIX,
-        MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
+        upload_resume_disposition, upload_retry_backoff, upload_wallet_need,
+        wallet_index_for_upload_attempt, wallet_job_request, JobUploadLock, LockOutcome,
+        QueueAssignment, QueueCandidate, UnpinnedRotation, UploadResume, WalletJob,
+        WalletJobAttemptInfo, WalletJobError, WalletNeed, WalletOperation, WalletSlots,
+        CONGESTION_WAIT_ERROR_PREFIX, MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
     };
     use crate::storage::walrus::{
         PreparedRegisterTransaction, UploadExecutionIdentity, UploadJournal,
@@ -4741,6 +5586,192 @@ the checkpoint it replied about",
         assert!(
             *finalize.parts.context.priority() > *metadata.parts.context.priority()
                 && *metadata.parts.context.priority() > *upload.parts.context.priority()
+        );
+    }
+
+    fn queue_candidate(
+        index: usize,
+        priority: i32,
+        ready_at_ms: i64,
+        need: WalletNeed,
+    ) -> QueueCandidate {
+        QueueCandidate {
+            index,
+            priority,
+            ready_at_ms,
+            need,
+        }
+    }
+
+    /// Wallet 1 is busy, so its metadata stays in the one queue. A free key
+    /// takes the oldest unpinned upload instead of lining those uploads up
+    /// on wallet 1.
+    #[test]
+    fn plan_dispatch_leaves_pinned_metadata_queued_while_its_wallet_is_busy() {
+        let candidates = vec![
+            queue_candidate(0, 0, 10, WalletNeed::AnyFree),
+            queue_candidate(1, 0, 20, WalletNeed::AnyFree),
+            queue_candidate(2, 0, 30, WalletNeed::AnyFree),
+            queue_candidate(3, 1, 40, WalletNeed::Pinned(1)),
+        ];
+        let planned = plan_dispatch(&candidates, vec![2], 8, 8);
+        assert_eq!(
+            planned,
+            vec![QueueAssignment {
+                index: 0,
+                wallet: Some(2),
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_dispatch_runs_metadata_when_its_wallet_is_the_only_free_key() {
+        let candidates = vec![
+            queue_candidate(0, 0, 10, WalletNeed::AnyFree),
+            queue_candidate(1, 0, 20, WalletNeed::AnyFree),
+            queue_candidate(2, 0, 30, WalletNeed::AnyFree),
+            queue_candidate(3, 1, 40, WalletNeed::Pinned(1)),
+        ];
+        let planned = plan_dispatch(&candidates, vec![1], 8, 8);
+        assert_eq!(
+            planned,
+            vec![QueueAssignment {
+                index: 3,
+                wallet: Some(1),
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_dispatch_runs_metadata_and_one_upload_when_two_wallets_are_free() {
+        let candidates = vec![
+            queue_candidate(0, 0, 10, WalletNeed::AnyFree),
+            queue_candidate(1, 0, 20, WalletNeed::AnyFree),
+            queue_candidate(2, 0, 30, WalletNeed::AnyFree),
+            queue_candidate(3, 1, 5, WalletNeed::Pinned(1)),
+        ];
+        let planned = plan_dispatch(&candidates, vec![1, 2], 8, 8);
+        assert_eq!(
+            planned,
+            vec![
+                QueueAssignment {
+                    index: 3,
+                    wallet: Some(1),
+                },
+                QueueAssignment {
+                    index: 0,
+                    wallet: Some(2),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_dispatch_earlier_metadata_wins_the_only_free_key() {
+        let candidates = vec![
+            queue_candidate(0, 1, 50, WalletNeed::Pinned(1)),
+            queue_candidate(1, 1, 10, WalletNeed::Pinned(1)),
+        ];
+        let planned = plan_dispatch(&candidates, vec![1], 8, 8);
+        assert_eq!(
+            planned,
+            vec![QueueAssignment {
+                index: 1,
+                wallet: Some(1),
+            }]
+        );
+    }
+
+    #[test]
+    fn plan_dispatch_finalize_does_not_consume_the_wallet_budget() {
+        let candidates = vec![
+            queue_candidate(0, 0, 3, WalletNeed::AnyFree),
+            queue_candidate(1, 1, 2, WalletNeed::Pinned(1)),
+            queue_candidate(2, 2, 1, WalletNeed::None),
+        ];
+        assert_eq!(
+            plan_dispatch(&candidates, vec![], 0, 4),
+            vec![QueueAssignment {
+                index: 2,
+                wallet: None,
+            }]
+        );
+        assert_eq!(
+            plan_dispatch(&candidates, vec![1], 1, 4),
+            vec![
+                QueueAssignment {
+                    index: 2,
+                    wallet: None,
+                },
+                QueueAssignment {
+                    index: 1,
+                    wallet: Some(1),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn wallet_slot_try_acquire_does_not_queue_a_waiter() {
+        let slots = Arc::new(WalletSlots::new(2));
+        let first = slots.try_acquire(1).expect("first acquire");
+        assert!(slots.try_acquire(1).is_none());
+        drop(first);
+        assert!(slots.try_acquire(1).is_some());
+    }
+
+    /// An idle pool used to sort by index, so every retry reclaimed wallet 0
+    /// and gas escalation treated that one key as the whole pool.
+    #[test]
+    fn free_wallets_preferred_rotates_idle_ties_off_wallet_zero() {
+        let slots = Arc::new(WalletSlots::new(4));
+        let idle = [0usize; 4];
+        assert_eq!(slots.free_wallets_preferred(&idle), vec![0, 1, 2, 3]);
+        slots.advance_rotation(1);
+        assert_eq!(slots.free_wallets_preferred(&idle), vec![1, 2, 3, 0]);
+        let _held = slots.try_acquire(1);
+        assert_eq!(slots.free_wallets_preferred(&idle), vec![2, 3, 0]);
+        drop(_held);
+        let loaded = [9usize, 0, 0, 0];
+        assert_eq!(slots.free_wallets_preferred(&loaded), vec![1, 2, 3, 0]);
+    }
+
+    /// A pinned job can take the rotation head in the same plan. The unpinned
+    /// claim then receives the next key, and the cursor must pass that key,
+    /// not merely count the claim.
+    #[test]
+    fn unpinned_rotation_passes_the_key_a_pinned_job_already_took() {
+        let slots = Arc::new(WalletSlots::new(4));
+        let idle = [0usize; 4];
+        let mut unpinned = UnpinnedRotation::new(slots.as_ref());
+        unpinned.note(1);
+        drop(unpinned);
+        assert_eq!(slots.free_wallets_preferred(&idle), vec![2, 3, 0, 1]);
+
+        let mut walked = UnpinnedRotation::new(slots.as_ref());
+        walked.note(2);
+        walked.note(3);
+        drop(walked);
+        assert_eq!(slots.free_wallets_preferred(&idle), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn upload_wallet_need_pins_only_after_the_blob_has_a_signer() {
+        assert_eq!(
+            upload_wallet_need(3, 0, None, None, false, false),
+            WalletNeed::AnyFree
+        );
+        assert_eq!(
+            upload_wallet_need(3, 0, Some(1), Some("registered"), true, true),
+            WalletNeed::Pinned(1)
+        );
+        assert_eq!(
+            upload_wallet_need(3, 2, Some(1), Some("encoded"), true, true),
+            WalletNeed::Pinned(1)
+        );
+        assert_eq!(
+            upload_wallet_need(3, 2, None, None, false, false),
+            WalletNeed::Pinned(3)
         );
     }
 

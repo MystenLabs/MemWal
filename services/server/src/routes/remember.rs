@@ -2365,7 +2365,6 @@ mod tests {
             package_id: "0xpackage".to_string(),
             seal_policy_package_id: "0xpackage".to_string(),
             registry_id: "0xregistry".to_string(),
-            registry_scan_max_pages: crate::types::DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9003".to_string(),
             seal_sidecar_url: "http://localhost:9004".to_string(),
             sidecar_secret: None,

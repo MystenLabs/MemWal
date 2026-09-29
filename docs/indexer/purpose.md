@@ -29,19 +29,16 @@ questions:
   - "How does the MemWal relayer resolve delegate key ownership?"
   - "How do I configure and run the MemWal indexer?"
 answer: >-
-  The indexer eliminates expensive onchain registry scans by listening to Sui events and
-  syncing account data into PostgreSQL. The relayer resolves delegate keys using a priority
-  chain: PostgreSQL cache, indexed accounts, onchain registry scan, header hint, and config
-  fallback. The indexer is recommended for production but optional for development.
+  The indexer listens to Sui events and records which owner has an account.
+  Delegate-key authentication does not scan AccountRegistry. A cold key needs
+  x-account-id or MEMWAL_ACCOUNT_ID. A key already cached resolves without either.
 ---
 
 The indexer keeps the backend in sync with onchain state so the relayer can resolve accounts quickly.
 
 ## Why It Exists
 
-Without the indexer, every authenticated request would require the relayer to scan the onchain `AccountRegistry` to find which `MemWalAccount` holds a given delegate key. This involves fetching the registry object, iterating through its dynamic fields, and checking each account — an expensive chain of RPC calls.
-
-The indexer eliminates this by listening to Sui events and syncing account data into PostgreSQL. The relayer can then resolve delegate key ownership with a single database lookup.
+Delegate-key authentication does not walk `AccountRegistry`. A cold key is verified against the signed `x-account-id`, or against `MEMWAL_ACCOUNT_ID` when that env is set. The indexer is what fills the `accounts` table the existence check and owner-token lookup read.
 
 ## How It Works
 
@@ -55,15 +52,13 @@ The indexer is a standalone Rust service (`services/indexer`) that:
 
 ## Auth Resolution Flow
 
-When the relayer receives a request, it resolves the delegate key's account using this priority:
+When the relayer receives a signed request, it resolves the delegate key's account in this order:
 
-1. **PostgreSQL cache** (`delegate_key_cache`) — fastest, populated lazily by the relayer itself
-2. **Indexed accounts** (`accounts`) — populated by the indexer, enables account discovery without chain scans
-3. **Onchain registry scan** — fallback, scans `AccountRegistry` dynamic fields via RPC
-4. **Header hint** (`x-account-id`) — client-provided hint, useful during first-time setup
-5. **Config fallback** (`MEMWAL_ACCOUNT_ID`) — server-level default
+1. **PostgreSQL cache** (`delegate_key_cache`) — populated after a successful resolution
+2. **Signed `x-account-id`**, or **`MEMWAL_ACCOUNT_ID`** when the header is absent — one account object, not a registry walk
+3. Otherwise **`401`**. A cold key with no account id is not looked up onchain
 
-After successful resolution through any strategy, the mapping is cached in `delegate_key_cache` for future requests.
+After a successful resolution, the mapping is cached in `delegate_key_cache`. The indexed `accounts` table is not part of this chain.
 
 ## Configuration
 
