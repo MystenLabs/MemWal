@@ -407,17 +407,19 @@ Lower distance means more similar:
 |---|---|
 | `< 0.25` | Duplicate or very close |
 | `0.25 - 0.55` | Related |
-| `0.55 - 0.7` | Weak/noisy |
-| `>= 0.7` | Usually unrelated |
+| `0.55 - 0.8` | Weak/noisy |
+| `>= 0.8` | Usually unrelated |
 
-Use SDK-side filtering when you only want clearly relevant results:
+Use SDK-side filtering when you only want clearly relevant results. `0.8` is a
+starting point; calibrate it against your own memories and queries because
+useful matches can vary by phrasing and dataset:
 
 ```ts
 const memories = await memwal.recall({
   query: "what did I eat yesterday?",
   limit: 10,
   namespace: "reading-tracker",
-  maxDistance: 0.7,
+  maxDistance: 0.8,
 });
 ```
 
@@ -429,7 +431,7 @@ const memories = await memwal.recall({
   limit: 10,
   namespace: "reading-tracker",
 });
-const relevant = memories.results.filter((memory) => memory.distance < 0.7);
+const relevant = memories.results.filter((memory) => memory.distance < 0.8);
 ```
 
 ---
@@ -571,7 +573,7 @@ Lifecycle hooks run automatically:
 |---|---|
 | `health()` returns error | Check relayer URL is correct and reachable |
 | `recall()` returns empty | Verify namespace matches what was used in `remember()` |
-| `recall()` returns unrelated filler | Recall is top-K without a default relevance threshold; filter by `distance`, for example `distance < 0.7` |
+| `recall()` returns unrelated filler | Recall is top-K without a default relevance threshold; filter by `distance`, for example `distance < 0.8`, and calibrate the cutoff against your data |
 | `401 Unauthorized` | Usually wrong `MEMWAL_PRIVATE_KEY`, key not registered on the account, account ID mismatch, or staging/mainnet mismatch. Check `.env.local` and dashboard credentials |
 | SDK import errors | Run `pnpm add @mysten-incubation/memwal` — check Node.js ≥ 18 |
 | Manual client errors | Install peer deps: `@mysten/sui @mysten/seal @mysten/walrus` |

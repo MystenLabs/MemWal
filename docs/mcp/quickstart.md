@@ -42,6 +42,10 @@ answer: >-
 
 Every supported client runs the same local server, `npx -y @mysten-incubation/memwal-mcp`, and differs only in where the configuration lives. Pick your client below, add the server, restart, and sign in.
 
+For regular Claude Desktop or web chat, use the [OAuth custom connector](/mcp/claude-connector)
+instead of the local setup below. It needs no local Node.js or CLI. The Code tab
+inside Claude Desktop uses the [Claude Code plugin guide](/mcp/claude-code).
+
 ## Prerequisites
 
 - You need Node.js 20 or later, because the server runs through `npx` with no install step.

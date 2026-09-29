@@ -1361,6 +1361,8 @@ pub async fn check_global_accounts_rate_limit(
 /// Pre-authentication rate limiting middleware for the public
 /// `GET /api/accounts/{owner}/exists` route.
 ///
+/// MCP proxy routes under `/api/mcp` share this IP budget.
+///
 /// This is the only route in `public_routes` that reaches the DB pool
 /// (`max_connections(10)`) — `/health`, `/version`, `/config`, `/metrics`
 /// are all static/no-DB. Modeled directly on `sponsor_rate_limit_middleware`:

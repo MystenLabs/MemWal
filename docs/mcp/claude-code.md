@@ -30,13 +30,18 @@ questions:
   - What is the difference between the MemWal plugin and MCP-only on Claude Code?
   - How do I fix the memwal MCP server when it shows as failed in Claude Code?
 answer: >-
-  To add Walrus Memory to Claude Code, install the MemWal plugin through the marketplace (/plugin marketplace add MystenLabs/MemWal, then /plugin install memwal@memwal-plugins), or add it as MCP-only with claude mcp add. The plugin includes lifecycle hooks for session start, user prompt, and post-tool events that reinforce automatic memory behavior and make the agent prefer Walrus Memory over Claude Code's built-in memory.
+  To add Walrus Memory to Claude Code, install the MemWal plugin through the marketplace (/plugin marketplace add https://github.com/MystenLabs/MemWal.git, then /plugin install memwal@memwal-plugins), or add it as MCP-only with claude mcp add. The plugin includes lifecycle hooks for session start, user prompt, and post-tool events that reinforce automatic memory behavior and make the agent prefer Walrus Memory over Claude Code's built-in memory.
 ---
 
 Add MemWal to Claude Code so it recalls context and saves durable facts as you work. Install it as a **plugin** (recommended; adds automatic-memory hooks) or as **MCP-only** (just the tools).
 
+This guide covers Claude Code, including the **Code tab inside Claude Desktop**.
+For regular Desktop or web chat, use the [OAuth custom connector](/mcp/claude-connector),
+which does not require Node.js or the Claude Code CLI.
+
 ## Prerequisites
 
+- Confirm `claude --version` works in the terminal you will use. Installing the Desktop app does not guarantee the CLI is on your `PATH`; see [Claude Code setup](https://code.claude.com/docs/en/setup).
 - Install Node.js 20+ with `npx` on your `PATH`; check with `node --version`.
 - Use a Claude Code version with plugin support if you want the plugin install; the `/plugin` command confirms support, and MCP-only works on any version with `claude mcp add`.
 - Have a [Walrus Memory account](/fundamentals/concepts/ownership-and-access) ready. An unauthenticated memory-tool call returns sign-in instructions rather than signing you in, so ask the agent to run `memwal_login` and open the URL it returns. You can create the account during that flow at [memory.walrus.xyz](https://memory.walrus.xyz). Config files carry no keys: credentials land in `~/.memwal/credentials.json` after sign-in.
@@ -47,16 +52,24 @@ Add MemWal to Claude Code so it recalls context and saves durable facts as you w
   <Tab title="Plugin (recommended)">
     <Steps>
       <Step title="Add the marketplace and install">
-        Agents with a terminal should run the CLI, then verify the plugin is enabled. Slash commands are only for a human inside Claude Code.
+        Run these as separate commands in a terminal, stopping if one fails. Agents with a shell tool can run them after checking the prerequisites, then verify the plugin is enabled. A manually added `enabledPlugins` setting alone does not verify installation.
 
         ```bash
-        claude plugin marketplace add MystenLabs/MemWal
+        claude plugin marketplace add https://github.com/MystenLabs/MemWal.git
         claude plugin install memwal@memwal-plugins -s user
         claude plugin list
         ```
 
+        In Claude Desktop's Code tab, use the plugin UI instead: open the `+`
+        menu beside the prompt, choose **Plugins → Add plugin**, select MemWal
+        from a configured marketplace, then confirm it under **Manage plugins**.
+        Do not paste slash commands into chat as plain text.
+
+        Slash commands are an alternative only in an interactive Claude Code
+        session that exposes `/plugin`:
+
         ```
-        /plugin marketplace add MystenLabs/MemWal
+        /plugin marketplace add https://github.com/MystenLabs/MemWal.git
         /plugin install memwal@memwal-plugins
         ```
       </Step>

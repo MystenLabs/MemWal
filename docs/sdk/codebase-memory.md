@@ -93,15 +93,15 @@ When the assistant is about to answer, recall the most relevant memories for the
 const recalled = await memwal.recall({
   query: "How are session tokens issued and how long do they last?",
   limit: 5,
-  // Drop weak matches so only genuinely relevant context reaches the model.
-  maxDistance: 0.5,
+  // Start at 0.8; calibrate against your repository's memories and queries.
+  maxDistance: 0.8,
 });
 
 const context = recalled.results.map((m) => m.text).join("\n");
 // Prepend `context` to the model prompt.
 ```
 
-Each result carries the matched `text`, its `distance`, and the `blob_id` that durably addresses the stored chunk. Tune `limit` and `maxDistance` to balance recall against prompt size.
+Each result carries the matched `text`, its `distance`, and the `blob_id` that durably addresses the stored chunk. `0.8` is a starting point: calibrate `maxDistance` against your repository's memories and query phrasing to balance recall against prompt size and noise.
 
 ## Organizing without tags
 

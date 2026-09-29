@@ -50,7 +50,7 @@ function resolveEnvVar(value: string): string {
 function resolveEnvVars(raw: Record<string, unknown>): Record<string, unknown> {
   const resolved: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
-    resolved[key] = typeof value === "string" ? resolveEnvVar(value) : value;
+    resolved[key] = key === "privateKey" && typeof value === "string" ? resolveEnvVar(value) : value;
   }
   return resolved;
 }
@@ -125,6 +125,24 @@ export function resolveAgent(defaultNamespace: string, sessionKey?: string): Res
     rawName !== namespace && /^[a-zA-Z0-9_-]{1,64}$/.test(trimmed) ? rawName : undefined;
   const agentName = trimmed.normalize("NFKC").slice(0, 64) || namespace;
   return { namespace, legacyNamespace, agentName };
+}
+
+/**
+ * Namespace a memory tool may use for this session.
+ * Omitted or empty uses the calling agent. A supplied value must be that
+ * agent's namespace or, when present, its legacy namespace. Anything else
+ * (including the main namespace from a sub-agent) is rejected.
+ */
+export function resolveToolNamespace(
+  defaultNamespace: string,
+  sessionKey: string | undefined,
+  requested: unknown,
+): string | undefined {
+  const { namespace, legacyNamespace } = resolveAgent(defaultNamespace, sessionKey);
+  if (requested == null || requested === "") return namespace;
+  if (typeof requested !== "string") return undefined;
+  if (requested === namespace || requested === legacyNamespace) return requested;
+  return undefined;
 }
 
 export function keyPreview(key: string): string {
