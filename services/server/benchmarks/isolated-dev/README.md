@@ -31,4 +31,13 @@ The dev endpoint may still receive existing dev clients. Record background traff
 6. Record failed and unresolved jobs, and latency distributions with their denominators. A successful 202 is not completed storage. A sidecar 503 is not proof of an upstream 429.
 7. If the deployed SHA changes, stop issuing new writes, continue collecting existing job outcomes, and label the run as confounded. Do not roll back a teammate's deployment automatically.
 
+## Owner-scoped rate-limit exemption
+
+One 100-request burst from one account exceeds the per-delegate-key budget (60 weighted/min, `/api/remember` weighs 5). This branch exempts exactly one test owner, `0x8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e76`, from the write-path request-rate buckets in `rate_limit_middleware` only, and only when both hold:
+
+- `RAILWAY_ENVIRONMENT_NAME=dev`
+- `MEMWAL_DEV_BENCH_UNMETERED_OWNER` equals that address
+
+Authentication, storage quota, sponsor, read-API, restore and owner-token limits still apply, and every other owner is metered. An exempt run measures the upload pipeline, not normal-user rate-limit capacity. Remove the variable when releasing dev.
+
 No automatic cleanup or retries of failed paid writes. Keep credentials out of logs and artifacts. No production modifications.

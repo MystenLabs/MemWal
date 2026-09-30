@@ -416,6 +416,45 @@ pub(crate) fn owner_is_unmetered(owner: &str) -> bool {
     hex.eq_ignore_ascii_case(UNMETERED_OWNER_HEX)
 }
 
+/// Dev burst benchmark owner. Only the write-path request-rate buckets in
+/// `rate_limit_middleware` skip it, and only on the Railway `dev` environment
+/// with `MEMWAL_DEV_BENCH_UNMETERED_OWNER` set to this exact address.
+/// Authentication, storage quota, sponsor, read-API and restore limits are
+/// unchanged, and every other owner is metered as before.
+const DEV_BENCH_UNMETERED_OWNER_HEX: &str =
+    "8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e76";
+
+fn strip_0x(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 && trimmed.as_bytes()[..2].eq_ignore_ascii_case(b"0x") {
+        &trimmed[2..]
+    } else {
+        trimmed
+    }
+}
+
+fn dev_bench_owner_exempt(
+    owner: &str,
+    configured: Option<&str>,
+    environment: Option<&str>,
+) -> bool {
+    environment.map(str::trim) == Some("dev")
+        && configured
+            .is_some_and(|c| strip_0x(c).eq_ignore_ascii_case(DEV_BENCH_UNMETERED_OWNER_HEX))
+        && strip_0x(owner).eq_ignore_ascii_case(DEV_BENCH_UNMETERED_OWNER_HEX)
+}
+
+fn owner_is_dev_bench_unmetered(owner: &str) -> bool {
+    static GATE: std::sync::OnceLock<(Option<String>, Option<String>)> = std::sync::OnceLock::new();
+    let (configured, environment) = GATE.get_or_init(|| {
+        (
+            std::env::var("MEMWAL_DEV_BENCH_UNMETERED_OWNER").ok(),
+            std::env::var("RAILWAY_ENVIRONMENT_NAME").ok(),
+        )
+    });
+    dev_bench_owner_exempt(owner, configured.as_deref(), environment.as_deref())
+}
+
 /// Multi-layer rate limiting middleware for the write-path authenticated
 /// routes (`/api/*`, mounted on `protected_routes` in `main.rs`).
 ///
@@ -462,7 +501,7 @@ pub async fn rate_limit_middleware(
             return next.run(request).await;
         }
     };
-    if owner_is_unmetered(&auth.owner) {
+    if owner_is_unmetered(&auth.owner) || owner_is_dev_bench_unmetered(&auth.owner) {
         return next.run(request).await;
     }
 
@@ -2016,6 +2055,41 @@ pub async fn check_owner_token_owner_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_bench_owner_is_exempt_only_on_gated_dev() {
+        let owner = "0x8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e76";
+        let control = "0xca86ab64c16e3a401f962d0846a80ed57bb23fbe74d5f0a8fba70312b65b2998";
+        let gate = Some(owner);
+        assert!(dev_bench_owner_exempt(owner, gate, Some("dev")));
+        assert!(dev_bench_owner_exempt(
+            &owner.to_uppercase().replacen("0X", "0x", 1),
+            gate,
+            Some("dev")
+        ));
+        assert!(dev_bench_owner_exempt(
+            &owner[2..],
+            Some(&owner[2..]),
+            Some(" dev ")
+        ));
+        // Control owner stays metered, even on gated dev.
+        assert!(!dev_bench_owner_exempt(control, gate, Some("dev")));
+        assert!(!dev_bench_owner_exempt(control, Some(control), Some("dev")));
+        // No gate, a wrong gate, or any other environment keeps the owner metered.
+        assert!(!dev_bench_owner_exempt(owner, None, Some("dev")));
+        assert!(!dev_bench_owner_exempt(owner, Some(""), Some("dev")));
+        assert!(!dev_bench_owner_exempt(owner, gate, Some("staging")));
+        assert!(!dev_bench_owner_exempt(owner, gate, Some("production")));
+        assert!(!dev_bench_owner_exempt(owner, gate, None));
+        // Near miss.
+        assert!(!dev_bench_owner_exempt(
+            "0x8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e77",
+            gate,
+            Some("dev")
+        ));
+        // The shared unmetered helper is unchanged by this owner.
+        assert!(!owner_is_unmetered(owner));
+    }
 
     #[test]
     fn mcp_rate_limit_keys_do_not_share_the_accounts_budget() {
