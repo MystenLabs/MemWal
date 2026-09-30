@@ -17,13 +17,15 @@ export const summarySchema = z.object({
 });
 
 export async function generateSourceMetadata(
-  text: string
+  text: string,
+  options: { abortSignal?: AbortSignal } = {}
 ): Promise<z.infer<typeof summarySchema>> {
   const previewText = text.slice(0, 8000);
 
   const { object } = await generateObject({
     model: getLanguageModel(SUMMARY_MODEL),
     schema: summarySchema,
+    abortSignal: options.abortSignal,
     prompt: `Analyze this document and provide a title, summary, and key claims.
 
 ---

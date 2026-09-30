@@ -32,10 +32,12 @@ const chunkSchema = z.object({
 async function chunkWithLLM(
   text: string,
   title: string,
+  abortSignal?: AbortSignal,
 ): Promise<Omit<Chunk, "chunkIndex">[]> {
   const { object } = await generateObject({
     model: getLanguageModel(CHUNK_MODEL),
     schema: chunkSchema,
+    abortSignal,
     prompt: `Split the following document into coherent topic chunks.
 Each chunk should be 500-1000 tokens and cover one coherent topic or section.
 Preserve the original text exactly — do NOT summarize, just split at topic boundaries.
@@ -63,6 +65,7 @@ ${text}
 export async function chunkDocument(
   text: string,
   title: string,
+  options: { abortSignal?: AbortSignal } = {},
 ): Promise<Chunk[]> {
   const tokenCount = estimateTokens(text);
 
@@ -75,7 +78,7 @@ export async function chunkDocument(
 
   // Normal document — single LLM call
   if (tokenCount <= WINDOW_SIZE * 2) {
-    rawChunks = await chunkWithLLM(text, title);
+    rawChunks = await chunkWithLLM(text, title, options.abortSignal);
   } else {
     // Very long document — sliding window approach
     const allChunks: Omit<Chunk, "chunkIndex">[] = [];
@@ -84,7 +87,7 @@ export async function chunkDocument(
     while (offset < text.length) {
       const windowEnd = offset + charIndexForTokens(WINDOW_SIZE);
       const windowText = text.slice(offset, windowEnd);
-      const windowChunks = await chunkWithLLM(windowText, title);
+      const windowChunks = await chunkWithLLM(windowText, title, options.abortSignal);
       allChunks.push(...windowChunks);
 
       // Advance by window minus overlap
