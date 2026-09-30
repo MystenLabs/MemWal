@@ -457,6 +457,16 @@ fn dev_chatgpt_owner_exempt(
         && strip_0x(owner).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX)
 }
 
+fn staging_chatgpt_owner_exempt(
+    owner: &str,
+    configured: Option<&str>,
+    environment: Option<&str>,
+) -> bool {
+    environment.map(str::trim) == Some("staging")
+        && configured.is_some_and(|c| strip_0x(c).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX))
+        && strip_0x(owner).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX)
+}
+
 fn owner_is_dev_bench_unmetered(owner: &str) -> bool {
     static GATE: std::sync::OnceLock<(
         Option<String>,
