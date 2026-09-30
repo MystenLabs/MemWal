@@ -458,17 +458,23 @@ fn dev_chatgpt_owner_exempt(
 }
 
 fn owner_is_dev_bench_unmetered(owner: &str) -> bool {
-    static GATE: std::sync::OnceLock<(Option<String>, Option<String>, Option<String>)> =
-        std::sync::OnceLock::new();
-    let (configured, environment, chatgpt) = GATE.get_or_init(|| {
+    static GATE: std::sync::OnceLock<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = std::sync::OnceLock::new();
+    let (configured, environment, chatgpt, staging_chatgpt) = GATE.get_or_init(|| {
         (
             std::env::var("MEMWAL_DEV_BENCH_UNMETERED_OWNER").ok(),
             std::env::var("RAILWAY_ENVIRONMENT_NAME").ok(),
             std::env::var("MEMWAL_DEV_CHATGPT_UNMETERED_OWNER").ok(),
+            std::env::var("MEMWAL_STAGING_CHATGPT_UNMETERED_OWNER").ok(),
         )
     });
     dev_bench_owner_exempt(owner, configured.as_deref(), environment.as_deref())
         || dev_chatgpt_owner_exempt(owner, chatgpt.as_deref(), environment.as_deref())
+        || staging_chatgpt_owner_exempt(owner, staging_chatgpt.as_deref(), environment.as_deref())
 }
 
 /// Multi-layer rate limiting middleware for the write-path authenticated
@@ -2071,6 +2077,31 @@ pub async fn check_owner_token_owner_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chatgpt_owner_requires_staging_gate_on_staging() {
+        let owner = super::DEV_CHATGPT_OWNER_HEX;
+        assert!(super::staging_chatgpt_owner_exempt(
+            owner,
+            Some(owner),
+            Some("staging")
+        ));
+        assert!(!super::staging_chatgpt_owner_exempt(
+            owner,
+            Some(owner),
+            Some("dev")
+        ));
+        assert!(!super::staging_chatgpt_owner_exempt(
+            owner,
+            None,
+            Some("staging")
+        ));
+        assert!(!super::staging_chatgpt_owner_exempt(
+            "0xdead",
+            Some(owner),
+            Some("staging")
+        ));
+    }
 
     #[test]
     fn chatgpt_owner_requires_its_own_dev_gate() {
