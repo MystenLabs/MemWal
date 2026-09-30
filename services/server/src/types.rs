@@ -162,12 +162,11 @@ pub struct AppState {
     /// `Arc` so the `MemoryEngine` impl can share the same handle rather
     /// than duplicating the pool.
     pub db: Arc<VectorDb>,
-    /// Small dedicated pool used ONLY to hold a per-job advisory lock across an
-    /// upload's guard-read → mint → persist section, so two attempts of the same
-    /// job cannot both mint. The connection is checked out only after that
-    /// wallet's upload permit is held; jobs waiting for a busy key do not take
-    /// one. Kept separate from `db` so an in-flight upload never starves request
-    /// handlers.
+    /// Small dedicated pool used ONLY to hold a per-job `pg_advisory_lock`
+    /// across an upload job's guard-read → mint → persist critical section, so
+    /// two concurrent attempts of the same job can't both mint a paid blob. Kept
+    /// separate from `db` so that holding a connection for the (up to 5-minute)
+    /// upload duration never starves the request-serving pool.
     pub wallet_lock_pool: sqlx::PgPool,
     /// Isolated old-V1 database. Present only when at least one tracked
     /// security-delete component is enabled.
