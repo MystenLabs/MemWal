@@ -38,7 +38,7 @@ use alerts::AlertManager;
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
 use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
-    WalletJobStorage,
+    WalletJobStorage, WALLET_FOLLOWUP_QUEUE, WALLET_UPLOAD_QUEUE,
 };
 use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
@@ -647,7 +647,14 @@ mod mcp_rate_limit_tests {
             redis,
             fallback_rate_limit: tokio::sync::Mutex::new(rate_limit::InMemoryFallback::default()),
             remember_job_storage: PostgresStorage::new(pool.clone()),
-            wallet_storage: PostgresStorage::new(pool.clone()),
+            wallet_storage: PostgresStorage::new_with_config(
+                pool.clone(),
+                apalis_sql::Config::new(WALLET_UPLOAD_QUEUE),
+            ),
+            wallet_followup_storage: PostgresStorage::new_with_config(
+                pool.clone(),
+                apalis_sql::Config::new(WALLET_FOLLOWUP_QUEUE).set_buffer_size(1),
+            ),
             bulk_job_storage: PostgresStorage::new(pool),
             blob_cache_ttl: std::time::Duration::from_secs(DEFAULT_BLOB_CACHE_TTL_SECS),
             blob_cache_max_bytes: DEFAULT_BLOB_CACHE_MAX_BYTES,
@@ -1528,17 +1535,21 @@ async fn main() {
     let bulk_job_storage: PostgresStorage<BulkRememberJob> =
         PostgresStorage::new(apalis_pool.clone());
 
-    // Single Apalis queue for all WalletJob signing operations. Workers select
-    // a key from the configured pool when they execute an upload job, so
-    // retries can rotate away from a wallet whose sponsored tx expired.
-    const WALLET_QUEUE_NAME: &str = "wallet_jobs";
+    // Uploads prefetch a batch and will not notice a metadata job until that
+    // batch drains. Metadata and finalize use a second queue whose workers
+    // are idle until one of those jobs appears.
     let wallet_storage: WalletJobStorage = PostgresStorage::new_with_config(
         apalis_pool.clone(),
-        apalis_sql::Config::new(WALLET_QUEUE_NAME),
+        apalis_sql::Config::new(WALLET_UPLOAD_QUEUE),
+    );
+    let wallet_followup_storage: WalletJobStorage = PostgresStorage::new_with_config(
+        apalis_pool.clone(),
+        apalis_sql::Config::new(WALLET_FOLLOWUP_QUEUE).set_buffer_size(1),
     );
     tracing::info!(
-        "  Apalis: job queue ready (table=apalis_jobs, queue={})",
-        WALLET_QUEUE_NAME
+        "  Apalis: job queues ready (table=apalis_jobs, upload={}, followup={})",
+        WALLET_UPLOAD_QUEUE,
+        WALLET_FOLLOWUP_QUEUE
     );
 
     reqwest::Url::parse(&config.walrus_publisher_url)
@@ -1847,6 +1858,7 @@ async fn main() {
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
         remember_job_storage: remember_job_storage.clone(),
         wallet_storage: wallet_storage.clone(),
+        wallet_followup_storage: wallet_followup_storage.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
         blob_cache_ttl,
         blob_cache_max_bytes,
@@ -2047,11 +2059,11 @@ async fn main() {
         tracing::info!("  Apalis: worker 'bulk-remember' spawned (concurrency=2)");
     }
 
-    // Worker 4: WalletJob — single worker, single queue.
-    //
-    // Concurrency = WALLET_JOB_CONCURRENCY (default 8). Multiple jobs can be
-    // dispatched simultaneously against the same wallet; transient Sui/RPC
-    // conflicts are classified by `WalletJobError` and retried by Apalis.
+    // Upload workers prefetch. Followup workers only see metadata and
+    // finalize, so a certified blob starts on the next poll instead of
+    // waiting out that prefetch. Same concurrency: one followup worker per
+    // upload worker, which is enough when a full round of uploads finishes
+    // together. Transient Sui conflicts are still classified and retried.
     let wallet_concurrency: usize = std::env::var("WALLET_JOB_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -2061,7 +2073,7 @@ async fn main() {
         let storage = wallet_storage.clone();
         tokio::spawn(async move {
             loop {
-                let worker = WorkerBuilder::new("wallet_jobs")
+                let worker = WorkerBuilder::new(WALLET_UPLOAD_QUEUE)
                     .data(worker_state.clone())
                     .backend(storage.clone())
                     .build_fn(execute_wallet_job);
@@ -2072,13 +2084,41 @@ async fn main() {
                     .run()
                     .await
                 {
-                    tracing::error!("Apalis wallet worker exited: {}", e);
+                    tracing::error!("Apalis wallet upload worker exited: {}", e);
                 }
                 tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
             }
         });
         tracing::info!(
-            "  Apalis: worker 'wallet_jobs' spawned (concurrency={})",
+            "  Apalis: worker '{}' spawned (concurrency={})",
+            WALLET_UPLOAD_QUEUE,
+            wallet_concurrency
+        );
+    }
+    {
+        let worker_state = state.clone();
+        let storage = wallet_followup_storage.clone();
+        tokio::spawn(async move {
+            loop {
+                let worker = WorkerBuilder::new(WALLET_FOLLOWUP_QUEUE)
+                    .data(worker_state.clone())
+                    .backend(storage.clone())
+                    .build_fn(execute_wallet_job);
+
+                #[allow(deprecated)]
+                if let Err(e) = Monitor::new()
+                    .register_with_count(wallet_concurrency, worker)
+                    .run()
+                    .await
+                {
+                    tracing::error!("Apalis wallet followup worker exited: {}", e);
+                }
+                tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
+            }
+        });
+        tracing::info!(
+            "  Apalis: worker '{}' spawned (concurrency={})",
+            WALLET_FOLLOWUP_QUEUE,
             wallet_concurrency
         );
     }

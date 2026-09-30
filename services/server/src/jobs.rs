@@ -481,7 +481,7 @@ async fn schedule_metadata_congestion_retry(
         policy_package_id,
         end_epoch,
     );
-    let mut storage = state.wallet_storage.clone();
+    let mut storage = wallet_job_queue(state, &retry.operation);
     match storage
         .schedule_request(wallet_job_request(retry), run_at)
         .await
@@ -585,6 +585,30 @@ pub struct WalletJob {
 
 /// Convenience type alias
 pub type WalletJobStorage = PostgresStorage<WalletJob>;
+
+/// Upload jobs. Workers prefetch a batch from this queue and do not look up
+/// again until that batch is done.
+pub const WALLET_UPLOAD_QUEUE: &str = "wallet_jobs";
+
+/// Metadata and finalize. A separate queue so a certified blob is picked up
+/// while upload workers are still inside a prefetched batch.
+pub const WALLET_FOLLOWUP_QUEUE: &str = "wallet_followup_jobs";
+
+pub(crate) fn wallet_job_uses_followup_queue(operation: &WalletOperation) -> bool {
+    matches!(
+        operation,
+        WalletOperation::SetMetadataAndTransfer { .. }
+            | WalletOperation::FinalizeUploadedBlob { .. }
+    )
+}
+
+pub(crate) fn wallet_job_queue(state: &AppState, operation: &WalletOperation) -> WalletJobStorage {
+    if wallet_job_uses_followup_queue(operation) {
+        state.wallet_followup_storage.clone()
+    } else {
+        state.wallet_storage.clone()
+    }
+}
 
 // ============================================================
 // Legacy MetaTransferJob — kept for backward-compat with existing DB rows.
@@ -797,9 +821,9 @@ fn upload_retry_backoff(
     Some(backoff_duration(attempt_info.current as u32))
 }
 
-/// Apalis runs a larger value first. A transferred blob only needs a database
-/// write, and a certified blob only needs metadata. Both finish before a new
-/// upload starts. Equal priorities stay first-come.
+/// Apalis runs a larger value first inside one queue. Finalize outranks
+/// metadata on the followup queue. Uploads are a separate queue, so this
+/// number does not stop an upload a worker has already picked up.
 fn wallet_job_priority(operation: &WalletOperation) -> i32 {
     match operation {
         WalletOperation::FinalizeUploadedBlob { .. } => 2,
@@ -931,11 +955,10 @@ fn steer_uncommitted_upload_wallet(journal: &mut UploadJournal, free_wallet: usi
 
 /// Apalis worker handler for WalletJob.
 ///
-/// Multiple concurrent invocations of this handler share the `wallet_jobs`
-/// queue. Upload jobs derive the execution wallet from the enqueued starting
-/// wallet and current attempt; legacy metadata-transfer jobs keep their pinned
-/// wallet because the blob object is owned by the wallet that
-/// registered/certified it.
+/// Upload jobs and followup jobs are separate queues, but both call this
+/// handler. Upload jobs derive the execution wallet from the enqueued starting
+/// wallet and current attempt; metadata jobs keep their pinned wallet because
+/// the blob object is owned by the wallet that registered it.
 pub(crate) async fn execute_wallet_job(
     job: WalletJob,
     ctx: Data<Arc<AppState>>,
@@ -1095,68 +1118,12 @@ pub(crate) async fn execute_wallet_job(
             policy_package_id,
             end_epoch,
         } => {
-            // Mark the wallet busy for this transaction too. `least_loaded_index`
-            // answers "is this key signing right now", and only the upload arm
-            // was telling it — so a metadata+transfer, which signs on the very
-            // same wallet, read as idle. A concurrently-enqueued upload would
-            // then pick that key precisely because it looked free, and queue
-            // behind the transaction anyway. That is the failure join-shortest-
-            // queue exists to avoid, and it showed up as the pool converging on
-            // whichever key was mid-transfer.
-            //
-            // `enqueued_wallet_index` rather than a fresh pick: this operation
-            // must run on the key that already owns the blob object.
+            // Mark the wallet busy for least-loaded assignment. This job signs
+            // on the key that owns the blob, but it must not hold the upload
+            // permit. A worker that already took this key's next upload can
+            // register while the metadata transaction is in flight. Priority
+            // still prefers this job over an upload that has not been prefetched.
             let _wallet_slot = state.key_pool.begin_attempt(enqueued_wallet_index);
-
-            // Same permit as the upload. That caller drops it when
-            // `execute_durable_upload` returns, before this job is polled, so
-            // taking it here cannot deadlock with the upload that enqueued us.
-            // Hold it only until the chain call returns: the vector insert
-            // does not sign. Touch `updated_at` before the wait and again
-            // before the sidecar call; the running-row heartbeat does not
-            // match an `uploaded` row.
-            touch_uploaded_remember_job(state.db.pool(), remember_job_id.as_deref()).await;
-            let admission =
-                match admit_wallet_upload(enqueued_wallet_index, state.key_pool.len()).await {
-                    Ok(permit) => permit,
-                    Err(err) => {
-                        if let Some(outcome) = schedule_metadata_congestion_retry(
-                            state,
-                            enqueued_wallet_index,
-                            congestion_requeues,
-                            &err,
-                            &blob_object_id,
-                            &owner,
-                            &namespace,
-                            package_id.as_deref(),
-                            agent_id.as_deref(),
-                            remember_job_id.as_deref(),
-                            blob_id.as_deref(),
-                            vector.as_deref(),
-                            blob_size_bytes,
-                            importance,
-                            encrypted_b64.as_deref(),
-                            account_id.as_deref(),
-                            policy_package_id.as_deref(),
-                            end_epoch,
-                        )
-                        .await
-                        {
-                            return outcome;
-                        }
-                        return Err(finish_metadata_attempt_error(
-                            state,
-                            remember_job_id.as_deref(),
-                            &owner,
-                            &namespace,
-                            enqueued_wallet_index,
-                            err,
-                            attempt_info,
-                        )
-                        .await
-                        .into_apalis_error());
-                    }
-                };
 
             touch_uploaded_remember_job(state.db.pool(), remember_job_id.as_deref()).await;
             let result = execute_set_metadata_and_transfer(
@@ -1172,7 +1139,6 @@ pub(crate) async fn execute_wallet_job(
                 policy_package_id.as_deref(),
             )
             .await;
-            drop(admission);
 
             match result {
                 Ok(()) => match (blob_id, vector, blob_size_bytes) {
@@ -1505,24 +1471,25 @@ async fn enqueue_finalize_uploaded_blob(
     package_id: Option<String>,
     end_epoch: Option<i32>,
 ) -> Result<(), WalletJobError> {
-    let mut storage = state.wallet_storage.clone();
+    let job = WalletJob {
+        wallet_index,
+        congestion_requeues: 0,
+        operation: WalletOperation::FinalizeUploadedBlob {
+            owner,
+            namespace,
+            remember_job_id,
+            blob_id,
+            vector,
+            blob_size_bytes,
+            importance,
+            agent_id,
+            package_id,
+            end_epoch,
+        },
+    };
+    let mut storage = wallet_job_queue(state, &job.operation);
     storage
-        .push_request(wallet_job_request(WalletJob {
-            wallet_index,
-            congestion_requeues: 0,
-            operation: WalletOperation::FinalizeUploadedBlob {
-                owner,
-                namespace,
-                remember_job_id,
-                blob_id,
-                vector,
-                blob_size_bytes,
-                importance,
-                agent_id,
-                package_id,
-                end_epoch,
-            },
-        }))
+        .push_request(wallet_job_request(job))
         .await
         .map_err(|e| {
             WalletJobError::Transient(format!(
@@ -1886,7 +1853,7 @@ async fn resume_metadata_and_transfer(
         importance,
         &state.config.seal_policy_package_id,
     );
-    let mut storage = state.wallet_storage.clone();
+    let mut storage = wallet_job_queue(state, &job.operation);
     if let Err(e) = storage.push_request(wallet_job_request(job)).await {
         let classified = classify_wallet_remember_handoff_failure(
             state.db.pool(),
@@ -2583,7 +2550,7 @@ async fn execute_upload_and_transfer_locked(
 
             let job_id_for_log = remember_job_id.as_deref().unwrap_or("-").to_string();
             let recovery_remember_job_id = remember_job_id.clone();
-            let mut storage = state.wallet_storage.clone();
+            let mut storage = state.wallet_followup_storage.clone();
             if let Err(e) = storage
                 .push_request(wallet_job_request(WalletJob {
                     wallet_index,
@@ -3738,9 +3705,9 @@ mod tests {
         recovery_seal_persistence, steer_uncommitted_upload_wallet, touch_uploaded_remember_job,
         update_remember_job_after_wallet_error, upload_journal_signer_committed,
         upload_resume_disposition, upload_retry_backoff, wallet_index_for_upload_attempt,
-        wallet_job_request, JobUploadLock, LockOutcome, UploadResume, WalletJob,
-        WalletJobAttemptInfo, WalletJobError, WalletOperation, CONGESTION_WAIT_ERROR_PREFIX,
-        MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
+        wallet_job_request, wallet_job_uses_followup_queue, JobUploadLock, LockOutcome,
+        UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
+        CONGESTION_WAIT_ERROR_PREFIX, MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
     };
     use crate::storage::walrus::{
         PreparedRegisterTransaction, UploadExecutionIdentity, UploadJournal,
@@ -4682,8 +4649,8 @@ the checkpoint it replied about",
     }
 
     #[test]
-    fn wallet_job_priority_finishes_certified_work_before_a_new_upload() {
-        let upload = wallet_job_request(WalletJob {
+    fn wallet_job_priority_finishes_finalize_before_metadata() {
+        let upload = WalletJob {
             wallet_index: 1,
             congestion_requeues: 0,
             operation: WalletOperation::UploadAndTransfer {
@@ -4699,8 +4666,8 @@ the checkpoint it replied about",
                 prepare_claim_token: None,
                 epochs: 1,
             },
-        });
-        let metadata = wallet_job_request(metadata_congestion_retry_job(
+        };
+        let metadata_job = metadata_congestion_retry_job(
             4,
             2,
             "0xblob",
@@ -4717,8 +4684,8 @@ the checkpoint it replied about",
             None,
             None,
             None,
-        ));
-        let finalize = wallet_job_request(WalletJob {
+        );
+        let finalize = WalletJob {
             wallet_index: 4,
             congestion_requeues: 0,
             operation: WalletOperation::FinalizeUploadedBlob {
@@ -4733,8 +4700,15 @@ the checkpoint it replied about",
                 package_id: None,
                 end_epoch: None,
             },
-        });
+        };
 
+        assert!(!wallet_job_uses_followup_queue(&upload.operation));
+        assert!(wallet_job_uses_followup_queue(&metadata_job.operation));
+        assert!(wallet_job_uses_followup_queue(&finalize.operation));
+
+        let upload = wallet_job_request(upload);
+        let metadata = wallet_job_request(metadata_job);
+        let finalize = wallet_job_request(finalize);
         assert_eq!(*upload.parts.context.priority(), 0);
         assert_eq!(*metadata.parts.context.priority(), 1);
         assert_eq!(*finalize.parts.context.priority(), 2);
