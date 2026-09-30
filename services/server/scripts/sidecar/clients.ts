@@ -7,6 +7,7 @@
  * (`refreshWalrusClient`) whenever that metadata goes stale.
  */
 
+import { MetadataEncoder } from "./metadata-encoder.js";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { SuiGraphQLClient } from "@mysten/sui/graphql";
 import { normalizeStructTag } from "@mysten/sui/utils";
@@ -96,6 +97,8 @@ export async function createDecryptSealClient(): Promise<SealClient> {
 // to the authenticated SessionKey.
 export const sealEncryptClient = createSealClient();
 
+const metadataEncoder = new MetadataEncoder();
+
 function createWalrusClient(): WalrusClient {
     // WalrusClient only resolves package/staking ids itself for
     // "mainnet"/"testnet" — anything else (e.g. a devstack localnet) needs
@@ -126,7 +129,14 @@ function createWalrusClient(): WalrusClient {
             },
         }
         : { ...baseConfig, network: SUI_NETWORK as "mainnet" | "testnet" };
-    return new WalrusClient(config);
+    const client = new WalrusClient(config);
+    if (useRelay) {
+        client.computeBlobMetadata = async (input) => metadataEncoder.compute({
+            ...input,
+            numShards: input.numShards ?? (await client.systemState()).committee.n_shards,
+        });
+    }
+    return client;
 }
 
 let walrusClient = createWalrusClient();
