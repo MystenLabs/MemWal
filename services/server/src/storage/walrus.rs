@@ -1568,6 +1568,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_upload_shared_outage_preserves_request_for_retry() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = axum::Router::new().route(
+            "/walrus/upload-step-v3",
+            axum::routing::post({
+                let seen = seen.clone();
+                move |axum::Json(request): axum::Json<serde_json::Value>| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(request);
+                        (
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            axum::Json(serde_json::json!({
+                                "code": "SHARED_SERVICE_UNAVAILABLE", "error": "connection reset"
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let journal = super::UploadJournal {
+            wallet_index: 3,
+            wallet_address: Some("0xsigner".into()),
+            execution_identity: None,
+            resume_step: Some(serde_json::json!({"step":"encoded","blobId":"blob"})),
+            register_transaction: Some(super::PreparedRegisterTransaction {
+                transaction_bytes: "bytes".into(),
+                signature: "signature".into(),
+                digest: "digest".into(),
+                sponsor_digest: None,
+            }),
+        };
+        for _ in 0..2 {
+            let result = super::advance_durable_upload(
+                &reqwest::Client::new(),
+                &url,
+                None,
+                b"ciphertext",
+                1,
+                "0xowner",
+                "test",
+                "0xpackage",
+                "job",
+                journal.clone(),
+            )
+            .await;
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("outage must not advance journal"),
+            };
+            assert!(matches!(
+                crate::jobs::WalletJobError::classify_sidecar_error(&error.to_string()),
+                crate::jobs::WalletJobError::UploadSlotCongestion(_)
+            ));
+        }
+        server.abort();
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[0]["keyIndex"], 3);
+        assert_eq!(requests[0]["registerTransaction"]["digest"], "digest");
+    }
+
+    #[tokio::test]
     async fn find_blob_by_job_returns_found() {
         let (url, server, seen) = mock_find_blob_server(
             axum::http::StatusCode::OK,

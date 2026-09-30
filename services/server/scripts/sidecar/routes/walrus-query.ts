@@ -530,7 +530,7 @@ const METADATA_FIELD_NAME_GRPC = {
  * Fetch the memwal_* metadata entries attached to a Blob object as key/value
  * pairs over gRPC. Returns [] when the blob has no metadata dynamic field.
  */
-async function fetchBlobMetadataEntries(objectId: string): Promise<Array<{ key: string; value: string }>> {
+export async function fetchBlobMetadataEntries(objectId: string): Promise<Array<{ key: string; value: string }>> {
     const dynField = await withRpcRetry<any>(`[query-blobs] getDynamicField ${objectId}`, () =>
         (suiClient as any).getDynamicField({
             parentId: objectId,

@@ -28,7 +28,8 @@ import {
     ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
     DURABLE_WALLET_FALLBACK_POLICY,
 } from "../wallet.js";
-import { ownerMatchesRecipient, readBlobObject } from "./walrus-query.js";
+import { recoverMetadataBatch } from "../metadata-recovery.js";
+import { fetchBlobMetadataEntries, ownerMatchesRecipient, readBlobObject } from "./walrus-query.js";
 import { assertUploadExecutionIdentity, parseUploadExecutionIdentity } from "./health.js";
 
 export function metadataReceiptAlreadyApplied(
@@ -42,6 +43,9 @@ export function metadataReceiptAlreadyApplied(
 function registerWalrusMetadataBatchRoute(app: Express): void {
     app.post("/walrus/set-metadata-batch", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), async (req, res) => {
         const traceId = requestIdFor(req);
+        const metadataStartedAt = Date.now();
+        let reconcileMs = 0;
+        let submitMs = 0;
         try {
             const { blobs, owner, packageId, policyPackageId, registryId, accountId, sealAbi, agentId, keyIndex } =
                 req.body;
@@ -104,27 +108,50 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
             // this transfer is still signing.
             const { secretKey } = decodeSuiPrivateKey(privateKey);
             const signer = Ed25519Keypair.fromSecretKey(secretKey);
-            const digest = await setMetadataAndTransferBlobs(
-                signer,
-                normalized,
-                targetOwner,
-                packageId,
-                agentId,
-                {},
-                ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+            const result = await recoverMetadataBatch(
+                normalized, targetOwner, signer.toSuiAddress(), packageId, agentId,
+                async (id) => {
+                    const readStartedAt = Date.now();
+                    const object = await withRpcRetry(`[metadata-recovery] ${id}`, () =>
+                        readBlobObject(id, {}));
+                    const currentOwner = object.object.owner;
+                    const receipt = {
+                        owner: currentOwner,
+                        metadata: ownerMatchesRecipient(currentOwner, targetOwner)
+                            ? await fetchBlobMetadataEntries(id) : [],
+                    };
+                    reconcileMs += Date.now() - readStartedAt;
+                    return receipt;
+                },
+                async (pending) => {
+                    const started = Date.now();
+                    try { return await setMetadataAndTransferBlobs(
+                        signer, pending, targetOwner, packageId, agentId, {},
+                        ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+                    ); } finally { submitMs += Date.now() - started; }
+                },
             );
-            console.log(`[walrus/set-metadata-batch] transferred ${normalized.length} blobs to owner`);
-            res.json({ transferred: normalized.length, digest });
+            console.log(`[walrus/set-metadata-batch] reconciled ${normalized.length} blobs for owner`);
+            res.json(result);
         } catch (err: any) {
             const message = errorMessage(err);
             if (err instanceof InvalidSealPersistenceFenceError) {
                 return res.status(400).json({ error: message, traceId });
+            }
+            if (message.startsWith("BLOB_OWNER_MISMATCH")) {
+                return res.status(409).json({
+                    error: message,
+                    code: "BLOB_OWNER_MISMATCH",
+                    traceId,
+                });
             }
             sidecarLog("error", "walrus_set_metadata_batch_failed", {
                 requestId: traceId,
                 error: message,
             });
             res.status(500).json({ error: message, traceId });
+        } finally {
+            sidecarLog("info", "metadata_phase_timing", { requestId: traceId, blobObjectIds: Array.isArray(req.body?.blobs) ? req.body.blobs.map((b: any) => b?.blobObjectId) : [], elapsedMs: Date.now() - metadataStartedAt, reconcileMs, submitMs, status: res.statusCode });
         }
     });
 }
