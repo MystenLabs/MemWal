@@ -444,15 +444,31 @@ fn dev_bench_owner_exempt(
         && strip_0x(owner).eq_ignore_ascii_case(DEV_BENCH_UNMETERED_OWNER_HEX)
 }
 
+const DEV_CHATGPT_OWNER_HEX: &str =
+    "2c8a8c8759dc0db1f3f8d31db6153103d9de8db3290e398a9ccb2f24167e6ab5";
+
+fn dev_chatgpt_owner_exempt(
+    owner: &str,
+    configured: Option<&str>,
+    environment: Option<&str>,
+) -> bool {
+    environment.map(str::trim) == Some("dev")
+        && configured.is_some_and(|c| strip_0x(c).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX))
+        && strip_0x(owner).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX)
+}
+
 fn owner_is_dev_bench_unmetered(owner: &str) -> bool {
-    static GATE: std::sync::OnceLock<(Option<String>, Option<String>)> = std::sync::OnceLock::new();
-    let (configured, environment) = GATE.get_or_init(|| {
+    static GATE: std::sync::OnceLock<(Option<String>, Option<String>, Option<String>)> =
+        std::sync::OnceLock::new();
+    let (configured, environment, chatgpt) = GATE.get_or_init(|| {
         (
             std::env::var("MEMWAL_DEV_BENCH_UNMETERED_OWNER").ok(),
             std::env::var("RAILWAY_ENVIRONMENT_NAME").ok(),
+            std::env::var("MEMWAL_DEV_CHATGPT_UNMETERED_OWNER").ok(),
         )
     });
     dev_bench_owner_exempt(owner, configured.as_deref(), environment.as_deref())
+        || dev_chatgpt_owner_exempt(owner, chatgpt.as_deref(), environment.as_deref())
 }
 
 /// Multi-layer rate limiting middleware for the write-path authenticated
@@ -2055,6 +2071,36 @@ pub async fn check_owner_token_owner_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chatgpt_owner_requires_its_own_dev_gate() {
+        let owner = super::DEV_CHATGPT_OWNER_HEX;
+        assert!(super::dev_chatgpt_owner_exempt(
+            owner,
+            Some(owner),
+            Some("dev")
+        ));
+        for environment in [None, Some("staging"), Some("production")] {
+            assert!(!super::dev_chatgpt_owner_exempt(
+                owner,
+                Some(owner),
+                environment
+            ));
+        }
+        assert!(!super::dev_chatgpt_owner_exempt(owner, None, Some("dev")));
+        assert!(!super::dev_chatgpt_owner_exempt(
+            owner,
+            Some("wrong"),
+            Some("dev")
+        ));
+        assert!(!super::dev_chatgpt_owner_exempt(
+            super::DEV_BENCH_UNMETERED_OWNER_HEX,
+            Some(owner),
+            Some("dev")
+        ));
+        assert!(!dev_bench_owner_exempt(owner, Some(owner), Some("dev")));
+        assert!(!owner_is_unmetered(owner));
+    }
 
     #[test]
     fn dev_bench_owner_is_exempt_only_on_gated_dev() {

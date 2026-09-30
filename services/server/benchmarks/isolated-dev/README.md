@@ -41,3 +41,9 @@ One 100-request burst from one account exceeds the per-delegate-key budget (60 w
 Authentication, storage quota, sponsor, read-API, restore and owner-token limits still apply, and every other owner is metered. An exempt run measures the upload pipeline, not normal-user rate-limit capacity. Remove the variable when releasing dev.
 
 No automatic cleanup or retries of failed paid writes. Keep credentials out of logs and artifacts. No production modifications.
+
+## Upload contention correction and separate test identity
+
+The benchmark branch now admits a wallet before opening its per-job upload-lock transaction. A connection-pool miss uses a short retry on the same wallet; it is not treated as upstream throttling. Shared-service errors carrying the sidecar's structured availability code use bounded congestion backoff on the same durable journal and signer. The job advisory lock still protects paid side effects.
+
+A second DEV-only test owner is `0x2c8a8c8759dc0db1f3f8d31db6153103d9de8db3290e398a9ccb2f24167e6ab5`, account `0x40e9903fd628ec03135410f6a59035bb6cf58315dad7d90d2c1260226ddabbc9`. Its independent gate is `MEMWAL_DEV_CHATGPT_UNMETERED_OWNER`, which must equal that exact owner and requires `RAILWAY_ENVIRONMENT_NAME=dev`. No secret belongs in this repository. A separate identity distinguishes traffic; it does not isolate the server or uploader pool from concurrent tests.

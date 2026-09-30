@@ -1807,13 +1807,9 @@ async fn main() {
             Arc::new(client) as Arc<dyn sui::SuiApi>
         });
 
-    // Shared application state
-    // Dedicated pool for per-job upload advisory locks (see AppState docs). Sized
-    // to the wallet-job concurrency (+1 headroom) so every concurrent upload can
-    // hold its own lock connection without touching the request-serving pool. Read
-    // WALLET_JOB_CONCURRENCY here independently of the worker registration below.
-    // Generously size the advisory lock pool so that workers holding transaction
-    // locks across Walrus uploads do not starve concurrent requests or retries.
+    // One connection per admitted upload, not per prefetched job. Waiters block
+    // on the wallet semaphore before checkout. A miss fails in a few seconds
+    // instead of the sqlx default 30s, and is not treated as relay congestion.
     let wallet_lock_pool_size = std::env::var("WALLET_LOCK_POOL_SIZE")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
@@ -1827,6 +1823,7 @@ async fn main() {
         });
     let wallet_lock_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(wallet_lock_pool_size)
+        .acquire_timeout(jobs::WALLET_LOCK_POOL_ACQUIRE_TIMEOUT)
         .connect(&config.database_url)
         .await
         .expect("Failed to create wallet advisory-lock pool");
