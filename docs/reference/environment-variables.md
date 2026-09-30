@@ -127,6 +127,7 @@ These are not all enforced at boot, but most real deployments need them.
 | `BLOB_CACHE_TTL_SECS` | `1209600` | Redis TTL for cached SEAL ciphertext by `blob_id`. `0` disables blob cache use |
 | `BLOB_CACHE_MAX_BYTES` | `524288` | Maximum SEAL ciphertext bytes cached in Redis. Larger blobs stay Walrus-only; `0` disables blob cache use |
 | `SERVER_SUI_PRIVATE_KEYS` | none | Comma-separated upload key pool. Takes priority over `SERVER_SUI_PRIVATE_KEY` for uploads |
+| `WALLET_JOB_CONCURRENCY` | one per `SERVER_SUI_PRIVATE_KEYS` entry | How many wallet upload jobs run at once, and the size of the advisory-lock pool that backs them. Clamped to `100` |
 | `SECURITY_DELETE_EXECUTE_MAX_IN_FLIGHT` | `1` | Process-local concurrency for security-deletion PTBs that mutate the Walrus System shared object. Shared by API submit and reconciler replay; coordinate the aggregate across replicas |
 | `SECURITY_DELETE_CRASH_TEST_SECRET` | unset | Localnet-only secret enabling the deletion submit crash-after-CAS failpoint. Load-test stacks generate it; never set it in production |
 | `MEMWAL_ACCOUNT_ID` | none | Optional account ID in server config |
@@ -171,6 +172,7 @@ These are not all enforced at boot, but most real deployments need them.
 ### Notes
 
 - If both `SERVER_SUI_PRIVATE_KEYS` and `SERVER_SUI_PRIVATE_KEY` are set, the key pool takes priority for uploads. Upload jobs use the pool in round-robin order.
+- `WALLET_JOB_CONCURRENCY` defaults to the number of configured upload wallets, which is also what the TS sidecar defaults `WALRUS_UPLOAD_MAX_CONCURRENCY` to. Leaving it unset keeps the Rust worker and the sidecar on the same number. Raising it above the wallet count does not buy throughput: the sidecar allows one upload per wallet (`WALRUS_UPLOAD_PER_WALLET_CONCURRENCY`, default `1`), so the surplus jobs only queue on its semaphore. The relayer logs the resolved value at boot and warns when it exceeds the wallet count.
 - Roll out durable registration sponsorship in two phases: first deploy all replicas with `DURABLE_ENOKI_REGISTER_ENABLED=false`; after old replicas have drained, set it to `true`. This prevents mixed-version workers from rejecting persisted sponsored journals. During phase 1, if `ENOKI_API_KEY` is set, durable register **direct-signs and pays gas from the uploader wallet** — the new SUI address-balance alert is load-bearing for that window. After phase 2, drain every replica before rolling the gate back to `false`; otherwise old replicas can 409 sponsored journals as `INVALID_PREPARED_REGISTER_TRANSACTION`.
 - Keep `ENOKI_FALLBACK_TO_DIRECT_SIGN=false` in production if the server wallet should not pay gas for rebuildable Enoki flows when sponsorship is missing, expired, or rejected. Durable registration does not fall back after its rollout gate is enabled.
 - `OPENAI_API_KEY` and `OPENAI_API_BASE` control the embedding and fact-extraction provider used by `remember`, `recall`, `analyze`, `ask`, and restore re-indexing.
