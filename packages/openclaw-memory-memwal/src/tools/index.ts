@@ -1,9 +1,9 @@
 /**
  * Agent-callable tools — require tools.allow config to be visible to the LLM.
  *
- * Tools accept an optional namespace parameter. The before_prompt_build hook
- * injects the current agent's namespace into the system prompt, guiding the
- * LLM to pass the correct namespace. Falls back to defaultNamespace if omitted.
+ * Registered as factories so each call is pinned to the calling agent's
+ * namespace from ctx.sessionKey. An omitted namespace uses that agent.
+ * A model-supplied namespace is accepted only when it matches.
  */
 
 import type { MemWal } from "@mysten-incubation/memwal";

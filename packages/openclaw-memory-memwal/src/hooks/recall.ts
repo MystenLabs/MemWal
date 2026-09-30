@@ -16,8 +16,7 @@ export function registerRecallHook(api: any, client: MemWal, config: PluginConfi
 
     const { namespace, legacyNamespace, agentName } = resolveAgent(config.defaultNamespace, ctx?.sessionKey);
     const namespaceInstruction =
-      `When using memory_search or memory_store tools, ` +
-      `pass namespace=${JSON.stringify(namespace)} to scope operations to the current agent's memory.`;
+      "Memory tools are pinned to the calling agent's namespace.";
 
     try {
       // Each read carries its own deadline. `recall()` self-aborts after 15s,
