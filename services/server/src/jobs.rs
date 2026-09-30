@@ -1358,7 +1358,6 @@ fn recovery_seal_persistence<'a>(
         )),
     }
 }
-
 async fn execute_set_metadata_and_transfer(
     state: &AppState,
     wallet_index: usize,
@@ -3515,7 +3514,7 @@ impl WalletJobError {
 
     pub fn is_sidecar_upload_transport_error(msg: &str) -> bool {
         let lower = msg.to_ascii_lowercase();
-        if !lower.contains("walrus/upload") {
+        if !lower.contains("walrus/upload") && !lower.contains("walrus/set-metadata-batch") {
             return false;
         }
         lower.contains("error sending request for url")
@@ -3625,6 +3624,11 @@ impl WalletJobError {
             || Self::is_sidecar_upload_transport_error(msg)
         {
             return WalletJobError::UploadSlotCongestion(msg.to_string());
+        }
+        // A third party owns the blob. The uploader cannot transfer it, and
+        // the relayer must not sign as the target.
+        if lower.contains("blob_owner_mismatch") || lower.contains("metadata_receipt_mismatch") {
+            return WalletJobError::Permanent(msg.to_string());
         }
         // Enoki sponsored dry-run aborts in 0x2::balance::split with ENotEnough
         // (abort code 2) when the selected pool wallet's SUI gas coin cannot be
@@ -4222,6 +4226,14 @@ the checkpoint it replied about",
             ),
             WalletJobError::UploadSlotCongestion(_)
         ));
+    }
+
+    #[test]
+    fn metadata_transport_failure_preserves_bounded_recovery_budget() {
+        let msg = "Internal Error: Sidecar walrus/set-metadata-batch request failed: error sending request for url (http://localhost:9000/walrus/set-metadata-batch)";
+        assert!(matches!(WalletJobError::classify_sidecar_error(msg), WalletJobError::UploadSlotCongestion(_)));
+        let mismatch = "walrus set-metadata-batch failed: Transaction was not signed by the correct sender";
+        assert!(!WalletJobError::is_sidecar_upload_transport_error(mismatch));
     }
 
     #[test]
