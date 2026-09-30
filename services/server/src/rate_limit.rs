@@ -406,6 +406,12 @@ fn rate_limiter_unavailable_response() -> Response {
 const UNMETERED_OWNER_HEX: &str =
     "158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7";
 
+/// TEMPORARY staging benchmark owner (not for merge): same treatment as
+/// `UNMETERED_OWNER_HEX` so a replay of the 100-concurrent remember burst is
+/// comparable. Every other owner is metered exactly as before.
+const STAGING_BENCH_UNMETERED_OWNER_HEX: &str =
+    "8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e76";
+
 pub(crate) fn owner_is_unmetered(owner: &str) -> bool {
     let trimmed = owner.trim();
     let hex = if trimmed.len() >= 2 && trimmed.as_bytes()[..2].eq_ignore_ascii_case(b"0x") {
@@ -414,6 +420,7 @@ pub(crate) fn owner_is_unmetered(owner: &str) -> bool {
         trimmed
     };
     hex.eq_ignore_ascii_case(UNMETERED_OWNER_HEX)
+        || hex.eq_ignore_ascii_case(STAGING_BENCH_UNMETERED_OWNER_HEX)
 }
 
 /// Multi-layer rate limiting middleware for the write-path authenticated
@@ -2043,6 +2050,15 @@ mod tests {
         ));
         assert!(!owner_is_unmetered(
             "0x158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e8"
+        ));
+        assert!(owner_is_unmetered(
+            "0x8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e76"
+        ));
+        assert!(!owner_is_unmetered(
+            "0x8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e77"
+        ));
+        assert!(!owner_is_unmetered(
+            "0xca86ab64c16e3a401f962d0846a80ed57bb23fbe74d5f0a8fba70312b65b2998"
         ));
         assert!(!owner_is_unmetered("0x158a78f0"));
     }
