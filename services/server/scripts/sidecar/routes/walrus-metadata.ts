@@ -43,6 +43,9 @@ export function metadataReceiptAlreadyApplied(
 function registerWalrusMetadataBatchRoute(app: Express): void {
     app.post("/walrus/set-metadata-batch", express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }), async (req, res) => {
         const traceId = requestIdFor(req);
+        const metadataStartedAt = Date.now();
+        let reconcileMs = 0;
+        let submitMs = 0;
         try {
             const { blobs, owner, packageId, policyPackageId, registryId, accountId, sealAbi, agentId, keyIndex } =
                 req.body;
@@ -108,19 +111,25 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
             const result = await recoverMetadataBatch(
                 normalized, targetOwner, signer.toSuiAddress(), packageId, agentId,
                 async (id) => {
+                    const readStartedAt = Date.now();
                     const object = await withRpcRetry(`[metadata-recovery] ${id}`, () =>
                         readBlobObject(id, {}));
                     const currentOwner = object.object.owner;
-                    return {
+                    const receipt = {
                         owner: currentOwner,
                         metadata: ownerMatchesRecipient(currentOwner, targetOwner)
                             ? await fetchBlobMetadataEntries(id) : [],
                     };
+                    reconcileMs += Date.now() - readStartedAt;
+                    return receipt;
                 },
-                (pending) => setMetadataAndTransferBlobs(
-                    signer, pending, targetOwner, packageId, agentId, {},
-                    ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
-                ),
+                async (pending) => {
+                    const started = Date.now();
+                    try { return await setMetadataAndTransferBlobs(
+                        signer, pending, targetOwner, packageId, agentId, {},
+                        ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
+                    ); } finally { submitMs += Date.now() - started; }
+                },
             );
             console.log(`[walrus/set-metadata-batch] reconciled ${normalized.length} blobs for owner`);
             res.json(result);
@@ -141,6 +150,8 @@ function registerWalrusMetadataBatchRoute(app: Express): void {
                 error: message,
             });
             res.status(500).json({ error: message, traceId });
+        } finally {
+            sidecarLog("info", "metadata_phase_timing", { requestId: traceId, blobObjectIds: Array.isArray(req.body?.blobs) ? req.body.blobs.map((b: any) => b?.blobObjectId) : [], elapsedMs: Date.now() - metadataStartedAt, reconcileMs, submitMs, status: res.statusCode });
         }
     });
 }

@@ -739,6 +739,7 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
         express.json({ limit: JSON_LIMIT_WALRUS_UPLOAD }),
         async (req, res) => {
             const traceId = requestIdFor(req);
+            const phaseStartedAt = Date.now();
             // `close` also fires after a normal end(). `writableEnded` is set
             // by res.json, so this aborts only when the client leaves first.
             const clientDisconnect = new AbortController();
@@ -1076,7 +1077,10 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                 sidecarLog("error", "walrus_upload_step_failed", {
                     requestId: traceId,
                     phase,
+                    elapsedMs: Date.now() - phaseStartedAt,
                     error: message,
+                    causeCode: (error as any)?.cause?.code ?? (error as any)?.code ?? null,
+                    causeName: (error as any)?.cause?.name ?? null,
                 });
                 const durableError = classifyDurableSideEffectError(
                     error,
@@ -1095,6 +1099,7 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                 reply(500, { error: message, traceId });
                 return;
             } finally {
+                sidecarLog("info", "upload_phase_timing", { requestId: traceId, jobId: sanitizeRequestId(req.body?.jobId), phase, elapsedMs: Date.now() - phaseStartedAt, encodeMs, status: res.statusCode });
                 settleFlight(500, { error: "upload step ended without a result", traceId });
                 res.off("close", abortIfDropped);
                 // A continuable checkpoint keeps the permit for the next step.
