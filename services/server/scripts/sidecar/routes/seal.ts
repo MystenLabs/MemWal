@@ -13,6 +13,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import express, { type Express, type Response as ExpressResponse } from "express";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
@@ -168,9 +169,32 @@ async function resolveSessionKey(req: express.Request, packageId: string): Promi
   });
 }
 
+const ACCOUNT_READ_ATTEMPTS = 4;
+
+/**
+ * Read-only, so any transient failure is safe to retry. Covers the gRPC-web
+ * transport's bare "fetch failed" (dropped connection, no status code), which
+ * the shared classifier does not treat as retryable. One such drop failed a
+ * whole remember before any paid work (bench-w7-pr1055-204e580-100-20261001).
+ */
+export async function readSealAccountWithRetry<T>(
+  read: () => Promise<T>,
+  sleep: (ms: number) => Promise<unknown> = delay,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await read();
+    } catch (err) {
+      const transient = isRetryableRpcError(err) || errorMessage(err).toLowerCase().includes("fetch failed");
+      if (!transient || attempt >= ACCOUNT_READ_ATTEMPTS) throw err;
+      await sleep(500 * 2 ** (attempt - 1));
+    }
+  }
+}
+
 const accountReader = {
   async getObject(input: { objectId: string; include: { json: true } }) {
-    return await suiClient.getObject(input);
+    return await readSealAccountWithRetry(() => suiClient.getObject(input));
   },
 };
 
