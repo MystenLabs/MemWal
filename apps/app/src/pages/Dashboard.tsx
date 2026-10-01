@@ -479,6 +479,16 @@ export default function Dashboard({
         scrollToDelegateKeys()
     }, [autoScrollToKeys, isKeyListLoading, scrollToDelegateKeys])
 
+    // A first mint in this browser also saves the key, which mounts the SDK
+    // credentials card above the delegate keys section and pushes the one-time
+    // key block off screen (WALM-743). Bring the block back into view once it
+    // renders, so the user sees the key they must copy now.
+    const newKeyBlockRef = useRef<HTMLDivElement>(null)
+    useEffect(() => {
+        if (!newPrivateKey) return
+        newKeyBlockRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, [newPrivateKey])
+
     // Two distinct Console arrivals gate the same dialog: a key action
     // (mint or revoke) from /keys (fromKeys), or a brand-new account that
     // just finished /setup after coming from Console's "Set up"
@@ -1412,7 +1422,11 @@ const result = await generateText({
                         </div>
                     )}
                     {newPrivateKey && (
-                        <div className="dashboard-key-ready-block" data-analytics-sensitive="new-delegate-private-key">
+                        <div
+                            ref={newKeyBlockRef}
+                            className="dashboard-key-ready-block"
+                            data-analytics-sensitive="new-delegate-private-key"
+                        >
                             <div className="warning-box dashboard-key-ready-warning">
                                 <TriangleAlert className="dashboard-key-ready-warning-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                                 <p>
