@@ -267,7 +267,8 @@ async fn finish_connect_episode(state: &AppState, headers: &HeaderMap) {
         return;
     };
     let started = state.mcp_connect_episodes.write().await.remove(id);
-    let Some(started) = started.filter(|s| crate::observability::connect_episode_is_fresh(*s)) else {
+    let Some(started) = started.filter(|s| crate::observability::connect_episode_is_fresh(*s))
+    else {
         return;
     };
     let waited = started.elapsed();
@@ -342,7 +343,12 @@ async fn legacy_delegate_registered(
         return refuse(HandshakeRejection::NoAccountHeader, route, headers, None);
     };
     let Some(pk) = public_key_from_delegate_hex(token) else {
-        return refuse(HandshakeRejection::MalformedDelegateKey, route, headers, None);
+        return refuse(
+            HandshakeRejection::MalformedDelegateKey,
+            route,
+            headers,
+            None,
+        );
     };
     // Cached: this runs on the SSE handshake and on every JSON-RPC envelope,
     // so an uncached read here is one fullnode call per envelope.
@@ -595,11 +601,7 @@ pub async fn sse_proxy(
             // Dropping it here left the client with no ETA and the wrong
             // remediation, since it could not tell a timed cap from a
             // concurrency one.
-            "content-type"
-                | "cache-control"
-                | "www-authenticate"
-                | "connection"
-                | "retry-after"
+            "content-type" | "cache-control" | "www-authenticate" | "connection" | "retry-after"
         ) {
             if let (Ok(n), Ok(v)) = (
                 HeaderName::from_bytes(name.as_str().as_bytes()),
@@ -947,9 +949,9 @@ mod tests {
             ]
         );
         assert!(
-            codes.iter().all(|c| c
-                .chars()
-                .all(|ch| ch.is_ascii_lowercase() || ch == '_')),
+            codes
+                .iter()
+                .all(|c| c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_')),
             "low-cardinality snake_case only — never a token or an account"
         );
     }

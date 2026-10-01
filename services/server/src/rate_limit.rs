@@ -457,14 +457,25 @@ fn dev_chatgpt_owner_exempt(
         && strip_0x(owner).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX)
 }
 
+/// Staging-only exemption for the exact owner addresses listed in
+/// `MEMWAL_STAGING_CHATGPT_UNMETERED_OWNER` (comma-separated). A burst test
+/// needs a fresh owner per setup (for example one that is also an upload
+/// wallet). Without a configurable list the only way to run one was turning
+/// the limiter off for every caller. Every other owner stays metered, and no
+/// value has any effect outside staging.
 fn staging_chatgpt_owner_exempt(
     owner: &str,
     configured: Option<&str>,
     environment: Option<&str>,
 ) -> bool {
+    let owner = strip_0x(owner.trim());
     environment.map(str::trim) == Some("staging")
-        && configured.is_some_and(|c| strip_0x(c).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX))
-        && strip_0x(owner).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX)
+        && !owner.is_empty()
+        && configured.is_some_and(|list| {
+            list.split(',')
+                .map(|entry| strip_0x(entry.trim()))
+                .any(|entry| !entry.is_empty() && entry.eq_ignore_ascii_case(owner))
+        })
 }
 
 fn owner_is_dev_bench_unmetered(owner: &str) -> bool {
@@ -2109,6 +2120,38 @@ mod tests {
         assert!(!super::staging_chatgpt_owner_exempt(
             "0xdead",
             Some(owner),
+            Some("staging")
+        ));
+    }
+
+    #[test]
+    fn staging_exempts_only_the_listed_owners() {
+        let a = "0x5e13406b8084251ce56d87dd7b7da264e50148d56432c798fd91612212ff2796";
+        let b = "2c8a8c8759dc0db1f3f8d31db6153103d9de8db3290e398a9ccb2f24167e6ab5";
+        let list = format!(" {a}, {b} ,");
+        assert!(super::staging_chatgpt_owner_exempt(
+            a,
+            Some(&list),
+            Some("staging")
+        ));
+        assert!(super::staging_chatgpt_owner_exempt(
+            &format!("0x{b}"),
+            Some(&list),
+            Some("staging")
+        ));
+        assert!(!super::staging_chatgpt_owner_exempt(
+            "0x158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7",
+            Some(&list),
+            Some("staging")
+        ));
+        assert!(!super::staging_chatgpt_owner_exempt(
+            a,
+            Some(&list),
+            Some("production")
+        ));
+        assert!(!super::staging_chatgpt_owner_exempt(
+            "",
+            Some(",,"),
             Some("staging")
         ));
     }
