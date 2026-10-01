@@ -1054,6 +1054,7 @@ pub(crate) async fn execute_wallet_job(
             // that is actually full. Before register is submitted the journal
             // can move onto a wallet that is free right now. A congestion
             // resume must not: the prepared bytes may already be in flight.
+            let mut claimed_slot = None;
             if let Some(job_id) = remember_job_id.as_deref() {
                 let mut journal = load_upload_journal(state.db.pool(), job_id, wallet_index)
                     .await
@@ -1072,7 +1073,10 @@ pub(crate) async fn execute_wallet_job(
                             .await
                             .map_err(WalletJobError::into_apalis_error)?;
                     }
-                } else if let Some(free) = state.key_pool.least_loaded_index() {
+                } else if let Some(claim) = state.key_pool.claim_least_loaded() {
+                    // Claimed before the await below, so a concurrent worker
+                    // cannot pick the same idle wallet in the meantime.
+                    let free = claim.index();
                     let from = journal.wallet_index;
                     if steer_uncommitted_upload_wallet(&mut journal, free) {
                         persist_upload_journal(state.db.pool(), job_id, &journal)
@@ -1086,6 +1090,9 @@ pub(crate) async fn execute_wallet_job(
                             );
                     }
                     wallet_index = journal.wallet_index;
+                    if claim.index() == wallet_index {
+                        claimed_slot = Some(claim);
+                    }
                 }
             }
             // Mark this wallet busy for the rest of the attempt, so a
@@ -1093,7 +1100,10 @@ pub(crate) async fn execute_wallet_job(
             // queueing behind this upload. Held by guard rather than paired
             // calls because every return below — and there are many — has to
             // release it.
-            let _wallet_slot = state.key_pool.begin_attempt(wallet_index);
+            let _wallet_slot = match claimed_slot {
+                Some(claim) => claim,
+                None => state.key_pool.begin_attempt(wallet_index),
+            };
 
             if wallet_index != enqueued_wallet_index || attempt_info.current > 1 {
                 tracing::info!(

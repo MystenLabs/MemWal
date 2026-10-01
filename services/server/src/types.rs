@@ -375,6 +375,31 @@ impl KeyPool {
         }
     }
 
+    /// Picks the least-loaded key and marks it busy in one step.
+    ///
+    /// `least_loaded_index` followed later by `begin_attempt` leaves a gap.
+    /// Every worker choosing inside that gap sees the same idle wallet, steers
+    /// its job there, and pins it. On staging one wallet took 27 of a
+    /// 100-job burst while most others got 3, and the run lasted as long as
+    /// that one queue (bench-w9-merged-9e9a10c-r1). The compare-exchange makes
+    /// the loser of a tie re-scan and see the wallet as taken.
+    pub fn claim_least_loaded(self: &Arc<Self>) -> Option<WalletAttemptGuard> {
+        loop {
+            let index = self.least_loaded_index()?;
+            let slot = &self.inflight[index];
+            let seen = slot.load(Ordering::Relaxed);
+            if slot
+                .compare_exchange(seen, seen + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(WalletAttemptGuard {
+                    pool: Arc::clone(self),
+                    index,
+                });
+            }
+        }
+    }
+
     /// In-flight count per key. Observability only.
     pub fn inflight_snapshot(&self) -> Vec<usize> {
         self.inflight
@@ -413,6 +438,12 @@ impl KeyPool {
 pub struct WalletAttemptGuard {
     pool: Arc<KeyPool>,
     index: usize,
+}
+
+impl WalletAttemptGuard {
+    pub fn index(&self) -> usize {
+        self.index
+    }
 }
 
 impl Drop for WalletAttemptGuard {
@@ -2840,6 +2871,27 @@ mod tests {
 
     fn pool(n: usize) -> Arc<KeyPool> {
         Arc::new(KeyPool::new((0..n).map(|i| format!("key{i}")).collect()))
+    }
+
+    #[test]
+    fn claiming_a_free_wallet_takes_it_before_the_next_worker_looks() {
+        // bench-w9-merged-9e9a10c-r1: one wallet took 27 of 100 jobs because
+        // every worker choosing in the same instant saw the same idle wallet.
+        let pool = pool(3);
+        let _a = pool.begin_attempt(0);
+        let _b = pool.begin_attempt(1);
+        // Plain lookups herd: both see wallet 2 as the only idle one.
+        assert_eq!(pool.least_loaded_index().unwrap(), 2);
+        assert_eq!(pool.least_loaded_index().unwrap(), 2);
+        // Claims do not: the first takes 2, the second sees 2 as busy.
+        let first = pool.claim_least_loaded().unwrap();
+        let second = pool.claim_least_loaded().unwrap();
+        assert_eq!(first.index(), 2);
+        assert_ne!(second.index(), 2);
+        assert_eq!(pool.inflight_snapshot().iter().sum::<usize>(), 4);
+        drop(first);
+        drop(second);
+        assert_eq!(pool.inflight_snapshot(), vec![1, 1, 0]);
     }
 
     #[test]
