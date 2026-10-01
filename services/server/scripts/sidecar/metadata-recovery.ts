@@ -28,6 +28,12 @@ function ownerIs(recipient: unknown, expected: string): boolean {
  * Skip a blob only when the target already owns it AND the memwal metadata
  * matches this request. The relayer must not sign as that target, and must
  * not submit another uploader transfer for a step that already landed.
+ *
+ * When the target is also the signer (the owner is a pool wallet), register
+ * already left the blob with that address, so ownership is not a receipt.
+ * Register's tags also look the same as a finished write. Sign the metadata
+ * step instead: it is idempotent, and it is the only step that adds the
+ * agent id and the SEAL persistence fence. A tag that disagrees still fails.
  */
 export async function recoverMetadataBatch<T extends MetadataRecoveryBlob>(
     blobs: T[],
@@ -45,11 +51,17 @@ export async function recoverMetadataBatch<T extends MetadataRecoveryBlob>(
             const metadata = new Map(receipt.metadata.map(({ key, value }) => [key, value]));
             const metadataOwner = suiAddress(metadata.get("memwal_owner"));
             const metadataPackage = suiAddress(metadata.get("memwal_package_id"));
+            const metadataAgent = metadata.get("memwal_agent_id");
+            const signerIsOwner = suiAddress(signer) === suiAddress(owner);
             if (metadata.get("memwal_namespace") !== (blob.namespace || "default")
                 || metadataOwner !== suiAddress(owner)
                 || (packageId !== undefined && metadataPackage !== suiAddress(packageId))
-                || (agentId !== undefined && metadata.get("memwal_agent_id") !== agentId)) {
+                || (agentId !== undefined && metadataAgent !== undefined && metadataAgent !== agentId)
+                || (agentId !== undefined && metadataAgent === undefined && !signerIsOwner)) {
                 throw new Error(`METADATA_RECEIPT_MISMATCH: ${blob.blobObjectId}`);
+            }
+            if (signerIsOwner) {
+                pending.push(blob);
             }
             continue;
         }

@@ -108,3 +108,50 @@ test("target ownership with different metadata is not treated as done", async ()
         /METADATA_RECEIPT_MISMATCH: 0xlanded/,
     );
 });
+
+// Staging bench-100k-20260930: the owner was uploader wallet #5, so register
+// left the blob with the owner and wrote only its own tags. Treating that as a
+// finished transfer failed every job on that wallet with METADATA_RECEIPT_MISMATCH.
+const registerOnly = (owner: string) => ({
+    owner: { AddressOwner: owner },
+    metadata: [
+        { key: "memwal_namespace", value: "bench" },
+        { key: "memwal_owner", value: owner },
+        { key: "memwal_package_id", value: pkg },
+        { key: "memwal_job_id", value: "job-1" },
+    ],
+});
+
+for (const agentId of [agent, undefined]) {
+    test(`owner that is the upload wallet still gets its metadata step (agentId ${agentId ? "set" : "unset"})`, async () => {
+        const signed: string[] = [];
+        const result = await recoverMetadataBatch(
+            [{ blobObjectId: "0xself", namespace: "bench" }],
+            target,
+            target,
+            pkg,
+            agentId,
+            async () => registerOnly(target),
+            async (blobs) => {
+                signed.push(...blobs.map((blob) => blob.blobObjectId));
+                return "digest-self";
+            },
+        );
+        assert.deepEqual(signed, ["0xself"]);
+        assert.equal(result.transferStatus, "ok");
+    });
+}
+
+test("owner that is the upload wallet with a conflicting tag still fails", async () => {
+    const conflicting = registerOnly(target);
+    conflicting.metadata[0] = { key: "memwal_namespace", value: "other-ns" };
+    await assert.rejects(
+        () => recoverMetadataBatch(
+            [{ blobObjectId: "0xself", namespace: "bench" }],
+            target, target, pkg, agent,
+            async () => conflicting,
+            async () => "nope",
+        ),
+        /METADATA_RECEIPT_MISMATCH: 0xself/,
+    );
+});
