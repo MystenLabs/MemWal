@@ -189,11 +189,11 @@ test("Seal key-fetch errors preserve budget only for identified outages", () => 
 
 // bench-w7-pr1055-204e580-100-20261001: one remember failed before any paid
 // work on a bare gRPC "fetch failed" from the Seal account read.
-test("Seal account read retries a dropped connection and stops on a real error", async () => {
-    const { readSealAccountWithRetry } = await import("../sidecar/routes/seal.js");
+test("Seal encrypt-side RPC retries a dropped connection and stops on a real error", async () => {
+    const { retryTransientSealRpc } = await import("../sidecar/routes/seal.js");
     const noWait = async () => {};
     let calls = 0;
-    const value = await readSealAccountWithRetry(async () => {
+    const value = await retryTransientSealRpc(async () => {
         calls += 1;
         if (calls < 3) throw Object.assign(new Error("fetch failed"), { name: "RpcError" });
         return "account";
@@ -203,7 +203,7 @@ test("Seal account read retries a dropped connection and stops on a real error",
 
     let permanentCalls = 0;
     await assert.rejects(
-        readSealAccountWithRetry(async () => {
+        retryTransientSealRpc(async () => {
             permanentCalls += 1;
             throw new Error("object 0x1 is not a MemWalAccount");
         }, noWait),
@@ -213,7 +213,7 @@ test("Seal account read retries a dropped connection and stops on a real error",
 
     let droppedCalls = 0;
     await assert.rejects(
-        readSealAccountWithRetry(async () => {
+        retryTransientSealRpc(async () => {
             droppedCalls += 1;
             throw new Error("fetch failed");
         }, noWait),

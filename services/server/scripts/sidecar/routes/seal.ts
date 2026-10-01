@@ -172,12 +172,15 @@ async function resolveSessionKey(req: express.Request, packageId: string): Promi
 const ACCOUNT_READ_ATTEMPTS = 4;
 
 /**
- * Read-only, so any transient failure is safe to retry. Covers the gRPC-web
- * transport's bare "fetch failed" (dropped connection, no status code), which
- * the shared classifier does not treat as retryable. One such drop failed a
- * whole remember before any paid work (bench-w7-pr1055-204e580-100-20261001).
+ * For Seal encrypt-side calls with no side effects: the MemWalAccount read and
+ * the encrypt itself (key-server object reads; a retry only yields a fresh
+ * ciphertext). Covers the gRPC-web transport's bare "fetch failed" (dropped
+ * connection, no status code), which the shared classifier does not retry.
+ * One such drop failed a whole remember before any paid work in each of
+ * bench-w7-pr1055-204e580-100 (account read) and
+ * bench-w9-merged-9e9a10c-r3 (encrypt).
  */
-export async function readSealAccountWithRetry<T>(
+export async function retryTransientSealRpc<T>(
   read: () => Promise<T>,
   sleep: (ms: number) => Promise<unknown> = delay,
 ): Promise<T> {
@@ -194,7 +197,7 @@ export async function readSealAccountWithRetry<T>(
 
 const accountReader = {
   async getObject(input: { objectId: string; include: { json: true } }) {
-    return await readSealAccountWithRetry(() => suiClient.getObject(input));
+    return await retryTransientSealRpc(() => suiClient.getObject(input));
   },
 };
 
@@ -287,12 +290,12 @@ export function registerSealRoutes(app: Express, policy = DEFAULT_SEAL_ROUTE_POL
 
           phase = "encrypt";
           const plaintext = Buffer.from(data, "base64");
-                const result = await sealEncryptClient.encrypt({
+                const result = await retryTransientSealRpc(() => sealEncryptClient.encrypt({
             threshold: SEAL_THRESHOLD,
             packageId: identity.immutablePackageId,
                     id: buildSealEncryptId(identity.owner, identity.accessCounterVersion),
             data: new Uint8Array(plaintext),
-          });
+          }));
 
                 const encryptedBase64 = Buffer.from(result.encryptedObject).toString("base64");
           res.json({ encryptedData: encryptedBase64 });
