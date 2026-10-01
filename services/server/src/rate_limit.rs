@@ -401,103 +401,6 @@ fn rate_limiter_unavailable_response() -> Response {
 // Rate Limit Middleware
 // ============================================================
 
-/// One mainnet owner used for a local write benchmark. Request-rate buckets
-/// skip this address only. Storage quota still applies.
-const UNMETERED_OWNER_HEX: &str =
-    "158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7";
-
-pub(crate) fn owner_is_unmetered(owner: &str) -> bool {
-    let trimmed = owner.trim();
-    let hex = if trimmed.len() >= 2 && trimmed.as_bytes()[..2].eq_ignore_ascii_case(b"0x") {
-        &trimmed[2..]
-    } else {
-        trimmed
-    };
-    hex.eq_ignore_ascii_case(UNMETERED_OWNER_HEX)
-}
-
-/// Dev burst benchmark owner. Only the write-path request-rate buckets in
-/// `rate_limit_middleware` skip it, and only on the Railway `dev` environment
-/// with `MEMWAL_DEV_BENCH_UNMETERED_OWNER` set to this exact address.
-/// Authentication, storage quota, sponsor, read-API and restore limits are
-/// unchanged, and every other owner is metered as before.
-const DEV_BENCH_UNMETERED_OWNER_HEX: &str =
-    "8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e76";
-
-fn strip_0x(value: &str) -> &str {
-    let trimmed = value.trim();
-    if trimmed.len() >= 2 && trimmed.as_bytes()[..2].eq_ignore_ascii_case(b"0x") {
-        &trimmed[2..]
-    } else {
-        trimmed
-    }
-}
-
-fn dev_bench_owner_exempt(
-    owner: &str,
-    configured: Option<&str>,
-    environment: Option<&str>,
-) -> bool {
-    environment.map(str::trim) == Some("dev")
-        && configured
-            .is_some_and(|c| strip_0x(c).eq_ignore_ascii_case(DEV_BENCH_UNMETERED_OWNER_HEX))
-        && strip_0x(owner).eq_ignore_ascii_case(DEV_BENCH_UNMETERED_OWNER_HEX)
-}
-
-const DEV_CHATGPT_OWNER_HEX: &str =
-    "2c8a8c8759dc0db1f3f8d31db6153103d9de8db3290e398a9ccb2f24167e6ab5";
-
-fn dev_chatgpt_owner_exempt(
-    owner: &str,
-    configured: Option<&str>,
-    environment: Option<&str>,
-) -> bool {
-    environment.map(str::trim) == Some("dev")
-        && configured.is_some_and(|c| strip_0x(c).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX))
-        && strip_0x(owner).eq_ignore_ascii_case(DEV_CHATGPT_OWNER_HEX)
-}
-
-/// Staging-only exemption for the exact owner addresses listed in
-/// `MEMWAL_STAGING_CHATGPT_UNMETERED_OWNER` (comma-separated). A burst test
-/// needs a fresh owner per setup (for example one that is also an upload
-/// wallet). Without a configurable list the only way to run one was turning
-/// the limiter off for every caller. Every other owner stays metered, and no
-/// value has any effect outside staging.
-fn staging_chatgpt_owner_exempt(
-    owner: &str,
-    configured: Option<&str>,
-    environment: Option<&str>,
-) -> bool {
-    let owner = strip_0x(owner.trim());
-    environment.map(str::trim) == Some("staging")
-        && !owner.is_empty()
-        && configured.is_some_and(|list| {
-            list.split(',')
-                .map(|entry| strip_0x(entry.trim()))
-                .any(|entry| !entry.is_empty() && entry.eq_ignore_ascii_case(owner))
-        })
-}
-
-fn owner_is_dev_bench_unmetered(owner: &str) -> bool {
-    static GATE: std::sync::OnceLock<(
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = std::sync::OnceLock::new();
-    let (configured, environment, chatgpt, staging_chatgpt) = GATE.get_or_init(|| {
-        (
-            std::env::var("MEMWAL_DEV_BENCH_UNMETERED_OWNER").ok(),
-            std::env::var("RAILWAY_ENVIRONMENT_NAME").ok(),
-            std::env::var("MEMWAL_DEV_CHATGPT_UNMETERED_OWNER").ok(),
-            std::env::var("MEMWAL_STAGING_CHATGPT_UNMETERED_OWNER").ok(),
-        )
-    });
-    dev_bench_owner_exempt(owner, configured.as_deref(), environment.as_deref())
-        || dev_chatgpt_owner_exempt(owner, chatgpt.as_deref(), environment.as_deref())
-        || staging_chatgpt_owner_exempt(owner, staging_chatgpt.as_deref(), environment.as_deref())
-}
-
 /// Multi-layer rate limiting middleware for the write-path authenticated
 /// routes (`/api/*`, mounted on `protected_routes` in `main.rs`).
 ///
@@ -544,9 +447,6 @@ pub async fn rate_limit_middleware(
             return next.run(request).await;
         }
     };
-    if owner_is_unmetered(&auth.owner) || owner_is_dev_bench_unmetered(&auth.owner) {
-        return next.run(request).await;
-    }
 
     let config = &state.config.rate_limit;
     let mut redis = state.redis.clone();
@@ -784,9 +684,6 @@ pub async fn read_api_rate_limit_middleware(
             return next.run(request).await;
         }
     };
-    if owner_is_unmetered(&auth.owner) {
-        return next.run(request).await;
-    }
 
     let config = &state.config.read_api_rate_limit;
     let mut redis = state.redis.clone();
@@ -1039,7 +936,7 @@ pub(crate) async fn check_restore_call_rate_limit(
     owner: &str,
 ) -> Result<(), AppError> {
     let limit = state.config.restore_requests_per_owner_per_minute;
-    if limit == 0 || owner_is_unmetered(owner) {
+    if limit == 0 {
         return Ok(());
     }
 
@@ -1188,7 +1085,7 @@ pub async fn charge_explicit_weight(
     weight: i64,
     _path: &str,
 ) -> Result<(), AppError> {
-    if weight <= 0 || owner_is_unmetered(&auth.owner) {
+    if weight <= 0 {
         return Ok(());
     }
 
@@ -2027,9 +1924,6 @@ pub async fn check_owner_token_owner_rate_limit(
     per_minute: i64,
     per_hour: i64,
 ) -> Result<SponsorRlResult, ()> {
-    if owner_is_unmetered(owner) {
-        return Ok(SponsorRlResult::Allowed);
-    }
     let now = chrono::Utc::now().timestamp_millis() as f64;
     let mut redis = state.redis.clone();
 
@@ -2100,128 +1994,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chatgpt_owner_requires_staging_gate_on_staging() {
-        let owner = super::DEV_CHATGPT_OWNER_HEX;
-        assert!(super::staging_chatgpt_owner_exempt(
-            owner,
-            Some(owner),
-            Some("staging")
-        ));
-        assert!(!super::staging_chatgpt_owner_exempt(
-            owner,
-            Some(owner),
-            Some("dev")
-        ));
-        assert!(!super::staging_chatgpt_owner_exempt(
-            owner,
-            None,
-            Some("staging")
-        ));
-        assert!(!super::staging_chatgpt_owner_exempt(
-            "0xdead",
-            Some(owner),
-            Some("staging")
-        ));
-    }
-
-    #[test]
-    fn staging_exempts_only_the_listed_owners() {
-        let a = "0x5e13406b8084251ce56d87dd7b7da264e50148d56432c798fd91612212ff2796";
-        let b = "2c8a8c8759dc0db1f3f8d31db6153103d9de8db3290e398a9ccb2f24167e6ab5";
-        let list = format!(" {a}, {b} ,");
-        assert!(super::staging_chatgpt_owner_exempt(
-            a,
-            Some(&list),
-            Some("staging")
-        ));
-        assert!(super::staging_chatgpt_owner_exempt(
-            &format!("0x{b}"),
-            Some(&list),
-            Some("staging")
-        ));
-        assert!(!super::staging_chatgpt_owner_exempt(
-            "0x158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7",
-            Some(&list),
-            Some("staging")
-        ));
-        assert!(!super::staging_chatgpt_owner_exempt(
-            a,
-            Some(&list),
-            Some("production")
-        ));
-        assert!(!super::staging_chatgpt_owner_exempt(
-            "",
-            Some(",,"),
-            Some("staging")
-        ));
-    }
-
-    #[test]
-    fn chatgpt_owner_requires_its_own_dev_gate() {
-        let owner = super::DEV_CHATGPT_OWNER_HEX;
-        assert!(super::dev_chatgpt_owner_exempt(
-            owner,
-            Some(owner),
-            Some("dev")
-        ));
-        for environment in [None, Some("staging"), Some("production")] {
-            assert!(!super::dev_chatgpt_owner_exempt(
-                owner,
-                Some(owner),
-                environment
-            ));
-        }
-        assert!(!super::dev_chatgpt_owner_exempt(owner, None, Some("dev")));
-        assert!(!super::dev_chatgpt_owner_exempt(
-            owner,
-            Some("wrong"),
-            Some("dev")
-        ));
-        assert!(!super::dev_chatgpt_owner_exempt(
-            super::DEV_BENCH_UNMETERED_OWNER_HEX,
-            Some(owner),
-            Some("dev")
-        ));
-        assert!(!dev_bench_owner_exempt(owner, Some(owner), Some("dev")));
-        assert!(!owner_is_unmetered(owner));
-    }
-
-    #[test]
-    fn dev_bench_owner_is_exempt_only_on_gated_dev() {
-        let owner = "0x8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e76";
-        let control = "0xca86ab64c16e3a401f962d0846a80ed57bb23fbe74d5f0a8fba70312b65b2998";
-        let gate = Some(owner);
-        assert!(dev_bench_owner_exempt(owner, gate, Some("dev")));
-        assert!(dev_bench_owner_exempt(
-            &owner.to_uppercase().replacen("0X", "0x", 1),
-            gate,
-            Some("dev")
-        ));
-        assert!(dev_bench_owner_exempt(
-            &owner[2..],
-            Some(&owner[2..]),
-            Some(" dev ")
-        ));
-        // Control owner stays metered, even on gated dev.
-        assert!(!dev_bench_owner_exempt(control, gate, Some("dev")));
-        assert!(!dev_bench_owner_exempt(control, Some(control), Some("dev")));
-        // No gate, a wrong gate, or any other environment keeps the owner metered.
-        assert!(!dev_bench_owner_exempt(owner, None, Some("dev")));
-        assert!(!dev_bench_owner_exempt(owner, Some(""), Some("dev")));
-        assert!(!dev_bench_owner_exempt(owner, gate, Some("staging")));
-        assert!(!dev_bench_owner_exempt(owner, gate, Some("production")));
-        assert!(!dev_bench_owner_exempt(owner, gate, None));
-        // Near miss.
-        assert!(!dev_bench_owner_exempt(
-            "0x8afc5559a20d8b12dde835f4532bcd079e64ac2b390723cffd3af3323d0a6e77",
-            gate,
-            Some("dev")
-        ));
-        // The shared unmetered helper is unchanged by this owner.
-        assert!(!owner_is_unmetered(owner));
-    }
-
-    #[test]
     fn mcp_rate_limit_keys_do_not_share_the_accounts_budget() {
         let v4: std::net::IpAddr = "203.0.113.5".parse().unwrap();
         let mapped: std::net::IpAddr = "::ffff:203.0.113.5".parse().unwrap();
@@ -2236,22 +2008,6 @@ mod tests {
             assert!(!key.contains("accounts"), "{key}");
         }
     }
-
-    #[test]
-    fn only_one_owner_skips_rate_limits() {
-        assert!(owner_is_unmetered(
-            "0x158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7"
-        ));
-        assert!(owner_is_unmetered(
-            "158A78F06E4A85CDEF1A1F10BC30C41E4860C1A19F3B049A05098ACA588593E7"
-        ));
-        assert!(!owner_is_unmetered(
-            "0x158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e8"
-        ));
-        assert!(!owner_is_unmetered("0x158a78f0"));
-    }
-
-    // ---- Path normalization ----
 
     #[test]
     fn test_endpoint_weight_trailing_slash_normalized() {
