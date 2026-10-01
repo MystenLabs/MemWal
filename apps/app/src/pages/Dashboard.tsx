@@ -26,6 +26,7 @@ import { Card } from '../components/Card'
 import SecurityDeleteSection from '../components/SecurityDeleteSection'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
+import { accountReadyCopy } from '../utils/accountReadyCopy'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import { apiGet } from '../utils/api'
 import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
@@ -307,6 +308,11 @@ export default function Dashboard({
     // Revoke has no one-time secret to protect, so its dialog can open
     // immediately — same direct-reset reasoning as justMintedKey above.
     const [justRemovedKeys, setJustRemovedKeys] = useState(false)
+    // What the dialog reports for a /keys action (WALM-743). Captured when the
+    // action succeeds: the add-key form resets its label and the revoke
+    // confirm state clears before the dialog opens.
+    const [mintedKeyLabel, setMintedKeyLabel] = useState('')
+    const [removedKeyCount, setRemovedKeyCount] = useState(0)
 
     // WalletSigner adapter — wraps dapp-kit hooks into SDK's WalletSigner interface
     const walletSigner = useMemo<WalletSigner | null>(() => {
@@ -482,6 +488,15 @@ export default function Dashboard({
     const showAccountReadyDialog = Boolean(
         config.consoleUrl && !accountReadyDismissed && !removeKeysConfirm &&
         ((fromKeys && ((justMintedKey && !newPrivateKey) || justRemovedKeys)) || fromConsoleSetup)
+    )
+    // Mint and revoke clear each other's flag, so the latest key action picks
+    // the copy. A /setup arrival with no /keys action keeps the new-account copy.
+    const accountReadyDialogCopy = accountReadyCopy(
+        justRemovedKeys
+            ? { kind: 'revoke', count: removedKeyCount }
+            : fromKeys && justMintedKey
+                ? { kind: 'mint', label: mintedKeyLabel }
+                : null
     )
     const dismissAccountReadyDialog = useCallback(() => {
         setAccountReadyDismissed(true)
@@ -684,6 +699,7 @@ export default function Dashboard({
 
             const delegatePublicKeyHex = bytesToHex(delegate.publicKey)
             setNewPrivateKey(delegate.privateKey)
+            setMintedKeyLabel(trimmedLabel)
             setDelegateKeys(delegate.privateKey, delegatePublicKeyHex, effectiveAccountObjectId!)
             closeAddKeyForm()
             setNewKeyLabel('New key')
@@ -775,6 +791,7 @@ export default function Dashboard({
             // can already be true from an earlier dismissed dialog, in which
             // case setting it to true again wouldn't change the dependency
             // and an effect-based reset would silently no-op.
+            setRemovedKeyCount(publicKeyHexes.length)
             setJustRemovedKeys(true)
             setJustMintedKey(false)
             setAccountReadyDismissed(false)
@@ -1758,14 +1775,9 @@ const result = await generateText({
                             aria-describedby="dashboard-account-ready-description"
                         >
                             <div className="dashboard-confirm-copy dashboard-account-ready-body">
-                                {/* "Your account is ready" reads oddly after a revoke. */}
-                                <h3 id="dashboard-account-ready-title">
-                                    {justRemovedKeys ? 'Your keys are updated' : 'Your account is ready'}
-                                </h3>
+                                <h3 id="dashboard-account-ready-title">{accountReadyDialogCopy.title}</h3>
                                 <p id="dashboard-account-ready-description">
-                                    {justRemovedKeys
-                                        ? 'Head back to Walrus Console to see the change.'
-                                        : 'Finish connecting your account in Walrus Console.'}
+                                    {accountReadyDialogCopy.description}
                                 </p>
                             </div>
                             <div className="dashboard-confirm-actions dashboard-account-ready-actions">
