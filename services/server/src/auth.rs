@@ -10,9 +10,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::owner_token_auth;
-use crate::storage::sui::{
-    find_account_by_delegate_key, verify_delegate_key_cached, OnchainVerifyError,
-};
+use crate::storage::sui::{verify_delegate_key_cached, OnchainVerifyError};
 use crate::types::{AppState, AuthInfo};
 
 /// Maximum signed-JSON body the auth middleware will buffer before computing
@@ -33,7 +31,9 @@ pub(crate) const PROTECTED_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 /// Flow:
 /// 1. Verify Ed25519 signature:
 ///    `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`
-/// 2. Resolve account: cache → signed header hint/config fallback → registry scan
+/// 2. Resolve account: cache → signed `x-account-id` or `MEMWAL_ACCOUNT_ID`.
+///    A cold key with neither is rejected. The relayer does not scan
+///    AccountRegistry.
 /// 3. Verify onchain: public_key ∈ MemWalAccount.delegate_keys
 /// 4. Cache the mapping for future requests
 /// 5. Store AuthInfo { public_key, owner } in request extensions
@@ -390,7 +390,8 @@ pub async fn verify_signature(
         }
     }
 
-    // Step 2: Resolve account — cache → signed header hint/config fallback → registry scan
+    // Step 2: Resolve account — cache, then the signed account id or
+    // MEMWAL_ACCOUNT_ID. No registry scan.
     // Identity failures stay on constant_time_reject (bare 401) so "account not
     // found" vs "key not in account" cannot be timed. RPC/scan unavailability
     // is 503: a Sui 429 is not a revoke (WALM-429).
@@ -446,12 +447,14 @@ fn cached_row_answers_request(cached_account_id: &str, requested_account_id: Opt
     }
 }
 
-/// Resolve a delegate key to its account using multiple strategies:
-/// 1. PostgreSQL cache (fastest)
-/// 2. Signed header hint or config fallback (single-object verification)
-/// 3. On-chain registry scan (slower, auto-discovery fallback)
+/// Resolve a delegate key to its account.
 ///
-/// After successful resolution, the mapping is cached for future requests.
+/// 1. PostgreSQL cache.
+/// 2. Signed `x-account-id`, or `MEMWAL_ACCOUNT_ID` when the header is absent.
+///    Either way this is one object read, not a registry walk.
+///
+/// A cold key with no account id is rejected. A successful resolution is
+/// cached for later requests.
 #[tracing::instrument(name = "auth.resolve_account", skip_all)]
 async fn resolve_account(
     state: &AppState,
@@ -544,12 +547,9 @@ async fn resolve_account(
         }
     }
 
-    // Strategy 2: Use exact account hint/config fallback before any registry scan.
-    //
-    // Modern SDKs always send x-account-id and sign it in the
-    // canonical signature, so an intermediary cannot swap this hint. Verifying
-    // the signed object directly avoids an expensive AccountRegistry scan that
-    // fetches many account objects on cache miss.
+    // Strategy 2: signed x-account-id, or MEMWAL_ACCOUNT_ID when the header
+    // is absent. The id is part of the canonical signature, so an
+    // intermediary cannot swap it. This reads that one account object.
     if let Some(exact_account_id) = account_id_hint
         .as_deref()
         .or(state.config.memwal_account_id.as_deref())
@@ -593,69 +593,12 @@ async fn resolve_account(
         }
     }
 
-    // Strategy 3: The legacy registry scan uses JSON-RPC. Testnet no longer
-    // serves JSON-RPC, so fail closed when a modern signed x-account-id hint
-    // is absent instead of silently contacting a retired endpoint.
-    if state.config.sui_network == "testnet" {
-        return Err(AccountResolveError::Unauthorized(
-            "x-account-id is required for delegate-key authentication on testnet".to_string(),
-        ));
-    }
-
-    // Non-testnet compatibility path: scan AccountRegistry only when no exact
-    // account id is available. The scan runs before the rate limiter, so use
-    // an in-process concurrency permit so
-    // unknown-key floods can't stack unbounded scans, and a per-scan page
-    // cap (MEMWAL_REGISTRY_SCAN_MAX_PAGES) inside the scan itself. Both
-    // rejection messages name the x-account-id remediation, but they surface
-    // only in server logs: the middleware collapses identity failures to a
-    // bare 401 (no oracle) and RPC/scan unavailability to 503. A key past the
-    // page cap therefore cannot self-resolve — operators must diagnose the
-    // lockout from the warn logs and either raise the cap or have the client
-    // send the header hint, which Strategy 2 verifies directly without any
-    // scan.
-    let _scan_permit = match state.registry_scan_semaphore.try_acquire() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return Err(AccountResolveError::Unavailable(
-                "registry scan concurrency limit reached; retry, or send the x-account-id \
-                 header hint to skip the registry scan"
-                    .to_string(),
-            ));
-        }
-    };
-    match find_account_by_delegate_key(
-        &state.http_client,
-        &state.config.sui_rpc_url,
-        &state.config.registry_id,
-        pk_bytes,
-        &state.config.package_id,
-        state.config.registry_scan_max_pages,
-    )
-    .await
-    {
-        Ok((account_id, owner)) => {
-            // Cache for future requests
-            let _ = state
-                .db
-                .cache_delegate_key(public_key_hex, &account_id, &owner)
-                .await;
-            return Ok((account_id, owner));
-        }
-        Err(e) if e.is_unavailable() => {
-            tracing::warn!("registry scan unavailable: {}", e);
-            return Err(AccountResolveError::Unavailable(format!(
-                "{}; send the x-account-id header hint to authenticate without a scan",
-                e
-            )));
-        }
-        Err(e) => {
-            tracing::debug!("registry scan did not find key: {}", e);
-        }
-    }
-
+    // No signed account id and no MEMWAL_ACCOUNT_ID. Do not scan
+    // AccountRegistry. A cached key already returned above. Every network
+    // takes this path: testnet has no JSON-RPC, and mainnet's registry is
+    // too long for a sequential scan to finish inside a client timeout.
     Err(AccountResolveError::Unauthorized(
-        "no account found: not in cache, exact account id, or registry".to_string(),
+        "x-account-id is required for delegate-key authentication".to_string(),
     ))
 }
 

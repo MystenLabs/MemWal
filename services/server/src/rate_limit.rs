@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     storage::db::{StorageAdmission, StorageReservationRequest},
-    types::{AppError, AppState, AuthInfo},
+    types::{AppError, AppState, AuthInfo, McpRateLimitConfig},
 };
 
 // ============================================================
@@ -1361,7 +1361,10 @@ pub async fn check_global_accounts_rate_limit(
 /// Pre-authentication rate limiting middleware for the public
 /// `GET /api/accounts/{owner}/exists` route.
 ///
-/// MCP proxy routes under `/api/mcp` share this IP budget.
+/// Hosted MCP used to share this budget. It must not be mounted here again:
+/// `/api/mcp*` is on `mcp_rate_limit_middleware`, whose Redis keys are
+/// `rate:mcp:*`. This budget stays small because the route is an anonymous
+/// address-existence oracle.
 ///
 /// This is the only route in `public_routes` that reaches the DB pool
 /// (`max_connections(10)`) — `/health`, `/version`, `/config`, `/metrics`
@@ -1474,6 +1477,185 @@ pub async fn accounts_rate_limit_middleware(
         Ok(SponsorRlResult::HourLimitExceeded) => {
             return rate_limit_response(
                 "accounts_global_sustained",
+                config.global_per_hour,
+                "hour",
+                300,
+            );
+        }
+        Ok(SponsorRlResult::Allowed) => {}
+        Err(()) => return rate_limiter_unavailable_response(),
+    }
+
+    next.run(request).await
+}
+
+// ============================================================
+// Hosted MCP rate limit (own budget, one ceiling for every IP)
+// ============================================================
+
+fn mcp_ip_rate_keys(ip: std::net::IpAddr) -> (String, String) {
+    let ip = McpRateLimitConfig::normalize_ip(ip);
+    (
+        format!("rate:mcp:ip:min:{ip}"),
+        format!("rate:mcp:ip:hr:{ip}"),
+    )
+}
+
+const MCP_GLOBAL_MIN_KEY: &str = "rate:mcp:global:min";
+const MCP_GLOBAL_HR_KEY: &str = "rate:mcp:global:hr";
+
+/// Deployment-wide MCP cap. Same shape as `check_global_accounts_rate_limit`,
+/// but the keys must stay `rate:mcp:global:*` so MCP traffic cannot fill the
+/// accounts-exists windows.
+async fn check_global_mcp_rate_limit(
+    state: &crate::types::AppState,
+    per_minute: i64,
+    per_hour: i64,
+) -> Result<SponsorRlResult, ()> {
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let mut redis = state.redis.clone();
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    match check_and_record_window(
+        &mut redis,
+        MCP_GLOBAL_MIN_KEY,
+        min_window_start,
+        now,
+        per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => return Ok(SponsorRlResult::MinuteLimitExceeded),
+        Err(e) => {
+            tracing::error!("check_global_mcp_rate_limit: Redis error (minute): {}", e);
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_and_record_window(
+        &mut redis,
+        MCP_GLOBAL_HR_KEY,
+        hr_window_start,
+        now + 0.1,
+        per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => return Ok(SponsorRlResult::HourLimitExceeded),
+        Err(e) => {
+            tracing::error!("check_global_mcp_rate_limit: Redis error (hour): {}", e);
+            return Err(());
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    Ok(SponsorRlResult::Allowed)
+}
+
+/// Pre-authentication rate limit for `/api/mcp`, `/api/mcp/sse`, and
+/// `/api/mcp/messages`.
+///
+/// Every client IP uses the same `per_minute` / `per_hour` pair. There is
+/// no venue allowlist. Each request counts as 1, not a tool weight. The
+/// same request also counts toward the deployment-wide caps, which must
+/// stay higher than the per-IP caps. Bearer tokens are not exempt. Redis
+/// errors return 503, same as the accounts-exists limiter.
+/// `RATE_LIMIT_DISABLED=1` skips this, same as every other request-rate
+/// middleware.
+pub async fn mcp_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.config.rate_limit.bench_bypass_enabled {
+        return next.run(request).await;
+    }
+
+    let ip = McpRateLimitConfig::normalize_ip(rate_limit_peer_addr(
+        &request,
+        state.config.trusted_proxy_hops,
+    ));
+    let config = &state.config.mcp_rate_limit;
+
+    let mut redis = state.redis.clone();
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    let (min_key, hr_key) = mcp_ip_rate_keys(ip);
+    let min_window_start = now - 60_000.0;
+    let hr_window_start = now - 3_600_000.0;
+
+    match check_and_record_window(
+        &mut redis,
+        &min_key,
+        min_window_start,
+        now,
+        config.per_minute,
+        1,
+        120,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "mcp rate limit [IP/min]: ip={} denied (limit={})",
+                ip,
+                config.per_minute
+            );
+            return rate_limit_response("mcp_ip_burst", config.per_minute, "min", 60);
+        }
+        Err(e) => {
+            tracing::error!(
+                "mcp_rate_limit_middleware: Redis error (minute bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_and_record_window(
+        &mut redis,
+        &hr_key,
+        hr_window_start,
+        now + 0.1,
+        config.per_hour,
+        1,
+        3700,
+    )
+    .await
+    {
+        Ok(WindowCheckResult::Denied) => {
+            tracing::warn!(
+                "mcp rate limit [IP/hr]: ip={} denied (limit={})",
+                ip,
+                config.per_hour
+            );
+            return rate_limit_response("mcp_ip_sustained", config.per_hour, "hour", 300);
+        }
+        Err(e) => {
+            tracing::error!(
+                "mcp_rate_limit_middleware: Redis error (hour bucket): {}",
+                e
+            );
+            return rate_limiter_unavailable_response();
+        }
+        Ok(WindowCheckResult::Allowed) => {}
+    }
+
+    match check_global_mcp_rate_limit(&state, config.global_per_minute, config.global_per_hour)
+        .await
+    {
+        Ok(SponsorRlResult::MinuteLimitExceeded) => {
+            return rate_limit_response("mcp_global_burst", config.global_per_minute, "min", 60);
+        }
+        Ok(SponsorRlResult::HourLimitExceeded) => {
+            return rate_limit_response(
+                "mcp_global_sustained",
                 config.global_per_hour,
                 "hour",
                 300,
@@ -1811,7 +1993,21 @@ pub async fn check_owner_token_owner_rate_limit(
 mod tests {
     use super::*;
 
-    // ---- Path normalization ----
+    #[test]
+    fn mcp_rate_limit_keys_do_not_share_the_accounts_budget() {
+        let v4: std::net::IpAddr = "203.0.113.5".parse().unwrap();
+        let mapped: std::net::IpAddr = "::ffff:203.0.113.5".parse().unwrap();
+        let (min_a, hr_a) = mcp_ip_rate_keys(v4);
+        let (min_b, hr_b) = mcp_ip_rate_keys(mapped);
+        assert_eq!(min_a, min_b);
+        assert_eq!(hr_a, hr_b);
+        assert_eq!(min_a, "rate:mcp:ip:min:203.0.113.5");
+        assert_eq!(hr_a, "rate:mcp:ip:hr:203.0.113.5");
+        for key in [&min_a, &hr_a, MCP_GLOBAL_MIN_KEY, MCP_GLOBAL_HR_KEY] {
+            assert!(key.starts_with("rate:mcp:"), "{key}");
+            assert!(!key.contains("accounts"), "{key}");
+        }
+    }
 
     #[test]
     fn test_endpoint_weight_trailing_slash_normalized() {

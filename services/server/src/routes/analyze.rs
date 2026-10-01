@@ -562,7 +562,7 @@ pub async fn analyze(
                 let embed_fut = state.embedder.embed(&fact.text);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
-                    &state.config.sidecar_url,
+                    &state.config.seal_sidecar_url,
                     state.config.sidecar_secret.as_deref(),
                     fact.text.as_bytes(),
                     &owner,
