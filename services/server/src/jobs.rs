@@ -258,6 +258,261 @@ async fn update_remember_job_after_wallet_error(
     .await;
 }
 
+/// Record a metadata failure only while `status = 'uploaded'`, so the other
+/// helper still cannot clobber a winner.
+async fn record_uploaded_metadata_error(
+    pool: &sqlx::PgPool,
+    remember_job_id: Option<&str>,
+    error: &WalletJobError,
+    msg: &str,
+    attempt_info: WalletJobAttemptInfo,
+) {
+    let Some(jid) = remember_job_id else {
+        return;
+    };
+    let terminal = error.aborts_retries() || attempt_info.retries_exhausted(error);
+    if terminal {
+        // Release only if this statement is the one that failed the row.
+        // A concurrent winner may already have moved it to `done`, and a
+        // `running` row is the other helper's job.
+        let updated = sqlx::query(
+            "UPDATE remember_jobs SET status = 'failed', error_msg = $1, updated_at = NOW() WHERE id = $2 AND status = 'uploaded'",
+        )
+        .bind(msg)
+        .bind(jid)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected())
+        .unwrap_or(0);
+        if updated > 0 {
+            crate::storage::db::release_storage_reservations_with_pool(pool, &[jid.to_string()])
+                .await;
+        }
+        return;
+    }
+    let _ = sqlx::query(
+        "UPDATE remember_jobs SET error_msg = $1, updated_at = NOW() WHERE id = $2 AND status = 'uploaded'",
+    )
+    .bind(msg)
+    .bind(jid)
+    .execute(pool)
+    .await;
+}
+
+/// Persist a failed metadata attempt, then pause before Apalis polls again.
+///
+/// Apalis has no retry delay of its own. Without the pause, five attempts of
+/// the same dry-run land inside a couple of seconds.
+async fn finish_metadata_attempt_error(
+    state: &AppState,
+    remember_job_id: Option<&str>,
+    owner: &str,
+    namespace: &str,
+    wallet_index: usize,
+    err: WalletJobError,
+    attempt_info: WalletJobAttemptInfo,
+) -> WalletJobError {
+    let err = escalate_if_gas_pool_exhausted(err, attempt_info.current, attempt_info.max, 1);
+    let msg = err.to_string();
+    maybe_alert_walrus_gas_pool_exhausted(
+        state,
+        &err,
+        remember_job_id,
+        Some(owner),
+        Some(namespace),
+        wallet_index,
+        &msg,
+    )
+    .await;
+    update_remember_job_after_wallet_error(
+        state.db.pool(),
+        remember_job_id,
+        &err,
+        &msg,
+        Some(attempt_info),
+    )
+    .await;
+    record_uploaded_metadata_error(state.db.pool(), remember_job_id, &err, &msg, attempt_info)
+        .await;
+    tracing::error!(
+        "[wallet-job:set-metadata] job_id={} {} classification={} retryable={}",
+        remember_job_id.unwrap_or("-"),
+        msg,
+        err.kind(),
+        !err.aborts_retries()
+    );
+    if let Some(delay) = upload_retry_backoff(&err, attempt_info) {
+        tracing::info!(
+            "[wallet-job:set-metadata] job_id={} backing off {:?} before attempt {}/{}",
+            remember_job_id.unwrap_or("-"),
+            delay,
+            attempt_info.current + 1,
+            attempt_info.max,
+        );
+        tokio::time::sleep(delay).await;
+    }
+    err
+}
+
+/// Refresh `updated_at` on an `uploaded` row. Does not clear `error_msg`.
+///
+/// The permit wait is 8 minutes and the sidecar call is up to 5. Each fits
+/// in the 10-minute sweep; back to back they do not. The upload heartbeat
+/// only matches `status = 'running'`.
+async fn touch_uploaded_remember_job(pool: &sqlx::PgPool, remember_job_id: Option<&str>) {
+    let Some(jid) = remember_job_id else {
+        return;
+    };
+    let _ = sqlx::query(
+        "UPDATE remember_jobs SET updated_at = NOW() WHERE id = $1 AND status = 'uploaded'",
+    )
+    .bind(jid)
+    .execute(pool)
+    .await;
+}
+
+/// Next metadata attempt, still pinned to the wallet that owns the blob.
+#[allow(clippy::too_many_arguments)]
+fn metadata_congestion_retry_job(
+    wallet_index: usize,
+    congestion_requeues: u32,
+    blob_object_id: &str,
+    owner: &str,
+    namespace: &str,
+    package_id: Option<&str>,
+    agent_id: Option<&str>,
+    remember_job_id: Option<&str>,
+    blob_id: Option<&str>,
+    vector: Option<&[f32]>,
+    blob_size_bytes: Option<i64>,
+    importance: f32,
+    encrypted_b64: Option<&str>,
+    account_id: Option<&str>,
+    policy_package_id: Option<&str>,
+    end_epoch: Option<i32>,
+) -> WalletJob {
+    WalletJob {
+        wallet_index,
+        congestion_requeues: congestion_requeues + 1,
+        operation: WalletOperation::SetMetadataAndTransfer {
+            blob_object_id: blob_object_id.to_string(),
+            owner: owner.to_string(),
+            namespace: namespace.to_string(),
+            package_id: package_id.map(str::to_string),
+            agent_id: agent_id.map(str::to_string),
+            remember_job_id: remember_job_id.map(str::to_string),
+            blob_id: blob_id.map(str::to_string),
+            vector: vector.map(|values| values.to_vec()),
+            blob_size_bytes,
+            importance,
+            encrypted_b64: encrypted_b64.map(str::to_string),
+            account_id: account_id.map(str::to_string),
+            policy_package_id: policy_package_id.map(str::to_string),
+            end_epoch,
+        },
+    }
+}
+
+/// Park metadata on the congestion budget. `None` means this attempt should
+/// finish through Apalis. Does not call `update_remember_job_after_wallet_error`:
+/// its terminal branch releases the reservation before the status check.
+#[allow(clippy::too_many_arguments)]
+async fn schedule_metadata_congestion_retry(
+    state: &AppState,
+    wallet_index: usize,
+    congestion_requeues: u32,
+    err: &WalletJobError,
+    blob_object_id: &str,
+    owner: &str,
+    namespace: &str,
+    package_id: Option<&str>,
+    agent_id: Option<&str>,
+    remember_job_id: Option<&str>,
+    blob_id: Option<&str>,
+    vector: Option<&[f32]>,
+    blob_size_bytes: Option<i64>,
+    importance: f32,
+    encrypted_b64: Option<&str>,
+    account_id: Option<&str>,
+    policy_package_id: Option<&str>,
+    end_epoch: Option<i32>,
+) -> Option<Result<(), Error>> {
+    if !matches!(err, WalletJobError::UploadSlotCongestion(_))
+        || congestion_requeues >= MAX_CONGESTION_REQUEUES
+    {
+        return None;
+    }
+
+    let waiting = congestion_wait_message(err.message());
+    // Attempt 1/5 on purpose: a congestion requeue must not look exhausted
+    // and fail the uploaded row.
+    record_uploaded_metadata_error(
+        state.db.pool(),
+        remember_job_id,
+        err,
+        &waiting,
+        WalletJobAttemptInfo {
+            current: 1,
+            max: MAX_ATTEMPTS as usize,
+        },
+    )
+    .await;
+    if let Some(job_id) = remember_job_id {
+        keep_upload_storage_reservation(state, job_id, owner, encrypted_b64.unwrap_or("")).await;
+    }
+
+    let delay_secs = congestion_backoff_secs(congestion_requeues);
+    let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
+    let retry = metadata_congestion_retry_job(
+        wallet_index,
+        congestion_requeues,
+        blob_object_id,
+        owner,
+        namespace,
+        package_id,
+        agent_id,
+        remember_job_id,
+        blob_id,
+        vector,
+        blob_size_bytes,
+        importance,
+        encrypted_b64,
+        account_id,
+        policy_package_id,
+        end_epoch,
+    );
+    let mut storage = wallet_job_queue(state, &retry.operation);
+    match storage
+        .schedule_request(wallet_job_request(retry), run_at)
+        .await
+    {
+        Ok(_) => {
+            tracing::warn!(
+                "[wallet-job:set-metadata] job_id={} upload slots saturated; requeued delay={}s requeue={}/{} wallet={}",
+                remember_job_id.unwrap_or("-"),
+                delay_secs,
+                congestion_requeues + 1,
+                MAX_CONGESTION_REQUEUES,
+                wallet_index,
+            );
+            Some(Ok(()))
+        }
+        Err(requeue_err) => {
+            tracing::error!(
+                "[wallet-job:set-metadata] job_id={} congestion requeue failed, falling back to Apalis retry: {}",
+                remember_job_id.unwrap_or("-"),
+                requeue_err,
+            );
+            Some(Err(WalletJobError::Transient(format!(
+                "{}; congestion requeue failed: {}",
+                err.message(),
+                requeue_err
+            ))
+            .into_apalis_error()))
+        }
+    }
+}
+
 async fn mark_remember_job_failed(
     pool: &sqlx::PgPool,
     remember_job_id: Option<&str>,
@@ -331,6 +586,30 @@ pub struct WalletJob {
 /// Convenience type alias
 pub type WalletJobStorage = PostgresStorage<WalletJob>;
 
+/// Upload jobs. Workers prefetch a batch from this queue and do not look up
+/// again until that batch is done.
+pub const WALLET_UPLOAD_QUEUE: &str = "wallet_jobs";
+
+/// Metadata and finalize. A separate queue so a certified blob is picked up
+/// while upload workers are still inside a prefetched batch.
+pub const WALLET_FOLLOWUP_QUEUE: &str = "wallet_followup_jobs";
+
+pub(crate) fn wallet_job_uses_followup_queue(operation: &WalletOperation) -> bool {
+    matches!(
+        operation,
+        WalletOperation::SetMetadataAndTransfer { .. }
+            | WalletOperation::FinalizeUploadedBlob { .. }
+    )
+}
+
+pub(crate) fn wallet_job_queue(state: &AppState, operation: &WalletOperation) -> WalletJobStorage {
+    if wallet_job_uses_followup_queue(operation) {
+        state.wallet_followup_storage.clone()
+    } else {
+        state.wallet_storage.clone()
+    }
+}
+
 // ============================================================
 // Legacy MetaTransferJob — kept for backward-compat with existing DB rows.
 // ============================================================
@@ -391,6 +670,121 @@ const WAL_BALANCE_LOW_THRESHOLD_MIST: u64 = 2_000_000_000;
 /// retries" alert.
 const MAX_CONGESTION_REQUEUES: u32 = 6;
 
+/// Stored on `remember_jobs.error_msg` while a congestion requeue is waiting.
+/// The 10-minute stale sweep must not fail that row: the continuation is
+/// already scheduled, and a false `failed` makes the client resubmit.
+/// `fail_stale_remember_jobs` only sweeps this prefix after 45 minutes, which
+/// is a lost-job backstop rather than a wait budget.
+pub const CONGESTION_WAIT_ERROR_PREFIX: &str = "upload congestion, waiting to retry: ";
+
+fn congestion_wait_message(msg: &str) -> String {
+    format!("{CONGESTION_WAIT_ERROR_PREFIX}{msg}")
+}
+
+/// A dropped upload connection is the same journal, not a fresh upload.
+/// Rotating the wallet starts a second blob while the first step is still
+/// running on the sidecar. Slot-timeout congestion can still move, because
+/// that request never started.
+fn congestion_resume_wallet(current: usize, pool: usize, transport: bool) -> usize {
+    if transport || pool == 0 {
+        current
+    } else {
+        (current + 1) % pool
+    }
+}
+
+/// How many times one worker re-posts the same journal after the connection
+/// drops. The sidecar single-flights that key, so the retry waits for the
+/// step already running instead of taking another slot. Past this, the job
+/// parks on the congestion requeue and frees the worker.
+const SAME_JOURNAL_ATTACHES: u32 = 3;
+
+fn wallet_upload_gates(pool_len: usize) -> &'static Vec<tokio::sync::Semaphore> {
+    use std::sync::OnceLock;
+    static GATES: OnceLock<Vec<tokio::sync::Semaphore>> = OnceLock::new();
+    GATES.get_or_init(|| {
+        (0..pool_len.max(1))
+            .map(|_| tokio::sync::Semaphore::new(1))
+            .collect()
+    })
+}
+
+/// One permit per wallet. A job for a busy key waits on that key only, so an
+/// idle wallet is not stuck behind it. The wait is 8 minutes, inside the
+/// 10-minute stale sweep, so the caller refreshes `updated_at` first.
+///
+/// Take this permit before `JobUploadLock::try_acquire`. The wait must not
+/// hold a lock-pool connection.
+async fn admit_wallet_upload(
+    wallet_index: usize,
+    pool_len: usize,
+) -> Result<tokio::sync::SemaphorePermit<'static>, WalletJobError> {
+    let gates = wallet_upload_gates(pool_len);
+    let index = wallet_index % gates.len();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(8 * 60),
+        gates[index].acquire(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(WalletJobError::UploadSlotCongestion(format!(
+            "timed out waiting for wallet {wallet_index} upload slot"
+        ))),
+        Err(_) => Err(WalletJobError::UploadSlotCongestion(format!(
+            "timed out waiting for wallet {wallet_index} upload slot"
+        ))),
+    }
+}
+
+/// The storage reservation is admitted at enqueue and expires after 15
+/// minutes. A congestion wait can outlive that. Refresh it so a burst cannot
+/// take the bytes this job is still going to write. If the row was already
+/// swept, admit it again; a rejection is logged and the upload still retries.
+async fn keep_upload_storage_reservation(
+    state: &AppState,
+    job_id: &str,
+    owner: &str,
+    encrypted_b64: &str,
+) {
+    let ttl_secs = crate::rate_limit::STORAGE_RESERVATION_TTL.as_secs() as i64;
+    let extended = sqlx::query(
+        "UPDATE storage_reservations
+         SET expires_at = GREATEST(expires_at, NOW() + ($2 * INTERVAL '1 second'))
+         WHERE id = $1",
+    )
+    .bind(job_id)
+    .bind(ttl_secs)
+    .execute(state.db.pool())
+    .await;
+    match extended {
+        Ok(result) if result.rows_affected() > 0 => return,
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                "[wallet-job:upload] job_id={} could not extend storage reservation: {}",
+                job_id,
+                e
+            );
+            return;
+        }
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encrypted_b64)
+        .map(|raw| raw.len() as i64)
+        .unwrap_or(encrypted_b64.len() as i64)
+        .max(1);
+    if let Err(e) =
+        crate::rate_limit::reserve_storage_quota_one(state, owner, job_id.to_string(), bytes).await
+    {
+        tracing::warn!(
+            "[wallet-job:upload] job_id={} storage reservation was gone and could not be renewed: {}",
+            job_id,
+            e
+        );
+    }
+}
+
 /// Backoff before re-running a congestion-requeued upload: 30s, 60s, 120s,
 /// 240s, 480s, then capped at 600s. Deliberately minutes-scale — the 2-16s
 /// `backoff_duration` style is useless against a backlog that takes minutes
@@ -398,6 +792,49 @@ const MAX_CONGESTION_REQUEUES: u32 = 6;
 /// congestion window).
 fn congestion_backoff_secs(requeues: u32) -> u64 {
     (30u64 << requeues.min(31)).min(600)
+}
+
+/// How long `wallet_lock_pool.begin()` may wait for a connection. A miss is
+/// this process running out of its own lock pool, not a Walrus 429, so it
+/// must not occupy a worker for the sqlx default of 30s.
+pub(crate) const WALLET_LOCK_POOL_ACQUIRE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(3);
+
+/// Scheduled delay after a lock-pool miss. The connection is free as soon as
+/// an admitted upload finishes; the minutes-scale congestion ladder is not.
+const LOCK_POOL_RETRY_DELAY_SECS: u64 = 1;
+
+/// Why `JobUploadLock::try_acquire` refused to proceed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockDeferReason {
+    /// Another attempt of this same job holds the advisory lock.
+    SameJob,
+    /// `wallet_lock_pool` had no free connection.
+    Pool,
+}
+
+fn resume_needs_upload_slot(disposition: &UploadResume) -> bool {
+    matches!(disposition, UploadResume::Upload)
+}
+
+/// Same-job contention waits out the real upload. A pool miss retries in a
+/// second on the same wallet: rotating would only spread the checkout storm.
+fn upload_lock_retry_delay(reason: LockDeferReason, congestion_requeues: u32) -> u64 {
+    match reason {
+        LockDeferReason::SameJob => congestion_backoff_secs(congestion_requeues),
+        LockDeferReason::Pool => LOCK_POOL_RETRY_DELAY_SECS,
+    }
+}
+
+fn upload_lock_retry_wallet(
+    reason: LockDeferReason,
+    wallet_index: usize,
+    pool_len: usize,
+) -> usize {
+    match reason {
+        LockDeferReason::Pool => wallet_index,
+        LockDeferReason::SameJob => (wallet_index + 1) % pool_len.max(1),
+    }
 }
 
 /// Exponential back-off: attempt 1→2s, 2→4s, 3→8s, 4→16s, 5→32s.
@@ -430,11 +867,23 @@ fn upload_retry_backoff(
     Some(backoff_duration(attempt_info.current as u32))
 }
 
+/// Apalis runs a larger value first inside one queue. Finalize outranks
+/// metadata on the followup queue. Uploads are a separate queue, so this
+/// number does not stop an upload a worker has already picked up.
+fn wallet_job_priority(operation: &WalletOperation) -> i32 {
+    match operation {
+        WalletOperation::FinalizeUploadedBlob { .. } => 2,
+        WalletOperation::SetMetadataAndTransfer { .. } => 1,
+        WalletOperation::UploadAndTransfer { .. } => 0,
+    }
+}
+
 pub(crate) fn wallet_job_request(
     job: WalletJob,
 ) -> Request<WalletJob, apalis_sql::context::SqlContext> {
     let mut context = apalis_sql::context::SqlContext::new();
     context.set_max_attempts(MAX_ATTEMPTS as i32);
+    context.set_priority(wallet_job_priority(&job.operation));
     Request::new_with_ctx(job, context)
 }
 
@@ -504,17 +953,58 @@ fn wallet_index_for_upload_attempt(
     Some(start.wrapping_add(offset) % pool_size)
 }
 
+/// Whether this journal already names the signer that owns the blob.
+///
+/// `encoded` is a local checkpoint, and a prepared register has not been
+/// submitted. `registered` and later refer to a blob object that signer owns.
+fn upload_journal_signer_committed(journal: &UploadJournal) -> bool {
+    matches!(
+        journal
+            .resume_step
+            .as_ref()
+            .and_then(|step| step.get("step"))
+            .and_then(serde_json::Value::as_str),
+        Some("registered" | "uploaded" | "certified")
+    )
+}
+
+/// A congestion resume must keep the journaled signer. A prepared register
+/// may already have been submitted, and steering would drop those bytes and
+/// mint a second blob.
+fn pin_journal_wallet(journal: &UploadJournal, congestion_requeues: u32) -> bool {
+    upload_journal_signer_committed(journal)
+        || (congestion_requeues > 0
+            && (journal.resume_step.is_some()
+                || journal.register_transaction.is_some()
+                || journal.wallet_address.is_some()))
+}
+
+/// Move an uncommitted journal onto `free_wallet`.
+///
+/// Returns whether the caller must persist the journal. A prepared register
+/// signed by the old wallet is dropped so the sidecar rebuilds it. The
+/// journaled address is cleared so the new key is not rejected as a mapping
+/// mismatch. A committed journal is left untouched.
+fn steer_uncommitted_upload_wallet(journal: &mut UploadJournal, free_wallet: usize) -> bool {
+    if upload_journal_signer_committed(journal) || journal.wallet_index == free_wallet {
+        return false;
+    }
+    journal.wallet_index = free_wallet;
+    journal.wallet_address = None;
+    journal.register_transaction = None;
+    true
+}
+
 // ============================================================
 // execute_wallet_job — dispatcher for WalletJob
 // ============================================================
 
 /// Apalis worker handler for WalletJob.
 ///
-/// Multiple concurrent invocations of this handler share the `wallet_jobs`
-/// queue. Upload jobs derive the execution wallet from the enqueued starting
-/// wallet and current attempt; legacy metadata-transfer jobs keep their pinned
-/// wallet because the blob object is owned by the wallet that
-/// registered/certified it.
+/// Upload jobs and followup jobs are separate queues, but both call this
+/// handler. Upload jobs derive the execution wallet from the enqueued starting
+/// wallet and current attempt; metadata jobs keep their pinned wallet because
+/// the blob object is owned by the wallet that registered it.
 pub(crate) async fn execute_wallet_job(
     job: WalletJob,
     ctx: Data<Arc<AppState>>,
@@ -538,26 +1028,82 @@ pub(crate) async fn execute_wallet_job(
             prepare_claim_token,
             epochs,
         } => {
-            let wallet_index = match wallet_index_for_upload_attempt(
-                enqueued_wallet_index,
-                attempt_info.current,
-                state.key_pool.len(),
-            ) {
-                Some(index) => index,
-                None => {
-                    return Err(WalletJobError::Permanent(
-                        "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
-                            .into(),
-                    )
-                    .into_apalis_error());
+            let mut wallet_index = if congestion_requeues > 0 {
+                // The requeue already chose the signer. Do not walk the attempt
+                // cursor; that is what pairs a cached prepare with another key.
+                enqueued_wallet_index % state.key_pool.len().max(1)
+            } else {
+                match wallet_index_for_upload_attempt(
+                    enqueued_wallet_index,
+                    attempt_info.current,
+                    state.key_pool.len(),
+                ) {
+                    Some(index) => index,
+                    None => {
+                        return Err(WalletJobError::Permanent(
+                            "No Sui keys configured (set SERVER_SUI_PRIVATE_KEYS or SERVER_SUI_PRIVATE_KEY)"
+                                .into(),
+                        )
+                        .into_apalis_error());
+                    }
                 }
             };
+            // The attempt index is only the fallback. Once a durable journal
+            // exists, the sidecar queues on that signer, so the busy-count has
+            // to name the same wallet or least-loaded keeps feeding the one
+            // that is actually full. Before register is submitted the journal
+            // can move onto a wallet that is free right now. A congestion
+            // resume must not: the prepared bytes may already be in flight.
+            let mut claimed_slot = None;
+            if let Some(job_id) = remember_job_id.as_deref() {
+                let mut journal = load_upload_journal(state.db.pool(), job_id, wallet_index)
+                    .await
+                    .map_err(WalletJobError::into_apalis_error)?;
+                if pin_journal_wallet(&journal, congestion_requeues) {
+                    wallet_index = journal.wallet_index;
+                } else if congestion_requeues > 0 {
+                    // Nothing has been submitted, but a stored index would
+                    // otherwise keep signing while admission follows the
+                    // rotated payload. Write the payload wallet through.
+                    if journal.wallet_index != wallet_index {
+                        journal.wallet_index = wallet_index;
+                        journal.wallet_address = None;
+                        journal.register_transaction = None;
+                        persist_upload_journal(state.db.pool(), job_id, &journal)
+                            .await
+                            .map_err(WalletJobError::into_apalis_error)?;
+                    }
+                } else if let Some(claim) = state.key_pool.claim_least_loaded() {
+                    // Claimed before the await below, so a concurrent worker
+                    // cannot pick the same idle wallet in the meantime.
+                    let free = claim.index();
+                    let from = journal.wallet_index;
+                    if steer_uncommitted_upload_wallet(&mut journal, free) {
+                        persist_upload_journal(state.db.pool(), job_id, &journal)
+                            .await
+                            .map_err(WalletJobError::into_apalis_error)?;
+                        tracing::info!(
+                                "[wallet-job:upload] job_id={} moved uncommitted upload off wallet {} onto {}",
+                                job_id,
+                                from,
+                                journal.wallet_index,
+                            );
+                    }
+                    wallet_index = journal.wallet_index;
+                    if claim.index() == wallet_index {
+                        claimed_slot = Some(claim);
+                    }
+                }
+            }
             // Mark this wallet busy for the rest of the attempt, so a
             // concurrently-enqueued job picks an idle wallet instead of
             // queueing behind this upload. Held by guard rather than paired
             // calls because every return below — and there are many — has to
             // release it.
-            let _wallet_slot = state.key_pool.begin_attempt(wallet_index);
+            let _wallet_slot = match claimed_slot {
+                Some(claim) => claim,
+                None => state.key_pool.begin_attempt(wallet_index),
+            };
 
             if wallet_index != enqueued_wallet_index || attempt_info.current > 1 {
                 tracing::info!(
@@ -628,30 +1174,25 @@ pub(crate) async fn execute_wallet_job(
             policy_package_id,
             end_epoch,
         } => {
-            // Mark the wallet busy for this transaction too. `least_loaded_index`
-            // answers "is this key signing right now", and only the upload arm
-            // was telling it — so a metadata+transfer, which signs on the very
-            // same wallet, read as idle. A concurrently-enqueued upload would
-            // then pick that key precisely because it looked free, and queue
-            // behind the transaction anyway. That is the failure join-shortest-
-            // queue exists to avoid, and it showed up as the pool converging on
-            // whichever key was mid-transfer.
-            //
-            // `enqueued_wallet_index` rather than a fresh pick: this operation
-            // must run on the key that already owns the blob object.
+            // Mark the wallet busy for least-loaded assignment. This job signs
+            // on the key that owns the blob, but it must not hold the upload
+            // permit. A worker that already took this key's next upload can
+            // register while the metadata transaction is in flight. Priority
+            // still prefers this job over an upload that has not been prefetched.
             let _wallet_slot = state.key_pool.begin_attempt(enqueued_wallet_index);
 
+            touch_uploaded_remember_job(state.db.pool(), remember_job_id.as_deref()).await;
             let result = execute_set_metadata_and_transfer(
                 state,
                 enqueued_wallet_index,
-                blob_object_id,
-                owner.clone(),
-                namespace.clone(),
-                package_id.clone(),
-                agent_id.clone(),
-                encrypted_b64,
-                account_id,
-                policy_package_id,
+                &blob_object_id,
+                &owner,
+                &namespace,
+                package_id.as_deref(),
+                agent_id.as_deref(),
+                encrypted_b64.as_deref(),
+                account_id.as_deref(),
+                policy_package_id.as_deref(),
             )
             .await;
 
@@ -717,42 +1258,42 @@ pub(crate) async fn execute_wallet_job(
                     )),
                 },
                 Err(err) => {
-                    // This operation is pinned to the wallet that owns the blob,
-                    // so retrying cannot rotate onto another pool candidate.
-                    // Escalate a balance::split gas-budget failure immediately.
-                    let err = escalate_if_gas_pool_exhausted(
-                        err,
-                        attempt_info.current,
-                        attempt_info.max,
-                        1,
-                    );
-                    let msg = err.to_string();
-                    maybe_alert_walrus_gas_pool_exhausted(
+                    if let Some(outcome) = schedule_metadata_congestion_retry(
                         state,
-                        &err,
-                        remember_job_id.as_deref(),
-                        Some(&owner),
-                        Some(&namespace),
                         enqueued_wallet_index,
-                        &msg,
-                    )
-                    .await;
-                    update_remember_job_after_wallet_error(
-                        state.db.pool(),
-                        remember_job_id.as_deref(),
+                        congestion_requeues,
                         &err,
-                        &msg,
-                        Some(attempt_info),
+                        &blob_object_id,
+                        &owner,
+                        &namespace,
+                        package_id.as_deref(),
+                        agent_id.as_deref(),
+                        remember_job_id.as_deref(),
+                        blob_id.as_deref(),
+                        vector.as_deref(),
+                        blob_size_bytes,
+                        importance,
+                        encrypted_b64.as_deref(),
+                        account_id.as_deref(),
+                        policy_package_id.as_deref(),
+                        end_epoch,
                     )
-                    .await;
-                    tracing::error!(
-                        "[wallet-job:set-metadata] job_id={} {} classification={} retryable={}",
-                        remember_job_id.as_deref().unwrap_or("-"),
-                        msg,
-                        err.kind(),
-                        !err.aborts_retries()
-                    );
-                    Err(err)
+                    .await
+                    {
+                        return outcome;
+                    }
+                    // Pinned to the wallet that owns the blob, so a gas-budget
+                    // failure escalates immediately instead of rotating.
+                    Err(finish_metadata_attempt_error(
+                        state,
+                        remember_job_id.as_deref(),
+                        &owner,
+                        &namespace,
+                        enqueued_wallet_index,
+                        err,
+                        attempt_info,
+                    )
+                    .await)
                 }
             }
         }
@@ -827,37 +1368,36 @@ fn recovery_seal_persistence<'a>(
         )),
     }
 }
-
 async fn execute_set_metadata_and_transfer(
     state: &AppState,
     wallet_index: usize,
-    blob_object_id: String,
-    owner: String,
-    namespace: String,
-    package_id: Option<String>,
-    agent_id: Option<String>,
-    encrypted_b64: Option<String>,
-    account_id: Option<String>,
-    policy_package_id: Option<String>,
+    blob_object_id: &str,
+    owner: &str,
+    namespace: &str,
+    package_id: Option<&str>,
+    agent_id: Option<&str>,
+    encrypted_b64: Option<&str>,
+    account_id: Option<&str>,
+    policy_package_id: Option<&str>,
 ) -> Result<(), WalletJobError> {
     let seal_persistence = recovery_seal_persistence(
-        account_id.as_deref(),
+        account_id,
         &state.config.registry_id,
-        policy_package_id.as_deref(),
-        encrypted_b64.as_deref(),
+        policy_package_id,
+        encrypted_b64,
     )?;
     let set_metadata_result = crate::storage::walrus::set_metadata_batch(
         &state.http_client,
         &state.config.sidecar_url,
         state.config.sidecar_secret.as_deref(),
         wallet_index,
-        &owner,
-        package_id.as_deref().unwrap_or(&state.config.package_id),
-        agent_id.as_deref(),
+        owner,
+        package_id.unwrap_or(&state.config.package_id),
+        agent_id,
         vec![SetMetadataBatchEntry {
-            blob_object_id,
-            namespace: namespace.clone(),
-            encrypted_data: encrypted_b64,
+            blob_object_id: blob_object_id.to_string(),
+            namespace: namespace.to_string(),
+            encrypted_data: encrypted_b64.map(str::to_string),
         }],
         seal_persistence,
     )
@@ -873,8 +1413,8 @@ async fn execute_set_metadata_and_transfer(
                 &classified,
                 wallet_index,
                 None,
-                Some(&owner),
-                Some(&namespace),
+                Some(owner),
+                Some(namespace),
                 &msg,
             )
             .await;
@@ -986,24 +1526,25 @@ async fn enqueue_finalize_uploaded_blob(
     package_id: Option<String>,
     end_epoch: Option<i32>,
 ) -> Result<(), WalletJobError> {
-    let mut storage = state.wallet_storage.clone();
+    let job = WalletJob {
+        wallet_index,
+        congestion_requeues: 0,
+        operation: WalletOperation::FinalizeUploadedBlob {
+            owner,
+            namespace,
+            remember_job_id,
+            blob_id,
+            vector,
+            blob_size_bytes,
+            importance,
+            agent_id,
+            package_id,
+            end_epoch,
+        },
+    };
+    let mut storage = wallet_job_queue(state, &job.operation);
     storage
-        .push_request(wallet_job_request(WalletJob {
-            wallet_index,
-            congestion_requeues: 0,
-            operation: WalletOperation::FinalizeUploadedBlob {
-                owner,
-                namespace,
-                remember_job_id,
-                blob_id,
-                vector,
-                blob_size_bytes,
-                importance,
-                agent_id,
-                package_id,
-                end_epoch,
-            },
-        }))
+        .push_request(wallet_job_request(job))
         .await
         .map_err(|e| {
             WalletJobError::Transient(format!(
@@ -1096,6 +1637,10 @@ async fn upload_resume_disposition(pool: &sqlx::PgPool, job_id: &str) -> UploadR
 /// another attempt of the SAME job already holds it, acquisition returns `None`
 /// and the caller must NOT upload. Different jobs never contend.
 ///
+/// The caller holds the wallet upload permit before this checkout. Waiting for
+/// that permit with a connection already open pins one pool slot per prefetched
+/// job, and the jobs that lose the checkout were then parked on the relay backoff.
+///
 /// A transaction lock is cancellation-safe: SQLx queues a rollback when a
 /// dropped transaction returns its connection to the pool, and PostgreSQL
 /// releases the advisory lock with that transaction. A session advisory lock
@@ -1137,20 +1682,29 @@ impl JobUploadLock {
 /// rule is unit-testable without a live pool.
 enum LockOutcome {
     Proceed(JobUploadLock),
-    Defer(WalletJobError),
+    Defer {
+        error: WalletJobError,
+        reason: LockDeferReason,
+    },
 }
 
 fn lock_outcome(acquired: Result<Option<JobUploadLock>, sqlx::Error>, job_id: &str) -> LockOutcome {
     match acquired {
         Ok(Some(lock)) => LockOutcome::Proceed(lock),
-        Ok(None) => LockOutcome::Defer(WalletJobError::Transient(format!(
-            "another attempt of upload job {} is in progress",
-            job_id
-        ))),
-        Err(e) => LockOutcome::Defer(WalletJobError::Transient(format!(
-            "could not acquire upload lock for job {}: {}",
-            job_id, e
-        ))),
+        Ok(None) => LockOutcome::Defer {
+            error: WalletJobError::Transient(format!(
+                "another attempt of upload job {} is in progress",
+                job_id
+            )),
+            reason: LockDeferReason::SameJob,
+        },
+        Err(e) => LockOutcome::Defer {
+            error: WalletJobError::Transient(format!(
+                "could not acquire upload lock for job {}: {}",
+                job_id, e
+            )),
+            reason: LockDeferReason::Pool,
+        },
     }
 }
 
@@ -1367,7 +1921,7 @@ async fn resume_metadata_and_transfer(
         importance,
         &state.config.seal_policy_package_id,
     );
-    let mut storage = state.wallet_storage.clone();
+    let mut storage = wallet_job_queue(state, &job.operation);
     if let Err(e) = storage.push_request(wallet_job_request(job)).await {
         let classified = classify_wallet_remember_handoff_failure(
             state.db.pool(),
@@ -1422,24 +1976,63 @@ async fn execute_durable_upload(
 ) -> Result<(), WalletJobError> {
     let mut journal =
         load_upload_journal(state.db.pool(), remember_job_id, fallback_wallet_index).await?;
+    // `prepare_admitted_upload` already holds this wallet's only permit.
+    // Taking it again deadlocks the semaphore. A different journal signer
+    // would upload on a key that was never admitted.
+    if journal.wallet_index != fallback_wallet_index {
+        return Err(WalletJobError::Transient(format!(
+            "upload permit is for wallet {fallback_wallet_index} but the journal signer is {}",
+            journal.wallet_index
+        )));
+    }
 
     // Each sidecar call advances one checkpointable step. Persist the returned
     // checkpoint before asking the sidecar to perform the next side effect.
     for _ in 0..6 {
-        let advanced = crate::storage::walrus::advance_durable_upload(
-            &state.http_client,
-            &state.config.sidecar_url,
-            state.config.sidecar_secret.as_deref(),
-            encrypted,
-            epochs as u64,
-            owner,
-            namespace,
-            package_id,
-            remember_job_id,
-            journal,
-        )
-        .await
-        .map_err(|e| WalletJobError::classify_sidecar_error(&e.to_string()))?;
+        let mut attaches = 0u32;
+        let advanced = loop {
+            let _ = sqlx::query(
+                "UPDATE remember_jobs SET updated_at = NOW() WHERE id = $1 AND status = 'running'",
+            )
+            .bind(remember_job_id)
+            .execute(state.db.pool())
+            .await;
+            match crate::storage::walrus::advance_durable_upload(
+                &state.http_client,
+                &state.config.sidecar_url,
+                state.config.sidecar_secret.as_deref(),
+                encrypted,
+                epochs as u64,
+                owner,
+                namespace,
+                package_id,
+                remember_job_id,
+                journal.clone(),
+            )
+            .await
+            .map_err(|e| WalletJobError::classify_sidecar_error(&e.to_string()))
+            {
+                Ok(advanced) => break advanced,
+                Err(err)
+                    if attaches < SAME_JOURNAL_ATTACHES
+                        && matches!(
+                            &err,
+                            WalletJobError::UploadSlotCongestion(msg)
+                                if WalletJobError::is_sidecar_upload_transport_error(msg)
+                        ) =>
+                {
+                    attaches += 1;
+                    tracing::info!(
+                        "[wallet-job:upload] job_id={} dropped upload connection; reattaching same journal ({}/{})",
+                        remember_job_id,
+                        attaches,
+                        SAME_JOURNAL_ATTACHES,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        };
 
         match advanced {
             DurableUploadAdvance::Prepared(next) => {
@@ -1500,6 +2093,123 @@ async fn execute_durable_upload(
     )))
 }
 
+enum PreparedUpload {
+    Ready {
+        lock: Option<JobUploadLock>,
+        /// Held until the upload returns. Resume paths leave this empty so
+        /// metadata does not block the next blob on this key.
+        admission: Option<tokio::sync::SemaphorePermit<'static>>,
+        wallet_index: usize,
+    },
+    Deferred {
+        error: WalletJobError,
+        reason: LockDeferReason,
+        wallet_index: usize,
+    },
+}
+
+/// Wait for the wallet permit before checking out a lock-pool connection.
+///
+/// Prefetch runs many upload jobs at once. If each one opens a transaction
+/// and then waits for the one-per-wallet semaphore, the lock pool runs out
+/// and the losers are requeued for half a minute or more. Jobs that only
+/// need to resume metadata never take the permit.
+async fn prepare_admitted_upload(
+    db_pool: &sqlx::PgPool,
+    lock_pool: &sqlx::PgPool,
+    pool_len: usize,
+    mut wallet_index: usize,
+    remember_job_id: Option<&str>,
+) -> Result<PreparedUpload, WalletJobError> {
+    let mut admission = None;
+    let mut upload_lock = None;
+    for pass in 0..3 {
+        let needs_slot = match remember_job_id {
+            Some(jid) => resume_needs_upload_slot(&upload_resume_disposition(db_pool, jid).await),
+            None => false,
+        };
+        if needs_slot && admission.is_none() {
+            if let Some(jid) = remember_job_id {
+                let _ = sqlx::query(
+                    "UPDATE remember_jobs SET updated_at = NOW() WHERE id = $1 AND status IN ('pending', 'running')",
+                )
+                .bind(jid)
+                .execute(db_pool)
+                .await;
+            }
+            admission = Some(admit_wallet_upload(wallet_index, pool_len).await?);
+        } else if !needs_slot {
+            drop(admission.take());
+        }
+
+        let Some(jid) = remember_job_id else {
+            return Ok(PreparedUpload::Ready {
+                lock: None,
+                admission,
+                wallet_index,
+            });
+        };
+
+        if upload_lock.is_none() {
+            match lock_outcome(JobUploadLock::try_acquire(lock_pool, jid).await, jid) {
+                LockOutcome::Proceed(lock) => upload_lock = Some(lock),
+                LockOutcome::Defer { error, reason } => {
+                    drop(admission.take());
+                    return Ok(PreparedUpload::Deferred {
+                        error,
+                        reason,
+                        wallet_index,
+                    });
+                }
+            }
+        }
+
+        if resume_needs_upload_slot(&upload_resume_disposition(db_pool, jid).await) {
+            let journal = match load_upload_journal(db_pool, jid, wallet_index).await {
+                Ok(journal) => journal,
+                Err(err) => {
+                    if let Some(lock) = upload_lock.take() {
+                        lock.release(jid).await;
+                    }
+                    return Err(err);
+                }
+            };
+            if journal.wallet_index != wallet_index || admission.is_none() {
+                if journal.wallet_index != wallet_index {
+                    tracing::info!(
+                        "[wallet-job:upload] job_id={} upload permit was for wallet {} but the journal signer is {}; waiting on the signer",
+                        jid,
+                        wallet_index,
+                        journal.wallet_index,
+                    );
+                }
+                if let Some(lock) = upload_lock.take() {
+                    lock.release(jid).await;
+                }
+                drop(admission.take());
+                wallet_index = journal.wallet_index;
+                if pass == 2 {
+                    return Err(WalletJobError::Transient(format!(
+                        "upload signer for job {jid} changed while waiting for a wallet slot"
+                    )));
+                }
+                continue;
+            }
+        } else {
+            drop(admission.take());
+        }
+
+        return Ok(PreparedUpload::Ready {
+            lock: upload_lock,
+            admission,
+            wallet_index,
+        });
+    }
+    Err(WalletJobError::Transient(
+        "upload admission did not settle".into(),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_upload_and_transfer(
     state: &AppState,
@@ -1518,56 +2228,138 @@ async fn execute_upload_and_transfer(
     congestion_requeues: u32,
     attempt_info: WalletJobAttemptInfo,
 ) -> Result<(), WalletJobError> {
-    // ── Per-job upload mutex ───────────────────────────────────
-    // Guard-read + mint + persist must be atomic per job: the wallet queue runs
-    // up to WALLET_JOB_CONCURRENCY workers, and Apalis's orphan-reenqueue can
-    // re-dispatch a still-Running job (stale worker heartbeat) so two attempts of
-    // the SAME job can run at once — both would read `running`/NULL and both mint.
-    // A per-job advisory lock serializes them; the loser bails without uploading.
-    let mut upload_lock = if let Some(ref jid) = remember_job_id {
-        let acquired = JobUploadLock::try_acquire(&state.wallet_lock_pool, jid).await;
-        match lock_outcome(acquired, jid) {
-            LockOutcome::Proceed(lock) => Some(lock),
-            // Deferred or fail-closed: in BOTH cases we must NOT upload — return
-            // the retriable error so Apalis re-tries later, by which point the
-            // holder should have persisted `uploaded`, or the pool should be
-            // reachable again.
-            //
-            // "Later" is not automatic: no WorkerBuilder in main.rs attaches a
-            // retry/backoff layer, so a bare `Err` here gets re-polled almost
-            // immediately (observed on staging: all 5 attempts of one job
-            // exhausted in ~124ms). That races the actual lock holder — a real
-            // upload can take seconds — and burns the whole attempt budget
-            // before the holder has any chance to finish, leaving the row
-            // silently `running` with no error_msg until the unrelated
-            // 10-minute staleness sweep force-fails it. Sleep with the
-            // existing (previously unused) exponential backoff before
-            // returning, and persist a visible error_msg immediately instead
-            // of leaving the row silent for the sweep to eventually catch.
-            LockOutcome::Defer(err) => {
-                tracing::warn!(
-                    "[wallet-job:upload] job_id={} deferring upload (attempt {}/{}): {}",
-                    jid,
-                    attempt_info.current,
-                    attempt_info.max,
-                    err,
-                );
-                // No attempt_info: a Defer loser must not mark the row failed
-                // on the final attempt while the lock holder is still working.
+    // Guard-read + mint + persist must be atomic per job: Apalis can run two
+    // attempts of the same job, and both would mint. The permit is taken
+    // before the lock connection so waiters do not exhaust wallet_lock_pool.
+    let prepared = match prepare_admitted_upload(
+        state.db.pool(),
+        &state.wallet_lock_pool,
+        state.key_pool.len(),
+        wallet_index,
+        remember_job_id.as_deref(),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // Admission failed before any paid side effect. Do not leave a
+            // spent queue attempt reported as running until the stale sweep.
+            update_remember_job_after_wallet_error(
+                state.db.pool(),
+                remember_job_id.as_deref(),
+                &error,
+                error.message(),
+                Some(attempt_info),
+            )
+            .await;
+            if let Some(delay) = upload_retry_backoff(&error, attempt_info) {
+                tokio::time::sleep(delay).await;
+            }
+            return Err(error);
+        }
+    };
+    let (mut upload_lock, admission, wallet_index) = match prepared {
+        PreparedUpload::Deferred {
+            error,
+            reason,
+            wallet_index,
+        } => {
+            // No WorkerBuilder retry layer is attached, so a bare Err is
+            // re-polled immediately and burns the 5 upload attempts while the
+            // other attempt is still minting. Re-enqueue with the attempt
+            // budget intact. A pool miss is not that wait: it retries in a
+            // second on the same wallet.
+            let Some(jid) = remember_job_id.clone() else {
+                return Err(error);
+            };
+            tracing::warn!(
+                "[wallet-job:upload] job_id={} deferring upload (attempt {}/{}): {}",
+                jid,
+                attempt_info.current,
+                attempt_info.max,
+                error,
+            );
+            update_remember_job_after_wallet_error(
+                state.db.pool(),
+                Some(jid.as_str()),
+                &error,
+                error.message(),
+                None,
+            )
+            .await;
+
+            if congestion_requeues < MAX_CONGESTION_REQUEUES {
+                let delay_secs = upload_lock_retry_delay(reason, congestion_requeues);
+                let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
+                let next_wallet =
+                    upload_lock_retry_wallet(reason, wallet_index, state.key_pool.len());
+                let why = match reason {
+                    LockDeferReason::SameJob => "held by another attempt",
+                    LockDeferReason::Pool => "pool exhausted",
+                };
                 update_remember_job_after_wallet_error(
                     state.db.pool(),
                     Some(jid.as_str()),
-                    &err,
-                    err.message(),
+                    &error,
+                    &congestion_wait_message(error.message()),
                     None,
                 )
                 .await;
-                tokio::time::sleep(backoff_duration(attempt_info.current as u32)).await;
-                return Err(err);
+                keep_upload_storage_reservation(state, &jid, &owner, &encrypted_b64).await;
+                let mut storage = state.wallet_storage.clone();
+                match storage
+                    .schedule_request(
+                        wallet_job_request(WalletJob {
+                            wallet_index: next_wallet,
+                            congestion_requeues: congestion_requeues + 1,
+                            operation: WalletOperation::UploadAndTransfer {
+                                encrypted_b64,
+                                vector,
+                                importance,
+                                owner,
+                                namespace,
+                                package_id,
+                                account_id,
+                                agent_public_key,
+                                remember_job_id,
+                                prepare_claim_token,
+                                epochs,
+                            },
+                        }),
+                        run_at,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::warn!(
+                            "[wallet-job:upload] job_id={} upload lock {}; requeued delay={}s requeue={}/{} next_wallet={}",
+                            jid,
+                            why,
+                            delay_secs,
+                            congestion_requeues + 1,
+                            MAX_CONGESTION_REQUEUES,
+                            next_wallet,
+                        );
+                        return Ok(());
+                    }
+                    Err(requeue_err) => {
+                        tracing::error!(
+                            "[wallet-job:upload] job_id={} upload lock requeue failed, falling back to Apalis retry: {}",
+                            jid,
+                            requeue_err,
+                        );
+                    }
+                }
             }
+
+            tokio::time::sleep(backoff_duration(attempt_info.current as u32)).await;
+            return Err(error);
         }
-    } else {
-        None
+        PreparedUpload::Ready {
+            lock,
+            admission,
+            wallet_index,
+        } => (lock, admission, wallet_index),
     };
 
     // Consume the preparation claim while holding the per-job upload lock,
@@ -1603,6 +2395,7 @@ async fn execute_upload_and_transfer(
         epochs,
         congestion_requeues,
         attempt_info,
+        admission,
     )
     .await;
 
@@ -1629,6 +2422,7 @@ async fn execute_upload_and_transfer_locked(
     epochs: u32,
     congestion_requeues: u32,
     attempt_info: WalletJobAttemptInfo,
+    mut admission: Option<tokio::sync::SemaphorePermit<'static>>,
 ) -> Result<(), WalletJobError> {
     // ── Idempotency guard ──────────────────────────────────────
     // `upload_blob` mints a paid on-chain Walrus Blob. On a retry (Apalis
@@ -1801,12 +2595,85 @@ async fn execute_upload_and_transfer_locked(
         {
             Ok(()) => Ok(()),
             Err(err) => {
+                // The upload attempt is over. Free the wallet before any
+                // backoff so the next blob on this key can register.
+                drop(admission.take());
                 // Sidecar failures are classified where they originate inside
                 // execute_durable_upload. Preserve that classification here:
                 // journal/state validation can already return Permanent, and
                 // reclassifying its display text would incorrectly make it
                 // retryable and leave the polling row running.
                 let msg = err.message().to_string();
+                // Park on the congestion budget instead of the 5-attempt one.
+                if matches!(err, WalletJobError::UploadSlotCongestion(_))
+                    && congestion_requeues < MAX_CONGESTION_REQUEUES
+                {
+                    update_remember_job_after_wallet_error(
+                        state.db.pool(),
+                        Some(jid.as_str()),
+                        &err,
+                        &congestion_wait_message(&msg),
+                        None,
+                    )
+                    .await;
+                    keep_upload_storage_reservation(state, jid, &owner, &encrypted_b64).await;
+                    let delay_secs = congestion_backoff_secs(congestion_requeues);
+                    let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
+                    let next_wallet = congestion_resume_wallet(
+                        wallet_index,
+                        state.key_pool.len(),
+                        WalletJobError::is_sidecar_upload_transport_error(&msg)
+                            || WalletJobError::is_shared_upload_service_error(&msg),
+                    );
+                    let job_id_for_log = jid.clone();
+                    let mut storage = state.wallet_storage.clone();
+                    match storage
+                        .schedule_request(
+                            wallet_job_request(WalletJob {
+                                wallet_index: next_wallet,
+                                congestion_requeues: congestion_requeues + 1,
+                                operation: WalletOperation::UploadAndTransfer {
+                                    encrypted_b64,
+                                    vector,
+                                    importance,
+                                    owner,
+                                    namespace,
+                                    package_id,
+                                    account_id,
+                                    agent_public_key,
+                                    remember_job_id,
+                                    prepare_claim_token,
+                                    epochs,
+                                },
+                            }),
+                            run_at,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::warn!(
+                                "[wallet-job:upload] job_id={} durable upload congested; requeued delay={}s requeue={}/{} next_wallet={}",
+                                job_id_for_log,
+                                delay_secs,
+                                congestion_requeues + 1,
+                                MAX_CONGESTION_REQUEUES,
+                                next_wallet,
+                            );
+                            return Ok(());
+                        }
+                        Err(requeue_err) => {
+                            tracing::error!(
+                                "[wallet-job:upload] job_id={} durable congestion requeue failed, falling back to Apalis retry: {}",
+                                job_id_for_log,
+                                requeue_err,
+                            );
+                            return Err(WalletJobError::Transient(format!(
+                                "{}; congestion requeue failed: {}",
+                                msg, requeue_err
+                            )));
+                        }
+                    }
+                }
                 maybe_alert_walrus_upload_exhausted(
                     state,
                     &err,
@@ -1900,7 +2767,7 @@ async fn execute_upload_and_transfer_locked(
 
             let job_id_for_log = remember_job_id.as_deref().unwrap_or("-").to_string();
             let recovery_remember_job_id = remember_job_id.clone();
-            let mut storage = state.wallet_storage.clone();
+            let mut storage = state.wallet_followup_storage.clone();
             if let Err(e) = storage
                 .push_request(wallet_job_request(WalletJob {
                     wallet_index,
@@ -1947,6 +2814,7 @@ async fn execute_upload_and_transfer_locked(
             return Ok(());
         }
         Err(UploadBlobError::App(e)) => {
+            drop(admission.take());
             let msg = format!("walrus upload failed: {}", e);
             // A balance::split gas-budget failure stays retriable (rotates onto
             // another pool wallet) until every candidate wallet has failed it,
@@ -1972,10 +2840,13 @@ async fn execute_upload_and_transfer_locked(
                     state.db.pool(),
                     remember_job_id.as_deref(),
                     &classified,
-                    &msg,
+                    &congestion_wait_message(&msg),
                     None,
                 )
                 .await;
+                if let Some(job_id) = remember_job_id.as_deref() {
+                    keep_upload_storage_reservation(state, job_id, &owner, &encrypted_b64).await;
+                }
 
                 let delay_secs = congestion_backoff_secs(congestion_requeues);
                 let run_at = chrono::Utc::now().timestamp() + delay_secs as i64;
@@ -2624,6 +3495,44 @@ impl WalletJobError {
         lower.contains("timed out waiting for") && lower.contains("upload slot")
     }
 
+    /// The relayer's HTTP client lost the upload sidecar while a step was
+    /// queued or in flight (`error sending request for url (.../walrus/upload...)`).
+    /// The sidecar often still finishes that step. It is the same backlog as
+    /// an acquire timeout, not a bad blob, so it must take the congestion
+    /// requeue instead of the 5-attempt wallet budget.
+    /// Trust the sidecar's structured availability code, not a bare 503 in
+    /// arbitrary error text. A shared-service failure may follow submission;
+    /// retry the same journal and signer on the bounded congestion schedule.
+    pub fn is_shared_upload_service_error(msg: &str) -> bool {
+        if !msg
+            .to_ascii_lowercase()
+            .contains("durable walrus upload failed (")
+        {
+            return false;
+        }
+        let Some(start) = msg.find('{') else {
+            return false;
+        };
+        let Ok(body) = serde_json::from_str::<serde_json::Value>(&msg[start..]) else {
+            return false;
+        };
+        body.get("code").and_then(serde_json::Value::as_str) == Some("SHARED_SERVICE_UNAVAILABLE")
+            || (body.get("code").and_then(serde_json::Value::as_str) == Some("NO_SIDE_EFFECT")
+                && body.get("causeCode").and_then(serde_json::Value::as_str)
+                    == Some("SHARED_SERVICE_UNAVAILABLE"))
+    }
+
+    pub fn is_sidecar_upload_transport_error(msg: &str) -> bool {
+        let lower = msg.to_ascii_lowercase();
+        if !lower.contains("walrus/upload") && !lower.contains("walrus/set-metadata-batch") {
+            return false;
+        }
+        lower.contains("error sending request for url")
+            || lower.contains("error decoding response body")
+            || lower.contains("request or response body error")
+            || lower.contains("durable walrus upload response failed")
+    }
+
     /// True if `msg` is one of the sidecar's register-transaction journal
     /// assertions (`validatePreparedRegisterTransaction` and friends in
     /// scripts/sidecar/routes/walrus-upload-journal.ts).
@@ -2691,8 +3600,10 @@ impl WalletJobError {
     /// error replacement; each arm matches on substrings only, with no
     /// alert-threshold coupling.
     pub fn is_infrastructure_funding_error(msg: &str) -> bool {
-        Self::is_gas_pool_budget_error(msg)
+        msg.starts_with(CONGESTION_WAIT_ERROR_PREFIX)
+            || Self::is_gas_pool_budget_error(msg)
             || Self::is_upload_slot_congestion_error(msg)
+            || Self::is_sidecar_upload_transport_error(msg)
             || Self::is_walrus_wal_shortfall(msg)
     }
 
@@ -2718,8 +3629,16 @@ impl WalletJobError {
             return WalletJobError::Permanent(msg.to_string());
         }
         // Sidecar upload limiter saturated — see UploadSlotCongestion docs.
-        if Self::is_upload_slot_congestion_error(msg) {
+        if Self::is_upload_slot_congestion_error(msg)
+            || Self::is_shared_upload_service_error(msg)
+            || Self::is_sidecar_upload_transport_error(msg)
+        {
             return WalletJobError::UploadSlotCongestion(msg.to_string());
+        }
+        // A third party owns the blob. The uploader cannot transfer it, and
+        // the relayer must not sign as the target.
+        if lower.contains("blob_owner_mismatch") || lower.contains("metadata_receipt_mismatch") {
+            return WalletJobError::Permanent(msg.to_string());
         }
         // Enoki sponsored dry-run aborts in 0x2::balance::split with ENotEnough
         // (abort code 2) when the selected pool wallet's SUI gas coin cannot be
@@ -3023,15 +3942,20 @@ mod tests {
 
     use super::{
         backoff_duration, build_resume_transfer_job, classify_wallet_remember_handoff_failure,
-        congestion_backoff_secs, consume_preparation_claim, durable_step_field,
-        escalate_if_gas_pool_exhausted, gas_pool_exhaustion_threshold,
-        is_walrus_package_version_mismatch, load_upload_journal, lock_outcome,
-        mark_remember_job_failed, parse_locked_object_info, parse_wal_balance_alert_info,
-        persist_upload_journal, persist_uploaded_state, recovery_seal_persistence,
-        update_remember_job_after_wallet_error, upload_resume_disposition, upload_retry_backoff,
-        wallet_index_for_upload_attempt, wallet_job_request, JobUploadLock, LockOutcome,
-        UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError, WalletOperation,
-        MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
+        congestion_backoff_secs, congestion_resume_wallet, congestion_wait_message,
+        consume_preparation_claim, durable_step_field, escalate_if_gas_pool_exhausted,
+        gas_pool_exhaustion_threshold, is_walrus_package_version_mismatch, load_upload_journal,
+        lock_outcome, mark_remember_job_failed, metadata_congestion_retry_job,
+        parse_locked_object_info, parse_wal_balance_alert_info, persist_upload_journal,
+        persist_uploaded_state, pin_journal_wallet, record_uploaded_metadata_error,
+        recovery_seal_persistence, resume_needs_upload_slot, steer_uncommitted_upload_wallet,
+        touch_uploaded_remember_job, update_remember_job_after_wallet_error,
+        upload_journal_signer_committed, upload_lock_retry_delay, upload_lock_retry_wallet,
+        upload_resume_disposition, upload_retry_backoff, wallet_index_for_upload_attempt,
+        wallet_job_request, wallet_job_uses_followup_queue, JobUploadLock, LockDeferReason,
+        LockOutcome, UploadResume, WalletJob, WalletJobAttemptInfo, WalletJobError,
+        WalletOperation, CONGESTION_WAIT_ERROR_PREFIX, MAX_ATTEMPTS, MAX_CONGESTION_REQUEUES,
+        WALLET_LOCK_POOL_ACQUIRE_TIMEOUT,
     };
     use crate::storage::walrus::{
         PreparedRegisterTransaction, UploadExecutionIdentity, UploadJournal,
@@ -3076,7 +4000,10 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
             assert!(spent.retries_exhausted(&err), "{}", err.kind());
         }
 
-        let mid = WalletJobAttemptInfo { current: 1, max: MAX_ATTEMPTS as usize };
+        let mid = WalletJobAttemptInfo {
+            current: 1,
+            max: MAX_ATTEMPTS as usize,
+        };
         assert!(!mid.retries_exhausted(&low));
         let permanent = WalletJobError::Permanent("registerTransaction digest mismatch".into());
         assert!(!spent.retries_exhausted(&permanent) && permanent.aborts_retries());
@@ -3118,14 +4045,45 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     /// any pre-submission failure, including shared-infra blips that the next
     /// attempt succeeds through.
     #[test]
-    fn no_side_effect_without_a_shape_assertion_stays_transient() {
+    fn shared_service_failure_uses_bounded_congestion_retry() {
         assert!(matches!(
             WalletJobError::classify_sidecar_error(
                 "durable Walrus upload failed (503 Service Unavailable): \
 {\"error\":\"fetch failed\",\"code\":\"NO_SIDE_EFFECT\",\
 \"causeCode\":\"SHARED_SERVICE_UNAVAILABLE\"}"
             ),
-            WalletJobError::Transient(_)
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+    }
+
+    #[test]
+    fn shared_upload_retry_requires_a_structured_availability_code() {
+        for body in [
+            r#"{"code":"SHARED_SERVICE_UNAVAILABLE","error":"connection reset"}"#,
+            r#"{"code":"NO_SIDE_EFFECT","causeCode":"SHARED_SERVICE_UNAVAILABLE"}"#,
+        ] {
+            let message = format!("durable Walrus upload failed (503 Service Unavailable): {body}");
+            let error = WalletJobError::classify_sidecar_error(&message);
+            assert!(matches!(error, WalletJobError::UploadSlotCongestion(_)));
+            assert_eq!(
+                congestion_resume_wallet(
+                    3,
+                    6,
+                    WalletJobError::is_shared_upload_service_error(&message)
+                ),
+                3
+            );
+        }
+        for body in [
+            r#"{"code":"NO_SIDE_EFFECT","error":"MoveAbort code 503"}"#,
+            r#"{"code":"DURABLE_SIDE_EFFECT_VERIFY_FAILED","causeCode":"SHARED_SERVICE_UNAVAILABLE"}"#,
+            r#"{"error":"SHARED_SERVICE_UNAVAILABLE"}"#,
+        ] {
+            let message = format!("durable Walrus upload failed (503 Service Unavailable): {body}");
+            assert!(!WalletJobError::is_shared_upload_service_error(&message));
+        }
+        assert!(!WalletJobError::is_shared_upload_service_error(
+            "unrelated SHARED_SERVICE_UNAVAILABLE"
         ));
     }
 
@@ -3199,6 +4157,10 @@ the checkpoint it replied about",
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/014_storage_reservations.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         pool
     }
@@ -3272,6 +4234,108 @@ the checkpoint it replied about",
             WalletJobError::classify_sidecar_error(
                 "walrus upload failed: timed out waiting for global upload slot"
             ),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+    }
+
+    #[test]
+    fn metadata_transport_failure_preserves_bounded_recovery_budget() {
+        let msg = "Internal Error: Sidecar walrus/set-metadata-batch request failed: error sending request for url (http://localhost:9000/walrus/set-metadata-batch)";
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(msg),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+        let mismatch =
+            "walrus set-metadata-batch failed: Transaction was not signed by the correct sender";
+        assert!(!WalletJobError::is_sidecar_upload_transport_error(mismatch));
+    }
+
+    #[test]
+    fn classify_dropped_upload_sidecar_connection_as_congestion() {
+        let transport = "Internal Error: durable Walrus upload request failed: \
+            error sending request for url (http://localhost:9000/walrus/upload-step-v3)";
+        let classified = WalletJobError::classify_sidecar_error(transport);
+        assert!(
+            matches!(classified, WalletJobError::UploadSlotCongestion(_)),
+            "a dropped upload-step connection is congestion, got {}",
+            classified.kind()
+        );
+        assert!(!classified.aborts_retries());
+
+        let slot = "Internal Error: durable Walrus upload failed (503 Service Unavailable): \
+            {\"error\":\"timed out waiting for wallet 1 upload slot\",\"code\":\"NO_SIDE_EFFECT\"}";
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(slot),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+
+        // A transport error that is not the upload sidecar stays on the
+        // normal retry track.
+        assert!(!matches!(
+            WalletJobError::classify_sidecar_error(
+                "error sending request for url (https://example.com/other)"
+            ),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+
+        // The source chain is appended after Display. It must stay congestion,
+        // and both the raw failure and the waiting prefix are infrastructure
+        // so a poller never sees the localhost URL.
+        let with_source = format!("{transport}: connection reset by peer");
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(&with_source),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+        assert!(WalletJobError::is_infrastructure_funding_error(
+            &with_source
+        ));
+        assert!(WalletJobError::is_infrastructure_funding_error(
+            &congestion_wait_message(&with_source)
+        ));
+        assert!(!WalletJobError::is_infrastructure_funding_error(
+            "error sending request for url (https://example.com/other)"
+        ));
+    }
+
+    #[test]
+    fn a_dropped_upload_connection_resumes_the_same_wallet() {
+        assert_eq!(congestion_resume_wallet(4, 16, true), 4);
+        assert_eq!(congestion_resume_wallet(15, 16, false), 0);
+        assert_eq!(congestion_resume_wallet(0, 0, false), 0);
+    }
+
+    #[test]
+    fn a_congestion_resume_keeps_a_prepared_register_signer() {
+        let prepared = UploadJournal {
+            wallet_index: 4,
+            wallet_address: Some("0xabc".into()),
+            execution_identity: None,
+            resume_step: Some(serde_json::json!({"step": "encoded"})),
+            register_transaction: Some(PreparedRegisterTransaction {
+                transaction_bytes: "aa".into(),
+                signature: "bb".into(),
+                digest: "cc".into(),
+                sponsor_digest: None,
+            }),
+        };
+        assert!(pin_journal_wallet(&prepared, 1));
+        assert!(!upload_journal_signer_committed(&prepared));
+        let fresh = UploadJournal {
+            wallet_index: 4,
+            wallet_address: None,
+            execution_identity: None,
+            resume_step: None,
+            register_transaction: None,
+        };
+        assert!(!pin_journal_wallet(&fresh, 0));
+    }
+
+    #[test]
+    fn a_lost_upload_response_body_is_the_same_transport_error() {
+        let msg = "Internal Error: durable Walrus upload response failed for http://localhost:9000/walrus/upload-step-v3: error decoding response body";
+        assert!(WalletJobError::is_sidecar_upload_transport_error(msg));
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(msg),
             WalletJobError::UploadSlotCongestion(_)
         ));
     }
@@ -3376,6 +4440,40 @@ the checkpoint it replied about",
             "congestion requeue budget should span >= 20 minutes, got {}s",
             total
         );
+    }
+
+    #[test]
+    fn lock_pool_miss_retries_without_the_relay_backoff() {
+        assert_eq!(
+            WALLET_LOCK_POOL_ACQUIRE_TIMEOUT,
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(upload_lock_retry_delay(LockDeferReason::Pool, 0), 1);
+        assert_eq!(upload_lock_retry_delay(LockDeferReason::Pool, 4), 1);
+        assert_eq!(upload_lock_retry_wallet(LockDeferReason::Pool, 4, 17), 4);
+        // The other attempt is actually uploading. That wait stays minutes-scale.
+        assert_eq!(upload_lock_retry_delay(LockDeferReason::SameJob, 0), 30);
+        assert_eq!(upload_lock_retry_delay(LockDeferReason::SameJob, 1), 60);
+        assert_eq!(
+            upload_lock_retry_wallet(LockDeferReason::SameJob, 16, 17),
+            0
+        );
+    }
+
+    #[test]
+    fn resume_paths_do_not_take_the_upload_slot() {
+        assert!(resume_needs_upload_slot(&UploadResume::Upload));
+        assert!(!resume_needs_upload_slot(&UploadResume::Indeterminate));
+        assert!(!resume_needs_upload_slot(&UploadResume::AlreadyDone {
+            blob_id: "blob".into(),
+        }));
+        assert!(!resume_needs_upload_slot(&UploadResume::ResumeTransfer {
+            blob_id: "blob".into(),
+            blob_object_id: "0xobj".into(),
+        }));
+        assert!(!resume_needs_upload_slot(&UploadResume::ResumeIndex {
+            blob_id: "blob".into(),
+        }));
     }
 
     #[test]
@@ -3614,6 +4712,59 @@ the checkpoint it replied about",
         assert_eq!(picked, vec![3, 0, 1, 2, 3]);
     }
 
+    fn empty_journal(wallet_index: usize) -> UploadJournal {
+        UploadJournal {
+            wallet_index,
+            wallet_address: None,
+            execution_identity: None,
+            resume_step: None,
+            register_transaction: None,
+        }
+    }
+
+    fn prepared_register() -> PreparedRegisterTransaction {
+        PreparedRegisterTransaction {
+            transaction_bytes: "aa".into(),
+            signature: "bb".into(),
+            digest: "cc".into(),
+            sponsor_digest: None,
+        }
+    }
+
+    #[test]
+    fn uncommitted_upload_moves_onto_a_free_wallet() {
+        let mut encoded = empty_journal(4);
+        encoded.wallet_address = Some("0xold".into());
+        encoded.resume_step = Some(serde_json::json!({
+            "step": "encoded",
+            "blobId": "blob",
+            "rootHash": "root",
+            "unencodedSize": 4
+        }));
+        encoded.register_transaction = Some(prepared_register());
+        assert!(!upload_journal_signer_committed(&encoded));
+        assert!(steer_uncommitted_upload_wallet(&mut encoded, 12));
+        assert_eq!(encoded.wallet_index, 12);
+        assert!(encoded.wallet_address.is_none());
+        assert!(encoded.register_transaction.is_none());
+        assert!(encoded.resume_step.is_some());
+        // Already there: keep a prepared register signed by this wallet.
+        encoded.register_transaction = Some(prepared_register());
+        assert!(!steer_uncommitted_upload_wallet(&mut encoded, 12));
+        assert!(encoded.register_transaction.is_some());
+    }
+
+    #[test]
+    fn committed_upload_stays_on_its_signer() {
+        for step in ["registered", "uploaded", "certified"] {
+            let mut journal = empty_journal(5);
+            journal.resume_step = Some(serde_json::json!({ "step": step }));
+            assert!(upload_journal_signer_committed(&journal));
+            assert!(!steer_uncommitted_upload_wallet(&mut journal, 14));
+            assert_eq!(journal.wallet_index, 5);
+        }
+    }
+
     #[test]
     fn metadata_recovery_requires_complete_v1_new_seal_fence() {
         assert!(matches!(
@@ -3819,6 +4970,77 @@ the checkpoint it replied about",
         });
 
         assert_eq!(req.parts.context.max_attempts(), MAX_ATTEMPTS as i32);
+        assert_eq!(*req.parts.context.priority(), 2);
+    }
+
+    #[test]
+    fn wallet_job_priority_finishes_finalize_before_metadata() {
+        let upload = WalletJob {
+            wallet_index: 1,
+            congestion_requeues: 0,
+            operation: WalletOperation::UploadAndTransfer {
+                encrypted_b64: String::new(),
+                vector: vec![],
+                importance: 0.0,
+                owner: String::new(),
+                namespace: String::new(),
+                package_id: String::new(),
+                account_id: String::new(),
+                agent_public_key: None,
+                remember_job_id: None,
+                prepare_claim_token: None,
+                epochs: 1,
+            },
+        };
+        let metadata_job = metadata_congestion_retry_job(
+            4,
+            2,
+            "0xblob",
+            "0xowner",
+            "ns",
+            None,
+            None,
+            Some("job"),
+            Some("blob"),
+            None,
+            Some(1),
+            0.5,
+            None,
+            None,
+            None,
+            None,
+        );
+        let finalize = WalletJob {
+            wallet_index: 4,
+            congestion_requeues: 0,
+            operation: WalletOperation::FinalizeUploadedBlob {
+                owner: "0xowner".into(),
+                namespace: "ns".into(),
+                remember_job_id: Some("job".into()),
+                blob_id: "blob".into(),
+                vector: vec![0.1],
+                blob_size_bytes: 1,
+                importance: 0.5,
+                agent_id: None,
+                package_id: None,
+                end_epoch: None,
+            },
+        };
+
+        assert!(!wallet_job_uses_followup_queue(&upload.operation));
+        assert!(wallet_job_uses_followup_queue(&metadata_job.operation));
+        assert!(wallet_job_uses_followup_queue(&finalize.operation));
+
+        let upload = wallet_job_request(upload);
+        let metadata = wallet_job_request(metadata_job);
+        let finalize = wallet_job_request(finalize);
+        assert_eq!(*upload.parts.context.priority(), 0);
+        assert_eq!(*metadata.parts.context.priority(), 1);
+        assert_eq!(*finalize.parts.context.priority(), 2);
+        assert!(
+            *finalize.parts.context.priority() > *metadata.parts.context.priority()
+                && *metadata.parts.context.priority() > *upload.parts.context.priority()
+        );
     }
 
     async fn insert_job_full(
@@ -4000,6 +5222,44 @@ the checkpoint it replied about",
         }
     }
 
+    /// A queued upload must not reserve the scarce DB lock connection while
+    /// another upload owns its wallet. Uses a missing random job ID, so no
+    /// remember row is created or updated and no sidecar is called.
+    #[tokio::test]
+    async fn waiting_for_wallet_does_not_checkout_lock_connection() {
+        let db = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&test_database_url())
+            .await
+            .unwrap();
+        let locks = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_lazy(&test_database_url())
+            .unwrap();
+        let holder = super::admit_wallet_upload(0, 1).await.unwrap();
+        let id = format!("admission-test-{}", uuid::Uuid::new_v4());
+        let waiting = super::prepare_admitted_upload(&db, &locks, 1, 0, Some(&id));
+        tokio::pin!(waiting);
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut waiting)
+            .await
+            .is_err());
+        assert_eq!(
+            locks.size(),
+            0,
+            "wallet wait must not consume lock-pool capacity"
+        );
+        drop(holder);
+        // With the slot free the helper now reaches the lock checkout and
+        // journal read. The latter fails for this deliberately absent row.
+        let _ = tokio::time::timeout(Duration::from_secs(5), &mut waiting)
+            .await
+            .expect("lock checkout should settle after wallet slot release");
+        assert_eq!(locks.size(), 1);
+        locks.close().await;
+        db.close().await;
+    }
+
     // GH #477 RC-3: two concurrent attempts of the SAME job must not both mint.
     // The per-job advisory lock is the mutex; this proves the second acquirer is
     // refused while the first holds it, and succeeds again after release.
@@ -4087,14 +5347,21 @@ the checkpoint it replied about",
     fn lock_outcome_defers_when_contended_and_fails_closed_on_error() {
         // Contended (Ok(None)) → Defer with a retriable error, never Proceed.
         match lock_outcome(Ok(None), "job-x") {
-            LockOutcome::Defer(WalletJobError::Transient(msg)) => {
+            LockOutcome::Defer {
+                error: WalletJobError::Transient(msg),
+                reason: LockDeferReason::SameJob,
+            } => {
                 assert!(msg.contains("in progress"), "contended message: {msg}");
             }
             _ => panic!("contended lock must Defer(Transient), never Proceed"),
         }
         // Lock-pool error → fail closed to a retriable Defer, never Proceed.
+        // A checkout miss is not same-job contention: it must not use that backoff.
         match lock_outcome(Err(sqlx::Error::PoolClosed), "job-y") {
-            LockOutcome::Defer(WalletJobError::Transient(msg)) => {
+            LockOutcome::Defer {
+                error: WalletJobError::Transient(msg),
+                reason: LockDeferReason::Pool,
+            } => {
                 assert!(msg.contains("could not acquire"), "error message: {msg}");
             }
             _ => panic!("lock-pool error must fail closed to Defer(Transient)"),
@@ -4113,7 +5380,7 @@ the checkpoint it replied about",
         let acquired = JobUploadLock::try_acquire(&pool, &job_id).await;
         match lock_outcome(acquired, &job_id) {
             LockOutcome::Proceed(lock) => lock.release(&job_id).await,
-            LockOutcome::Defer(_) => panic!("a free lock must Proceed"),
+            LockOutcome::Defer { .. } => panic!("a free lock must Proceed"),
         }
     }
 
@@ -4293,6 +5560,331 @@ the checkpoint it replied about",
         assert_eq!(row.1, None, "error_msg must not be overwritten either");
         assert_eq!(row.2.as_deref(), Some("blob-winner"));
 
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    const ENOKI_DRY_RUN: &str = "Enoki API error (400): {\"code\":\"dry_run_failed\",\"message\":\"Could not find the referenced object 0xa2cf3a6d91952320d2f8262826e9f56b9520829934b8405e90ccb1963103a472 at version Some(SequenceNumber(1025755045))\"}";
+
+    async fn seed_storage_reservation(pool: &sqlx::PgPool, job_id: &str) {
+        sqlx::query(
+            "INSERT INTO storage_reservations (id, owner, bytes, expires_at) VALUES ($1, '0xtest-owner', 128, NOW() + INTERVAL '15 minutes')",
+        )
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn reservation_exists(pool: &sqlx::PgPool, job_id: &str) -> bool {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_reservations WHERE id = $1)")
+            .bind(job_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn uploaded_metadata_error_keeps_the_row_uploaded_and_records_enoki() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &job_id, "uploaded", Some("blob-1")).await;
+        seed_storage_reservation(&pool, &job_id).await;
+        sqlx::query(
+            "UPDATE remember_jobs SET updated_at = NOW() - INTERVAL '30 minutes' WHERE id = $1",
+        )
+        .bind(&job_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let stale_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT updated_at FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let err = WalletJobError::Transient(ENOKI_DRY_RUN.to_string());
+        let msg = err.message().to_string();
+        record_uploaded_metadata_error(
+            &pool,
+            Some(job_id.as_str()),
+            &err,
+            &msg,
+            WalletJobAttemptInfo { current: 1, max: 5 },
+        )
+        .await;
+
+        let row: (String, Option<String>, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as("SELECT status, error_msg, updated_at FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "uploaded");
+        let msg = row.1.unwrap_or_default();
+        assert!(msg.contains("dry_run_failed"), "{msg}");
+        assert!(
+            msg.contains("Could not find the referenced object"),
+            "{msg}"
+        );
+        assert!(
+            row.2 > stale_at,
+            "updated_at must move so the sweep does not treat a live retry as stale"
+        );
+        assert!(reservation_exists(&pool, &job_id).await);
+
+        let _ = sqlx::query("DELETE FROM storage_reservations WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn terminal_uploaded_metadata_error_fails_the_row_and_releases_quota() {
+        let pool = test_pool().await;
+        let exhausted_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &exhausted_id, "uploaded", Some("blob-1")).await;
+        seed_storage_reservation(&pool, &exhausted_id).await;
+        let exhausted = WalletJobError::Transient(ENOKI_DRY_RUN.to_string());
+        let exhausted_msg = exhausted.message().to_string();
+        record_uploaded_metadata_error(
+            &pool,
+            Some(exhausted_id.as_str()),
+            &exhausted,
+            &exhausted_msg,
+            WalletJobAttemptInfo {
+                current: MAX_ATTEMPTS as usize,
+                max: MAX_ATTEMPTS as usize,
+            },
+        )
+        .await;
+        let exhausted_row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&exhausted_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(exhausted_row.0, "failed");
+        let exhausted_text = exhausted_row.1.unwrap_or_default();
+        assert!(
+            exhausted_text.contains("dry_run_failed"),
+            "{exhausted_text}"
+        );
+        assert!(!reservation_exists(&pool, &exhausted_id).await);
+
+        let permanent_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &permanent_id, "uploaded", Some("blob-2")).await;
+        seed_storage_reservation(&pool, &permanent_id).await;
+        let permanent = WalletJobError::Permanent(ENOKI_DRY_RUN.to_string());
+        let permanent_msg = permanent.message().to_string();
+        record_uploaded_metadata_error(
+            &pool,
+            Some(permanent_id.as_str()),
+            &permanent,
+            &permanent_msg,
+            WalletJobAttemptInfo { current: 1, max: 5 },
+        )
+        .await;
+        let permanent_row: (String,) =
+            sqlx::query_as("SELECT status FROM remember_jobs WHERE id = $1")
+                .bind(&permanent_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(permanent_row.0, "failed");
+        assert!(!reservation_exists(&pool, &permanent_id).await);
+
+        for id in [&exhausted_id, &permanent_id] {
+            let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn uploaded_metadata_recorder_leaves_running_and_done_rows_alone() {
+        let pool = test_pool().await;
+        let err = WalletJobError::Transient(ENOKI_DRY_RUN.to_string());
+        let msg = err.message().to_string();
+        for status in ["running", "done"] {
+            let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+            insert_job_with_status(&pool, &job_id, status, Some("blob-1")).await;
+            seed_storage_reservation(&pool, &job_id).await;
+            record_uploaded_metadata_error(
+                &pool,
+                Some(job_id.as_str()),
+                &err,
+                &msg,
+                WalletJobAttemptInfo { current: 1, max: 5 },
+            )
+            .await;
+            let row: (String, Option<String>) =
+                sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                    .bind(&job_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(row.0, status);
+            assert_eq!(row.1, None, "{status} error_msg must stay empty");
+            assert!(reservation_exists(&pool, &job_id).await, "{status}");
+            let _ = sqlx::query("DELETE FROM storage_reservations WHERE id = $1")
+                .bind(&job_id)
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .execute(&pool)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn uploaded_metadata_touch_refreshes_updated_at_and_keeps_error_msg() {
+        let pool = test_pool().await;
+        let uploaded_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &uploaded_id, "uploaded", Some("blob-1")).await;
+        sqlx::query(
+            "UPDATE remember_jobs SET error_msg = 'enoki-still-here', updated_at = NOW() - INTERVAL '30 minutes' WHERE id = $1",
+        )
+        .bind(&uploaded_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT updated_at FROM remember_jobs WHERE id = $1")
+                .bind(&uploaded_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        touch_uploaded_remember_job(&pool, Some(uploaded_id.as_str())).await;
+
+        let uploaded: (String, Option<String>, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as("SELECT status, error_msg, updated_at FROM remember_jobs WHERE id = $1")
+                .bind(&uploaded_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(uploaded.0, "uploaded");
+        assert_eq!(uploaded.1.as_deref(), Some("enoki-still-here"));
+        assert!(uploaded.2 > before, "uploaded updated_at must move");
+
+        let running_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &running_id, "running", None).await;
+        sqlx::query(
+            "UPDATE remember_jobs SET error_msg = 'leave-running', updated_at = NOW() - INTERVAL '30 minutes' WHERE id = $1",
+        )
+        .bind(&running_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let running_before: (Option<String>, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as("SELECT error_msg, updated_at FROM remember_jobs WHERE id = $1")
+                .bind(&running_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        touch_uploaded_remember_job(&pool, Some(running_id.as_str())).await;
+
+        let running_after: (String, Option<String>, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as("SELECT status, error_msg, updated_at FROM remember_jobs WHERE id = $1")
+                .bind(&running_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(running_after.0, "running");
+        assert_eq!(running_after.1, running_before.0);
+        assert_eq!(running_after.2, running_before.1);
+
+        for id in [&uploaded_id, &running_id] {
+            let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await;
+        }
+    }
+
+    #[test]
+    fn uploaded_metadata_congestion_retry_pins_the_wallet() {
+        let vector = vec![0.25_f32, 0.5];
+        let job = metadata_congestion_retry_job(
+            4,
+            2,
+            "0xblob-object",
+            "0xowner",
+            "bench-ns",
+            Some("0xpkg"),
+            Some("0xagent"),
+            Some("job-1"),
+            Some("blob-1"),
+            Some(vector.as_slice()),
+            Some(64),
+            0.5,
+            Some("ciphertext-b64"),
+            Some("0xacct"),
+            Some("0xpolicy"),
+            Some(12),
+        );
+        assert_eq!(job.wallet_index, 4);
+        assert_eq!(job.congestion_requeues, 3);
+        match job.operation {
+            WalletOperation::SetMetadataAndTransfer {
+                blob_object_id,
+                encrypted_b64,
+                remember_job_id,
+                ..
+            } => {
+                assert_eq!(blob_object_id, "0xblob-object");
+                assert_eq!(encrypted_b64.as_deref(), Some("ciphertext-b64"));
+                assert_eq!(remember_job_id.as_deref(), Some("job-1"));
+            }
+            other => panic!("expected SetMetadataAndTransfer, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn uploaded_metadata_congestion_wait_keeps_uploaded_and_reservation() {
+        let pool = test_pool().await;
+        let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
+        insert_job_with_status(&pool, &job_id, "uploaded", Some("blob-1")).await;
+        seed_storage_reservation(&pool, &job_id).await;
+        let err = WalletJobError::UploadSlotCongestion(
+            "timed out waiting for wallet 4 upload slot".into(),
+        );
+        let msg = congestion_wait_message(err.message());
+        record_uploaded_metadata_error(
+            &pool,
+            Some(job_id.as_str()),
+            &err,
+            &msg,
+            WalletJobAttemptInfo { current: 1, max: 5 },
+        )
+        .await;
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "uploaded");
+        let text = row.1.unwrap_or_default();
+        assert!(text.starts_with(CONGESTION_WAIT_ERROR_PREFIX), "{text}");
+        assert!(reservation_exists(&pool, &job_id).await);
+
+        let _ = sqlx::query("DELETE FROM storage_reservations WHERE id = $1")
+            .bind(&job_id)
+            .execute(&pool)
+            .await;
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE id = $1")
             .bind(&job_id)
             .execute(&pool)

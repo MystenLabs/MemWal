@@ -6,11 +6,19 @@
 import { shutdownMcpSessions } from "../mcp/index.js";
 import { createSidecarApp } from "./app.js";
 import { SIDECAR_HOST, SIDECAR_PORT, SIDECAR_SHUTDOWN_TIMEOUT_MS } from "./config.js";
+import { startSealListener, stopSealListener } from "./seal-listener.js";
 import { sidecarStartedAtMs, sidecarStateSnapshot } from "./state.js";
 import { truncateForLog } from "./util.js";
 
 export function startSidecarServer(): void {
     const app = createSidecarApp();
+    void startSealListener({ exitOnFailure: true }).then(
+        () => {},
+        (err) => {
+            console.error(`[seal-listener] failed to start: ${err instanceof Error ? err.message : err}`);
+            process.exit(1);
+        }
+    );
     const server = app.listen(SIDECAR_PORT, SIDECAR_HOST, () => {
         console.log(JSON.stringify({
             event: "sidecar_ready",
@@ -25,6 +33,11 @@ export function startSidecarServer(): void {
     // cleanly, then close the HTTP server.
     async function gracefulShutdown(signal: string): Promise<void> {
         console.log(JSON.stringify({ event: "sidecar_shutdown_begin", signal }));
+        try {
+            await stopSealListener();
+        } catch (err: any) {
+            console.error(`[sidecar] seal listener shutdown error: ${err?.message || err}`);
+        }
         try {
             await shutdownMcpSessions();
         } catch (err: any) {

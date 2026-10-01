@@ -118,7 +118,7 @@ Every protected API call goes through Ed25519 signature verification:
 1. The SDK signs a message: `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}` using the delegate private key
 2. The relayer verifies the Ed25519 signature against the provided public key
 3. Timestamps must be within a **5-minute window**, and the relayer records each `x-nonce` UUID in Redis for replay protection
-4. The relayer resolves the public key to a `MemWalAccount` using the priority chain: cache first, then the signed account header or config fallback, then an onchain registry scan
+4. The relayer resolves the public key to a `MemWalAccount` from the delegate-key cache, or by verifying the signed `x-account-id` (or `MEMWAL_ACCOUNT_ID`). It does not scan `AccountRegistry`
 5. The relayer fetches the onchain account to verify the delegate key appears in `delegate_keys`
 6. The relayer scopes all subsequent operations to the resolved owner address
 

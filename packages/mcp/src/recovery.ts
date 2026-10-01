@@ -217,12 +217,11 @@ export async function recoverPendingLogin(): Promise<RecoveryResult> {
             res.authError !== AUTH_UPSTREAM_UNAVAILABLE;
         const outcome: RecoveryOutcome = denied ? "rejected" : "unavailable";
         // Non-destructive either way. A 401 is ambiguous even when it IS a
-        // denial: on testnet the registry scan is disabled outright and a
-        // genuinely registered key is refused for want of an x-account-id hint
-        // (services/server/src/auth.rs — "x-account-id is required for
-        // delegate-key authentication on testnet"). Clearing here would destroy
-        // a recoverable key in exactly that environment, so the record is
-        // always left for its TTL to retire.
+        // denial: a genuinely registered key is refused when the request has
+        // no x-account-id (services/server/src/auth.rs — "x-account-id is
+        // required for delegate-key authentication"). Clearing here would
+        // destroy a recoverable key, so the record is always left for its
+        // TTL to retire.
         log.warn(`login.pending.${outcome}`, {
             publicKey: pending.delegatePublicKeyHex,
             status: res.status,
@@ -292,8 +291,7 @@ export function formatStrandedLoginNotice(result: RecoveryResult): string | null
             `The relayer did not accept it. If you never approved the wallet step, run`,
             `\`memwal_login\`: it reuses this key. If you did, remove the key above from`,
             `the dashboard first and then run \`memwal_login\`, because the wallet step`,
-            `cannot register a key that is already there. This is expected on Testnet,`,
-            `where the relayer cannot confirm a registered key at start.`,
+            `cannot register a key that is already there.`,
         );
     }
     return lines.join("\n");

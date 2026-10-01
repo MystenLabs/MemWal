@@ -8,6 +8,7 @@
  * Per-wallet addresses and balances are served separately behind sidecar auth.
  */
 
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { Express, Request, Response as ExpressResponse } from "express";
 import {
     DURABLE_UPLOAD_PROTOCOL_VERSION,
@@ -102,6 +103,19 @@ async function assertProvenanceEndpointIdentity(): Promise<void> {
 }
 
 export function registerHealthRoute(app: Express, requireProvenance = true): void {
+    const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+    loopDelay.enable();
+    const loopTimer = setInterval(() => {
+        sidecarLog("info", "sidecar_event_loop", {
+            maxDelayMs: loopDelay.max / 1e6,
+            p99DelayMs: loopDelay.percentile(99) / 1e6,
+            activeUploads: getUploadCounts().active,
+            queuedUploads: getUploadCounts().queued,
+        });
+        loopDelay.reset();
+    }, 10_000);
+    loopTimer.unref();
+
     app.get("/health", (_req: Request, res: ExpressResponse) => {
         res.json({ status: "ok", uptimeMs: Date.now() - sidecarStartedAtMs });
     });

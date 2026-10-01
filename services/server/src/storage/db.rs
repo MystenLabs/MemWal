@@ -237,6 +237,33 @@ pub struct VectorDb {
 #[cfg(test)]
 static DB_SETUP_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
+/// Builds a test `VectorDb`, retrying when Postgres aborts the migration
+/// replay with a deadlock (40P01).
+///
+/// `DB_SETUP_LOCK` only orders setups against each other. Migration 020 locks
+/// `memory_tombstones` then `vector_entries`, while `insert_vector` from a test
+/// that is already running locks them in the opposite order, so CI sometimes
+/// aborts the setup (`stale_sweep_tests::orphaned_preparation_is_failed`).
+/// Every migration is idempotent, so replaying the setup is safe.
+#[cfg(test)]
+pub(crate) async fn test_vector_db(database_url: &str) -> VectorDb {
+    let _guard = DB_SETUP_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let mut attempt = 0u64;
+    loop {
+        match VectorDb::new(database_url).await {
+            Ok(db) => return db,
+            Err(err) if attempt < 5 && err.to_string().contains("deadlock detected") => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
+            }
+            Err(err) => panic!("test database must be reachable with pgvector installed: {err:?}"),
+        }
+    }
+}
+
 impl VectorDb {
     pub fn with_storage_alerts(self, alerts: Arc<AlertManager>, sui_network: String) -> Self {
         Self {
@@ -287,6 +314,40 @@ mod tests {
             .find(|(n, _)| *n == name)
             .map(|(_, sql)| *sql)
             .unwrap_or_else(|| panic!("migration {name} is not wired into the pipeline"))
+    }
+
+    fn is_pg_deadlock(error: &sqlx::Error) -> bool {
+        error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .is_some_and(|code| code.as_ref() == "40P01")
+    }
+
+    /// Replays an idempotent migration while other tests are writing.
+    ///
+    /// A multi-statement file holds every lock until it commits. Migration
+    /// 020 locks `memory_tombstones` and then `vector_entries`.
+    /// `insert_vector` locks those tables in the opposite order, so Postgres
+    /// aborts one side with `40P01`. Each statement is idempotent, so the
+    /// aborted setup is safe to run again.
+    async fn execute_idempotent_migration(pool: &sqlx::PgPool, sql: &str) {
+        let mut conn = pool.acquire().await.expect("test database connection");
+        let mut last_err = None;
+        for attempt in 0..5 {
+            match sqlx::raw_sql(sql).execute(&mut *conn).await {
+                Ok(_) => return,
+                Err(err) if is_pg_deadlock(&err) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(25 * (attempt as u64 + 1))).await;
+                }
+                Err(err) => panic!("test migration failed: {err}"),
+            }
+        }
+        panic!(
+            "test migration deadlocked after retries: {}",
+            last_err.expect("deadlock error")
+        );
     }
 
     /// Every `.sql` file in `services/server/migrations` must be wired
@@ -449,7 +510,7 @@ mod tests {
             migration_sql("010_restore_failed_blobs.sql"),
             migration_sql("014_memory_read_api_columns.sql"),
         ] {
-            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+            execute_idempotent_migration(&pool, migration).await;
         }
 
         // Mirrors the ordering in VectorDb::new(): batched Rust backfill
@@ -458,10 +519,11 @@ mod tests {
         // CONCURRENTLY IF NOT EXISTS.
         super::backfill_updated_at(&pool).await.unwrap();
 
-        sqlx::raw_sql(migration_sql("015_memory_read_api_updated_at_not_null.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        execute_idempotent_migration(
+            &pool,
+            migration_sql("015_memory_read_api_updated_at_not_null.sql"),
+        )
+        .await;
 
         super::recover_invalid_concurrent_indexes(&pool)
             .await
@@ -474,7 +536,7 @@ mod tests {
             migration_sql("019_memory_read_api_updated_at_set_not_null.sql"),
             migration_sql("020_read_api_followups.sql"),
         ] {
-            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+            execute_idempotent_migration(&pool, migration).await;
         }
 
         let db = VectorDb {
@@ -1509,7 +1571,7 @@ mod tests {
             migration_sql("012_remember_write_idempotency.sql"),
             migration_sql("013_remember_write_idempotency_index.sql"),
         ] {
-            sqlx::raw_sql(migration).execute(db.pool()).await.unwrap();
+            execute_idempotent_migration(db.pool(), migration).await;
         }
         Some(db)
     }
@@ -2600,7 +2662,8 @@ impl VectorDb {
         if let Err(e) = &result {
             self.maybe_alert_storage_exhausted(e).await;
         }
-        let result = result.map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
+        let result =
+            result.map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
         crate::observability::observe_db("vector.insert", db_status(&result), started.elapsed());
         result?;
         sqlx::query("DELETE FROM memory_tombstones WHERE memory_id = $1")
@@ -3197,15 +3260,28 @@ impl VectorDb {
         stale_after: std::time::Duration,
     ) -> Result<u64, AppError> {
         let stale_after_secs = stale_after.as_secs().min(i64::MAX as u64) as i64;
+        // A congestion requeue parks the row on `running` for minutes while
+        // the next attempt is already scheduled. The normal 10-minute sweep
+        // would mark that wait failed and the client would send the fact
+        // again. Only a prefix that has not been refreshed for 45 minutes is
+        // a lost job.
+        let congestion_wait_stale_secs: i64 = 45 * 60;
         let result = sqlx::query(
             "UPDATE remember_jobs
              SET status = 'failed',
                  error_msg = COALESCE(error_msg, 'stale/orphaned remember job'),
                  updated_at = NOW()
              WHERE status IN ('running', 'uploaded')
-               AND updated_at < NOW() - ($1 * INTERVAL '1 second')",
+               AND updated_at < NOW() - ($1 * INTERVAL '1 second')
+               AND (
+                    error_msg IS NULL
+                    OR error_msg NOT LIKE ($2 || '%')
+                    OR updated_at < NOW() - ($3 * INTERVAL '1 second')
+               )",
         )
         .bind(stale_after_secs)
+        .bind(crate::jobs::CONGESTION_WAIT_ERROR_PREFIX)
+        .bind(congestion_wait_stale_secs)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to fail stale remember jobs: {}", e)))?;
@@ -4364,13 +4440,7 @@ mod quota_admission_tests {
     }
 
     async fn test_db() -> VectorDb {
-        let _guard = super::DB_SETUP_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
-        VectorDb::new(&test_database_url())
-            .await
-            .expect("test database must be reachable with pgvector installed")
+        super::test_vector_db(&test_database_url()).await
     }
 
     /// Unique per test so concurrent runs cannot see each other's rows, and so
@@ -4787,13 +4857,7 @@ mod stale_sweep_tests {
     }
 
     async fn test_db() -> VectorDb {
-        let _guard = super::DB_SETUP_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
-        VectorDb::new(&test_database_url())
-            .await
-            .expect("test database must be reachable with pgvector installed")
+        super::test_vector_db(&test_database_url()).await
     }
 
     /// Unique per test so concurrent runs cannot see each other's rows.
@@ -4942,6 +5006,74 @@ mod stale_sweep_tests {
             0,
             "a late preparation must be fenced out, or it would queue a paid write for a dead job",
         );
+    }
+
+    /// A congestion requeue leaves the row `running` with a prefixed
+    /// error while the next attempt is already scheduled. The 10-minute
+    /// sweep must not fail that wait. 45 minutes without a refresh is the
+    /// lost-job backstop.
+    #[tokio::test]
+    async fn a_congestion_wait_survives_the_normal_sweep_and_dies_when_abandoned() {
+        let db = test_db().await;
+        let owner = unique_owner("congestion-wait");
+        let waiting = seed_job(&db, &owner, "running", true, Some("claim-1"), 20 * 60).await;
+        let abandoned = seed_job(&db, &owner, "running", true, Some("claim-2"), 50 * 60).await;
+        let plain = seed_job(&db, &owner, "running", true, None, 20 * 60).await;
+        let prefix = crate::jobs::CONGESTION_WAIT_ERROR_PREFIX;
+        for id in [&waiting, &abandoned] {
+            sqlx::query("UPDATE remember_jobs SET error_msg = $2 WHERE id = $1")
+                .bind(id)
+                .bind(format!(
+                    "{prefix}timed out waiting for wallet 1 upload slot"
+                ))
+                .execute(&db.pool)
+                .await
+                .expect("stamp congestion wait");
+        }
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &waiting).await, "running");
+        assert_eq!(status_of(&db, &abandoned).await, "failed");
+        assert_eq!(status_of(&db, &plain).await, "failed");
+    }
+
+    /// A metadata retry writes the Enoki text while the row stays `uploaded`.
+    /// If that retry then goes quiet, the sweep may fail the row, but it must
+    /// keep the Enoki sentence. `COALESCE` only fills an empty `error_msg`.
+    #[tokio::test]
+    async fn an_uploaded_metadata_error_survives_the_stale_sweep() {
+        let db = test_db().await;
+        let owner = unique_owner("metadata-enoki");
+        let id = seed_job(&db, &owner, "uploaded", true, None, 900).await;
+        let enoki = "wallet job error (transient): Enoki API error (400): dry_run_failed Could not find the referenced object at version Some(SequenceNumber(1025755045))";
+        sqlx::query("UPDATE remember_jobs SET error_msg = $2 WHERE id = $1")
+            .bind(&id)
+            .bind(enoki)
+            .execute(&db.pool)
+            .await
+            .expect("stamp enoki error");
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "failed");
+        let msg = row.1.unwrap_or_default();
+        assert!(msg.contains("dry_run_failed"), "{msg}");
+        assert!(
+            msg.contains("Could not find the referenced object"),
+            "{msg}"
+        );
+        assert!(!msg.contains("stale/orphaned"), "{msg}");
     }
 
     /// The pre-existing sweep is unchanged.
