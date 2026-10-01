@@ -14,25 +14,39 @@ const { startSealListener } = await import("../sidecar/seal-listener.js");
 const probeSource = `
 const { parentPort, workerData } = require("node:worker_threads");
 const flag = new Int32Array(workerData.sab);
+parentPort.postMessage({ ready: true });
 while (Atomics.load(flag, 0) === 0) {}
-const started = Date.now();
 fetch(workerData.url).then(async (res) => {
-    parentPort.postMessage({ ms: Date.now() - started, status: res.status });
+    parentPort.postMessage({ answeredAt: Date.now(), status: res.status });
 }).catch((err) => {
     parentPort.postMessage({ error: String(err && err.message || err) });
 });
 `;
 
-function probe(url: string, sab: SharedArrayBuffer): { result: Promise<{ ms: number; status: number }>; stop: () => Promise<void> } {
+type ProbeResult = { answeredAt: number; status: number };
+
+// Absolute timestamps, not durations measured inside the worker: a worker that
+// starts late on a slow runner must not shorten how long the block "looked".
+function probe(url: string, sab: SharedArrayBuffer): {
+    ready: Promise<void>;
+    result: Promise<ProbeResult>;
+    stop: () => Promise<void>;
+} {
     const worker = new Worker(probeSource, { eval: true, workerData: { url, sab } });
-    const result = new Promise<{ ms: number; status: number }>((resolve, reject) => {
-        worker.once("message", (message: { ms?: number; status?: number; error?: string }) => {
+    let markReady: () => void = () => {};
+    const ready = new Promise<void>((resolve) => {
+        markReady = resolve;
+    });
+    const result = new Promise<ProbeResult>((resolve, reject) => {
+        worker.on("message", (message: { ready?: boolean; answeredAt?: number; status?: number; error?: string }) => {
+            if (message.ready) return markReady();
             if (message.error) reject(new Error(message.error));
-            else resolve({ ms: message.ms ?? -1, status: message.status ?? 0 });
+            else resolve({ answeredAt: message.answeredAt ?? 0, status: message.status ?? 0 });
         });
         worker.once("error", reject);
     });
     return {
+        ready,
         result,
         stop: async () => {
             await worker.terminate();
@@ -55,27 +69,25 @@ test("seal listener answers while the upload process event loop is blocked", { t
     const sealProbe = probe(`http://127.0.0.1:${seal.port}/health`, sab);
     const mainProbe = probe(`http://127.0.0.1:${address.port}/health`, sab);
     try {
+        // Both probe threads are running and spinning on the flag before the
+        // upload process blocks, so start-up time cannot eat into the window.
+        await Promise.all([sealProbe.ready, mainProbe.ready]);
         const blockedMs = 800;
-        const until = Date.now() + blockedMs;
-        let armed = false;
-        while (Date.now() < until) {
-            // Release the probes only after this thread is already spinning.
-            if (!armed) {
-                Atomics.store(flag, 0, 1);
-                armed = true;
-            }
-        }
+        const blockStart = Date.now();
+        const blockEnd = blockStart + blockedMs;
+        Atomics.store(flag, 0, 1);
+        while (Date.now() < blockEnd) {}
 
         const [sealResult, mainResult] = await Promise.all([sealProbe.result, mainProbe.result]);
         assert.equal(sealResult.status, 200);
         assert.equal(mainResult.status, 200);
         assert.ok(
-            sealResult.ms < blockedMs / 2,
-            `seal health took ${sealResult.ms}ms while the upload process was blocked for ${blockedMs}ms`
+            sealResult.answeredAt < blockEnd,
+            `seal health answered ${sealResult.answeredAt - blockEnd}ms after the ${blockedMs}ms block ended`
         );
         assert.ok(
-            mainResult.ms >= blockedMs - 50,
-            `upload process answered in ${mainResult.ms}ms; the event loop was not actually blocked`
+            mainResult.answeredAt >= blockEnd,
+            `upload process answered ${blockEnd - mainResult.answeredAt}ms before its blocked event loop was released`
         );
     } finally {
         main.close();
