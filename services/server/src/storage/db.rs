@@ -237,6 +237,33 @@ pub struct VectorDb {
 #[cfg(test)]
 static DB_SETUP_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
+/// Builds a test `VectorDb`, retrying when Postgres aborts the migration
+/// replay with a deadlock (40P01).
+///
+/// `DB_SETUP_LOCK` only orders setups against each other. Migration 020 locks
+/// `memory_tombstones` then `vector_entries`, while `insert_vector` from a test
+/// that is already running locks them in the opposite order, so CI sometimes
+/// aborts the setup (`stale_sweep_tests::orphaned_preparation_is_failed`).
+/// Every migration is idempotent, so replaying the setup is safe.
+#[cfg(test)]
+pub(crate) async fn test_vector_db(database_url: &str) -> VectorDb {
+    let _guard = DB_SETUP_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let mut attempt = 0u64;
+    loop {
+        match VectorDb::new(database_url).await {
+            Ok(db) => return db,
+            Err(err) if attempt < 5 && err.to_string().contains("deadlock detected") => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
+            }
+            Err(err) => panic!("test database must be reachable with pgvector installed: {err:?}"),
+        }
+    }
+}
+
 impl VectorDb {
     pub fn with_storage_alerts(self, alerts: Arc<AlertManager>, sui_network: String) -> Self {
         Self {
@@ -4413,13 +4440,7 @@ mod quota_admission_tests {
     }
 
     async fn test_db() -> VectorDb {
-        let _guard = super::DB_SETUP_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
-        VectorDb::new(&test_database_url())
-            .await
-            .expect("test database must be reachable with pgvector installed")
+        super::test_vector_db(&test_database_url()).await
     }
 
     /// Unique per test so concurrent runs cannot see each other's rows, and so
@@ -4836,13 +4857,7 @@ mod stale_sweep_tests {
     }
 
     async fn test_db() -> VectorDb {
-        let _guard = super::DB_SETUP_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
-        VectorDb::new(&test_database_url())
-            .await
-            .expect("test database must be reachable with pgvector installed")
+        super::test_vector_db(&test_database_url()).await
     }
 
     /// Unique per test so concurrent runs cannot see each other's rows.
