@@ -25,9 +25,11 @@ function ownerIs(recipient: unknown, expected: string): boolean {
 }
 
 /**
- * Skip a blob only when the target already owns it AND the memwal metadata
- * matches this request. The relayer must not sign as that target, and must
- * not submit another uploader transfer for a step that already landed.
+ * Skip a blob only when the target already owns it and every present memwal
+ * field agrees with this request. Register writes namespace, owner, package,
+ * and job id, but not memwal_agent_id. When the signer is that owner, a
+ * missing agent id is stamped. A field that is present and disagrees stays
+ * a permanent mismatch. The relayer must not sign a blob it does not own.
  */
 export async function recoverMetadataBatch<T extends MetadataRecoveryBlob>(
     blobs: T[],
@@ -45,10 +47,21 @@ export async function recoverMetadataBatch<T extends MetadataRecoveryBlob>(
             const metadata = new Map(receipt.metadata.map(({ key, value }) => [key, value]));
             const metadataOwner = suiAddress(metadata.get("memwal_owner"));
             const metadataPackage = suiAddress(metadata.get("memwal_package_id"));
-            if (metadata.get("memwal_namespace") !== (blob.namespace || "default")
+            const metadataAgent = metadata.get("memwal_agent_id");
+            const conflicts = metadata.get("memwal_namespace") !== (blob.namespace || "default")
                 || metadataOwner !== suiAddress(owner)
                 || (packageId !== undefined && metadataPackage !== suiAddress(packageId))
-                || (agentId !== undefined && metadata.get("memwal_agent_id") !== agentId)) {
+                || (agentId !== undefined && metadataAgent !== undefined && metadataAgent !== agentId);
+            if (conflicts) {
+                throw new Error(`METADATA_RECEIPT_MISMATCH: ${blob.blobObjectId}`);
+            }
+            // The upload key is the memory owner, so register already
+            // transferred the blob and left the agent id for this step.
+            if (agentId !== undefined && metadataAgent === undefined && ownerIs(receipt.owner, signer)) {
+                pending.push(blob);
+                continue;
+            }
+            if (agentId !== undefined && metadataAgent === undefined) {
                 throw new Error(`METADATA_RECEIPT_MISMATCH: ${blob.blobObjectId}`);
             }
             continue;
