@@ -4231,8 +4231,12 @@ the checkpoint it replied about",
     #[test]
     fn metadata_transport_failure_preserves_bounded_recovery_budget() {
         let msg = "Internal Error: Sidecar walrus/set-metadata-batch request failed: error sending request for url (http://localhost:9000/walrus/set-metadata-batch)";
-        assert!(matches!(WalletJobError::classify_sidecar_error(msg), WalletJobError::UploadSlotCongestion(_)));
-        let mismatch = "walrus set-metadata-batch failed: Transaction was not signed by the correct sender";
+        assert!(matches!(
+            WalletJobError::classify_sidecar_error(msg),
+            WalletJobError::UploadSlotCongestion(_)
+        ));
+        let mismatch =
+            "walrus set-metadata-batch failed: Transaction was not signed by the correct sender";
         assert!(!WalletJobError::is_sidecar_upload_transport_error(mismatch));
     }
 

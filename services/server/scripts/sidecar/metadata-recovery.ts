@@ -30,10 +30,12 @@ function ownerIs(recipient: unknown, expected: string): boolean {
  * not submit another uploader transfer for a step that already landed.
  *
  * When the target is also the signer (the owner is a pool wallet), register
- * already left the blob with that address, so ownership is not a receipt.
- * Register's tags also look the same as a finished write. Sign the metadata
- * step instead: it is idempotent, and it is the only step that adds the
- * agent id and the SEAL persistence fence. A tag that disagrees still fails.
+ * already left the blob with that address, so ownership is not a receipt and
+ * register's tags look the same as a finished write. Only the metadata step
+ * writes memwal_agent_id, so a matching agent id proves it ran. Without that
+ * proof, sign the metadata step: it is idempotent, and it is the only step
+ * that adds the agent id and the SEAL persistence fence. A tag that
+ * disagrees still fails.
  */
 export async function recoverMetadataBatch<T extends MetadataRecoveryBlob>(
     blobs: T[],
@@ -60,7 +62,8 @@ export async function recoverMetadataBatch<T extends MetadataRecoveryBlob>(
                 || (agentId !== undefined && metadataAgent === undefined && !signerIsOwner)) {
                 throw new Error(`METADATA_RECEIPT_MISMATCH: ${blob.blobObjectId}`);
             }
-            if (signerIsOwner) {
+            const metadataStepProven = agentId !== undefined && metadataAgent === agentId;
+            if (signerIsOwner && !metadataStepProven) {
                 pending.push(blob);
             }
             continue;
