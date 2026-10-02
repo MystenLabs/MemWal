@@ -79,6 +79,8 @@ Each result line includes `score` and `distance`. `distance` is cosine distance 
 
 The cutoff is applied to the `limit` nearest matches, not before them, so a tight `maxDistance` returns fewer than `limit` results — that is the cutoff biting, not an empty namespace. Raise `limit` to widen the candidate pool the cutoff sees.
 
+A match whose blob fails to download from Walrus, or whose ciphertext fails to decrypt, is left out of the results and counted instead of being discarded quietly. The tool reports that count: a recall where every match failed says so rather than returning "No matching memories found", and a partial loss appends a trailing note naming how many were omitted. Read a reported loss as stored-but-unreadable, never as proof the namespace is empty.
+
 | **Parameter** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
 | `query` | string | yes | Natural-language query to match against stored memories. |
@@ -509,6 +511,12 @@ The URL is valid for **5 minutes**. Call the tool again to mint a fresh one. Mak
 ### Recall returns "No matching memories found" right after a remember
 
 By default `memwal_remember` returns at accept (`job_id`, ~1s). That reply is **not stored yet** — the Walrus write is still in flight. Empty recall immediately after accept is expected. Settle with the job-status tool this server advertises (`memwal_remember_status` on a current sidecar) and only treat `blob_id` as saved. `MEMWAL_MCP_REMEMBER_WAIT_MS=90000` is the opt-in wait-for-`blob_id` path (needs a client that raises the 60s tools/call ceiling).
+
+### Recall reports matches it could not return
+
+The relayer matched those memories in its index but could not fetch their Walrus blob or decrypt the ciphertext, so they are missing from the results. The namespace is not empty.
+
+Retry the same query to tell the two causes apart: a Walrus fetch that failed transiently succeeds on a later call, so a count that falls to zero was never real loss. A count that survives repeated retries is a permanent decrypt failure — typically blobs written under a key the session can no longer use — and re-running the query will not recover them. Do not read `memwal_restore`'s `skipped` as the same signal: it counts blobs already present in the index and ones it declined to re-attempt, so it is large on a perfectly healthy namespace.
 
 ### 401 Unauthorized from the relayer
 
