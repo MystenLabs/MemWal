@@ -118,6 +118,11 @@ const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
     // Partial index for /health recent_write_outcomes. CONCURRENTLY, own
     // file — see 022's header.
     migration!("022_remember_jobs_recent_outcomes.sql"),
+    // Balance samples and sponsored-transaction log for the admin spend view.
+    migration!("023_admin_activity.sql"),
+    // deleted_at range index for the admin activity delete counts.
+    // CONCURRENTLY, own file -- see 024's header.
+    migration!("024_memory_tombstones_deleted_at_index.sql"),
 ];
 
 /// Every migration the pipeline applies, in the order it applies them.
@@ -2077,6 +2082,8 @@ const CONCURRENTLY_BUILT_INDEXES: &[(&str, &str)] = &[
     // `writes=degraded` alive, so losing it silently disables a
     // silent-failure detector.
     ("remember_jobs_recent_outcomes_idx", "022"),
+    // Admin activity memory-delete counts over a deleted_at window.
+    ("idx_memory_tombstones_deleted_at", "024"),
 ];
 
 /// Session advisory lock for recover + `CREATE INDEX CONCURRENTLY`.

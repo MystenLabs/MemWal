@@ -414,7 +414,6 @@ function RequireAccountForSetup() {
 function AppContent() {
   const currentAccount = useCurrentAccount()
   const autoConnectStatus = useAutoConnectWallet()
-  const { delegateKey } = useDelegateKey()
   const authPending = autoConnectStatus === 'idle'
 
   const requireAccount = (element: React.ReactNode) => {
@@ -429,10 +428,10 @@ function AppContent() {
         currentAccount ? <PostAuthRedirect /> : <LandingPage />
       } />
       <Route path="/dashboard" element={requireAccount(<Dashboard />)} />
+      {/* dev (#1003): owns the has-key redirect and the fromConsoleSetup signal. */}
       <Route path="/setup" element={<RequireAccountForSetup />} />
-      <Route path="/playground" element={requireAccount(
-        delegateKey ? <Playground /> : <Navigate to="/dashboard" replace />
-      )} />
+      {/* #1006: the playground only needs a signed-in account. */}
+      <Route path="/playground" element={requireAccount(<Playground />)} />
       <Route path="/connect/mcp" element={<ConnectMcp />} />
       <Route path="/connect/claude" element={<ConnectClaude />} />
       <Route path="/keys" element={<KeysPage />} />

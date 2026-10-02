@@ -44,7 +44,7 @@ export function AdminKeyEntry({
   return (
     <div className="admin-key-entry-shell">
       <Card
-        className="dashboard-keys-card admin-key-entry-card"
+        className="dashboard-keys-card sept-section admin-key-entry-card"
         title="Admin sign in"
         subtitle="Enter your admin API key to continue"
       >
