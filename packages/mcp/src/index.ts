@@ -524,7 +524,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
         note(
             "Walrus Memory MCP is not authorized yet — opening browser to connect your Sui wallet."
         );
-        creds = await loginFlow({ relayerUrl, webUrl, label });
+        creds = await loginFlow({ relayerUrl, webUrl, label, freshKey: args.forceLogin });
         note(`Authorized as ${creds.walletAddress.slice(0, 10)}...`);
         // Before the question is put, not after: if the user abandons the
         // prompt, the install must still read as "never answered" rather than
