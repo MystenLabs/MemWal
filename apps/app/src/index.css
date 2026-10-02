@@ -10297,7 +10297,7 @@ h1, h2, h3 {
 
 .dash-page .dashboard-account-ready-body {
   display: flex;
-  padding: 16px 24px;
+  padding: 24px 24px 16px;
   flex-direction: column;
   align-items: flex-start;
   gap: 10px;
