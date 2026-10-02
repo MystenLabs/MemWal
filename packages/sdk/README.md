@@ -52,10 +52,14 @@ await memwal.rememberAndWait(
 const memories = await memwal.recall({
   query: "What are the user's preferences?",
   topK: 10,
-  maxDistance: 0.7,
+  maxDistance: 0.8,
 });
 await memwal.restore("demo");
 ```
+
+`0.8` is a starting point for the distance cutoff. Calibrate `maxDistance`
+against your own memories and query phrasing: lower values reduce noise, while
+higher values preserve more relevant matches.
 
 If you are self-hosting the relayer and do not have an account ID yet, see [Self-Hosting](../../docs/relayer/self-hosting.md) for the account creation and delegate key setup flow.
 

@@ -13,6 +13,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import express, { type Express, type Response as ExpressResponse } from "express";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
@@ -30,7 +31,7 @@ import {
   SIDECAR_ENABLE_MIGRATION_SEAL_ROUTE,
 } from "../config.js";
 import { sealCommitteeIdentityMatches, type SealCommitteeIdentity } from "../../seal-config.js";
-import { createSealClient, sealEncryptClient, suiClient } from "../clients.js";
+import { createDecryptSealClient, sealEncryptClient, suiClient } from "../clients.js";
 import { buildSealEncryptId, fetchSealEncryptIdentity, type SealEncryptPurpose } from "../seal-identity.js";
 import {
   buildSealApproveTx,
@@ -168,9 +169,35 @@ async function resolveSessionKey(req: express.Request, packageId: string): Promi
   });
 }
 
+const ACCOUNT_READ_ATTEMPTS = 4;
+
+/**
+ * For Seal encrypt-side calls with no side effects: the MemWalAccount read and
+ * the encrypt itself (key-server object reads; a retry only yields a fresh
+ * ciphertext). Covers the gRPC-web transport's bare "fetch failed" (dropped
+ * connection, no status code), which the shared classifier does not retry.
+ * One such drop failed a whole remember before any paid work in each of
+ * bench-w7-pr1055-204e580-100 (account read) and
+ * bench-w9-merged-9e9a10c-r3 (encrypt).
+ */
+export async function retryTransientSealRpc<T>(
+  read: () => Promise<T>,
+  sleep: (ms: number) => Promise<unknown> = delay,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await read();
+    } catch (err) {
+      const transient = isRetryableRpcError(err) || errorMessage(err).toLowerCase().includes("fetch failed");
+      if (!transient || attempt >= ACCOUNT_READ_ATTEMPTS) throw err;
+      await sleep(500 * 2 ** (attempt - 1));
+    }
+  }
+}
+
 const accountReader = {
   async getObject(input: { objectId: string; include: { json: true } }) {
-    return await suiClient.getObject(input);
+    return await retryTransientSealRpc(() => suiClient.getObject(input));
   },
 };
 
@@ -263,12 +290,12 @@ export function registerSealRoutes(app: Express, policy = DEFAULT_SEAL_ROUTE_POL
 
           phase = "encrypt";
           const plaintext = Buffer.from(data, "base64");
-                const result = await sealEncryptClient.encrypt({
+                const result = await retryTransientSealRpc(() => sealEncryptClient.encrypt({
             threshold: SEAL_THRESHOLD,
             packageId: identity.immutablePackageId,
                     id: buildSealEncryptId(identity.owner, identity.accessCounterVersion),
             data: new Uint8Array(plaintext),
-          });
+          }));
 
                 const encryptedBase64 = Buffer.from(result.encryptedObject).toString("base64");
           res.json({ encryptedData: encryptedBase64 });
@@ -330,7 +357,7 @@ export function registerSealRoutes(app: Express, policy = DEFAULT_SEAL_ROUTE_POL
             ]);
 
         phase = "fetch_keys";
-            const sealClient = createSealClient();
+            const sealClient = await createDecryptSealClient();
         // Fetch keys from key servers
         await sealClient.fetchKeys({
           ids: [fullId],
@@ -419,7 +446,7 @@ export function registerSealRoutes(app: Express, policy = DEFAULT_SEAL_ROUTE_POL
         );
 
         phase = "fetch_keys";
-            const sealClient = createSealClient();
+            const sealClient = await createDecryptSealClient();
         // ONE fetchKeys call for ALL IDs
         try {
           await sealClient.fetchKeys({

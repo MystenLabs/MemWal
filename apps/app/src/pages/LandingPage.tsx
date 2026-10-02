@@ -4,8 +4,8 @@
  * 1. Continue with Google (Enoki)
  * 2. Connect wallet (any Sui wallet)
  *
- * After login, redirects to /dashboard where SetupWizard handles
- * delegate key generation if needed.
+ * After login, routes through "/" (PostAuthRedirect), which sends a
+ * brand-new account to /setup and an existing one to /dashboard.
  */
 
 import {
@@ -83,7 +83,13 @@ export default function LandingPage() {
                 trackEvent('sign_in_complete', { auth_method: authMethod })
                 signInTrackedRef.current = true
             }
-            navigate('/dashboard')
+            // A wallet connect (Slush etc.) resolves in-page, with no OAuth
+            // redirect through "/" — so PostAuthRedirect never gets a chance
+            // to run for this path unless we send it there ourselves. Route
+            // through "/" instead of hardcoding /dashboard so new-account
+            // detection (PostAuthAccountCheck) and any pending mcp/claude/keys
+            // connect query apply the same way they do for Enoki sign-in.
+            navigate('/')
         }
     }, [currentAccount, updateAuthMethod, navigate])
 

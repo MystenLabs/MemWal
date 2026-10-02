@@ -38,7 +38,7 @@ use alerts::AlertManager;
 use engine::{MemoryEngine, PlaintextEngine, WalrusSealEngine};
 use jobs::{
     execute_bulk_remember, execute_wallet_job, BulkRememberJob, MetaTransferJob, RememberJob,
-    WalletJobStorage,
+    WalletJobStorage, WALLET_FOLLOWUP_QUEUE, WALLET_UPLOAD_QUEUE,
 };
 use services::{CompositeRanker, Embedder, Extractor, LlmExtractor, OpenAiEmbedder, Ranker};
 use storage::db::VectorDb;
@@ -174,10 +174,9 @@ fn resolve_sidecar_relayer_urls(
 ) -> SidecarRelayerUrls {
     // Loopback unless an operator explicitly asked for something else. This is
     // the behaviour change: `MEMWAL_RELAYER_URL` no longer steers the dial.
-    let dial =
-        dial_override_env
-            .clone()
-            .unwrap_or_else(|| format!("http://127.0.0.1:{}", port));
+    let dial = dial_override_env
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", port));
 
     // An explicit public origin wins; `MEMWAL_RELAYER_URL` remains the fallback
     // so `memwal_health` names exactly what it names today on every deployment.
@@ -268,8 +267,12 @@ mod sidecar_relayer_url_tests {
 
     #[test]
     fn an_explicit_loopback_override_is_not_warned_about() {
-        let urls =
-            resolve_sidecar_relayer_urls(Some("http://localhost:9000".to_string()), None, None, 8000);
+        let urls = resolve_sidecar_relayer_urls(
+            Some("http://localhost:9000".to_string()),
+            None,
+            None,
+            8000,
+        );
         assert_eq!(urls.dial, "http://localhost:9000");
         assert!(urls.warnings.is_empty());
     }
@@ -309,7 +312,10 @@ mod sidecar_relayer_url_tests {
             "http://100.64.0.1:8000",
             "not a url",
         ] {
-            assert!(!is_loopback_relayer_url(url), "{url} should not be loopback");
+            assert!(
+                !is_loopback_relayer_url(url),
+                "{url} should not be loopback"
+            );
         }
     }
 }
@@ -434,6 +440,292 @@ mod cors_tests {
             2,
             "only x-auth-error and retry-after should be exposed, got: {exposed}"
         );
+    }
+}
+
+#[cfg(test)]
+mod mcp_rate_limit_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    /// Bytes consumed by one RESP command, or `None` if `buf` is incomplete.
+    fn resp_command_len(buf: &[u8]) -> Option<usize> {
+        if *buf.first()? != b'*' {
+            return None;
+        }
+        let header_end = buf.iter().position(|b| *b == b'\n')?;
+        if header_end == 0 || buf[header_end - 1] != b'\r' {
+            return None;
+        }
+        let n: usize = std::str::from_utf8(&buf[1..header_end - 1])
+            .ok()?
+            .parse()
+            .ok()?;
+        let mut i = header_end + 1;
+        for _ in 0..n {
+            if *buf.get(i)? != b'$' {
+                return None;
+            }
+            let rel = buf[i + 1..].iter().position(|b| *b == b'\n')?;
+            let line_end = i + 1 + rel;
+            if buf[line_end - 1] != b'\r' {
+                return None;
+            }
+            let len: usize = std::str::from_utf8(&buf[i + 1..line_end - 1])
+                .ok()?
+                .parse()
+                .ok()?;
+            let next = line_end.checked_add(1)?.checked_add(len)?.checked_add(2)?;
+            if buf.len() < next || buf[next - 2] != b'\r' || buf[next - 1] != b'\n' {
+                return None;
+            }
+            i = next;
+        }
+        Some(i)
+    }
+
+    /// Accepts a Redis handshake and answers every command with integer 0,
+    /// which the sliding-window script treats as a denied window.
+    async fn reply_denied(mut socket: tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = socket.set_nodelay(true);
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 8192];
+        loop {
+            match socket.read(&mut tmp).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    while let Some(consumed) = resp_command_len(&buf) {
+                        buf.drain(..consumed);
+                        if socket.write_all(b":0\r\n").await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn denying_redis() -> redis::aio::ConnectionManager {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(reply_denied(socket));
+            }
+        });
+        let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
+        let config = redis::aio::ConnectionManagerConfig::new()
+            .set_number_of_retries(1)
+            .set_factor(1)
+            .set_exponent_base(1)
+            .set_max_delay(50)
+            .set_connection_timeout(std::time::Duration::from_secs(2))
+            .set_response_timeout(std::time::Duration::from_secs(2));
+        client
+            .get_connection_manager_with_config(config)
+            .await
+            .expect("stub redis accepts the handshake")
+    }
+
+    fn rate_limit_test_config() -> Config {
+        Config {
+            port: 8000,
+            database_url: "postgres://memwal@127.0.0.1/memwal".to_string(),
+            sui_rpc_url: "http://127.0.0.1:9".to_string(),
+            sui_grpc_url: None,
+            sui_network: "testnet".to_string(),
+            memwal_account_id: None,
+            openai_api_key: None,
+            openai_api_base: "http://127.0.0.1:9".to_string(),
+            walrus_publisher_url: "http://127.0.0.1:9".to_string(),
+            walrus_aggregator_url: "http://127.0.0.1:9".to_string(),
+            walrus_storage_epochs: 3,
+            walrus_aggregator_urls: vec!["http://127.0.0.1:9".to_string()],
+            walrus_skip_consistency_check: false,
+            walrus_aggregator_race_after_ms: types::DEFAULT_WALRUS_AGGREGATOR_RACE_AFTER_MS,
+            sui_private_key: None,
+            sui_private_keys: vec![],
+            package_id: "0xpackage".to_string(),
+            seal_policy_package_id: "0xpackage".to_string(),
+            registry_id: "0xregistry".to_string(),
+            sidecar_url: "http://127.0.0.1:9".to_string(),
+            seal_sidecar_url: "http://127.0.0.1:10".to_string(),
+            sidecar_secret: None,
+            seal_expected_committee_identity: None,
+            rate_limit: rate_limit::RateLimitConfig::default(),
+            sponsor_rate_limit: types::SponsorRateLimitConfig::default(),
+            read_api_rate_limit: types::ReadApiRateLimitConfig::default(),
+            accounts_rate_limit: types::AccountsRateLimitConfig::default(),
+            mcp_rate_limit: types::McpRateLimitConfig::default(),
+            trusted_proxy_hops: 0,
+            allowed_origins: String::new(),
+            benchmark_mode: false,
+            writes_paused: false,
+            enable_memory_deletion: false,
+            enable_security_delete: false,
+            legacy_db_url: None,
+            deletion_reconciler_enabled: false,
+            deletion_object_resolver_enabled: false,
+            delete_batch_max: 900,
+            max_active_batches_per_owner: 16,
+            security_delete_auth_requests_per_minute: 20,
+            security_delete_prepare_requests_per_minute: 10,
+            sui_rpc_requests_per_window: 3_000,
+            sui_rpc_window: std::time::Duration::from_secs(10),
+            sui_rpc_attempt_timeout: std::time::Duration::from_secs(5),
+            sui_rpc_max_in_flight: 64,
+            security_delete_execute_max_in_flight: 1,
+            security_delete_crash_test_secret: None,
+            sponsor_private_key: None,
+            sponsor_min_balance_alert: 0,
+            claim_ttl_secs: 600,
+            exec_grace_secs: 60,
+            deletion_token_secret: None,
+            deletion_token_ttl_secs: 2700,
+            expiry_margin_epochs: 1,
+            walrus_package_id: String::new(),
+            walrus_system_object_id: String::new(),
+            walrus_staking_pool_id: String::new(),
+            owner_token_secret: "owner-token-test-secret".to_string(),
+            owner_token_service_credential: "owner-token-test-credential".to_string(),
+            owner_token_ttl_secs: 900,
+            owner_token_rate_limit: types::OwnerTokenRateLimitConfig::default(),
+            restore_requests_per_owner_per_minute: 10,
+            balance_monitor_interval_secs: 900,
+            wallet_balance_low_threshold_wal: 50_000_000_000,
+            wallet_balance_low_threshold_sui: 5_000_000_000,
+            sponsor_balance_low_threshold_sui: 5_000_000_000,
+            mcp_oauth: None,
+            auth_max_clock_drift_secs: types::DEFAULT_AUTH_CLOCK_DRIFT_SECS,
+        }
+    }
+
+    async fn test_state(redis: redis::aio::ConnectionManager) -> Arc<AppState> {
+        let pool = sqlx::postgres::PgPool::connect_lazy("postgres://memwal@127.0.0.1/memwal")
+            .expect("lazy pool");
+        let db = Arc::new(VectorDb::from_pool(pool.clone()));
+        let http_client = reqwest::Client::new();
+        let config = Arc::new(rate_limit_test_config());
+        Arc::new(AppState {
+            db: Arc::clone(&db),
+            wallet_lock_pool: pool.clone(),
+            legacy_db: None,
+            security_delete_nonce_store: Arc::new(security_delete_auth::RedisNonceStore::new(
+                redis.clone(),
+            )),
+            security_delete_wallet_verifier: Arc::new(
+                security_delete_auth::NativeWalletSignatureVerifier,
+            ),
+            security_delete_sui: None,
+            security_delete_background_sui: None,
+            walrus_sui_client: None,
+            security_delete_execution_gate: Arc::new(types::SecurityDeleteExecutionGate::new(1)),
+            config: Arc::clone(&config),
+            http_client: http_client.clone(),
+            sui_grpc_client: None,
+            delegate_keys_cache: storage::sui::new_delegate_keys_cache(),
+            delegate_verify_cache: storage::sui::new_delegate_verify_cache(),
+            delegate_reject_cache: storage::sui::new_delegate_reject_cache(),
+            mcp_connect_episodes: observability::new_mcp_connect_episodes(),
+            alerts: Arc::new(AlertManager::from_env(http_client.clone())),
+            key_pool: Arc::new(KeyPool::new(Vec::new())),
+            engine: Arc::new(PlaintextEngine::new(db)),
+            embedder: Arc::new(OpenAiEmbedder::new(
+                http_client.clone(),
+                Arc::clone(&config),
+            )),
+            extractor: Arc::new(LlmExtractor::new(http_client, config)),
+            ranker: Arc::new(CompositeRanker),
+            redis,
+            fallback_rate_limit: tokio::sync::Mutex::new(rate_limit::InMemoryFallback::default()),
+            remember_job_storage: PostgresStorage::new(pool.clone()),
+            wallet_storage: PostgresStorage::new_with_config(
+                pool.clone(),
+                apalis_sql::Config::new(WALLET_UPLOAD_QUEUE),
+            ),
+            wallet_followup_storage: PostgresStorage::new_with_config(
+                pool.clone(),
+                apalis_sql::Config::new(WALLET_FOLLOWUP_QUEUE).set_buffer_size(1),
+            ),
+            bulk_job_storage: PostgresStorage::new(pool),
+            blob_cache_ttl: std::time::Duration::from_secs(DEFAULT_BLOB_CACHE_TTL_SECS),
+            blob_cache_max_bytes: DEFAULT_BLOB_CACHE_MAX_BYTES,
+            embedding_cache_ttl: std::time::Duration::from_secs(DEFAULT_EMBEDDING_CACHE_TTL_SECS),
+        })
+    }
+
+    async fn expect_mcp_ip_burst(app: &Router, method: Method, uri: &str, bearer: bool) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if bearer {
+            builder = builder.header(header::AUTHORIZATION, "Bearer not-a-delegate-key");
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{uri} bearer={bearer} body={json}"
+        );
+        // Missing ConnectInfo is 0.0.0.0. Every IP shares one MCP ceiling,
+        // and that ceiling is not the accounts-exists oracle budget.
+        assert_eq!(
+            json["layer"], "mcp_ip_burst",
+            "{uri} must use the MCP IP bucket, not accounts_ip_burst"
+        );
+        assert_eq!(
+            json["limit"], "2000 weighted-requests/min",
+            "{uri} body={json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_rate_limit_routes_use_their_own_ip_bucket() {
+        let state = test_state(denying_redis().await).await;
+        // Merged the same way `main` merges `mcp_routes` into `public_routes`.
+        let app = Router::new()
+            .merge(mcp_routes(Arc::clone(&state)))
+            .with_state(state);
+
+        for (method, uri) in [
+            (Method::GET, "/api/mcp/sse"),
+            (Method::POST, "/api/mcp/messages"),
+            (Method::GET, "/api/mcp"),
+            (Method::POST, "/api/mcp"),
+            (Method::DELETE, "/api/mcp"),
+            (Method::OPTIONS, "/api/mcp"),
+        ] {
+            expect_mcp_ip_burst(&app, method, uri, false).await;
+        }
+        // A Bearer token does not skip the MCP IP budget.
+        expect_mcp_ip_burst(&app, Method::POST, "/api/mcp", true).await;
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/not-mcp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 }
 
@@ -830,6 +1122,131 @@ async fn apalis_schema_ready(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
     .await
 }
 
+async fn wait_for_local_health(client: &reqwest::Client, url: &str, label: &str) -> bool {
+    for attempt in 1..=30 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("  {}: ready (attempt {})", label, attempt);
+                return true;
+            }
+            _ => {
+                if attempt % 5 == 0 {
+                    tracing::debug!("  {}: waiting... (attempt {})", label, attempt);
+                }
+            }
+        }
+    }
+    false
+}
+
+async fn health_ok(client: &reqwest::Client, url: &str, timeout: std::time::Duration) -> bool {
+    match client.get(url).timeout(timeout).send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(unix)]
+const SIDECAR_SIGTERM: i32 = 15;
+#[cfg(unix)]
+const SIDECAR_SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// Signal every process in the sidecar group. The leader pid is the group id
+/// because the child is spawned with `process_group(0)`. `npx` is not the
+/// Node process, and this image has no `kill` binary, so a shell-out cannot
+/// reach the seal worker.
+#[cfg(unix)]
+fn signal_sidecar_group(pid: u32, sig: i32) -> bool {
+    let delivered = unsafe { kill(-(pid as i32), sig) == 0 };
+    if !delivered {
+        let err = std::io::Error::last_os_error();
+        // ESRCH: the group is already gone.
+        if err.raw_os_error() != Some(3) {
+            tracing::error!("signal {sig} to sidecar process group {pid} failed: {err}");
+        }
+    }
+    delivered
+}
+
+#[cfg(unix)]
+fn terminate_sidecar_group(pid: u32) {
+    signal_sidecar_group(pid, SIDECAR_SIGTERM);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    signal_sidecar_group(pid, SIDECAR_SIGKILL);
+}
+
+async fn stop_sidecar_child(child: &mut tokio::process::Child) {
+    let Some(pid) = child.id() else {
+        return;
+    };
+    #[cfg(unix)]
+    {
+        signal_sidecar_group(pid, SIDECAR_SIGTERM);
+        match tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await {
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        // The leader can exit and leave the seal worker in the group.
+        signal_sidecar_group(pid, SIDECAR_SIGKILL);
+        if child.id().is_some() {
+            let _ = child.wait().await;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        child.kill().await.ok();
+        let _ = child.wait().await;
+        let _ = pid;
+    }
+}
+
+/// MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
+///
+/// No signed-request auth here: MCP clients ship a single Bearer at SSE
+/// open and the sidecar parses it as the Ed25519 delegate key. Body limit
+/// is generous on the POST route (JSON-RPC envelopes can carry analyze
+/// text up to a few hundred KiB) and irrelevant on the GET SSE route.
+///
+/// The router uses `mcp_rate_limit_middleware`, not the accounts-exists
+/// budget. Bearer tokens are not exempt. `reset_fallback` drops the
+/// fallback `Router::layer` also wraps; without it, `merge` would
+/// rate-limit every unmatched path.
+fn mcp_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/mcp/sse", get(mcp_proxy::sse_proxy))
+        .route(
+            "/api/mcp/messages",
+            post(mcp_proxy::messages_proxy).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
+        // Streamable HTTP transport (MCP 2025-06). Single URL that
+        // handles GET (open SSE), POST (JSON-RPC with optional SSE
+        // upgrade), and DELETE (close session). Lets users add the
+        // server via `claude mcp add --transport http memwal <URL>`
+        // without any package install.
+        .route(
+            "/api/mcp",
+            get(mcp_proxy::streamable_proxy)
+                .post(mcp_proxy::streamable_proxy)
+                .delete(mcp_proxy::streamable_proxy)
+                .options(mcp_proxy::streamable_proxy)
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::mcp_rate_limit_middleware,
+        ))
+        // `Router::layer` also wraps this router's fallback. Merging that
+        // fallback into `public_routes` would run this budget on every
+        // unmatched path. Put a plain 404 back before the merge.
+        .reset_fallback()
+}
+
 #[tokio::main]
 async fn main() {
     #[cfg(all(feature = "ci-offline-onchain", debug_assertions))]
@@ -885,6 +1302,13 @@ async fn main() {
         config.accounts_rate_limit.per_hour,
         config.accounts_rate_limit.global_per_minute,
         config.accounts_rate_limit.global_per_hour,
+    );
+    tracing::info!(
+        "  mcp rate limit: {}/min, {}/hr per IP; {}/min, {}/hr global",
+        config.mcp_rate_limit.per_minute,
+        config.mcp_rate_limit.per_hour,
+        config.mcp_rate_limit.global_per_minute,
+        config.mcp_rate_limit.global_per_hour,
     );
     tracing::info!(
         "  owner-token issuance: {} (ttl={}s); rate limit {}/min, {}/hr per credential; {}/min, {}/hr per owner",
@@ -950,12 +1374,27 @@ async fn main() {
         .env("MEMWAL_RELAYER_URL", &relayer_urls.dial)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
+    // One group for npx, tsx, the sidecar, and the forked seal worker.
+    // Signaling the group does not depend on /bin/kill or on Node's handler.
+    #[cfg(unix)]
+    sidecar_command.process_group(0);
     if let Some(public_relayer_url) = &relayer_urls.public {
         sidecar_command.env("MEMWAL_PUBLIC_RELAYER_URL", public_relayer_url);
+    }
+    let seal_url = config.seal_sidecar_url.clone();
+    let seal_plan = crate::types::plan_seal_deployment_from_env(&config.sidecar_url);
+    if let Some((seal_host, seal_port)) = seal_plan.bind {
+        sidecar_command.env("SIDECAR_SEAL_HOST", &seal_host);
+        sidecar_command.env("SIDECAR_SEAL_PORT", seal_port.to_string());
+        sidecar_command.env("SIDECAR_SEAL_LISTENER", "1");
+        tracing::info!("  seal listener: {}", seal_url);
+    } else {
+        sidecar_command.env("SIDECAR_SEAL_LISTENER", "0");
     }
     let mut sidecar_child = sidecar_command
         .spawn()
         .expect("Failed to start TS sidecar. Is Node.js installed?");
+    let sidecar_group = sidecar_child.id();
 
     // Wait for sidecar to be ready (health check with retry)
     // Set 30s timeout on HTTP client to prevent hanging LLM/Walrus requests
@@ -964,25 +1403,20 @@ async fn main() {
         .build()
         .expect("Failed to build HTTP client");
     let health_url = format!("{}/health", sidecar_url);
-    let mut ready = false;
-    for attempt in 1..=30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        match http_client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("  sidecar: ready (attempt {})", attempt);
-                ready = true;
-                break;
-            }
-            _ => {
-                if attempt % 5 == 0 {
-                    tracing::debug!("  sidecar: waiting... (attempt {})", attempt);
-                }
-            }
-        }
-    }
-    if !ready {
-        sidecar_child.kill().await.ok();
+    if !wait_for_local_health(&http_client, &health_url, "sidecar").await {
+        stop_sidecar_child(&mut sidecar_child).await;
         panic!("TS sidecar failed to start after 15s. Check scripts/sidecar-server.ts");
+    }
+    let seal_health_url = if seal_url.trim_end_matches('/') != sidecar_url.trim_end_matches('/') {
+        Some(format!("{}/health", seal_url.trim_end_matches('/')))
+    } else {
+        None
+    };
+    if let Some(seal_health) = &seal_health_url {
+        if !wait_for_local_health(&http_client, seal_health, "seal listener").await {
+            stop_sidecar_child(&mut sidecar_child).await;
+            panic!("Seal listener failed to start after 15s. Recall would block behind uploads.");
+        }
     }
 
     // Keep a cheap heartbeat in the Rust logs so operators can distinguish
@@ -1000,49 +1434,47 @@ async fn main() {
     );
     let sidecar_watch_client = http_client.clone();
     let sidecar_watch_url = health_url.clone();
+    let seal_watch_url = seal_health_url.clone();
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(sidecar_watch_interval_secs));
         let mut consecutive_failures = 0u32;
+        let timeout = std::time::Duration::from_secs(sidecar_watch_timeout_secs);
         loop {
             interval.tick().await;
-            match sidecar_watch_client
-                .get(&sidecar_watch_url)
-                .timeout(std::time::Duration::from_secs(sidecar_watch_timeout_secs))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    if consecutive_failures > 0 {
-                        tracing::info!(
-                            "  sidecar: health recovered after {} failed check(s)",
-                            consecutive_failures
-                        );
-                    }
-                    consecutive_failures = 0;
-                }
-                Ok(resp) => {
-                    consecutive_failures += 1;
-                    tracing::error!(
-                        "  sidecar: health check failed status={} consecutive_failures={}",
-                        resp.status(),
+            let upload_ok = health_ok(&sidecar_watch_client, &sidecar_watch_url, timeout).await;
+            let seal_ok = match &seal_watch_url {
+                Some(url) => health_ok(&sidecar_watch_client, url, timeout).await,
+                None => true,
+            };
+            if upload_ok && seal_ok {
+                if consecutive_failures > 0 {
+                    tracing::info!(
+                        "  sidecar: health recovered after {} failed check(s)",
                         consecutive_failures
                     );
                 }
-                Err(e) => {
-                    consecutive_failures += 1;
-                    tracing::error!(
-                        "  sidecar: health check error consecutive_failures={} error={}",
-                        consecutive_failures,
-                        e
-                    );
-                }
+                consecutive_failures = 0;
+            } else {
+                consecutive_failures += 1;
+                tracing::error!(
+                    "  sidecar: health check failed upload_ok={} seal_ok={} consecutive_failures={}",
+                    upload_ok,
+                    seal_ok,
+                    consecutive_failures
+                );
             }
             if consecutive_failures >= sidecar_watch_max_failures {
                 tracing::error!(
                     "  sidecar: unhealthy for {} consecutive check(s); exiting relayer for supervisor restart",
                     consecutive_failures
                 );
+                if let Some(pid) = sidecar_group {
+                    #[cfg(unix)]
+                    terminate_sidecar_group(pid);
+                    #[cfg(not(unix))]
+                    let _ = pid;
+                }
                 std::process::exit(1);
             }
         }
@@ -1075,6 +1507,14 @@ async fn main() {
     } else {
         None
     };
+    if legacy_db.is_some() {
+        // The legacy migrations that just ran are what create
+        // `delete_blobs_tracking`, and they run *after* `VectorDb::new()`
+        // probed for it. Re-probe now so the first boot that enables
+        // security deletion already hides claimed-for-deletion memories from
+        // recall, instead of waiting for the next restart (WALM-592).
+        db.refresh_pending_delete_filter().await;
+    }
 
     let apalis_startup_timeout_secs = parse_env_u64(
         "APALIS_STARTUP_TIMEOUT_SECS",
@@ -1095,17 +1535,21 @@ async fn main() {
     let bulk_job_storage: PostgresStorage<BulkRememberJob> =
         PostgresStorage::new(apalis_pool.clone());
 
-    // Single Apalis queue for all WalletJob signing operations. Workers select
-    // a key from the configured pool when they execute an upload job, so
-    // retries can rotate away from a wallet whose sponsored tx expired.
-    const WALLET_QUEUE_NAME: &str = "wallet_jobs";
+    // Uploads prefetch a batch and will not notice a metadata job until that
+    // batch drains. Metadata and finalize use a second queue whose workers
+    // are idle until one of those jobs appears.
     let wallet_storage: WalletJobStorage = PostgresStorage::new_with_config(
         apalis_pool.clone(),
-        apalis_sql::Config::new(WALLET_QUEUE_NAME),
+        apalis_sql::Config::new(WALLET_UPLOAD_QUEUE),
+    );
+    let wallet_followup_storage: WalletJobStorage = PostgresStorage::new_with_config(
+        apalis_pool.clone(),
+        apalis_sql::Config::new(WALLET_FOLLOWUP_QUEUE).set_buffer_size(1),
     );
     tracing::info!(
-        "  Apalis: job queue ready (table=apalis_jobs, queue={})",
-        WALLET_QUEUE_NAME
+        "  Apalis: job queues ready (table=apalis_jobs, upload={}, followup={})",
+        WALLET_UPLOAD_QUEUE,
+        WALLET_FOLLOWUP_QUEUE
     );
 
     reqwest::Url::parse(&config.walrus_publisher_url)
@@ -1363,19 +1807,23 @@ async fn main() {
             Arc::new(client) as Arc<dyn sui::SuiApi>
         });
 
-    // Shared application state
-    // Dedicated pool for per-job upload advisory locks (see AppState docs). Sized
-    // to the wallet-job concurrency (+1 headroom) so every concurrent upload can
-    // hold its own lock connection without touching the request-serving pool. Read
-    // WALLET_JOB_CONCURRENCY here independently of the worker registration below.
-    let wallet_lock_pool_size = std::env::var("WALLET_JOB_CONCURRENCY")
+    // One connection per admitted upload, not per prefetched job. Waiters block
+    // on the wallet semaphore before checkout. A miss fails in a few seconds
+    // instead of the sqlx default 30s, and is not treated as relay congestion.
+    let wallet_lock_pool_size = std::env::var("WALLET_LOCK_POOL_SIZE")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(8)
-        .saturating_add(1)
-        .max(2);
+        .unwrap_or_else(|| {
+            std::env::var("WALLET_JOB_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(8)
+                .saturating_mul(4)
+                .max(32)
+        });
     let wallet_lock_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(wallet_lock_pool_size)
+        .acquire_timeout(jobs::WALLET_LOCK_POOL_ACQUIRE_TIMEOUT)
         .connect(&config.database_url)
         .await
         .expect("Failed to create wallet advisory-lock pool");
@@ -1405,11 +1853,9 @@ async fn main() {
         ranker,
         redis,
         fallback_rate_limit: tokio::sync::Mutex::new(crate::rate_limit::InMemoryFallback::default()),
-        registry_scan_semaphore: tokio::sync::Semaphore::new(
-            crate::types::REGISTRY_SCAN_MAX_CONCURRENT,
-        ),
         remember_job_storage: remember_job_storage.clone(),
         wallet_storage: wallet_storage.clone(),
+        wallet_followup_storage: wallet_followup_storage.clone(),
         bulk_job_storage: bulk_job_storage.clone(),
         blob_cache_ttl,
         blob_cache_max_bytes,
@@ -1610,11 +2056,11 @@ async fn main() {
         tracing::info!("  Apalis: worker 'bulk-remember' spawned (concurrency=2)");
     }
 
-    // Worker 4: WalletJob — single worker, single queue.
-    //
-    // Concurrency = WALLET_JOB_CONCURRENCY (default 8). Multiple jobs can be
-    // dispatched simultaneously against the same wallet; transient Sui/RPC
-    // conflicts are classified by `WalletJobError` and retried by Apalis.
+    // Upload workers prefetch. Followup workers only see metadata and
+    // finalize, so a certified blob starts on the next poll instead of
+    // waiting out that prefetch. Same concurrency: one followup worker per
+    // upload worker, which is enough when a full round of uploads finishes
+    // together. Transient Sui conflicts are still classified and retried.
     let wallet_concurrency: usize = std::env::var("WALLET_JOB_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -1624,7 +2070,7 @@ async fn main() {
         let storage = wallet_storage.clone();
         tokio::spawn(async move {
             loop {
-                let worker = WorkerBuilder::new("wallet_jobs")
+                let worker = WorkerBuilder::new(WALLET_UPLOAD_QUEUE)
                     .data(worker_state.clone())
                     .backend(storage.clone())
                     .build_fn(execute_wallet_job);
@@ -1635,13 +2081,41 @@ async fn main() {
                     .run()
                     .await
                 {
-                    tracing::error!("Apalis wallet worker exited: {}", e);
+                    tracing::error!("Apalis wallet upload worker exited: {}", e);
                 }
                 tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
             }
         });
         tracing::info!(
-            "  Apalis: worker 'wallet_jobs' spawned (concurrency={})",
+            "  Apalis: worker '{}' spawned (concurrency={})",
+            WALLET_UPLOAD_QUEUE,
+            wallet_concurrency
+        );
+    }
+    {
+        let worker_state = state.clone();
+        let storage = wallet_followup_storage.clone();
+        tokio::spawn(async move {
+            loop {
+                let worker = WorkerBuilder::new(WALLET_FOLLOWUP_QUEUE)
+                    .data(worker_state.clone())
+                    .backend(storage.clone())
+                    .build_fn(execute_wallet_job);
+
+                #[allow(deprecated)]
+                if let Err(e) = Monitor::new()
+                    .register_with_count(wallet_concurrency, worker)
+                    .run()
+                    .await
+                {
+                    tracing::error!("Apalis wallet followup worker exited: {}", e);
+                }
+                tokio::time::sleep(APALIS_MONITOR_RESTART_DELAY).await;
+            }
+        });
+        tracing::info!(
+            "  Apalis: worker '{}' spawned (concurrency={})",
+            WALLET_FOLLOWUP_QUEUE,
             wallet_concurrency
         );
     }
@@ -1729,8 +2203,7 @@ async fn main() {
                 .write()
                 .await;
             let before = reject_cache.len();
-            reject_cache
-                .retain(|_, rejected_at| storage::sui::reject_entry_is_fresh(*rejected_at));
+            reject_cache.retain(|_, rejected_at| storage::sui::reject_entry_is_fresh(*rejected_at));
             let evicted = before - reject_cache.len();
             drop(reject_cache);
             if evicted > 0 {
@@ -2169,30 +2642,7 @@ async fn main() {
     let owner_token_probe_routes =
         Router::new().route("/v1/owners/{owner}/_token_probe", get(routes::token_probe));
 
-    // MCP proxy routes — reverse-proxy to the Node sidecar's `/mcp/*` routes.
-    // No signed-request auth here: MCP clients ship a single Bearer at SSE
-    // open and the sidecar parses it as the Ed25519 delegate key. Body limit
-    // is generous on the POST route (JSON-RPC envelopes can carry analyze
-    // text up to a few hundred KiB) and irrelevant on the GET SSE route.
-    let mcp_routes = Router::new()
-        .route("/api/mcp/sse", get(mcp_proxy::sse_proxy))
-        .route(
-            "/api/mcp/messages",
-            post(mcp_proxy::messages_proxy).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
-        )
-        // Streamable HTTP transport (MCP 2025-06). Single URL that
-        // handles GET (open SSE), POST (JSON-RPC with optional SSE
-        // upgrade), and DELETE (close session). Lets users add the
-        // server via `claude mcp add --transport http memwal <URL>`
-        // without any package install.
-        .route(
-            "/api/mcp",
-            get(mcp_proxy::streamable_proxy)
-                .post(mcp_proxy::streamable_proxy)
-                .delete(mcp_proxy::streamable_proxy)
-                .options(mcp_proxy::streamable_proxy)
-                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
-        );
+    let mcp_routes = mcp_routes(state.clone());
 
     // Admin dashboard routes (requires ADMIN_API_KEY)
     let admin_dashboard_routes = Router::new()
@@ -2385,8 +2835,9 @@ async fn main() {
     .await
     .expect("Server failed");
 
-    // Cleanup sidecar after shutdown
-    sidecar_child.kill().await.ok();
+    // Cleanup sidecar after shutdown. SIGTERM lets it stop the seal child;
+    // SIGKILL would leave that child listening.
+    stop_sidecar_child(&mut sidecar_child).await;
     tracing::info!("sidecar stopped");
     telemetry.shutdown();
 }

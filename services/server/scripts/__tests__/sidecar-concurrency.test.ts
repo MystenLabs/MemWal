@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AsyncSemaphore, WalrusUploadLimitError } from "../sidecar/concurrency.js";
+import { AsyncSemaphore, WalrusUploadCancelledError, WalrusUploadLimitError } from "../sidecar/concurrency.js";
 
 test("acquire resolves immediately while capacity is available", async () => {
     const sem = new AsyncSemaphore(2);
@@ -37,6 +37,24 @@ test("waiter times out with WalrusUploadLimitError naming the label", async () =
     // The timed-out waiter must be dropped from the queue.
     assert.equal(sem.snapshot().queued, 0);
     release1();
+});
+
+test("abort drops a queued waiter and does not take the slot later", async () => {
+    const sem = new AsyncSemaphore(1);
+    const hold = await sem.acquire(1_000, "test");
+    const controller = new AbortController();
+    const waiting = sem.acquire(1_000, "wallet 1", controller.signal);
+    controller.abort();
+    await assert.rejects(waiting, (err: unknown) => {
+        assert.ok(err instanceof WalrusUploadCancelledError);
+        assert.match((err as Error).message, /wallet 1/);
+        return true;
+    });
+    assert.equal(sem.snapshot().queued, 0);
+    hold();
+    const next = await sem.acquire(1_000, "after-cancel");
+    assert.deepEqual(sem.snapshot(), { capacity: 1, available: 0, queued: 0 });
+    next();
 });
 
 test("double release never grows capacity beyond the configured limit", async () => {

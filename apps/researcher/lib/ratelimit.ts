@@ -27,7 +27,11 @@ export function getClientIp(request: Request): string | undefined {
   return validIp(realIp) ?? validIp(forwarded);
 }
 
-export async function checkIpRateLimit(ip: string | undefined) {
+async function checkHourlyIpBudget(
+  keyPrefix: string,
+  ip: string | undefined,
+  max: number
+) {
   if (!isProductionEnvironment || !ip) {
     if (!isProductionEnvironment) {
       return;
@@ -37,14 +41,14 @@ export async function checkIpRateLimit(ip: string | undefined) {
 
   try {
     const redis = await requireSharedRedisClient();
-    const key = `ip-rate-limit:${ip}`;
+    const key = `${keyPrefix}:${ip}`;
     const [count] = await redis
       .multi()
       .incr(key)
       .expire(key, TTL_SECONDS, "NX")
       .exec();
 
-    if (typeof count === "number" && count > MAX_MESSAGES) {
+    if (typeof count === "number" && count > max) {
       throw new ChatbotError("rate_limit:chat");
     }
   } catch (error) {
@@ -54,6 +58,24 @@ export async function checkIpRateLimit(ip: string | undefined) {
     // A shared limiter outage must not silently disable abuse protection.
     throw new ChatbotError("offline:chat");
   }
+}
+
+export function checkIpRateLimit(ip: string | undefined) {
+  return checkHourlyIpBudget("ip-rate-limit", ip, MAX_MESSAGES);
+}
+
+/**
+ * Direct source ingestion gets its own bucket. Sharing the chat key meant every
+ * upload spent one of a user's ten hourly chat messages, and a burst of chat
+ * could lock out ingestion — two unrelated budgets drawing on one counter.
+ */
+const MAX_INGESTS_PER_HOUR = (() => {
+  const parsed = Number(process.env.RESEARCH_MAX_INGESTS_PER_HOUR);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 20;
+})();
+
+export function checkIngestRateLimit(ip: string | undefined) {
+  return checkHourlyIpBudget("ingest-rate-limit", ip, MAX_INGESTS_PER_HOUR);
 }
 
 type AuthRateLimitBucket = "challenge" | "verify";

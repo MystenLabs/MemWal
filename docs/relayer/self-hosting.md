@@ -230,6 +230,6 @@ See [Database Sync](/indexer/database-sync) for the full schema.
 - DB migrations run automatically on boot (`pgvector` must already be installed as a PostgreSQL extension).
 - Connection pool: 10 max connections (relayer), 3 max connections (indexer).
 - `/health` is the basic service check, `/metrics` exposes Prometheus metrics, and API routes live under `/api/*`.
-- The indexer is recommended for fast account lookup in production. Without it, the relayer falls back to onchain registry scans.
+- The indexer records which owner has an account. Delegate-key authentication does not scan `AccountRegistry`; a cold key needs `x-account-id` or `MEMWAL_ACCOUNT_ID`.
 - Without `OPENAI_API_KEY`, the server uses deterministic mock embeddings (hash-based), useful for local testing but not production.
 - Use `LOG_FORMAT=json` in production and see [Observability](/relayer/observability) for dashboards and alerts.

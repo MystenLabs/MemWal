@@ -313,6 +313,19 @@ export const JSON_LIMIT_WALRUS_VERIFY = JSON_LIMIT_WALRUS_UPLOAD;
 
 export const SIDECAR_PORT = parseInt(process.env.SIDECAR_PORT || "9000", 10);
 export const SIDECAR_HOST = process.env.SIDECAR_HOST || "127.0.0.1";
+// Seal encrypt/decrypt listens here, in its own process. Upload work on
+// SIDECAR_PORT must not share that event loop: a blocked loop makes fetchKeys
+// miss the recall deadline and the relayer's 30s client timeout.
+export const SIDECAR_SEAL_HOST = process.env.SIDECAR_SEAL_HOST?.trim() || SIDECAR_HOST;
+export const SIDECAR_SEAL_PORT = (() => {
+    const raw = process.env.SIDECAR_SEAL_PORT?.trim();
+    if (!raw) return SIDECAR_PORT + 1;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+        throw new Error(`invalid SIDECAR_SEAL_PORT=${raw}`);
+    }
+    return parsed;
+})();
 export const SIDECAR_ROUTE_MODE = (() => {
     const mode = (process.env.SIDECAR_ROUTE_MODE || "full").trim().toLowerCase();
     if (mode === "full" || mode === "writer") return mode;

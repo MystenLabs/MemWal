@@ -1,7 +1,7 @@
-    /// Sanitized by `sanitize_job_error_for_client`, as on every other
-    /// client-facing job-status path: an infrastructure-funding failure is
-    /// replaced wholesale (its raw text names the relayer's own wallet and
-    /// balance), and long hex runs are redacted.
+/// Sanitized by `sanitize_job_error_for_client`, as on every other
+/// client-facing job-status path: an infrastructure-funding failure is
+/// replaced wholesale (its raw text names the relayer's own wallet and
+/// balance), and long hex runs are redacted.
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -110,17 +110,6 @@ impl SecurityDeleteExecutionGate {
     }
 }
 
-/// Default cap on AccountRegistry pages walked by the auth fallback scan
-/// (Strategy 3 in `auth::resolve_account`). 50 accounts per page → 1000
-/// accounts. Override via MEMWAL_REGISTRY_SCAN_MAX_PAGES.
-pub const DEFAULT_REGISTRY_SCAN_MAX_PAGES: u32 = 20;
-
-/// Max concurrent AccountRegistry fallback scans. Auth runs BEFORE the
-/// rate limiter, so unauthenticated unknown-key traffic could otherwise
-/// stack unbounded full-registry scans (each page fans out one
-/// `sui_getObject` per candidate account).
-pub const REGISTRY_SCAN_MAX_CONCURRENT: usize = 2;
-
 /// Default accepted clock drift (seconds, each direction) between a client's
 /// signed timestamp and the relayer's clock. A request is fresh when
 /// `|now - timestamp| <= this`.
@@ -173,11 +162,12 @@ pub struct AppState {
     /// `Arc` so the `MemoryEngine` impl can share the same handle rather
     /// than duplicating the pool.
     pub db: Arc<VectorDb>,
-    /// Small dedicated pool used ONLY to hold a per-job `pg_advisory_lock`
-    /// across an upload job's guard-read → mint → persist critical section, so
-    /// two concurrent attempts of the same job can't both mint a paid blob. Kept
-    /// separate from `db` so that holding a connection for the (up to 5-minute)
-    /// upload duration never starves the request-serving pool.
+    /// Small dedicated pool used ONLY to hold a per-job advisory lock across an
+    /// upload's guard-read → mint → persist section, so two attempts of the same
+    /// job cannot both mint. The connection is checked out only after that
+    /// wallet's upload permit is held; jobs waiting for a busy key do not take
+    /// one. Kept separate from `db` so an in-flight upload never starves request
+    /// handlers.
     pub wallet_lock_pool: sqlx::PgPool,
     /// Isolated old-V1 database. Present only when at least one tracked
     /// security-delete component is enabled.
@@ -251,23 +241,21 @@ pub struct AppState {
     pub redis: redis::aio::ConnectionManager,
     /// In-memory token bucket fallback for when Redis is unavailable
     pub fallback_rate_limit: tokio::sync::Mutex<crate::rate_limit::InMemoryFallback>,
-    /// Bounds concurrent AccountRegistry fallback scans (auth Strategy 3).
-    /// Auth runs before the rate limiter, so this — plus the per-scan page
-    /// cap (`Config::registry_scan_max_pages`) — is what stops unknown-key
-    /// floods from stacking unbounded registry walks. `try_acquire` only:
-    /// saturation rejects the request rather than queueing.
-    pub registry_scan_semaphore: tokio::sync::Semaphore,
     /// Apalis storage for legacy RememberJob payloads. Kept so the worker can
     /// fail unfenced rows closed and surface them for reconciliation.
     #[allow(dead_code)]
     pub remember_job_storage: RememberJobStorage,
-    /// Single Apalis storage for WalletJob. Routing dimension was previously a
-    /// Vec<WalletJobStorage> keyed by wallet_index; that existed to side-step
-    /// Sui coin-object equivocation locks. Per Will Bradley (Mysten, 2026-05-12
-    /// Slack callout): Sui no longer permanently locks coin objects on
-    /// equivocation, so one wallet + concurrent workers + retry handler is
-    /// sufficient. See `plans/simplify-walrus-wallet-queues/reports/` for context.
+    /// Apalis storage for upload WalletJobs. Workers prefetch a batch from
+    /// this queue. Routing dimension was previously a Vec<WalletJobStorage>
+    /// keyed by wallet_index; that existed to side-step Sui coin-object
+    /// equivocation locks. Per Will Bradley (Mysten, 2026-05-12 Slack
+    /// callout): Sui no longer permanently locks coin objects on equivocation,
+    /// so one upload queue + concurrent workers + retry handler is sufficient.
+    /// See `plans/simplify-walrus-wallet-queues/reports/` for context.
     pub wallet_storage: WalletJobStorage,
+    /// Metadata and finalize. Separate from `wallet_storage` so a certified
+    /// blob is not stuck behind uploads a worker already prefetched.
+    pub wallet_followup_storage: WalletJobStorage,
     /// Apalis storage for BulkRememberJob.
     pub bulk_job_storage: BulkRememberJobStorage,
     /// Redis TTL for Walrus blob ciphertext cache entries.
@@ -387,6 +375,31 @@ impl KeyPool {
         }
     }
 
+    /// Picks the least-loaded key and marks it busy in one step.
+    ///
+    /// `least_loaded_index` followed later by `begin_attempt` leaves a gap.
+    /// Every worker choosing inside that gap sees the same idle wallet, steers
+    /// its job there, and pins it. On staging one wallet took 27 of a
+    /// 100-job burst while most others got 3, and the run lasted as long as
+    /// that one queue (bench-w9-merged-9e9a10c-r1). The compare-exchange makes
+    /// the loser of a tie re-scan and see the wallet as taken.
+    pub fn claim_least_loaded(self: &Arc<Self>) -> Option<WalletAttemptGuard> {
+        loop {
+            let index = self.least_loaded_index()?;
+            let slot = &self.inflight[index];
+            let seen = slot.load(Ordering::Relaxed);
+            if slot
+                .compare_exchange(seen, seen + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(WalletAttemptGuard {
+                    pool: Arc::clone(self),
+                    index,
+                });
+            }
+        }
+    }
+
     /// In-flight count per key. Observability only.
     pub fn inflight_snapshot(&self) -> Vec<usize> {
         self.inflight
@@ -425,6 +438,12 @@ impl KeyPool {
 pub struct WalletAttemptGuard {
     pool: Arc<KeyPool>,
     index: usize,
+}
+
+impl WalletAttemptGuard {
+    pub fn index(&self) -> usize {
+        self.index
+    }
 }
 
 impl Drop for WalletAttemptGuard {
@@ -479,13 +498,11 @@ pub struct Config {
     /// package after an upgrade without changing the ciphertext namespace.
     pub seal_policy_package_id: String,
     pub registry_id: String,
-    /// Max AccountRegistry pages (50 accounts each) the auth fallback scan
-    /// walks before giving up (MEMWAL_REGISTRY_SCAN_MAX_PAGES, default 20).
-    /// Bounds the RPC fan-out an unknown delegate key can trigger; clients
-    /// past the cap must send the x-account-id hint instead.
-    pub registry_scan_max_pages: u32,
-    /// URL of the SEAL/Walrus TS sidecar HTTP server
+    /// URL of the Walrus upload sidecar. Upload work stays here.
     pub sidecar_url: String,
+    /// Seal encrypt/decrypt. A different port from `sidecar_url` so recall
+    /// does not wait on the upload process event loop.
+    pub seal_sidecar_url: String,
     /// Shared secret for authenticating Rust→sidecar calls (X-Sidecar-Secret header)
     pub sidecar_secret: Option<String>,
     /// Reviewed SEAL committee identity pinned on every encryption request.
@@ -502,6 +519,9 @@ pub struct Config {
     /// Rate limiting for the public, unauthenticated `GET
     /// /api/accounts/{owner}/exists` endpoint
     pub accounts_rate_limit: AccountsRateLimitConfig,
+    /// Hosted MCP (`/api/mcp`, `/api/mcp/sse`, `/api/mcp/messages`).
+    /// Separate Redis keys from `accounts_rate_limit`.
+    pub mcp_rate_limit: McpRateLimitConfig,
     /// Reverse-proxy hops trusted to append/sanitize X-Forwarded-For. Zero
     /// ignores caller-supplied XFF and uses the direct peer address.
     pub trusted_proxy_hops: usize,
@@ -611,6 +631,367 @@ pub struct Config {
     pub auth_max_clock_drift_secs: i64,
 }
 
+/// Where recall dials seal, and whether this process should fork a listener.
+/// `bind` is a literal address. The name `localhost` is never used: on some
+/// hosts it resolves only to `::1`, so a dialer using `127.0.0.1` is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealDeployment {
+    pub dial_url: String,
+    pub bind: Option<(String, u16)>,
+}
+
+pub fn plan_seal_deployment(
+    sidecar_url: &str,
+    explicit: Option<&str>,
+    bind_host_env: Option<&str>,
+    listener_disabled: bool,
+    writer_only: bool,
+) -> SealDeployment {
+    let mut planned = plan_seal_deployment_raw(
+        sidecar_url,
+        explicit,
+        bind_host_env,
+        listener_disabled,
+        writer_only,
+    );
+    if let Some(url) = normalize_parsed_url(&planned.dial_url) {
+        planned.dial_url = canonical_dial_url(&url);
+    }
+    planned
+}
+
+fn plan_seal_deployment_raw(
+    sidecar_url: &str,
+    explicit: Option<&str>,
+    bind_host_env: Option<&str>,
+    listener_disabled: bool,
+    writer_only: bool,
+) -> SealDeployment {
+    if let Some(raw) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        if normalize_parsed_url(raw).is_none() {
+            panic!("SIDECAR_SEAL_URL is not a valid absolute URL: {raw}");
+        }
+    }
+    let fallback = SealDeployment {
+        dial_url: canonical_dial(sidecar_url),
+        bind: None,
+    };
+    if writer_only || listener_disabled {
+        if let Some(raw) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(url) = normalize_parsed_url(raw) {
+                return SealDeployment {
+                    dial_url: canonical_dial_url(&url),
+                    bind: None,
+                };
+            }
+        }
+        return fallback;
+    }
+    if let Some(raw) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        let url = normalize_parsed_url(raw).expect("SIDECAR_SEAL_URL checked above");
+        return deployment_for_url(&url, bind_host_env, sidecar_url);
+    }
+    let Some(url) = normalize_parsed_url(sidecar_url) else {
+        return fallback;
+    };
+    if !is_loopback_host(url.host_str().unwrap_or("")) {
+        return SealDeployment {
+            dial_url: base_url_string(&url),
+            bind: None,
+        };
+    }
+    let Some(port) = url.port() else {
+        return SealDeployment {
+            dial_url: base_url_string(&url),
+            bind: None,
+        };
+    };
+    let next = port.saturating_add(1);
+    if next == port {
+        return SealDeployment {
+            dial_url: base_url_string(&url),
+            bind: None,
+        };
+    }
+    let host = canonical_bind_host(url.host_str().unwrap_or(""), bind_host_env);
+    let dial_host = dial_host_for(&host);
+    SealDeployment {
+        dial_url: origin(url.scheme(), &dial_host, next),
+        bind: Some((host, next)),
+    }
+}
+
+pub fn plan_seal_deployment_from_env(sidecar_url: &str) -> SealDeployment {
+    let explicit = std::env::var("SIDECAR_SEAL_URL").ok();
+    let bind_host = std::env::var("SIDECAR_HOST").ok();
+    let listener_disabled = std::env::var("SIDECAR_SEAL_LISTENER")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        });
+    let writer_only = std::env::var("SIDECAR_ROUTE_MODE")
+        .ok()
+        .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("writer"));
+    plan_seal_deployment(
+        sidecar_url,
+        explicit.as_deref(),
+        bind_host.as_deref(),
+        listener_disabled,
+        writer_only,
+    )
+}
+
+fn deployment_for_url(
+    url: &url::Url,
+    bind_host_env: Option<&str>,
+    sidecar_url: &str,
+) -> SealDeployment {
+    let dial_fallback = base_url_string(url);
+    let Some(host) = url.host_str() else {
+        return SealDeployment {
+            dial_url: dial_fallback,
+            bind: None,
+        };
+    };
+    if !is_loopback_host(host) {
+        return SealDeployment {
+            dial_url: dial_fallback,
+            bind: None,
+        };
+    }
+    let Some(port) = url.port() else {
+        return SealDeployment {
+            dial_url: dial_fallback,
+            bind: None,
+        };
+    };
+    if let Some(sidecar) = normalize_parsed_url(sidecar_url) {
+        if sidecar.port() == Some(port)
+            && sidecar
+                .host_str()
+                .is_some_and(|item| is_loopback_host(item))
+        {
+            return SealDeployment {
+                dial_url: dial_fallback,
+                bind: None,
+            };
+        }
+    }
+    let bind_host = canonical_bind_host(host, bind_host_env);
+    let dial_host = dial_host_for(&bind_host);
+    SealDeployment {
+        dial_url: origin(url.scheme(), &dial_host, port),
+        bind: Some((bind_host, port)),
+    }
+}
+
+fn dial_host_for(bind_host: &str) -> String {
+    // Unspecified addresses accept a local dial but are not dial targets.
+    // `localhost` is only ::1 on some hosts, so a 127.0.0.1 dial is refused.
+    match bind_host {
+        "localhost" | "0.0.0.0" => "127.0.0.1".to_string(),
+        "::" | "[::]" => "::1".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn canonical_dial(raw: &str) -> String {
+    match normalize_parsed_url(raw) {
+        Some(url) => canonical_dial_url(&url),
+        None => raw.trim().trim_end_matches('/').to_string(),
+    }
+}
+
+fn canonical_dial_url(url: &url::Url) -> String {
+    let Some(host) = url.host_str() else {
+        return base_url_string(url);
+    };
+    let dial_host = dial_host_for(host);
+    match url.port_or_known_default() {
+        Some(port) if url.port().is_some() => origin(url.scheme(), &dial_host, port),
+        _ => {
+            let mut copy = url.clone();
+            if copy.set_host(Some(&dial_host)).is_err() {
+                return base_url_string(url);
+            }
+            base_url_string(&copy)
+        }
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn canonical_bind_host(url_host: &str, env_host: Option<&str>) -> String {
+    if let Some(env_host) = env_host.map(str::trim).filter(|value| !value.is_empty()) {
+        if env_host != "localhost" {
+            return env_host.to_string();
+        }
+    }
+    if url_host == "::1" || url_host == "[::1]" {
+        return "::1".to_string();
+    }
+    "127.0.0.1".to_string()
+}
+
+fn origin(scheme: &str, host: &str, port: u16) -> String {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.contains(':') {
+        format!("{scheme}://[{host}]:{port}")
+    } else {
+        format!("{scheme}://{host}:{port}")
+    }
+}
+
+fn normalize_parsed_url(raw: &str) -> Option<url::Url> {
+    url::Url::parse(raw.trim()).ok()
+}
+
+fn normalize_base_url(raw: &str) -> Option<String> {
+    normalize_parsed_url(raw).map(|url| base_url_string(&url))
+}
+
+fn base_url_string(url: &url::Url) -> String {
+    let mut copy = url.clone();
+    copy.set_path("");
+    copy.set_query(None);
+    copy.set_fragment(None);
+    copy.to_string().trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod seal_sidecar_url_tests {
+    use super::{plan_seal_deployment, SealDeployment};
+
+    fn plan(
+        sidecar: &str,
+        explicit: Option<&str>,
+        bind_host: Option<&str>,
+        listener_disabled: bool,
+        writer_only: bool,
+    ) -> SealDeployment {
+        plan_seal_deployment(sidecar, explicit, bind_host, listener_disabled, writer_only)
+    }
+
+    #[test]
+    fn localhost_upload_url_binds_ipv4_loopback_on_the_next_port() {
+        assert_eq!(
+            plan("http://localhost:9000", None, None, false, false),
+            SealDeployment {
+                dial_url: "http://127.0.0.1:9001".into(),
+                bind: Some(("127.0.0.1".into(), 9001)),
+            }
+        );
+        assert_eq!(
+            plan("http://127.0.0.1:9000/", None, None, false, false).dial_url,
+            "http://127.0.0.1:9001"
+        );
+    }
+
+    #[test]
+    fn an_explicit_remote_url_is_dialed_and_not_bound() {
+        assert_eq!(
+            plan(
+                "http://127.0.0.1:9000",
+                Some("http://seal.internal:9100/"),
+                None,
+                false,
+                false,
+            ),
+            SealDeployment {
+                dial_url: "http://seal.internal:9100".into(),
+                bind: None,
+            }
+        );
+    }
+
+    #[test]
+    fn disabling_the_listener_or_writer_mode_does_not_fork() {
+        assert_eq!(
+            plan("http://localhost:9000", None, None, true, false),
+            SealDeployment {
+                dial_url: "http://127.0.0.1:9000".into(),
+                bind: None,
+            }
+        );
+        assert_eq!(
+            plan(
+                "http://127.0.0.1:9000",
+                Some("http://localhost:9100"),
+                None,
+                true,
+                false,
+            ),
+            SealDeployment {
+                dial_url: "http://127.0.0.1:9100".into(),
+                bind: None,
+            }
+        );
+        assert_eq!(
+            plan(
+                "http://127.0.0.1:9000",
+                Some("http://0.0.0.0:9100"),
+                None,
+                false,
+                true,
+            )
+            .dial_url,
+            "http://127.0.0.1:9100"
+        );
+        assert_eq!(
+            plan(
+                "http://127.0.0.1:9000",
+                Some("http://127.0.0.1:9100"),
+                None,
+                false,
+                true,
+            ),
+            SealDeployment {
+                dial_url: "http://127.0.0.1:9100".into(),
+                bind: None,
+            }
+        );
+    }
+
+    #[test]
+    fn ipv6_upload_url_moves_the_seal_port() {
+        assert_eq!(
+            plan("http://[::1]:9000", None, None, false, false),
+            SealDeployment {
+                dial_url: "http://[::1]:9001".into(),
+                bind: Some(("::1".into(), 9001)),
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "SIDECAR_SEAL_URL is not a valid absolute URL")]
+    fn an_unparseable_seal_url_refuses_to_boot() {
+        plan(
+            "http://127.0.0.1:9000",
+            Some("not a url"),
+            None,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn a_portless_origin_stays_put() {
+        assert_eq!(
+            plan("http://sidecar.internal", None, None, false, false).dial_url,
+            "http://sidecar.internal"
+        );
+        assert!(plan("http://sidecar.internal", None, None, false, false)
+            .bind
+            .is_none());
+    }
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let network = std::env::var("SUI_NETWORK")
@@ -650,6 +1031,10 @@ impl Config {
                 "SEAL_EXPECTED_COMMITTEE_IDENTITY must be set when SEAL_REQUIRE_COMMITTEE_IDENTITY=true"
             );
         }
+
+        let sidecar_url =
+            std::env::var("SIDECAR_URL").unwrap_or_else(|_| "http://localhost:9000".to_string());
+        let seal_sidecar_url = plan_seal_deployment_from_env(&sidecar_url).dial_url;
 
         Self {
             port: std::env::var("PORT")
@@ -695,21 +1080,15 @@ impl Config {
             package_id,
             seal_policy_package_id,
             registry_id: normalize_object_id_env("MEMWAL_REGISTRY_ID"),
-            registry_scan_max_pages: std::env::var("MEMWAL_REGISTRY_SCAN_MAX_PAGES")
-                .ok()
-                .and_then(|v| v.trim().parse::<u32>().ok())
-                // 0 would silently disable the Strategy 3 fallback scan;
-                // clamp to at least one page.
-                .map(|v| v.max(1))
-                .unwrap_or(DEFAULT_REGISTRY_SCAN_MAX_PAGES),
-            sidecar_url: std::env::var("SIDECAR_URL")
-                .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+            sidecar_url,
+            seal_sidecar_url,
             sidecar_secret: std::env::var("SIDECAR_AUTH_TOKEN").ok(),
             seal_expected_committee_identity,
             rate_limit: RateLimitConfig::from_env(),
             sponsor_rate_limit: SponsorRateLimitConfig::from_env(),
             read_api_rate_limit: ReadApiRateLimitConfig::from_env(),
             accounts_rate_limit: AccountsRateLimitConfig::from_env(),
+            mcp_rate_limit: McpRateLimitConfig::from_env(),
             trusted_proxy_hops: std::env::var("TRUSTED_PROXY_HOPS")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
@@ -1241,6 +1620,105 @@ impl AccountsRateLimitConfig {
             }
         }
         c
+    }
+}
+
+// ============================================================
+// Hosted MCP rate limit
+// ============================================================
+
+/// Rate limits for `/api/mcp`, `/api/mcp/sse`, and `/api/mcp/messages`.
+///
+/// Redis keys are `rate:mcp:*`, not `rate:accounts:*`. The accounts-exists
+/// route is an anonymous address oracle and stays on its own small budget.
+/// Every client IP shares this one ceiling. There is no venue allowlist.
+/// Bearer tokens are not exempt.
+///
+/// The deployment-wide caps must stay above the per-IP caps. If they were
+/// equal, one IP could spend the whole deployment's budget and every other
+/// IP would receive 429.
+#[derive(Debug, Clone)]
+pub struct McpRateLimitConfig {
+    /// Requests per minute for every client IP (default: 2000).
+    pub per_minute: i64,
+    /// Requests per hour for every client IP (default: 8000).
+    pub per_hour: i64,
+    /// Deployment-wide cap (default: 2500). Must stay above `per_minute`.
+    pub global_per_minute: i64,
+    /// Deployment-wide sustained cap (default: 15000). Must stay above `per_hour`.
+    pub global_per_hour: i64,
+}
+
+impl Default for McpRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_minute: 2000,
+            per_hour: 8000,
+            global_per_minute: 2500,
+            global_per_hour: 15000,
+        }
+    }
+}
+
+impl McpRateLimitConfig {
+    /// Collapse an IPv4-mapped IPv6 address to IPv4 so the Redis key agrees
+    /// whether the peer socket was v4 or `::ffff:`.
+    pub fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+        match ip {
+            std::net::IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(std::net::IpAddr::V4)
+                .unwrap_or(std::net::IpAddr::V6(v6)),
+            other => other,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let defaults = Self::default();
+        let config = Self {
+            per_minute: env_positive_i64("MCP_RATE_LIMIT_PER_MINUTE", defaults.per_minute),
+            per_hour: env_positive_i64("MCP_RATE_LIMIT_PER_HOUR", defaults.per_hour),
+            global_per_minute: env_positive_i64(
+                "MCP_GLOBAL_RATE_LIMIT_PER_MINUTE",
+                defaults.global_per_minute,
+            ),
+            global_per_hour: env_positive_i64(
+                "MCP_GLOBAL_RATE_LIMIT_PER_HOUR",
+                defaults.global_per_hour,
+            ),
+        };
+        if config.global_per_minute <= config.per_minute {
+            tracing::warn!(
+                "MCP global per-minute cap {} is not above the per-IP cap {}; one IP can exhaust the deployment",
+                config.global_per_minute,
+                config.per_minute
+            );
+        }
+        if config.global_per_hour <= config.per_hour {
+            tracing::warn!(
+                "MCP global per-hour cap {} is not above the per-IP cap {}; one IP can exhaust the deployment",
+                config.global_per_hour,
+                config.per_hour
+            );
+        }
+        config
+    }
+}
+
+fn env_positive_i64(name: &str, default: i64) -> i64 {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    match raw.trim().parse::<i64>() {
+        Ok(n) if n > 0 => n,
+        Ok(_) => {
+            tracing::warn!("ignoring non-positive {name}={raw:?}; using {default}");
+            default
+        }
+        Err(_) => {
+            tracing::warn!("ignoring invalid {name}={raw:?}; using {default}");
+            default
+        }
     }
 }
 
@@ -2009,8 +2487,8 @@ pub struct AccountExistsResponse {
 ///
 /// Exists so a client that holds a delegate key but lost the surrounding
 /// metadata can rebuild `credentials.json` (WALM-332). All three fields are
-/// required for that: `account_id` and `owner` come from the registry scan,
-/// `package_id` from server config.
+/// required for that: `account_id` and `owner` come from auth (the signed
+/// account id, or the delegate-key cache), `package_id` from server config.
 #[derive(Debug, Serialize)]
 pub struct WhoamiResponse {
     pub account_id: String,
@@ -2396,6 +2874,27 @@ mod tests {
     }
 
     #[test]
+    fn claiming_a_free_wallet_takes_it_before_the_next_worker_looks() {
+        // bench-w9-merged-9e9a10c-r1: one wallet took 27 of 100 jobs because
+        // every worker choosing in the same instant saw the same idle wallet.
+        let pool = pool(3);
+        let _a = pool.begin_attempt(0);
+        let _b = pool.begin_attempt(1);
+        // Plain lookups herd: both see wallet 2 as the only idle one.
+        assert_eq!(pool.least_loaded_index().unwrap(), 2);
+        assert_eq!(pool.least_loaded_index().unwrap(), 2);
+        // Claims do not: the first takes 2, the second sees 2 as busy.
+        let first = pool.claim_least_loaded().unwrap();
+        let second = pool.claim_least_loaded().unwrap();
+        assert_eq!(first.index(), 2);
+        assert_ne!(second.index(), 2);
+        assert_eq!(pool.inflight_snapshot().iter().sum::<usize>(), 4);
+        drop(first);
+        drop(second);
+        assert_eq!(pool.inflight_snapshot(), vec![1, 1, 0]);
+    }
+
+    #[test]
     fn an_idle_pool_still_spreads_round_robin() {
         // The regression this guards: with every counter at 0 a plain argmin
         // returns index 0 forever, funnelling the whole pool onto one wallet
@@ -2603,14 +3102,15 @@ mod tests {
             package_id: "0x1".into(),
             seal_policy_package_id: "0x1".into(),
             registry_id: "0x2".into(),
-            registry_scan_max_pages: DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9000".into(),
+            seal_sidecar_url: "http://localhost:9001".into(),
             sidecar_secret: None,
             seal_expected_committee_identity: None,
             rate_limit: RateLimitConfig::default(),
             sponsor_rate_limit: SponsorRateLimitConfig::default(),
             read_api_rate_limit: ReadApiRateLimitConfig::default(),
             accounts_rate_limit: AccountsRateLimitConfig::default(),
+            mcp_rate_limit: McpRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -3172,6 +3672,71 @@ mod tests {
         // this middleware used to (bug-)reuse, or the fix regresses.
         assert!(config.per_minute < RateLimitConfig::default().max_requests_per_minute);
         assert!(config.per_hour < RateLimitConfig::default().max_requests_per_hour);
+    }
+
+    #[test]
+    fn mcp_rate_limit_default_values() {
+        let config = McpRateLimitConfig::default();
+        assert_eq!(config.per_minute, 2000);
+        assert_eq!(config.per_hour, 8000);
+        assert_eq!(config.global_per_minute, 2500);
+        assert_eq!(config.global_per_hour, 15000);
+        assert!(config.global_per_minute > config.per_minute);
+        assert!(config.global_per_hour > config.per_hour);
+        let accounts = AccountsRateLimitConfig::default();
+        assert_eq!(accounts.per_minute, 20);
+        assert_eq!(accounts.per_hour, 120);
+        assert_eq!(accounts.global_per_minute, 200);
+        assert_eq!(accounts.global_per_hour, 1500);
+    }
+
+    static MCP_RATE_LIMIT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn mcp_rate_limit_from_env_parses_overrides() {
+        let _lock = MCP_RATE_LIMIT_ENV_LOCK.lock().unwrap();
+        let keys = [
+            "MCP_RATE_LIMIT_PER_MINUTE",
+            "MCP_RATE_LIMIT_PER_HOUR",
+            "MCP_GLOBAL_RATE_LIMIT_PER_MINUTE",
+            "MCP_GLOBAL_RATE_LIMIT_PER_HOUR",
+        ];
+        let saved: Vec<_> = keys
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+        struct Restore<'a>(&'a [(&'static str, Option<String>)]);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                for (key, previous) in self.0 {
+                    match previous {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(&saved);
+
+        std::env::set_var("MCP_RATE_LIMIT_PER_MINUTE", "0");
+        std::env::set_var("MCP_RATE_LIMIT_PER_HOUR", "-5");
+        std::env::set_var("MCP_GLOBAL_RATE_LIMIT_PER_MINUTE", "");
+        std::env::set_var("MCP_GLOBAL_RATE_LIMIT_PER_HOUR", "15000abc");
+        let rejected = McpRateLimitConfig::from_env();
+        assert_eq!(rejected.per_minute, 2000);
+        assert_eq!(rejected.per_hour, 8000);
+        assert_eq!(rejected.global_per_minute, 2500);
+        assert_eq!(rejected.global_per_hour, 15000);
+
+        std::env::set_var("MCP_RATE_LIMIT_PER_MINUTE", "90");
+        std::env::set_var("MCP_RATE_LIMIT_PER_HOUR", "900");
+        std::env::set_var("MCP_GLOBAL_RATE_LIMIT_PER_MINUTE", "4000");
+        std::env::set_var("MCP_GLOBAL_RATE_LIMIT_PER_HOUR", "20000");
+        let config = McpRateLimitConfig::from_env();
+        assert_eq!(config.per_minute, 90);
+        assert_eq!(config.per_hour, 900);
+        assert_eq!(config.global_per_minute, 4000);
+        assert_eq!(config.global_per_hour, 20000);
     }
 
     #[test]
