@@ -14,5 +14,9 @@
         "walrus",
         "sui",
         "semantic-search"
-    ]
+    ],
+    "mcpServers": "./.mcp.json",
+    "skills": "./skills/",
+    "commands": "./commands/",
+    "hooks": "./hooks/hooks.json"
 }
