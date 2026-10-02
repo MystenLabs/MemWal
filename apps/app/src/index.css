@@ -14837,6 +14837,7 @@ body:has(.signin-proposed) {
 .signin-fit--desktop {
   width: min(100vw, calc(100vh * 1440 / 966));
   height: min(100vh, calc(100vw * 966 / 1440));
+  margin-left: auto;
 }
 
 .signin-fit--mobile {
@@ -14959,7 +14960,7 @@ body:has(.signin-proposed) {
     width: calc(117px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
     height: calc(53.929px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
     left: calc(
-      (100cqw - min(100cqw, 100cqh * 1440 / 966)) / 2
+      (100cqw - min(100cqw, 100cqh * 1440 / 966))
       + 50px * min(100cqw, 100cqh * 1440 / 966) / 1440px
     );
   }
