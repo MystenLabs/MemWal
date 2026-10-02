@@ -633,7 +633,10 @@ export class MemWal {
      * console.log(accepted.job_ids)
      * ```
      */
-    async rememberBulkAsync(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
+    async rememberBulkAsync(
+        items: RememberBulkItem[],
+        options: { idempotencyKey?: string } = {},
+    ): Promise<RememberBulkAcceptedResult> {
         if (!Array.isArray(items) || items.length === 0) {
             throw new Error("rememberBulkAsync: items must be a non-empty array");
         }
@@ -643,10 +646,15 @@ export class MemWal {
             namespace: item.namespace ?? this.namespace,
         }));
 
+        const body: Record<string, unknown> = { items: normalised };
+        if (options.idempotencyKey) {
+            body.idempotency_key = options.idempotencyKey;
+        }
+
         const accepted = await this.signedRequest<RememberBulkAcceptedResult>(
             "POST",
             "/api/remember/bulk",
-            { items: normalised },
+            body,
             [200, 202],
         );
 
@@ -820,8 +828,11 @@ export class MemWal {
     /**
      * Remember multiple memories and return as soon as the server accepts the jobs.
      */
-    async rememberBulk(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
-        return this.rememberBulkAsync(items);
+    async rememberBulk(
+        items: RememberBulkItem[],
+        options: { idempotencyKey?: string } = {},
+    ): Promise<RememberBulkAcceptedResult> {
+        return this.rememberBulkAsync(items, options);
     }
 
     /**
@@ -829,10 +840,12 @@ export class MemWal {
      */
     async rememberBulkAndWait(
         items: RememberBulkItem[],
-        opts: RememberBulkOptions = {},
+        opts: RememberBulkOptions & { idempotencyKey?: string } = {},
     ): Promise<RememberBulkResult> {
         const namespaces = items.map((item) => item.namespace ?? this.namespace);
-        const accepted = await this.rememberBulkAsync(items);
+        const accepted = await this.rememberBulkAsync(items, {
+            idempotencyKey: opts.idempotencyKey,
+        });
         return this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
     }
 
