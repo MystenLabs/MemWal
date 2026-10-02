@@ -28,7 +28,7 @@
  *   6. `window.location.replace(redirect_url)` — hands control back to
  *      Claude (or whatever OAuth client started the flow).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
     ConnectModal,
     useCurrentAccount,
@@ -44,11 +44,46 @@ import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 
 const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
 
+/** The `POST /complete` body, plus the analytics flag that goes with it. */
+type CompletePayload = {
+    account_id: string
+    owner_address: string
+    owner_signature: string
+    tx_digest: string
+    reused_delegate: boolean
+}
+
+/** Where the in-flight `POST /complete` payload survives a reload. */
+const PENDING_COMPLETE_KEY = 'memwal_claude_pending_complete'
+
+/**
+ * The saved `POST /complete` payload for this session, if any.
+ *
+ * Session-scoped on purpose: one authorization's wallet signature must never be
+ * replayed against another.
+ */
+function loadStoredComplete(sessionId: string): CompletePayload | null {
+    try {
+        const raw = sessionStorage.getItem(PENDING_COMPLETE_KEY)
+        if (!raw) return null
+        const saved = JSON.parse(raw) as { session?: string; payload?: CompletePayload }
+        if (saved.session !== sessionId || !saved.payload?.owner_signature) return null
+        return saved.payload
+    } catch {
+        return null
+    }
+}
+
+function hasStoredComplete(sessionId: string): boolean {
+    return loadStoredComplete(sessionId) !== null
+}
+
 type Step =
     | 'loading'
     | 'consent'
     | 'signing'
     | 'finishing'
+    | 'retry-complete'
     | 'redirecting'
     | 'no-account'
     | 'error'
@@ -82,6 +117,8 @@ async function resolveAccountId(
     }
 }
 
+type OAuthRequestError = Error & { status: number; oauthError?: string }
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetch(url, {
         ...init,
@@ -89,13 +126,29 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     })
     const body = await res.json().catch(() => null)
     if (!res.ok) {
+        const envelope = body && typeof body === 'object' ? (body as Record<string, unknown>) : null
         const description =
-            body && typeof body === 'object' && 'error_description' in body
-                ? String((body as { error_description: unknown }).error_description)
+            envelope && 'error_description' in envelope
+                ? String(envelope.error_description)
                 : `request failed (${res.status})`
-        throw new Error(description)
+        const err = new Error(description) as OAuthRequestError
+        err.status = res.status
+        if (envelope && typeof envelope.error === 'string') err.oauthError = envelope.error
+        throw err
     }
     return body as T
+}
+
+/**
+ * The relayer could not reach Sui, so it left the authorization session
+ * `pending` instead of burning it (WALM-605). Re-POSTing `/complete` alone is
+ * the recovery: the wallet signature and the on-chain registration from the
+ * first attempt are both still good, so restarting `handleConnect` would only
+ * re-ask the wallet and re-submit a transaction the chain has already taken.
+ */
+function isRetryableComplete(err: unknown): boolean {
+    const e = err as Partial<OAuthRequestError> | null
+    return e?.oauthError === 'temporarily_unavailable' || e?.status === 503
 }
 
 export default function ConnectClaude() {
@@ -126,7 +179,10 @@ export default function ConnectClaude() {
             .then((view) => {
                 if (cancelled) return
                 setSession(view)
-                setStep('consent')
+                // A reload mid-recovery resumes at the retry step. Landing on
+                // consent would re-run handleConnect, which re-asks the wallet
+                // to sign and re-sends a transaction the chain already took.
+                setStep(hasStoredComplete(sessionId) ? 'retry-complete' : 'consent')
             })
             .catch((err) => {
                 if (cancelled) return
@@ -146,6 +202,109 @@ export default function ConnectClaude() {
         sessionStorage.setItem('memwal_claude_connect', JSON.stringify({ session: sessionId }))
     }, [sessionValid, sessionId])
 
+
+    // Everything `POST /complete` needs, kept so a retry re-sends exactly this
+    // request instead of re-running `handleConnect`, which would re-ask the
+    // wallet for a signature and re-submit `add_delegate_key` for a key that
+    // is already on chain.
+    //
+    // A ref does not survive a reload, and a reload is the obvious thing to try
+    // when the relayer says "retry", so the payload also goes to sessionStorage.
+    // It gets its own key rather than joining `memwal_claude_connect`, which
+    // the mount effect rewrites to `{ session }` on every load and would drop
+    // the payload.
+    const pendingComplete = useRef<CompletePayload | null>(null)
+
+    const forgetPendingComplete = useCallback(() => {
+        pendingComplete.current = null
+        try {
+            sessionStorage.removeItem(PENDING_COMPLETE_KEY)
+        } catch {
+            // Nothing to clean up if storage is unavailable.
+        }
+    }, [])
+
+    const rememberPendingComplete = useCallback(
+        (payload: CompletePayload) => {
+            pendingComplete.current = payload
+            try {
+                sessionStorage.setItem(
+                    PENDING_COMPLETE_KEY,
+                    JSON.stringify({ session: sessionId, payload }),
+                )
+            } catch {
+                // Private mode or a full quota: the in-page button still works.
+            }
+        },
+        [sessionId],
+    )
+
+    const readPendingComplete = useCallback((): CompletePayload | null => {
+        if (pendingComplete.current) return pendingComplete.current
+        const saved = loadStoredComplete(sessionId)
+        if (saved) pendingComplete.current = saved
+        return saved
+    }, [sessionId])
+
+    const completeSession = useCallback(async (payload: CompletePayload) => {
+        // Durable before the request, not after it fails. A reload while
+        // /complete is still in flight is the gap a ref cannot cover, and on
+        // the first-time path it is the expensive one: without the crumb the
+        // page lands on consent, re-runs handleConnect, and re-submits
+        // add_delegate_key for a key the tx above already put on chain. That
+        // no longer dead-ends now that /account detects it, but it still costs
+        // a wallet round-trip and a sponsored transaction.
+        //
+        // Writing early is safe because every terminal exit clears it: success
+        // below, and a definitive 400 in the catch. A spent session therefore
+        // cannot leave a crumb that loops the user on "Sui is busy".
+        rememberPendingComplete(payload)
+        setStep('finishing')
+        try {
+            const { redirect_url } = await fetchJson<{ redirect_url: string }>(
+                `${apiBase}/api/oauth/session/${sessionId}/complete`,
+                {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        account_id: payload.account_id,
+                        owner_address: payload.owner_address,
+                        owner_signature: payload.owner_signature,
+                        tx_digest: payload.tx_digest,
+                    }),
+                },
+            )
+            sessionStorage.removeItem('memwal_claude_connect')
+            sessionStorage.removeItem(PENDING_COMPLETE_KEY)
+            setStep('redirecting')
+            trackEvent('claude_connect_complete', { reused_delegate: payload.reused_delegate })
+            window.location.replace(redirect_url)
+        } catch (err) {
+            if (!isRetryableComplete(err)) {
+                // Definitive: the session is spent. Clear the crumb so a reload
+                // lands on the error rather than looping on "Sui is busy".
+                forgetPendingComplete()
+                throw err
+            }
+            // The session is still pending, so offer this one request again
+            // rather than dropping into the terminal error state. The crumb
+            // written above is what the retry step and a reload both read.
+            setErrorMsg(err instanceof Error ? err.message : String(err))
+            setStep('retry-complete')
+            trackEvent('claude_connect_failed', { error_type: 'sui_unavailable' })
+        }
+    }, [apiBase, sessionId, rememberPendingComplete, forgetPendingComplete])
+
+    const handleRetryComplete = useCallback(async () => {
+        const payload = readPendingComplete()
+        if (!payload) return
+        try {
+            await completeSession(payload)
+        } catch (err) {
+            setErrorMsg(err instanceof Error ? err.message : String(err))
+            setStep('error')
+            trackEvent('claude_connect_failed', { error_type: getAnalyticsErrorType(err) })
+        }
+    }, [completeSession, readPendingComplete])
     const handleConnect = useCallback(async () => {
         if (!session) return
         if (!currentAccount) {
@@ -168,6 +327,9 @@ export default function ConnectClaude() {
                 needs_onchain_registration: boolean
                 delegate_public_key: string
                 delegate_sui_address: string
+                // Absent on a relayer older than WALM-605, which is the
+                // pre-existing behaviour: no resume, just the first-time path.
+                resume_pending_registration?: boolean
             }>(`${apiBase}/api/oauth/session/${sessionId}/account`, {
                 method: 'POST',
                 body: JSON.stringify({ account_id: accountId, owner_address: currentAccount.address }),
@@ -187,30 +349,18 @@ export default function ConnectClaude() {
                         tx.object('0x6'),
                     ],
                 })
-                let result
-                try {
-                    result = await signAndExecute({ transaction: tx })
-                } catch (txErr: unknown) {
-                    const m = txErr instanceof Error ? txErr.message : String(txErr)
-                    if (m.includes('abort code: 0') && m.includes('add_delegate_key')) {
-                        setErrorMsg(
-                            `This wallet (${currentAccount.address.slice(0, 10)}…${currentAccount.address.slice(-6)}) is not the owner of Walrus Memory account ${accountId.slice(0, 10)}…${accountId.slice(-6)}. ` +
-                            `Switch to the wallet that created this account, or run /setup for a new one.`
-                        )
-                        trackEvent('claude_connect_failed', { error_type: 'owner_mismatch' })
-                        setStep('error')
-                        return
-                    }
-                    if (m.includes('abort code: 2') && m.includes('add_delegate_key')) {
-                        setErrorMsg(
-                            `This account already has the maximum number of delegate keys (20). Go to /dashboard and revoke an unused key, then try again.`
-                        )
-                        trackEvent('claude_connect_failed', { error_type: 'max_delegate_keys' })
-                        setStep('error')
-                        return
-                    }
-                    throw txErr
-                }
+                // Deliberately no `account.move` abort-code branches here.
+                // This page signs through `useSponsoredTransaction`, which
+                // throws `new Error(sponsorFailureMessage(...))`, and the
+                // relayer's `sponsor::mask_upstream` collapses any upstream
+                // 5xx into a bare 502 `sponsor_upstream_error` that never
+                // echoes the Move abort. `EDelegateKeyAlreadyExists` (0),
+                // `ETooManyDelegateKeys` (2) and `ENotOwner` (4) therefore all
+                // reach us as the same opaque sponsor string; matching on them
+                // read like recovery while never firing. The duplicate-key
+                // case is settled before this point, by `/account`'s on-chain
+                // check (`resume_pending_registration`).
+                const result = await signAndExecute({ transaction: tx })
                 await suiClient.waitForTransaction({ digest: result.digest })
                 txDigest = result.digest
             }
@@ -220,28 +370,23 @@ export default function ConnectClaude() {
                 `Walrus Memory OAuth authorization\nsession:${sessionId}\naccount:${accountId.toLowerCase()}\nowner:${currentAccount.address.toLowerCase()}`,
             )
             const { signature: ownerSignature } = await signPersonalMessage({ message: proofMessage })
-            const { redirect_url } = await fetchJson<{ redirect_url: string }>(
-                `${apiBase}/api/oauth/session/${sessionId}/complete`,
-                {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        account_id: accountId,
-                        owner_address: currentAccount.address,
-                        owner_signature: ownerSignature,
-                        tx_digest: txDigest || 'reused-delegate',
-                    }),
-                },
-            )
-            sessionStorage.removeItem('memwal_claude_connect')
-            setStep('redirecting')
-            trackEvent('claude_connect_complete', { reused_delegate: !preflight.needs_onchain_registration })
-            window.location.replace(redirect_url)
+            const resuming = preflight.resume_pending_registration === true
+            await completeSession({
+                account_id: accountId,
+                owner_address: currentAccount.address,
+                owner_signature: ownerSignature,
+                // `/complete` requires a non-empty digest. When no tx was sent
+                // this call names why, rather than claiming a reused delegate
+                // for a key this session registered on an earlier attempt.
+                tx_digest: txDigest || (resuming ? 'already-on-chain' : 'reused-delegate'),
+                reused_delegate: !preflight.needs_onchain_registration && !resuming,
+            })
         } catch (err) {
             setErrorMsg(err instanceof Error ? err.message : String(err))
             setStep('error')
             trackEvent('claude_connect_failed', { error_type: getAnalyticsErrorType(err) })
         }
-    }, [session, currentAccount, suiClient, signAndExecute, signPersonalMessage, apiBase, sessionId])
+    }, [session, currentAccount, suiClient, signAndExecute, signPersonalMessage, completeSession])
 
     const handleCancel = useCallback(async () => {
         try {
@@ -260,6 +405,7 @@ export default function ConnectClaude() {
     // Auto-proceed once the wallet popup resolves.
     useEffect(() => {
         if (!walletPickerOpen && currentAccount && step === 'consent') {
+            if (hasStoredComplete(sessionId)) return
             void handleConnect()
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -318,6 +464,23 @@ export default function ConnectClaude() {
                             </p>
                             <div className="setup-classic-actions">
                                 <Link to="/setup" className="lp-btn-yellow">Create account and continue</Link>
+                            </div>
+                        </div>
+                    )}
+
+                    {step === 'retry-complete' && (
+                        <div className="setup-classic-intro">
+                            <h2 className="setup-classic-title">Sui is busy — try again</h2>
+                            <p className="setup-classic-description">
+                                We couldn't reach Sui to verify your delegate key, so this authorization is
+                                still pending rather than spent. Nothing needs redoing — press the button to
+                                finish.
+                            </p>
+                            <p className="setup-classic-description" style={errorTextStyle}>{errorMsg}</p>
+                            <div className="setup-classic-actions">
+                                <button type="button" className="lp-btn-yellow" onClick={handleRetryComplete}>
+                                    Finish connecting
+                                </button>
                             </div>
                         </div>
                     )}
