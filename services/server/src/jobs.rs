@@ -968,15 +968,18 @@ fn upload_journal_signer_committed(journal: &UploadJournal) -> bool {
     )
 }
 
-/// A congestion resume must keep the journaled signer. A prepared register
-/// may already have been submitted, and steering would drop those bytes and
-/// mint a second blob.
+/// Keep the journaled signer once this upload has a wallet-specific checkpoint.
+///
+/// A stored wallet address or a prepared register belongs to one key slot.
+/// Retrying those bytes on another slot is `WALLET_MAPPING_MISMATCH`, and the
+/// prepared transaction may already have been submitted. An encoded checkpoint
+/// that names no signer may still move, except during a congestion resume,
+/// where the in-flight attempt stays on the journaled slot.
 fn pin_journal_wallet(journal: &UploadJournal, congestion_requeues: u32) -> bool {
     upload_journal_signer_committed(journal)
-        || (congestion_requeues > 0
-            && (journal.resume_step.is_some()
-                || journal.register_transaction.is_some()
-                || journal.wallet_address.is_some()))
+        || journal.wallet_address.is_some()
+        || journal.register_transaction.is_some()
+        || (congestion_requeues > 0 && journal.resume_step.is_some())
 }
 
 /// Move an uncommitted journal onto `free_wallet`.
@@ -1049,11 +1052,11 @@ pub(crate) async fn execute_wallet_job(
                 }
             };
             // The attempt index is only the fallback. Once a durable journal
-            // exists, the sidecar queues on that signer, so the busy-count has
-            // to name the same wallet or least-loaded keeps feeding the one
-            // that is actually full. Before register is submitted the journal
-            // can move onto a wallet that is free right now. A congestion
-            // resume must not: the prepared bytes may already be in flight.
+            // names a signer, the sidecar queues on that key, so the busy-count
+            // has to name the same wallet or least-loaded keeps feeding the one
+            // that is actually full. An encoded checkpoint with no signer can
+            // still move onto a free wallet. A stored address or prepared
+            // register cannot: those bytes may already be in flight.
             let mut claimed_slot = None;
             if let Some(job_id) = remember_job_id.as_deref() {
                 let mut journal = load_upload_journal(state.db.pool(), job_id, wallet_index)
@@ -3640,6 +3643,12 @@ impl WalletJobError {
         if lower.contains("blob_owner_mismatch") || lower.contains("metadata_receipt_mismatch") {
             return WalletJobError::Permanent(msg.to_string());
         }
+        // The key at the journaled slot is a different wallet than the one
+        // that prepared this upload. The same journal fails identically on
+        // every retry, and another slot cannot sign the prepared bytes.
+        if lower.contains("wallet_mapping_mismatch") {
+            return WalletJobError::Permanent(msg.to_string());
+        }
         // Enoki sponsored dry-run aborts in 0x2::balance::split with ENotEnough
         // (abort code 2) when the selected pool wallet's SUI gas coin cannot be
         // split to cover the sponsored budget (its SUI is fragmented or too low).
@@ -4319,7 +4328,17 @@ the checkpoint it replied about",
             }),
         };
         assert!(pin_journal_wallet(&prepared, 1));
+        // A normal retry has the same hazard: the prepared bytes name a signer.
+        assert!(pin_journal_wallet(&prepared, 0));
         assert!(!upload_journal_signer_committed(&prepared));
+        let mut addressed = prepared.clone();
+        addressed.register_transaction = None;
+        assert!(pin_journal_wallet(&addressed, 0));
+        let mut encoded_only = prepared.clone();
+        encoded_only.wallet_address = None;
+        encoded_only.register_transaction = None;
+        assert!(!pin_journal_wallet(&encoded_only, 0));
+        assert!(pin_journal_wallet(&encoded_only, 1));
         let fresh = UploadJournal {
             wallet_index: 4,
             wallet_address: None,
@@ -4328,6 +4347,22 @@ the checkpoint it replied about",
             register_transaction: None,
         };
         assert!(!pin_journal_wallet(&fresh, 0));
+        assert!(!pin_journal_wallet(&fresh, 1));
+    }
+
+    #[test]
+    fn wallet_mapping_mismatch_stops_the_retry_budget() {
+        let msg = "Internal Error: durable Walrus upload failed (409 Conflict): \
+            {\"error\":\"keyIndex no longer maps to the journaled wallet\",\
+            \"code\":\"WALLET_MAPPING_MISMATCH\",\
+            \"expectedWalletAddress\":\"0xaa\",\"actualWalletAddress\":\"0x9b\"}";
+        let classified = WalletJobError::classify_sidecar_error(msg);
+        assert!(
+            matches!(classified, WalletJobError::Permanent(_)),
+            "a journaled-wallet mismatch is deterministic, got {}",
+            classified.kind()
+        );
+        assert!(classified.aborts_retries());
     }
 
     #[test]
