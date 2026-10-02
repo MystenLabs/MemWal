@@ -5,6 +5,8 @@
 ### Fixed
 
 - `wait_for_remember_jobs` / `remember_bulk_and_wait` no longer return a batch they could not read as if it were still uploading. When every status poll is rate-limited, the wait makes one confirming read and raises `MemWalRateLimited` (`status` 429, `job_ids`, `retry_after`) if that is refused too. An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)
+- `with_memwal_*` gains `save_mode` and confirmable saves: `memwal_wait_for_saves` (async and sync) polls every job the middleware enqueued, and restores the job ids if that poll raises so a retry can still confirm them. (WALM-307, #410, #412)
+- `wait_for_remember_jobs` chunks its status reads to the relayer's 20-id `MAX_BULK_ITEMS` cap. Above it the relayer answers a non-transient 400, so a wait over 21+ jobs raised on every attempt and could never confirm — reachable from `save_mode="remember"` after 21 turns, or from two fat `analyze` extracts. (WALM-307)
 
 ## 0.1.12
 
