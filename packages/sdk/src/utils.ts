@@ -299,6 +299,26 @@ export function redactInternalUrls(text: string): string {
     );
 }
 
+/** A 401 whose body is an expired SEAL session, not a bad delegate key. */
+export function isExpiredSealSession(status: number, rawBody: string): boolean {
+    if (Number(status) !== 401 || typeof rawBody !== "string") return false;
+    const trimmed = rawBody.trim();
+    if (!trimmed) return false;
+    try {
+        const parsed = JSON.parse(trimmed) as { code?: unknown; error?: unknown; message?: unknown };
+        if (parsed && typeof parsed === "object") {
+            if (parsed.code === "SESSION_EXPIRED") return true;
+            const text = [parsed.error, parsed.message]
+                .filter((part): part is string => typeof part === "string")
+                .join(" ");
+            if (/session key has expired/i.test(text)) return true;
+        }
+    } catch {
+        // Plain text still counts when it names the session.
+    }
+    return /session key has expired/i.test(trimmed);
+}
+
 /**
  * LOW-26: Sanitize a raw server error body before surfacing it to callers.
  *
@@ -314,6 +334,16 @@ export function sanitizeServerError(
 ): { message: string; raw: string; serverCode?: string } {
     // Number() so a string "401" (some MCP / HTTP paths) still hits this branch.
     if (Number(status) === 401) {
+        // Every other 401 is rewritten as a credential mismatch. An expired
+        // session is refreshable, so it must keep its own code or the SDK
+        // tells the caller their delegate key is wrong.
+        if (isExpiredSealSession(status, rawBody)) {
+            return {
+                message: "Walrus Memory seal session expired.",
+                raw: rawBody,
+                serverCode: "SESSION_EXPIRED",
+            };
+        }
         return {
             message:
                 "401 from relayer: typically wrong private key, key not registered on this account, " +

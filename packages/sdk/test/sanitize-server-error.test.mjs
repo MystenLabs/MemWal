@@ -24,6 +24,17 @@ test("string status \"401\" with an empty body uses AUTH_REJECTED troubleshootin
     assert.doesNotMatch(message, /memwal_login/);
 });
 
+test("an expired seal session 401 keeps SESSION_EXPIRED", () => {
+    const raw = JSON.stringify({
+        error: "Session key has expired",
+        code: "SESSION_EXPIRED",
+    });
+    const { message, serverCode } = sanitizeServerError(401, raw);
+    assert.equal(serverCode, "SESSION_EXPIRED");
+    assert.match(message, /seal session expired/);
+    assert.doesNotMatch(message, /wrong private key/);
+});
+
 test("non-empty 401 keeps the AUTH_REJECTED troubleshooting URL", () => {
     const { message, serverCode } = sanitizeServerError(401, "auth rejected");
     assert.equal(serverCode, "AUTH_REJECTED");

@@ -8,7 +8,7 @@ import {
     isRetryableRpcError,
     isRetryableSharedInfraError,
 } from "../sidecar/retry/rpc.js";
-import { sealKeyFetchErrorCode } from "../sidecar/routes/seal.js";
+import { sealFailureHttpStatus, sealKeyFetchErrorCode } from "../sidecar/routes/seal.js";
 import { assertFinalizedTransactionSuccess } from "../sidecar/wallet.js";
 import { executeDirectSignedTransaction } from "../sidecar/enoki.js";
 
@@ -172,6 +172,23 @@ test("direct signing marks submission only after transaction build and signing",
         "submitted-digest",
     );
     assert.deepEqual(callOrder, ["started", "execute"]);
+});
+
+test("an expired SEAL session is 401, not a 500", () => {
+    assert.deepEqual(
+        sealFailureHttpStatus(new Error("Session key has expired")),
+        { status: 401, code: "SESSION_EXPIRED" },
+    );
+    assert.deepEqual(
+        sealFailureHttpStatus(new Error("access denied by key server policy")),
+        { status: 500 },
+    );
+    assert.deepEqual(
+        sealFailureHttpStatus(Object.assign(new Error("fetch failed"), {
+            cause: { code: "ECONNRESET" },
+        })),
+        { status: 503, code: "SHARED_SERVICE_UNAVAILABLE" },
+    );
 });
 
 test("Seal key-fetch errors preserve budget only for identified outages", () => {

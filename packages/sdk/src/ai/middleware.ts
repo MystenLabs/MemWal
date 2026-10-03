@@ -61,14 +61,17 @@ export interface WithMemWalOptions extends MemWalConfig {
 /**
  * Wrap an AI SDK model with Walrus Memory management
  *
- * BEFORE each LLM call:
- * - Uses the last user message as a search query
+ * BEFORE each user turn (a prompt whose last message is the user):
+ * - Uses that user message as a search query
  * - Recalls relevant memories (server: search → download → decrypt)
  * - Injects relevant memories as nonce-delimited, untrusted user data
  *
- * AFTER each LLM call:
+ * AFTER that same turn:
  * - Analyzes and saves important facts (server: LLM extract → embed → encrypt → Walrus → store)
  * - Fire-and-forget — does not block the response
+ *
+ * Tool steps re-enter this middleware with the same user text followed by
+ * assistant and tool messages. Those steps do not recall or analyze again.
  */
 export function withMemWal(
     model: AnyLanguageModel,
@@ -106,7 +109,7 @@ export function withMemWal(
             // ============================================================
             transformParams: async ({ params }: any) => {
                 try {
-                    const lastUserMessage = findLastUserMessage(params.prompt);
+                    const lastUserMessage = userTurnText(params.prompt);
                     if (!lastUserMessage) return params;
 
                     const recallResult = await memwal.recall(lastUserMessage, maxMemories);
@@ -140,7 +143,7 @@ export function withMemWal(
                 const result = await doGenerate();
 
                 if (autoSave) {
-                    const userMessage = findLastUserMessage(params.prompt);
+                    const userMessage = userTurnText(params.prompt);
                     if (userMessage) {
                         saveInBackground(userMessage);
                     }
@@ -154,7 +157,7 @@ export function withMemWal(
                 const result = await doStream();
 
                 if (autoSave) {
-                    const userMessage = findLastUserMessage(params.prompt);
+                    const userMessage = userTurnText(params.prompt);
                     if (userMessage) {
                         saveInBackground(userMessage);
                     }
@@ -179,6 +182,18 @@ export function withMemWal(
 // ============================================================
 // Helpers
 // ============================================================
+
+/** Text of the user message that opened this model step.
+ *
+ * A tool loop keeps that message in history and appends assistant and tool
+ * messages. Recalling or analyzing from those later steps repeats one turn.
+ */
+function userTurnText(prompt: unknown): string | null {
+    if (!Array.isArray(prompt) || prompt.length === 0) return null;
+    const last = prompt[prompt.length - 1] as { role?: string };
+    if (last?.role !== "user") return null;
+    return findLastUserMessage(prompt);
+}
 
 function findLastUserMessage(
     prompt: unknown

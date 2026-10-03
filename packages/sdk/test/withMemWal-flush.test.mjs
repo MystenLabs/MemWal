@@ -65,6 +65,54 @@ test("flush() awaits the fire-and-forget auto-save analyze() call", async () => 
     }
 });
 
+test("a tool step does not recall or analyze the same user message again", async () => {
+    const originalRecall = MemWal.prototype.recall;
+    const originalAnalyze = MemWal.prototype.analyze;
+    let recalls = 0;
+    let analyzes = 0;
+    MemWal.prototype.recall = async () => {
+        recalls += 1;
+        return { results: [] };
+    };
+    MemWal.prototype.analyze = async () => {
+        analyzes += 1;
+    };
+
+    try {
+        const model = withMemWal(fakeLanguageModel(), {
+            key: TEST_KEY,
+            accountId: TEST_ACCOUNT_ID,
+        });
+        const user = { role: "user", content: [{ type: "text", text: "remember this" }] };
+        await model.doGenerate({ prompt: [user] });
+        await model.flush();
+        assert.equal(recalls, 1);
+        assert.equal(analyzes, 1);
+
+        await model.doGenerate({
+            prompt: [
+                user,
+                { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "lookup", input: {} }] },
+                {
+                    role: "tool",
+                    content: [{
+                        type: "tool-result",
+                        toolCallId: "c1",
+                        toolName: "lookup",
+                        output: { type: "text", value: "ok" },
+                    }],
+                },
+            ],
+        });
+        await model.flush();
+        assert.equal(recalls, 1);
+        assert.equal(analyzes, 1);
+    } finally {
+        MemWal.prototype.recall = originalRecall;
+        MemWal.prototype.analyze = originalAnalyze;
+    }
+});
+
 test("a wrapped v2 model still reports its finish reason", async () => {
     const originalRecall = MemWal.prototype.recall;
     const originalAnalyze = MemWal.prototype.analyze;

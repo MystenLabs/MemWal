@@ -68,6 +68,7 @@ import {
     redactInternalUrls,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
+    isExpiredSealSession,
 } from "./utils.js";
 import {
     assertCompatibleRelayer,
@@ -116,6 +117,23 @@ const SEAL_SESSION_TTL_MIN = 5;
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
 
+/** Absolute expiry for a cached SEAL session.
+ *
+ * The TTL clock starts at `creationTimeMs`, which `SessionKey.create` stamps
+ * before the personal-message signature returns. Caching `Date.now() + ttl`
+ * at the end of that wait outlives the session whenever create is slow, and
+ * the sidecar then rejects recall with an expired session.
+ */
+export function sealSessionExpiresAt(
+    creationTimeMs: number,
+    ttlMin: number,
+    now = Date.now(),
+): number {
+    const created = Number.isFinite(creationTimeMs) ? creationTimeMs : now;
+    const ttl = Number.isFinite(ttlMin) && ttlMin > 0 ? ttlMin : SEAL_SESSION_TTL_MIN;
+    return created + ttl * 60_000 - SEAL_SESSION_SAFETY_MARGIN_MS;
+}
+
 /** Per-call knobs for `signedRequest`. `timeoutMs` overrides the client-wide
  * deadline for one endpoint; `signal` is the caller's own cancellation and is
  * honoured alongside it, never replaced by it. */
@@ -123,12 +141,42 @@ interface SignedRequestOptions {
     includeDelegateKey?: boolean;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** Set on the one retry after the relayer reports SESSION_EXPIRED. */
+    retriedExpiredSession?: boolean;
 }
 
 type RememberStatusResponse = RememberJobStatus | { error?: string };
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A status poll needs this much of the wait left to be worth sending.
+ * Less than this is the 1ms abort that reported a finished job as timed out. */
+const MIN_POLL_BUDGET_MS = 50;
+
+/** Wait out the rest of the budget without sending another poll. */
+function sleepUntil(deadline: number): Promise<void> {
+    const rest = deadline - Date.now();
+    return rest > 0 ? sleep(rest) : Promise.resolve();
+}
+
+/** Sleep before the next status poll, but never past the point where that
+ * poll can still finish inside the caller's budget.
+ *
+ * Returns false when the remaining budget cannot hold a poll, so the caller
+ * stops instead of issuing a request that is aborted immediately. A zero
+ * delay (the first attempt) still polls, including when the whole budget is
+ * shorter than the minimum, so an already-finished job is observed.
+ */
+async function sleepBeforePoll(desiredMs: number, deadline: number): Promise<boolean> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    if (desiredMs <= 0) return true;
+    if (remaining <= MIN_POLL_BUDGET_MS) return false;
+    const sleepMs = Math.min(desiredMs, remaining - MIN_POLL_BUDGET_MS);
+    if (sleepMs > 0) await sleep(sleepMs);
+    return deadline - Date.now() > 0;
 }
 
 /** Window over which the same (namespace, text) resolves to one key.
@@ -143,6 +191,13 @@ const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
 async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
     const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
     return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
+}
+
+/** One identity for a whole bulk body. JSON keeps item boundaries intact, so
+ * reordering items or moving a character across the namespace/text split
+ * derives a different key. */
+function bulkRequestIdentity(items: Array<{ namespace: string; text: string }>): string {
+    return JSON.stringify(items.map((item) => [item.namespace, item.text]));
 }
 
 /** Deadline for a request that names no other.
@@ -233,6 +288,13 @@ function requestTimeoutError(method: string, path: string, ms: number): Error {
     );
     err.name = "MemWalRequestTimeout";
     (err as Error & { status?: number }).status = 504;
+    return err;
+}
+
+function abortedError(signal: AbortSignal): Error {
+    if (signal.reason instanceof Error) return signal.reason;
+    const err = new Error("The operation was aborted");
+    err.name = "AbortError";
     return err;
 }
 
@@ -503,8 +565,14 @@ export class MemWal {
         while (Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
             // the backoff resumes from where it was on the next normal poll.
-            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            // The sleep is clamped so it cannot consume the budget and leave
+            // the next poll 1ms to complete.
+            const desiredDelay = retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++);
             retryAfterMs = 0;
+            if (!(await sleepBeforePoll(desiredDelay, deadline))) {
+                await sleepUntil(deadline);
+                break;
+            }
 
             let status: RememberStatusResponse;
 
@@ -623,6 +691,11 @@ export class MemWal {
      * Returns `202 Accepted` immediately with `job_ids[]`.
      *
      * @param items - Array of `{ text, namespace? }` items (max 20 per call)
+     * @param options.idempotencyKey - Optional key for the whole batch. When
+     *   omitted, one is derived from the items (same 30-minute bucket as
+     *   `remember`) and sent as `idempotency_key`. The relayer stores
+     *   `bulk:{key}:{index}` per item, so a retry collapses onto the same jobs
+     *   instead of writing every item again.
      *
      * @example
      * ```typescript
@@ -633,7 +706,10 @@ export class MemWal {
      * console.log(accepted.job_ids)
      * ```
      */
-    async rememberBulkAsync(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
+    async rememberBulkAsync(
+        items: RememberBulkItem[],
+        options: { idempotencyKey?: string } = {},
+    ): Promise<RememberBulkAcceptedResult> {
         if (!Array.isArray(items) || items.length === 0) {
             throw new Error("rememberBulkAsync: items must be a non-empty array");
         }
@@ -642,11 +718,17 @@ export class MemWal {
             text: item.text,
             namespace: item.namespace ?? this.namespace,
         }));
+        const requestIdentity = bulkRequestIdentity(normalised);
+        const generatedKey = options.idempotencyKey === undefined;
+        const idempotencyKey = options.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? (await derivedIdempotencyKey(requestIdentity));
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
         const accepted = await this.signedRequest<RememberBulkAcceptedResult>(
             "POST",
             "/api/remember/bulk",
-            { items: normalised },
+            { items: normalised, idempotency_key: idempotencyKey },
             [200, 202],
         );
 
@@ -655,6 +737,7 @@ export class MemWal {
                 `rememberBulkAsync: server returned ${accepted.job_ids?.length ?? 0} job_ids for ${normalised.length} items`,
             );
         }
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
 
         return accepted;
     }
@@ -725,8 +808,16 @@ export class MemWal {
         while (pending.size > 0 && Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
             // the backoff resumes from where it was on the next normal poll.
-            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            // Same deadline clamp as the single-job wait.
+            const desiredDelay = retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++);
             retryAfterMs = 0;
+            if (!(await sleepBeforePoll(desiredDelay, deadline))) {
+                // The bulk wait's confirming read is defined to start at the
+                // deadline. Leaving early made that read look like one more
+                // in-budget poll.
+                await sleepUntil(deadline);
+                break;
+            }
 
             const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
             if (pendingIds.length === 0) {
@@ -820,8 +911,11 @@ export class MemWal {
     /**
      * Remember multiple memories and return as soon as the server accepts the jobs.
      */
-    async rememberBulk(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
-        return this.rememberBulkAsync(items);
+    async rememberBulk(
+        items: RememberBulkItem[],
+        options: { idempotencyKey?: string } = {},
+    ): Promise<RememberBulkAcceptedResult> {
+        return this.rememberBulkAsync(items, options);
     }
 
     /**
@@ -829,11 +923,33 @@ export class MemWal {
      */
     async rememberBulkAndWait(
         items: RememberBulkItem[],
-        opts: RememberBulkOptions = {},
+        opts: RememberBulkOptions & { idempotencyKey?: string } = {},
     ): Promise<RememberBulkResult> {
-        const namespaces = items.map((item) => item.namespace ?? this.namespace);
-        const accepted = await this.rememberBulkAsync(items);
-        return this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
+        if (!Array.isArray(items) || items.length === 0) {
+            throw new Error("rememberBulkAndWait: items must be a non-empty array");
+        }
+        const normalised = items.map((item) => ({
+            text: item.text,
+            namespace: item.namespace ?? this.namespace,
+        }));
+        const requestIdentity = bulkRequestIdentity(normalised);
+        const generatedKey = opts.idempotencyKey === undefined;
+        const idempotencyKey = opts.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? (await derivedIdempotencyKey(requestIdentity));
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
+
+        const accepted = await this.rememberBulkAsync(items, { idempotencyKey });
+        const completed = await this.waitForRememberJobs(
+            accepted.job_ids,
+            normalised.map((item) => item.namespace),
+            opts,
+        );
+        // Clear only after the wait returns. A thrown poll keeps the key so
+        // retrying this call reuses it, same as rememberAndWait. Within the
+        // bucket the derived key matches even after this delete.
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
+        return completed;
     }
 
     /**
@@ -1542,26 +1658,47 @@ export class MemWal {
 
         this.sessionCache = {
             bytes,
-            expiresAt:
-                Date.now() +
-                SEAL_SESSION_TTL_MIN * 60_000 -
-                SEAL_SESSION_SAFETY_MARGIN_MS,
+            expiresAt: sealSessionExpiresAt(
+                Number(exported.creationTimeMs),
+                Number(exported.ttlMin),
+            ),
         };
         return bytes;
     }
 
-    private async buildSealSession(): Promise<string> {
+    private async buildSealSession(signal?: AbortSignal): Promise<string> {
+        if (signal?.aborted) throw abortedError(signal);
         // Fast path: cached session still fresh.
         if (this.sessionCache && Date.now() < this.sessionCache.expiresAt) {
             return this.sessionCache.bytes;
         }
-        // Single-flight: concurrent requests share one build.
-        if (this.sessionBuildPromise) return this.sessionBuildPromise;
-
-        this.sessionBuildPromise = this.buildSealSessionInner().finally(() => {
-            this.sessionBuildPromise = null;
+        // Single-flight: concurrent requests share one build. The caller's
+        // signal only stops this waiter; the in-flight create still fills
+        // the cache for whoever is next.
+        if (!this.sessionBuildPromise) {
+            this.sessionBuildPromise = this.buildSealSessionInner().finally(() => {
+                this.sessionBuildPromise = null;
+            });
+        }
+        const built = this.sessionBuildPromise;
+        if (!signal) return built;
+        return new Promise((resolve, reject) => {
+            const onAbort = () => {
+                signal.removeEventListener("abort", onAbort);
+                reject(abortedError(signal));
+            };
+            signal.addEventListener("abort", onAbort, { once: true });
+            built.then(
+                (bytes) => {
+                    signal.removeEventListener("abort", onAbort);
+                    resolve(bytes);
+                },
+                (err) => {
+                    signal.removeEventListener("abort", onAbort);
+                    reject(err);
+                },
+            );
         });
-        return this.sessionBuildPromise;
     }
 
     /**
@@ -1689,11 +1826,12 @@ export class MemWal {
         // decrypt. Manual-mode methods (rememberManual, recallManual) opt
         // out and transmit no decrypt credential at all.
         if (options.includeDelegateKey !== false) {
-            headers["x-seal-session"] = await this.buildSealSession();
+            headers["x-seal-session"] = await this.buildSealSession(options.signal);
         }
         // Bound the request. `fetch` never times out on its own, so this is the
         // only thing standing between a stalled socket and a call that hangs
         // for as long as the connection stays open.
+        const attemptStarted = Date.now();
         const deadlineMs = options.timeoutMs ?? this.requestTimeoutMs;
         const deadline = deadlineSignal(deadlineMs, options.signal);
         try {
@@ -1715,6 +1853,26 @@ export class MemWal {
                 // error rather than an opaque 401 so the caller can fix node time.
                 const clockDriftError = clockDriftErrorFromResponse(res);
                 if (clockDriftError) throw clockDriftError;
+
+                // One fresh session, inside the deadline that already saw the
+                // 401. A second full timeout would let the call outlive timeoutMs.
+                const remainingMs = deadlineMs - (Date.now() - attemptStarted);
+                if (
+                    options.includeDelegateKey !== false
+                    && !options.retriedExpiredSession
+                    && remainingMs > 0
+                    && !deadline.signal.aborted
+                    && !options.signal?.aborted
+                    && isExpiredSealSession(res.status, raw)
+                ) {
+                    this.sessionCache = null;
+                    return await this.signedRequest<T>(method, path, body, acceptedStatuses, {
+                        ...options,
+                        signal: deadline.signal,
+                        timeoutMs: remainingMs,
+                        retriedExpiredSession: true,
+                    });
+                }
 
                 const { message, serverCode } = sanitizeServerError(
                     res.status,

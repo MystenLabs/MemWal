@@ -2766,6 +2766,16 @@ impl axum::response::IntoResponse for AppError {
         crate::observability::record_app_error(self.kind());
         let (status, message) = match &self {
             AppError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg.clone()),
+            // An expired SEAL session is a credential the client can replace.
+            // The code has to survive onto the wire: the SDK treats every other
+            // 401 as a wrong delegate key and will not mint a new session.
+            AppError::Unauthorized(msg) if unauthorized_session_expired(msg) => {
+                let body = serde_json::json!({
+                    "error": msg,
+                    "code": "SESSION_EXPIRED",
+                });
+                return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(body)).into_response();
+            }
             AppError::Unauthorized(msg) => (axum::http::StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Internal(msg) => {
                 // SEC: Never leak internal error details to the client.
@@ -2830,6 +2840,10 @@ impl axum::response::IntoResponse for AppError {
     }
 }
 
+fn unauthorized_session_expired(msg: &str) -> bool {
+    msg.to_ascii_lowercase().contains("session key has expired")
+}
+
 impl AppError {
     pub fn kind(&self) -> &'static str {
         match self {
@@ -2856,6 +2870,8 @@ impl AppError {
 #[derive(Debug, Deserialize)]
 pub struct SidecarError {
     pub error: String,
+    #[serde(default)]
+    pub code: Option<String>,
 }
 
 // ============================================================
@@ -3493,6 +3509,27 @@ mod tests {
         let err = AppError::Unauthorized("test".into());
         let resp = axum::response::IntoResponse::into_response(err);
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn app_error_expired_session_unauthorized_carries_code() {
+        let err = AppError::Unauthorized("Session key has expired".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body["code"], "SESSION_EXPIRED");
+        assert_eq!(body["error"], "Session key has expired");
+    }
+
+    #[tokio::test]
+    async fn app_error_other_unauthorized_has_no_session_code() {
+        let err = AppError::Unauthorized("Sponsor authorization required".into());
+        let resp = axum::response::IntoResponse::into_response(err);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(body.get("code").is_none());
+        assert_eq!(body["error"], "Sponsor authorization required");
     }
 
     #[test]

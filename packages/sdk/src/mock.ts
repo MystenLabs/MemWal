@@ -169,7 +169,8 @@ export class MemWalMock {
     }
 
     async rememberBulkAsync(
-        items: RememberBulkItem[]
+        items: RememberBulkItem[],
+        _options: { idempotencyKey?: string } = {},
     ): Promise<RememberBulkAcceptedResult> {
         const jobIds = items.map(
             (item) => this.store(item.text, item.namespace).jobId
@@ -178,9 +179,10 @@ export class MemWalMock {
     }
 
     async rememberBulk(
-        items: RememberBulkItem[]
+        items: RememberBulkItem[],
+        options: { idempotencyKey?: string } = {},
     ): Promise<RememberBulkAcceptedResult> {
-        return this.rememberBulkAsync(items);
+        return this.rememberBulkAsync(items, options);
     }
 
     async getRememberBulkStatus(
@@ -231,7 +233,7 @@ export class MemWalMock {
 
     async rememberBulkAndWait(
         items: RememberBulkItem[],
-        opts: RememberBulkOptions = {}
+        opts: RememberBulkOptions & { idempotencyKey?: string } = {}
     ): Promise<RememberBulkResult> {
         const accepted = await this.rememberBulkAsync(items);
         const namespaces = items.map(

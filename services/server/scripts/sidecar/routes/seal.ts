@@ -99,6 +99,24 @@ export function sealEncryptCommitteeFailure(
   return null;
 }
 
+/** HTTP status for a SEAL route failure.
+ *
+ * An expired session is the caller's credential, so it is 401. The phrase is
+ * what `SessionKey.import` throws. A shared RPC outage stays 503.
+ */
+export function sealFailureHttpStatus(err: unknown): {
+  status: number;
+  code?: "SHARED_SERVICE_UNAVAILABLE" | "SESSION_EXPIRED";
+} {
+  if (isRetryableRpcError(err)) {
+    return { status: 503, code: "SHARED_SERVICE_UNAVAILABLE" };
+  }
+  if (errorMessage(err).toLowerCase().includes("session key has expired")) {
+    return { status: 401, code: "SESSION_EXPIRED" };
+  }
+  return { status: 500 };
+}
+
 function sendSealFailure(
   res: ExpressResponse,
   operation: string,
@@ -108,13 +126,13 @@ function sendSealFailure(
 ) {
   const message = formattedError(err);
   const error = `${operation} failed during ${phase}: ${message} (traceId=${traceId}, timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS})`;
-  const sharedServiceUnavailable = isRetryableRpcError(err);
+  const failure = sealFailureHttpStatus(err);
   console.error(
     `[${operation}] [${traceId}] phase=${phase} timeoutMs=${SEAL_KEY_SERVER_TIMEOUT_MS} error: ${message}`
   );
-  res.status(sharedServiceUnavailable ? 503 : 500).json({
+  res.status(failure.status).json({
     error,
-    ...(sharedServiceUnavailable ? { code: "SHARED_SERVICE_UNAVAILABLE" } : {}),
+    ...(failure.code ? { code: failure.code } : {}),
     traceId,
     phase,
     timeoutMs: SEAL_KEY_SERVER_TIMEOUT_MS,

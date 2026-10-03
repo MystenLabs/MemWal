@@ -415,21 +415,7 @@ pub async fn seal_decrypt_batch(
     if !status.is_success() {
         crate::observability::record_sidecar_failure("seal_decrypt_batch", "http_error");
         let body_text = resp.text().await.unwrap_or_default();
-        let detail = serde_json::from_str::<SidecarError>(&body_text)
-            .map(|err| err.error)
-            .unwrap_or(body_text);
-        // 503 is the sidecar's shared-outage signal. Recall retries that;
-        // Internal becomes a non-retryable 500.
-        if status.as_u16() == 503 {
-            return Err(AppError::UpstreamUnavailable(format!(
-                "seal decrypt-batch failed: {}",
-                detail
-            )));
-        }
-        return Err(AppError::Internal(format!(
-            "seal decrypt-batch failed: {}",
-            detail
-        )));
+        return Err(seal_decrypt_batch_failure(status.as_u16(), &body_text));
     }
 
     let batch_resp: SealDecryptBatchResponse = resp.json().await.map_err(|e| {
@@ -487,10 +473,41 @@ pub async fn seal_decrypt_batch(
     Ok(out)
 }
 
+/// Map a failed `POST /seal/decrypt-batch` onto the relayer error the caller sees.
+///
+/// 503 stays the shared-outage signal. A 401 for an expired session is
+/// Unauthorized. Anything else stays Internal.
+fn seal_decrypt_batch_failure(status: u16, body_text: &str) -> AppError {
+    let parsed = serde_json::from_str::<SidecarError>(body_text).ok();
+    let detail = parsed
+        .as_ref()
+        .map(|err| err.error.clone())
+        .unwrap_or_else(|| body_text.to_string());
+    let code = parsed.as_ref().and_then(|err| err.code.clone());
+    let session_expired = status == 401
+        && (code.as_deref() == Some("SESSION_EXPIRED")
+            || detail
+                .to_ascii_lowercase()
+                .contains("session key has expired"));
+    if session_expired {
+        tracing::warn!(
+            status,
+            detail,
+            "seal decrypt-batch rejected an expired session"
+        );
+        return AppError::Unauthorized("Session key has expired".into());
+    }
+    if status == 503 {
+        return AppError::UpstreamUnavailable(format!("seal decrypt-batch failed: {}", detail));
+    }
+    AppError::Internal(format!("seal decrypt-batch failed: {}", detail))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DecryptOutcome, SealAbi, SealDecryptBatchRequest, SealDecryptRequest, SealEncryptRequest,
+        seal_decrypt_batch_failure, AppError, DecryptOutcome, SealAbi, SealDecryptBatchRequest,
+        SealDecryptRequest, SealEncryptRequest,
     };
 
     #[test]
@@ -555,6 +572,34 @@ mod tests {
         // remember/analyze write fails.
         assert_eq!(value["accountId"], "0x3");
         assert_eq!(value["expectedSealCommitteeIdentity"]["threshold"], 1);
+    }
+
+    #[test]
+    fn expired_seal_session_is_unauthorized_not_an_internal_error() {
+        let body = r#"{"error":"seal/decrypt-batch failed during resolve_session: Session key has expired (traceId=abc, timeoutMs=30000)","code":"SESSION_EXPIRED"}"#;
+        assert!(matches!(
+            seal_decrypt_batch_failure(401, body),
+            AppError::Unauthorized(msg) if msg == "Session key has expired"
+        ));
+        // The phrase alone is enough when an older sidecar omitted the code.
+        let phrase_only = r#"{"error":"Session key has expired"}"#;
+        assert!(matches!(
+            seal_decrypt_batch_failure(401, phrase_only),
+            AppError::Unauthorized(_)
+        ));
+        // A 500 that happens to mention the phrase is still a server fault.
+        // Only the sidecar's 401 is the client-refreshable case.
+        assert!(matches!(
+            seal_decrypt_batch_failure(500, body),
+            AppError::Internal(_)
+        ));
+        assert!(matches!(
+            seal_decrypt_batch_failure(
+                503,
+                r#"{"error":"busy","code":"SHARED_SERVICE_UNAVAILABLE"}"#
+            ),
+            AppError::UpstreamUnavailable(_)
+        ));
     }
 
     #[test]
