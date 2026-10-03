@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { LogOut } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
+import { AdminActivityPanel } from '../components/AdminActivity'
 import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { AdminWalletBalances } from '../components/AdminWalletBalances'
 import { AdminUploadErrors } from '../components/AdminUploadErrors'
@@ -16,6 +17,14 @@ export default function AdminDashboard() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isRestoring, setIsRestoring] = useState(true)
   const [banner, setBanner] = useState<string | undefined>(undefined)
+  const [navSolid, setNavSolid] = useState(false)
+
+  useEffect(() => {
+    const onScroll = () => setNavSolid(window.scrollY > 220)
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
 
   useEffect(() => {
     const stored = sessionStorage.getItem(ADMIN_KEY_STORAGE)
@@ -60,6 +69,10 @@ export default function AdminDashboard() {
   // actually valid. Rather than leave three "Invalid API key" cards sitting
   // on screen waiting for someone to notice and click Logout, drop straight
   // back to the login form with an explicit reason.
+  const activityPreview =
+    import.meta.env.DEV &&
+    new URLSearchParams(window.location.search).get('preview') === 'activity'
+
   const handleInvalidKey = () => {
     sessionStorage.removeItem(ADMIN_KEY_STORAGE)
     queryClient.removeQueries({ queryKey: ['admin'] })
@@ -69,10 +82,10 @@ export default function AdminDashboard() {
 
   return (
     <div className="admin-dashboard-page dash-page">
-      <nav className="nav playground-nav dashboard-nav">
+      <nav className={`nav playground-nav dashboard-nav${navSolid ? ' dashboard-nav--solid' : ''}`}>
         <div className="nav-inner">
           <Link to="/" className="nav-brand">
-            <img className="nav-brand-logo" src="/walrus-memory-logo.svg" alt="Walrus Memory" />
+            <img className="nav-brand-logo" src="/walrus-memory-logo.svg?v=3" alt="Walrus Memory" />
           </Link>
           {adminKey && (
             <div className="nav-user">
@@ -88,12 +101,12 @@ export default function AdminDashboard() {
       <main className="admin-dashboard-container dash-shell">
         <div className="dashboard-header">
           <h2>Admin Dashboard</h2>
-          <p>Monitor wallet balances, upload errors, and system configuration</p>
+          <p>Monitor spend, wallet balances, upload errors, and system configuration</p>
         </div>
 
         {isRestoring ? (
           <div className="admin-loading">Checking saved session...</div>
-        ) : !adminKey ? (
+        ) : !adminKey && !activityPreview ? (
           <AdminKeyEntry
             onKeySubmit={handleKeySubmit}
             isLoading={isSubmitting}
@@ -101,9 +114,18 @@ export default function AdminDashboard() {
           />
         ) : (
           <div className="admin-panels">
-            <AdminWalletBalances adminKey={adminKey} onInvalidKey={handleInvalidKey} />
-            <AdminUploadErrors adminKey={adminKey} onInvalidKey={handleInvalidKey} />
-            <AdminConfig adminKey={adminKey} onInvalidKey={handleInvalidKey} />
+            <AdminActivityPanel
+              adminKey={adminKey ?? ''}
+              onInvalidKey={handleInvalidKey}
+              preview={activityPreview && !adminKey}
+            />
+            {adminKey && (
+              <>
+                <AdminWalletBalances adminKey={adminKey} onInvalidKey={handleInvalidKey} />
+                <AdminUploadErrors adminKey={adminKey} onInvalidKey={handleInvalidKey} />
+                <AdminConfig adminKey={adminKey} onInvalidKey={handleInvalidKey} />
+              </>
+            )}
           </div>
         )}
       </main>

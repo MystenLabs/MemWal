@@ -26,7 +26,7 @@ export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
 
   if (isLoading) {
     return (
-      <Card title="Configuration" className="dashboard-keys-card admin-config-card">
+      <Card title="Configuration" className="dashboard-keys-card sept-section admin-config-card">
         <div className="admin-loading">Loading configuration...</div>
       </Card>
     )
@@ -34,7 +34,7 @@ export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
 
   if (error) {
     return (
-      <Card title="Configuration" className="dashboard-keys-card admin-config-card">
+      <Card title="Configuration" className="dashboard-keys-card sept-section admin-config-card">
         <div className="admin-error">
           {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load configuration'}
         </div>
@@ -44,14 +44,14 @@ export function AdminConfig({ adminKey, onInvalidKey }: AdminConfigProps) {
 
   if (!data) {
     return (
-      <Card title="Configuration" className="dashboard-keys-card admin-config-card">
+      <Card title="Configuration" className="dashboard-keys-card sept-section admin-config-card">
         <div className="admin-error">No configuration available</div>
       </Card>
     )
   }
 
   return (
-    <Card title="Configuration" className="dashboard-keys-card admin-config-card">
+    <Card title="Configuration" className="dashboard-keys-card sept-section admin-config-card">
       <div className="admin-config-items">
         <div className="admin-config-item">
           <span className="admin-config-label">Balance Monitor Interval</span>
