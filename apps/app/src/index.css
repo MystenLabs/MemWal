@@ -14837,7 +14837,6 @@ body:has(.signin-proposed) {
 .signin-fit--desktop {
   width: min(100vw, calc(100vh * 1440 / 966));
   height: min(100vh, calc(100vw * 966 / 1440));
-  margin-left: auto;
 }
 
 .signin-fit--mobile {
@@ -14918,7 +14917,7 @@ body:has(.signin-proposed) {
 }
 
 .signin-stage--desktop .signin-logo {
-  left: 50px;
+  left: 100px;
   top: 35px;
 }
 
@@ -14941,10 +14940,6 @@ body:has(.signin-proposed) {
     display: block;
     position: fixed;
     z-index: 0;
-    top: calc(-252px * 100cqw / 1440px);
-    left: calc(-187px * 100cqw / 1440px);
-    width: calc(1814px * 100cqw / 1440px);
-    height: calc(776px * 100cqw / 1440px);
     background-image: url('/signin/glow-desktop.png');
   }
 
@@ -14959,9 +14954,46 @@ body:has(.signin-proposed) {
     z-index: 30;
     width: calc(117px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
     height: calc(53.929px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
+  }
+}
+
+/* Up to a 14-inch MacBook (1512px) the stage sits on the right so the laptop meets the window edge. */
+@media (min-width: 720px) and (max-width: 1512px) {
+  .signin-fit--desktop {
+    margin-left: auto;
+  }
+
+  .signin-glow--pin {
+    top: calc(-252px * 100cqw / 1440px);
+    left: calc(-187px * 100cqw / 1440px);
+    width: calc(1814px * 100cqw / 1440px);
+    height: calc(776px * 100cqw / 1440px);
+  }
+
+  .signin-logo--pin {
     left: calc(
       (100cqw - min(100cqw, 100cqh * 1440 / 966))
-      + 50px * min(100cqw, 100cqh * 1440 / 966) / 1440px
+      + 100px * min(100cqw, 100cqh * 1440 / 966) / 1440px
+    );
+  }
+}
+
+/* Wider than a 14-inch MacBook, the same group is centered so the left side does not go empty. */
+@media (min-width: 1513px) {
+  .signin-glow--pin {
+    top: calc(-252px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
+    left: calc(
+      (100cqw - min(100cqw, 100cqh * 1440 / 966)) / 2
+      - 187px * min(100cqw, 100cqh * 1440 / 966) / 1440px
+    );
+    width: calc(1814px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
+    height: calc(776px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
+  }
+
+  .signin-logo--pin {
+    left: calc(
+      (100cqw - min(100cqw, 100cqh * 1440 / 966)) / 2
+      + 100px * min(100cqw, 100cqh * 1440 / 966) / 1440px
     );
   }
 }
