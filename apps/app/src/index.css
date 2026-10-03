@@ -14917,7 +14917,7 @@ body:has(.signin-proposed) {
 }
 
 .signin-stage--desktop .signin-logo {
-  left: 100px;
+  left: 50px;
   top: 35px;
 }
 
@@ -14973,7 +14973,7 @@ body:has(.signin-proposed) {
   .signin-logo--pin {
     left: calc(
       (100cqw - min(100cqw, 100cqh * 1440 / 966))
-      + 100px * min(100cqw, 100cqh * 1440 / 966) / 1440px
+      + 50px * min(100cqw, 100cqh * 1440 / 966) / 1440px
     );
   }
 }
@@ -14993,7 +14993,7 @@ body:has(.signin-proposed) {
   .signin-logo--pin {
     left: calc(
       (100cqw - min(100cqw, 100cqh * 1440 / 966)) / 2
-      + 100px * min(100cqw, 100cqh * 1440 / 966) / 1440px
+      + 50px * min(100cqw, 100cqh * 1440 / 966) / 1440px
     );
   }
 }
