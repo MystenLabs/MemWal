@@ -151,34 +151,6 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** A status poll needs this much of the wait left to be worth sending.
- * Less than this is the 1ms abort that reported a finished job as timed out. */
-const MIN_POLL_BUDGET_MS = 50;
-
-/** Wait out the rest of the budget without sending another poll. */
-function sleepUntil(deadline: number): Promise<void> {
-    const rest = deadline - Date.now();
-    return rest > 0 ? sleep(rest) : Promise.resolve();
-}
-
-/** Sleep before the next status poll, but never past the point where that
- * poll can still finish inside the caller's budget.
- *
- * Returns false when the remaining budget cannot hold a poll, so the caller
- * stops instead of issuing a request that is aborted immediately. A zero
- * delay (the first attempt) still polls, including when the whole budget is
- * shorter than the minimum, so an already-finished job is observed.
- */
-async function sleepBeforePoll(desiredMs: number, deadline: number): Promise<boolean> {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return false;
-    if (desiredMs <= 0) return true;
-    if (remaining <= MIN_POLL_BUDGET_MS) return false;
-    const sleepMs = Math.min(desiredMs, remaining - MIN_POLL_BUDGET_MS);
-    if (sleepMs > 0) await sleep(sleepMs);
-    return deadline - Date.now() > 0;
-}
-
 /** Window over which the same (namespace, text) resolves to one key.
  *
  * `pendingRememberKeys` only dedupes retries that reuse one client instance,
@@ -191,13 +163,6 @@ const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
 async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
     const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
     return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
-}
-
-/** One identity for a whole bulk body. JSON keeps item boundaries intact, so
- * reordering items or moving a character across the namespace/text split
- * derives a different key. */
-function bulkRequestIdentity(items: Array<{ namespace: string; text: string }>): string {
-    return JSON.stringify(items.map((item) => [item.namespace, item.text]));
 }
 
 /** Deadline for a request that names no other.
@@ -565,14 +530,8 @@ export class MemWal {
         while (Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
             // the backoff resumes from where it was on the next normal poll.
-            // The sleep is clamped so it cannot consume the budget and leave
-            // the next poll 1ms to complete.
-            const desiredDelay = retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++);
+            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
             retryAfterMs = 0;
-            if (!(await sleepBeforePoll(desiredDelay, deadline))) {
-                await sleepUntil(deadline);
-                break;
-            }
 
             let status: RememberStatusResponse;
 
@@ -691,11 +650,6 @@ export class MemWal {
      * Returns `202 Accepted` immediately with `job_ids[]`.
      *
      * @param items - Array of `{ text, namespace? }` items (max 20 per call)
-     * @param options.idempotencyKey - Optional key for the whole batch. When
-     *   omitted, one is derived from the items (same 30-minute bucket as
-     *   `remember`) and sent as `idempotency_key`. The relayer stores
-     *   `bulk:{key}:{index}` per item, so a retry collapses onto the same jobs
-     *   instead of writing every item again.
      *
      * @example
      * ```typescript
@@ -706,10 +660,7 @@ export class MemWal {
      * console.log(accepted.job_ids)
      * ```
      */
-    async rememberBulkAsync(
-        items: RememberBulkItem[],
-        options: { idempotencyKey?: string } = {},
-    ): Promise<RememberBulkAcceptedResult> {
+    async rememberBulkAsync(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
         if (!Array.isArray(items) || items.length === 0) {
             throw new Error("rememberBulkAsync: items must be a non-empty array");
         }
@@ -718,17 +669,11 @@ export class MemWal {
             text: item.text,
             namespace: item.namespace ?? this.namespace,
         }));
-        const requestIdentity = bulkRequestIdentity(normalised);
-        const generatedKey = options.idempotencyKey === undefined;
-        const idempotencyKey = options.idempotencyKey
-            ?? this.pendingRememberKeys.get(requestIdentity)
-            ?? (await derivedIdempotencyKey(requestIdentity));
-        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
         const accepted = await this.signedRequest<RememberBulkAcceptedResult>(
             "POST",
             "/api/remember/bulk",
-            { items: normalised, idempotency_key: idempotencyKey },
+            { items: normalised },
             [200, 202],
         );
 
@@ -737,7 +682,6 @@ export class MemWal {
                 `rememberBulkAsync: server returned ${accepted.job_ids?.length ?? 0} job_ids for ${normalised.length} items`,
             );
         }
-        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
 
         return accepted;
     }
@@ -808,16 +752,8 @@ export class MemWal {
         while (pending.size > 0 && Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
             // the backoff resumes from where it was on the next normal poll.
-            // Same deadline clamp as the single-job wait.
-            const desiredDelay = retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++);
+            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
             retryAfterMs = 0;
-            if (!(await sleepBeforePoll(desiredDelay, deadline))) {
-                // The bulk wait's confirming read is defined to start at the
-                // deadline. Leaving early made that read look like one more
-                // in-budget poll.
-                await sleepUntil(deadline);
-                break;
-            }
 
             const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
             if (pendingIds.length === 0) {
@@ -911,11 +847,8 @@ export class MemWal {
     /**
      * Remember multiple memories and return as soon as the server accepts the jobs.
      */
-    async rememberBulk(
-        items: RememberBulkItem[],
-        options: { idempotencyKey?: string } = {},
-    ): Promise<RememberBulkAcceptedResult> {
-        return this.rememberBulkAsync(items, options);
+    async rememberBulk(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
+        return this.rememberBulkAsync(items);
     }
 
     /**
@@ -923,33 +856,11 @@ export class MemWal {
      */
     async rememberBulkAndWait(
         items: RememberBulkItem[],
-        opts: RememberBulkOptions & { idempotencyKey?: string } = {},
+        opts: RememberBulkOptions = {},
     ): Promise<RememberBulkResult> {
-        if (!Array.isArray(items) || items.length === 0) {
-            throw new Error("rememberBulkAndWait: items must be a non-empty array");
-        }
-        const normalised = items.map((item) => ({
-            text: item.text,
-            namespace: item.namespace ?? this.namespace,
-        }));
-        const requestIdentity = bulkRequestIdentity(normalised);
-        const generatedKey = opts.idempotencyKey === undefined;
-        const idempotencyKey = opts.idempotencyKey
-            ?? this.pendingRememberKeys.get(requestIdentity)
-            ?? (await derivedIdempotencyKey(requestIdentity));
-        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
-
-        const accepted = await this.rememberBulkAsync(items, { idempotencyKey });
-        const completed = await this.waitForRememberJobs(
-            accepted.job_ids,
-            normalised.map((item) => item.namespace),
-            opts,
-        );
-        // Clear only after the wait returns. A thrown poll keeps the key so
-        // retrying this call reuses it, same as rememberAndWait. Within the
-        // bucket the derived key matches even after this delete.
-        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
-        return completed;
+        const namespaces = items.map((item) => item.namespace ?? this.namespace);
+        const accepted = await this.rememberBulkAsync(items);
+        return this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
     }
 
     /**
