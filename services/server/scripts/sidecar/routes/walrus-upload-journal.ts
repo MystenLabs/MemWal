@@ -1008,6 +1008,9 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                             traceId,
                             jobId,
                             keyIndex: keySlot,
+                            // getBlobObject caches a miss. Clear it or the retry
+                            // reads the same Error and the job burns its attempts.
+                            resetWalrusCache: () => client.reset(),
                         }, true) as WriteBlobStepUploaded;
                     }
                 } else if (resume.step === "uploaded") {

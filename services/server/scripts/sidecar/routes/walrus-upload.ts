@@ -7,6 +7,7 @@ import express, { type Express } from "express";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import {
+    isUnseenSuiObject,
     isWalrusBlobObjectMissingFromEffects,
     isWalrusPackageVersionMismatch,
     isWalrusReferencedObjectStale,
@@ -57,9 +58,13 @@ export async function uploadWalrusBlobWithEffectsRetry(
         traceId: string;
         jobId?: string | null;
         keyIndex: number;
+        /** Drop the Walrus client's cached object miss before the next try. */
+        resetWalrusCache?: () => void;
+        retryDelaysMs?: readonly number[];
     },
     deletable?: boolean
 ): Promise<any> {
+    const delays = context.retryDelaysMs ?? WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS;
     for (let attempt = 1; ; attempt += 1) {
         try {
             return await flow.upload({
@@ -68,20 +73,28 @@ export async function uploadWalrusBlobWithEffectsRetry(
             });
         } catch (err: unknown) {
             const message = errorMessage(err);
-            const retryDelayMs = WALRUS_UPLOAD_EFFECTS_RETRY_DELAYS_MS[attempt - 1];
-            if (!retryDelayMs || !isWalrusBlobObjectMissingFromEffects(message)) {
+            // Index past the schedule is `undefined`. Zero is a real delay.
+            const retryDelayMs = delays[attempt - 1];
+            const unseenObject = isUnseenSuiObject(message);
+            const retryable = unseenObject || isWalrusBlobObjectMissingFromEffects(message);
+            if (retryDelayMs === undefined || !retryable) {
+                // The failed load stays in the DataLoader until this client resets.
+                // Effects misses do not use that loader, so they do not reset it.
+                if (unseenObject) context.resetWalrusCache?.();
                 throw err;
             }
 
+            if (unseenObject) context.resetWalrusCache?.();
             console.warn(
                 `[walrus/upload] [${context.traceId}] upload_blob_retry ${JSON.stringify({
-                jobId: context.jobId,
-                keyIndex: context.keyIndex,
-                attempt,
-                nextAttempt: attempt + 1,
-                retryDelayMs,
-                registerDigest,
-                message: truncateForLog(message),
+                    jobId: context.jobId,
+                    keyIndex: context.keyIndex,
+                    attempt,
+                    nextAttempt: attempt + 1,
+                    retryDelayMs,
+                    registerDigest,
+                    clearedCache: unseenObject,
+                    message: truncateForLog(message),
                 })}`
             );
             await sleep(retryDelayMs);
@@ -221,7 +234,8 @@ export function registerWalrusUploadRoute(app: Express): void {
             );
 
             phase = "encode";
-            const flow = getWalrusClient().writeBlobFlow({
+            const walrusClient = getWalrusClient();
+            const flow = walrusClient.writeBlobFlow({
                 blob: blobData,
             });
             await flow.encode();
@@ -289,6 +303,7 @@ export function registerWalrusUploadRoute(app: Express): void {
                         traceId,
                         jobId: jobIdForLog,
                         keyIndex: keySlot,
+                        resetWalrusCache: () => walrusClient.reset(),
                     }),
                 () => ({ registerDigest })
             );
