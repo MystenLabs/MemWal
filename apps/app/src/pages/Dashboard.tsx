@@ -14,13 +14,15 @@ import { useSponsoredTransaction } from '../hooks/useSponsoredTransaction'
 import { generateDelegateKey } from '@mysten-incubation/memwal/account'
 import type { WalletSigner } from '@mysten-incubation/memwal/manual'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { TriangleAlert, Info, Copy, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, ChevronLeft, ChevronRight } from 'lucide-react'
+import { TriangleAlert, Info, Eye, EyeOff, Trash2, RefreshCw, Plus, LogOut, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useDelegateKey } from '../App'
 import { Card } from '../components/Card'
+import { CopyStatusIcon, CopyStatusLabel } from '../components/CopyStatus'
 import SecurityDeleteSection from '../components/SecurityDeleteSection'
 import { SecretValueInput } from '../components/SecretValueInput'
 import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
+import { useCopyFeedback } from '../hooks/useCopyFeedback'
 import { apiGet } from '../utils/api'
 import { assertDelegateKeyRegistered, deriveDelegatePublicKeyHex, normalizeDelegatePrivateKey } from '../utils/delegateKeyImport'
 import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
@@ -187,7 +189,7 @@ export default function Dashboard({
     }, [legacyRegistryDiffers, address, previewMode, suiClient])
     const securityDeleteAccountObjectId = legacyRegistryDiffers ? legacyAccountObjectId : effectiveAccountObjectId
     const [showKey, setShowKey] = useState(false)
-    const [copied, setCopied] = useState<string | null>(null)
+    const { copy: copyText, statusOf: copyStatusOf } = useCopyFeedback()
     const [navSolid, setNavSolid] = useState(false)
 
     useEffect(() => {
@@ -258,14 +260,12 @@ export default function Dashboard({
     }, [currentAccount, signAndExecuteTx, signPersonalMsg])
 
     const copyToClipboard = useCallback(async (text: string, label: string) => {
-        await navigator.clipboard.writeText(text)
-        setCopied(label)
+        if (!(await copyText(text, label))) return
         trackEvent('copy_action', {
             item: label.startsWith('pk-') ? 'public_key' : label,
             location: 'dashboard',
         })
-        setTimeout(() => setCopied(null), 2000)
-    }, [])
+    }, [copyText])
 
     const handleLogout = useCallback(async () => {
         trackEvent('sign_out', { location: 'dashboard' })
@@ -925,12 +925,12 @@ asyncio.run(main())`
                     <div className="nav-user">
                         <button
                             type="button"
-                            className="nav-address"
+                            className="nav-address copy-status-button"
                             onClick={() => copyToClipboard(address, 'wallet')}
-                            aria-label={copied === 'wallet' ? 'Wallet address copied' : 'Copy wallet address'}
+                            aria-label="Copy wallet address"
                         >
-                            {address.slice(0, 6)}...{address.slice(-4)}
-                            <Copy size={10} aria-hidden="true" />
+                            <CopyStatusLabel status={copyStatusOf('wallet')} idle={`${address.slice(0, 6)}...${address.slice(-4)}`} copied="Copied" error="Failed" />
+                            <CopyStatusIcon status={copyStatusOf('wallet')} size={10} />
                         </button>
                         <button className="lp-nav-cta" onClick={handleLogout}>
                             Sign out <LogOut size={14} />
@@ -1022,12 +1022,12 @@ asyncio.run(main())`
                                 <div className="dashboard-credential-actions">
                                     <button
                                         type="button"
-                                        className={`dashboard-credential-icon-button${copied === 'acct' ? ' dashboard-credential-icon-button--copied' : ''}`}
+                                        className={`dashboard-credential-icon-button copy-status-button${copyStatusOf('acct') === 'copied' ? ' dashboard-credential-icon-button--copied' : ''}`}
                                         onClick={() => copyToClipboard(effectiveAccountObjectId, 'acct')}
                                         aria-label="Copy account ID"
-                                        title={copied === 'acct' ? 'Copied' : 'Copy account ID'}
+                                        title="Copy account ID"
                                     >
-                                        <Copy size={14} />
+                                        <CopyStatusIcon status={copyStatusOf('acct')} />
                                     </button>
                                 </div>
                             </div>
@@ -1043,12 +1043,12 @@ asyncio.run(main())`
                             <div className="dashboard-credential-actions">
                                 <button
                                     type="button"
-                                    className={`dashboard-credential-icon-button${copied === 'server-env' ? ' dashboard-credential-icon-button--copied' : ''}`}
+                                    className={`dashboard-credential-icon-button copy-status-button${copyStatusOf('server-env') === 'copied' ? ' dashboard-credential-icon-button--copied' : ''}`}
                                     onClick={() => copyToClipboard(`${SERVER_URL_ENV}=${config.memwalServerUrl}`, 'server-env')}
                                     aria-label="Copy relayer URL env line"
-                                    title={copied === 'server-env' ? 'Copied' : 'Copy env line'}
+                                    title="Copy env line"
                                 >
-                                    <Copy size={14} />
+                                    <CopyStatusIcon status={copyStatusOf('server-env')} />
                                 </button>
                             </div>
                         </div>
@@ -1061,12 +1061,12 @@ asyncio.run(main())`
                             <div className="dashboard-credential-actions">
                                 <button
                                     type="button"
-                                    className={`dashboard-credential-icon-button${copied === 'pub' ? ' dashboard-credential-icon-button--copied' : ''}`}
+                                    className={`dashboard-credential-icon-button copy-status-button${copyStatusOf('pub') === 'copied' ? ' dashboard-credential-icon-button--copied' : ''}`}
                                     onClick={() => copyToClipboard(delegatePublicKey!, 'pub')}
                                     aria-label="Copy delegate public key"
-                                    title={copied === 'pub' ? 'Copied' : 'Copy public key'}
+                                    title="Copy public key"
                                 >
-                                    <Copy size={14} />
+                                    <CopyStatusIcon status={copyStatusOf('pub')} />
                                 </button>
                             </div>
                         </div>
@@ -1088,12 +1088,12 @@ asyncio.run(main())`
                                     <>
                                         <button
                                             type="button"
-                                            className={`dashboard-credential-icon-button${copied === 'priv' ? ' dashboard-credential-icon-button--copied' : ''}`}
+                                            className={`dashboard-credential-icon-button copy-status-button${copyStatusOf('priv') === 'copied' ? ' dashboard-credential-icon-button--copied' : ''}`}
                                             onClick={() => copyToClipboard(delegateKey!, 'priv')}
                                             aria-label="Copy delegate private key"
-                                            title={copied === 'priv' ? 'Copied' : 'Copy private key'}
+                                            title="Copy private key"
                                         >
-                                            <Copy size={14} />
+                                            <CopyStatusIcon status={copyStatusOf('priv')} />
                                         </button>
                                     </>
                                 )}
@@ -1292,10 +1292,12 @@ asyncio.run(main())`
                                 />
                                 <div className="key-actions">
                                     <button
-                                        className="btn btn-secondary btn-sm"
+                                        className="btn btn-secondary btn-sm copy-status-button"
                                         onClick={() => copyToClipboard(newPrivateKey, 'new-priv')}
+                                        aria-label="Copy private key"
                                     >
-                                        <Copy size={12} /> {copied === 'new-priv' ? 'Copied' : 'Copy private key'}
+                                        <CopyStatusIcon status={copyStatusOf('new-priv')} size={12} />
+                                        <CopyStatusLabel status={copyStatusOf('new-priv')} idle="Copy private key" />
                                     </button>
                                     <button
                                         className="btn btn-secondary btn-sm"
@@ -1455,12 +1457,12 @@ asyncio.run(main())`
                                                 <td data-label="Actions" className="dashboard-key-row-actions">
                                                     <div className="dashboard-key-actions">
                                                         <button
-                                                            className={`btn btn-secondary btn-sm dashboard-key-icon-action${copied === copyPublicKeyLabel ? ' dashboard-key-icon-action--copied' : ''}`}
+                                                            className={`btn btn-secondary btn-sm dashboard-key-icon-action copy-status-button${copyStatusOf(copyPublicKeyLabel) === 'copied' ? ' dashboard-key-icon-action--copied' : ''}`}
                                                             onClick={() => copyToClipboard(k.publicKey, copyPublicKeyLabel)}
-                                                            aria-label={copied === copyPublicKeyLabel ? 'Public key copied' : 'Copy public key'}
-                                                            title={copied === copyPublicKeyLabel ? 'Copied' : 'Copy public key'}
+                                                            aria-label="Copy public key"
+                                                            title="Copy public key"
                                                         >
-                                                            <Copy size={14} />
+                                                            <CopyStatusIcon status={copyStatusOf(copyPublicKeyLabel)} />
                                                         </button>
                                                         <button
                                                             className="btn btn-danger btn-sm dashboard-key-icon-action"

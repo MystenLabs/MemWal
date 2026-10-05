@@ -1,10 +1,11 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Copy } from 'lucide-react'
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter'
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript'
 import python from 'react-syntax-highlighter/dist/esm/languages/hljs/python'
+import { CopyStatusIcon } from '../components/CopyStatus'
 import { config } from '../config'
+import { useCopyFeedback, type CopyStatus } from '../hooks/useCopyFeedback'
 import { trackEvent } from '../utils/analytics'
 
 SyntaxHighlighter.registerLanguage('javascript', js)
@@ -132,10 +133,10 @@ type ConnectWalrusMemoryProps = {
     importExistingKeyUnavailable?: boolean
 }
 
-function CodeBlock({ text, label, copied, onCopy, language }: {
+function CodeBlock({ text, label, statusOf, onCopy, language }: {
     text: string
     label: string
-    copied: string | null
+    statusOf: (label: string) => CopyStatus
     onCopy: (text: string, label: string) => void
     language?: 'javascript' | 'python'
 }) {
@@ -155,11 +156,11 @@ function CodeBlock({ text, label, copied, onCopy, language }: {
             )}
             <button
                 type="button"
-                className="connect-wm-copy"
-                aria-label={copied === label ? 'Copied' : `Copy ${label}`}
+                className="connect-wm-copy copy-status-button"
+                aria-label={`Copy ${label}`}
                 onClick={() => onCopy(text, label)}
             >
-                <Copy size={16} aria-hidden="true" />
+                <CopyStatusIcon status={statusOf(label)} size={16} />
             </button>
         </div>
     )
@@ -178,7 +179,7 @@ export default function ConnectWalrusMemory({
     importExistingKeyUnavailable = false,
 }: ConnectWalrusMemoryProps) {
     const [clientId, setClientId] = useState<ConnectClientId>('claude-code')
-    const [copied, setCopied] = useState<string | null>(null)
+    const { copy: copyText, statusOf } = useCopyFeedback()
     const [existingKey, setExistingKey] = useState('')
     const [sdkKind, setSdkKind] = useState<SdkKind>('js')
     const guideRef = useRef<HTMLDivElement>(null)
@@ -200,10 +201,9 @@ export default function ConnectWalrusMemory({
     const client = CLIENTS.find((item) => item.id === clientId) ?? CLIENTS[0]
 
     const copy = async (text: string, item: string) => {
-        await navigator.clipboard.writeText(text)
-        setCopied(item)
-        trackEvent('copy_action', { item, location: 'dashboard_connect' })
-        window.setTimeout(() => setCopied((current) => (current === item ? null : current)), 2000)
+        if (await copyText(text, item)) {
+            trackEvent('copy_action', { item, location: 'dashboard_connect' })
+        }
     }
 
     return (
@@ -280,11 +280,11 @@ export default function ConnectWalrusMemory({
                                 <div>
                                     <h3>Install the plugin</h3>
                                     <p>Add Walrus Memory to {client.label}:</p>
-                                    <CodeBlock text={client.command} label={`${client.label} install`} copied={copied} onCopy={copy} />
+                                    <CodeBlock text={client.command} label={`${client.label} install`} statusOf={statusOf} onCopy={copy} />
                                     {client.slash && (
                                         <>
                                             <p className="connect-wm-or">Or, inside {client.label}:</p>
-                                            <CodeBlock text={client.slash} label={`${client.label} slash`} copied={copied} onCopy={copy} />
+                                            <CodeBlock text={client.slash} label={`${client.label} slash`} statusOf={statusOf} onCopy={copy} />
                                         </>
                                     )}
                                     {client.id === 'cursor' && (
@@ -339,7 +339,7 @@ export default function ConnectWalrusMemory({
                             <div>
                                 <h3>Install the SDK</h3>
                                 <p>Add Walrus Memory to your application:</p>
-                                <CodeBlock text={SDK_INSTALLS[sdkKind]} label={`${sdkKind} install`} copied={copied} onCopy={copy} />
+                                <CodeBlock text={SDK_INSTALLS[sdkKind]} label={`${sdkKind} install`} statusOf={statusOf} onCopy={copy} />
                             </div>
                         </li>
                         <li>
@@ -398,7 +398,7 @@ export default function ConnectWalrusMemory({
                                     <CodeBlock
                                         text={sdkSnippet}
                                         label="SDK quickstart"
-                                        copied={copied}
+                                        statusOf={statusOf}
                                         onCopy={copy}
                                         language={sdkKind === 'python' ? 'python' : 'javascript'}
                                     />

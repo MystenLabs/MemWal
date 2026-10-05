@@ -6125,7 +6125,7 @@ h1, h2, h3 {
   background: rgba(255, 255, 255, 0.12);
   border: 1px solid rgba(255, 255, 255, 0.16);
   color: var(--dash-text);
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background 0.12s ease, border-color 0.12s ease, translate 0.16s var(--copy-status-ease);
 }
 
 .dash-page .key-display .btn-secondary:hover:not(:disabled) {
@@ -9569,7 +9569,7 @@ h1, h2, h3 {
   background: rgba(255, 255, 255, 0.08);
   color: #faf8f5;
   cursor: pointer;
-  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease, translate 0.16s var(--copy-status-ease);
 }
 
 .dash-page .dashboard-credential-icon-button:hover:not(:disabled) {
@@ -15922,6 +15922,72 @@ body:has(.signin-proposed) {
   .copy-btn--done .copy-btn-icon,
   .copy-btn--error .copy-btn-icon {
     animation: none;
+  }
+}
+
+/* ── Copy status: icon crossfade, check draw, label blur, press ─────── */
+:root {
+  --copy-status-ease: cubic-bezier(0.23, 1, 0.32, 1);
+}
+/* .btn already transitions `all`; other buttons keep their own lists. */
+.copy-status-button:where(:not(.btn)) {
+  transition: translate 0.16s var(--copy-status-ease);
+}
+.copy-status-button:active:not(:disabled) {
+  translate: 0 1px;
+}
+.copy-status-icon {
+  display: inline-grid;
+  flex-shrink: 0;
+  width: var(--copy-status-size, 14px);
+  height: var(--copy-status-size, 14px);
+}
+.copy-status-icon > svg {
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  transform: scale(0.92);
+  transition: opacity 0.36s var(--copy-status-ease), transform 0.36s var(--copy-status-ease);
+}
+.copy-status-icon--idle > [data-icon='idle'],
+.copy-status-icon--copied > [data-icon='copied'],
+.copy-status-icon--error > [data-icon='error'] {
+  opacity: 1;
+  transform: scale(1);
+}
+.copy-status-icon [data-icon='copied'] path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  transition: stroke-dashoffset 0.26s var(--copy-status-ease);
+}
+.copy-status-icon--copied [data-icon='copied'] path {
+  stroke-dashoffset: 0;
+}
+.copy-status-label {
+  display: inline-grid;
+}
+.copy-status-label > span {
+  grid-area: 1 / 1;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(3px);
+  filter: blur(3px);
+  transition: opacity 0.36s var(--copy-status-ease), transform 0.36s var(--copy-status-ease), filter 0.36s var(--copy-status-ease);
+}
+.copy-status-label > [data-active] {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .copy-status-button:active:not(:disabled) {
+    translate: none;
+  }
+  .copy-status-icon > svg,
+  .copy-status-icon [data-icon='copied'] path,
+  .copy-status-label > span {
+    transition: none;
   }
 }
 
