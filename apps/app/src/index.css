@@ -14922,7 +14922,8 @@ body:has(.signin-proposed) {
 }
 
 .signin-logo--pin,
-.signin-glow--pin {
+.signin-glow--pin,
+.signin-bloom--pin {
   display: none;
 }
 
@@ -14955,11 +14956,29 @@ body:has(.signin-proposed) {
     width: calc(117px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
     height: calc(53.929px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
   }
+
+  /* Same ellipse as Figma, but outside the stage so the blur is not cut off
+     at the stage edge and the purple continues into the right corner. */
+  .signin-bloom--pin {
+    display: block;
+    position: fixed;
+    z-index: 0;
+    width: calc(368px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
+    height: calc(480px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
+    top: calc(
+      (100cqh - min(100cqh, 100cqw * 966 / 1440)) / 2
+      + 224px * min(100cqw, 100cqh * 1440 / 966) / 1440px
+    );
+    border-radius: 50%;
+    background: linear-gradient(to bottom, #2f43cb, #9550c2);
+    filter: blur(calc(387px * min(100cqw, 100cqh * 1440 / 966) / 1440px));
+    pointer-events: none;
+  }
 }
 
 /* Pin right only while the window is at least as tall as a 14-inch fullscreen
    (1512×982). The spare width there is about 48px, so the laptop still meets
-   the edge. Any shorter window centers below, at every scale. */
+   the edge. */
 @media (min-width: 720px) and (aspect-ratio <= 1512 / 982) {
   .signin-fit--desktop {
     margin-left: auto;
@@ -14978,25 +14997,48 @@ body:has(.signin-proposed) {
       + 50px * min(100cqw, 100cqh * 1440 / 966) / 1440px
     );
   }
+
+  .signin-bloom--pin {
+    left: calc(
+      (100cqw - min(100cqw, 100cqh * 1440 / 966))
+      + 882px * min(100cqw, 100cqh * 1440 / 966) / 1440px
+    );
+  }
 }
 
-/* Shorter than that ratio the spare width is large. Share it, or it all sits on the left. */
+/* Shorter than a 14-inch window: grow the whole stage to the window width
+   so the laptop meets the right edge. The bottom of the artboard clips. */
 @media (min-width: 720px) and (aspect-ratio > 1512 / 982) {
+  .signin-proposed {
+    align-items: flex-start;
+  }
+
+  .signin-fit--desktop {
+    width: 100vw;
+    height: calc(100vw * 966 / 1440);
+    margin-left: 0;
+  }
+
   .signin-glow--pin {
-    top: calc(-252px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
-    left: calc(
-      (100cqw - min(100cqw, 100cqh * 1440 / 966)) / 2
-      - 187px * min(100cqw, 100cqh * 1440 / 966) / 1440px
-    );
-    width: calc(1814px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
-    height: calc(776px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
+    top: calc(-252px * 100cqw / 1440px);
+    left: calc(-187px * 100cqw / 1440px);
+    width: calc(1814px * 100cqw / 1440px);
+    height: calc(776px * 100cqw / 1440px);
   }
 
   .signin-logo--pin {
-    left: calc(
-      (100cqw - min(100cqw, 100cqh * 1440 / 966)) / 2
-      + 50px * min(100cqw, 100cqh * 1440 / 966) / 1440px
-    );
+    top: calc(28px * 100cqw / 1440px);
+    left: calc(50px * 100cqw / 1440px);
+    width: calc(117px * 100cqw / 1440px);
+    height: calc(53.929px * 100cqw / 1440px);
+  }
+
+  .signin-bloom--pin {
+    top: calc(224px * 100cqw / 1440px);
+    left: calc(882px * 100cqw / 1440px);
+    width: calc(368px * 100cqw / 1440px);
+    height: calc(480px * 100cqw / 1440px);
+    filter: blur(calc(387px * 100cqw / 1440px));
   }
 }
 

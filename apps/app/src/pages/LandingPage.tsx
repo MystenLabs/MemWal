@@ -44,7 +44,7 @@ function SignInHero({ stage }: { stage: 'desktop' | 'mobile' }) {
             <div className="signin-hero" aria-hidden="true">
                 <img className="signin-tile signin-tile--back" src="/signin/tile-back.png?v=light2" alt="" />
                 <div className="signin-screen">
-                    <img src="/signin/screen.png?v=laptop1" alt="" />
+                    <img src="/signin/screen.png?v=laptop2" alt="" />
                     <div className="signin-screen-fade" />
                 </div>
                 <img className="signin-tile signin-tile--left" src="/signin/tile-left.png?v=glass3" alt="" />
@@ -55,7 +55,7 @@ function SignInHero({ stage }: { stage: 'desktop' | 'mobile' }) {
     return (
         <div className="signin-hero" aria-hidden="true">
             <div className="signin-screen">
-                <img src="/signin/screen.png?v=laptop1" alt="" />
+                <img src="/signin/screen.png?v=laptop2" alt="" />
                 <div className="signin-screen-fade" />
             </div>
             <img className="signin-tile signin-tile--left" src="/signin/tile-left-mobile.png?v=light2" alt="" />
@@ -151,6 +151,7 @@ export default function LandingPage() {
     return (
         <div className="wm-page signin-proposed">
             <div className="signin-glow signin-glow--pin" aria-hidden="true" />
+            <div className="signin-bloom signin-bloom--pin" aria-hidden="true" />
             <img className="signin-logo signin-logo--pin" src="/signin/logo-wordmark.svg" alt="Walrus Memory" />
             <div className="signin-fit signin-fit--desktop">
                 <div className="signin-stage signin-stage--desktop">
