@@ -88,7 +88,6 @@ const SDK_INSTALLS = {
 } as const
 
 type SdkKind = keyof typeof SDK_INSTALLS
-const CONSOLE_HREF = 'https://console.walrus.xyz/'
 
 function CursorMark() {
     return (
@@ -422,7 +421,7 @@ export default function ConnectWalrusMemory({
                     <div className="connect-wm-memories-copy">
                         <h3 id="connect-wm-memories-title">View your <br />memories</h3>
                         <p>See your agent memories alongside your files in Walrus Console.</p>
-                        <a href={CONSOLE_HREF} target="_blank" rel="noopener noreferrer">Open Walrus Console</a>
+                        <a href={config.consoleUrl} target="_blank" rel="noopener noreferrer">Open Walrus Console</a>
                     </div>
                 </section>
             )}

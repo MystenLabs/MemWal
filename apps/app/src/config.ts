@@ -11,9 +11,9 @@ function parseCsv(value: string | undefined, fallback = '') {
 }
 
 const memwalPackageId = import.meta.env.VITE_MEMWAL_PACKAGE_ID as string ||
-    '0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6'
+    '0x0a625e2db2af6f591a4c80a3d8551ddf11656089cc3a20c5e9e7f8fb75b9265c'
 const memwalRegistryId = import.meta.env.VITE_MEMWAL_REGISTRY_ID as string ||
-    '0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437'
+    '0x736aef9906798fca4460490ccdf8e8502ef170122dc26ecae32111b78c6b42dd'
 const sealKeyServers = parseCsv(import.meta.env.VITE_SEAL_KEY_SERVERS as string)
 const legacySealKeyServers = parseCsv(import.meta.env.VITE_LEGACY_SEAL_KEY_SERVERS as string)
 const localE2eJsonRpc = import.meta.env.DEV &&
@@ -83,15 +83,20 @@ export const config = {
     walrusSystemObjectId: import.meta.env.VITE_WALRUS_SYSTEM_OBJECT_ID as string || '',
     walrusStakingPoolId: import.meta.env.VITE_WALRUS_STAKING_POOL_ID as string || '',
     sidecarUrl: import.meta.env.VITE_SIDECAR_URL as string || 'http://localhost:9000',
-    docsUrl: import.meta.env.VITE_DOCS_URL as string || '',
+    docsUrl: import.meta.env.VITE_DOCS_URL as string ||
+        'https://docs.wal.app/walrus-memory/',
     termsOfServiceUrl: import.meta.env.VITE_TERMS_OF_SERVICE_URL as string ||
         'https://docs.wal.app/docs/legal/walrus_general_tos',
     privacyPolicyUrl: import.meta.env.VITE_PRIVACY_POLICY_URL as string ||
         'https://docs.wal.app/docs/legal/privacy',
-    // "Back to Console" target on /keys (WALM-675). Per-deployment like the
-    // package/registry ids above — never read from a URL query param, since
-    // that's exactly the trust model WALM-288 broke. Empty hides the link.
-    consoleUrl: import.meta.env.VITE_CONSOLE_URL as string || '',
+    // "Back to Console" target (WALM-675). Never read from a URL query param,
+    // since that's the trust model WALM-288 broke. A set VITE_CONSOLE_URL
+    // wins; otherwise this is the Memory tab for the active network.
+    // WM only appends from=wm, and Console's return flow runs on that tab.
+    consoleUrl: import.meta.env.VITE_CONSOLE_URL as string ||
+        ((import.meta.env.VITE_SUI_NETWORK as string || 'testnet') === 'mainnet'
+            ? 'https://console.walrus.xyz/buckets?tab=memory'
+            : 'https://testnet.console.walrus.xyz/buckets?tab=memory'),
     gtmContainerId: import.meta.env.VITE_GTM_CONTAINER_ID as string || '',
     gaMeasurementId: import.meta.env.VITE_GA_MEASUREMENT_ID as string || '',
     posthogProjectApiKey: (

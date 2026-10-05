@@ -911,7 +911,7 @@ async def main():
 asyncio.run(main())`
 
     const sdkSnippet = quickstartLanguage === 'py' ? sdkPythonSnippet : sdkTypeScriptSnippet
-    const docsHref = config.docsUrl || 'https://docs.memwal.ai'
+    const docsHref = config.docsUrl || 'https://docs.wal.app/walrus-memory/'
     const githubHref = 'https://github.com/MystenLabs/memwal'
     const discordHref = 'https://discord.gg/walrusprotocol'
 

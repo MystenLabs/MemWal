@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
+import { config } from '../config'
 import ConnectWalrusMemory from './ConnectWalrusMemory'
 
 vi.mock('../utils/analytics', () => ({
@@ -38,7 +39,7 @@ describe('ConnectWalrusMemory', () => {
 
         expect(screen.queryByRole('link', { name: /view your memory in walrus console/i })).not.toBeInTheDocument()
         expect(screen.getByRole('heading', { name: 'View your memories' })).toBeInTheDocument()
-        expect(screen.getByRole('link', { name: /open walrus console/i })).toHaveAttribute('href', 'https://console.walrus.xyz/')
+        expect(screen.getByRole('link', { name: /open walrus console/i })).toHaveAttribute('href', config.consoleUrl)
     })
 
     it('copies the Claude Code slash commands without a plain-text label', async () => {
