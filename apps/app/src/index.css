@@ -14957,8 +14957,10 @@ body:has(.signin-proposed) {
   }
 }
 
-/* Up to a 14-inch MacBook (1512px) the stage sits on the right so the laptop meets the window edge. */
-@media (min-width: 720px) and (max-width: 1512px) {
+/* Pin right only while the window is at least as tall as a 14-inch fullscreen
+   (1512×982). The spare width there is about 48px, so the laptop still meets
+   the edge. Any shorter window centers below, at every scale. */
+@media (min-width: 720px) and (aspect-ratio <= 1512 / 982) {
   .signin-fit--desktop {
     margin-left: auto;
   }
@@ -14978,8 +14980,8 @@ body:has(.signin-proposed) {
   }
 }
 
-/* Wider than a 14-inch MacBook, the same group is centered so the left side does not go empty. */
-@media (min-width: 1513px) {
+/* Shorter than that ratio the spare width is large. Share it, or it all sits on the left. */
+@media (min-width: 720px) and (aspect-ratio > 1512 / 982) {
   .signin-glow--pin {
     top: calc(-252px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
     left: calc(
