@@ -16172,3 +16172,142 @@ body:has(.signin-proposed) {
 .connect-wm-secret {
   -webkit-text-security: disc;
 }
+
+/* ── Phone layout: signed-in nav and Connect Walrus Memory ─────────── */
+@media (max-width: 640px) {
+  /* Matches the Connect Walrus Memory hero; 72px clips "Playground". */
+  .dash-page .playground-dashboard .dashboard-header h2 {
+    font-size: 40px !important;
+  }
+
+  /* On desktop the timeline line hangs from the first tab. The tabs wrap
+     here, so the timeline starts flush left with a narrower rail. */
+  .dash-page .connect-wm-guide:has(.connect-wm-client)::before,
+  .dash-page .connect-wm-guide:not(:has(.connect-wm-client))::before {
+    display: none;
+  }
+
+  .dash-page .connect-wm-guide:has(.connect-wm-client) .connect-wm-client,
+  .dash-page .connect-wm-guide:has(.connect-wm-client) .connect-wm-timeline li,
+  .dash-page .connect-wm-guide:not(:has(.connect-wm-client)) .connect-wm-timeline li {
+    margin-left: 0;
+  }
+
+  .dash-page .connect-wm-tabbar {
+    margin-bottom: 28px;
+  }
+
+  .dash-page .connect-wm-client {
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+
+  .dash-page .connect-wm-client::after {
+    left: 24px;
+    top: 48px;
+    bottom: -32px;
+  }
+
+  .dash-page .connect-wm-client-badge {
+    width: 48px;
+    height: 48px;
+  }
+
+  .dash-page .connect-wm-client-badge img,
+  .dash-page .connect-wm-client-badge svg {
+    width: 28px;
+    height: 28px;
+  }
+
+  .dash-page .connect-wm-client h3 {
+    font-size: 28px;
+  }
+
+  .dash-page .connect-wm-timeline {
+    gap: 40px;
+  }
+
+  .dash-page .connect-wm-timeline li {
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .dash-page .connect-wm-timeline li:not(:last-child)::before {
+    left: 24px;
+    bottom: -40px;
+  }
+
+  .dash-page .connect-wm-timeline h3 {
+    font-size: 24px;
+  }
+
+  /* Commands keep one per line and scroll sideways instead of breaking
+     mid-word; the copy button stays pinned at the top right. */
+  .dash-page .connect-wm-code {
+    align-items: flex-start;
+  }
+
+  .dash-page .connect-wm-code pre {
+    padding: 14px 8px 14px 14px;
+    overflow-x: auto;
+    white-space: pre;
+    overflow-wrap: normal;
+    font-size: 13px;
+    scrollbar-width: none;
+  }
+
+  .dash-page .connect-wm-copy {
+    margin: 7px 6px 0 0;
+  }
+}
+
+@media (max-width: 480px) {
+  /* The client icons sit above the title instead of over it. */
+  .dash-page .connect-wm-stack {
+    position: relative;
+    top: auto;
+    right: auto;
+    order: -1;
+    margin-bottom: 2px;
+  }
+
+  .dash-page .connect-wm-stack::after {
+    display: none;
+  }
+
+  .dash-page .connect-wm-mark {
+    width: 28px;
+    height: 28px;
+  }
+
+  .dash-page .connect-wm-mark img,
+  .dash-page .connect-wm-mark svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+@media (max-width: 420px) {
+  /* Sign out collapses to its icon so the address no longer runs into the logo. */
+  .setup-classic-nav .lp-nav-cta,
+  .playground-nav .lp-nav-cta,
+  .dashboard-nav .lp-nav-cta {
+    width: 36px;
+    min-width: 36px;
+    padding: 0;
+    justify-content: center;
+    gap: 0;
+  }
+
+  .setup-classic-nav .nav-cta-label,
+  .playground-nav .nav-cta-label,
+  .dashboard-nav .nav-cta-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}

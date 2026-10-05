@@ -361,7 +361,7 @@ export default function SetupWizard() {
                                 navigate('/')
                             }}
                         >
-                            Sign out <LogOut size={14} />
+                            <span className="nav-cta-label">Sign out</span> <LogOut size={14} aria-hidden="true" />
                         </button>
                     </div>
                 </div>

@@ -933,7 +933,7 @@ asyncio.run(main())`
                             <CopyStatusIcon status={copyStatusOf('wallet')} size={10} />
                         </button>
                         <button className="lp-nav-cta" onClick={handleLogout}>
-                            Sign out <LogOut size={14} />
+                            <span className="nav-cta-label">Sign out</span> <LogOut size={14} aria-hidden="true" />
                         </button>
                     </div>
                 </div>
