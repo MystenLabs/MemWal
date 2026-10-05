@@ -20,7 +20,7 @@ import {
     ENOKI_TRANSIENT_MAX_ATTEMPTS,
     ENOKI_TRANSIENT_MAX_DELAY_MS,
 } from "./config.js";
-import { suiClient } from "./clients.js";
+import { refreshWalrusClient, suiClient } from "./clients.js";
 import { enforceAddressBalanceCoinIntents } from "./address-balance.js";
 import { errorMessage, truncateForLog } from "./util.js";
 
@@ -94,6 +94,16 @@ export function isMoveAbortBalanceSplit(message: string): boolean {
  */
 export function isMoveAbortWalDestroyZero(message: string): boolean {
     return /moveabort/i.test(message) && /destroy_zero/i.test(message);
+}
+
+/**
+ * Drop the process-wide Walrus client after a stale-price `destroy_zero`.
+ * The durable retry rebuilds the register from that client. Waiting for the
+ * max-age refresh spends the attempt budget on the same split.
+ */
+export function refreshWalrusClientOnStaleWalPrice(message: string): void {
+    if (!isMoveAbortWalDestroyZero(message)) return;
+    refreshWalrusClient("walrus_wal_payment_destroy_zero");
 }
 
 export async function callEnoki<T>(path: string, payload: unknown): Promise<T> {

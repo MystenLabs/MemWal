@@ -68,6 +68,7 @@ import { uploadWalrusBlobWithEffectsRetry } from "./walrus-upload.js";
 import { enforceAddressBalanceCoinIntents } from "../address-balance.js";
 import {
     callEnoki,
+    refreshWalrusClientOnStaleWalPrice,
     type EnokiExecuteResponse,
     type EnokiSponsorResponse,
 } from "../enoki.js";
@@ -1077,6 +1078,9 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                     return;
                 }
                 const message = errorMessage(error);
+                // Sponsor dry-run aborts before a register is journaled. The
+                // next attempt builds a new transaction from this client.
+                refreshWalrusClientOnStaleWalPrice(message);
                 sidecarLog("error", "walrus_upload_step_failed", {
                     requestId: traceId,
                     phase,

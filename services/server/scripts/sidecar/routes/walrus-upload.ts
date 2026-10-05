@@ -37,7 +37,7 @@ import { acquireWalrusUploadSlots, walrusUploadLimitSnapshot, WalrusUploadLimitE
 import { requestIdFor, sanitizeRequestId, sidecarLog } from "../log.js";
 import { sidecarStartedAtMs, sidecarStateSnapshot } from "../state.js";
 import { MEMWAL_JOB_TAG_KEY, dedupeAddresses, errorMessage, parseWalrusKeySlot, shortAddress, sleep, truncateForLog } from "../util.js";
-import { isMoveAbortBalanceSplit, isMoveAbortWalDestroyZero } from "../enoki.js";
+import { isMoveAbortBalanceSplit, refreshWalrusClientOnStaleWalPrice } from "../enoki.js";
 import {
     ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
     patchGasCoinIntents,
@@ -434,15 +434,7 @@ export function registerWalrusUploadRoute(app: Express): void {
             if (phase === "register_sponsor" && isMoveAbortBalanceSplit(message)) {
                 refreshWalrusClient("register_sponsor_balance_split");
             }
-            // `coin::destroy_zero` (ENonZero) means the WAL payment coin the
-            // register PTB pre-funded from the cached storage price wasn't fully
-            // consumed on-chain — the live price dropped between the cached read
-            // and execution. Recreate the client so the retry re-reads the
-            // current price and splits the exact amount. The Rust worker
-            // classifies this abort Transient so Apalis actually retries.
-            if (isMoveAbortWalDestroyZero(message)) {
-                refreshWalrusClient("walrus_wal_payment_destroy_zero");
-            }
+            refreshWalrusClientOnStaleWalPrice(message);
             if (isWalrusPackageVersionMismatch(message)) {
                 // EWrongVersion is phase-independent: can fire from register / upload / certify
                 // any time the Walrus system package gets upgraded on-chain after this sidecar
