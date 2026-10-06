@@ -568,6 +568,25 @@ fn should_reset_prepared_register(
     ) && prepared.is_some()
 }
 
+/// An `encoded` checkpoint is a local hash of the bytes from that attempt.
+/// Re-encrypting the fact produces a new blob id. Walrus then refuses the
+/// resume and reports `NO_SIDE_EFFECT`, so nothing was submitted. Dropping
+/// the checkpoint lets the same bytes be encoded again. A later step owns a
+/// blob object and must not be discarded here.
+fn should_drop_stale_encoded_resume(
+    body: &str,
+    error_code: Option<&str>,
+    resume_step: Option<&serde_json::Value>,
+) -> bool {
+    let encoded = resume_step
+        .and_then(|step| step.get("step"))
+        .and_then(serde_json::Value::as_str)
+        == Some("encoded");
+    encoded
+        && error_code == Some("NO_SIDE_EFFECT")
+        && body.to_ascii_lowercase().contains("resume blobid mismatch")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn advance_durable_upload(
     client: &reqwest::Client,
@@ -626,6 +645,19 @@ pub async fn advance_durable_upload(
         let error_code = serde_json::from_str::<DurableUploadErrorResponse>(&body)
             .ok()
             .and_then(|error| error.code);
+        if should_drop_stale_encoded_resume(
+            &body,
+            error_code.as_deref(),
+            journal.resume_step.as_ref(),
+        ) {
+            // The encoded checkpoint names a blob id the current bytes do not
+            // hash to. The sidecar submitted nothing, so the next loop pass
+            // encodes these bytes from scratch. The prepared register, if any,
+            // belongs to the old blob id.
+            journal.resume_step = None;
+            journal.register_transaction = None;
+            return Ok(DurableUploadAdvance::Prepared(journal));
+        }
         let reset_safe = should_reset_prepared_register(
             error_code.as_deref(),
             journal.register_transaction.as_ref(),
@@ -1273,8 +1305,8 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 mod tests {
     use super::{
         aggregate_download_errors, error_chain, is_valid_blob_id, register_transaction_for_resume,
-        should_reset_prepared_register, PreparedRegisterTransaction, QueryBlobsResponse,
-        WalrusUploadErrorResponse,
+        should_drop_stale_encoded_resume, should_reset_prepared_register,
+        PreparedRegisterTransaction, QueryBlobsResponse, WalrusUploadErrorResponse,
     };
     use crate::types::AppError;
 
@@ -1385,6 +1417,36 @@ mod tests {
         assert!(!should_reset_prepared_register(
             Some("DURABLE_SIDE_EFFECT_VERIFY_FAILED"),
             Some(&sponsored),
+        ));
+    }
+
+    #[test]
+    fn encoded_resume_drops_only_on_blob_id_mismatch() {
+        let encoded = serde_json::json!({
+            "step": "encoded",
+            "blobId": "Y8n5tChPgigsw_ptMHoDxIqbVzYqJRdpNDcbs84s4Fc"
+        });
+        let mismatch = r#"{"error":"Resume blobId mismatch: expected Y8n5tChP, got IRQ1QmKp. The blob content may have changed.","code":"NO_SIDE_EFFECT"}"#;
+        assert!(should_drop_stale_encoded_resume(
+            mismatch,
+            Some("NO_SIDE_EFFECT"),
+            Some(&encoded),
+        ));
+        let registered = serde_json::json!({ "step": "registered" });
+        assert!(!should_drop_stale_encoded_resume(
+            mismatch,
+            Some("NO_SIDE_EFFECT"),
+            Some(&registered),
+        ));
+        assert!(!should_drop_stale_encoded_resume(
+            r#"{"error":"fetch failed","code":"NO_SIDE_EFFECT"}"#,
+            Some("NO_SIDE_EFFECT"),
+            Some(&encoded),
+        ));
+        assert!(!should_drop_stale_encoded_resume(
+            mismatch,
+            Some("SHARED_SERVICE_UNAVAILABLE"),
+            Some(&encoded),
         ));
     }
 

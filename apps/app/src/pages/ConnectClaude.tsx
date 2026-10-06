@@ -42,7 +42,7 @@ import { config } from '../config'
 import { getAnalyticsErrorType, trackEvent } from '../utils/analytics'
 import { fetchAccountIdForOwner } from '../utils/suiClientCompat'
 
-const WALRUS_MEMORY_LOGO = '/walrus-memory-logo.svg'
+
 
 type Step =
     | 'loading'
@@ -266,17 +266,17 @@ export default function ConnectClaude() {
     }, [walletPickerOpen, currentAccount])
 
     return (
-        <div className="setup-classic">
-            <nav className="nav setup-classic-nav">
+        <div className="dash-page mcp-connect">
+            <nav className="nav playground-nav dashboard-nav">
                 <div className="nav-inner">
                     <Link to="/" className="nav-brand">
-                        <img className="nav-brand-logo" src={WALRUS_MEMORY_LOGO} alt="Walrus Memory" />
+                        <img className="nav-brand-logo" src="/walrus-memory-logo.svg?v=3" alt="Walrus Memory" />
                     </Link>
                 </div>
             </nav>
 
-            <main className="container setup-classic-container">
-                <div className="setup-classic-panel">
+            <main className="dash-shell">
+                <div className="mcp-connect-panel">
                     {step === 'loading' && (
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title">Loading…</h2>
@@ -305,7 +305,7 @@ export default function ConnectClaude() {
 
                     {step === 'redirecting' && (
                         <div className="setup-classic-intro">
-                            <h2 className="setup-classic-title"><span style={{ color: '#22c55e' }}>✓</span> Connected</h2>
+                            <h2 className="setup-classic-title"><span className="mcp-ok">✓</span> Connected</h2>
                             <p className="setup-classic-description">Redirecting you back…</p>
                         </div>
                     )}
@@ -317,7 +317,7 @@ export default function ConnectClaude() {
                                 This wallet doesn't have a Walrus Memory account yet. Run through the one-time setup, then we'll bring you back here to finish connecting.
                             </p>
                             <div className="setup-classic-actions">
-                                <Link to="/setup" className="lp-btn-yellow">Create account and continue</Link>
+                                <Link to="/setup" className="mcp-btn">Create account and continue</Link>
                             </div>
                         </div>
                     )}
@@ -325,7 +325,7 @@ export default function ConnectClaude() {
                     {step === 'error' && (
                         <div className="setup-classic-intro">
                             <h2 className="setup-classic-title">Something went wrong</h2>
-                            <p className="setup-classic-description" style={errorTextStyle}>{errorMsg}</p>
+                            <p className="setup-classic-description mcp-error">{errorMsg}</p>
                         </div>
                     )}
                 </div>
@@ -351,87 +351,44 @@ function ConsentCard({
         <div className="setup-classic-intro">
             <h2 className="setup-classic-title">Connect to Walrus Memory</h2>
             <p className="setup-classic-description">
-                <strong style={{ color: '#faf8f5' }}>{session.client_name}</strong>{' '}
-                <span style={{ color: '#8f9294' }}>(name supplied by the connecting app — not verified by Walrus Memory)</span>{' '}
+                <strong className="mcp-client-name">{session.client_name}</strong>{' '}
+                <span className="mcp-unverified">(name supplied by the connecting app — not verified by Walrus Memory)</span>{' '}
                 wants access to your Walrus Memory account.
             </p>
 
             <div className="card setup-classic-feature-card">
-                <p style={cardLabelStyle}>This grants persistent access, until you revoke it</p>
-                <ul style={permListStyle}>
+                <p className="mcp-kicker">This grants persistent access, until you revoke it</p>
+                <ul className="mcp-perms">
                     {session.scopes.includes('memwal:read') && <li>✓ Read your memories</li>}
                     {session.scopes.includes('memwal:write') && <li>✓ Save new memories</li>}
                     <li>✓ Walrus Memory will hold an encrypted key on your behalf to authorize these actions — it never leaves our servers, and you can revoke it from the dashboard at any time</li>
                 </ul>
 
-                <div style={dividerStyle} />
+                <div className="mcp-rule" />
 
-                <p style={cardLabelStyle}>Verified redirect destination</p>
-                <div style={detailRowStyle}>
-                    <span style={detailValueStyle}>{session.redirect_host}</span>
+                <p className="mcp-kicker">Verified redirect destination</p>
+                <div className="mcp-detail">
+                    <span className="mcp-detail-value">{session.redirect_host}</span>
                 </div>
 
-                <div style={dividerStyle} />
+                <div className="mcp-rule" />
 
-                <p style={cardLabelStyle}>Connected wallet</p>
-                <div style={detailRowStyle}>
-                    <span style={detailValueStyle}>
+                <p className="mcp-kicker">Connected wallet</p>
+                <div className="mcp-detail">
+                    <span className="mcp-detail-value">
                         {wallet ? `${wallet.slice(0, 12)}…${wallet.slice(-6)}` : '(not connected yet)'}
                     </span>
                 </div>
             </div>
 
-            <div className="setup-classic-actions" style={{ display: 'flex', gap: 12 }}>
-                <button onClick={onConnect} className="lp-btn-yellow">
+            <div className="setup-classic-actions">
+                <button onClick={onConnect} className="mcp-btn">
                     {wallet ? 'Approve' : 'Connect Sui wallet'}
                 </button>
-                <button onClick={onCancel} className="lp-btn-yellow" style={{ background: 'transparent', color: '#8f9294' }}>
+                <button onClick={onCancel} className="mcp-btn mcp-btn--ghost">
                     Deny
                 </button>
             </div>
         </div>
     )
-}
-
-const cardLabelStyle: React.CSSProperties = {
-    margin: '0 0 10px',
-    fontFamily: 'var(--font-mono)',
-    fontSize: '0.7rem',
-    fontWeight: 600,
-    textTransform: 'uppercase',
-    letterSpacing: '0.08em',
-    color: '#8f9294',
-}
-
-const permListStyle: React.CSSProperties = {
-    listStyle: 'none',
-    padding: 0,
-    margin: 0,
-    lineHeight: 1.7,
-    fontSize: '0.9rem',
-    color: '#faf8f5',
-}
-
-const dividerStyle: React.CSSProperties = {
-    height: 1,
-    background: '#2a2c2e',
-    margin: '18px 0',
-}
-
-const detailRowStyle: React.CSSProperties = {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 2,
-    marginBottom: 12,
-}
-
-const detailValueStyle: React.CSSProperties = {
-    fontFamily: 'var(--font-mono)',
-    fontSize: '0.84rem',
-    color: '#faf8f5',
-    wordBreak: 'break-all',
-}
-
-const errorTextStyle: React.CSSProperties = {
-    color: '#ff6b6b',
 }

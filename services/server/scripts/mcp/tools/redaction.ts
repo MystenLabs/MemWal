@@ -631,7 +631,10 @@ function wordsAround(text: string, token: string): number {
  * Drop-in for `inputs.map(sanitizeFact)` — every entry comes back with the same
  * shape and the same per-entry refusals — plus the cross-entry pass above.
  */
-export function sanitizeFactBatch(inputs: string[]): SanitizedText[] {
+export function sanitizeFactBatch(
+    inputs: string[],
+    { bareScope = "batch" }: { bareScope?: "batch" | "neighbours" } = {},
+): SanitizedText[] {
     const perEntry = inputs.map((text) => sanitizeFact(text ?? ""));
     // Nothing survived the per-entry pass, so there is nothing left to screen.
     if (perEntry.every((r) => r.refusal)) return perEntry;
@@ -667,9 +670,11 @@ export function sanitizeFactBatch(inputs: string[]): SanitizedText[] {
                 if (isInsidePlaceholder(whole, offset)) return match;
                 if (!looksLikeOpaqueToken(match)) return match;
                 // An entry that is essentially just this token is screened
-                // against every entry; one with a sentence around it, against
-                // the entries either side.
-                const bare = wordsAround(own, match) < 3;
+                // against every entry in batch mode; one with a sentence around
+                // it, against the entries either side. Passage mode always uses
+                // neighbours so one label in a long transcript cannot take every
+                // lone blob id or SHA with it.
+                const bare = bareScope === "batch" && wordsAround(own, match) < 3;
                 const context = bare ? wholeBatch : neighbourhood;
                 const start = bare
                     ? views.slice(0, i).reduce(
@@ -710,11 +715,11 @@ export function sanitizeFactBatch(inputs: string[]): SanitizedText[] {
  * `isError`, so the client saw a successful call that had saved nothing.
  *
  * The fix is the one `memwal_remember_bulk` already uses on entries: scope the
- * refusal to the span that earned it. A passage is split into segments, each is
- * screened on its own, the offending ones are dropped and named, and everything
- * else is extracted from.
+ * refusal to the span that earned it. A passage is split into segments, the
+ * segment texts are screened together, the offending ones are dropped and
+ * named, and everything else is extracted from.
  *
- * Two deliberate wrinkles:
+ * Three deliberate wrinkles:
  *
  *   - A no-save directive drops its NEIGHBOURS too, within its own paragraph.
  *     "My bank PIN is 4821" on one line and "don't save this" on the next is
@@ -727,6 +732,12 @@ export function sanitizeFactBatch(inputs: string[]): SanitizedText[] {
  *     tagged fence (```json, ```sh) is code, a short one is a snippet, and a
  *     fence INSIDE the passage is still dropped as a paste — none of those
  *     change.
+ *   - A credential split across lines is the same shape as one split across
+ *     bulk entries (WALM-687). Non-blank segment texts go through
+ *     `sanitizeFactBatch` with `bareScope: "neighbours"`, so blank lines do not
+ *     break neighbour adjacency and a bare token is not screened against the
+ *     whole passage. A dropped segment still contributes its kinds; `dropped`
+ *     stays line and reason, never the secret text.
  * ------------------------------------------------------------------------ */
 
 /**
@@ -816,10 +827,21 @@ function splitPassage(text: string): PassageSegment[] {
  */
 export function sanitizePassage(input: string): SanitizedPassage {
     const segments = splitPassage(unwrapTranscriptFence(input ?? ""));
-    const results = segments.map((s) =>
-        s.blank ? null : sanitizeFact(s.text),
+    // Blank lines are left out, so a label and a value with a blank line
+    // between them are still neighbours. A bare token is screened against its
+    // neighbours only: one label in a 200k-character passage must not take
+    // every lone blob id or SHA with it.
+    const screened = sanitizeFactBatch(
+        segments.filter((s) => !s.blank).map((s) => s.text),
+        { bareScope: "neighbours" },
     );
-    const dropped: (RefusalReason | null)[] = results.map((r) => r?.refusal ?? null);
+    let next = 0;
+    const results = segments.map((s) =>
+        s.blank ? { text: "", changed: false, kinds: [], count: 0 } : screened[next++],
+    );
+    const dropped: (RefusalReason | null)[] = results.map((r, i) =>
+        segments[i].blank ? null : (r.refusal ?? null),
+    );
 
     // A directive takes its immediate neighbours with it, unless a blank line
     // stands between them — see the note above. Computed against the ORIGINAL
@@ -846,15 +868,18 @@ export function sanitizePassage(input: string): SanitizedPassage {
             continue;
         }
         nonBlank += 1;
+        const result = results[i];
+        // Fold kinds even when the segment is dropped. A bare key is refused
+        // as `credential-only` with empty text, and skipping it here would
+        // report no kind at all (WALM-687). `dropped` stays line + reason.
+        count += result.count;
+        for (const kind of result.kinds) {
+            if (!kinds.includes(kind)) kinds.push(kind);
+        }
         const reason = dropped[i];
         if (reason) {
             droppedSpans.push({ line: segment.line, reason });
             continue;
-        }
-        const result = results[i]!;
-        count += result.count;
-        for (const kind of result.kinds) {
-            if (!kinds.includes(kind)) kinds.push(kind);
         }
         kept.push(result.text);
     }
