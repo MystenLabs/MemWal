@@ -26,6 +26,7 @@
 
 mod accounts;
 mod admin;
+pub mod admin_activity;
 pub mod admin_dashboard;
 mod analyze;
 mod memory_read;

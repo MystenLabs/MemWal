@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { Card } from './Card'
+import { CopyableText } from './CopyableText'
 import { fetchAdminWallets, formatTokenAmount, type AdminWalletsResponse } from '../utils/admin-api'
 
 interface AdminWalletBalancesProps {
@@ -37,7 +38,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
 
   if (isLoading) {
     return (
-      <Card title="Wallet Balances" className="dashboard-keys-card admin-wallets-card">
+      <Card title="Wallet Balances" className="dashboard-keys-card sept-section admin-wallets-card">
         <div className="admin-loading">Loading wallet data...</div>
       </Card>
     )
@@ -45,7 +46,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
 
   if (error) {
     return (
-      <Card title="Wallet Balances" className="dashboard-keys-card admin-wallets-card">
+      <Card title="Wallet Balances" className="dashboard-keys-card sept-section admin-wallets-card">
         <div className="admin-error">
           {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load wallets'}
         </div>
@@ -59,7 +60,7 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
     <div className="admin-wallets-section">
       <Card
         title="Uploader Pool Wallets"
-        className="dashboard-keys-card admin-wallets-card"
+        className="dashboard-keys-card sept-section admin-wallets-card"
         action={
           <div className="card-header-actions">
             <button
@@ -68,8 +69,8 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
               title="Refresh wallet data"
               disabled={isFetching}
             >
-              <RefreshCw size={12} />
-              Refresh
+              <span>Refresh</span>
+              <RefreshCw size={12} aria-hidden="true" />
             </button>
           </div>
         }
@@ -93,8 +94,12 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
                 </tr>
               ) : response.uploaderPoolWallets.map((wallet) => (
                 <tr key={wallet.address} className="admin-table-row">
-                  <td title={wallet.address} className="admin-table-monospace">
-                    {abbreviateAddress(wallet.address)}
+                  <td className="admin-table-monospace">
+                    <CopyableText
+                      value={wallet.address}
+                      display={abbreviateAddress(wallet.address)}
+                      label="Copy wallet address"
+                    />
                   </td>
                   <td
                     style={{ textAlign: 'right' }}
@@ -131,13 +136,21 @@ export function AdminWalletBalances({ adminKey, onInvalidKey }: AdminWalletBalan
         </div>
       </Card>
 
-      <Card title="Sponsor Wallet" className="dashboard-keys-card admin-sponsor-card">
+      <Card title="Sponsor Wallet" className="dashboard-keys-card sept-section admin-sponsor-card">
         <div className="admin-sponsor-content">
           <div className="admin-sponsor-item">
             <span className="admin-sponsor-label">Address</span>
-            <code className="admin-sponsor-value" title={response.sponsorWallet.address}>
-              {abbreviateAddress(response.sponsorWallet.address)}
-            </code>
+            <span className="admin-sponsor-value">
+              {response.sponsorWallet.address.startsWith('0x') ? (
+                <CopyableText
+                  value={response.sponsorWallet.address}
+                  display={abbreviateAddress(response.sponsorWallet.address)}
+                  label="Copy sponsor wallet address"
+                />
+              ) : (
+                response.sponsorWallet.address
+              )}
+            </span>
           </div>
 
           <div className="admin-sponsor-item">
