@@ -225,7 +225,7 @@ fn sponsor_authorization_message(
 fn validate_sponsor_transaction_kind(
     transaction_kind_bytes: &[u8],
     package_id: &str,
-) -> Result<(), AppError> {
+) -> Result<&'static str, AppError> {
     let kind: TransactionKind = bcs::from_bytes(transaction_kind_bytes)
         .map_err(|_| AppError::BadRequest("Invalid transaction kind".into()))?;
     let TransactionKind::ProgrammableTransaction(programmable) = kind else {
@@ -272,7 +272,14 @@ fn validate_sponsor_transaction_kind(
             "Transaction kind is not permitted for sponsorship".into(),
         )),
         // One allowlisted call: create, add, or remove.
-        [_] => Ok(()),
+        [function] => match *function {
+            "create_account" => Ok("create_account"),
+            "add_delegate_key" => Ok("add_delegate_key"),
+            "remove_delegate_key" => Ok("remove_delegate_key"),
+            _ => Err(AppError::BadRequest(
+                "Transaction kind is not permitted for sponsorship".into(),
+            )),
+        },
         // Batching exists for bulk revoke only. Every command has to be a
         // removal, and the batch stays inside the sponsored-gas bound.
         calls
@@ -285,7 +292,7 @@ fn validate_sponsor_transaction_kind(
                     "Too many delegate key removals in one transaction (max {MAX_SPONSORED_DELEGATE_REMOVALS})"
                 )));
             }
-            Ok(())
+            Ok("remove_delegate_key")
         }
         _ => Err(AppError::BadRequest(
             "Transaction kind is not permitted for sponsorship".into(),
@@ -406,10 +413,41 @@ async fn consume_pending_sponsor(
     Ok(())
 }
 
+async fn record_sponsor_kind(state: &AppState, digest: &str, kind: &str) -> Result<(), AppError> {
+    let mut redis = state.redis.clone();
+    let _: String = redis::cmd("SET")
+        .arg(format!("sponsor:kind:{digest}"))
+        .arg(kind)
+        .arg("EX")
+        .arg(PENDING_SPONSOR_TTL_SECONDS)
+        .query_async(&mut redis)
+        .await
+        .map_err(|error| {
+            AppError::UpstreamUnavailable(format!("Sponsor kind Redis unavailable: {error}"))
+        })?;
+    Ok(())
+}
+
+async fn take_sponsor_kind(state: &AppState, digest: &str) -> Option<String> {
+    let mut redis = state.redis.clone();
+    let key = format!("sponsor:kind:{digest}");
+    let value: Option<String> = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut redis)
+        .await
+        .ok()
+        .flatten();
+    if value.is_some() {
+        let _: Result<i64, _> = redis::cmd("DEL").arg(&key).query_async(&mut redis).await;
+    }
+    value
+}
+
 /// Forward a validated sponsor request to the sidecar's POST /sponsor.
 async fn forward_sponsor(
     state: &AppState,
     req: &SponsorRequest,
+    kind: &str,
 ) -> Result<Response<Body>, AppError> {
     // Re-serialise only validated fields before forwarding.
     let forwarded = serde_json::json!({
@@ -456,6 +494,13 @@ async fn forward_sponsor(
             .filter(|digest| validate_digest(digest))
             .ok_or_else(|| AppError::Internal("Invalid sponsor upstream digest".into()))?;
         record_pending_sponsor(state, digest, &req.sender).await?;
+        if let Err(err) = record_sponsor_kind(state, digest, kind).await {
+            tracing::warn!(
+                digest,
+                error = %err,
+                "failed to remember sponsored transaction kind"
+            );
+        }
         Ok(Response::builder()
             .status(axum::http::StatusCode::from_u16(upstream_status.as_u16()).unwrap())
             .header("Content-Type", "application/json")
@@ -480,10 +525,11 @@ pub async fn sponsor_proxy(
     body: axum::body::Bytes,
 ) -> Result<Response<Body>, AppError> {
     let (req, transaction_kind_bytes) = parse_sponsor_request(&body)?;
-    validate_sponsor_transaction_kind(&transaction_kind_bytes, &state.config.package_id)?;
+    let kind =
+        validate_sponsor_transaction_kind(&transaction_kind_bytes, &state.config.package_id)?;
     authenticate_sponsor_request(&state, &req, &transaction_kind_bytes).await?;
 
-    forward_sponsor(&state, &req).await
+    forward_sponsor(&state, &req, kind).await
 }
 
 /// POST /sponsor/execute — proxy to sidecar POST /sponsor/execute
@@ -535,6 +581,24 @@ pub async fn sponsor_execute_proxy(
     };
 
     if upstream_status.is_success() {
+        let kind = take_sponsor_kind(&state, &req.digest)
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
+        let pool = state.db.pool().clone();
+        let sender_owned = sender.to_string();
+        let digest = req.digest.clone();
+        tokio::spawn(async move {
+            if let Err(err) =
+                crate::routes::admin_activity::record_sponsored_tx(&pool, &sender_owned, &kind)
+                    .await
+            {
+                tracing::warn!(
+                    digest = %digest,
+                    error = %err,
+                    "failed to record sponsored transaction"
+                );
+            }
+        });
         Ok(Response::builder()
             .status(axum::http::StatusCode::from_u16(upstream_status.as_u16()).unwrap())
             .header("Content-Type", "application/json")
@@ -660,7 +724,10 @@ nonce: 00000000-0000-4000-8000-000000000000"
         let package = format!("0x{}", "a".repeat(64));
         for function in ["create_account", "add_delegate_key", "remove_delegate_key"] {
             let bytes = move_call_kind(&package, "account", function);
-            validate_sponsor_transaction_kind(&bytes, &package).unwrap();
+            assert_eq!(
+                validate_sponsor_transaction_kind(&bytes, &package).unwrap(),
+                function
+            );
         }
 
         let foreign_package = format!("0x{}", "b".repeat(64));

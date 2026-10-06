@@ -111,6 +111,7 @@ const undocumentedByDesign = new Set([
     "/api/admin/wallets",
     "/api/admin/upload-errors",
     "/api/admin/config",
+    "/api/admin/activity",
     // The OAuth consent flow the dashboard drives between /oauth/authorize
     // and the redirect back to the client. The browser calls these with an
     // opaque session id; no integrator writes against them, so the public

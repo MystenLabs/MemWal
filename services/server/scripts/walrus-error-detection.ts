@@ -84,6 +84,16 @@ export function isWalrusBlobObjectMissingFromEffects(message: string): boolean {
 }
 
 /**
+ * A gRPC `getObject` miss for one id. `@mysten/walrus` stores that Error in
+ * its DataLoader, so the next `getBlobObject` for the same id fails without
+ * asking the RPC again. Distinct from the effects message above.
+ */
+export function isUnseenSuiObject(message: string): boolean {
+    if (!message) return false;
+    return /\bobject 0x[0-9a-f]{64} not found\b/i.test(message);
+}
+
+/**
  * Detect a Sui owned-object lock / equivocation error: a specific
  * object+version is locked to a competing transaction, so the transaction is
  * rejected by >1/3 of validator stake and is non-retriable within the epoch.

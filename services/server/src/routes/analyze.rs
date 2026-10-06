@@ -58,6 +58,22 @@ fn importance_changed(existing: f32, incoming: f32) -> bool {
     (existing - incoming).abs() > 1e-6
 }
 
+/// Reset an unpaid failed analyze job before enqueueing a fresh ciphertext.
+///
+/// SEAL encryption is not deterministic, so the retry's bytes are a new Walrus
+/// blob. The previous `encoded` checkpoint still names the old blob id. Leaving
+/// it in place makes the sidecar reject the retry with `Resume blobId mismatch`
+/// and burn the attempt budget. A registered-or-later resume, or any recorded
+/// blob, is left untouched: those bytes may already have been submitted.
+fn unpaid_analyze_retry_reset_sql() -> &'static str {
+    "UPDATE remember_jobs SET status = 'pending', error_msg = NULL, \
+     upload_wallet_index = NULL, upload_wallet_address = NULL, \
+     upload_execution_identity = NULL, upload_resume_step = NULL, \
+     upload_register_transaction = NULL, updated_at = NOW() \
+     WHERE id = $1 AND status = 'failed' AND blob_id IS NULL AND blob_object_id IS NULL \
+     AND (upload_resume_step IS NULL OR upload_resume_step->>'step' = 'encoded')"
+}
+
 fn classify_analyze_job_reuse(
     status: &str,
     blob_id: Option<&str>,
@@ -831,19 +847,32 @@ pub async fn analyze(
                             return Err(e);
                         }
                     } else {
-                        if let Err(e) = sqlx::query(
-                            "UPDATE remember_jobs SET status = 'pending', error_msg = NULL, updated_at = NOW()
-                             WHERE id = $1 AND status = 'failed' AND blob_id IS NULL",
-                        )
-                        .bind(&existing_id)
-                        .execute(state.db.pool())
-                        .await
+                        let reset = match sqlx::query(unpaid_analyze_retry_reset_sql())
+                            .bind(&existing_id)
+                            .execute(state.db.pool())
+                            .await
                         {
-                            rate_limit::release_storage_quota(&state, &all_ids[idx + 1..]).await;
-                            return Err(AppError::Internal(format!(
-                                "Failed to reset analyze job: {}",
-                                e
-                            )));
+                            Ok(result) => result,
+                            Err(e) => {
+                                rate_limit::release_storage_quota(&state, &all_ids[idx + 1..])
+                                    .await;
+                                return Err(AppError::Internal(format!(
+                                    "Failed to reset analyze job: {}",
+                                    e
+                                )));
+                            }
+                        };
+                        // A resume past encode, or a row that is no longer an
+                        // unpaid failure, must not be overwritten with new
+                        // ciphertext.
+                        if reset.rows_affected() == 0 {
+                            accepted_facts.push(AnalyzeAcceptedFact {
+                                text: fact_text,
+                                id: existing_id.clone(),
+                                job_id: existing_id.clone(),
+                            });
+                            job_ids.push(existing_id);
+                            continue;
                         }
                         if let Err(e) = rate_limit::reserve_storage_quota(
                             &state,
@@ -946,7 +975,8 @@ pub async fn analyze(
 mod tests {
     use super::{
         analyze_fact_idempotency_key, classify_analyze_job_reuse, should_skip_pre_extract_embed,
-        AnalyzeJobReuse, ANALYZE_CONCURRENCY, MAX_ANALYZE_TEXT_BYTES, MAX_PRE_EXTRACT_EMBED_BYTES,
+        unpaid_analyze_retry_reset_sql, AnalyzeJobReuse, ANALYZE_CONCURRENCY,
+        MAX_ANALYZE_TEXT_BYTES, MAX_PRE_EXTRACT_EMBED_BYTES,
     };
     use crate::routes::remember::MAX_REMEMBER_TEXT_BYTES;
     use crate::services::extractor::MAX_ANALYZE_FACTS;
@@ -1062,6 +1092,18 @@ mod tests {
             classify_analyze_job_reuse("failed", None, None, 0.5),
             AnalyzeJobReuse::RetryUnpaidFailure
         );
+    }
+
+    #[test]
+    fn unpaid_retry_drops_the_encoded_checkpoint_only() {
+        let sql = unpaid_analyze_retry_reset_sql();
+        assert!(sql.contains("upload_resume_step = NULL"));
+        assert!(sql.contains("upload_register_transaction = NULL"));
+        assert!(sql.contains("upload_wallet_address = NULL"));
+        assert!(sql.contains("blob_id IS NULL"));
+        assert!(sql.contains("blob_object_id IS NULL"));
+        assert!(sql.contains("upload_resume_step->>'step' = 'encoded'"));
+        assert!(!sql.contains("preparation_encrypted_b64"));
     }
 
     #[test]

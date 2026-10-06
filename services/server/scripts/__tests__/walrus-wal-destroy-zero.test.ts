@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { isMoveAbortBalanceSplit, isMoveAbortWalDestroyZero } from "../sidecar/enoki.js";
+import {
+    isMoveAbortBalanceSplit,
+    isMoveAbortWalDestroyZero,
+    refreshWalrusClientOnStaleWalPrice,
+} from "../sidecar/enoki.js";
 
 // Production format reference (issue #351): the Walrus register PTB pre-funds an
 // exact WAL payment from the client's cached storage price, then asserts the
@@ -59,4 +64,40 @@ test("unrelated errors do not match", () => {
     assert.equal(isMoveAbortWalDestroyZero("connection refused"), false);
     assert.equal(isMoveAbortWalDestroyZero("HTTP 500 from upload relay"), false);
     assert.equal(isMoveAbortWalDestroyZero(""), false);
+});
+
+// Job 2b1cf6b0, Enoki budget dry-run, 2026-10-05. The shape is the gRPC
+// abort text, not the older MoveLocation rendering above.
+const CAREERACE_DESTROY_ZERO =
+    "Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Dry run failed, could not automatically determine a budget: MoveAbort in 4th command, abort code: 0, in '0x0000000000000000000000000000000000000000000000000000000000000002::balance::destroy_zero' (instruction 8)\",\"data\":{\"executionError\":{\"$kind\":\"MoveAbort\",\"message\":\"MoveAbort in 4th command, abort code: 0, in '0x0000000000000000000000000000000000000000000000000000000000000002::balance::destroy_zero' (instruction 8)\",\"command\":3,\"MoveAbort\":{\"abortCode\":\"0\",\"location\":{\"package\":\"0x0000000000000000000000000000000000000000000000000000000000000002\",\"module\":\"balance\",\"function\":9,\"instruction\":8,\"functionName\":\"destroy_zero\"}}}}}]}";
+
+test("matches the careerace budget dry-run abort", () => {
+    assert.equal(isMoveAbortWalDestroyZero(CAREERACE_DESTROY_ZERO), true);
+    assert.equal(isMoveAbortBalanceSplit(CAREERACE_DESTROY_ZERO), false);
+});
+
+test("a stale-price abort refreshes the Walrus client and other errors do not", () => {
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message?: unknown) => {
+        warnings.push(String(message));
+    };
+    try {
+        refreshWalrusClientOnStaleWalPrice(CAREERACE_DESTROY_ZERO);
+        refreshWalrusClientOnStaleWalPrice("Object 0x" + "ab".repeat(32) + " not found");
+        refreshWalrusClientOnStaleWalPrice("Sponsored transaction has expired");
+    } finally {
+        console.warn = warn;
+    }
+    assert.deepEqual(
+        warnings.filter((line) => line.includes("[walrus/client] refreshed")),
+        ["[walrus/client] refreshed reason=walrus_wal_payment_destroy_zero"],
+    );
+});
+
+test("both upload routes drop the cached price on this abort", () => {
+    const journal = readFileSync(new URL("../sidecar/routes/walrus-upload-journal.ts", import.meta.url), "utf8");
+    const legacy = readFileSync(new URL("../sidecar/routes/walrus-upload.ts", import.meta.url), "utf8");
+    assert.match(journal, /refreshWalrusClientOnStaleWalPrice\(message\)/);
+    assert.match(legacy, /refreshWalrusClientOnStaleWalPrice\(message\)/);
 });
