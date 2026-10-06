@@ -14826,6 +14826,22 @@ body:has(.signin-proposed) {
   overflow: hidden;
   background: #000000;
   color: #faf8f5;
+  /* The artboard is 966 tall, but the laptop tile ends near 857. Fit to
+     880 so the empty tail does not shrink the page. Centered when shorter
+     than the window. From 1.9:1 upward the size stays what it is at 1.9
+     for this width, and the page scrolls. Spare width pulls the laptop
+     until 100px stays clipped. */
+  --signin-frame-height: 880px;
+  --signin-scale: min(100vw / 1440px, 100vh / var(--signin-frame-height));
+  --signin-stage-left: calc(100vw - 1440px * var(--signin-scale));
+  --signin-pull: max(0px, min(var(--signin-stage-left), 191px * var(--signin-scale) - 100px));
+  --signin-frame-top: max(0px, (100vh - var(--signin-frame-height) * var(--signin-scale)) / 2);
+}
+
+@media (min-width: 720px) and (aspect-ratio >= 1.9) {
+  .signin-proposed {
+    --signin-scale: calc(100vw / (1.9 * var(--signin-frame-height)));
+  }
 }
 
 .signin-fit {
@@ -14835,8 +14851,11 @@ body:has(.signin-proposed) {
 }
 
 .signin-fit--desktop {
-  width: min(100vw, calc(100vh * 1440 / 966));
-  height: min(100vh, calc(100vw * 966 / 1440));
+  width: 100vw;
+  height: calc(var(--signin-frame-height) * var(--signin-scale));
+  margin-top: var(--signin-frame-top);
+  margin-left: 0;
+  margin-right: 0;
 }
 
 .signin-fit--mobile {
@@ -14856,9 +14875,9 @@ body:has(.signin-proposed) {
 }
 
 .signin-stage--desktop {
-  width: 1440px;
+  width: calc(100vw / var(--signin-scale));
   height: 966px;
-  transform: scale(calc(100cqw / 1440px));
+  transform: scale(var(--signin-scale));
 }
 
 .signin-stage--mobile {
@@ -14927,7 +14946,32 @@ body:has(.signin-proposed) {
   display: none;
 }
 
+.signin-scroll {
+  height: 100%;
+  overflow: hidden;
+}
+
+.signin-sheet {
+  position: relative;
+  display: flow-root;
+  width: 100%;
+  min-height: 100%;
+  overflow: clip;
+}
+
 @media (min-width: 720px) {
+  .signin-proposed {
+    align-items: stretch;
+    justify-content: flex-start;
+  }
+
+  .signin-scroll {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
   .signin-stage--desktop {
     background: transparent;
   }
@@ -14937,108 +14981,67 @@ body:has(.signin-proposed) {
     display: none;
   }
 
-  .signin-glow--pin {
-    display: block;
-    position: fixed;
-    z-index: 0;
-    background-image: url('/signin/glow-desktop.png');
-  }
-
   .signin-fit--desktop {
     z-index: 1;
   }
 
+  .signin-glow--pin {
+    display: block;
+    position: absolute;
+    z-index: 0;
+    top: calc(var(--signin-frame-top) - 252px * var(--signin-scale));
+    left: calc(var(--signin-stage-left) - var(--signin-pull) - 187px * var(--signin-scale));
+    width: calc(1814px * var(--signin-scale));
+    height: calc(776px * var(--signin-scale));
+    background-image: url('/signin/glow-desktop.png');
+  }
+
   .signin-logo--pin {
     display: block;
-    position: fixed;
-    top: 28px;
+    position: absolute;
+    top: calc(var(--signin-frame-top) + 28px * var(--signin-scale));
+    left: calc(50px * var(--signin-scale));
     z-index: 30;
-    width: calc(117px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
-    height: calc(53.929px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
+    width: calc(117px * var(--signin-scale));
+    height: calc(53.929px * var(--signin-scale));
+  }
+
+  /* The stage spans the viewport. Slide the laptop group toward the right,
+     then back left by the spare width so more of the clipped screen shows. */
+  .signin-stage--desktop .signin-hero {
+    position: absolute;
+    inset: 0;
+    translate: calc((var(--signin-stage-left) - var(--signin-pull)) / var(--signin-scale)) 0;
   }
 
   /* Same ellipse as Figma, but outside the stage so the blur is not cut off
      at the stage edge and the purple continues into the right corner. */
   .signin-bloom--pin {
     display: block;
-    position: fixed;
+    position: absolute;
     z-index: 0;
-    width: calc(368px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
-    height: calc(480px * min(100cqw, 100cqh * 1440 / 966) / 1440px);
-    top: calc(
-      (100cqh - min(100cqh, 100cqw * 966 / 1440)) / 2
-      + 224px * min(100cqw, 100cqh * 1440 / 966) / 1440px
-    );
+    top: calc(var(--signin-frame-top) + 224px * var(--signin-scale));
+    left: calc(var(--signin-stage-left) - var(--signin-pull) + 882px * var(--signin-scale));
+    width: calc(368px * var(--signin-scale));
+    height: calc(480px * var(--signin-scale));
     border-radius: 50%;
     background: linear-gradient(to bottom, #2f43cb, #9550c2);
-    filter: blur(calc(387px * min(100cqw, 100cqh * 1440 / 966) / 1440px));
+    filter: blur(calc(387px * var(--signin-scale)));
     pointer-events: none;
   }
 }
 
-/* Pin right only while the window is at least as tall as a 14-inch fullscreen
-   (1512×982). The spare width there is about 48px, so the laptop still meets
-   the edge. */
-@media (min-width: 720px) and (aspect-ratio <= 1512 / 982) {
-  .signin-fit--desktop {
-    margin-left: auto;
+@media (min-width: 720px) and (aspect-ratio >= 1.9) {
+  .signin-scroll {
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: none;
   }
 
-  .signin-glow--pin {
-    top: calc(-252px * 100cqw / 1440px);
-    left: calc(-187px * 100cqw / 1440px);
-    width: calc(1814px * 100cqw / 1440px);
-    height: calc(776px * 100cqw / 1440px);
-  }
-
-  .signin-logo--pin {
-    left: calc(
-      (100cqw - min(100cqw, 100cqh * 1440 / 966))
-      + 50px * min(100cqw, 100cqh * 1440 / 966) / 1440px
-    );
-  }
-
-  .signin-bloom--pin {
-    left: calc(
-      (100cqw - min(100cqw, 100cqh * 1440 / 966))
-      + 882px * min(100cqw, 100cqh * 1440 / 966) / 1440px
-    );
-  }
-}
-
-/* Shorter than a 14-inch window: grow the whole stage to the window width
-   so the laptop meets the right edge. The bottom of the artboard clips. */
-@media (min-width: 720px) and (aspect-ratio > 1512 / 982) {
-  .signin-proposed {
-    align-items: flex-start;
-  }
-
-  .signin-fit--desktop {
-    width: 100vw;
-    height: calc(100vw * 966 / 1440);
-    margin-left: 0;
-  }
-
-  .signin-glow--pin {
-    top: calc(-252px * 100cqw / 1440px);
-    left: calc(-187px * 100cqw / 1440px);
-    width: calc(1814px * 100cqw / 1440px);
-    height: calc(776px * 100cqw / 1440px);
-  }
-
-  .signin-logo--pin {
-    top: calc(28px * 100cqw / 1440px);
-    left: calc(50px * 100cqw / 1440px);
-    width: calc(117px * 100cqw / 1440px);
-    height: calc(53.929px * 100cqw / 1440px);
-  }
-
-  .signin-bloom--pin {
-    top: calc(224px * 100cqw / 1440px);
-    left: calc(882px * 100cqw / 1440px);
-    width: calc(368px * 100cqw / 1440px);
-    height: calc(480px * 100cqw / 1440px);
-    filter: blur(calc(387px * 100cqw / 1440px));
+  .signin-scroll::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
   }
 }
 
