@@ -139,7 +139,7 @@ pub fn build_delete_tx(
         nonce,
     });
 
-    // Builder 0.3.1 still validates legacy coin-gas presence even when the
+    // Builder 0.4.0 still validates legacy coin-gas presence even when the
     // final Transaction uses ValidDuring/address-balance gas. Supply a
     // validation-only reference, then remove it from the protocol object.
     builder.add_gas_objects([ObjectInput::owned(Address::ZERO, 1, Digest::ZERO)]);
