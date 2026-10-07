@@ -504,17 +504,16 @@ fn render_related_memories_block(memories: &[&str]) -> String {
     out
 }
 
-fn english_weekday(weekday: chrono::Weekday) -> &'static str {
-    match weekday {
-        chrono::Weekday::Mon => "Monday",
-        chrono::Weekday::Tue => "Tuesday",
-        chrono::Weekday::Wed => "Wednesday",
-        chrono::Weekday::Thu => "Thursday",
-        chrono::Weekday::Fri => "Friday",
-        chrono::Weekday::Sat => "Saturday",
-        chrono::Weekday::Sun => "Sunday",
-    }
-}
+/// Sunday-first so `Weekday::num_days_from_sunday` indexes it.
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
 
 /// Render the temporal-anchor user message: the `<context>` tag plus a
 /// weekday calendar the model copies instead of calculating.
@@ -535,22 +534,15 @@ fn render_occurred_at_block(occurred_at: chrono::DateTime<chrono::Utc>) -> Strin
     let mut out = format!(
         "<context occurred_at=\"{}\" weekday=\"{}\"/>\n",
         occurred_at.to_rfc3339(),
-        english_weekday(today.weekday()),
+        WEEKDAYS[today.weekday().num_days_from_sunday() as usize],
     );
     out.push_str(
         "Weekday calendar — copy these dates exactly; do not calculate your own. \
 A bare weekday (\"by Friday\", \"on Sunday\") means the \"this\" date. \
 \"next DAY\" is seven days after \"this\". \"last DAY\" is seven days before \"this\".\n",
     );
-    for weekday in [
-        chrono::Weekday::Sun,
-        chrono::Weekday::Mon,
-        chrono::Weekday::Tue,
-        chrono::Weekday::Wed,
-        chrono::Weekday::Thu,
-        chrono::Weekday::Fri,
-        chrono::Weekday::Sat,
-    ] {
+    let mut weekday = chrono::Weekday::Sun;
+    for name in WEEKDAYS {
         let ahead = i64::from(weekday.days_since(today.weekday()));
         let this_day = today + Duration::days(ahead);
         let last_day = this_day - Duration::days(7);
@@ -558,12 +550,12 @@ A bare weekday (\"by Friday\", \"on Sunday\") means the \"this\" date. \
         let today_mark = if ahead == 0 { " (today)" } else { "" };
         out.push_str(&format!(
             "{name}: last {last}; this {this}{today_mark}; next {next}\n",
-            name = english_weekday(weekday),
             last = last_day.format("%Y-%m-%d"),
             this = this_day.format("%Y-%m-%d"),
             today_mark = today_mark,
             next = next_day.format("%Y-%m-%d"),
         ));
+        weekday = weekday.succ();
     }
     out
 }

@@ -265,22 +265,17 @@ export function normalizePrivateKey(key: string): string {
  *   comparison strips them. Otherwise `http://[::1]` warns as if it were remote.
  * - Does NOT throw — explicit user-supplied `http://` is honored.
  */
-function isLocalHost(hostname: string): boolean {
-    const host = hostname.toLowerCase();
-    const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
-    return (
-        bare === "localhost" ||
-        bare === "127.0.0.1" ||
-        bare === "::1" ||
-        bare.endsWith(".localhost")
-    );
-}
-
 export function normalizeServerUrl(url: string): string {
     const trimmed = url.replace(/\/$/, "");
     try {
         const parsed = new URL(trimmed);
-        const isLocal = isLocalHost(parsed.hostname);
+        let host = parsed.hostname.toLowerCase();
+        if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+        const isLocal =
+            host === "localhost" ||
+            host === "127.0.0.1" ||
+            host === "::1" ||
+            host.endsWith(".localhost");
         if (parsed.protocol === "http:" && !isLocal) {
             // eslint-disable-next-line no-console
             console.warn(
