@@ -64,6 +64,7 @@ import {
     bytesToHex,
     normalizePrivateKey,
     normalizeServerUrl,
+    assertNonBlankText,
     sanitizeServerError,
     redactInternalUrls,
     clockDriftErrorFromResponse,
@@ -441,6 +442,7 @@ export class MemWal {
         namespace?: string,
         options: { idempotencyKey?: string } = {},
     ): Promise<RememberAcceptedResult> {
+        assertNonBlankText(text);
         const resolvedNamespace = namespace ?? this.namespace;
         const requestIdentity = `${resolvedNamespace}\0${text}`;
         const generatedKey = options.idempotencyKey === undefined;
@@ -637,6 +639,9 @@ export class MemWal {
         if (!Array.isArray(items) || items.length === 0) {
             throw new Error("rememberBulkAsync: items must be a non-empty array");
         }
+        items.forEach((item, i) => {
+            assertNonBlankText(item?.text, `items[${i}].text cannot be empty`);
+        });
 
         const normalised = items.map((item) => ({
             text: item.text,
@@ -1069,6 +1074,7 @@ export class MemWal {
      * @returns EmbedResult with vector
      */
     async embed(text: string): Promise<EmbedResult> {
+        assertNonBlankText(text, "text cannot be empty");
         return this.signedRequest<EmbedResult>(
             "POST",
             "/api/embed",
@@ -1096,6 +1102,7 @@ export class MemWal {
         text: string,
         namespaceOrOptions?: string | AnalyzeOptions,
     ): Promise<AnalyzeResult> {
+        assertNonBlankText(text);
         const options = normalizeAnalyzeOptions(namespaceOrOptions);
         const body: Record<string, unknown> = {
             text,

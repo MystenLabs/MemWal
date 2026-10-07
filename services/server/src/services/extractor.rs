@@ -200,7 +200,13 @@ const FACT_EXTRACTION_PROMPT: &str = include_str!("prompts/extract.txt");
 /// stays cacheable (same pattern as the `<related_memories>` block).
 /// Callers without an `occurred_at` pass `None`; the impl does NOT
 /// fall back to `now()`.
-pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v6";
+///
+/// v7: the `<context>` user message now carries a server-computed
+/// weekday calendar (`last` / `this` / `next` for each weekday). The
+/// prompt tells the model to copy those dates. Leaving the arithmetic
+/// to the model stamped the wrong day, and the weekday name disagreed
+/// with the ISO date (GH #1131).
+pub const FACT_EXTRACTION_PROMPT_VERSION: &str = "extract.v7";
 
 /// Map a bucket name from the extractor LLM to a numeric importance score.
 /// Unknown / missing buckets default to `IMPORTANCE_STANDARD` so a noisy
@@ -498,23 +504,68 @@ fn render_related_memories_block(memories: &[&str]) -> String {
     out
 }
 
-/// Render a `<context occurred_at="..."/>` block for the temporal-anchor
-/// user message. Format is a single self-closing XML-style tag (no body
-/// content) carrying the RFC 3339 UTC timestamp.
+fn english_weekday(weekday: chrono::Weekday) -> &'static str {
+    match weekday {
+        chrono::Weekday::Mon => "Monday",
+        chrono::Weekday::Tue => "Tuesday",
+        chrono::Weekday::Wed => "Wednesday",
+        chrono::Weekday::Thu => "Thursday",
+        chrono::Weekday::Fri => "Friday",
+        chrono::Weekday::Sat => "Saturday",
+        chrono::Weekday::Sun => "Sunday",
+    }
+}
+
+/// Render the temporal-anchor user message: the `<context>` tag plus a
+/// weekday calendar the model copies instead of calculating.
 ///
-/// The prompt (see `prompts/extract.txt`, v6 onwards) instructs the LLM
-/// to use this timestamp as the absolute anchor for resolving in-turn
-/// relative-time references ("last Friday", "yesterday") into absolute
-/// dates that end up *inside the extracted fact text* — so the date
-/// flows into both the SEAL-encrypted blob and the embedding vector.
+/// The prompt (see `prompts/extract.txt`, v7) tells the LLM to copy
+/// `last` / `this` / `next` dates from this block. "this DAY" is that
+/// weekday on or after `occurred_at` (today, when today is that
+/// weekday). Asking the model to do the arithmetic stamped the wrong
+/// day, and the weekday name disagreed with the ISO date (GH #1131).
 ///
-/// No prompt-injection escaping is needed here: the timestamp value is
-/// a server-controlled RFC 3339 serialisation, not user-supplied text.
-/// `chrono::DateTime<Utc>::to_rfc3339` produces deterministic output
-/// from the standard library — `2023-05-25T17:50:00+00:00` — with no
-/// embeddable control characters.
+/// No prompt-injection escaping is needed: every value is a
+/// server-controlled date, not user-supplied text. Weekday names are
+/// English literals so a non-English process locale cannot rename them.
 fn render_occurred_at_block(occurred_at: chrono::DateTime<chrono::Utc>) -> String {
-    format!("<context occurred_at=\"{}\"/>", occurred_at.to_rfc3339())
+    use chrono::{Datelike, Duration};
+
+    let today = occurred_at.date_naive();
+    let mut out = format!(
+        "<context occurred_at=\"{}\" weekday=\"{}\"/>\n",
+        occurred_at.to_rfc3339(),
+        english_weekday(today.weekday()),
+    );
+    out.push_str(
+        "Weekday calendar — copy these dates exactly; do not calculate your own. \
+A bare weekday (\"by Friday\", \"on Sunday\") means the \"this\" date. \
+\"next DAY\" is seven days after \"this\". \"last DAY\" is seven days before \"this\".\n",
+    );
+    for weekday in [
+        chrono::Weekday::Sun,
+        chrono::Weekday::Mon,
+        chrono::Weekday::Tue,
+        chrono::Weekday::Wed,
+        chrono::Weekday::Thu,
+        chrono::Weekday::Fri,
+        chrono::Weekday::Sat,
+    ] {
+        let ahead = i64::from(weekday.days_since(today.weekday()));
+        let this_day = today + Duration::days(ahead);
+        let last_day = this_day - Duration::days(7);
+        let next_day = this_day + Duration::days(7);
+        let today_mark = if ahead == 0 { " (today)" } else { "" };
+        out.push_str(&format!(
+            "{name}: last {last}; this {this}{today_mark}; next {next}\n",
+            name = english_weekday(weekday),
+            last = last_day.format("%Y-%m-%d"),
+            this = this_day.format("%Y-%m-%d"),
+            today_mark = today_mark,
+            next = next_day.format("%Y-%m-%d"),
+        ));
+    }
+    out
 }
 
 /// Parsed shape of OpenRouter's "200 OK wrapping an upstream
@@ -1103,19 +1154,23 @@ mod tests {
         );
         // The version const must track the prompt: if the prompt changes,
         // the version should not silently stay behind.
-        assert_eq!(FACT_EXTRACTION_PROMPT_VERSION, "extract.v6");
+        assert_eq!(FACT_EXTRACTION_PROMPT_VERSION, "extract.v7");
     }
 
     #[test]
     fn extract_v6_prompt_contains_temporal_anchor_section() {
-        // the extract.v6 prompt must instruct the LLM about the
-        // `<context occurred_at="..."/>` tag. Pin three load-bearing
+        // the extract.v7 prompt must instruct the LLM about the
+        // `<context occurred_at="..." weekday="..."/>` tag. Pin the load-bearing
         // pieces of the temporal-anchor section so a future prompt edit
         // can't silently remove them.
         let prompt = FACT_EXTRACTION_PROMPT;
         assert!(
-            prompt.contains("`<context occurred_at=\"...\"/>`"),
-            "v6 must document the context tag the LLM should expect"
+            prompt.contains("`<context occurred_at=\"...\" weekday=\"...\"/>`"),
+            "v7 must document the context tag the LLM should expect"
+        );
+        assert!(
+            prompt.contains("Copy dates from the calendar"),
+            "v7 must tell the model to copy the weekday calendar instead of calculating"
         );
         assert!(
             prompt.contains("temporal anchor"),
@@ -1149,10 +1204,17 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         let block = super::render_occurred_at_block(ts);
-        assert_eq!(
-            block, "<context occurred_at=\"2023-05-25T17:50:00+00:00\"/>",
-            "tag shape must match what the prompt's v6 examples reference"
+        assert!(
+            block.starts_with(
+                "<context occurred_at=\"2023-05-25T17:50:00+00:00\" weekday=\"Thursday\"/>"
+            ),
+            "tag shape must keep the RFC 3339 timestamp and name the weekday: {block}"
         );
+        // 2023-05-25 is a Thursday. "last Friday" in the prompt example is 19 May.
+        assert!(
+            block.contains("Thursday: last 2023-05-18; this 2023-05-25 (today); next 2023-06-01")
+        );
+        assert!(block.contains("Friday: last 2023-05-19; this 2023-05-26; next 2023-06-02"));
     }
 
     #[test]
@@ -1164,10 +1226,30 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         let block = super::render_occurred_at_block(ts_naive);
-        // -07:00 + 7h = +00:00 → "2023-05-26T00:50:00.123+00:00"
-        assert_eq!(
-            block, "<context occurred_at=\"2023-05-26T00:50:00.123+00:00\"/>",
-            "non-UTC inputs must be normalised to UTC in the rendered tag"
+        // -07:00 + 7h = +00:00 → "2023-05-26T00:50:00.123+00:00", a Friday.
+        assert!(
+            block.starts_with(
+                "<context occurred_at=\"2023-05-26T00:50:00.123+00:00\" weekday=\"Friday\"/>"
+            ),
+            "non-UTC inputs must be normalised to UTC in the rendered tag: {block}"
+        );
+        assert!(block.contains("Friday: last 2023-05-19; this 2023-05-26 (today); next 2023-06-02"));
+    }
+
+    #[test]
+    fn weekday_calendar_uses_the_next_occurrence_on_or_after_today() {
+        // GH #1131: occurred_at is Wednesday 2026-10-07. "by Sunday" is
+        // 2026-10-11 and "by Friday" is 2026-10-09. The model was
+        // inventing both, so those dates have to be in the calendar.
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-10-07T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let block = super::render_occurred_at_block(ts);
+        assert!(block.contains("weekday=\"Wednesday\""));
+        assert!(block.contains("Sunday: last 2026-10-04; this 2026-10-11; next 2026-10-18"));
+        assert!(block.contains("Friday: last 2026-10-02; this 2026-10-09; next 2026-10-16"));
+        assert!(
+            block.contains("Wednesday: last 2026-09-30; this 2026-10-07 (today); next 2026-10-14")
         );
     }
 

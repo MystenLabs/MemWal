@@ -261,18 +261,26 @@ export function normalizePrivateKey(key: string): string {
  *   non-localhost host (plaintext HTTP on the open internet exposes
  *   signed requests and any server-side secrets to passive interception).
  * - Localhost / 127.0.0.1 / ::1 are exempt from the warning (common in dev).
+ *   `URL.hostname` keeps the brackets on an IPv6 address (`[::1]`), so the
+ *   comparison strips them. Otherwise `http://[::1]` warns as if it were remote.
  * - Does NOT throw — explicit user-supplied `http://` is honored.
  */
+function isLocalHost(hostname: string): boolean {
+    const host = hostname.toLowerCase();
+    const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+    return (
+        bare === "localhost" ||
+        bare === "127.0.0.1" ||
+        bare === "::1" ||
+        bare.endsWith(".localhost")
+    );
+}
+
 export function normalizeServerUrl(url: string): string {
     const trimmed = url.replace(/\/$/, "");
     try {
         const parsed = new URL(trimmed);
-        const host = parsed.hostname.toLowerCase();
-        const isLocal =
-            host === "localhost" ||
-            host === "127.0.0.1" ||
-            host === "::1" ||
-            host.endsWith(".localhost");
+        const isLocal = isLocalHost(parsed.hostname);
         if (parsed.protocol === "http:" && !isLocal) {
             // eslint-disable-next-line no-console
             console.warn(
@@ -285,6 +293,20 @@ export function normalizeServerUrl(url: string): string {
         // invalid URL — let the fetch call surface the error at request time
     }
     return trimmed;
+}
+
+/**
+ * Reject empty and whitespace-only text before a request is sent.
+ *
+ * The relayer does the same. A blank body used to be accepted and then
+ * sit until the client timed out (#1129). Non-blank text is not trimmed.
+ */
+export function assertNonBlankText(text: string, message = "Text cannot be empty"): void {
+    if (typeof text !== "string" || text.trim().length === 0) {
+        const err = new Error(message) as Error & { status?: number };
+        err.status = 400;
+        throw err;
+    }
 }
 
 // ============================================================
@@ -317,7 +339,7 @@ export function sanitizeServerError(
         return {
             message:
                 "401 from relayer: typically wrong private key, key not registered on this account, " +
-                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+                "account ID mismatch (a wallet address is not a MemWal account ID), or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
                 "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
             raw: rawBody,
             serverCode: "AUTH_REJECTED",

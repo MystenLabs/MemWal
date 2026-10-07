@@ -468,7 +468,7 @@ pub async fn embed(
     Extension(_auth): Extension<AuthInfo>,
     Json(body): Json<EmbedRequest>,
 ) -> Result<Json<EmbedResponse>, AppError> {
-    if body.text.is_empty() {
+    if text_is_blank(&body.text) {
         return Err(AppError::BadRequest("text cannot be empty".into()));
     }
     if body.text.len() > MAX_EMBED_TEXT_BYTES {

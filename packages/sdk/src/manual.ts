@@ -46,6 +46,7 @@ import {
     normalizePrivateKey,
     u64ToLeHex,
     normalizeServerUrl,
+    assertNonBlankText,
     sanitizeServerError,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
@@ -351,7 +352,7 @@ export class MemWalManual {
      * 3. Send {encrypted_data, vector} to server — server handles Walrus upload relay
      */
     async rememberManual(text: string, namespace?: string): Promise<RememberManualResult> {
-        if (!text) throw new Error("Text cannot be empty");
+        assertNonBlankText(text);
 
         const ns = namespace ?? this.namespace;
 

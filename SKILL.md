@@ -574,7 +574,7 @@ Lifecycle hooks run automatically:
 | `health()` returns error | Check relayer URL is correct and reachable |
 | `recall()` returns empty | Verify namespace matches what was used in `remember()` |
 | `recall()` returns unrelated filler | Recall is top-K without a default relevance threshold; filter by `distance`, for example `distance < 0.8`, and calibrate the cutoff against your data |
-| `401 Unauthorized` | Usually wrong `MEMWAL_PRIVATE_KEY`, key not registered on the account, account ID mismatch, or staging/mainnet mismatch. Check `.env.local` and dashboard credentials |
+| `401 Unauthorized` | Usually wrong `MEMWAL_PRIVATE_KEY`, key not registered on the account, account ID mismatch (a wallet address is not a MemWal account ID), or staging/mainnet mismatch. Check `.env.local` and dashboard credentials |
 | SDK import errors | Run `pnpm add @mysten-incubation/memwal` — check Node.js ≥ 18 |
 | Manual client errors | Install peer deps: `@mysten/sui @mysten/seal @mysten/walrus` |
 | Direct Sui reads fail or examples look stale | Prefer `SuiGrpcClient` from `@mysten/sui/grpc`; JSON-RPC snippets using `SuiClient` / `getFullnodeUrl` may be stale |
