@@ -10,10 +10,10 @@ You may receive a `<related_memories>` block alongside the input. It lists exist
 - Do NOT edit, merge, or supersede existing memories — only emit what is new in the input
 - If no `<related_memories>` block is present, or it is empty, extract as usual without context
 
-You may also receive a `<context occurred_at="..."/>` tag alongside the input. The `occurred_at` value is the absolute timestamp (RFC 3339) of when this conversation turn took place. Use it as the **temporal anchor** for facts extracted from this input:
+You may also receive a `<context occurred_at="..." weekday="..."/>` tag, followed by a weekday calendar, alongside the input. The `occurred_at` value is the absolute timestamp (RFC 3339) of when this conversation turn took place. Use it as the **temporal anchor** for facts extracted from this input:
 
 - **Default to attaching a date** when a fact describes a current event, recent action, state change happening now, or near-future plan. Use the format `Weekday, D Month YYYY (YYYY-MM-DD)` — for example `Friday, 19 May 2023 (2023-05-19)` — embedding both the natural-language form and the ISO date.
-- **Resolve specific relative time references against `occurred_at` before writing the fact.** "Yesterday" + occurred_at=2023-05-25 → `Wednesday, 24 May 2023 (2023-05-24)`. "Last Friday" → use occurred_at's weekday to compute the prior Friday. "Two weeks ago" → subtract 14 days. "This morning" → the same date as occurred_at.
+- **Resolve specific relative time references against `occurred_at` and the weekday calendar before writing the fact.** Copy dates from the calendar. Do not calculate them. "Yesterday" + occurred_at=2023-05-25 → `Wednesday, 24 May 2023 (2023-05-24)`. "Last Friday" copies the calendar's **last** Friday. "Two weeks ago" → subtract 14 days. "This morning" → the same date as occurred_at. A bare weekday ("by Friday", "on Sunday", "this Friday") copies the calendar's **this** date. "Next Friday" copies the **next** date. The weekday name and the `(YYYY-MM-DD)` in the fact must be that same calendar cell. If they would disagree, copy the calendar instead of keeping either invented half.
 - **Keep vague references honest.** If a relative reference is too imprecise to resolve to a specific date (e.g. "a few years ago", "recently", "sometime in March", "next week"), do NOT fabricate a specific date. Either preserve the user's vague phrasing as-is, or — when the conversation timestamp lets you narrow it without inventing — anchor to a month using the format `around late May 2023 (2023-05)`.
 - **CRITICAL: if a fact is recounting an event from the past that has its own original date or relative reference (e.g. "I went to Paris in 2019", "I broke my arm when I was twelve"), keep that original date — do NOT replace it with `occurred_at`.** The `occurred_at` anchor is only for events happening *in* or *around* this conversation turn, not for arbitrary recounted memories.
 - **When you are uncertain whether a fact is time-anchored or stable, prefer leaving the date off.** A timeless fact is recoverable; a wrongly-stamped fact pollutes retrieval. Stable traits (allergies, names, locations, preferences, ongoing roles) should never carry a date.
@@ -89,7 +89,17 @@ Input: "User: I went hiking last Friday with my brother."
 Output:
 standard	User went hiking on Friday, 19 May 2023 (2023-05-19) with their brother
 
-(Note: "last Friday" was resolved against occurred_at=2023-05-25 (a Thursday), so the prior Friday is 19 May 2023. The absolute date in both natural-language and ISO form is attached to the fact.)
+(Note: "last Friday" is copied from the weekday calendar's **last** Friday for occurred_at=2023-05-25 (a Thursday), which is 19 May 2023. The absolute date in both natural-language and ISO form is attached to the fact. Do not calculate a different Friday.)
+
+Example with `<context>` — a bare weekday copies the calendar's "this" date:
+<context occurred_at="2026-10-07T10:00:00Z" weekday="Wednesday"/>
+Friday: last 2026-10-02; this 2026-10-09; next 2026-10-16
+Sunday: last 2026-10-04; this 2026-10-11; next 2026-10-18
+Input: "User: I want to ship my first Sui contract by Sunday."
+Output:
+standard	User wants to ship their first Sui contract by Sunday, 11 October 2026 (2026-10-11)
+
+(Note: "by Sunday" names a weekday and does not say "last" or "next", so the date is the calendar's **this** Sunday, 2026-10-11. The weekday name and the ISO date are that same cell.)
 
 Example with `<context>` — recounted old event keeps its own date:
 <context occurred_at="2023-05-25T17:50:00Z"/>

@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `normalizeServerUrl` no longer warns about plaintext HTTP for IPv6 loopback. `URL.hostname` keeps the brackets on `[::1]`, so the `::1` exemption never matched `http://[::1]:8000`. (#1128)
+- `remember`, `rememberBulk`, `analyze`, and `embed` reject whitespace-only text immediately, with the same messages the relayer returns. A blank body used to be accepted and then sit until the client timed out. (#1129)
+- A 401 `AUTH_REJECTED` now says a wallet address is not a MemWal account ID. The relayer still returns one 401 for every credential failure, so the message names the mix-up instead of revealing which check failed. (#1132)
 - `rememberBulkAndWait` / `waitForRememberJobs` no longer resolve a batch they could not read as if it were still uploading. The status endpoint counts against the delegate-key budget, and a 429 on every poll used to be retried silently until the wait ran out, leaving each item as `timeout` with "polling timed out", even when nothing had been stored. When no poll got through, the wait now makes one confirming read. If that is rate-limited too, it throws `MemWalRateLimited` (`status: 429`, `jobIds`, `retryAfterSeconds`). An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)
 
 ## 0.1.9

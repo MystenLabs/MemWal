@@ -1929,6 +1929,15 @@ fn default_namespace() -> String {
     "default".to_string()
 }
 
+/// Empty or whitespace-only text. Callers reject it before creating a job.
+///
+/// `str::is_empty` lets `" "`, `"\t"`, and `"\n"` through. Those used to be
+/// accepted and then sit until the client timed out (GH #1129). A non-blank
+/// fact is not trimmed: surrounding spaces stay part of the stored text.
+pub fn text_is_blank(text: &str) -> bool {
+    text.trim().is_empty()
+}
+
 /// Shared namespace validation for every request that carries a namespace.
 ///
 /// API-compatibility note: this rejects the empty string, and the read paths
@@ -4131,6 +4140,17 @@ mod tests {
         // rejecting them would strand namespaces written before the NUL check.
         assert!(validate_namespace("has\nnewline").is_ok());
         assert!(validate_namespace("has\ttab").is_ok());
+    }
+
+    #[test]
+    fn blank_text_is_empty_or_whitespace_only() {
+        assert!(text_is_blank(""));
+        assert!(text_is_blank(" "));
+        assert!(text_is_blank("\t"));
+        assert!(text_is_blank("\n"));
+        assert!(text_is_blank("  \t\n "));
+        // Surrounding whitespace on a real fact is kept by the caller.
+        assert!(!text_is_blank("  hello  "));
     }
 
     // ── HealthResponse.prompt_versions wire shape ────────────────

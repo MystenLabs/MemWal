@@ -12,6 +12,7 @@ from memwal.client import (
 
 def test_auth_rejected_message_points_to_troubleshooting_guide() -> None:
     assert "docs.wal.app/walrus-memory/troubleshooting/overview" in AUTH_REJECTED_MESSAGE
+    assert "wallet address" in AUTH_REJECTED_MESSAGE
 
 
 def test_auth_503_is_retryable_not_a_credential_failure() -> None:
