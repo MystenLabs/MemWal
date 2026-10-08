@@ -137,6 +137,35 @@ export function formatRecallLine(
     return `${index + 1}. [score=${score} distance=${distance}]${stamp} ${memory.text}`;
 }
 
+/**
+ * Trailing notices explaining why the returned list is shorter than the caller
+ * asked for.
+ *
+ * Both counts describe rows the model will never see, so emitting fewer lines
+ * without saying why would read as "that is all there is". They are not the
+ * same kind of absence, and the wording keeps them apart: `collapsed` is a
+ * deliberate read-side fold of facts stored more than once, while `dropped` is
+ * real loss — the relayer matched those memories but could not download or
+ * decrypt their blobs, so they never reached `results` at all (WALM-397).
+ *
+ * Returns an empty array when nothing was withheld, keeping the common case
+ * byte-identical to a recall that lost nothing.
+ */
+export function recallNotices(collapsed: number, dropped: number): string[] {
+    const notices: string[] = [];
+    if (collapsed > 0) {
+        notices.push(
+            `\n(${collapsed} duplicate ${collapsed === 1 ? "copy" : "copies"} of the above collapsed; the same fact is stored more than once.)`
+        );
+    }
+    if (dropped > 0) {
+        notices.push(
+            `\n(${dropped} additional ${dropped === 1 ? "match" : "matches"} failed to download or decrypt and ${dropped === 1 ? "was" : "were"} omitted.)`,
+        );
+    }
+    return notices;
+}
+
 /** `YYYY-MM-DD` for a parseable timestamp, else null. */
 function isoDateOrNull(value: unknown): string | null {
     if (typeof value !== "string") return null;
@@ -184,19 +213,7 @@ export function registerRecallTool(
             }
             const { unique, collapsed } = collapseDuplicates(filtered);
             const lines = unique.map((m, i) => formatRecallLine(m, i));
-            // Say what was folded away rather than quietly returning fewer rows
-            // than the caller asked for. It also surfaces that the same fact was
-            // stored repeatedly, which is usually worth knowing.
-            if (collapsed > 0) {
-                lines.push(
-                    `\n(${collapsed} duplicate ${collapsed === 1 ? "copy" : "copies"} of the above collapsed; the same fact is stored more than once.)`
-                );
-            }
-            if (dropped > 0) {
-                lines.push(
-                    `\n(${dropped} additional matches could not be decrypted and were omitted.)`,
-                );
-            }
+            lines.push(...recallNotices(collapsed, dropped));
             return {
                 content: [
                     {
