@@ -221,6 +221,11 @@ impl McpOAuthConfig {
     }
 }
 
+/// Short `Retry-After` for OAuth 503s. Mirrors signed HTTP auth's
+/// `AUTH_UPSTREAM_RETRY_AFTER_SECS` so both surfaces ask for the same backoff
+/// when Sui is throttling us (WALM-429/WALM-605).
+pub const OAUTH_UPSTREAM_RETRY_AFTER_SECS: u64 = 5;
+
 /// RFC 6749-shaped error response (`{"error": "...", "error_description":
 /// "..."}`), distinct from `crate::types::AppError` because OAuth clients
 /// (Claude's connector implementation specifically) parse `error` as a
@@ -232,6 +237,10 @@ pub struct OAuthError {
     pub status: axum::http::StatusCode,
     pub error: &'static str,
     pub description: String,
+    /// Seconds to advertise in `Retry-After`. Only set on retryable failures,
+    /// so a client that may safely re-submit the *same* request knows to back
+    /// off instead of restarting the whole flow (WALM-605).
+    pub retry_after_secs: Option<u64>,
 }
 
 impl OAuthError {
@@ -244,6 +253,7 @@ impl OAuthError {
             status,
             error,
             description: description.into(),
+            retry_after_secs: None,
         }
     }
 
@@ -295,6 +305,20 @@ impl OAuthError {
         )
     }
 
+    /// RFC 6749 §4.1.2.1 `temporarily_unavailable`: the request was well
+    /// formed, but an upstream (Sui) could not be consulted, so the server has
+    /// no answer yet — as opposed to `invalid_request`, which asserts a
+    /// definitive "no". Retryable, so a handler must not have destroyed
+    /// single-use state before returning it (WALM-605).
+    pub fn temporarily_unavailable(description: impl Into<String>) -> Self {
+        Self {
+            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            error: "temporarily_unavailable",
+            description: description.into(),
+            retry_after_secs: Some(OAUTH_UPSTREAM_RETRY_AFTER_SECS),
+        }
+    }
+
     pub fn server_error(description: impl Into<String>) -> Self {
         Self::new(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -317,6 +341,7 @@ impl From<crate::types::AppError> for OAuthError {
 impl axum::response::IntoResponse for OAuthError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::header;
+        let retry_after_secs = self.retry_after_secs;
         let body = serde_json::json!({
             "error": self.error,
             "error_description": self.description,
@@ -325,6 +350,11 @@ impl axum::response::IntoResponse for OAuthError {
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        if let Some(secs) = retry_after_secs {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, secs.into());
+        }
         response
     }
 }
