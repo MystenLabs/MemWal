@@ -221,11 +221,20 @@ export class MemWalMock {
         const succeeded = results.filter(
             (result) => result.status === "done"
         ).length;
+        // The mock resolves every job synchronously, so nothing can time out —
+        // but the field must be present to match RememberBulkResult.
+        const failed = results.filter(
+            (result) => result.status === "failed"
+        ).length;
+        const timedOut = results.filter(
+            (result) => result.status === "timeout"
+        ).length;
         return {
             results,
             total: results.length,
             succeeded,
-            failed: results.length - succeeded,
+            failed,
+            timedOut,
         };
     }
 
