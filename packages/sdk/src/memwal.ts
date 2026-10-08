@@ -68,6 +68,8 @@ import {
     redactInternalUrls,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
+    DEFAULT_PREFLIGHT_TIMEOUT_MS,
+    DEFAULT_RECALL_TIMEOUT_MS,
 } from "./utils.js";
 import {
     assertCompatibleRelayer,
@@ -116,12 +118,18 @@ const SEAL_SESSION_TTL_MIN = 5;
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
 
-/** Per-call knobs for `signedRequest`. `timeoutMs` overrides the client-wide
- * deadline for one endpoint; `signal` is the caller's own cancellation and is
- * honoured alongside it, never replaced by it. */
+/** Per-call knobs for `MemWal.signedRequest`. */
 interface SignedRequestOptions {
+    /** ENG-1696: omit the SEAL credential on Manual-mode routes. */
     includeDelegateKey?: boolean;
+    /** Caller-owned cancellation, honoured alongside `timeoutMs`. */
     signal?: AbortSignal;
+    /**
+     * Deadline for the signed request itself. The clock starts after the
+     * preflights resolve, so this is never charged for a slow `/version`,
+     * `/health` or `/config`. Omit (or pass 0) for no deadline — which is what
+     * every route other than recall does today (WALM-598).
+     */
     timeoutMs?: number;
 }
 
@@ -167,16 +175,19 @@ const RESTORE_REQUEST_TIMEOUT_MS = 60_000;
 const ANALYZE_REQUEST_TIMEOUT_MS = 60_000;
 
 /** `POST /api/recall` has carried its own 15s deadline since before the rest
- * had any; keeping it named makes that a decision rather than an accident. */
-const RECALL_REQUEST_TIMEOUT_MS = 15_000;
+ * had any; keeping it named makes that a decision rather than an accident.
+ * WALM-598 made it configurable via `MemWalConfig.recallTimeoutMs`;
+ * `DEFAULT_RECALL_TIMEOUT_MS` in utils.ts is the value that knob falls back
+ * to, and this alias keeps the pre-existing call sites reading the same. */
+const RECALL_REQUEST_TIMEOUT_MS = DEFAULT_RECALL_TIMEOUT_MS;
 
-/** What `recall()` tells the relayer it will wait, so the 504 naming the stuck
- * stage arrives before the abort above rather than after it. A second under
- * that abort because the two clocks start at different moments: this timer
- * starts before `fetch`, the relayer's when the request lands, and the margin
- * the relayer keeps for its reply cannot also cover DNS, TCP and TLS. Derived
- * from the timeout so the two can never drift apart. */
-const RECALL_DEADLINE_MS = RECALL_REQUEST_TIMEOUT_MS - 1_000;
+/** How far under the client's own abort `recall()` asks the relayer to stop,
+ * so the 504 naming the stuck stage arrives before the abort rather than
+ * after it. A second, because the two clocks start at different moments: this
+ * timer starts before `fetch`, the relayer's when the request lands, and the
+ * margin the relayer keeps for its reply cannot also cover DNS, TCP and TLS. */
+const RECALL_DEADLINE_MARGIN_MS = 1_000;
+const RECALL_DEADLINE_MS = RECALL_REQUEST_TIMEOUT_MS - RECALL_DEADLINE_MARGIN_MS;
 
 /**
  * Abort signal that fires after `ms`, or when `caller` aborts — whichever is
@@ -225,14 +236,23 @@ function deadlineSignal(
  * `status: 504` is load-bearing, not decoration: `isTransientPollingStatus`
  * treats it as retryable, so one stalled poll inside a wait loop is abandoned
  * and retried against the remaining budget instead of failing the whole wait.
+ *
+ * `phase` names the round-trip that actually stalled — `"preflight GET
+ * /version"`, `"POST /api/recall"` — so WALM-598's diagnostic question ("which
+ * step ate the budget?") is answerable from the error alone. The name stays
+ * `MemWalRequestTimeout`: that is the shipped contract callers and
+ * `isTransientPollingStatus` already key off (WALM-648).
  */
-function requestTimeoutError(method: string, path: string, ms: number): Error {
+function requestTimeoutError(method: string, path: string, ms: number, phase?: string): Error {
+    const stage = phase ?? `${method} ${path}`;
     const err = new Error(
-        `Walrus Memory request timed out after ${ms}ms (${method} ${path}). The relayer ` +
+        `Walrus Memory request timed out after ${ms}ms during ${stage}. The relayer ` +
             `accepted the connection but did not answer in time.`,
     );
     err.name = "MemWalRequestTimeout";
-    (err as Error & { status?: number }).status = 504;
+    (err as Error & { status?: number; phase?: string; timeoutMs?: number }).status = 504;
+    (err as Error & { phase?: string }).phase = stage;
+    (err as Error & { timeoutMs?: number }).timeoutMs = ms;
     return err;
 }
 
@@ -356,6 +376,13 @@ export class MemWal {
     private accountId: string;
     /** Deadline applied to any request that does not name its own. */
     private requestTimeoutMs: number;
+    /**
+     * Recall's abort budget, and the independent per-round-trip budget for the
+     * unauthenticated preflights that precede it. Separate so a slow
+     * `/version`, `/health` or `/config` is never charged against recall.
+     */
+    private recallTimeoutMs: number;
+    private preflightTimeoutMs: number;
 
     // ENG-1697 state — all internal, never surfaced to user code.
     // The public API (`MemWal.create({ key, accountId })`) is unchanged.
@@ -396,6 +423,8 @@ export class MemWal {
             Number.isFinite(config.requestTimeoutMs) && (config.requestTimeoutMs as number) > 0
                 ? (config.requestTimeoutMs as number)
                 : DEFAULT_REQUEST_TIMEOUT_MS;
+        this.recallTimeoutMs = config.recallTimeoutMs ?? DEFAULT_RECALL_TIMEOUT_MS;
+        this.preflightTimeoutMs = config.preflightTimeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS;
     }
 
     /**
@@ -928,6 +957,15 @@ export class MemWal {
         const resolvedNamespace = options.namespace ?? this.namespace;
 
         {
+            // WALM-598: this budget is handed to `signedRequest`, which starts
+            // the clock on the `/api/recall` fetch itself — after
+            // `ensureCompatibleRelayer` (`/version`, falling back to `/health`)
+            // and `buildSealSession` (`/config` + Sui RPC) have already
+            // resolved. Those preflights carry their own independent
+            // deadlines, so a relayer whose `/health` p50 had crept to ~9s can
+            // no longer eat most of recall's window and make a perfectly
+            // healthy recall surface an `AbortError` (GH #438).
+            const timeoutMs = options.timeoutMs ?? this.recallTimeoutMs;
             const result = await this.signedRequest<RecallResult>("POST", "/api/recall", {
                 query,
                 limit,
@@ -942,9 +980,11 @@ export class MemWal {
                 // "relevance" default.
                 sort: options.sort,
                 // How long this call waits, so the relayer can stop just
-                // short of it and name the step it was stuck in.
-                deadline_ms: RECALL_DEADLINE_MS,
-            }, { timeoutMs: RECALL_REQUEST_TIMEOUT_MS });
+                // short of it and name the step it was stuck in. Derived from
+                // the budget actually in force, so a caller-supplied
+                // `timeoutMs` moves both clocks together.
+                deadline_ms: Math.max(1, timeoutMs - RECALL_DEADLINE_MARGIN_MS),
+            }, { timeoutMs });
 
             let processed = result;
             if (typeof options.maxDistance === "number") {
@@ -1280,7 +1320,12 @@ export class MemWal {
      * Check server health. The endpoint is public and does not require request signing.
      */
     async health(): Promise<HealthResult> {
-        const res = await this.fetchWithDeadline<HealthResult>(`${this.serverUrl}/health`);
+        const res = await this.fetchWithDeadline<HealthResult>(
+            `${this.serverUrl}/health`,
+            {},
+            this.preflightTimeoutMs,
+            "GET /health",
+        );
         if (!res.ok) {
             throw new Error(`Health check failed: ${res.status}`);
         }
@@ -1325,9 +1370,15 @@ export class MemWal {
     }
 
     private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
+        // WALM-598: both round-trips get their own bounded budget. They run
+        // inside whatever signed request triggered the compatibility probe, so
+        // leaving them untimed let a stalled relayer silently drain that
+        // caller's deadline (and, with no signal at all, hang indefinitely).
         const versionRes = await this.fetchWithDeadline<Partial<RelayerVersionMetadata>>(
             `${this.serverUrl}/version`,
             { method: "GET" },
+            this.preflightTimeoutMs,
+            "preflight GET /version",
         );
         let body: Partial<RelayerVersionMetadata>;
 
@@ -1337,6 +1388,8 @@ export class MemWal {
             const healthRes = await this.fetchWithDeadline<Partial<RelayerVersionMetadata>>(
                 `${this.serverUrl}/health`,
                 { method: "GET" },
+                this.preflightTimeoutMs,
+                "preflight GET /health",
             );
             if (!healthRes.ok) {
                 throw new Error(
@@ -1380,9 +1433,13 @@ export class MemWal {
 
     private async fetchServerConfig(): Promise<ServerConfig> {
         if (this.serverConfig) return this.serverConfig;
+        // WALM-598: bounded like the other preflights — this one is awaited
+        // inside `buildSealSession`, itself awaited inside a caller's budget.
         const res = await this.fetchWithDeadline<Record<string, unknown>>(
             `${this.serverUrl}/config`,
             { method: "GET" },
+            this.preflightTimeoutMs,
+            "preflight GET /config",
         );
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
@@ -1614,6 +1671,7 @@ export class MemWal {
         url: string,
         init: RequestInit = {},
         timeoutMs?: number,
+        phase?: string,
     ): Promise<{ ok: boolean; status: number; body: T | undefined }> {
         const ms = timeoutMs ?? this.requestTimeoutMs;
         const deadline = deadlineSignal(ms);
@@ -1626,7 +1684,7 @@ export class MemWal {
             };
         } catch (err) {
             if (deadline.timedOut()) {
-                throw requestTimeoutError(init.method ?? "GET", url, ms);
+                throw requestTimeoutError(init.method ?? "GET", url, ms, phase);
             }
             throw err;
         } finally {
@@ -1691,9 +1749,16 @@ export class MemWal {
         if (options.includeDelegateKey !== false) {
             headers["x-seal-session"] = await this.buildSealSession();
         }
-        // Bound the request. `fetch` never times out on its own, so this is the
-        // only thing standing between a stalled socket and a call that hangs
-        // for as long as the connection stays open.
+        // WALM-598: the caller's deadline starts HERE, not at the top of the
+        // call. Everything above — `ensureCompatibleRelayer()` (`/version` ->
+        // `/health`) and `buildSealSession()` (`/config`, dynamic imports, a
+        // Sui RPC round-trip for `SessionKey.create`) — is preflight work that
+        // used to run inside the caller's budget while being unabortable
+        // itself. Each of those now carries its own independent deadline.
+        //
+        // `fetch` never times out on its own, so this deadline is also the only
+        // thing standing between a stalled socket and a call that hangs for as
+        // long as the connection stays open.
         const deadlineMs = options.timeoutMs ?? this.requestTimeoutMs;
         const deadline = deadlineSignal(deadlineMs, options.signal);
         try {

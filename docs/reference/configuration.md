@@ -50,6 +50,10 @@ Used by:
 | `accountId` | yes | MemWalAccount object ID on Sui |
 | `serverUrl` | no | Relayer URL. Default: `https://relayer.memory.walrus.xyz` |
 | `namespace` | no | Default memory boundary. Default: `"default"` |
+| `recallTimeoutMs` | no | Abort budget for the `/api/recall` request itself. Default: `15000`. `0` disables the deadline |
+| `preflightTimeoutMs` | no | Per-round-trip budget for the unauthenticated preflights (`GET /version`, `/health`, `/config`). Default: `5000` |
+
+`RecallOptions.timeoutMs` overrides `recallTimeoutMs` for a single `recall()` call. The recall clock starts after the preflights resolve, so a slow `/health` is never charged against it.
 
 ## `MemWalManualConfig`
 
@@ -70,6 +74,7 @@ Core fields:
 | `registryId` | yes | `AccountRegistry` shared object ID on Sui |
 | `accountId` | yes | `MemWalAccount` object ID |
 | `namespace` | no | Default namespace |
+| `preflightTimeoutMs` | no | Per-round-trip budget for the compatibility preflight. Default: `5000` |
 
 Sui signer fields:
 
@@ -105,6 +110,7 @@ Walrus and network fields:
 ## Rules That Matter
 
 - `namespace` defaults to `"default"` when omitted.
+- A blown deadline throws a `TimeoutError` whose `phase` names the round-trip that stalled; `isTimeoutError()` distinguishes it from a transport failure.
 - `MemWal` is the default relayer-handled path.
 - `MemWalManual` is the manual client path, but it still uses the relayer for registration, search, and restore.
 - `withMemWal` builds on top of `MemWal`, so it uses the same relayer-backed config shape.
