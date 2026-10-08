@@ -1,0 +1,42 @@
+[package]
+name = "memwal"
+version = "0.1.0"
+edition = "2021"
+description = "Rust SDK for Walrus Memory — privacy-first AI memory with Ed25519-signed requests and SEAL session auth"
+license = "Apache-2.0"
+readme = "README.md"
+homepage = "https://memory.walrus.xyz"
+documentation = "https://docs.rs/memwal"
+repository = "https://github.com/MystenLabs/MemWal"
+keywords = ["walrus", "ai", "memory", "ed25519"]
+categories = ["api-bindings", "asynchronous"]
+
+[dependencies]
+# Async & HTTP
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+reqwest = { version = "0.12", features = ["json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Crypto & Auth
+ed25519-dalek = { version = "2", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+blake2 = "0.10"
+percent-encoding = "2"
+rand = "0.8"
+zeroize = "1"
+
+# Error Handling
+thiserror = "1"
+
+[dev-dependencies]
+wiremock = "0.6"
+
+[[example]]
+name = "quick_start"
