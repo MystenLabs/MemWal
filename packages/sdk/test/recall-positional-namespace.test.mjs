@@ -65,3 +65,17 @@ test("recall(query, limit, namespace) still sends the positional namespace", asy
     assert.equal(sent.body.namespace, "profile");
     assert.equal(sent.body.limit, 5);
 });
+
+test("recall(query, options, namespace) does not mutate the options object", async () => {
+    const sent = stubRecall();
+    const options = { maxTokens: 200 };
+    await client().recall("q", options, "profile");
+    assert.deepEqual(options, { maxTokens: 200 });
+    assert.equal(sent.body.namespace, "profile");
+});
+
+test("recall(query, options) without a namespace keeps the client default", async () => {
+    const sent = stubRecall();
+    await client().recall("q", { limit: 5 });
+    assert.equal(sent.body.namespace, "default");
+});
