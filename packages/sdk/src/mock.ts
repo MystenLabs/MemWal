@@ -89,6 +89,25 @@ function validateText(text: string, field = "text"): void {
     }
 }
 
+const MAX_IDEMPOTENCY_KEY_BYTES = 255;
+
+function validateIdempotencyKey(key: string | undefined): void {
+    if (key === undefined) return;
+    if (key.length === 0) {
+        throw new Error("idempotency_key cannot be empty (omit it instead)");
+    }
+    if (new TextEncoder().encode(key).length > MAX_IDEMPOTENCY_KEY_BYTES) {
+        throw new Error(
+            `idempotency_key exceeds maximum length of ${MAX_IDEMPOTENCY_KEY_BYTES} bytes`,
+        );
+    }
+}
+
+/** How many semantic candidates `sort: "recent"` reorders. Mirrors `RecallSort::candidate_limit`. */
+function recentCandidateLimit(limit: number): number {
+    return Math.max(Math.min(limit * 5, 50), limit);
+}
+
 /**
  * Deterministic, dependency-free in-memory implementation of the core MemWal API.
  * It never opens a socket, reads credentials, or contacts Sui/Walrus. Recall uses
@@ -99,6 +118,8 @@ export class MemWalMock {
     private readonly namespace: string;
     private readonly memories: MockMemory[] = [];
     private readonly jobs = new Map<string, MockMemory>();
+    /** idempotency key → job id. Released when that job's memory is forgotten. */
+    private readonly idempotency = new Map<string, string>();
     private sequence = 0;
 
     private constructor(config: MemWalMockConfig = {}) {
@@ -117,14 +138,15 @@ export class MemWalMock {
     destroy(): void {
         this.memories.length = 0;
         this.jobs.clear();
+        this.idempotency.clear();
     }
 
     async rememberAsync(
         text: string,
         namespace?: string,
-        _options: { idempotencyKey?: string } = {}
+        options: { idempotencyKey?: string } = {}
     ): Promise<RememberAcceptedResult> {
-        const memory = this.store(text, namespace);
+        const memory = this.store(text, namespace, undefined, options.idempotencyKey);
         return { job_id: memory.jobId, status: "done" };
     }
 
@@ -171,6 +193,9 @@ export class MemWalMock {
     async rememberBulkAsync(
         items: RememberBulkItem[]
     ): Promise<RememberBulkAcceptedResult> {
+        if (!Array.isArray(items) || items.length === 0) {
+            throw new Error("rememberBulkAsync: items must be a non-empty array");
+        }
         const jobIds = items.map(
             (item) => this.store(item.text, item.namespace).jobId
         );
@@ -268,7 +293,12 @@ export class MemWalMock {
             } else if (typeof limitOrOptions === "number") {
                 options = { limit: limitOrOptions, namespace };
             } else {
-                options = limitOrOptions;
+                // Positional namespace fills an options object that omitted it.
+                // An explicit options.namespace still wins. (#1038)
+                options = { ...limitOrOptions };
+                if (options.namespace === undefined && namespace !== undefined) {
+                    options.namespace = namespace;
+                }
             }
         }
         validateText(query, "query");
@@ -278,7 +308,7 @@ export class MemWalMock {
             throw new Error("limit must be a non-negative integer");
         }
         const queryTokens = tokenize(query);
-        const ranked = this.memories
+        const semantic = this.memories
             .filter((memory) => memory.namespace === resolvedNamespace)
             .map((memory) => ({
                 memory,
@@ -293,7 +323,20 @@ export class MemWalMock {
                 (left, right) =>
                     left.distance - right.distance ||
                     left.memory.sequence - right.memory.sequence
-            )
+            );
+        // `recent` reorders a bounded semantic window by write time, then
+        // truncates. Relevance keeps the cosine order. (#1124)
+        const ordered =
+            options.sort === "recent"
+                ? semantic
+                      .slice(0, recentCandidateLimit(resolvedLimit))
+                      .sort(
+                          (left, right) =>
+                              right.memory.sequence - left.memory.sequence ||
+                              left.distance - right.distance,
+                      )
+                : semantic;
+        const ranked = ordered
             .slice(0, resolvedLimit)
             .map(({ memory, distance: memoryDistance }) => ({
                 blob_id: memory.blobId,
@@ -386,6 +429,15 @@ export class MemWalMock {
     }
 
     async listNamespaces(options: ListNamespacesOptions = {}): Promise<NamespacesResult> {
+        // The relayer rejects limit < 1 with this message. slice(0, 0) would
+        // otherwise report has_more with a null cursor, and slice(0, -1)
+        // would drop the last namespace. (#1144, #1145)
+        if (
+            options.limit !== undefined &&
+            (!Number.isInteger(options.limit) || options.limit < 1)
+        ) {
+            throw new Error("limit must be positive");
+        }
         const grouped = new Map<string, { count: number; bytes: number; sequence: number }>();
         for (const memory of this.memories) {
             const entry = grouped.get(memory.namespace) ?? { count: 0, bytes: 0, sequence: 0 };
@@ -464,6 +516,7 @@ export class MemWalMock {
         if (index < 0) return false;
         const [memory] = this.memories.splice(index, 1);
         this.jobs.delete(memory.jobId);
+        this.releaseIdempotency(memory.jobId);
         return true;
     }
 
@@ -481,18 +534,36 @@ export class MemWalMock {
                     this.memories.splice(index, 1);
             }
         }
-        for (const memory of removed) this.jobs.delete(memory.jobId);
+        for (const memory of removed) {
+            this.jobs.delete(memory.jobId);
+            this.releaseIdempotency(memory.jobId);
+        }
         return removed.length;
     }
 
     private store(
         text: string,
         namespace?: string,
-        blobId?: string
+        blobId?: string,
+        idempotencyKey?: string,
     ): MockMemory {
         validateText(text);
+        validateIdempotencyKey(idempotencyKey);
         const resolvedNamespace = namespace ?? this.namespace;
         if (!resolvedNamespace) throw new Error("namespace cannot be empty");
+        if (idempotencyKey !== undefined) {
+            const existingId = this.idempotency.get(idempotencyKey);
+            const existing = existingId ? this.jobs.get(existingId) : undefined;
+            if (existing) {
+                if (existing.text !== text || existing.namespace !== resolvedNamespace) {
+                    throw new Error(
+                        "idempotency_key was already used for a request with different content",
+                    );
+                }
+                return existing;
+            }
+            if (existingId) this.idempotency.delete(idempotencyKey);
+        }
         this.sequence += 1;
         const suffix = this.sequence.toString().padStart(6, "0");
         const memory: MockMemory = {
@@ -505,7 +576,14 @@ export class MemWalMock {
         };
         this.memories.push(memory);
         this.jobs.set(memory.jobId, memory);
+        if (idempotencyKey !== undefined) this.idempotency.set(idempotencyKey, memory.jobId);
         return memory;
+    }
+
+    private releaseIdempotency(jobId: string): void {
+        for (const [key, id] of this.idempotency) {
+            if (id === jobId) this.idempotency.delete(key);
+        }
     }
 
     private toRememberResult(memory: MockMemory): RememberResult {

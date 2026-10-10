@@ -257,3 +257,164 @@ test("MemWalMock namespace walks defer new writes until the next poll", async ()
     assert.deepEqual(poll.namespaces.map(ns => ns.name), ["bravo"]);
     assert.equal(poll.namespaces[0].memory_count, 2);
 });
+
+test("MemWalMock.listNamespaces rejects a non-positive limit instead of paging forever", async () => {
+    const mock = MemWalMock.create();
+    await mock.remember("User likes coffee", "ns-a");
+    await mock.remember("User likes tea", "ns-b");
+    await mock.remember("User likes water", "ns-c");
+
+    await assert.rejects(
+        () => mock.listNamespaces({ limit: 0 }),
+        /limit must be positive/,
+    );
+    await assert.rejects(
+        () => mock.listNamespaces({ limit: -1 }),
+        /limit must be positive/,
+    );
+    await assert.rejects(
+        () => mock.listNamespaces({ limit: 1.5 }),
+        /limit must be positive/,
+    );
+
+    const page = await mock.listNamespaces({ limit: 1 });
+    assert.equal(page.namespaces.length, 1);
+    assert.equal(page.has_more, true);
+    assert.ok(page.next_cursor);
+});
+
+test("MemWalMock.rememberBulkAsync rejects an empty or non-array batch", async () => {
+    const mock = MemWalMock.create();
+    const message = "rememberBulkAsync: items must be a non-empty array";
+    await assert.rejects(() => mock.rememberBulkAsync([]), {
+        name: "Error",
+        message,
+    });
+    await assert.rejects(() => mock.rememberBulkAsync("nope"), {
+        name: "Error",
+        message,
+    });
+});
+
+test("MemWalMock collapses a repeated idempotency key onto the original job", async () => {
+    const mock = MemWalMock.create();
+    const first = await mock.rememberAsync("dedupe me", "ns", {
+        idempotencyKey: "key-123",
+    });
+    const second = await mock.rememberAsync("dedupe me", "ns", {
+        idempotencyKey: "key-123",
+    });
+    assert.equal(first.job_id, second.job_id);
+    assert.equal(
+        (await mock.recall({ query: "dedupe", namespace: "ns", limit: 10 })).total,
+        1,
+    );
+
+    await assert.rejects(
+        () => mock.rememberAsync("other text", "ns", { idempotencyKey: "key-123" }),
+        /different content/,
+    );
+    await assert.rejects(
+        () => mock.rememberAsync("dedupe me", "ns", { idempotencyKey: "" }),
+        /cannot be empty/,
+    );
+    await assert.rejects(
+        () =>
+            mock.rememberAsync("dedupe me", "ns", {
+                idempotencyKey: "k".repeat(256),
+            }),
+        /maximum length/,
+    );
+
+    const written = await mock.rememberAndWait("again", "ns", {
+        idempotencyKey: "key-again",
+    });
+    assert.equal(mock.forget(written.blob_id), true);
+    const rewritten = await mock.rememberAndWait("again", "ns", {
+        idempotencyKey: "key-again",
+    });
+    assert.notEqual(rewritten.job_id, written.job_id);
+    const after = await mock.recall({
+        query: "again",
+        namespace: "ns",
+        maxDistance: 0.5,
+    });
+    assert.equal(after.total, 1);
+    assert.equal(after.results[0].blob_id, rewritten.blob_id);
+});
+
+test("MemWalMock.recall sort recent returns the newest match and keeps relevance ties", async () => {
+    const mock = MemWalMock.create();
+    await mock.rememberAndWait("project release version one");
+    await mock.rememberAndWait("project release version two");
+
+    const recent = await mock.recall({
+        query: "project release",
+        sort: "recent",
+        limit: 1,
+    });
+    assert.equal(recent.results[0].text, "project release version two");
+
+    const relevance = await mock.recall({
+        query: "project release",
+        sort: "relevance",
+        limit: 1,
+    });
+    assert.equal(relevance.results[0].text, "project release version one");
+
+    const omitted = await mock.recall({ query: "project release", limit: 1 });
+    assert.equal(omitted.results[0].text, "project release version one");
+});
+
+test("MemWalMock.recall sort recent stays inside the semantic candidate window", async () => {
+    const mock = MemWalMock.create();
+    for (let i = 1; i <= 6; i++) {
+        await mock.rememberAndWait(`alpha fact ${i}`);
+    }
+    // Equal overlap, so semantic order is insertion order. limit 1 → window 5.
+    const recent = await mock.recall({ query: "alpha", sort: "recent", limit: 1 });
+    assert.equal(recent.results[0].text, "alpha fact 5");
+});
+
+test("MemWalMock.recall sort recent filters namespace and still applies the token budget", async () => {
+    const mock = MemWalMock.create();
+    await mock.rememberAndWait("alpha one", "kept");
+    await mock.rememberAndWait("alpha two", "kept");
+    await mock.rememberAndWait("alpha elsewhere", "other");
+
+    const result = await mock.recall({
+        query: "alpha",
+        namespace: "kept",
+        sort: "recent",
+        limit: 2,
+        maxTokens: 3,
+    });
+
+    assert.deepEqual(
+        result.results.map((memory) => memory.text),
+        ["alpha two"],
+    );
+    assert.equal(result.meta.truncated, true);
+});
+
+test("MemWalMock.recall uses a positional namespace when the options object omits one", async () => {
+    const mock = MemWalMock.create({ namespace: "default" });
+    await mock.rememberAndWait("profile fact", "profile");
+    await mock.rememberAndWait("default fact", "default");
+
+    const positional = await mock.recall("fact", { limit: 5 }, "profile");
+    assert.deepEqual(
+        positional.results.map((memory) => memory.text),
+        ["profile fact"],
+    );
+
+    const explicit = await mock.recall(
+        "fact",
+        { limit: 5, namespace: "default" },
+        "profile",
+    );
+    assert.deepEqual(
+        explicit.results.map((memory) => memory.text),
+        ["default fact"],
+    );
+});
