@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- `remember(text, { idempotencyKey })` and `rememberAndWait(text, { timeoutMs, idempotencyKey })` treat a plain object in the namespace slot as options. That call used to send the object as the namespace and the relayer answered 400. An explicit string namespace still wins. (#1142)
+- `getRememberStatus("")` returns `not_found` without a request, and `waitForRememberJob("")` fails immediately with status 404. `GET /api/remember/` is not a route; the empty 404 body used to throw `SyntaxError`, and the wait treated that as transient until timeout. (#1087)
+- `waitForRememberJobs` settles every slot when the same job id is listed more than once. `indexOf` plus a `Set` of ids left the later copies as `timeout`. (#1121, #1084)
+- `rememberBulkAsync` rejects more than 20 items before signing, matching the relayer's `MAX_BULK_ITEMS`. (#1104)
+- Remember-job status reads (`getRememberStatus`, `waitForRememberJob`, `getRememberBulkStatus`) no longer attach `x-seal-session`. Status is metadata and does not decrypt. (#1135)
+- Bulk status includes each job's `namespace`. `waitForRememberJobs(jobIds)` uses that value when the caller did not pass one, instead of the client default. A caller-supplied namespace still wins. (#1136)
+- `getPublicKeyHex()` and any request after `destroy()` throw. `getPublicKeyHex()` used to return the zeroed key, and `remember()` still sent `GET /version` before noticing the client was destroyed. (#1090)
 - `rememberBulkAndWait` / `waitForRememberJobs` no longer resolve a batch they could not read as if it were still uploading. The status endpoint counts against the delegate-key budget, and a 429 on every poll used to be retried silently until the wait ran out, leaving each item as `timeout` with "polling timed out", even when nothing had been stored. When no poll got through, the wait now makes one confirming read. If that is rate-limited too, it throws `MemWalRateLimited` (`status: 429`, `jobIds`, `retryAfterSeconds`). An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)
 
 ## 0.1.9

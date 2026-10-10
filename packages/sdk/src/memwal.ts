@@ -157,6 +157,36 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
  * own rather than the 30s default a stalled socket would hold it for. */
 const CONFIRM_READ_TIMEOUT_MS = 5_000;
 
+/** Matches the relayer's `MAX_BULK_ITEMS`. Reject before a signed request. */
+const MAX_BULK_ITEMS = 20;
+
+interface RememberCallOptions {
+    idempotencyKey?: string;
+    pollIntervalMs?: number;
+    timeoutMs?: number;
+}
+
+/**
+ * `remember(text, { idempotencyKey })` is the natural call when the namespace
+ * stays at the client default. A plain object in the namespace slot is those
+ * options, not a namespace name. (#1142)
+ */
+function splitRememberArgs(
+    namespaceOrOptions?: string | RememberCallOptions,
+    options?: RememberCallOptions,
+): { namespace?: string; options: RememberCallOptions } {
+    if (typeof namespaceOrOptions === "object" && namespaceOrOptions !== null) {
+        return { namespace: undefined, options: namespaceOrOptions };
+    }
+    return { namespace: namespaceOrOptions, options: options ?? {} };
+}
+
+function destroyedClientError(): Error {
+    return new Error(
+        "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
+    );
+}
+
 /** `POST /api/restore` bounds itself at 55s server-side and answers with an
  * error rather than going quiet, so the client must outlast that or it would
  * abandon a response already on its way. */
@@ -438,13 +468,14 @@ export class MemWal {
      */
     async rememberAsync(
         text: string,
-        namespace?: string,
-        options: { idempotencyKey?: string } = {},
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        const resolvedNamespace = namespace ?? this.namespace;
+        const split = splitRememberArgs(namespaceOrOptions, options);
+        const resolvedNamespace = split.namespace ?? this.namespace;
         const requestIdentity = `${resolvedNamespace}\0${text}`;
-        const generatedKey = options.idempotencyKey === undefined;
-        const idempotencyKey = options.idempotencyKey
+        const generatedKey = split.options.idempotencyKey === undefined;
+        const idempotencyKey = split.options.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
             ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
@@ -469,11 +500,22 @@ export class MemWal {
      * resolves at the terminal state and hides progress.
      */
     async getRememberStatus(jobId: string): Promise<RememberJobStatus> {
+        // `GET /api/remember/` is not a route. The relayer answers 404 with an
+        // empty body, and parsing that threw SyntaxError. (#1087)
+        if (typeof jobId !== "string" || jobId.length === 0) {
+            return {
+                job_id: jobId,
+                status: "not_found",
+                error: `Job ${jobId} not found`,
+            };
+        }
         const status = await this.signedRequest<RememberStatusResponse>(
             "GET",
             `/api/remember/${jobId}`,
             {},
             [200, 404],
+            // Status is metadata. No SEAL decrypt, so no session. (#1135)
+            { includeDelegateKey: false },
         );
 
         if (!("status" in status)) {
@@ -494,6 +536,12 @@ export class MemWal {
         jobId: string,
         opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
     ): Promise<RememberResult> {
+        if (typeof jobId !== "string" || jobId.length === 0) {
+            throw Object.assign(new Error(`remember job not found: ${jobId}`), {
+                status: 404,
+                jobId,
+            });
+        }
         const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
@@ -524,7 +572,7 @@ export class MemWal {
                     // and the client deadline keeps ONE stalled poll from
                     // swallowing the entire budget, so the loop still gets to
                     // retry. An expired poll surfaces as a transient 504.
-                    { timeoutMs: this.pollDeadlineMs(deadline) },
+                    { timeoutMs: this.pollDeadlineMs(deadline), includeDelegateKey: false },
                 );
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
@@ -576,19 +624,22 @@ export class MemWal {
      */
     async rememberAndWait(
         text: string,
-        namespace?: string,
-        opts: { pollIntervalMs?: number; timeoutMs?: number; idempotencyKey?: string } = {},
+        namespaceOrOptions?: string | RememberCallOptions,
+        opts?: RememberCallOptions,
     ): Promise<RememberResult> {
-        const resolvedNamespace = namespace ?? this.namespace;
+        const split = splitRememberArgs(namespaceOrOptions, opts);
+        const resolvedNamespace = split.namespace ?? this.namespace;
         const requestIdentity = `${resolvedNamespace}\0${text}`;
-        const generatedKey = opts.idempotencyKey === undefined;
-        const idempotencyKey = opts.idempotencyKey
+        const generatedKey = split.options.idempotencyKey === undefined;
+        const idempotencyKey = split.options.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
             ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
+        // Pass the resolved string. rememberAsync would otherwise read the
+        // options object in this slot as a namespace. (#1142)
         const accepted = await this.rememberAsync(text, resolvedNamespace, { idempotencyKey });
-        const completed = await this.waitForRememberJob(accepted.job_id, opts);
+        const completed = await this.waitForRememberJob(accepted.job_id, split.options);
         // Clear only after terminal success. A polling timeout/transport failure
         // keeps the key so retrying the high-level operation reuses the same job.
         if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
@@ -601,15 +652,15 @@ export class MemWal {
      * The relayer continues embedding, encrypting, uploading, and indexing in the background.
      * Use rememberAndWait() when the caller needs the final blob_id before continuing.
      *
-     * @param text - The text to remember
-     * @param namespace - Optional namespace override
+     * A plain object in the namespace position is options, so
+     * `remember(text, { idempotencyKey })` keeps the client namespace. (#1142)
      */
     async remember(
         text: string,
-        namespace?: string,
-        options: { idempotencyKey?: string } = {},
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        return this.rememberAsync(text, namespace, options);
+        return this.rememberAsync(text, namespaceOrOptions, options);
     }
 
     /**
@@ -636,6 +687,12 @@ export class MemWal {
     async rememberBulkAsync(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
         if (!Array.isArray(items) || items.length === 0) {
             throw new Error("rememberBulkAsync: items must be a non-empty array");
+        }
+        // The relayer rejects this after the request is signed. Say so first. (#1104)
+        if (items.length > MAX_BULK_ITEMS) {
+            throw new Error(
+                `rememberBulkAsync: items exceeds maximum of ${MAX_BULK_ITEMS} per bulk request`,
+            );
         }
 
         const normalised = items.map((item) => ({
@@ -668,7 +725,8 @@ export class MemWal {
             "/api/remember/bulk/status",
             { job_ids: jobIds },
             [200],
-            { timeoutMs: opts.timeoutMs },
+            // Status is metadata. No SEAL decrypt, so no session. (#1135)
+            { timeoutMs: opts.timeoutMs, includeDelegateKey: false },
         );
     }
 
@@ -697,29 +755,43 @@ export class MemWal {
         let answered = false;
 
         const settle = (jobId: string, status: RememberBulkStatusItem) => {
-            const idx = jobIds.indexOf(jobId);
             lastSeen.set(jobId, status);
-            if (status.status === "done") {
-                results[idx] = {
-                    id: jobId,
-                    blob_id: status.blob_id ?? "",
-                    status: "done",
-                    namespace: namespaces[idx] ?? this.namespace,
-                };
-                pending.delete(jobId);
-            } else if (status.status === "failed" || status.status === "not_found") {
-                results[idx] = {
-                    id: jobId,
-                    blob_id: "",
-                    status: "failed",
-                    namespace: namespaces[idx] ?? this.namespace,
-                    error:
-                        status.status === "not_found"
-                            ? "job not found"
-                            : redactInternalUrls(status.error ?? "unknown error"),
-                };
-                pending.delete(jobId);
+            // The same id can occupy more than one slot. `indexOf` updated only
+            // the first, and `pending` is a Set, so the copies stayed `timeout`.
+            // (#1121, #1084)
+            const terminal =
+                status.status === "done" ||
+                status.status === "failed" ||
+                status.status === "not_found";
+            for (let idx = 0; idx < jobIds.length; idx++) {
+                if (jobIds[idx] !== jobId) continue;
+                if (namespaces[idx] === undefined && status.namespace) {
+                    results[idx].namespace = status.namespace;
+                }
+                if (!terminal) continue;
+                // Caller namespace, then the job's own, then the client default. (#1136)
+                const namespace = namespaces[idx] ?? status.namespace ?? this.namespace;
+                if (status.status === "done") {
+                    results[idx] = {
+                        id: jobId,
+                        blob_id: status.blob_id ?? "",
+                        status: "done",
+                        namespace,
+                    };
+                } else {
+                    results[idx] = {
+                        id: jobId,
+                        blob_id: "",
+                        status: "failed",
+                        namespace,
+                        error:
+                            status.status === "not_found"
+                                ? "job not found"
+                                : redactInternalUrls(status.error ?? "unknown error"),
+                    };
+                }
             }
+            if (terminal) pending.delete(jobId);
         };
 
         while (pending.size > 0 && Date.now() < deadline) {
@@ -790,8 +862,9 @@ export class MemWal {
             }
         }
 
-        for (const jobId of pending) {
-            const idx = jobIds.indexOf(jobId);
+        for (let idx = 0; idx < jobIds.length; idx++) {
+            const jobId = jobIds[idx];
+            if (!pending.has(jobId)) continue;
             const seen = lastSeen.get(jobId);
             results[idx].error = seen
                 ? `still ${seen.status} after ${timeoutMs}ms` + (seen.error ? `: ${redactInternalUrls(seen.error)}` : "")
@@ -1307,6 +1380,9 @@ export class MemWal {
     // ============================================================
 
     private async getPublicKey(): Promise<Uint8Array> {
+        // destroy() zero-fills the cache in place, and an uncached key would
+        // otherwise derive the well-known key of the all-zero seed. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         if (!this.publicKey) {
             const ed = await getEd();
             this.publicKey = await ed.getPublicKeyAsync(this.privateKey);
@@ -1647,6 +1723,8 @@ export class MemWal {
         const options = Array.isArray(acceptedStatusesOrOptions)
             ? requestOptions
             : acceptedStatusesOrOptions;
+        // Before the version probe. A destroyed client must not open GET /version. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         await this.ensureCompatibleRelayer();
         const ed = await getEd();
 
@@ -1665,11 +1743,9 @@ export class MemWal {
         const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
         const msgBytes = new TextEncoder().encode(message);
 
-        if (this.destroyed) {
-            throw new Error(
-                "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
-            );
-        }
+        // Again after the version await. A destroy that lands while that
+        // request is in flight must still refuse to sign. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         // Sign with Ed25519
         const signature = await ed.signAsync(msgBytes, this.privateKey);
         const publicKey = await this.getPublicKey();

@@ -229,6 +229,8 @@ export interface RememberBulkAcceptedResult {
 export interface RememberBulkStatusItem {
     job_id: string;
     status: "pending" | "running" | "uploaded" | "done" | "failed" | "not_found";
+    /** Set when the relayer found the job. Absent for `not_found`. */
+    namespace?: string;
     blob_id?: string;
     error?: string;
 }

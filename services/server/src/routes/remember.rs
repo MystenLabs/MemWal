@@ -1446,14 +1446,21 @@ pub async fn remember_bulk(
     ))
 }
 
-type BulkStatusRow = (String, String, String, Option<String>, Option<String>);
+type BulkStatusRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
 
 fn build_bulk_status_results(
     job_ids: Vec<String>,
     rows: Vec<BulkStatusRow>,
 ) -> Vec<RememberBulkStatusItem> {
     let mut by_id = std::collections::HashMap::with_capacity(rows.len());
-    for (id, _owner_db, status, blob_id, error_msg) in rows {
+    for (id, _owner_db, status, blob_id, error_msg, namespace) in rows {
         by_id.insert(
             id.clone(),
             RememberBulkStatusItem {
@@ -1461,6 +1468,7 @@ fn build_bulk_status_results(
                 error: sanitize_job_error_for_client(&status, error_msg),
                 status,
                 blob_id,
+                namespace: Some(namespace),
             },
         );
     }
@@ -1475,6 +1483,7 @@ fn build_bulk_status_results(
                 status: "not_found".to_string(),
                 blob_id: None,
                 error: None,
+                namespace: None,
             });
         results.push(item);
     }
@@ -1484,7 +1493,7 @@ fn build_bulk_status_results(
 
 /// POST /api/remember/bulk/status  — poll multiple job statuses at once
 ///
-/// Returns `{ results: [{ job_id, status, blob_id?, error? }] }` preserving the
+/// Returns `{ results: [{ job_id, status, namespace?, blob_id?, error? }] }` preserving the
 /// same order as `job_ids[]` in the request. All jobs must belong to the
 /// authenticated owner.
 pub async fn remember_bulk_status(
@@ -1504,7 +1513,7 @@ pub async fn remember_bulk_status(
 
     let rows: Vec<BulkStatusRow> =
         sqlx::query_as(
-            "SELECT id, owner, status, blob_id, error_msg FROM remember_jobs WHERE id = ANY($1) AND owner = $2",
+            "SELECT id, owner, status, blob_id, error_msg, namespace FROM remember_jobs WHERE id = ANY($1) AND owner = $2",
         )
         .bind(&body.job_ids)
         .bind(&auth.owner)
@@ -2266,6 +2275,7 @@ mod tests {
                     "done".to_string(),
                     Some("blob-1".to_string()),
                     None,
+                    "profile".to_string(),
                 ),
                 (
                     "job-2".to_string(),
@@ -2273,6 +2283,7 @@ mod tests {
                     "failed".to_string(),
                     None,
                     Some("boom".to_string()),
+                    "notes".to_string(),
                 ),
             ],
         );
@@ -2281,13 +2292,17 @@ mod tests {
         assert_eq!(results[0].job_id, "job-2");
         assert_eq!(results[0].status, "failed");
         assert_eq!(results[0].error.as_deref(), Some("boom"));
+        assert_eq!(results[0].namespace.as_deref(), Some("notes"));
         assert_eq!(results[1].job_id, "missing");
         assert_eq!(results[1].status, "not_found");
+        assert_eq!(results[1].namespace, None);
         assert_eq!(results[2].job_id, "job-1");
         assert_eq!(results[2].status, "done");
         assert_eq!(results[2].blob_id.as_deref(), Some("blob-1"));
+        assert_eq!(results[2].namespace.as_deref(), Some("profile"));
         assert_eq!(results[3].job_id, "job-2");
         assert_eq!(results[3].status, "failed");
+        assert_eq!(results[3].namespace.as_deref(), Some("notes"));
     }
 
     // ── Text size limit ──────────────────────────────────────────

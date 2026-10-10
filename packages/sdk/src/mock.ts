@@ -23,6 +23,26 @@ import type {
 } from "./types.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
 
+/** Matches the relayer's `MAX_BULK_ITEMS`. */
+const MAX_BULK_ITEMS = 20;
+
+interface RememberCallOptions {
+    idempotencyKey?: string;
+    pollIntervalMs?: number;
+    timeoutMs?: number;
+}
+
+/** A plain object in the namespace slot is options, not a namespace. (#1142) */
+function splitRememberArgs(
+    namespaceOrOptions?: string | RememberCallOptions,
+    options?: RememberCallOptions,
+): { namespace?: string; options: RememberCallOptions } {
+    if (typeof namespaceOrOptions === "object" && namespaceOrOptions !== null) {
+        return { namespace: undefined, options: namespaceOrOptions };
+    }
+    return { namespace: namespaceOrOptions, options: options ?? {} };
+}
+
 export interface MemWalMockSeed {
     text: string;
     namespace?: string;
@@ -121,19 +141,20 @@ export class MemWalMock {
 
     async rememberAsync(
         text: string,
-        namespace?: string,
-        _options: { idempotencyKey?: string } = {}
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        const memory = this.store(text, namespace);
+        const split = splitRememberArgs(namespaceOrOptions, options);
+        const memory = this.store(text, split.namespace);
         return { job_id: memory.jobId, status: "done" };
     }
 
     async remember(
         text: string,
-        namespace?: string,
-        options: { idempotencyKey?: string } = {}
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        return this.rememberAsync(text, namespace, options);
+        return this.rememberAsync(text, namespaceOrOptions, options);
     }
 
     async getRememberStatus(jobId: string): Promise<RememberJobStatus> {
@@ -159,18 +180,25 @@ export class MemWalMock {
 
     async rememberAndWait(
         text: string,
-        namespace?: string,
-        opts: { pollIntervalMs?: number; timeoutMs?: number; idempotencyKey?: string } = {}
+        namespaceOrOptions?: string | RememberCallOptions,
+        opts?: RememberCallOptions,
     ): Promise<RememberResult> {
-        const accepted = await this.rememberAsync(text, namespace, {
-            idempotencyKey: opts.idempotencyKey,
+        const split = splitRememberArgs(namespaceOrOptions, opts);
+        const accepted = await this.rememberAsync(text, split.namespace, {
+            idempotencyKey: split.options.idempotencyKey,
         });
-        return this.waitForRememberJob(accepted.job_id, opts);
+        return this.waitForRememberJob(accepted.job_id, split.options);
     }
 
     async rememberBulkAsync(
         items: RememberBulkItem[]
     ): Promise<RememberBulkAcceptedResult> {
+        // Non-arrays still throw TypeError from `.map`, as they do today.
+        if (Array.isArray(items) && items.length > MAX_BULK_ITEMS) {
+            throw new Error(
+                `rememberBulkAsync: items exceeds maximum of ${MAX_BULK_ITEMS} per bulk request`,
+            );
+        }
         const jobIds = items.map(
             (item) => this.store(item.text, item.namespace).jobId
         );
@@ -190,7 +218,12 @@ export class MemWalMock {
             results: jobIds.map((jobId) => {
                 const memory = this.jobs.get(jobId);
                 return memory
-                    ? { job_id: jobId, status: "done", blob_id: memory.blobId }
+                    ? {
+                          job_id: jobId,
+                          status: "done",
+                          blob_id: memory.blobId,
+                          namespace: memory.namespace,
+                      }
                     : { job_id: jobId, status: "not_found" };
             }),
         };
