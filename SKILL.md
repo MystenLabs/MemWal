@@ -150,7 +150,7 @@ const stored = await memwal.waitForRememberJob(accepted.job_id, {
 
 | Method | Description | Returns |
 |---|---|---|
-| `remember(text, namespace?)` | Accept one memory job immediately | `{ job_id, status }` |
+| `remember(text, namespaceOrOptions?, options?)` | Accept one memory job immediately. A plain object in the namespace slot is options (`{ idempotencyKey }`), not a namespace | `{ job_id, status }` |
 | `rememberAndWait(text, namespace?, opts?)` | Store one memory and wait for completion | `{ id, job_id, blob_id, owner, namespace }` |
 | `recall({ query, limit?, topK?, namespace?, maxDistance? })` *(preferred)* or `recall(query, limit?, namespace?)` | Semantic search for memories | `{ results: [{ blob_id, text, distance }], total }` |
 | `analyze(text, namespace?)` | Extract facts and accept one memory job per fact | `{ job_ids, facts, fact_count, status, owner }` |
@@ -236,6 +236,7 @@ interface AnalyzeResult {
 interface RememberBulkStatusItem {
   job_id: string;
   status: "pending" | "running" | "uploaded" | "done" | "failed" | "not_found";
+  namespace?: string; // present when the job row exists; omitted for not_found
   blob_id?: string;
   error?: string;
 }
