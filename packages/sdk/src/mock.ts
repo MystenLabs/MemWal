@@ -32,13 +32,14 @@ interface RememberCallOptions {
     timeoutMs?: number;
 }
 
-/** A plain object in the namespace slot is options, not a namespace. (#1142) */
+/** A plain object in the namespace slot is options, not a namespace.
+ * A third options argument is merged, and its fields win. (#1142) */
 function splitRememberArgs(
     namespaceOrOptions?: string | RememberCallOptions,
     options?: RememberCallOptions,
 ): { namespace?: string; options: RememberCallOptions } {
     if (typeof namespaceOrOptions === "object" && namespaceOrOptions !== null) {
-        return { namespace: undefined, options: namespaceOrOptions };
+        return { namespace: undefined, options: { ...namespaceOrOptions, ...options } };
     }
     return { namespace: namespaceOrOptions, options: options ?? {} };
 }

@@ -175,8 +175,12 @@ function splitRememberArgs(
     namespaceOrOptions?: string | RememberCallOptions,
     options?: RememberCallOptions,
 ): { namespace?: string; options: RememberCallOptions } {
+    // The third argument is the dedicated options bag. When the namespace
+    // slot is also an object, keep both and let the bag win on a clash.
+    // `rememberAndWait(text, { timeoutMs }, { idempotencyKey })` is typed
+    // and used to drop the key, so a retry minted a second blob. (#1142)
     if (typeof namespaceOrOptions === "object" && namespaceOrOptions !== null) {
-        return { namespace: undefined, options: namespaceOrOptions };
+        return { namespace: undefined, options: { ...namespaceOrOptions, ...options } };
     }
     return { namespace: namespaceOrOptions, options: options ?? {} };
 }
@@ -1372,6 +1376,10 @@ export class MemWal {
      */
     async getPublicKeyHex(): Promise<string> {
         const pk = await this.getPublicKey();
+        // `await` yields even when the key was already cached. destroy()
+        // zero-fills that cache in place, so encode only after a fresh check
+        // or this resolves to 64 zero hex chars. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         return bytesToHex(pk);
     }
 
@@ -1381,13 +1389,17 @@ export class MemWal {
 
     private async getPublicKey(): Promise<Uint8Array> {
         // destroy() zero-fills the cache in place, and an uncached key would
-        // otherwise derive the well-known key of the all-zero seed. (#1090)
+        // otherwise derive the well-known key of the all-zero seed. Re-check
+        // after every await, and never cache a key derived once wiped. (#1090)
         if (this.destroyed) throw destroyedClientError();
         if (!this.publicKey) {
             const ed = await getEd();
-            this.publicKey = await ed.getPublicKeyAsync(this.privateKey);
+            if (this.destroyed) throw destroyedClientError();
+            const derived = await ed.getPublicKeyAsync(this.privateKey);
+            if (this.destroyed) throw destroyedClientError();
+            this.publicKey = derived;
         }
-        return this.publicKey;
+        return this.publicKey.slice();
     }
 
     private async ensureCompatibleRelayer(): Promise<RelayerVersionMetadata> {
@@ -1748,7 +1760,11 @@ export class MemWal {
         if (this.destroyed) throw destroyedClientError();
         // Sign with Ed25519
         const signature = await ed.signAsync(msgBytes, this.privateKey);
+        // destroy() during the sign, or during public-key derivation, must
+        // not reach fetch with the wiped seed's well-known key. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         const publicKey = await this.getPublicKey();
+        if (this.destroyed) throw destroyedClientError();
 
         // Make HTTP request
         const url = `${this.serverUrl}${path}`;

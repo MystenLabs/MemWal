@@ -104,6 +104,42 @@ test("rememberAndWait(text, options) does not send the options object as a names
     assert.equal(stored.namespace, "default");
 });
 
+test("rememberAndWait merges a third options bag and lets it win", async () => {
+    let posted;
+    globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/version") return versionBody();
+        if (path === "/api/remember" && init.method === "POST") {
+            posted = JSON.parse(init.body);
+            return Response.json({ job_id: "job-1", status: "pending" }, { status: 202 });
+        }
+        if (path === "/api/remember/job-1") {
+            return Response.json({
+                job_id: "job-1",
+                status: "pending",
+                namespace: "default",
+            });
+        }
+        throw new Error(`unexpected request ${path}`);
+    };
+
+    const memwal = client();
+    memwal.buildSealSession = async () => "test-session";
+    const started = Date.now();
+    await assert.rejects(
+        memwal.rememberAndWait(
+            "hello",
+            { timeoutMs: 30, idempotencyKey: "from-slot" },
+            { idempotencyKey: "stable" },
+        ),
+        /timed out after 30ms/,
+    );
+
+    assert.ok(Date.now() - started < 5_000);
+    assert.equal(posted.namespace, "default");
+    assert.equal(posted.idempotency_key, "stable");
+});
+
 test("an empty job id never requests GET /api/remember/", async () => {
     let fetches = 0;
     globalThis.fetch = async () => {
@@ -287,6 +323,49 @@ test("destroy() rejects key reads and requests without calling the relayer", asy
     await assert.rejects(fresh.getPublicKeyHex(), /destroyed/);
     await assert.rejects(fresh.remember("hi"), /destroyed/);
     assert.equal(fetches, 0);
+});
+
+test("destroy() during an in-flight getPublicKeyHex rejects", async () => {
+    const cached = client();
+    const before = await cached.getPublicKeyHex();
+    assert.match(before, /^[0-9a-f]{64}$/);
+    assert.notEqual(before, "0".repeat(64));
+
+    const pendingCached = cached.getPublicKeyHex();
+    cached.destroy();
+    await assert.rejects(pendingCached, /destroyed/);
+
+    const fresh = client();
+    const pendingFresh = fresh.getPublicKeyHex();
+    fresh.destroy();
+    await assert.rejects(pendingFresh, /destroyed/);
+});
+
+test("destroy() during an in-flight remember does not send the remember", async () => {
+    let releaseVersion;
+    const versionGate = new Promise((resolve) => {
+        releaseVersion = resolve;
+    });
+    const requested = [];
+    globalThis.fetch = async (url) => {
+        const path = new URL(url).pathname;
+        requested.push(path);
+        if (path === "/version") {
+            await versionGate;
+            return versionBody();
+        }
+        throw new Error(`a wiped client still sent ${path}`);
+    };
+
+    const memwal = client();
+    memwal.buildSealSession = async () => "test-session";
+    const pending = memwal.remember("hi");
+    await new Promise((resolve) => setImmediate(resolve));
+    memwal.destroy();
+    releaseVersion();
+
+    await assert.rejects(pending, /destroyed/);
+    assert.deepEqual(requested, ["/version"]);
 });
 
 test("MemWalMock.remember(text, options) stores under the client namespace", async () => {
