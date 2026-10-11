@@ -4,7 +4,7 @@ import { Activity, Bell, Database, KeyRound, LayoutDashboard, LogOut, Settings, 
 import { useSearchParams } from 'react-router-dom'
 import { AdminConfig } from '../components/AdminConfig'
 import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
-import { AdminKeyEntry } from '../components/AdminKeyEntry'
+import { ActivityPage, ConfigPage, UnavailablePage, UploadJobsPage, WalletsPage } from './OpsPages'
 import { AdminUploadErrors } from '../components/AdminUploadErrors'
 import { AdminWalletBalances } from '../components/AdminWalletBalances'
 import { config } from '../config'
@@ -317,7 +317,7 @@ export function AdminAnalyticsApp({
         <div className="wa-head">
           <div className="wa-title">
             <h1>{view === 'overview' ? 'Memory overview' : VIEWS.find((item) => item.id === view)?.label}</h1>
-            <p>Storage, retrieval and account activity</p>
+            <p>{view === 'activity' ? 'Account usage, delegate activity and adoption trends' : view === 'uploads' ? 'Upload progress, failures and processing health' : view === 'wallets' ? 'Uploader balances, sponsor funding and measured spend' : view === 'incidents' ? 'Investigate changes in retrieval traffic and performance' : view === 'quality' ? 'Measurement coverage, freshness and collection gaps' : view === 'config' ? 'Relayer settings and operational thresholds' : view === 'access' ? 'Admin sessions and recorded administrative activity' : view === 'storage' ? 'Plaintext, encrypted payload and encoded inventory' : view === 'retrieval' ? 'Request bytes, latency and transfer boundaries' : view === 'accounts' ? 'Owner wallets, delegate keys and selected-day activity' : 'Storage, retrieval and account activity'}</p>
           </div>
           <div className="wa-actions">
             <select className="wa-select" aria-label="Date range" value={range === 'week' ? '7d' : range} onChange={(event) => setParam('range', event.target.value)}>
@@ -330,13 +330,15 @@ export function AdminAnalyticsApp({
           </div>
         </div>
         {banner && <p className="wa-note" role="status" style={{ padding: '8px 16px' }}>{banner}</p>}
-        <div className="wa-seg" role="tablist" aria-label="Scope">
-          {(['overview', 'storage', 'retrieval', 'accounts'] as ViewId[]).map((id) => (
-            <button key={id} role="tab" aria-selected={view === id} onClick={() => setParam('view', id)}>
-              {id === 'overview' ? 'Overview' : id === 'storage' ? 'Storage' : id === 'retrieval' ? 'Retrieval' : 'Accounts'}
-            </button>
-          ))}
-        </div>
+        {['overview', 'storage', 'retrieval', 'accounts'].includes(view) && (
+          <div className="wa-seg" role="tablist" aria-label="Scope">
+            {(['overview', 'storage', 'retrieval', 'accounts'] as ViewId[]).map((id) => (
+              <button key={id} role="tab" aria-selected={view === id} onClick={() => setParam('view', id)}>
+                {id === 'overview' ? 'Overview' : id === 'storage' ? 'Storage' : id === 'retrieval' ? 'Retrieval' : 'Accounts'}
+              </button>
+            ))}
+          </div>
+        )}
         {view === 'overview' && !demo && (
           <LiveOverview
             activity={activityQuery.data}
@@ -374,24 +376,24 @@ export function AdminAnalyticsApp({
           </>
         )}
 
-        {view === 'storage' && <StorageView accounts={model.accounts} />}
-        {view === 'retrieval' && (
+        {view === 'storage' && (demo ? <StorageView accounts={model.accounts} /> : <UnavailablePage title="Storage inventory unavailable" reason="The dev relayer does not store plaintext, encrypted, or encoded inventory snapshots. Wallet balances are on Wallets & Costs." />)}
+        {view === 'retrieval' && (demo ? (
           <RetrievalView
             requests={scoped}
             relayer={relayer}
             upstream={upstream}
             onOpen={setRequestId}
           />
-        )}
-        {view === 'accounts' && (
+        ) : <UnavailablePage title="Retrieval percentiles unavailable" reason="The dev relayer has request counters, not per-request byte distributions. p50/p90/p99 cannot be calculated from the activity API." />)}
+        {view === 'accounts' && (demo ? (
           <AccountTable rows={rows} sort={sort} onSort={setSort} onOpen={(id) => setParam('account', id)} query={query} onQuery={(value) => setParam('q', value)} showAll={showAll} onShowAll={(value) => setParam('all', value ? '1' : '')} />
-        )}
-        {view === 'activity' && <ActivityView requests={scoped} accounts={rows.length} />}
-        {view === 'uploads' && liveOps(<AdminUploadErrors adminKey={adminKey ?? ''} onInvalidKey={onInvalidKey} />, 'Upload errors need an admin key. The demo fixture does not invent failed jobs.')}
-        {view === 'wallets' && liveOps(<AdminWalletBalances adminKey={adminKey ?? ''} onInvalidKey={onInvalidKey} />, 'Wallet balances and costs need an admin key. Spend is not inferred from storage size.')}
-        {view === 'incidents' && <IncidentView modelStart={model.incident} requests={model.requests} now={now} timeZone={timeZone} />}
-        {view === 'quality' && <QualityView demo={demo} />}
-        {view === 'config' && liveOps(<AdminConfig adminKey={adminKey ?? ''} onInvalidKey={onInvalidKey} />, 'Configuration is read from the relayer after admin sign-in.')}
+        ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} hours={liveHours} onInvalidKey={onInvalidKey} />)}
+        {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} hours={liveHours} onInvalidKey={onInvalidKey} />}
+        {view === 'uploads' && adminKey && <UploadJobsPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
+        {view === 'wallets' && adminKey && <WalletsPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
+        {view === 'incidents' && <UnavailablePage title="No verified incident" reason="The incident year and dates are unconfirmed. This page will not invent an April/May window." />}
+        {view === 'quality' && <UnavailablePage title="Coverage" reason="Request-byte percentiles, encoded size, and delegate lifecycle are not stored. Memories written and upload failures come from the admin activity and upload-error APIs." />}
+        {view === 'config' && adminKey && <ConfigPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
         {view === 'access' && (
           <section className="wa-panel">
             <h3>Access & audit</h3>
