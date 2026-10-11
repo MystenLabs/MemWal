@@ -15,7 +15,7 @@ import {
   type AdminInventory,
   type UploadError,
 } from '../utils/admin-api'
-import { formatBytes, formatCount } from './metrics'
+import { formatBytes, formatCount, toCsv } from './metrics'
 import { baselineChange, investigationWindows } from './range'
 
 function useInvalid(error: unknown, onInvalidKey: () => void) {
