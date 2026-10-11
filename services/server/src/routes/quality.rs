@@ -42,6 +42,7 @@ pub struct QualityFacts {
     pub jobs_done: Option<i64>,
     pub jobs_failed: Option<i64>,
     pub jobs_error: bool,
+    pub response_body_samples: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,19 +61,17 @@ fn percent(observed: i64, expected: i64) -> Option<f64> {
     Some((observed as f64 / expected as f64) * 100.0)
 }
 
-fn counted(records: i64, since: Option<String>) -> (&'static str, &'static str) {
+fn counted(records: i64) -> (&'static str, &'static str) {
     if records == 0 {
-        ("collecting_no_samples", "historical_unavailable")
+        ("collection_path_unverified", "historical_unavailable")
     } else {
         ("healthy", "request_detail")
     }
 }
 
 pub fn build_quality_sources(facts: &QualityFacts) -> Vec<QualitySource> {
-    let (retrieval_health, retrieval_coverage) =
-        counted(facts.retrieval_records, facts.retrieval_since.clone());
-    let (plain_health, plain_coverage) =
-        counted(facts.plaintext_observations, facts.plaintext_since.clone());
+    let (retrieval_health, retrieval_coverage) = counted(facts.retrieval_records);
+    let (plain_health, plain_coverage) = counted(facts.plaintext_observations);
     let encrypted = if facts.inventory_error {
         QualitySource {
             id: "encrypted_size",
@@ -141,7 +140,7 @@ pub fn build_quality_sources(facts: &QualityFacts) -> Vec<QualitySource> {
             id: "upload_jobs",
             name: "Upload job lifecycle",
             capability: "implemented",
-            health: "healthy",
+            health: "unknown",
             coverage: "complete",
             classification: "measured",
             population: "remember_jobs terminal statuses",
@@ -206,19 +205,19 @@ pub fn build_quality_sources(facts: &QualityFacts) -> Vec<QualitySource> {
         QualitySource {
             id: "response_bytes",
             name: "Relayer response-byte distribution",
-            capability: "not_implemented",
-            health: "disabled",
-            coverage: "historical_unavailable",
+            capability: "implemented",
+            health: if facts.response_body_samples == 0 { "collection_path_unverified" } else { "healthy" },
+            coverage: if facts.response_body_samples == 0 { "historical_unavailable" } else { "aggregate_only" },
             classification: "measured",
-            population: "response-body bytes per HTTP response",
-            observed: None,
+            population: "uncompressed JSON body bytes encoded for a completed recall",
+            observed: Some(i64::try_from(facts.response_body_samples).unwrap_or(i64::MAX)),
             expected: None,
             coverage_percent: None,
             since: None,
             last_success: None,
             complete_through: None,
-            limitation: "This relayer does not register memwal_http_response_body_bytes. Duration histograms are not response-byte distributions.".into(),
-            detail: "Checked against the metrics this process registers. A request-record table would not by itself create this histogram.".into(),
+            limitation: "memwal_http_response_body_bytes counts encoded JSON bytes, not wire or TLS bytes, and not client receipt. A zero sample count means no recall has been observed since this process registered the histogram.".into(),
+            detail: "Separate from memwal_http_request_duration_seconds, which is time to response handling, not body-terminal duration.".into(),
             view: Some("retrieval"),
         },
         QualitySource {
@@ -302,7 +301,7 @@ pub fn build_quality_sources(facts: &QualityFacts) -> Vec<QualitySource> {
             id: "inventory_snapshots",
             name: "Inventory snapshots",
             capability: "implemented",
-            health: if facts.snapshots == 0 { "collecting_no_samples" } else { "healthy" },
+            health: "unknown",
             coverage: if facts.snapshots == 0 { "historical_unavailable" } else { "partial" },
             classification: "measured",
             population: "daily inventory snapshot rows",
@@ -433,6 +432,7 @@ pub async fn get_quality(
         jobs_done: jobs.as_ref().ok().map(|row| row.0),
         jobs_failed: jobs.as_ref().ok().map(|row| row.1),
         jobs_error: jobs.is_err(),
+        response_body_samples: crate::measurement::response_body_sample_count(),
     };
     let sources = build_quality_sources(&facts);
     let oldest = oldest_healthy_update(&sources);
@@ -472,6 +472,7 @@ mod tests {
             jobs_done: Some(3),
             jobs_failed: Some(1),
             jobs_error: false,
+            response_body_samples: 0,
         }
     }
 
@@ -479,8 +480,8 @@ mod tests {
     fn empty_retrieval_table_is_collecting_not_unsupported() {
         let sources = build_quality_sources(&facts());
         let retrieval = sources.iter().find(|source| source.id == "retrieval_requests").unwrap();
-        assert_eq!(retrieval.capability, "implemented");
-        assert_eq!(retrieval.health, "collecting_no_samples");
+        assert_eq!(retrieval.health, "collection_path_unverified");
+
         assert_eq!(retrieval.coverage, "historical_unavailable");
         assert_eq!(retrieval.observed, Some(0));
     }

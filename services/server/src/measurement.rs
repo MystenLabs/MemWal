@@ -9,13 +9,36 @@
 //! stores AccountCreated. No billing export is configured.
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use prometheus::{Histogram, HistogramOpts};
 use sqlx::PgPool;
 use std::future::Future;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use uuid::Uuid;
 
 pub const SCHEMA_VERSION: i32 = 1;
+
+static RESPONSE_BODY_BYTES: LazyLock<Histogram> = LazyLock::new(|| {
+    prometheus::register_histogram!(HistogramOpts::new(
+        "memwal_http_response_body_bytes",
+        "Uncompressed JSON response-body bytes encoded for a completed recall. Not wire bytes, not TLS overhead, and not proof the client received the body."
+    )
+    .buckets(vec![128.0, 512.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1_048_576.0]))
+    .expect("memwal_http_response_body_bytes")
+});
+
+static RESPONSE_BODY_DURATION_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    prometheus::register_histogram!(HistogramOpts::new(
+        "memwal_http_response_body_duration_seconds",
+        "Seconds from recall handler start through JSON body encoding. Not time-to-headers and not client receipt."
+    )
+    .buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]))
+    .expect("memwal_http_response_body_duration_seconds")
+});
+
+pub fn response_body_sample_count() -> u64 {
+    RESPONSE_BODY_BYTES.get_sample_count()
+}
 
 tokio::task_local! {
     static UPSTREAM_BYTES: Arc<AtomicI64>;
@@ -56,6 +79,8 @@ pub fn record_retrieval(
     relayer_body_bytes: i64,
     upstream_bytes: i64,
 ) {
+    RESPONSE_BODY_BYTES.observe(relayer_body_bytes.max(0) as f64);
+    RESPONSE_BODY_DURATION_SECONDS.observe(duration_ms.max(0) as f64 / 1000.0);
     tokio::spawn(async move {
         let now = Utc::now();
         let started = now - chrono::Duration::milliseconds(duration_ms.max(0));

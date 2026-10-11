@@ -10,6 +10,7 @@ const LABEL: Record<string, string> = {
   unsupported_by_source: 'Unsupported by source',
   healthy: 'Healthy',
   collecting_no_samples: 'Collecting, no samples',
+  collection_path_unverified: 'Collection path unverified',
   stale: 'Stale',
   failed: 'Failed',
   disabled: 'Disabled',
@@ -83,7 +84,7 @@ export function QualityPage({ adminKey, onInvalidKey, onOpenView }: { adminKey: 
           <input className="wa-input wa-search" aria-label="Search sources" placeholder="Search source" value={queryText} onChange={(event) => setQueryText(event.target.value)} />
           <select className="wa-select" aria-label="Health" value={health} onChange={(event) => setHealth(event.target.value)}>
             <option value="all">All health</option>
-            {['healthy', 'collecting_no_samples', 'failed', 'disabled', 'unknown'].map((value) => <option key={value} value={value}>{label(value)}</option>)}
+            {['healthy', 'collection_path_unverified', 'collecting_no_samples', 'failed', 'disabled', 'unknown'].map((value) => <option key={value} value={value}>{label(value)}</option>)}
           </select>
           <select className="wa-select" aria-label="Capability" value={capability} onChange={(event) => setCapability(event.target.value)}>
             <option value="all">All capabilities</option>
