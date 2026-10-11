@@ -60,7 +60,13 @@ export default defineConfig(({ mode }) => {
   // No path rewrite, so signed-request signatures (which sign method+path+
   // body, not host) stay valid. Unset by default — no proxy configured.
   const proxyTarget = env.DEV_BACKEND_PROXY_TARGET
-  const proxyConfig = { changeOrigin: true, secure: true }
+  const proxyConfig = {
+    changeOrigin: true,
+    secure: true,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    },
+  }
   const proxy = proxyTarget
     ? {
         '/api': { target: proxyTarget, ...proxyConfig },
