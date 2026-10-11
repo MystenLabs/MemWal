@@ -562,4 +562,33 @@ export async function fetchAdminUploadSummary(
   }
 }
 
+export interface MeasurementCoverage {
+  retrievalRecords: number
+  retrievalSince: string | null
+  plaintextObservations: number
+  plaintextSince: string | null
+  snapshots: number
+  auditEvents: number
+}
+
+export async function fetchAdminCoverage(adminKey: string): Promise<MeasurementCoverage> {
+  const raw = (await makeAdminRequest('/coverage', adminKey)) as {
+    retrieval_records: number
+    retrieval_since: string | null
+    plaintext_observations: number
+    plaintext_since: string | null
+    snapshots: number
+    audit_events: number
+  }
+  return {
+    retrievalRecords: raw.retrieval_records,
+    retrievalSince: raw.retrieval_since,
+    plaintextObservations: raw.plaintext_observations,
+    plaintextSince: raw.plaintext_since,
+    snapshots: raw.snapshots,
+    auditEvents: raw.audit_events,
+  }
+}
+
+
 

@@ -204,10 +204,15 @@ pub async fn recall(
     };
     let marker = StageMarker::default();
     let guard = HangUpGuard::new(marker.clone(), owner.clone());
-    let outcome = stage::run_with_deadline(
-        &marker,
-        deadline,
-        recall_pipeline(&state, &auth, &body, &weights, sort),
+    let measured = std::time::Instant::now();
+    let upstream = crate::measurement::upstream_scope();
+    let outcome = crate::measurement::with_upstream(
+        upstream.clone(),
+        stage::run_with_deadline(
+            &marker,
+            deadline,
+            recall_pipeline(&state, &auth, &body, &weights, sort),
+        ),
     )
     .await;
     guard.disarm();
@@ -215,6 +220,18 @@ pub async fn recall(
         Ok(result) => result?,
         Err(timed_out) => {
             let elapsed = already + timed_out.elapsed;
+            crate::measurement::record_retrieval(
+                state.db.pool().clone(),
+                owner.clone(),
+                namespace.clone(),
+                "recall",
+                "timeout",
+                0,
+                i32::try_from(body.limit).unwrap_or(0),
+                i64::try_from(measured.elapsed().as_millis()).unwrap_or(i64::MAX),
+                0,
+                upstream.load(std::sync::atomic::Ordering::Relaxed),
+            );
             return Err(recall_timed_out(
                 owner,
                 namespace,
@@ -224,6 +241,19 @@ pub async fn recall(
             ));
         }
     };
+    let body_bytes = i64::try_from(serde_json::to_vec(&response).map(|bytes| bytes.len()).unwrap_or(0)).unwrap_or(i64::MAX);
+    crate::measurement::record_retrieval(
+        state.db.pool().clone(),
+        owner.clone(),
+        namespace.clone(),
+        "recall",
+        "success",
+        i32::try_from(response.results.len()).unwrap_or(i32::MAX),
+        i32::try_from(body.limit).unwrap_or(0),
+        i64::try_from(measured.elapsed().as_millis()).unwrap_or(i64::MAX),
+        body_bytes,
+        upstream.load(std::sync::atomic::Ordering::Relaxed),
+    );
     Ok(Json(response))
 }
 

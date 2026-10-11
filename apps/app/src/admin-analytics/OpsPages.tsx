@@ -3,8 +3,9 @@ import { useQuery } from '@tanstack/react-query'
 import {
   fetchAdminConfig,
   fetchAdminErrors,
-  fetchAdminInventory,
+  fetchAdminCoverage,
   fetchAdminUploadSummary,
+  fetchAdminInventory,
   fetchAdminWallets,
   formatTokenAmount,
   shortAddress,
@@ -466,7 +467,13 @@ export function IncidentLivePage() {
   )
 }
 
-export function QualityPage({ activityError }: { activityError: Error | null }) {
+export function QualityPage({ activityError, adminKey }: { activityError: Error | null; adminKey: string | null }) {
+  const coverage = useQuery({
+    queryKey: ['admin', 'coverage'],
+    queryFn: () => fetchAdminCoverage(adminKey as string),
+    enabled: Boolean(adminKey),
+    retry: false,
+  })
   const activityState = activityError ? 'Failed' : 'Collected'
   const rows = [
     ['Account activity', 'GET /api/admin/activity', activityState, 'Top owners and write counts. Not every account.'],
@@ -493,6 +500,7 @@ export function QualityPage({ activityError }: { activityError: Error | null }) 
       </div>
       <section className="wa-panel">
         <h2>Coverage</h2>
+        <p className="wa-note">{coverage.data ? `Retrieval records ${coverage.data.retrievalRecords} since ${coverage.data.retrievalSince ?? 'none yet'}. Plaintext observations ${coverage.data.plaintextObservations}. Snapshots ${coverage.data.snapshots}. Audit events ${coverage.data.auditEvents}.` : coverage.error ? 'Coverage route is not on the running relayer yet.' : 'Loading coverage.'} Encoded storage, delegate lifecycle, and provider bandwidth stay unavailable.</p>
         <div className="wa-table-wrap">
           <table className="wa-table">
             <thead><tr><th>Metric</th><th>Source</th><th>Status</th><th>Limitation</th></tr></thead>

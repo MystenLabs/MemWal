@@ -377,6 +377,50 @@ pub async fn get_upload_summary(
     }))
 }
 
+#[derive(Debug, Serialize)]
+pub struct CoverageResponse {
+    pub generated_at: String,
+    pub retrieval_records: i64,
+    pub retrieval_since: Option<String>,
+    pub plaintext_observations: i64,
+    pub plaintext_since: Option<String>,
+    pub snapshots: i64,
+    pub snapshot_since: Option<String>,
+    pub audit_events: i64,
+    pub encoded_storage: &'static str,
+    pub delegate_lifecycle: &'static str,
+    pub provider_bandwidth: &'static str,
+}
+
+#[tracing::instrument(name = "admin.coverage", skip_all)]
+pub async fn get_coverage(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<CoverageResponse>, AppError> {
+    let coverage = crate::measurement::coverage(state.db.pool())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read measurement coverage: {e}")))?;
+    crate::measurement::record_audit(
+        state.db.pool().clone(),
+        "read_coverage",
+        "ok",
+        "shared admin key".into(),
+    );
+    Ok(Json(CoverageResponse {
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        retrieval_records: coverage.retrieval_records,
+        retrieval_since: coverage.retrieval_since,
+        plaintext_observations: coverage.plaintext_observations,
+        plaintext_since: coverage.plaintext_since,
+        snapshots: coverage.snapshots,
+        snapshot_since: coverage.snapshot_since,
+        audit_events: coverage.audit_events,
+        encoded_storage: "unavailable: WalrusUploadResponse has no encoded or allocated size",
+        delegate_lifecycle: "unsupported: indexer stores AccountCreated only, not DelegateKeyAdded or DelegateKeyRemoved",
+        provider_bandwidth: "unavailable: no provider billing source is configured",
+    }))
+}
+
+
 
 #[tracing::instrument(name = "admin.config", skip_all)]
 pub async fn get_admin_config(

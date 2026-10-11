@@ -5,6 +5,7 @@ mod compatibility;
 mod engine;
 mod jobs;
 mod jobs_security_delete;
+mod measurement;
 mod mcp_proxy;
 mod oauth;
 mod observability;
@@ -1007,6 +1008,9 @@ async fn balance_monitor_task(state: Arc<AppState>, interval_secs: u64) {
             {
                 tracing::warn!("balance_monitor: failed to record balance sample: {err}");
             }
+        }
+        if let Err(err) = crate::measurement::ensure_daily_snapshot(state.db.pool()).await {
+            tracing::warn!("balance_monitor: inventory snapshot failed: {err}");
         }
     }
 }
@@ -2698,6 +2702,10 @@ async fn main() {
         .route(
             "/api/admin/upload-summary",
             get(routes::admin_dashboard::get_upload_summary).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/admin/coverage",
+            get(routes::admin_dashboard::get_coverage).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .layer(middleware::from_fn(auth::verify_admin_key));
 

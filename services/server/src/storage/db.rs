@@ -123,6 +123,8 @@ const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
     // deleted_at range index for the admin activity delete counts.
     // CONCURRENTLY, own file -- see 024's header.
     migration!("024_memory_tombstones_deleted_at_index.sql"),
+    // Nullable measurement tables. No CONCURRENTLY. Unknown bytes stay NULL.
+    migration!("025_admin_measurements.sql"),
 ];
 
 /// Every migration the pipeline applies, in the order it applies them.

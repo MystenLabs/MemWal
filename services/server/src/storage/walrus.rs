@@ -1254,6 +1254,7 @@ async fn download_blob_from_aggregator(
         ))
     })?;
 
+    crate::measurement::note_upstream_bytes(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
     tracing::info!(
         "walrus download ok: blob_id={}, {} bytes, aggregator={}, skip_consistency_check={}",
         blob_id,

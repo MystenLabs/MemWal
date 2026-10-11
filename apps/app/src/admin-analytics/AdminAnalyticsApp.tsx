@@ -367,7 +367,7 @@ export function AdminAnalyticsApp({
         {view === 'uploads' && adminKey && <UploadJobsPage adminKey={adminKey} onInvalidKey={onInvalidKey} periodLabel={period.label} start={period.start} end={period.end} priorStart={compared?.start ?? null} />}
         {view === 'wallets' && adminKey && <WalletsPage adminKey={adminKey} onInvalidKey={onInvalidKey} activity={activityQuery.data} />}
         {view === 'incidents' && (demo ? <IncidentView modelStart={model.incident} requests={scoped} now={now} timeZone={timeZone} /> : <IncidentLivePage />)}
-        {view === 'quality' && (demo ? <QualityView demo /> : <QualityPage activityError={activityQuery.error as Error | null} />)}
+        {view === 'quality' && (demo ? <QualityView demo /> : <QualityPage activityError={activityQuery.error as Error | null} adminKey={adminKey} />)}
         {view === 'config' && adminKey && <ConfigPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
         {view === 'access' && (
           <section className="wa-panel">

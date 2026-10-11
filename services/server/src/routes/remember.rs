@@ -215,7 +215,13 @@ fn spawn_prepare_remember_job(
                 let (vector_result, encrypted_result) = tokio::join!(embed_fut, encrypt_fut);
                 let vector = vector_result?;
                 let encrypted = encrypted_result?;
-
+                crate::measurement::record_plaintext(
+                    state.db.pool().clone(),
+                    owner.clone(),
+                    namespace.clone(),
+                    i64::try_from(text.len()).unwrap_or(i64::MAX),
+                    "seal_encrypt",
+                );
                 // Reserve against quota, keyed by this job's id. The insert
                 // happens minutes later in jobs.rs (after the Walrus upload),
                 // so a plain check here would let a concurrent burst pass
