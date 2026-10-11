@@ -6,14 +6,14 @@ export interface WalletBalance {
   walBalance: bigint
   suiTotal: bigint
   walTotal: bigint
-  status: 'healthy' | 'warning' | 'critical'
+  status: 'ok' | 'low' | 'unknown'
 }
 
 export interface SponsorWallet {
   address: string
   suiBalance: bigint
   suiThreshold: bigint
-  status: 'healthy' | 'warning' | 'critical'
+  status: 'ok' | 'low' | 'unknown'
 }
 
 export interface UploadError {
@@ -110,10 +110,10 @@ async function makeAdminRequest(
       throw new Error('INVALID_KEY')
     }
     if (resp.status >= 500) {
-      throw new Error('SERVER_ERROR')
+      throw new Error(`SERVER_ERROR ${resp.status} ${endpoint}`)
     }
     const text = await resp.text()
-    throw new Error(text || `HTTP ${resp.status}`)
+    throw new Error(text || `HTTP ${resp.status} ${endpoint}`)
   }
 
   return resp.json()
@@ -171,10 +171,9 @@ interface RawConfigResponse {
   sponsor_sui_low_threshold_mist: string
 }
 
-function toBadgeStatus(status: string): 'healthy' | 'warning' | 'critical' {
-  if (status === 'ok') return 'healthy'
-  if (status === 'low') return 'critical'
-  return 'warning'
+function sourceWalletStatus(status: string): 'ok' | 'low' | 'unknown' {
+  if (status === 'ok' || status === 'low') return status
+  return 'unknown'
 }
 
 export async function fetchAdminWallets(
@@ -189,13 +188,13 @@ export async function fetchAdminWallets(
       walBalance: BigInt(wallet.wal || '0'),
       suiTotal: BigInt(wallet.sui_total || wallet.sui || '0'),
       walTotal: BigInt(wallet.wal_total || wallet.wal || '0'),
-      status: toBadgeStatus(wallet.status),
+      status: sourceWalletStatus(wallet.status),
     })),
     sponsorWallet: {
       address: raw.sponsor_wallet.address ?? 'Not configured',
       suiBalance: BigInt(raw.sponsor_wallet.sui || '0'),
       suiThreshold: BigInt(raw.sponsor_wallet.sui_threshold || '0'),
-      status: toBadgeStatus(raw.sponsor_wallet.status),
+      status: sourceWalletStatus(raw.sponsor_wallet.status),
     },
     lastUpdated: raw.uploader_pool.last_updated,
   }
@@ -428,3 +427,60 @@ export async function fetchAdminConfig(
     sponsorSuiLowThresholdMist: BigInt(raw.sponsor_sui_low_threshold_mist),
   }
 }
+
+export interface InventoryBreakdown {
+  key: string
+  rows: number
+  knownEncryptedBytes: bigint
+}
+
+export interface AdminInventory {
+  generatedAt: string
+  logicalRows: number
+  sizedRows: number
+  unknownSizeRows: number
+  distinctBlobs: number
+  uniqueEncryptedBytes: bigint
+  rowSumEncryptedBytes: bigint
+  plaintextBytes: bigint | null
+  encodedBytes: bigint | null
+  namespaces: InventoryBreakdown[]
+  owners: InventoryBreakdown[]
+}
+
+interface RawInventory {
+  generated_at: string
+  logical_rows: number
+  sized_rows: number
+  unknown_size_rows: number
+  distinct_blobs: number
+  unique_encrypted_bytes: string
+  row_sum_encrypted_bytes: string
+  plaintext_bytes: string | null
+  encoded_bytes: string | null
+  namespaces: Array<{ key: string; rows: number; known_encrypted_bytes: string }>
+  owners: Array<{ key: string; rows: number; known_encrypted_bytes: string }>
+}
+
+export async function fetchAdminInventory(adminKey: string): Promise<AdminInventory> {
+  const raw = (await makeAdminRequest('/inventory', adminKey)) as RawInventory
+  const mapBreakdown = (row: RawInventory['namespaces'][number]): InventoryBreakdown => ({
+    key: row.key,
+    rows: row.rows,
+    knownEncryptedBytes: BigInt(row.known_encrypted_bytes),
+  })
+  return {
+    generatedAt: raw.generated_at,
+    logicalRows: raw.logical_rows,
+    sizedRows: raw.sized_rows,
+    unknownSizeRows: raw.unknown_size_rows,
+    distinctBlobs: raw.distinct_blobs,
+    uniqueEncryptedBytes: BigInt(raw.unique_encrypted_bytes),
+    rowSumEncryptedBytes: BigInt(raw.row_sum_encrypted_bytes),
+    plaintextBytes: raw.plaintext_bytes == null ? null : BigInt(raw.plaintext_bytes),
+    encodedBytes: raw.encoded_bytes == null ? null : BigInt(raw.encoded_bytes),
+    namespaces: raw.namespaces.map(mapBreakdown),
+    owners: raw.owners.map(mapBreakdown),
+  }
+}
+

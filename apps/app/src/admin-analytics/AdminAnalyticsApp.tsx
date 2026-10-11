@@ -1,12 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Activity, Bell, Database, KeyRound, LayoutDashboard, LogOut, Settings, Shield, Users, Wallet } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
-import { AdminConfig } from '../components/AdminConfig'
+import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
-import { ActivityPage, ConfigPage, UnavailablePage, UploadJobsPage, WalletsPage } from './OpsPages'
-import { AdminUploadErrors } from '../components/AdminUploadErrors'
-import { AdminWalletBalances } from '../components/AdminWalletBalances'
+import { ActivityPage, ConfigPage, IncidentLivePage, QualityPage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage } from './OpsPages'
 import { config } from '../config'
 import './admin-analytics.css'
 import {
@@ -76,8 +74,8 @@ function rangeWindow(range: RangeId, day: string, timeZone: string, now: Date) {
       ? formatYmd(new Date(now.getTime() - 24 * 3600_000), timeZone)
       : day
     const bounds = calendarDayWindow(ymd, timeZone)
-    const end = range === 'today' ? now : bounds.end
-    return { start: bounds.start, end: end < bounds.end ? end : bounds.end, label: ymd }
+    return { start: bounds.start, end: bounds.end, label: ymd }
+
   }
   if (range === 'today') {
     const ymd = formatYmd(now, timeZone)
@@ -274,12 +272,6 @@ export function AdminAnalyticsApp({
     URL.revokeObjectURL(url)
   }
 
-  const liveOps = (node: ReactNode, empty: string) => {
-    if (!adminKey) {
-      return <p className="wa-note">{empty}</p>
-    }
-    return <div className="dash-page admin-dashboard-page">{node}</div>
-  }
 
   return (
     <div className="wa">
@@ -320,12 +312,13 @@ export function AdminAnalyticsApp({
             <p>{view === 'activity' ? 'Account usage, delegate activity and adoption trends' : view === 'uploads' ? 'Upload progress, failures and processing health' : view === 'wallets' ? 'Uploader balances, sponsor funding and measured spend' : view === 'incidents' ? 'Investigate changes in retrieval traffic and performance' : view === 'quality' ? 'Measurement coverage, freshness and collection gaps' : view === 'config' ? 'Relayer settings and operational thresholds' : view === 'access' ? 'Admin sessions and recorded administrative activity' : view === 'storage' ? 'Plaintext, encrypted payload and encoded inventory' : view === 'retrieval' ? 'Request bytes, latency and transfer boundaries' : view === 'accounts' ? 'Owner wallets, delegate keys and selected-day activity' : 'Storage, retrieval and account activity'}</p>
           </div>
           <div className="wa-actions">
-            <select className="wa-select" aria-label="Date range" value={range === 'week' ? '7d' : range} onChange={(event) => setParam('range', event.target.value)}>
-              <option value="today">Last 24 hours</option>
-              <option value="3d">Last 3 days</option>
-              <option value="7d">Last 7 days</option>
-            </select>
-            <span className="wa-env" title={`Prior window is the previous ${liveHours} hours on the dev relayer.`}>Compare to prior</span>
+            {['overview', 'retrieval', 'accounts', 'activity'].includes(view) && (
+              <select className="wa-select" aria-label="Date range" value={range} onChange={(event) => setParam('range', event.target.value)}>
+                {RANGES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            )}
+            {range === 'day' && ['overview', 'retrieval', 'accounts', 'activity'].includes(view) ? <input className="wa-input" aria-label="Selected day" type="date" value={day} onChange={(event) => setParam('day', event.target.value)} /> : null}
+            {['overview', 'retrieval', 'accounts', 'activity'].includes(view) && <span className="wa-env" title={`Activity comparisons use the previous ${liveHours} hours on the dev relayer.`}>Prior {liveHours}h</span>}
             <span className="wa-env">dev · {config.suiNetwork}</span>
           </div>
         </div>
@@ -346,6 +339,7 @@ export function AdminAnalyticsApp({
             error={activityQuery.error as Error | null}
             hours={liveHours}
             onInvalidKey={onInvalidKey}
+            onRetry={() => activityQuery.refetch()}
           />
         )}
         {view === 'overview' && demo && (
@@ -376,7 +370,7 @@ export function AdminAnalyticsApp({
           </>
         )}
 
-        {view === 'storage' && (demo ? <StorageView accounts={model.accounts} /> : <UnavailablePage title="Storage inventory unavailable" reason="The dev relayer does not store plaintext, encrypted, or encoded inventory snapshots. Wallet balances are on Wallets & Costs." />)}
+        {view === 'storage' && (demo ? <StorageView accounts={model.accounts} /> : adminKey && <StorageLivePage adminKey={adminKey} onInvalidKey={onInvalidKey} />)}
         {view === 'retrieval' && (demo ? (
           <RetrievalView
             requests={scoped}
@@ -384,15 +378,15 @@ export function AdminAnalyticsApp({
             upstream={upstream}
             onOpen={setRequestId}
           />
-        ) : <UnavailablePage title="Retrieval percentiles unavailable" reason="The dev relayer has request counters, not per-request byte distributions. p50/p90/p99 cannot be calculated from the activity API." />)}
+        ) : <RetrievalLivePage />)}
         {view === 'accounts' && (demo ? (
           <AccountTable rows={rows} sort={sort} onSort={setSort} onOpen={(id) => setParam('account', id)} query={query} onQuery={(value) => setParam('q', value)} showAll={showAll} onShowAll={(value) => setParam('all', value ? '1' : '')} />
-        ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} hours={liveHours} onInvalidKey={onInvalidKey} />)}
-        {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} hours={liveHours} onInvalidKey={onInvalidKey} />}
+        ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} hours={liveHours} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />)}
+        {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} hours={liveHours} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />}
         {view === 'uploads' && adminKey && <UploadJobsPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
-        {view === 'wallets' && adminKey && <WalletsPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
-        {view === 'incidents' && <UnavailablePage title="No verified incident" reason="The incident year and dates are unconfirmed. This page will not invent an April/May window." />}
-        {view === 'quality' && <UnavailablePage title="Coverage" reason="Request-byte percentiles, encoded size, and delegate lifecycle are not stored. Memories written and upload failures come from the admin activity and upload-error APIs." />}
+        {view === 'wallets' && adminKey && <WalletsPage adminKey={adminKey} onInvalidKey={onInvalidKey} activity={activityQuery.data} />}
+        {view === 'incidents' && (demo ? <IncidentView modelStart={model.incident} requests={scoped} now={now} timeZone={timeZone} /> : <IncidentLivePage />)}
+        {view === 'quality' && (demo ? <QualityView demo /> : <QualityPage activityError={activityQuery.error as Error | null} />)}
         {view === 'config' && adminKey && <ConfigPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
         {view === 'access' && (
           <section className="wa-panel">
@@ -449,16 +443,19 @@ function LiveOverview({
   error,
   hours,
   onInvalidKey,
+  onRetry,
 }: {
   activity: AdminActivity | undefined
   loading: boolean
   error: Error | null
   hours: number
   onInvalidKey: () => void
+  onRetry: () => void
 }) {
   if (error?.message === 'INVALID_KEY') onInvalidKey()
-  if (loading) return <p className="wa-note" style={{ padding: 16 }}>Loading dev relayer activity…</p>
-  if (!activity) return <p className="wa-note" style={{ padding: 16 }}>{error ? 'Dev relayer activity failed.' : 'No activity response.'}</p>
+  if (!activity) {
+    return <ActivityPage activity={activity} loading={loading} error={error} hours={hours} onInvalidKey={onInvalidKey} onRetry={onRetry} />
+  }
   const days = activity.actions.memoriesByDay
   const written = days.reduce((sum, day) => sum + day.count, 0)
   const points = days.map((day) => ({ label: day.day.slice(5), relayer: 0, upstream: 0, requests: day.count, latency: 0 }))
@@ -820,18 +817,6 @@ function RetrievalView({
   )
 }
 
-function ActivityView({ requests, accounts }: { requests: DemoRequest[]; accounts: number }) {
-  const writes = requests.filter((request) => request.operation === 'restore').length
-  return (
-    <section className="wa-panel">
-      <h3>Activity</h3>
-      <div className="wa-split"><span>Active accounts</span><b>{accounts}</b></div>
-      <div className="wa-split"><span>Authenticated operations</span><b>{requests.length}</b></div>
-      <div className="wa-split"><span>Distinct delegates</span><b>{new Set(requests.map((request) => request.delegateId ?? 'owner-session')).size}</b></div>
-      <p className="wa-note">Restore rows in this fixture are not writes. D1/D7/D30 retention is unavailable until account lifecycle events exist. {writes} restore operations are listed separately and are not a retention cohort.</p>
-    </section>
-  )
-}
 
 function IncidentView({
   modelStart,

@@ -149,7 +149,7 @@ export function buildDemo(now: Date): DemoModel {
           upstream: 'relayer',
           bytes: String(relayer),
           latencyMs: 12 + Math.floor(rand() * 40),
-          outcome: status === 'ok' ? 'served' : status,
+          outcome: status === 'ok' ? 'served' : 'error',
         },
         {
           id: `${requestId}_a2`,

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { LogOut } from 'lucide-react'
+
 import { useQueryClient } from '@tanstack/react-query'
 import { AdminAnalyticsApp } from '../admin-analytics/AdminAnalyticsApp'
 import { AdminKeyEntry } from '../components/AdminKeyEntry'

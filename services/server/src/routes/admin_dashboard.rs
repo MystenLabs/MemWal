@@ -287,6 +287,119 @@ pub async fn get_admin_config(
     }))
 }
 
+#[derive(Debug, Serialize)]
+pub struct InventoryBreakdown {
+    pub key: String,
+    pub rows: i64,
+    pub known_encrypted_bytes: String,
+}
+
+/// Current encrypted-size inventory from `vector_entries.blob_size_bytes`.
+///
+/// Zero is the column default, so a zero row is unknown size, not an empty
+/// blob. Shared blobs are counted once in `unique_encrypted_bytes`. Plaintext
+/// length and Walrus encoded allocation are not in this table.
+#[derive(Debug, Serialize)]
+pub struct InventoryResponse {
+    pub generated_at: String,
+    pub logical_rows: i64,
+    pub sized_rows: i64,
+    pub unknown_size_rows: i64,
+    pub distinct_blobs: i64,
+    pub unique_encrypted_bytes: String,
+    pub row_sum_encrypted_bytes: String,
+    pub plaintext_bytes: Option<String>,
+    pub encoded_bytes: Option<String>,
+    pub namespaces: Vec<InventoryBreakdown>,
+    pub owners: Vec<InventoryBreakdown>,
+}
+
+#[tracing::instrument(name = "admin.inventory", skip_all)]
+pub async fn get_inventory(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<InventoryResponse>, AppError> {
+    let totals: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        WITH sized AS (
+            SELECT blob_id, MAX(blob_size_bytes) AS blob_bytes
+            FROM vector_entries
+            WHERE blob_size_bytes > 0
+            GROUP BY blob_id
+        )
+        SELECT
+            (SELECT COUNT(*)::BIGINT FROM vector_entries),
+            (SELECT COUNT(*)::BIGINT FROM vector_entries WHERE blob_size_bytes > 0),
+            (SELECT COUNT(*)::BIGINT FROM vector_entries WHERE blob_size_bytes <= 0),
+            (SELECT COUNT(DISTINCT blob_id)::BIGINT FROM vector_entries),
+            (SELECT COALESCE(SUM(blob_size_bytes), 0)::BIGINT FROM vector_entries WHERE blob_size_bytes > 0),
+            (SELECT COALESCE(SUM(blob_bytes), 0)::BIGINT FROM sized)
+        "#,
+    )
+    .fetch_one(state.db.pool())
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to read storage inventory: {e}")))?;
+
+    let namespaces = load_inventory_breakdown(
+        state.db.pool(),
+        r#"
+        SELECT namespace,
+               COUNT(*)::BIGINT,
+               COALESCE(SUM(blob_size_bytes) FILTER (WHERE blob_size_bytes > 0), 0)::BIGINT
+        FROM vector_entries
+        GROUP BY namespace
+        ORDER BY 3 DESC, 2 DESC
+        LIMIT 12
+        "#,
+    )
+    .await?;
+    let owners = load_inventory_breakdown(
+        state.db.pool(),
+        r#"
+        SELECT owner,
+               COUNT(*)::BIGINT,
+               COALESCE(SUM(blob_size_bytes) FILTER (WHERE blob_size_bytes > 0), 0)::BIGINT
+        FROM vector_entries
+        GROUP BY owner
+        ORDER BY 3 DESC, 2 DESC
+        LIMIT 12
+        "#,
+    )
+    .await?;
+
+    Ok(Json(InventoryResponse {
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        logical_rows: totals.0,
+        sized_rows: totals.1,
+        unknown_size_rows: totals.2,
+        distinct_blobs: totals.3,
+        row_sum_encrypted_bytes: totals.4.to_string(),
+        unique_encrypted_bytes: totals.5.to_string(),
+        plaintext_bytes: None,
+        encoded_bytes: None,
+        namespaces,
+        owners,
+    }))
+}
+
+async fn load_inventory_breakdown(
+    pool: &sqlx::PgPool,
+    sql: &str,
+) -> Result<Vec<InventoryBreakdown>, AppError> {
+    let rows = sqlx::query_as::<_, (String, i64, i64)>(sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read inventory breakdown: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .map(|(key, rows, bytes)| InventoryBreakdown {
+            key,
+            rows,
+            known_encrypted_bytes: bytes.to_string(),
+        })
+        .collect())
+}
+
+
 // ============================================================
 // Unit Tests for Admin Dashboard Routes
 // ============================================================

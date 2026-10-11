@@ -159,7 +159,11 @@
 .wa-kpi .value { margin-top: 8px; font-size: 26px; font-weight: 500; letter-spacing: 0; line-height: 1.1; }
 .wa-kpi .delta { margin-top: 8px; color: var(--wa-muted); font-size: 12px; }
 .wa-kpi .delta.down { color: var(--wa-red); }
-.wa-unavailable { color: var(--wa-yellow); }
+.wa-unavailable { color: var(--wa-muted); }
+a.wa-ext { color: var(--wa-text); text-decoration: none; border-bottom: 1px solid #3a3a3a; }
+a.wa-ext:hover, a.wa-ext:focus-visible { color: #fff; border-bottom-color: var(--wa-accent); }
+.wa-num { text-align: right; font-variant-numeric: tabular-nums; }
+.wa-table th.wa-num { text-align: right; }
 
 .wa-board {
   display: grid;

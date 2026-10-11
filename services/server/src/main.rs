@@ -2691,6 +2691,10 @@ async fn main() {
             "/api/admin/activity",
             get(routes::admin_activity::get_admin_activity).layer(DefaultBodyLimit::max(16 * 1024)),
         )
+        .route(
+            "/api/admin/inventory",
+            get(routes::admin_dashboard::get_inventory).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .layer(middleware::from_fn(auth::verify_admin_key));
 
     // Public routes
