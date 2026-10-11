@@ -2707,6 +2707,10 @@ async fn main() {
             "/api/admin/coverage",
             get(routes::admin_dashboard::get_coverage).layer(DefaultBodyLimit::max(16 * 1024)),
         )
+        .route(
+            "/api/admin/quality",
+            get(routes::quality::get_quality).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .layer(middleware::from_fn(auth::verify_admin_key));
 
     // Public routes

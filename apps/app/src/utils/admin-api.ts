@@ -590,5 +590,80 @@ export async function fetchAdminCoverage(adminKey: string): Promise<MeasurementC
   }
 }
 
+export interface QualitySource {
+  id: string
+  name: string
+  capability: string
+  health: string
+  coverage: string
+  classification: string
+  population: string
+  observed: number | null
+  expected: number | null
+  coveragePercent: number | null
+  since: string | null
+  lastSuccess: string | null
+  limitation: string
+  detail: string
+  view: string | null
+}
+
+export interface QualityInventory {
+  generatedAt: string
+  checkedAt: string
+  commonCompleteness: string | null
+  oldestHealthyUpdate: string | null
+  sources: QualitySource[]
+}
+
+export async function fetchAdminQuality(adminKey: string): Promise<QualityInventory> {
+  const raw = (await makeAdminRequest('/quality', adminKey)) as {
+    generated_at: string
+    checked_at: string
+    common_completeness: string | null
+    oldest_healthy_update: string | null
+    sources: Array<{
+      id: string
+      name: string
+      capability: string
+      health: string
+      coverage: string
+      classification: string
+      population: string
+      observed: number | null
+      expected: number | null
+      coverage_percent: number | null
+      since: string | null
+      last_success: string | null
+      limitation: string
+      detail: string
+      view: string | null
+    }>
+  }
+  return {
+    generatedAt: raw.generated_at,
+    checkedAt: raw.checked_at,
+    commonCompleteness: raw.common_completeness,
+    oldestHealthyUpdate: raw.oldest_healthy_update,
+    sources: raw.sources.map((source) => ({
+      id: source.id,
+      name: source.name,
+      capability: source.capability,
+      health: source.health,
+      coverage: source.coverage,
+      classification: source.classification,
+      population: source.population,
+      observed: source.observed,
+      expected: source.expected,
+      coveragePercent: source.coverage_percent,
+      since: source.since,
+      lastSuccess: source.last_success,
+      limitation: source.limitation,
+      detail: source.detail,
+      view: source.view,
+    })),
+  }
+}
+
 
 

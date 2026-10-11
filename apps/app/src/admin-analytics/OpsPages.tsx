@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
+  fetchAdminActivity,
   fetchAdminConfig,
   fetchAdminErrors,
   fetchAdminCoverage,
@@ -15,6 +16,7 @@ import {
   type UploadError,
 } from '../utils/admin-api'
 import { formatBytes, formatCount } from './metrics'
+import { baselineChange, investigationWindows } from './range'
 
 function useInvalid(error: unknown, onInvalidKey: () => void) {
   const invalid = error instanceof Error && error.message === 'INVALID_KEY'
@@ -440,24 +442,199 @@ export function RetrievalLivePage() {
   )
 }
 
-export function IncidentLivePage() {
+function formatWhen(value: Date, timeZone: string) {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(value)
+}
+
+export function IncidentLivePage({
+  adminKey,
+  period,
+  timeZone,
+  baseline,
+  onInvalidKey,
+  onOpenDay,
+  onOpenQuality,
+}: {
+  adminKey: string | null
+  period: { start: Date; end: Date; label: string; partial?: boolean }
+  timeZone: string
+  baseline: { start: Date; end: Date; label: string } | null
+  onInvalidKey: () => void
+  onOpenDay: (ymd: string) => void
+  onOpenQuality: () => void
+}) {
+  const now = useMemo(() => new Date(), [period.start.getTime(), period.end.getTime()])
+  const adjacent = investigationWindows(period, now)
+  const before = baseline ?? adjacent.before
+  const during = useQuery({
+    queryKey: ['incident-during', period.start.toISOString(), period.end.toISOString(), before.start.toISOString()],
+    queryFn: () => fetchAdminActivity(adminKey as string, { start: period.start, end: period.end, priorStart: before.start }),
+    enabled: Boolean(adminKey),
+    retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
+  })
+  const beforeSeries = useQuery({
+    queryKey: ['incident-before', before.start.toISOString(), before.end.toISOString()],
+    queryFn: () => fetchAdminActivity(adminKey as string, { start: before.start, end: before.end }),
+    enabled: Boolean(adminKey),
+    retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
+  })
+  const after = useQuery({
+    queryKey: ['incident-after', adjacent.after?.start.toISOString() ?? '', adjacent.after?.end.toISOString() ?? ''],
+    queryFn: () => fetchAdminActivity(adminKey as string, { start: adjacent.after!.start, end: adjacent.after!.end }),
+    enabled: Boolean(adminKey && adjacent.after),
+    retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
+  })
+  const coverage = useQuery({
+    queryKey: ['admin', 'coverage'],
+    queryFn: () => fetchAdminCoverage(adminKey as string),
+    enabled: Boolean(adminKey),
+    retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
+  })
+  const [hover, setHover] = useState<number | null>(null)
+  const [ownerSort, setOwnerSort] = useState<'uploads' | 'owner'>('uploads')
+  useInvalid(during.error, onInvalidKey)
+  if (!adminKey) return null
+  if (during.isLoading && !during.data) return <div className="wa-page"><Skeleton rows={6} /></div>
+  if (during.error && !during.data) {
+    return (
+      <div className="wa-page">
+        <section className="wa-panel">
+          <h2>Analytics request failed</h2>
+          <p className="wa-note">{failureDetail(during.error as Error, 'GET /api/admin/activity')}</p>
+          <button className="wa-btn" type="button" onClick={() => during.refetch()}>Retry</button>
+        </section>
+      </div>
+    )
+  }
+  const actions = during.data?.actions
+  const retrievalReason = coverage.data?.retrievalRecords
+    ? `${formatCount(coverage.data.retrievalRecords)} retrieval records since ${coverage.data.retrievalSince ?? 'collection start'}. This window is not a request-level population.`
+    : 'No retrievals recorded. Collection has not stored a retrieval request, so percentiles are not calculated.'
+  const points = [
+    ...(beforeSeries.data?.actions.memoriesByDay ?? []).map((day) => ({ ...day, region: 'before' as const })),
+    ...(actions?.memoriesByDay ?? []).map((day) => ({ ...day, region: 'during' as const })),
+    ...(after.data?.actions.memoriesByDay ?? []).map((day) => ({ ...day, region: 'after' as const })),
+  ]
+  const peak = Math.max(1, ...points.map((point) => point.count))
+  const duringHours = Math.max(1 / 60, (period.end.getTime() - period.start.getTime()) / 3_600_000)
+  const beforeHours = Math.max(1 / 60, (before.end.getTime() - before.start.getTime()) / 3_600_000)
+  const unequal = Math.abs(duringHours - beforeHours) > 0.05
+  const owners = [...(actions?.topOwners ?? [])].sort((left, right) => ownerSort === 'owner' ? left.owner.localeCompare(right.owner) : right.uploadsCompleted - left.uploadsCompleted)
+  const duringUploads = actions?.uploadsCompleted ?? 0
+  const beforeUploads = actions?.uploadsCompletedPrior ?? 0
+  const exportInvestigation = () => {
+    const header = ['section', 'metric', 'before', 'during', 'after', 'change', 'definition', 'source']
+    const body = [
+      ['window', 'start', before.start.toISOString(), period.start.toISOString(), adjacent.after?.start.toISOString() ?? '', '', 'UTC half-open', 'resolved URL range'],
+      ['window', 'end', before.end.toISOString(), period.end.toISOString(), adjacent.after?.end.toISOString() ?? '', '', timeZone, 'resolved URL range'],
+      ['write', 'uploads_completed', String(beforeUploads), String(duringUploads), adjacent.after ? String(after.data?.actions.uploadsCompleted ?? '') : 'not_yet_available', baselineChange(duringUploads, beforeUploads), 'remember_jobs completed in the window', 'GET /api/admin/activity'],
+      ['write', 'uploads_failed', String(actions?.uploadsFailedPrior ?? 0), String(actions?.uploadsFailed ?? 0), adjacent.after ? String(after.data?.actions.uploadsFailed ?? '') : 'not_yet_available', baselineChange(actions?.uploadsFailed ?? 0, actions?.uploadsFailedPrior ?? 0), 'remember_jobs failed in the window', 'GET /api/admin/activity'],
+      ['retrieval', 'requests', '', '', '', '', retrievalReason, coverage.data ? 'GET /api/admin/coverage' : 'coverage unavailable'],
+      ['retrieval', 'node_bytes', '', '', '', '', 'Node provider correlation unavailable', 'not measured'],
+      ['reported', '2026-10-10 cold read', '', '', '', '', 'Reported, verification pending. Not a request percentile for this window.', 'separate snapshot'],
+    ]
+    const blob = new Blob([toCsv([header, ...body])], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'incident-investigation.csv'
+    link.click()
+    URL.revokeObjectURL(url)
+  }
   return (
     <div className="wa-page">
       <section className="wa-panel">
-        <h2>No verified incident window</h2>
-        <p className="wa-note">The incident year and exact start are unconfirmed. This page will not pick April or May.</p>
+        <div className="wa-chart-head">
+          <h2>No saved incidents</h2>
+          <button className="wa-btn" type="button" onClick={exportInvestigation}>Export investigation</button>
+        </div>
+        <p className="wa-note">Choose a time window to investigate traffic and performance. This is a custom investigation, not a confirmed incident window. April and May are not guessed.</p>
+        <p className="wa-note">During: {period.label}, {formatWhen(period.start, timeZone)} – {formatWhen(period.end, timeZone)} ({timeZone}){period.partial || adjacent.ongoing ? ' · partial' : ''}. Before: {before.label}, {formatWhen(before.start, timeZone)} – {formatWhen(before.end, timeZone)}. After: {adjacent.after ? `${adjacent.after.label}, ${formatWhen(adjacent.after.start, timeZone)} – ${formatWhen(adjacent.after.end, timeZone)}` : 'Not yet available. The during window is still open.'}</p>
+        <button className="wa-btn" type="button" onClick={onOpenQuality}>View measurement coverage</button>
+      </section>
+      <div className="wa-kpis">
+        <article className="wa-kpi"><div className="label">Uploads completed</div><div className="value">{formatCount(duringUploads)}</div><div className="delta">{baselineChange(duringUploads, beforeUploads)} vs before</div></article>
+        <article className="wa-kpi"><div className="label">Uploads / hour</div><div className="value">{(duringUploads / duringHours).toFixed(2)}</div><div className="delta">{unequal ? 'Windows differ in length' : 'Same elapsed duration'}</div></article>
+        <article className="wa-kpi"><div className="label">Retrieval requests</div><div className="value wa-unavailable">—</div><div className="delta">No request records</div></article>
+        <article className="wa-kpi"><div className="label">Relayer p99</div><div className="value wa-unavailable">—</div><div className="delta">Histogram not registered</div></article>
+        <article className="wa-kpi"><div className="label">Aggregator p99</div><div className="value wa-unavailable">—</div><div className="delta">Not retained per request</div></article>
+        <article className="wa-kpi"><div className="label">Node transfer</div><div className="value wa-unavailable">—</div><div className="delta">Correlation unavailable</div></article>
+      </div>
+      <div className="wa-invest">
+        <section className="wa-panel">
+          <div className="wa-chart-head">
+            <h2>Memories created</h2>
+            <span className="wa-note">Count · {timeZone} · not retrieval bytes</span>
+          </div>
+          {points.length === 0 ? <p className="wa-empty">No memories created in these measured windows.</p> : (
+            <div className="wa-timeline">
+              <svg viewBox="0 0 640 220" role="img" aria-label="Memories created by day">
+                {points.map((point, index) => {
+                  const bar = Math.max(8, 600 / points.length - 6)
+                  const height = Math.max(2, (point.count / peak) * 160)
+                  const x = 20 + index * (bar + 6)
+                  return (
+                    <g key={`${point.region}-${point.day}`}>
+                      <rect x={x} y={180 - height} width={bar} height={height} rx="2" fill={point.region === 'during' ? '#8055ff' : point.region === 'before' ? '#3a3a3a' : '#6a5acd'} onMouseEnter={() => setHover(index)} onMouseLeave={() => setHover(null)} onClick={() => onOpenDay(point.day)} />
+                      <text x={x} y="198" fill="#8a8a8a" fontSize="10">{point.day.slice(5)}</text>
+                    </g>
+                  )
+                })}
+              </svg>
+              {hover != null && points[hover] && (
+                <div className="wa-tip">{points[hover].day} · {timeZone} · memories created · {points[hover].count} · {points[hover].region} · sample is the day count · no deployment annotation</div>
+              )}
+              <p className="wa-note">Gray is before, violet is during, lighter violet is after. Click a day to open that calendar day. Missing retrieval series are omitted, not drawn as zero.</p>
+            </div>
+          )}
+        </section>
+        <section className="wa-panel">
+          <h2>Coverage and evidence</h2>
+          <p className="wa-note">{coverage.isError ? 'Coverage request failed. Write counts on the left are still usable.' : retrievalReason}</p>
+          <p className="wa-note">Earliest request detail: {coverage.data?.retrievalSince ?? 'none'}. Complete through: {during.data?.generatedAt ?? 'unknown'}. Aggregate retrieval histograms: not registered. Known gap: no per-request byte, latency, cache, or retry series.</p>
+          <p className="wa-note">10 Oct 2026 snapshot, reported, verification pending: 239.6 MiB plain, 10.11 TiB encoded accounting, 168,376 blobs, one cold-read node transfer of 445,556 B, aggregator-to-relayer p50/p90/p99 of 555 / 1,537 / 20,412 B. It does not fill this timeline or April/May percentiles.</p>
+          <h3>What changed</h3>
+          <p className="wa-note">Observed: uploads completed moved from {formatCount(beforeUploads)} to {formatCount(duringUploads)} ({baselineChange(duringUploads, beforeUploads)}). {owners[0] ? `${shortAddress(owners[0].owner)} completed ${formatCount(owners[0].uploadsCompleted)} of ${formatCount(duringUploads)} during uploads.` : 'No owner completed an upload in the during window.'}</p>
+          <p className="wa-note">Evidence: activity counts for the resolved windows. Retrieval volume, payload size, cache misses, retries, and latency are not in this response.</p>
+          <p className="wa-note">Hypothesis: none. Confirmed cause: none. An upload change is not a retrieval-incident cause.</p>
+          {coverage.isError && <button className="wa-btn" type="button" onClick={() => coverage.refetch()}>Retry coverage</button>}
+        </section>
+      </div>
+      {during.isError && during.data && <p className="wa-note">Refresh failed. Showing the last successful activity result from {during.data.generatedAt}.</p>}
+      <section className="wa-panel">
+        <h2>Before / during / after</h2>
+        <p className="wa-note">{unequal ? `Before is ${beforeHours.toFixed(1)} h and during is ${duringHours.toFixed(1)} h. Compare the per-hour rate, not only the raw count.` : 'Before and during use the same elapsed duration.'} Population is completed or failed remember jobs, not retrieval requests.</p>
         <div className="wa-table-wrap">
           <table className="wa-table">
-            <thead><tr><th>Window</th><th>Requests</th><th>p50 bytes</th><th>p99 bytes</th><th>p99 latency</th></tr></thead>
+            <thead><tr><th>Metric</th><th>Before</th><th>During</th><th>After</th><th>During vs before</th></tr></thead>
             <tbody>
-              {['Before', 'During', 'After'].map((label) => (
-                <tr key={label}>
-                  <td>{label}</td>
-                  <td className="wa-unavailable">Unavailable</td>
-                  <td className="wa-unavailable">Unavailable</td>
-                  <td className="wa-unavailable">Unavailable</td>
-                  <td className="wa-unavailable">Unavailable</td>
-                </tr>
+              <tr><td>Uploads completed</td><td className="num">{formatCount(beforeUploads)}</td><td className="num">{formatCount(duringUploads)}</td><td className="num">{adjacent.after ? (after.isLoading ? '…' : formatCount(after.data?.actions.uploadsCompleted ?? 0)) : 'Not yet available'}</td><td>{baselineChange(duringUploads, beforeUploads)}{unequal ? ` · ${(duringUploads / duringHours).toFixed(2)}/h vs ${(beforeUploads / beforeHours).toFixed(2)}/h` : ''}</td></tr>
+              <tr><td>Uploads failed</td><td className="num">{formatCount(actions?.uploadsFailedPrior ?? 0)}</td><td className="num">{formatCount(actions?.uploadsFailed ?? 0)}</td><td className="num">{adjacent.after ? formatCount(after.data?.actions.uploadsFailed ?? 0) : 'Not yet available'}</td><td>{baselineChange(actions?.uploadsFailed ?? 0, actions?.uploadsFailedPrior ?? 0)}</td></tr>
+              <tr><td>Memory deletes</td><td className="num">{formatCount(actions?.memoryDeletesPrior ?? 0)}</td><td className="num">{formatCount(actions?.memoryDeletes ?? 0)}</td><td className="num">{adjacent.after ? formatCount(after.data?.actions.memoryDeletes ?? 0) : 'Not yet available'}</td><td>{baselineChange(actions?.memoryDeletes ?? 0, actions?.memoryDeletesPrior ?? 0)}</td></tr>
+              <tr><td>Retrieval requests</td><td className="wa-unavailable" colSpan={4}>{retrievalReason}</td></tr>
+              <tr><td>Relayer → client bytes</td><td className="wa-unavailable" colSpan={4}>Response-body histograms are not registered. Not substituted from upload size.</td></tr>
+              <tr><td>Aggregator → relayer bytes</td><td className="wa-unavailable" colSpan={4}>Upstream body bytes are not retained per request.</td></tr>
+              <tr><td>Node → aggregator bytes</td><td className="wa-unavailable" colSpan={4}>Node provider correlation unavailable.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="wa-panel">
+        <h2>Upload contributors</h2>
+        <p className="wa-note">During-window owners only. Delegate, bytes, latency, cache, and retry are not on this response, so those rankings are not shown. Before-window owners are not returned, so new versus returning cannot be separated.</p>
+        <div className="wa-table-wrap">
+          <table className="wa-table">
+            <thead><tr><th><button type="button" onClick={() => setOwnerSort('owner')}>Owner{ownerSort === 'owner' ? ' ↓' : ''}</button></th><th><button type="button" onClick={() => setOwnerSort('uploads')}>Uploads completed{ownerSort === 'uploads' ? ' ↓' : ''}</button></th><th>Share of during uploads</th></tr></thead>
+            <tbody>
+              {owners.length === 0 ? <tr><td colSpan={3} className="wa-empty">No completed uploads in this window.</td></tr> : owners.map((owner) => (
+                <tr key={owner.owner}><td className="mono">{shortAddress(owner.owner)}</td><td className="num">{formatCount(owner.uploadsCompleted)}</td><td className="num">{duringUploads ? `${Math.round((owner.uploadsCompleted / duringUploads) * 100)}%` : 'No baseline'}</td></tr>
               ))}
             </tbody>
           </table>
@@ -467,54 +644,6 @@ export function IncidentLivePage() {
   )
 }
 
-export function QualityPage({ activityError, adminKey }: { activityError: Error | null; adminKey: string | null }) {
-  const coverage = useQuery({
-    queryKey: ['admin', 'coverage'],
-    queryFn: () => fetchAdminCoverage(adminKey as string),
-    enabled: Boolean(adminKey),
-    retry: false,
-  })
-  const activityState = activityError ? 'Failed' : 'Collected'
-  const rows = [
-    ['Account activity', 'GET /api/admin/activity', activityState, 'Top owners and write counts. Not every account.'],
-    ['Writes', 'remember jobs', activityState, 'Completed, failed, and in-flight counters.'],
-    ['Retrieval requests', 'Not collected', 'Unsupported', 'No request-byte or latency population.'],
-    ['Plaintext sizes', 'Not stored', 'Unsupported', 'Production rows do not keep plaintext length.'],
-    ['Encrypted sizes', 'vector_entries.blob_size_bytes', 'Partial', 'Zero is the column default, so coverage is sized rows only.'],
-    ['Encoded storage', 'Not collected', 'Unsupported', 'Walrus allocation field is not verified or stored.'],
-    ['Relayer response bytes', 'Not collected', 'Unsupported', 'No per-request histogram.'],
-    ['Node egress', 'Not collected', 'Unsupported', 'No correlated node telemetry.'],
-    ['Delegate lifecycle', 'Not collected', 'Unsupported', 'Auth cache is not a registry.'],
-    ['Upload failures', 'GET /api/admin/upload-errors', 'Collected', 'Failures only. Not queue depth.'],
-    ['Wallet balances', 'GET /api/admin/wallets', 'Collected', 'Current balances. Low is below threshold, not a critical tier.'],
-  ]
-  return (
-    <div className="wa-page">
-      <div className="wa-kpis">
-        <Kpi label="Sources listed" value={formatCount(rows.length)} delta="Defined inventory" />
-        <Kpi label="Collected" value={formatCount(rows.filter((row) => row[2] === 'Collected').length)} delta="Live admin routes" />
-        <Kpi label="Partial" value={formatCount(rows.filter((row) => row[2] === 'Partial').length)} delta="Known subtotal only" />
-        <Kpi label="Unsupported" value={formatCount(rows.filter((row) => row[2] === 'Unsupported').length)} delta="Not a zero" />
-        <Kpi label="Failed now" value={activityError ? '1' : '0'} delta={activityError ? activityError.message : 'Activity route'} />
-        <Kpi label="Latest complete" value="—" delta="Per-source timestamps differ" />
-      </div>
-      <section className="wa-panel">
-        <h2>Coverage</h2>
-        <p className="wa-note">{coverage.data ? `Retrieval records ${coverage.data.retrievalRecords} since ${coverage.data.retrievalSince ?? 'none yet'}. Plaintext observations ${coverage.data.plaintextObservations}. Snapshots ${coverage.data.snapshots}. Audit events ${coverage.data.auditEvents}.` : coverage.error ? 'Coverage route is not on the running relayer yet.' : 'Loading coverage.'} Encoded storage, delegate lifecycle, and provider bandwidth stay unavailable.</p>
-        <div className="wa-table-wrap">
-          <table className="wa-table">
-            <thead><tr><th>Metric</th><th>Source</th><th>Status</th><th>Limitation</th></tr></thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row[0]}><td>{row[0]}</td><td className="wa-mono">{row[1]}</td><td>{row[2]}</td><td>{row[3]}</td></tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-    </div>
-  )
-}
 
 export function ConfigPage({ adminKey, onInvalidKey }: { adminKey: string; onInvalidKey: () => void }) {
   const query = useQuery({

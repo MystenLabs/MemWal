@@ -137,18 +137,24 @@ export function resolveRange(
     }
   }
   if (preset === 'month' || preset === 'last-month' || preset === 'month-pick') {
-    const picked = preset === 'month-pick' && selected.month ? selected.month.split('-').map(Number) : [local.year, local.month]
+    const previous = local.month === 1 ? { year: local.year - 1, month: 12 } : { year: local.year, month: local.month - 1 }
+    const picked = preset === 'month-pick' && selected.month
+      ? selected.month.split('-').map(Number)
+      : preset === 'last-month'
+        ? [previous.year, previous.month]
+        : [local.year, local.month]
     const year = picked[0]
     const month = picked[1]
     const start = localMidnight(year, month, 1, timeZone)
     const next = month === 12 ? { year: year + 1, month: 1 } : { year, month: month + 1 }
     const end = localMidnight(next.year, next.month, 1, timeZone)
     const current = preset === 'month' || (preset === 'month-pick' && year === local.year && month === local.month)
+    const names = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
     return {
       preset,
       start,
       end: current && end > now ? now : end,
-      label: `${MONTHS[month - 1]} ${year}`,
+      label: `${names[month - 1]} ${year}`,
       partial: current && end > now,
     }
   }
@@ -227,4 +233,34 @@ export function comparisonWindow(compare: CompareId, applied: AppliedRange, time
   const day = clampDay(year, month, local.day)
   const start = zonedLocalToUtc(year, month, day, 0, 0, 0, timeZone)
   return { start, end: new Date(start.getTime() + duration), label: 'Same period last month' }
+}
+
+export function baselineChange(current: number, baseline: number): string {
+  if (baseline === 0) return 'No baseline'
+  const change = ((current - baseline) / baseline) * 100
+  return `${change > 0 ? '+' : ''}${change.toFixed(0)}%`
+}
+
+export function investigationWindows(during: { start: Date; end: Date }, now: Date) {
+  const duration = Math.max(0, during.end.getTime() - during.start.getTime())
+  const before = {
+    start: new Date(during.start.getTime() - duration),
+    end: during.start,
+    label: 'Equal duration immediately before',
+  }
+  if (during.end.getTime() >= now.getTime()) {
+    return { before, after: null, ongoing: true }
+  }
+  const afterEnd = new Date(during.end.getTime() + duration)
+  const partial = afterEnd.getTime() > now.getTime()
+  return {
+    before,
+    ongoing: false,
+    after: {
+      start: during.end,
+      end: partial ? now : afterEnd,
+      partial,
+      label: partial ? 'Partial window after the investigation' : 'Equal duration immediately after',
+    },
+  }
 }

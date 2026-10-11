@@ -28,6 +28,7 @@ mod accounts;
 mod admin;
 pub mod admin_activity;
 pub mod admin_dashboard;
+pub mod quality;
 mod analyze;
 mod memory_read;
 pub mod oauth;

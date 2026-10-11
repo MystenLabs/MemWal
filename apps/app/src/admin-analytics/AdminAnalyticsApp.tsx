@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Database, KeyRound, LayoutDashboard, LogOut, Settings, Shield, Users, Wallet } from 'lucide-react'
+import { Activity, AlertTriangle, Database, KeyRound, LayoutDashboard, LogOut, Settings, Shield, Users, Wallet } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
-import { ActivityPage, ConfigPage, IncidentLivePage, QualityPage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage } from './OpsPages'
+import { ActivityPage, ConfigPage, IncidentLivePage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage } from './OpsPages'
+import { QualityPage } from './QualityPage'
 import { DateRangeControl } from './DateRangeControl'
-import { comparisonWindow, isRangeId, resolveRange, type CompareId, type RangeId } from './range'
+import { comparisonWindow, formatSpan, isRangeId, resolveRange, type CompareId, type RangeId } from './range'
 import { config } from '../config'
 import './admin-analytics.css'
 import {
@@ -108,11 +109,11 @@ function Chart({
           <circle key={point.label} cx={x(index)} cy={y(pick(point))} r={hover === index ? 4 : 2.5} fill="#7c6af7" onMouseEnter={() => setHover(index)} onMouseLeave={() => setHover(null)} />
         ))}
         {points.map((point, index) => index % Math.ceil(points.length / 6) === 0 ? (
-          <text key={`${point.label}-x`} x={x(index)} y={height - 8} fill="#6f6f6f" fontSize="10" textAnchor="middle">{point.label.slice(5)}</text>
+          <text key={`${point.label}-x`} x={x(index)} y={height - 8} fill="#9a9a9a" fontSize="11" textAnchor="middle">{/^\d{4}-\d{2}-\d{2}T/.test(point.label) ? point.label.slice(11, 16) : /^\d{4}-\d{2}-\d{2}/.test(point.label) ? point.label.slice(5, 10) : point.label}</text>
         ) : null)}
       </svg>
       {hover != null && points[hover] && (
-        <div className="wa-tip" style={{ left: 48, top: 8 }}>{points[hover].label}: {series === 'bytes' ? formatBytes(BigInt(pick(points[hover]))) : pick(points[hover])} {unit}</div>
+        <div className="wa-tip" style={{ left: 48, top: 8 }}>{points[hover].label}: {series === 'bytes' ? formatBytes(BigInt(pick(points[hover]))) : pick(points[hover])} {series === 'requests' ? 'memories' : unit}</div>
       )}
     </div>
   )
@@ -263,7 +264,7 @@ export function AdminAnalyticsApp({
           <div key={group}>
             <div className="wa-group">{group.toUpperCase()}</div>
             {VIEWS.filter((item) => item.group === group).map((item) => {
-              const Icon = item.id === 'overview' ? LayoutDashboard : item.id === 'storage' ? Database : item.id === 'retrieval' ? Activity : item.id === 'accounts' ? Users : item.id === 'wallets' ? Wallet : item.id === 'config' ? Settings : item.id === 'access' ? Shield : KeyRound
+              const Icon = item.id === 'overview' ? LayoutDashboard : item.id === 'storage' ? Database : item.id === 'retrieval' ? Activity : item.id === 'accounts' ? Users : item.id === 'incidents' ? AlertTriangle : item.id === 'wallets' ? Wallet : item.id === 'config' ? Settings : item.id === 'access' ? Shield : KeyRound
               return (
               <button key={item.id} className="wa-navbtn" aria-current={view === item.id ? 'page' : undefined} onClick={() => setParam('view', item.id)}>
                 <Icon className="wa-ico" size={14} />
@@ -292,14 +293,28 @@ export function AdminAnalyticsApp({
               <DateRangeControl
                 range={range}
                 label={period.label}
-                onRange={(id) => setParam('range', id)}
                 compare={compare}
-                compareLabel={compared?.label ?? 'No comparison'}
+                compareLabel={compared ? `${formatSpan(compared.start, compared.end, timeZone)}` : 'No comparison'}
+                selected={{ day, month: params.get('month') || undefined, year: params.get('year') || undefined }}
+                onCommit={(patch) => {
+                  const next = new URLSearchParams(params)
+                  next.set('range', patch.range)
+                  const values: Record<string, string | undefined> = {
+                    day: patch.range === 'day' ? patch.day : undefined,
+                    month: patch.range === 'month-pick' ? patch.month : undefined,
+                    year: patch.range === 'year-pick' ? patch.year : undefined,
+                    from: patch.range === 'custom' ? patch.from : undefined,
+                    to: patch.range === 'custom' ? patch.to : undefined,
+                  }
+                  for (const [key, value] of Object.entries(values)) {
+                    if (value) next.set(key, value)
+                    else next.delete(key)
+                  }
+                  setParams(next, { replace: true })
+                }}
                 onCompare={(id) => setParam('compare', id === 'previous' ? '' : id)}
               />
             )}
-            {range === 'day' && <input className="wa-input" aria-label="Selected day" type="date" value={day} onChange={(event) => setParam('day', event.target.value)} />}
-
             <span className="wa-env">dev · {config.suiNetwork}</span>
           </div>
         </div>
@@ -319,6 +334,8 @@ export function AdminAnalyticsApp({
             loading={activityQuery.isLoading}
             error={activityQuery.error as Error | null}
             periodLabel={period.label}
+            windowEnd={period.end}
+            timeZone={timeZone}
             onInvalidKey={onInvalidKey}
             onRetry={() => activityQuery.refetch()}
           />
@@ -366,8 +383,8 @@ export function AdminAnalyticsApp({
         {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />}
         {view === 'uploads' && adminKey && <UploadJobsPage adminKey={adminKey} onInvalidKey={onInvalidKey} periodLabel={period.label} start={period.start} end={period.end} priorStart={compared?.start ?? null} />}
         {view === 'wallets' && adminKey && <WalletsPage adminKey={adminKey} onInvalidKey={onInvalidKey} activity={activityQuery.data} />}
-        {view === 'incidents' && (demo ? <IncidentView modelStart={model.incident} requests={scoped} now={now} timeZone={timeZone} /> : <IncidentLivePage />)}
-        {view === 'quality' && (demo ? <QualityView demo /> : <QualityPage activityError={activityQuery.error as Error | null} adminKey={adminKey} />)}
+        {view === 'incidents' && (demo ? <IncidentView modelStart={model.incident} requests={scoped} now={now} timeZone={timeZone} /> : <IncidentLivePage adminKey={adminKey} period={period} timeZone={timeZone} baseline={compared} onInvalidKey={onInvalidKey} onOpenDay={(ymd) => { const next = new URLSearchParams(params); next.set('range', 'day'); next.set('day', ymd); setParams(next) }} onOpenQuality={() => setParam('view', 'quality')} />)}
+        {view === 'quality' && (demo ? <QualityView demo /> : <QualityPage adminKey={adminKey} onInvalidKey={onInvalidKey} onOpenView={(id) => setParam('view', id)} />)}
         {view === 'config' && adminKey && <ConfigPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
         {view === 'access' && (
           <section className="wa-panel">
@@ -423,6 +440,8 @@ function LiveOverview({
   loading,
   error,
   periodLabel,
+  windowEnd,
+  timeZone,
   onInvalidKey,
   onRetry,
 }: {
@@ -430,6 +449,8 @@ function LiveOverview({
   loading: boolean
   error: Error | null
   periodLabel: string
+  windowEnd: Date
+  timeZone: string
   onInvalidKey: () => void
   onRetry: () => void
 }) {
@@ -437,18 +458,16 @@ function LiveOverview({
   if (!activity) {
     return <ActivityPage activity={activity} loading={loading} error={error} periodLabel={periodLabel} onInvalidKey={onInvalidKey} onRetry={onRetry} />
   }
-  const days = activity.actions.memoriesByDay
-  const buckets = activity.actions.memoriesByHour?.map((row) => ({ label: row.hour.slice(11, 16), relayer: 0, upstream: 0, requests: row.count, latency: 0 }))
-    ?? days.map((day) => ({ label: day.day.slice(5), relayer: 0, upstream: 0, requests: day.count, latency: 0 }))
+  const days = activity.actions.memoriesByDay.filter((day) => day.day < formatYmd(windowEnd, timeZone) || formatYmd(new Date(windowEnd.getTime() - 1), timeZone) === day.day)
+  const buckets = activity.actions.memoriesByHour?.map((row) => ({ label: row.hour, relayer: 0, upstream: 0, requests: row.count, latency: 0 }))
+    ?? days.map((day) => ({ label: day.day, relayer: 0, upstream: 0, requests: day.count, latency: 0 }))
   const written = (activity.actions.memoriesByHour ?? days).reduce((sum, row) => sum + row.count, 0)
   const maxUploads = Math.max(1, ...activity.actions.topOwners.map((owner) => owner.uploadsCompleted))
-  const stages: Array<[string, number]> = [
+  const outcomes: Array<[string, number]> = [
     ['Completed', activity.actions.uploadsCompleted],
     ['Failed', activity.actions.uploadsFailed],
-    ['In flight', activity.actions.uploadsInFlight],
-    ['Deletes', activity.actions.memoryDeletes],
   ]
-  const stageMax = Math.max(1, ...stages.map(([, count]) => count))
+  const outcomeMax = Math.max(1, ...outcomes.map(([, count]) => count))
   return (
     <>
       <div className="wa-kpis">
@@ -467,13 +486,19 @@ function LiveOverview({
         <aside className="wa-rail">
           <section>
             <h2>Upload outcomes</h2>
-            {stages.map(([label, count]) => (
+            <p className="wa-note">Completed and failed jobs in the selected window. Bar length is compared with the larger of those two counts.</p>
+            {outcomes.map(([label, count]) => (
               <div className="wa-bar-row" key={label}>
                 <span>{label}</span>
-                <div className="wa-bar"><i style={{ width: `${(count / stageMax) * 100}%` }} /></div>
+                <div className="wa-bar"><i style={{ width: `${(count / outcomeMax) * 100}%` }} /></div>
                 <b>{count}</b>
               </div>
             ))}
+          </section>
+          <section>
+            <h2>Other operations</h2>
+            <div className="wa-split"><span>Deletes in window</span><b>{formatCount(activity.actions.memoryDeletes)}</b></div>
+            <div className="wa-split"><span>In flight now</span><b>{formatCount(activity.actions.uploadsInFlight)}</b></div>
           </section>
           <section>
             <h2>Sponsored actions</h2>
