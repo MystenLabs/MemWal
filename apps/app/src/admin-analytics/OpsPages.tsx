@@ -4,6 +4,7 @@ import {
   fetchAdminConfig,
   fetchAdminErrors,
   fetchAdminInventory,
+  fetchAdminUploadSummary,
   fetchAdminWallets,
   formatTokenAmount,
   shortAddress,
@@ -74,11 +75,11 @@ function Kpi({ label, value, delta, title }: { label: string; value: string; del
   )
 }
 
-export function ActivityPage({ activity, loading, error, hours, onInvalidKey, onRetry }: {
+export function ActivityPage({ activity, loading, error, periodLabel, onInvalidKey, onRetry }: {
   activity: AdminActivity | undefined
   loading: boolean
   error: Error | null
-  hours: number
+  periodLabel: string
   onInvalidKey: () => void
   onRetry: () => void
 }) {
@@ -91,7 +92,7 @@ export function ActivityPage({ activity, loading, error, hours, onInvalidKey, on
   return (
     <div className="wa-page">
       <div className="wa-kpis">
-        <Kpi label="Memories written" value={actions ? formatCount(written) : '—'} delta={`Last ${hours}h`} />
+        <Kpi label="Memories written" value={actions ? formatCount(written) : '—'} delta={periodLabel} />
         <Kpi label="Uploads completed" value={actions ? formatCount(actions.uploadsCompleted) : '—'} delta={actions ? `Prior ${formatCount(actions.uploadsCompletedPrior)}` : 'Waiting'} />
         <Kpi label="Uploads failed" value={actions ? formatCount(actions.uploadsFailed) : '—'} delta={actions ? `Prior ${formatCount(actions.uploadsFailedPrior)}` : 'Waiting'} />
         <Kpi label="In flight" value={actions ? formatCount(actions.uploadsInFlight) : '—'} delta="Current jobs" />
@@ -114,7 +115,7 @@ export function ActivityPage({ activity, loading, error, hours, onInvalidKey, on
             {!actions && <p className="wa-note">Waiting for activity.</p>}
             {actions && actions.sponsored.length === 0 && <p className="wa-note">None in this window.</p>}
             {actions?.sponsored.map((row) => (
-              <div className="wa-split" key={row.kind}><span>{row.kind}</span><b>{row.count}</b></div>
+              <div className="wa-split" key={row.kind}><span>{row.kind === 'create_account' ? 'Account creation' : row.kind === 'add_delegate_key' ? 'Delegate added' : row.kind === 'remove_delegate_key' ? 'Delegate removed' : row.kind}</span><b>{row.count}</b></div>
             ))}
           </section>
           <section>
@@ -152,29 +153,45 @@ export function ActivityPage({ activity, loading, error, hours, onInvalidKey, on
   )
 }
 
-export function UploadJobsPage({ adminKey, onInvalidKey }: { adminKey: string; onInvalidKey: () => void }) {
+export function UploadJobsPage({ adminKey, onInvalidKey, periodLabel, start, end, priorStart }: {
+  adminKey: string
+  onInvalidKey: () => void
+  periodLabel: string
+  start: Date
+  end: Date
+  priorStart: Date | null
+}) {
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<UploadError | null>(null)
   const [filter, setFilter] = useState('')
   const limit = 20
+  const summary = useQuery({
+    queryKey: ['admin', 'upload-summary', start.toISOString(), end.toISOString(), priorStart?.toISOString() ?? ''],
+    queryFn: () => fetchAdminUploadSummary(adminKey, { start, end, priorStart }),
+    retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 2,
+  })
   const query = useQuery({
     queryKey: ['admin', 'errors', limit, offset],
     queryFn: () => fetchAdminErrors(adminKey, limit, offset),
     retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 2,
   })
-  useInvalid(query.error, onInvalidKey)
+  useInvalid(summary.error ?? query.error, onInvalidKey)
   const needle = filter.trim().toLowerCase()
   const rows = (query.data?.errors ?? []).filter((job) => !needle || `${job.id} ${job.owner} ${job.namespace} ${job.errorMessage}`.toLowerCase().includes(needle))
+  const data = summary.data
+  const rate = data && data.successDenominator > 0 ? `${Math.round((data.successNumerator / data.successDenominator) * 100)}%` : data ? 'No completed outcomes' : '—'
+  const oldest = data?.oldestQueuedAt ? `${Math.max(0, Math.round((Date.now() - Date.parse(data.oldestQueuedAt)) / 60000))} min` : data ? 'None queued' : '—'
   return (
     <div className="wa-page">
       <div className="wa-kpis">
-        <Kpi label="Failed in view" value={query.data ? formatCount(rows.length) : '—'} delta="This page" />
-        <Kpi label="Failed total" value={query.data ? formatCount(query.data.total) : '—'} delta="Recorded failures" />
-        <Kpi label="Queued" value="—" delta="Unavailable" title="Queue depth is not exposed by the failed-job list." />
-        <Kpi label="Processing" value="—" delta="Unavailable" title="In-flight jobs are on the activity API, not this list." />
-        <Kpi label="Completed" value="—" delta="Unavailable" title="This route lists failures only." />
-        <Kpi label="Success rate" value="—" delta="Upload failures only" />
+        <Kpi label="Queued now" value={data ? formatCount(data.queuedNow) : '—'} delta="Now" title="remember_jobs status pending. Not a historical queue." />
+        <Kpi label="Processing now" value={data ? formatCount(data.processingNow) : '—'} delta={data?.staleProcessing ? `${data.staleProcessing} quiet past 10 min` : 'Heartbeat under 10 min'} title="running or uploaded with a fresh updated_at. Quiet rows are excluded until the stale sweep fails them." />
+        <Kpi label="Completed" value={data ? formatCount(data.completed) : '—'} delta={periodLabel} title="status done. updated_at is the completion transition." />
+        <Kpi label="Failed" value={data ? formatCount(data.failed) : '—'} delta={data ? `Prior ${formatCount(data.failedPrior)}` : periodLabel} title="Terminal status failed in the selected window." />
+        <Kpi label="Success rate" value={rate} delta={data && data.successDenominator > 0 ? `${data.successNumerator}/${data.successDenominator}` : 'No terminal outcomes'} title="Completed / (completed + terminally failed). Queued and processing are excluded." />
+        <Kpi label="Oldest queued" value={oldest} delta="Created time" />
       </div>
+      {summary.error && !summary.isLoading && <Fail message="Upload summary failed." detail={failureDetail(summary.error as Error, 'GET /api/admin/upload-summary')} onRetry={() => summary.refetch()} />}
       <section className="wa-panel">
         <div className="wa-chart-head">
           <h2>Upload failures</h2>
@@ -183,7 +200,7 @@ export function UploadJobsPage({ adminKey, onInvalidKey }: { adminKey: string; o
             <button className="wa-btn" type="button" onClick={() => query.refetch()} disabled={query.isFetching}>{query.isFetching ? 'Refreshing' : 'Refresh'}</button>
           </div>
         </div>
-        <p className="wa-note">Only failed jobs are stored on this route. An empty result is not an empty queue.</p>
+        <p className="wa-note">This table is the recorded failure list. Completed and queued counts above come from remember_jobs, not from this page.</p>
         {query.isLoading && <Skeleton rows={5} />}
         {query.error && !query.isLoading && <Fail message="Failed to load upload errors." detail={failureDetail(query.error as Error, 'GET /api/admin/upload-errors')} onRetry={() => query.refetch()} />}
         {query.data && rows.length === 0 && <p className="wa-empty">No failed uploads in this period.</p>}

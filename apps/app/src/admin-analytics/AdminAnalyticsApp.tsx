@@ -5,6 +5,8 @@ import { useSearchParams } from 'react-router-dom'
 import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
 import { ActivityPage, ConfigPage, IncidentLivePage, QualityPage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage } from './OpsPages'
+import { DateRangeControl } from './DateRangeControl'
+import { comparisonWindow, isRangeId, resolveRange, type CompareId, type RangeId } from './range'
 import { config } from '../config'
 import './admin-analytics.css'
 import {
@@ -17,7 +19,7 @@ import {
   type PopulationSummary,
 } from './fixture'
 import {
-  calendarDayWindow,
+
   formatBytes,
   formatCount,
   formatMetric,
@@ -43,16 +45,7 @@ const VIEWS = [
 ] as const
 
 type ViewId = (typeof VIEWS)[number]['id']
-type RangeId = 'today' | 'yesterday' | '3d' | '7d' | 'week' | 'day'
 
-const RANGES: { id: RangeId; label: string }[] = [
-  { id: 'today', label: 'Today' },
-  { id: 'yesterday', label: 'Yesterday' },
-  { id: '3d', label: 'Last 3 days' },
-  { id: '7d', label: 'Last 7 days' },
-  { id: 'week', label: 'This week' },
-  { id: 'day', label: 'Selected day' },
-]
 
 interface Props {
   adminKey: string | null
@@ -68,35 +61,6 @@ function isView(value: string | null): value is ViewId {
   return VIEWS.some((view) => view.id === value)
 }
 
-function rangeWindow(range: RangeId, day: string, timeZone: string, now: Date) {
-  if (range === 'day' || range === 'yesterday') {
-    const ymd = range === 'yesterday'
-      ? formatYmd(new Date(now.getTime() - 24 * 3600_000), timeZone)
-      : day
-    const bounds = calendarDayWindow(ymd, timeZone)
-    return { start: bounds.start, end: bounds.end, label: ymd }
-
-  }
-  if (range === 'today') {
-    const ymd = formatYmd(now, timeZone)
-    const bounds = calendarDayWindow(ymd, timeZone)
-    return { start: bounds.start, end: now, label: `${ymd} elapsed` }
-  }
-  if (range === 'week') {
-    const ymd = formatYmd(now, timeZone)
-    const noon = calendarDayWindow(ymd, timeZone).start
-    const weekday = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(now)
-    const index = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(weekday)
-    const start = new Date(noon.getTime() - Math.max(0, index) * 86400_000)
-    return { start, end: now, label: 'Monday local midnight to now' }
-  }
-  const hours = range === '3d' ? 72 : 168
-  return {
-    start: new Date(now.getTime() - hours * 3600_000),
-    end: now,
-    label: range === '3d' ? 'Rolling 72 hours' : 'Rolling 168 hours',
-  }
-}
 
 function Spark({ points }: { points: number[] }) {
   const max = Math.max(1, ...points)
@@ -165,7 +129,8 @@ export function AdminAnalyticsApp({
 }: Props) {
   const [params, setParams] = useSearchParams()
   const view = isView(params.get('view')) ? params.get('view') as ViewId : 'overview'
-  const range = (RANGES.some((item) => item.id === params.get('range')) ? params.get('range') : '7d') as RangeId
+  const range: RangeId = isRangeId(params.get('range')) ? params.get('range') as RangeId : '7d'
+  const compare: CompareId = (['none', 'previous', 'week', 'month', 'year'] as const).includes(params.get('compare') as CompareId) ? params.get('compare') as CompareId : 'previous'
   const timeZone = params.get('tz') || 'Asia/Ho_Chi_Minh'
   const day = params.get('day') || formatYmd(new Date(), timeZone)
   const accountId = params.get('account') || ''
@@ -176,11 +141,11 @@ export function AdminAnalyticsApp({
   const [series, setSeries] = useState<'bytes' | 'requests' | 'latency'>('bytes')
   const now = useMemo(() => new Date(), [])
   const model = useMemo(() => buildDemo(now), [now])
-  const period = rangeWindow(range, day, timeZone, now)
-  const liveHours = range === '3d' ? 72 : range === 'today' || range === 'yesterday' || range === 'day' ? 24 : 168
+  const period = resolveRange(range, timeZone, now, { day, month: params.get('month') || undefined, year: params.get('year') || undefined, from: params.get('from') || undefined, to: params.get('to') || undefined })
+  const compared = comparisonWindow(compare, period, timeZone)
   const activityQuery = useQuery({
-    queryKey: ['admin', 'activity', liveHours],
-    queryFn: () => fetchAdminActivity(adminKey as string, liveHours),
+    queryKey: ['admin', 'activity', period.start.toISOString(), period.end.toISOString(), compared?.start.toISOString() ?? ''],
+    queryFn: () => fetchAdminActivity(adminKey as string, { start: period.start, end: period.end, priorStart: compared?.start ?? null }),
     enabled: !demo && Boolean(adminKey),
     retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 2,
   })
@@ -269,7 +234,7 @@ export function AdminAnalyticsApp({
       : (live?.actions.topOwners ?? []).map((owner) => [
         'dev-relayer-activity',
         live?.generatedAt ?? '',
-        String(live?.windowHours ?? liveHours),
+        period.label,
         owner.owner,
         String(owner.uploadsCompleted),
       ])
@@ -323,13 +288,18 @@ export function AdminAnalyticsApp({
             <p>{view === 'activity' ? 'Account usage, delegate activity and adoption trends' : view === 'uploads' ? 'Upload progress, failures and processing health' : view === 'wallets' ? 'Uploader balances, sponsor funding and measured spend' : view === 'incidents' ? 'Investigate changes in retrieval traffic and performance' : view === 'quality' ? 'Measurement coverage, freshness and collection gaps' : view === 'config' ? 'Relayer settings and operational thresholds' : view === 'access' ? 'Admin sessions and recorded administrative activity' : view === 'storage' ? 'Plaintext, encrypted payload and encoded inventory' : view === 'retrieval' ? 'Request bytes, latency and transfer boundaries' : view === 'accounts' ? 'Owner wallets, delegate keys and selected-day activity' : 'Storage, retrieval and account activity'}</p>
           </div>
           <div className="wa-actions">
-            {['overview', 'retrieval', 'accounts', 'activity'].includes(view) && (
-              <select className="wa-select" aria-label="Date range" value={range} onChange={(event) => setParam('range', event.target.value)}>
-                {RANGES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-              </select>
+            {['overview', 'retrieval', 'accounts', 'activity', 'uploads', 'incidents'].includes(view) && (
+              <DateRangeControl
+                range={range}
+                label={period.label}
+                onRange={(id) => setParam('range', id)}
+                compare={compare}
+                compareLabel={compared?.label ?? 'No comparison'}
+                onCompare={(id) => setParam('compare', id === 'previous' ? '' : id)}
+              />
             )}
-            {range === 'day' && ['overview', 'retrieval', 'accounts', 'activity'].includes(view) ? <input className="wa-input" aria-label="Selected day" type="date" value={day} onChange={(event) => setParam('day', event.target.value)} /> : null}
-            {['overview', 'retrieval', 'accounts', 'activity'].includes(view) && <span className="wa-env" title={`Activity comparisons use the previous ${liveHours} hours on the dev relayer.`}>Prior {liveHours}h</span>}
+            {range === 'day' && <input className="wa-input" aria-label="Selected day" type="date" value={day} onChange={(event) => setParam('day', event.target.value)} />}
+
             <span className="wa-env">dev · {config.suiNetwork}</span>
           </div>
         </div>
@@ -348,7 +318,7 @@ export function AdminAnalyticsApp({
             activity={activityQuery.data}
             loading={activityQuery.isLoading}
             error={activityQuery.error as Error | null}
-            hours={liveHours}
+            periodLabel={period.label}
             onInvalidKey={onInvalidKey}
             onRetry={() => activityQuery.refetch()}
           />
@@ -392,9 +362,9 @@ export function AdminAnalyticsApp({
         ) : <RetrievalLivePage />)}
         {view === 'accounts' && (demo ? (
           <AccountTable rows={rows} sort={sort} onSort={setSort} onOpen={(id) => setParam('account', id)} query={query} onQuery={(value) => setParam('q', value)} showAll={showAll} onShowAll={(value) => setParam('all', value ? '1' : '')} />
-        ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} hours={liveHours} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />)}
-        {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} hours={liveHours} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />}
-        {view === 'uploads' && adminKey && <UploadJobsPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
+        ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />)}
+        {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />}
+        {view === 'uploads' && adminKey && <UploadJobsPage adminKey={adminKey} onInvalidKey={onInvalidKey} periodLabel={period.label} start={period.start} end={period.end} priorStart={compared?.start ?? null} />}
         {view === 'wallets' && adminKey && <WalletsPage adminKey={adminKey} onInvalidKey={onInvalidKey} activity={activityQuery.data} />}
         {view === 'incidents' && (demo ? <IncidentView modelStart={model.incident} requests={scoped} now={now} timeZone={timeZone} /> : <IncidentLivePage />)}
         {view === 'quality' && (demo ? <QualityView demo /> : <QualityPage activityError={activityQuery.error as Error | null} />)}
@@ -452,24 +422,25 @@ function LiveOverview({
   activity,
   loading,
   error,
-  hours,
+  periodLabel,
   onInvalidKey,
   onRetry,
 }: {
   activity: AdminActivity | undefined
   loading: boolean
   error: Error | null
-  hours: number
+  periodLabel: string
   onInvalidKey: () => void
   onRetry: () => void
 }) {
   if (error?.message === 'INVALID_KEY') onInvalidKey()
   if (!activity) {
-    return <ActivityPage activity={activity} loading={loading} error={error} hours={hours} onInvalidKey={onInvalidKey} onRetry={onRetry} />
+    return <ActivityPage activity={activity} loading={loading} error={error} periodLabel={periodLabel} onInvalidKey={onInvalidKey} onRetry={onRetry} />
   }
   const days = activity.actions.memoriesByDay
-  const written = days.reduce((sum, day) => sum + day.count, 0)
-  const points = days.map((day) => ({ label: day.day.slice(5), relayer: 0, upstream: 0, requests: day.count, latency: 0 }))
+  const buckets = activity.actions.memoriesByHour?.map((row) => ({ label: row.hour.slice(11, 16), relayer: 0, upstream: 0, requests: row.count, latency: 0 }))
+    ?? days.map((day) => ({ label: day.day.slice(5), relayer: 0, upstream: 0, requests: day.count, latency: 0 }))
+  const written = (activity.actions.memoriesByHour ?? days).reduce((sum, row) => sum + row.count, 0)
   const maxUploads = Math.max(1, ...activity.actions.topOwners.map((owner) => owner.uploadsCompleted))
   const stages: Array<[string, number]> = [
     ['Completed', activity.actions.uploadsCompleted],
@@ -481,17 +452,17 @@ function LiveOverview({
   return (
     <>
       <div className="wa-kpis">
-        <article className="wa-kpi"><div className="label">Memories written</div><div className="value">{formatCount(written)}</div><div className="delta">Last {hours}h</div></article>
+        <article className="wa-kpi"><div className="label">Memories written</div><div className="value">{formatCount(written)}</div><div className="delta">{periodLabel}</div></article>
         <article className="wa-kpi"><div className="label">Uploads completed</div><div className="value">{formatCount(activity.actions.uploadsCompleted)}</div><div className="delta">Prior {formatCount(activity.actions.uploadsCompletedPrior)}</div></article>
         <article className="wa-kpi"><div className="label">Uploads failed</div><div className="value">{formatCount(activity.actions.uploadsFailed)}</div><div className="delta">Prior {formatCount(activity.actions.uploadsFailedPrior)}</div></article>
         <article className="wa-kpi"><div className="label">In flight</div><div className="value">{formatCount(activity.actions.uploadsInFlight)}</div><div className="delta">Current jobs</div></article>
-        <article className="wa-kpi"><div className="label" title="Request-byte percentiles are not stored on the dev relayer.">Retrieval p99</div><div className="value wa-unavailable">—</div><div className="delta">Unavailable</div></article>
+        <article className="wa-kpi"><div className="label" title="Request-byte percentiles are not stored.">Retrieval bytes p99</div><div className="value wa-unavailable">—</div><div className="delta">Unavailable</div></article>
         <article className="wa-kpi"><div className="label" title="Top 8 owners with completed uploads, not every account.">Owners listed</div><div className="value">{formatCount(activity.actions.topOwners.length)}</div><div className="delta">Top 8</div></article>
       </div>
       <div className="wa-board">
         <section className="wa-panel wa-chart-panel">
-          <div className="wa-chart-head"><h2>Memories written</h2><span className="wa-note">Dev relayer · last {hours} hours</span></div>
-          <Chart points={points} series="requests" />
+          <div className="wa-chart-head"><h2>Memories written</h2><span className="wa-note">{activity.windowStart ? periodLabel : `${periodLabel} requested. Relayer has not applied that window.`}{activity.clamped ? ' · shortened to the query limit' : ''}</span></div>
+          <Chart points={buckets} series="requests" />
         </section>
         <aside className="wa-rail">
           <section>
@@ -508,7 +479,7 @@ function LiveOverview({
             <h2>Sponsored actions</h2>
             {activity.actions.sponsored.length === 0 && <p className="wa-note">None in this window.</p>}
             {activity.actions.sponsored.map((row) => (
-              <div className="wa-split" key={row.kind}><span>{row.kind}</span><b>{row.count}</b></div>
+              <div className="wa-split" key={row.kind}><span>{row.kind === 'create_account' ? 'Account creation' : row.kind === 'add_delegate_key' ? 'Delegate added' : row.kind === 'remove_delegate_key' ? 'Delegate removed' : row.kind}</span><b>{row.count}</b></div>
             ))}
           </section>
         </aside>

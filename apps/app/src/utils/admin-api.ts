@@ -285,6 +285,11 @@ export interface MemoryDay {
 export interface AdminActivity {
   generatedAt: string
   windowHours: number
+  windowStart: string | null
+  windowEnd: string | null
+  priorStart: string | null
+  priorEnd: string | null
+  clamped: boolean
   balanceMonitorIntervalSecs: number
   uploaderWal: ActivityTokenWindow
   uploaderSui: ActivityTokenWindow
@@ -328,6 +333,11 @@ interface RawTokenWindow {
 interface RawActivityResponse {
   generated_at: string
   window_hours: number
+  window_start?: string
+  window_end?: string
+  prior_start?: string
+  prior_end?: string
+  clamped?: boolean
   balance_monitor_interval_secs: number
   uploader_wal: RawTokenWindow
   uploader_sui: RawTokenWindow
@@ -369,16 +379,24 @@ function mapTokenWindow(raw: RawTokenWindow): ActivityTokenWindow {
 
 export async function fetchAdminActivity(
   adminKey: string,
-  hours: number,
+  window: { start: Date; end: Date; priorStart?: Date | null },
 ): Promise<AdminActivity> {
   const utcOffsetMinutes = -new Date().getTimezoneOffset()
-  const raw = (await makeAdminRequest(
-    `/activity?hours=${hours}&utc_offset_minutes=${utcOffsetMinutes}`,
-    adminKey,
-  )) as RawActivityResponse
+  const params = new URLSearchParams({
+    start: window.start.toISOString(),
+    end: window.end.toISOString(),
+    utc_offset_minutes: String(utcOffsetMinutes),
+  })
+  if (window.priorStart) params.set('prior_start', window.priorStart.toISOString())
+  const raw = (await makeAdminRequest(`/activity?${params}`, adminKey)) as RawActivityResponse
   return {
     generatedAt: raw.generated_at,
     windowHours: raw.window_hours,
+    windowStart: raw.window_start ?? null,
+    windowEnd: raw.window_end ?? null,
+    priorStart: raw.prior_start ?? null,
+    priorEnd: raw.prior_end ?? null,
+    clamped: raw.clamped ?? false,
     balanceMonitorIntervalSecs: raw.balance_monitor_interval_secs,
     uploaderWal: mapTokenWindow(raw.uploader_wal),
     uploaderSui: mapTokenWindow(raw.uploader_sui),
@@ -483,4 +501,65 @@ export async function fetchAdminInventory(adminKey: string): Promise<AdminInvent
     owners: raw.owners.map(mapBreakdown),
   }
 }
+
+export interface UploadSummary {
+  generatedAt: string
+  windowStart: string
+  windowEnd: string
+  clamped: boolean
+  queuedNow: number
+  processingNow: number
+  staleProcessing: number
+  completed: number
+  completedPrior: number
+  failed: number
+  failedPrior: number
+  successNumerator: number
+  successDenominator: number
+  oldestQueuedAt: string | null
+}
+
+export async function fetchAdminUploadSummary(
+  adminKey: string,
+  window: { start: Date; end: Date; priorStart?: Date | null },
+): Promise<UploadSummary> {
+  const params = new URLSearchParams({
+    start: window.start.toISOString(),
+    end: window.end.toISOString(),
+  })
+  if (window.priorStart) params.set('prior_start', window.priorStart.toISOString())
+  const raw = (await makeAdminRequest(`/upload-summary?${params}`, adminKey)) as {
+    generated_at: string
+    window_start: string
+    window_end: string
+    clamped: boolean
+    queued_now: number
+    processing_now: number
+    stale_processing: number
+    completed: number
+    completed_prior: number
+    failed: number
+    failed_prior: number
+    success_numerator: number
+    success_denominator: number
+    oldest_queued_at: string | null
+  }
+  return {
+    generatedAt: raw.generated_at,
+    windowStart: raw.window_start,
+    windowEnd: raw.window_end,
+    clamped: raw.clamped,
+    queuedNow: raw.queued_now,
+    processingNow: raw.processing_now,
+    staleProcessing: raw.stale_processing,
+    completed: raw.completed,
+    completedPrior: raw.completed_prior,
+    failed: raw.failed,
+    failedPrior: raw.failed_prior,
+    successNumerator: raw.success_numerator,
+    successDenominator: raw.success_denominator,
+    oldestQueuedAt: raw.oldest_queued_at,
+  }
+}
+
 

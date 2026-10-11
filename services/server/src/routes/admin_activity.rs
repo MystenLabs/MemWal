@@ -20,7 +20,7 @@ use crate::types::{AppError, AppState};
 // baseline is the sample on that start boundary. One extra day keeps that
 // sample from being deleted as soon as the prior window opens.
 const SAMPLE_RETENTION: Duration = Duration::hours(24 * 61);
-const MAX_WINDOW_HOURS: i64 = 24 * 30;
+const MAX_WINDOW_HOURS: i64 = 24 * 400;
 const MAX_SERIES_POINTS: usize = 48;
 const SPONSOR_KINDS: [&str; 3] = ["create_account", "add_delegate_key", "remove_delegate_key"];
 
@@ -55,12 +55,27 @@ pub struct ActivityQuery {
     /// Vietnam is 420. Missing means UTC.
     #[serde(default)]
     pub utc_offset_minutes: Option<i32>,
+    /// Inclusive UTC start. With `end`, replaces the rolling `hours` window.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// Exclusive UTC end, clamped to now.
+    #[serde(default)]
+    pub end: Option<String>,
+    /// Start of an equal-duration comparison window. Missing means the
+    /// immediately preceding window.
+    #[serde(default)]
+    pub prior_start: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ActivityResponse {
     pub generated_at: String,
     pub window_hours: i64,
+    pub window_start: String,
+    pub window_end: String,
+    pub prior_start: String,
+    pub prior_end: String,
+    pub clamped: bool,
     pub balance_monitor_interval_secs: u64,
     pub uploader_wal: TokenWindow,
     pub uploader_sui: TokenWindow,
@@ -152,6 +167,72 @@ struct SampleRow {
 pub fn window_hours(hours: Option<i64>) -> i64 {
     hours.unwrap_or(24).clamp(1, MAX_WINDOW_HOURS)
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedWindow {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub prior_start: DateTime<Utc>,
+    pub prior_end: DateTime<Utc>,
+    pub clamped: bool,
+}
+
+fn parse_bound(raw: &str) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| format!("invalid timestamp: {raw}"))
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.filter(|item| !item.is_empty())
+}
+
+/// Explicit `start`/`end` replace rolling hours. End is clamped to `now`.
+/// A window longer than `MAX_WINDOW_HOURS` keeps the newest slice.
+pub fn resolve_window(
+    now: DateTime<Utc>,
+    hours: Option<i64>,
+    start: Option<&str>,
+    end: Option<&str>,
+    prior_start: Option<&str>,
+) -> Result<ResolvedWindow, String> {
+    let mut clamped = false;
+    let (mut start_at, mut end_at) = if let (Some(start), Some(end)) = (nonempty(start), nonempty(end))
+    {
+        let parsed_start = parse_bound(start)?;
+        let mut parsed_end = parse_bound(end)?;
+        if parsed_end > now {
+            parsed_end = now;
+            clamped = true;
+        }
+        if parsed_start >= parsed_end {
+            return Err("start must be before end".into());
+        }
+        (parsed_start, parsed_end)
+    } else {
+        let span = window_hours(hours);
+        (now - Duration::hours(span), now)
+    };
+    let max = Duration::hours(MAX_WINDOW_HOURS);
+    if end_at.signed_duration_since(start_at) > max {
+        start_at = end_at - max;
+        clamped = true;
+    }
+    let duration = end_at.signed_duration_since(start_at);
+    let prior_start_at = if let Some(raw) = nonempty(prior_start) {
+        parse_bound(raw)?
+    } else {
+        start_at - duration
+    };
+    Ok(ResolvedWindow {
+        start: start_at,
+        end: end_at,
+        prior_start: prior_start_at,
+        prior_end: prior_start_at + duration,
+        clamped,
+    })
+}
+
 
 pub fn utc_offset_minutes(minutes: Option<i32>) -> i32 {
     minutes.unwrap_or(0).clamp(-14 * 60, 14 * 60)
@@ -401,28 +482,44 @@ pub async fn get_admin_activity(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ActivityQuery>,
 ) -> Result<Json<ActivityResponse>, AppError> {
-    let hours = window_hours(query.hours);
     let utc_offset_minutes = utc_offset_minutes(query.utc_offset_minutes);
     let now = Utc::now();
-    let current_start = now - Duration::hours(hours);
-    let prior_start = now - Duration::hours(hours * 2);
+    let resolved = resolve_window(
+        now,
+        query.hours,
+        query.start.as_deref(),
+        query.end.as_deref(),
+        query.prior_start.as_deref(),
+    )
+    .map_err(AppError::BadRequest)?;
+    let hours = resolved.end.signed_duration_since(resolved.start).num_hours().max(1);
     let fetch_from = now - SAMPLE_RETENTION;
-
     let samples = load_samples(state.db.pool(), fetch_from).await?;
     let wal_points = column_points(&samples, |row| row.uploader_wal_frost);
     let uploader_sui_points = column_points(&samples, |row| row.uploader_sui_mist);
     let sponsor_points = column_points(&samples, |row| row.sponsor_sui_mist);
-
-    let actions =
-        load_actions(&state, prior_start, current_start, now, utc_offset_minutes, hours).await?;
-
+    let actions = load_actions(
+        &state,
+        resolved.prior_start,
+        resolved.prior_end,
+        resolved.start,
+        resolved.end,
+        utc_offset_minutes,
+        hours,
+    )
+    .await?;
     Ok(Json(ActivityResponse {
         generated_at: stamp(now),
         window_hours: hours,
+        window_start: stamp(resolved.start),
+        window_end: stamp(resolved.end),
+        prior_start: stamp(resolved.prior_start),
+        prior_end: stamp(resolved.prior_end),
+        clamped: resolved.clamped,
         balance_monitor_interval_secs: state.config.balance_monitor_interval_secs,
-        uploader_wal: token_window(&wal_points, current_start, now, prior_start),
-        uploader_sui: token_window(&uploader_sui_points, current_start, now, prior_start),
-        sponsor_sui: token_window(&sponsor_points, current_start, now, prior_start),
+        uploader_wal: token_window(&wal_points, resolved.start, resolved.end, resolved.prior_start, resolved.prior_end),
+        uploader_sui: token_window(&uploader_sui_points, resolved.start, resolved.end, resolved.prior_start, resolved.prior_end),
+        sponsor_sui: token_window(&sponsor_points, resolved.start, resolved.end, resolved.prior_start, resolved.prior_end),
         actions,
     }))
 }
@@ -446,11 +543,12 @@ fn token_window(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     prior_start: DateTime<Utc>,
+    prior_end: DateTime<Utc>,
 ) -> TokenWindow {
     let start_ms = start.timestamp_millis();
     let end_ms = end.timestamp_millis();
     let current = window_burn(points, start_ms, end_ms);
-    let prior = window_burn(points, prior_start.timestamp_millis(), start_ms);
+    let prior = window_burn(points, prior_start.timestamp_millis(), prior_end.timestamp_millis());
     TokenWindow {
         samples: i64::try_from(current.observations).unwrap_or(i64::MAX),
         comparable: windows_comparable(&current, &prior),
@@ -520,6 +618,7 @@ pub fn fill_memory_hours(
 async fn load_actions(
     state: &AppState,
     prior_start: DateTime<Utc>,
+    prior_end: DateTime<Utc>,
     current_start: DateTime<Utc>,
     now: DateTime<Utc>,
     utc_offset_minutes: i32,
@@ -528,7 +627,7 @@ async fn load_actions(
     let pool = state.db.pool();
     let (uploads_completed, uploads_failed) = job_counts(pool, current_start, now).await?;
     let (uploads_completed_prior, uploads_failed_prior) =
-        job_counts(pool, prior_start, current_start).await?;
+        job_counts(pool, prior_start, prior_end).await?;
     let uploads_in_flight: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM remember_jobs WHERE status IN ('pending', 'running', 'uploaded')",
     )
@@ -536,9 +635,9 @@ async fn load_actions(
     .await
     .map_err(|error| AppError::Internal(format!("Failed to count in-flight uploads: {error}")))?;
     let memory_deletes = tombstone_count(pool, current_start, now).await?;
-    let memory_deletes_prior = tombstone_count(pool, prior_start, current_start).await?;
+    let memory_deletes_prior = tombstone_count(pool, prior_start, prior_end).await?;
     let sponsored_now = sponsored_counts(pool, current_start, now).await?;
-    let sponsored_prior = sponsored_counts(pool, prior_start, current_start).await?;
+    let sponsored_prior = sponsored_counts(pool, prior_start, prior_end).await?;
     let top_owners = top_owners(pool, current_start, now).await?;
     let memories_by_day =
         load_memories_by_day(pool, current_start, now, utc_offset_minutes).await?;
@@ -548,7 +647,7 @@ async fn load_actions(
         None
     };
     let (security_now, security_prior) =
-        security_delete_counts(state, current_start, prior_start, now).await;
+        security_delete_counts(state, current_start, prior_start, prior_end, now).await;
 
     Ok(ActionWindow {
         uploads_completed,
@@ -715,6 +814,7 @@ async fn security_delete_counts(
     state: &AppState,
     current_start: DateTime<Utc>,
     prior_start: DateTime<Utc>,
+    prior_end: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> (Option<(i64, i64)>, Option<(i64, i64)>) {
     let Some(legacy) = state.legacy_db.as_ref() else {
@@ -722,7 +822,7 @@ async fn security_delete_counts(
     };
     let pool = legacy.pool();
     let current = security_delete_window(pool, current_start, now).await;
-    let prior = security_delete_window(pool, prior_start, current_start).await;
+    let prior = security_delete_window(pool, prior_start, prior_end).await;
     (current, prior)
 }
 
@@ -874,11 +974,32 @@ mod tests {
         assert_eq!(window_hours(Some(0)), 1);
         assert_eq!(window_hours(Some(24 * 7)), 168);
         assert_eq!(window_hours(Some(24 * 30)), 720);
-        assert_eq!(window_hours(Some(24 * 31)), 720);
+        assert_eq!(window_hours(Some(24 * 31)), 744);
+        assert_eq!(window_hours(Some(24 * 500)), 24 * 400);
         assert_eq!(utc_offset_minutes(None), 0);
         assert_eq!(utc_offset_minutes(Some(420)), 420);
         assert_eq!(utc_offset_minutes(Some(24 * 60)), 14 * 60);
     }
+
+    #[test]
+    fn explicit_window_is_not_a_rolling_day() {
+        let now = DateTime::parse_from_rfc3339("2026-10-12T03:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let resolved = resolve_window(
+            now,
+            Some(24),
+            Some("2026-10-10T17:00:00Z"),
+            Some("2026-10-11T17:00:00Z"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved.start.to_rfc3339(), "2026-10-10T17:00:00+00:00");
+        assert_eq!(resolved.end.to_rfc3339(), "2026-10-11T17:00:00+00:00");
+        assert!(!resolved.clamped);
+        assert_eq!(resolved.prior_end, resolved.start);
+    }
+
 
     #[test]
     fn memory_days_follow_the_viewer_calendar_and_keep_empty_days() {

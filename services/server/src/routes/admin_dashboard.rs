@@ -275,6 +275,109 @@ pub async fn get_upload_errors(
     }))
 }
 
+#[derive(Debug, Serialize)]
+pub struct UploadSummaryResponse {
+    pub generated_at: String,
+    pub window_start: String,
+    pub window_end: String,
+    pub clamped: bool,
+    pub queued_now: i64,
+    pub processing_now: i64,
+    pub stale_processing: i64,
+    pub completed: i64,
+    pub completed_prior: i64,
+    pub failed: i64,
+    pub failed_prior: i64,
+    pub success_numerator: i64,
+    pub success_denominator: i64,
+    pub oldest_queued_at: Option<String>,
+    pub definition_version: i32,
+}
+
+/// Completed / (completed + terminally failed). None when the period has no
+/// terminal outcomes. Queued and in-flight jobs are not in the denominator.
+pub fn terminal_success(completed: i64, failed: i64) -> Option<(i64, i64)> {
+    let denominator = completed.saturating_add(failed);
+    if denominator <= 0 {
+        None
+    } else {
+        Some((completed, denominator))
+    }
+}
+
+#[tracing::instrument(name = "admin.upload_summary", skip_all)]
+pub async fn get_upload_summary(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<crate::routes::admin_activity::ActivityQuery>,
+) -> Result<Json<UploadSummaryResponse>, AppError> {
+    let now = chrono::Utc::now();
+    let resolved = crate::routes::admin_activity::resolve_window(
+        now,
+        query.hours,
+        query.start.as_deref(),
+        query.end.as_deref(),
+        query.prior_start.as_deref(),
+    )
+    .map_err(AppError::BadRequest)?;
+    let row: (i64, i64, i64, i64, i64, i64, i64, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'pending')::BIGINT,
+            COUNT(*) FILTER (
+                WHERE status IN ('running', 'uploaded')
+                  AND (
+                    updated_at >= NOW() - INTERVAL '10 minutes'
+                    OR (
+                      error_msg LIKE ($5 || '%')
+                      AND updated_at >= NOW() - INTERVAL '45 minutes'
+                    )
+                  )
+            )::BIGINT,
+            COUNT(*) FILTER (
+                WHERE status IN ('running', 'uploaded')
+                  AND updated_at < NOW() - INTERVAL '10 minutes'
+                  AND NOT (
+                    error_msg LIKE ($5 || '%')
+                    AND updated_at >= NOW() - INTERVAL '45 minutes'
+                  )
+            )::BIGINT,
+            COUNT(*) FILTER (WHERE status = 'done' AND updated_at > $1 AND updated_at <= $2)::BIGINT,
+            COUNT(*) FILTER (WHERE status = 'failed' AND updated_at > $1 AND updated_at <= $2)::BIGINT,
+            COUNT(*) FILTER (WHERE status = 'done' AND updated_at > $3 AND updated_at <= $4)::BIGINT,
+            COUNT(*) FILTER (WHERE status = 'failed' AND updated_at > $3 AND updated_at <= $4)::BIGINT,
+            MIN(created_at) FILTER (WHERE status = 'pending')
+        FROM remember_jobs
+        "#,
+    )
+    .bind(resolved.start)
+    .bind(resolved.end)
+    .bind(resolved.prior_start)
+    .bind(resolved.prior_end)
+    .bind(crate::jobs::CONGESTION_WAIT_ERROR_PREFIX)
+    .fetch_one(state.db.pool())
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to summarize upload jobs: {e}")))?;
+    let (numerator, denominator) = terminal_success(row.3, row.4).unwrap_or((row.3, 0));
+    Ok(Json(UploadSummaryResponse {
+        generated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        window_start: resolved.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        window_end: resolved.end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        clamped: resolved.clamped,
+        queued_now: row.0,
+        processing_now: row.1,
+        stale_processing: row.2,
+        completed: row.3,
+        failed: row.4,
+        completed_prior: row.5,
+        failed_prior: row.6,
+        success_numerator: numerator,
+        success_denominator: denominator,
+        oldest_queued_at: row.7.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        definition_version: 1,
+    }))
+}
+
+
 #[tracing::instrument(name = "admin.config", skip_all)]
 pub async fn get_admin_config(
     State(state): State<Arc<AppState>>,
@@ -407,6 +510,13 @@ async fn load_inventory_breakdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_success_excludes_jobs_that_have_not_finished() {
+        assert_eq!(super::terminal_success(8, 2), Some((8, 10)));
+        assert_eq!(super::terminal_success(0, 0), None);
+        assert_eq!(super::terminal_success(3, 0), Some((3, 3)));
+    }
 
     #[test]
     fn wallet_status_respects_the_50_wal_and_5_sui_thresholds() {

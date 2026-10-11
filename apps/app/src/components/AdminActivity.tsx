@@ -219,6 +219,11 @@ function countLine(label: string, count: number, prior: number | null) {
 const PREVIEW_ACTIVITY: AdminActivity = {
   generatedAt: '2026-09-24T12:00:00.000Z',
   windowHours: 24,
+  windowStart: '2026-09-23T12:00:00.000Z',
+  windowEnd: '2026-09-24T12:00:00.000Z',
+  priorStart: '2026-09-22T12:00:00.000Z',
+  priorEnd: '2026-09-23T12:00:00.000Z',
+  clamped: false,
   balanceMonitorIntervalSecs: 300,
   uploaderWal: {
     samples: 8,
@@ -424,7 +429,7 @@ export function AdminActivityPanel({ adminKey, onInvalidKey, preview = false }: 
   const [hours, setHours] = useState<number>(24)
   const { data, isLoading, error } = useQuery({
     queryKey: ['admin', 'activity', hours],
-    queryFn: () => fetchAdminActivity(adminKey, hours),
+    queryFn: () => fetchAdminActivity(adminKey, { start: new Date(Date.now() - hours * 3600_000), end: new Date() }),
     enabled: !preview,
     refetchInterval: preview ? false : 60_000,
     retry: (failureCount, error) => {
