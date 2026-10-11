@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Bell, Database, KeyRound, LayoutDashboard, LogOut, Settings, Shield, Users, Wallet } from 'lucide-react'
+import { Activity, Database, KeyRound, LayoutDashboard, LogOut, Settings, Shield, Users, Wallet } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
@@ -250,19 +250,30 @@ export function AdminAnalyticsApp({
   const openRequest = selectedRequests.find((request) => request.id === requestId) ?? scoped.find((request) => request.id === requestId) ?? null
 
   const exportView = () => {
-    const header = ['definition_version', 'demo', 'timezone', 'start', 'end', 'account', 'owner', 'requests', 'relayer_bytes', 'coverage']
-    const body = rows.map((row) => [
-      model.definitionVersion,
-      demo ? 'demo-fixture' : 'unavailable',
-      timeZone,
-      period.start.toISOString(),
-      period.end.toISOString(),
-      row.account.id,
-      row.account.owner,
-      String(row.mine.length),
-      row.bytes.total.toString(),
-      demo ? 'demo' : 'unavailable',
-    ])
+    const live = activityQuery.data
+    const header = demo
+      ? ['definition_version', 'source', 'timezone', 'start', 'end', 'account', 'owner', 'requests', 'relayer_bytes']
+      : ['source', 'generated_at', 'window_hours', 'owner', 'uploads_completed']
+    const body = demo
+      ? rows.map((row) => [
+        model.definitionVersion,
+        'demo-fixture',
+        timeZone,
+        period.start.toISOString(),
+        period.end.toISOString(),
+        row.account.id,
+        row.account.owner,
+        String(row.mine.length),
+        row.bytes.total.toString(),
+      ])
+      : (live?.actions.topOwners ?? []).map((owner) => [
+        'dev-relayer-activity',
+        live?.generatedAt ?? '',
+        String(live?.windowHours ?? liveHours),
+        owner.owner,
+        String(owner.uploadsCompleted),
+      ])
+    if (!demo && body.length === 0) return
     const blob = new Blob([toCsv([header, ...body])], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -302,8 +313,8 @@ export function AdminAnalyticsApp({
         <div className="wa-util">
           <div className="wa-crumb">Admin / <b>{VIEWS.find((item) => item.id === view)?.label}</b></div>
           <span className="wa-clock">{new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now)} {timeZone}</span>
-          <button className="wa-btn" onClick={exportView}>Export</button>
-          <button className="wa-btn icon" aria-label="Notifications" title={demo ? 'Demo data. Node egress unavailable. Incident year not verified.' : 'Live request egress is unavailable.'}><Bell size={14} /></button>
+          <button className="wa-btn" onClick={exportView} disabled={!demo && !activityQuery.data} title={demo ? 'Download the fixture account summary' : 'Download the live owner upload counts. Request-byte export is not stored.'}>Export</button>
+          <span className="wa-env" title={demo ? 'Demo data. Node egress unavailable. Incident year not verified.' : 'Live request egress is unavailable. Wallet and activity routes are separate.'}>Notices</span>
           <button className="wa-btn" onClick={onLogout}><LogOut size={14} /> Sign out</button>
         </div>
         <div className="wa-head">
