@@ -474,14 +474,20 @@ export function RetrievalLivePage({ adminKey, start, end, onInvalidKey, onOpenQu
   const sources = inventory.data?.sources ?? []
   const byId = (id: string) => sources.find((source) => source.id === id)
   const records = byId('retrieval_requests')
-  const body = byId('response_bytes')
-  const aggregator = byId('aggregator_bytes')
-  const node = byId('node_egress')
   const failed = Boolean(inventory.error)
+  const bodyStatus = summary.data
+    ? summary.data.relayerBodyBytes.samples > 0
+      ? { status: 'Measured', why: summary.data.bodyDefinition, samples: summary.data.relayerBodyBytes.samples }
+      : { status: summary.data.requests === 0 ? 'No samples' : 'Field missing', why: summary.data.requests === 0 ? 'No recall completed in this window.' : 'Requests exist, but relayer body bytes are null.', samples: summary.data.relayerBodyBytes.samples }
+    : { status: summary.isError ? 'Request failed' : 'Loading', why: summary.isError ? 'The retrieval summary did not load.' : 'Waiting for the selected window.', samples: null as number | null }
+  const upstreamStatus = summary.data && summary.data.upstreamBytes.samples > 0
+    ? { status: 'Measured', why: 'Aggregator-to-relayer bytes recorded on the request. This is relayer ingress, not client egress.', samples: summary.data.upstreamBytes.samples }
+    : { status: summary.data ? 'Not measured' : 'Loading', why: summary.data?.nodeReason ? 'No upstream byte field on the requests in this window.' : 'Waiting for the selected window.', samples: summary.data ? 0 : null }
+  const nodeStatus = { status: 'Unsupported', why: summary.data?.nodeReason ?? 'Node telemetry is not correlated to a request id.', samples: summary.data?.nodeBytes.samples ?? null }
   const rows = [
-    ['Relayer → client', body ? boundaryCopy(body, '') : { status: failed ? 'Query failed' : 'Loading', why: failed ? 'The quality inventory did not load.' : 'Waiting for the quality inventory.', samples: null }],
-    ['Aggregator → relayer', boundaryCopy(aggregator, 'Upstream body bytes are not collected.')],
-    ['Storage node → aggregator', boundaryCopy(node, 'Node telemetry is not correlated to a request id.')],
+    ['Relayer → client', bodyStatus],
+    ['Aggregator → relayer', upstreamStatus],
+    ['Storage node → aggregator', nodeStatus],
   ] as const
   const samples = summary.isError ? null : summary.data ? summary.data.requests : failed ? null : records?.observed ?? null
   return (
