@@ -22,6 +22,7 @@ import type {
     ListNamespacesOptions,
 } from "./types.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { resolveRecallCall } from "./recall-args.js";
 
 /** Matches the relayer's `MAX_BULK_ITEMS`. */
 const MAX_BULK_ITEMS = 20;
@@ -308,9 +309,16 @@ export class MemWalMock {
     }
 
     async recall(params: RecallParams): Promise<RecallResult>;
+    /**
+     * @deprecated Prefer `recall({ query, limit, namespace })`.
+     */
+    async recall(query: string, options: RecallOptions): Promise<RecallResult>;
+    /**
+     * @deprecated Prefer `recall({ query, limit, namespace })`.
+     */
     async recall(
         query: string,
-        limitOrOptions?: number | RecallOptions,
+        limit?: number,
         namespace?: string
     ): Promise<RecallResult>;
     async recall(
@@ -318,27 +326,11 @@ export class MemWalMock {
         limitOrOptions: number | RecallOptions | undefined = 10,
         namespace?: string
     ): Promise<RecallResult> {
-        let query: string;
-        let options: RecallOptions;
-        if (typeof queryOrParams === "object") {
-            const { query: objectQuery, ...rest } = queryOrParams;
-            query = objectQuery;
-            options = rest;
-        } else {
-            query = queryOrParams;
-            if (limitOrOptions == null) {
-                options = { limit: 10, namespace };
-            } else if (typeof limitOrOptions === "number") {
-                options = { limit: limitOrOptions, namespace };
-            } else {
-                // Positional namespace fills an options object that omitted it.
-                // An explicit options.namespace still wins. (#1038)
-                options = { ...limitOrOptions };
-                if (options.namespace === undefined && namespace !== undefined) {
-                    options.namespace = namespace;
-                }
-            }
-        }
+        const { query, options } = resolveRecallCall(
+            queryOrParams,
+            limitOrOptions,
+            namespace
+        );
         validateText(query, "query");
         const resolvedNamespace = options.namespace ?? this.namespace;
         const resolvedLimit = options.topK ?? options.limit ?? 10;

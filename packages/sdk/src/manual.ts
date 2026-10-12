@@ -52,6 +52,7 @@ import {
     scoringWeightsToWire,
 } from "./utils.js";
 import { assertCompatibleRelayer, compatibilityErrorFromStatus } from "./compatibility.js";
+import { resolveLimitOrOptions } from "./recall-args.js";
 
 // ============================================================
 // Constants
@@ -379,9 +380,12 @@ export class MemWalManual {
      * 2. Search server for matching vectors
      * 3. Download blobs from Walrus
      * 4. SEAL decrypt each blob
+     *
+     * `recallManual(query, { limit?, namespace? })` is valid.
+     * `recallManual(query, namespace)` throws `TypeError`.
      */
+    async recallManual(query: string, options: MemWalManualRecallOptions): Promise<RecallManualResult>;
     async recallManual(query: string, limit?: number, namespace?: string): Promise<RecallManualResult>;
-    async recallManual(query: string, options?: MemWalManualRecallOptions): Promise<RecallManualResult>;
     async recallManual(
         query: string,
         limitOrOptions: number | MemWalManualRecallOptions = 10,
@@ -389,7 +393,11 @@ export class MemWalManual {
     ): Promise<RecallManualResult> {
         if (!query.trim()) throw new Error("Query cannot be empty");
 
-        const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions, namespace } : limitOrOptions;
+        const options = resolveLimitOrOptions(
+            "recallManual",
+            limitOrOptions,
+            namespace,
+        );
         const limit = options.limit ?? 10;
         const ns = options.namespace ?? this.namespace;
 
