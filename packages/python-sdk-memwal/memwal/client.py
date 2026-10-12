@@ -1615,7 +1615,7 @@ class MemWalClockDriftError(MemWalError):
 
 def _redact_internal_urls(text: str) -> str:
     return re.sub(
-        r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s)\]>'\"]*",
+        r"https?://(?:(?:[\w-]+\.)*localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|0\.0\.0\.0)(?::\d+)?[^\s)\]>'\"]*",
         "[internal]",
         text,
         flags=re.IGNORECASE,
