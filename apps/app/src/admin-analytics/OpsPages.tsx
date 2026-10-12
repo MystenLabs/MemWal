@@ -80,39 +80,57 @@ function Kpi({ label, value, delta, title }: { label: string; value: string; del
   )
 }
 
-export function ActivityPage({ activity, loading, error, periodLabel, onInvalidKey, onRetry }: {
+export function activityBuckets(windowHours: number, hourly: Array<{ hour: string; count: number }> | null | undefined, daily: Array<{ day: string; count: number }>) {
+  if (hourly && hourly.length > 0 && windowHours > 0 && windowHours <= 36) {
+    return { grain: 'Hourly', rows: hourly.map((row) => ({ label: row.hour.replace('T', ' ').slice(0, 16), value: row.count })) }
+  }
+  return { grain: 'Daily', rows: daily.map((row) => ({ label: row.day, value: row.count })) }
+}
+
+export function priorText(comparing: boolean, value: number) {
+  return comparing ? `Prior ${value}` : 'No comparison'
+}
+
+
+export function afterCell(partial: boolean, hours: number, loading: boolean, value: number | undefined) {
+  if (partial && hours < 1) return 'Still collecting'
+  if (loading) return '…'
+  return String(value ?? 0)
+}
+export function ActivityPage({ activity, loading, error, periodLabel, comparing, windowHours, onInvalidKey, onRetry }: {
   activity: AdminActivity | undefined
   loading: boolean
   error: Error | null
   periodLabel: string
+  comparing: boolean
+  windowHours: number
   onInvalidKey: () => void
   onRetry: () => void
 }) {
   useInvalid(error, onInvalidKey)
   const actions = activity?.actions
-  const series = actions?.memoriesByHour?.map((row) => ({ label: row.hour.slice(11, 16), value: row.count }))
-    ?? actions?.memoriesByDay.map((row) => ({ label: row.day.slice(5), value: row.count }))
-    ?? []
-  const written = series.reduce((sum, row) => sum + row.value, 0)
+  const buckets = activityBuckets(windowHours, actions?.memoriesByHour, actions?.memoriesByDay ?? [])
+  const written = buckets.rows.reduce((sum, row) => sum + row.value, 0)
+  const sameCount = actions != null && written === actions.uploadsCompleted
   return (
     <div className="wa-page">
       <div className="wa-kpis">
-        <Kpi label="Memories written" value={actions ? formatCount(written) : '—'} delta={periodLabel} />
-        <Kpi label="Uploads completed" value={actions ? formatCount(actions.uploadsCompleted) : '—'} delta={actions ? `Prior ${formatCount(actions.uploadsCompletedPrior)}` : 'Waiting'} />
-        <Kpi label="Uploads failed" value={actions ? formatCount(actions.uploadsFailed) : '—'} delta={actions ? `Prior ${formatCount(actions.uploadsFailedPrior)}` : 'Waiting'} />
-        <Kpi label="In flight" value={actions ? formatCount(actions.uploadsInFlight) : '—'} delta="Current jobs" />
+        <Kpi label="Successful writes" value={actions ? formatCount(written) : '—'} delta={periodLabel} title="Completed remember jobs in the chart buckets for the selected window." />
+        <Kpi label="Uploads completed" value={actions ? formatCount(actions.uploadsCompleted) : '—'} delta={actions ? priorText(comparing, actions.uploadsCompletedPrior) : 'Waiting'} title={sameCount ? 'Matches the chart total for this window. Both count remember jobs marked done.' : 'Jobs whose status became done in the selected window. The chart counts the same jobs by bucket.'} />
+        <Kpi label="Uploads failed" value={actions ? formatCount(actions.uploadsFailed) : '—'} delta={actions ? priorText(comparing, actions.uploadsFailedPrior) : 'Waiting'} />
+        <Kpi label="In flight" value={actions ? formatCount(actions.uploadsInFlight) : '—'} delta="Current state" title="Jobs pending, running, or uploaded now. Not limited to the selected period." />
         <Kpi label="Active delegates" value="—" delta="Unavailable" title="Delegate activity is not in the activity API." />
-        <Kpi label="Retrievals" value="—" delta="Unavailable" title="Retrieval requests are not stored per account." />
+        <Kpi label="Retrievals" value="—" delta="Not on this response" title="Retrieval records are a separate source. This page does not substitute upload counts." />
       </div>
       <div className="wa-board">
         <section className="wa-panel wa-chart-panel">
           <div className="wa-chart-head">
             <h2>Completed writes</h2>
-            <span className="wa-note">{actions?.memoriesByHour ? 'Hourly' : 'Daily'} · dev relayer</span>
+            <span className="wa-note">{buckets.grain} · {periodLabel}</span>
           </div>
           {loading && <Skeleton rows={5} />}
           {!loading && !actions && <Fail message="Dev relayer activity failed." detail={failureDetail(error, 'GET /api/admin/activity')} onRetry={onRetry} />}
-          {actions && <Bars rows={series} empty="No completed writes in this window." />}
+          {actions && <Bars rows={buckets.rows} empty="No completed writes in this window." />}
         </section>
         <aside className="wa-rail">
           <section>
@@ -124,8 +142,8 @@ export function ActivityPage({ activity, loading, error, periodLabel, onInvalidK
             ))}
           </section>
           <section>
-            <h2>Measured outflow</h2>
-            <p className="wa-note">Balance-sample decreases. Not a provider invoice.</p>
+            <h2>Observed balance outflow</h2>
+            <p className="wa-note">Balance-sample decreases. Not provider billing.</p>
             {activity && (
               <>
                 <div className="wa-split"><span>Uploader WAL</span><b>{activity.uploaderWal.comparable ? formatTokenAmount(activity.uploaderWal.outflow) : '—'}</b></div>
@@ -136,16 +154,17 @@ export function ActivityPage({ activity, loading, error, periodLabel, onInvalidK
         </aside>
         <section className="wa-panel wa-table-panel">
           <h2>Completed uploads by owner</h2>
+          <p className="wa-note">Top owners only. This is not every account.</p>
           <div className="wa-table-wrap">
             <table className="wa-table">
-              <thead><tr><th>Owner</th><th className="wa-num">Uploads</th><th>Prior window</th></tr></thead>
+              <thead><tr><th>Owner</th><th className="wa-num">Uploads</th>{comparing && <th>Prior window</th>}</tr></thead>
               <tbody>
-                {actions && actions.topOwners.length === 0 && <tr><td colSpan={3}>No completed uploads in this window.</td></tr>}
+                {actions && actions.topOwners.length === 0 && <tr><td colSpan={comparing ? 3 : 2}>No completed uploads in this window.</td></tr>}
                 {actions?.topOwners.map((owner) => (
                   <tr key={owner.owner}>
                     <td className="wa-mono" title={owner.owner}>{shortAddress(owner.owner)}</td>
                     <td className="wa-num">{owner.uploadsCompleted}</td>
-                    <td className="wa-note">Not returned per owner</td>
+                    {comparing && <td className="wa-note">Not returned per owner</td>}
                   </tr>
                 ))}
                 {!actions && <tr><td colSpan={3} className="wa-note">Owner rankings stay blank until activity loads.</td></tr>}
@@ -243,8 +262,12 @@ export function UploadJobsPage({ adminKey, onInvalidKey, periodLabel, start, end
             <div><dt>Queued</dt><dd>{new Date(selected.createdAt).toLocaleString()}</dd></div>
             <div><dt>Updated</dt><dd>{new Date(selected.timestamp).toLocaleString()}</dd></div>
           </dl>
-          <p className="wa-note">{selected.rawErrorMessage ?? selected.errorMessage}</p>
-          <p className="wa-note">Stage history, retry counts, and blob ids are not on this response. Retry and cancel are not offered because this route is read-only.</p>
+          <p className="wa-prose">{selected.errorMessage}</p>
+          <details>
+            <summary>Technical error</summary>
+            <p className="wa-prose wa-mono">{selected.rawErrorMessage ?? selected.errorMessage}</p>
+          </details>
+          <p className="wa-note">Read-only details. Retry and cancel are not on this route.</p>
         </Drawer>
       )}
     </div>
@@ -592,9 +615,9 @@ export function IncidentLivePage({
       <div className="wa-kpis">
         <article className="wa-kpi"><div className="label">Uploads completed</div><div className="value">{formatCount(duringUploads)}</div><div className="delta">{baselineChange(duringUploads, beforeUploads)} vs before</div></article>
         <article className="wa-kpi"><div className="label">Uploads / hour</div><div className="value">{(duringUploads / duringHours).toFixed(2)}</div><div className="delta">{unequal ? 'Windows differ in length' : 'Same elapsed duration'}</div></article>
-        <article className="wa-kpi"><div className="label">Retrieval requests</div><div className="value wa-unavailable">—</div><div className="delta">No request records</div></article>
-        <article className="wa-kpi"><div className="label">Relayer p99</div><div className="value wa-unavailable">—</div><div className="delta">Histogram not registered</div></article>
-        <article className="wa-kpi"><div className="label">Aggregator p99</div><div className="value wa-unavailable">—</div><div className="delta">Not retained per request</div></article>
+        <article className="wa-kpi"><div className="label">Retrieval requests</div><div className="value">{coverage.data ? formatCount(coverage.data.retrievalRecords) : '—'}</div><div className="delta">{coverage.data ? 'Recorded, not this chart' : 'Coverage unknown'}</div></article>
+        <article className="wa-kpi"><div className="label">Relayer p99</div><div className="value wa-unavailable">—</div><div className="delta">Percentile not on this response</div></article>
+        <article className="wa-kpi"><div className="label">Aggregator p99</div><div className="value wa-unavailable">—</div><div className="delta">Not implemented</div></article>
         <article className="wa-kpi"><div className="label">Node transfer</div><div className="value wa-unavailable">—</div><div className="delta">Correlation unavailable</div></article>
       </div>
       <div className="wa-invest">
@@ -645,11 +668,11 @@ export function IncidentLivePage({
           <table className="wa-table">
             <thead><tr><th>Metric</th><th>Before</th><th>During</th><th>After</th><th>During vs before</th></tr></thead>
             <tbody>
-              <tr><td>Uploads completed</td><td className="num">{formatCount(beforeUploads)}</td><td className="num">{formatCount(duringUploads)}</td><td className="num">{adjacent.after ? (after.isLoading ? '…' : formatCount(after.data?.actions.uploadsCompleted ?? 0)) : 'Not yet available'}</td><td>{baselineChange(duringUploads, beforeUploads)}{unequal ? ` · ${(duringUploads / duringHours).toFixed(2)}/h vs ${(beforeUploads / beforeHours).toFixed(2)}/h` : ''}</td></tr>
+              <tr><td>Uploads completed</td><td className="num">{formatCount(beforeUploads)}</td><td className="num">{formatCount(duringUploads)}</td><td className="num">{adjacent.after ? afterCell(Boolean(adjacent.after.partial), (adjacent.after.end.getTime() - adjacent.after.start.getTime()) / 3_600_000, after.isLoading, after.data?.actions.uploadsCompleted) : 'Not yet available'}</td><td>{baselineChange(duringUploads, beforeUploads)}{unequal ? ` · ${(duringUploads / duringHours).toFixed(2)}/h vs ${(beforeUploads / beforeHours).toFixed(2)}/h` : ''}</td></tr>
               <tr><td>Uploads failed</td><td className="num">{formatCount(actions?.uploadsFailedPrior ?? 0)}</td><td className="num">{formatCount(actions?.uploadsFailed ?? 0)}</td><td className="num">{adjacent.after ? formatCount(after.data?.actions.uploadsFailed ?? 0) : 'Not yet available'}</td><td>{baselineChange(actions?.uploadsFailed ?? 0, actions?.uploadsFailedPrior ?? 0)}</td></tr>
               <tr><td>Memory deletes</td><td className="num">{formatCount(actions?.memoryDeletesPrior ?? 0)}</td><td className="num">{formatCount(actions?.memoryDeletes ?? 0)}</td><td className="num">{adjacent.after ? formatCount(after.data?.actions.memoryDeletes ?? 0) : 'Not yet available'}</td><td>{baselineChange(actions?.memoryDeletes ?? 0, actions?.memoryDeletesPrior ?? 0)}</td></tr>
               <tr><td>Retrieval requests</td><td className="wa-unavailable" colSpan={4}>{retrievalReason}</td></tr>
-              <tr><td>Relayer → client bytes</td><td className="wa-unavailable" colSpan={4}>Response-body histograms are not registered. Not substituted from upload size.</td></tr>
+              <tr><td>Relayer → client bytes</td><td className="wa-unavailable" colSpan={4}>Percentile values are not on this response. Not substituted from upload size.</td></tr>
               <tr><td>Aggregator → relayer bytes</td><td className="wa-unavailable" colSpan={4}>Upstream body bytes are not retained per request.</td></tr>
               <tr><td>Node → aggregator bytes</td><td className="wa-unavailable" colSpan={4}>Node provider correlation unavailable.</td></tr>
             </tbody>

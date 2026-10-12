@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, AlertTriangle, Database, KeyRound, LayoutDashboard, LogOut, Menu, Settings, Shield, Users, Wallet, X } from 'lucide-react'
+import { Activity, AlertTriangle, ClipboardCheck, Database, KeyRound, LayoutDashboard, LineChart, ListChecks, LogOut, Menu, Settings, Shield, Users, Wallet, X } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
-import { ActivityPage, ConfigPage, IncidentLivePage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage } from './OpsPages'
+import { ActivityPage, ConfigPage, IncidentLivePage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage, priorText } from './OpsPages'
 import { QualityPage } from './QualityPage'
 import { Drawer, useNarrow } from './Drawer'
 import { Chevron } from './Controls'
@@ -308,7 +308,7 @@ export function AdminAnalyticsApp({
           <div key={group}>
             <div className="wa-group">{group.toUpperCase()}</div>
             {VIEWS.filter((item) => item.group === group).map((item) => {
-              const Icon = item.id === 'overview' ? LayoutDashboard : item.id === 'storage' ? Database : item.id === 'retrieval' ? Activity : item.id === 'accounts' ? Users : item.id === 'incidents' ? AlertTriangle : item.id === 'wallets' ? Wallet : item.id === 'config' ? Settings : item.id === 'access' ? Shield : KeyRound
+              const Icon = item.id === 'overview' ? LayoutDashboard : item.id === 'storage' ? Database : item.id === 'retrieval' ? Activity : item.id === 'accounts' ? Users : item.id === 'activity' ? LineChart : item.id === 'uploads' ? ListChecks : item.id === 'quality' ? ClipboardCheck : item.id === 'incidents' ? AlertTriangle : item.id === 'wallets' ? Wallet : item.id === 'config' ? Settings : item.id === 'access' ? Shield : KeyRound
               return (
               <button key={item.id} className="wa-navbtn" aria-current={view === item.id ? 'page' : undefined} onClick={() => { setParam('view', item.id); setNavOpen(false); menuButton.current?.focus() }}>
                 <Icon className="wa-ico" size={14} />
@@ -394,6 +394,7 @@ export function AdminAnalyticsApp({
             loading={activityQuery.isLoading}
             error={activityQuery.error as Error | null}
             periodLabel={period.label}
+            comparing={compare !== 'none'}
             windowEnd={period.end}
             timeZone={timeZone}
             onInvalidKey={onInvalidKey}
@@ -439,8 +440,8 @@ export function AdminAnalyticsApp({
         ) : <RetrievalLivePage adminKey={adminKey} onInvalidKey={onInvalidKey} onOpenQuality={() => setParam('view', 'quality')} />)}
         {view === 'accounts' && (demo ? (
           <AccountTable rows={rows} sort={sort} onSort={setSort} onOpen={(id) => setParam('account', id)} query={query} onQuery={(value) => setParam('q', value)} showAll={showAll} onShowAll={(value) => setParam('all', value ? '1' : '')} />
-        ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />)}
-        {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />}
+        ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} comparing={compare !== 'none'} windowHours={(period.end.getTime() - period.start.getTime()) / 3_600_000} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />)}
+        {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} comparing={compare !== 'none'} windowHours={(period.end.getTime() - period.start.getTime()) / 3_600_000} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />}
         {view === 'uploads' && adminKey && <UploadJobsPage adminKey={adminKey} onInvalidKey={onInvalidKey} periodLabel={period.label} start={period.start} end={period.end} priorStart={compared?.start ?? null} />}
         {view === 'wallets' && adminKey && <WalletsPage adminKey={adminKey} onInvalidKey={onInvalidKey} activity={activityQuery.data} />}
         {view === 'incidents' && (demo ? <IncidentView modelStart={model.incident} requests={scoped} now={now} timeZone={timeZone} /> : <IncidentLivePage adminKey={adminKey} period={period} timeZone={timeZone} baseline={compared} onInvalidKey={onInvalidKey} onOpenDay={(ymd) => { const next = new URLSearchParams(params); next.set('range', 'day'); next.set('day', ymd); setParams(next) }} onOpenQuality={() => setParam('view', 'quality')} />)}
@@ -497,6 +498,7 @@ function LiveOverview({
   periodLabel,
   windowEnd,
   timeZone,
+  comparing,
   onInvalidKey,
   onRetry,
 }: {
@@ -506,12 +508,13 @@ function LiveOverview({
   periodLabel: string
   windowEnd: Date
   timeZone: string
+  comparing: boolean
   onInvalidKey: () => void
   onRetry: () => void
 }) {
   if (error?.message === 'INVALID_KEY') onInvalidKey()
   if (!activity) {
-    return <ActivityPage activity={activity} loading={loading} error={error} periodLabel={periodLabel} onInvalidKey={onInvalidKey} onRetry={onRetry} />
+    return <ActivityPage activity={activity} loading={loading} error={error} periodLabel={periodLabel} comparing={comparing} windowHours={0} onInvalidKey={onInvalidKey} onRetry={onRetry} />
   }
   const days = activity.actions.memoriesByDay.filter((day) => day.day < formatYmd(windowEnd, timeZone) || formatYmd(new Date(windowEnd.getTime() - 1), timeZone) === day.day)
   const buckets = activity.actions.memoriesByHour?.map((row) => ({ label: row.hour, relayer: 0, upstream: 0, requests: row.count, latency: 0 }))
@@ -527,8 +530,8 @@ function LiveOverview({
     <>
       <div className="wa-kpis">
         <article className="wa-kpi"><div className="label">Memories written</div><div className="value">{formatCount(written)}</div><div className="delta">{periodLabel}</div></article>
-        <article className="wa-kpi"><div className="label">Uploads completed</div><div className="value">{formatCount(activity.actions.uploadsCompleted)}</div><div className="delta">Prior {formatCount(activity.actions.uploadsCompletedPrior)}</div></article>
-        <article className="wa-kpi"><div className="label">Uploads failed</div><div className="value">{formatCount(activity.actions.uploadsFailed)}</div><div className="delta">Prior {formatCount(activity.actions.uploadsFailedPrior)}</div></article>
+        <article className="wa-kpi"><div className="label">Uploads completed</div><div className="value">{formatCount(activity.actions.uploadsCompleted)}</div><div className="delta">{priorText(comparing, activity.actions.uploadsCompletedPrior)}</div></article>
+        <article className="wa-kpi"><div className="label">Uploads failed</div><div className="value">{formatCount(activity.actions.uploadsFailed)}</div><div className="delta">{priorText(comparing, activity.actions.uploadsFailedPrior)}</div></article>
         <article className="wa-kpi"><div className="label">In flight</div><div className="value">{formatCount(activity.actions.uploadsInFlight)}</div><div className="delta">Current jobs</div></article>
         <article className="wa-kpi"><div className="label" title="Request-byte percentiles are not stored.">Retrieval bytes p99</div><div className="value wa-unavailable">—</div><div className="delta">Unavailable</div></article>
         <article className="wa-kpi"><div className="label" title="Top 8 owners with completed uploads, not every account.">Owners listed</div><div className="value">{formatCount(activity.actions.topOwners.length)}</div><div className="delta">Top 8</div></article>
