@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- `MemWalMock.listNamespaces` rejects a non-positive or non-integer `limit` with `limit must be positive`, matching the relayer. `limit: 0` used to return `has_more: true` and `next_cursor: null`, so the documented pagination loop never finished, and `limit: -1` silently dropped the last namespace. (#1144, #1145)
+- `MemWalMock.rememberBulkAsync` rejects an empty or non-array batch with the same error as `MemWal`. (#1146)
+- `MemWalMock` honors `idempotencyKey`. A retry of the same text and namespace returns the original job, a different payload throws, and `forget` / `clear` release the key so the text can be written again. (#1147)
+- `MemWalMock.recall({ sort: "recent" })` orders a bounded semantic window (5× `limit`, at least `limit`, at most 50) by write time before truncating. Relevance order is unchanged. (#1124)
+- Positional `recall(query, options, namespace)` uses that namespace when `options.namespace` is omitted, on both `MemWal` and `MemWalMock`. An explicit `options.namespace` still wins. (#1038)
 - `remember(text, { idempotencyKey })` and `rememberAndWait(text, { timeoutMs }, { idempotencyKey })` treat a plain object in the namespace slot as options. A third options argument is merged, and its fields win. That call used to send the object as the namespace, or drop the third argument and mint a second blob. An explicit string namespace still wins. (#1142)
 - `getRememberStatus("")` returns `not_found` without a request, and `waitForRememberJob("")` fails immediately with status 404. `GET /api/remember/` is not a route; the empty 404 body used to throw `SyntaxError`, and the wait treated that as transient until timeout. (#1087)
 - `waitForRememberJobs` settles every slot when the same job id is listed more than once. `indexOf` plus a `Set` of ids left the later copies as `timeout`. (#1121, #1084)
