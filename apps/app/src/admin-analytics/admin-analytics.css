@@ -314,7 +314,7 @@ a.wa-ext:hover, a.wa-ext:focus-visible { color: #fff; border-bottom-color: var(-
 .wa-table th, .wa-table td { padding: 9px 10px; border-bottom: 1px solid #262626; text-align: right; white-space: nowrap; }
 .wa-table th:first-child, .wa-table td:first-child, .wa-table th:nth-child(2), .wa-table td:nth-child(2) { text-align: left; }
 .wa-table th { color: #bdbdbd; font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; }
-.wa-prose { text-align: left; white-space: normal; }
+.wa-table td.wa-prose, .wa-table th.wa-prose { text-align: left; white-space: normal; max-width: 42rem; }
 .wa-table th button { border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
 .wa-table tr { cursor: pointer; transition: background 150ms ease; }
 .wa-table tbody tr:hover td { background: #222; }

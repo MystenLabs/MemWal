@@ -415,7 +415,7 @@ export function boundaryCopy(source: { capability: string; health: string; obser
   if (source.capability === 'unsupported_by_source') return { status: 'Unsupported', why: source.limitation, samples: null }
   if (source.health === 'failed') return { status: 'Query failed', why: source.limitation, samples: null }
   if (source.observed === 0) return { status: 'No samples', why: 'Instrumentation is deployed. No sample has been recorded in this process.', samples: 0 }
-  return { status: 'Aggregate only', why: source.limitation, samples: source.observed }
+  return { status: 'Aggregate only', why: 'A process histogram is available. It is not a per-account request history.', samples: source.observed }
 }
 
 export function RetrievalLivePage({ adminKey, onInvalidKey, onOpenQuality }: { adminKey: string | null; onInvalidKey: () => void; onOpenQuality: () => void }) {
