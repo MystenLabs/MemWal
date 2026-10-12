@@ -1874,6 +1874,9 @@ pub struct RememberBulkStatusRequest {
 pub struct RememberBulkStatusItem {
     pub job_id: String,
     pub status: String,
+    /// Set when the job row exists. Omitted for `not_found`, which has no row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blob_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
