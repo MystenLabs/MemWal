@@ -66,7 +66,7 @@ export function CountChart({
         <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
       </details>
       {expanded && (
-        <ChartDialog title={title} context={`${grain} · ${unit} · ${timeZone.replace(/_/g, ' ')}`} onClose={() => setExpanded(false)}>
+        <ChartDialog title={title} context={`${grain} · ${unit} · ${timeZone.replace(/_/g, ' ')}`} restoreScroll={savedScroll.current} onClose={() => setExpanded(false)}>
           {showRegions && <ChartLegend />}
           {plot(true)}
           <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
@@ -167,23 +167,31 @@ function CountPlot({
   )
 }
 
-export function ChartDialog({ title, context, onClose, children }: { title: string; context: string; onClose: () => void; children: ReactNode }) {
+export function ChartDialog({ title, context, restoreScroll = 0, onClose, children }: { title: string; context: string; restoreScroll?: number; onClose: () => void; children: ReactNode }) {
   const titleId = useId()
   const closeRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
-  const scrollRef = useRef(0)
+  const scrollRef = useRef(restoreScroll)
+  scrollRef.current = restoreScroll
   useEffect(() => {
-    const overflow = document.body.style.overflow
     const root = document.querySelector('.wa')
-    scrollRef.current = window.scrollY
+    const previous = { position: document.body.style.position, top: document.body.style.top, width: document.body.style.width, overflow: document.body.style.overflow }
+    const y = scrollRef.current
+    document.body.style.position = 'fixed'
+    document.body.style.top = `-${y}px`
+    document.body.style.width = '100%'
     document.body.style.overflow = 'hidden'
     root?.setAttribute('inert', '')
     closeRef.current?.focus()
     const finish = () => {
       root?.removeAttribute('inert')
-      document.body.style.overflow = overflow
+      document.body.style.position = previous.position
+      document.body.style.top = previous.top
+      document.body.style.width = previous.width
+      document.body.style.overflow = previous.overflow
+      window.scrollTo(0, y)
       onCloseRef.current()
     }
     const onKey = (event: KeyboardEvent) => {
@@ -200,7 +208,11 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
     closeRef.current?.addEventListener('click', finish)
     return () => {
       root?.removeAttribute('inert')
-      document.body.style.overflow = overflow
+      document.body.style.position = previous.position
+      document.body.style.top = previous.top
+      document.body.style.width = previous.width
+      document.body.style.overflow = previous.overflow
+      window.scrollTo(0, y)
       document.removeEventListener('keydown', onKey)
       closeRef.current?.removeEventListener('click', finish)
     }
