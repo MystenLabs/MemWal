@@ -248,8 +248,14 @@ export interface RememberBulkItem {
     namespace?: string;
 }
 
+/** Options for rememberBulk / rememberBulkAsync requests */
+export interface RememberBulkAsyncOptions {
+    /** Optional caller-supplied idempotency key (defaults to derived key based on items) */
+    idempotencyKey?: string;
+}
+
 /** Options for remember bulk polling behaviour */
-export interface RememberBulkOptions {
+export interface RememberBulkOptions extends RememberBulkAsyncOptions {
     /** How often to poll each job_id (default: 1500ms) */
     pollIntervalMs?: number;
     /** Max total wait time before throwing (default: 120_000ms) */

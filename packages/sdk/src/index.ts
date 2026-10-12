@@ -62,6 +62,7 @@ export type {
     RestoreResult,
     RememberBulkItem,
     RememberBulkOptions,
+    RememberBulkAsyncOptions,
     RememberBulkAcceptedResult,
     RememberBulkStatusItem,
     RememberBulkStatusResult,

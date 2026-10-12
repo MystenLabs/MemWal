@@ -51,6 +51,7 @@ import type {
     ListMemoriesOptions,
     RememberBulkItem,
     RememberBulkOptions,
+    RememberBulkAsyncOptions,
     RememberBulkResult,
     RememberAcceptedResult,
     RememberJobStatus,
@@ -71,6 +72,8 @@ import {
     redactInternalUrls,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
+    derivedIdempotencyKey,
+    derivedBulkIdempotencyKey,
 } from "./utils.js";
 import {
     assertCompatibleRelayer,
@@ -135,19 +138,6 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Window over which the same (namespace, text) resolves to one key.
- *
- * `pendingRememberKeys` only dedupes retries that reuse one client instance,
- * and callers such as the MCP sidecar build a fresh client per session — so a
- * random key let a reconnect replay mint a second paid blob. The bucket bounds
- * the collapse: `remember_jobs` rows are never pruned, so an unbucketed key
- * would dedupe against a job from any point in history. */
-const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
-
-async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
-    const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
-    return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
-}
 
 /** Deadline for a request that names no other.
  *
@@ -722,7 +712,10 @@ export class MemWal {
      * console.log(accepted.job_ids)
      * ```
      */
-    async rememberBulkAsync(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
+    async rememberBulkAsync(
+        items: RememberBulkItem[],
+        options: RememberBulkAsyncOptions = {},
+    ): Promise<RememberBulkAcceptedResult> {
         if (!Array.isArray(items) || items.length === 0) {
             throw new Error("rememberBulkAsync: items must be a non-empty array");
         }
@@ -741,12 +734,20 @@ export class MemWal {
             namespace: item.namespace ?? this.namespace,
         }));
 
+        const requestIdentity = `bulk\0${normalised.map((item) => `${item.namespace}\0${item.text}`).join("\0\0")}`;
+        const generatedKey = options.idempotencyKey === undefined;
+        const idempotencyKey = options.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? (await derivedBulkIdempotencyKey(requestIdentity));
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
+
         const accepted = await this.signedRequest<RememberBulkAcceptedResult>(
             "POST",
             "/api/remember/bulk",
-            { items: normalised },
+            { items: normalised, idempotency_key: idempotencyKey },
             [200, 202],
         );
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
 
         if (!accepted.job_ids || accepted.job_ids.length !== normalised.length) {
             throw new Error(
@@ -934,8 +935,11 @@ export class MemWal {
     /**
      * Remember multiple memories and return as soon as the server accepts the jobs.
      */
-    async rememberBulk(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
-        return this.rememberBulkAsync(items);
+    async rememberBulk(
+        items: RememberBulkItem[],
+        options: RememberBulkAsyncOptions = {},
+    ): Promise<RememberBulkAcceptedResult> {
+        return this.rememberBulkAsync(items, options);
     }
 
     /**
@@ -945,9 +949,34 @@ export class MemWal {
         items: RememberBulkItem[],
         opts: RememberBulkOptions = {},
     ): Promise<RememberBulkResult> {
-        const namespaces = items.map((item) => item.namespace ?? this.namespace);
-        const accepted = await this.rememberBulkAsync(items);
-        return this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
+        if (!Array.isArray(items) || items.length === 0) {
+            throw new Error("rememberBulkAsync: items must be a non-empty array");
+        }
+        if (items.length > MAX_BULK_ITEMS) {
+            throw new Error(
+                `rememberBulkAsync: items exceeds maximum of ${MAX_BULK_ITEMS} per bulk request`,
+            );
+        }
+        items.forEach((item, i) => {
+            assertNonBlankText(item?.text, `items[${i}].text cannot be empty`);
+        });
+
+        const normalised = items.map((item) => ({
+            text: item.text,
+            namespace: item.namespace ?? this.namespace,
+        }));
+        const requestIdentity = `bulk\0${normalised.map((item) => `${item.namespace}\0${item.text}`).join("\0\0")}`;
+        const generatedKey = opts.idempotencyKey === undefined;
+        const idempotencyKey = opts.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? (await derivedBulkIdempotencyKey(requestIdentity));
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
+
+        const namespaces = normalised.map((item) => item.namespace);
+        const accepted = await this.rememberBulkAsync(items, { ...opts, idempotencyKey });
+        const completed = await this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
+        return completed;
     }
 
     /**

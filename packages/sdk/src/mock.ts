@@ -13,6 +13,7 @@ import type {
     RememberBulkItem,
     RememberBulkItemResult,
     RememberBulkOptions,
+    RememberBulkAsyncOptions,
     RememberBulkResult,
     RememberBulkStatusResult,
     RememberJobStatus,
@@ -23,6 +24,7 @@ import type {
 } from "./types.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
 import { resolveRecallCall } from "./recall-args.js";
+import { derivedBulkIdempotencyKey } from "./utils.js";
 
 /** Matches the relayer's `MAX_BULK_ITEMS`. */
 const MAX_BULK_ITEMS = 20;
@@ -220,7 +222,8 @@ export class MemWalMock {
     }
 
     async rememberBulkAsync(
-        items: RememberBulkItem[]
+        items: RememberBulkItem[],
+        options: RememberBulkAsyncOptions = {}
     ): Promise<RememberBulkAcceptedResult> {
         if (!Array.isArray(items) || items.length === 0) {
             throw new Error("rememberBulkAsync: items must be a non-empty array");
@@ -230,16 +233,28 @@ export class MemWalMock {
                 `rememberBulkAsync: items exceeds maximum of ${MAX_BULK_ITEMS} per bulk request`,
             );
         }
-        const jobIds = items.map(
-            (item) => this.store(item.text, item.namespace).jobId
+        items.forEach((item, i) => {
+            validateText(item?.text, `items[${i}].text`);
+        });
+
+        const normalised = items.map((item) => ({
+            text: item.text,
+            namespace: item.namespace ?? this.namespace,
+        }));
+        const requestIdentity = `bulk\0${normalised.map((item) => `${item.namespace}\0${item.text}`).join("\0\0")}`;
+        const bulkKey = options.idempotencyKey ?? (await derivedBulkIdempotencyKey(requestIdentity));
+        const jobIds = normalised.map(
+            (item, index) =>
+                this.store(item.text, item.namespace, undefined, `bulk:${bulkKey}:${index}`).jobId
         );
         return { job_ids: jobIds, total: jobIds.length, status: "done" };
     }
 
     async rememberBulk(
-        items: RememberBulkItem[]
+        items: RememberBulkItem[],
+        options: RememberBulkAsyncOptions = {}
     ): Promise<RememberBulkAcceptedResult> {
-        return this.rememberBulkAsync(items);
+        return this.rememberBulkAsync(items, options);
     }
 
     async getRememberBulkStatus(
@@ -297,7 +312,7 @@ export class MemWalMock {
         items: RememberBulkItem[],
         opts: RememberBulkOptions = {}
     ): Promise<RememberBulkResult> {
-        const accepted = await this.rememberBulkAsync(items);
+        const accepted = await this.rememberBulkAsync(items, opts);
         const namespaces = items.map(
             (item) => item.namespace ?? this.namespace
         );
