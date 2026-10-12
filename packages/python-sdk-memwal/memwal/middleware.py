@@ -374,9 +374,22 @@ def with_memwal_langchain(
 
             if result and isinstance(result[0], SystemMessage):
                 existing_content = result[0].content
-                result[0] = SystemMessage(
-                    content=f"{existing_content}\n\n{_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}".strip()
-                )
+                if isinstance(existing_content, list):
+                    new_content = list(existing_content) + [
+                        {"type": "text", "text": f"\n\n{_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}"}
+                    ]
+                else:
+                    text_str = str(existing_content or "")
+                    new_content = f"{text_str}\n\n{_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}".strip()
+                if hasattr(result[0], "model_copy"):
+                    result[0] = result[0].model_copy(update={"content": new_content})
+                else:
+                    result[0] = SystemMessage(
+                        content=new_content,
+                        additional_kwargs=getattr(result[0], "additional_kwargs", {}),
+                        id=getattr(result[0], "id", None),
+                        name=getattr(result[0], "name", None),
+                    )
             else:
                 result.insert(0, SystemMessage(content=_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION))
 
@@ -633,7 +646,7 @@ def _inject_openai_memory(
     memory_context: str,
 ) -> List[Dict[str, Any]]:
     """Insert a fixed system guard at index 0 and memory content in a user message."""
-    result = [dict(m) for m in messages]
+    result = [dict(m) if isinstance(m, dict) else m for m in messages]
     last_user_idx = -1
     for i in range(len(result) - 1, -1, -1):
         if isinstance(result[i], dict) and result[i].get("role") == "user":
@@ -651,7 +664,9 @@ def _inject_openai_memory(
         if isinstance(existing_content, list):
             result[0] = {
                 **result[0],
-                "content": existing_content + [{"type": "text", "text": f"\n\n{_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}"}],
+                "content": existing_content + [
+                    {"type": "text", "text": f"\n\n{_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}"}
+                ],
             }
         else:
             text_str = str(existing_content or "")

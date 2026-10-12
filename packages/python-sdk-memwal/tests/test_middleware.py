@@ -414,6 +414,50 @@ class TestWithMemWalLangChain:
         assert injected[4].content == "What do I like?"
 
     @respx.mock
+    async def test_multimodal_system_message_appends_block_and_preserves_metadata(self) -> None:
+        """A list-content SystemMessage appends a text block and retains its metadata."""
+        _mock_seal_session_prereqs()
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        llm = self._make_llm()
+        captured: list = []
+
+        async def _capture_agenerate(messages_batch, *a, **kw):
+            captured.extend(messages_batch)
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ok"))]
+            )
+
+        llm._agenerate = _capture_agenerate
+
+        respx.post(_RECALL_URL).mock(
+            return_value=_mock_recall([
+                {"blob_id": "b1", "text": "User loves coffee", "distance": 0.05}
+            ])
+        )
+        respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
+
+        smart_llm = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        blocks = [
+            {"type": "text", "text": "Base instructions", "cache_control": {"type": "ephemeral"}}
+        ]
+        sys_msg = SystemMessage(content=blocks, id="sys-123", additional_kwargs={"source": "test"})
+        await smart_llm._agenerate([[sys_msg, HumanMessage("What do I like?")]])
+
+        assert len(captured) == 1
+        injected = captured[0]
+        assert isinstance(injected[0], SystemMessage)
+        assert injected[0].id == "sys-123"
+        assert injected[0].additional_kwargs == {"source": "test"}
+        assert isinstance(injected[0].content, list)
+        assert len(injected[0].content) == 2
+        assert injected[0].content[0] == blocks[0]
+        assert "untrusted data" in injected[0].content[1]["text"]
+
+    @respx.mock
     async def test_no_memories_found_no_injection(self) -> None:
         """When no memories match, the message list is passed unchanged."""
         _mock_seal_session_prereqs()
