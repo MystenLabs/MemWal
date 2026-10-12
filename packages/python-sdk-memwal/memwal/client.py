@@ -96,7 +96,8 @@ PACKAGE_VERSION_CHECK_TIMEOUT_S = 10.0
 SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
 AUTH_REJECTED_MESSAGE = (
     "401 from relayer: typically wrong private key, key not registered on this "
-    "account, account ID mismatch, or staging/mainnet mismatch. Check .env.local "
+    "account, account ID mismatch (a wallet address is not a MemWal account ID), "
+    "or staging/mainnet mismatch. Check .env.local "
     "and dashboard credentials. Full troubleshooting: "
     "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
@@ -119,6 +120,18 @@ def _server_url_for_log(parsed: ParseResult) -> str:
     if parsed.port is not None:
         return f"{parsed.scheme}://{host}:{parsed.port}"
     return f"{parsed.scheme}://{host}"
+
+
+def _reject_blank_text(text: object, message: str = "Text cannot be empty") -> None:
+    """Reject empty and whitespace-only text before a request is sent.
+
+    The relayer does the same (#1129). Failing here means an older relayer
+    cannot accept the job and leave the caller polling until timeout.
+    Non-blank text is not trimmed.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(message)
 
 
 def normalize_server_url(url: str) -> str:
@@ -414,6 +427,7 @@ class MemWal:
             :class:`RememberAcceptedResult` with ``job_id`` and initial
             status (``"pending"``).
         """
+        _reject_blank_text(text)
         resolved_namespace = namespace or self._namespace
         request_identity = f"{resolved_namespace}\0{text}"
         generated_key = idempotency_key is None
@@ -569,6 +583,8 @@ class MemWal:
 
         if not items:
             raise ValueError("remember_bulk_async: items must be a non-empty array")
+        for index, item in enumerate(items):
+            _reject_blank_text(item.text, f"items[{index}].text cannot be empty")
 
         payload_items: List[Dict[str, Any]] = [
             {
@@ -898,6 +914,7 @@ class MemWal:
             :class:`AnalyzeResult` with extracted ``facts`` + per-fact
             ``job_ids`` for downstream polling.
         """
+        _reject_blank_text(text)
         body: Dict[str, Any] = {
             "text": text,
             "namespace": namespace or self._namespace,
@@ -970,6 +987,7 @@ class MemWal:
         :meth:`remember` (server handles embed + encrypt + upload).
         """
 
+        _reject_blank_text(text, "text cannot be empty")
         data = await self._signed_request(
             "POST",
             "/api/embed",

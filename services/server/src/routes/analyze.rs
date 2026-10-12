@@ -157,7 +157,7 @@ pub async fn analyze(
     Json(body): Json<AnalyzeRequest>,
 ) -> Result<(StatusCode, Json<AnalyzeAcceptedResponse>), AppError> {
     reject_if_writes_paused(state.config.writes_paused)?;
-    if body.text.is_empty() {
+    if text_is_blank(&body.text) {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
     // Reject oversize plaintext before spending an LLM call.

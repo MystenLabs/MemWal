@@ -758,7 +758,7 @@ pub async fn remember(
     Json(body): Json<RememberRequest>,
 ) -> Result<(StatusCode, Json<RememberAcceptedResponse>), AppError> {
     reject_if_writes_paused(state.config.writes_paused)?;
-    if body.text.is_empty() {
+    if text_is_blank(&body.text) {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
     // Reject oversize plaintext before spending embed + encrypt compute.
@@ -1315,7 +1315,7 @@ pub async fn remember_bulk(
         )));
     }
     for (i, item) in body.items.iter().enumerate() {
-        if item.text.is_empty() {
+        if text_is_blank(&item.text) {
             return Err(AppError::BadRequest(format!(
                 "items[{}].text cannot be empty",
                 i
