@@ -54,7 +54,7 @@ export function CountChart({
         <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
       </details>
       {expanded && (
-        <ChartDialog title={title} context={`${grain} · ${unit} · ${timeZone.replace(/_/g, ' ')}`} onClose={() => { setExpanded(false); expandRef.current?.focus() }}>
+        <ChartDialog title={title} context={`${grain} · ${unit} · ${timeZone.replace(/_/g, ' ')}`} onClose={() => { setExpanded(false); expandRef.current?.focus({ preventScroll: true }) }}>
           {showRegions && <ChartLegend />}
           {plot(true)}
           <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
@@ -170,10 +170,11 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
     root?.setAttribute('inert', '')
     closeRef.current?.focus()
     const finish = () => {
+      const y = scrollRef.current
       root?.removeAttribute('inert')
       document.body.style.overflow = overflow
-      window.scrollTo(0, scrollRef.current)
       onCloseRef.current()
+      requestAnimationFrame(() => window.scrollTo(0, y))
     }
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { event.preventDefault(); finish(); return }
