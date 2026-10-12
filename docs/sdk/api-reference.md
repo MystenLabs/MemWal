@@ -112,6 +112,8 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 
 - Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance?, sort?, scoringWeights? })`
 - `limit` defaults to `10`; `topK` is an alias and wins when both are set
+
+> ⚠️ **Truncation is silent.** The response carries no *more results* indicator. If `results.length === limit`, assume more matches exist and retry with a higher `limit`. Reads that need completeness (leaderboards, accuracy computations, deduplication) should not rely on the default of 10.
 - Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 - `sort` picks the ordering: `"relevance"` (default) or `"recent"` for newest-among-matches
