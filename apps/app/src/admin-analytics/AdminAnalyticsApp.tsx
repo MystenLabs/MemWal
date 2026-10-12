@@ -352,6 +352,7 @@ export function AdminAnalyticsApp({
               <DateRangeControl
                 range={range}
                 label={period.label}
+                rangeTitle={`${formatSpan(period.start, period.end, timeZone)} · ${timeZone}. Rolling day presets are 24-hour windows and can touch an extra calendar date.`}
                 compare={compare}
                 compareLabel={compared ? `Comparison · ${formatSpan(compared.start, compared.end, timeZone)}` : 'No comparison'}
                 selected={{ day, month: params.get('month') || undefined, year: params.get('year') || undefined }}

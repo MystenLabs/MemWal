@@ -43,6 +43,25 @@ test('range and comparison triggers use the same chevron slot', () => {
   }
 })
 
+test('arrow keys move the preset and Enter commits it', async () => {
+  const user = userEvent.setup()
+  const onCommit = vi.fn()
+  render(
+    <DateRangeControl
+      range="today"
+      label="Today"
+      compare="none"
+      compareLabel="No comparison"
+      selected={{}}
+      onCommit={onCommit}
+      onCompare={() => {}}
+    />,
+  )
+  await user.click(screen.getByRole('button', { name: /Today/ }))
+  await user.keyboard('{ArrowDown}{Enter}')
+  expect(onCommit).toHaveBeenCalledWith({ range: 'yesterday' })
+})
+
 
 test('Apply commits the selected month and closes the menu', async () => {
   const user = userEvent.setup()

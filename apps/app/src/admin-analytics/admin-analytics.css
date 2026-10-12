@@ -17,6 +17,10 @@
   --wa-icon: 14px;
   --wa-gap: 6px;
   --wa-radius: 6px;
+  --wa-menu: #1c1c1c;
+  --wa-heading: #c8c8c8;
+  --wa-hover: #2a2a2a;
+  --wa-selected: #32275f;
   display: grid;
   grid-template-columns: 238px minmax(0, 1fr);
   background: var(--wa-bg);
@@ -204,19 +208,19 @@
   width: 280px;
   max-height: min(420px, calc(100vh - 24px));
   overflow: auto;
-  background: #1c1c1c;
+  background: var(--wa-menu);
   border: 1px solid #333;
   border-radius: 8px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
   padding: 6px;
 }
-.wa-menu-group { color: #c8c8c8; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; padding: 8px 8px 4px; }
+.wa-menu-group { color: var(--wa-heading); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; padding: 8px 8px 4px; }
 .wa-menu button { width: 100%; display: flex; align-items: center; justify-content: flex-start; gap: 8px; border: 0; background: transparent; color: #ddd; text-align: left; border-radius: 6px; padding: 7px 8px; font: inherit; font-size: 13px; cursor: pointer; min-height: 32px; }
 .wa-cal button, .wa-months button { justify-content: center; }
 .wa-drawer summary { display: flex; align-items: center; min-height: 32px; cursor: pointer; }
-.wa-menu button:hover { background: #2a2a2a; }
+.wa-menu button:hover { background: var(--wa-hover); }
 .wa-menu button.active { box-shadow: inset 0 0 0 1px var(--wa-accent); }
-.wa-menu button[aria-selected="true"] { background: #32275f; color: #fff; }
+.wa-menu button[aria-selected="true"] { background: var(--wa-selected); color: #fff; }
 .wa-menu button:focus-visible { outline: 2px solid var(--wa-accent); outline-offset: -2px; }
 
 .wa-cal-panel { display: flex; flex-direction: column; gap: 8px; padding: 4px; }

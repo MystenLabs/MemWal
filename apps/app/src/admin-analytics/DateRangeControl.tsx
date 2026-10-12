@@ -68,6 +68,7 @@ export function DateRangeControl({
   selected,
   onCommit,
   onCompare,
+  rangeTitle,
 }: {
   range: RangeId
   label: string
@@ -76,6 +77,7 @@ export function DateRangeControl({
   selected: { day?: string; month?: string; year?: string }
   onCommit: (patch: RangeCommit) => void
   onCompare: (id: CompareId) => void
+  rangeTitle?: string
 }) {
   const [open, setOpen] = useState<'range' | 'compare' | 'month' | 'day' | 'year' | 'custom' | null>(null)
   const [active, setActive] = useState(0)
@@ -123,6 +125,23 @@ export function DateRangeControl({
     close()
   }
 
+  useEffect(() => {
+    if (open !== 'range' && open !== 'compare') return
+    const count = open === 'compare' ? COMPARES.length : RANGE_PRESETS.length
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Enter') return
+      event.preventDefault()
+      if (event.key === 'Enter') {
+        if (open === 'compare') { onCompare(COMPARES[active]?.id ?? 'none'); close() }
+        else chooseRange(RANGE_PRESETS[active]?.id ?? '7d')
+        return
+      }
+      setActive((current) => (current + (event.key === 'ArrowDown' ? 1 : -1) + count) % count)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open, active, onCompare])
+
   const applyCustom = () => {
     const from = new Date(draftFrom)
     const to = new Date(draftTo)
@@ -136,7 +155,7 @@ export function DateRangeControl({
 
   return (
     <>
-      <button ref={trigger} className="wa-btn" type="button" aria-haspopup="dialog" aria-expanded={open !== null && open !== 'compare'} aria-controls={menuId} onClick={() => setOpen(open && open !== 'compare' ? null : 'range')}>
+      <button ref={trigger} className="wa-btn" type="button" title={rangeTitle} aria-haspopup="dialog" aria-expanded={open !== null && open !== 'compare'} aria-controls={menuId} onClick={() => { setActive(Math.max(0, RANGE_PRESETS.findIndex((item) => item.id === range))); setOpen(open && open !== 'compare' ? null : 'range') }}>
         <span>{label}</span>
         <Chevron />
       </button>
