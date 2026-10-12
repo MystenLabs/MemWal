@@ -24,6 +24,7 @@ from memwal.client import (
     MemWalCompatibilityError,
     MemWalError,
     MemWalRateLimited,
+    MemWalRememberJobNotFound,
     MemWalSync,
     _HttpStatusError,
 )
@@ -739,6 +740,98 @@ class TestRecall:
         verify_key = nacl.signing.VerifyKey(bytes.fromhex(headers["x-public-key"]))
         verify_key.verify(message.encode("utf-8"), bytes.fromhex(headers["x-signature"]))
         assert result.blob_id == "b1"
+
+    async def test_wait_for_remember_job_rejects_empty_job_id(
+        self, memwal_client: MemWal
+    ) -> None:
+        with pytest.raises(MemWalRememberJobNotFound) as exc_info:
+            await memwal_client.wait_for_remember_job("")
+        assert exc_info.value.job_id == ""
+
+        with pytest.raises(MemWalRememberJobNotFound) as exc_info:
+            await memwal_client.wait_for_remember_job("   ")
+        assert exc_info.value.job_id == "   "
+
+    @respx.mock
+    async def test_wait_for_remember_job_empty_404_raises_job_not_found(
+        self, memwal_client: MemWal
+    ) -> None:
+        """When relayer returns an empty 404 body, wait_for_remember_job raises
+        MemWalRememberJobNotFound instead of crashing with JSONDecodeError."""
+        mock_seal_session_prereqs()
+        respx.get(f"{_TEST_SERVER}/api/remember/missing-job").mock(
+            return_value=httpx.Response(404, text="")
+        )
+
+        with pytest.raises(MemWalRememberJobNotFound) as exc_info:
+            await memwal_client.wait_for_remember_job(
+                "missing-job", poll_interval_ms=0, timeout_ms=50
+            )
+        assert exc_info.value.job_id == "missing-job"
+
+    @respx.mock
+    async def test_get_remember_status(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        respx.get(f"{_TEST_SERVER}/api/remember/job-123").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "job_id": "job-123",
+                    "status": "running",
+                    "owner": "0xowner",
+                    "namespace": "notes",
+                },
+            )
+        )
+
+        status = await memwal_client.get_remember_status("job-123")
+        assert status.job_id == "job-123"
+        assert status.status == "running"
+        assert status.owner == "0xowner"
+        assert status.namespace == "notes"
+
+    async def test_get_remember_status_empty_job_id(
+        self, memwal_client: MemWal
+    ) -> None:
+        status = await memwal_client.get_remember_status("")
+        assert status.job_id == ""
+        assert status.status == "not_found"
+
+    @respx.mock
+    async def test_get_remember_status_404_empty_body(
+        self, memwal_client: MemWal
+    ) -> None:
+        mock_seal_session_prereqs()
+        respx.get(f"{_TEST_SERVER}/api/remember/unknown").mock(
+            return_value=httpx.Response(404, text="")
+        )
+
+        status = await memwal_client.get_remember_status("unknown")
+        assert status.job_id == "unknown"
+        assert status.status == "not_found"
+
+    @respx.mock
+    def test_sync_get_remember_status(self) -> None:
+        sync_client = MemWalSync.create(
+            key=_TEST_KEY_HEX,
+            account_id=_TEST_ACCOUNT_ID,
+            server_url=_TEST_SERVER,
+        )
+        mock_seal_session_prereqs()
+        respx.get(f"{_TEST_SERVER}/api/remember/job-sync").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "job_id": "job-sync",
+                    "status": "done",
+                    "blob_id": "b-sync",
+                },
+            )
+        )
+        status = sync_client.get_remember_status("job-sync")
+        assert status.job_id == "job-sync"
+        assert status.status == "done"
+        assert status.blob_id == "b-sync"
 
 
 # ============================================================

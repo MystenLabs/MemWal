@@ -136,6 +136,7 @@ def test_sync_mock_polling_and_analyze_signatures_match_production():
     methods = (
         "remember",
         "remember_async",
+        "get_remember_status",
         "wait_for_remember_job",
         "remember_and_wait",
         "wait_for_remember_jobs",
