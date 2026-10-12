@@ -52,6 +52,8 @@ export interface WithMemWalOptions extends MemWalConfig {
     minRelevance?: number;
     /** Enable debug logging (default: false) */
     debug?: boolean;
+    /** Optional callback invoked when memory recall fails during transformParams */
+    onRecallError?: (error: unknown) => void;
 }
 
 // ============================================================
@@ -128,7 +130,12 @@ export function withMemWal(
 
                     return { ...params, prompt: enrichedPrompt };
                 } catch (error) {
-                    log("Memory search failed:", error);
+                    console.warn("[Walrus Memory] Recall failed during transformParams:", error);
+                    try {
+                        options.onRecallError?.(error);
+                    } catch (cbError) {
+                        console.warn("[Walrus Memory] onRecallError callback threw:", cbError);
+                    }
                     return params;
                 }
             },
