@@ -176,6 +176,12 @@ export class MemWalManual {
             typeof config.key === "string"
                 ? hexToBytes(normalizePrivateKey(config.key))
                 : config.key;
+        if (!(this.delegatePrivateKey instanceof Uint8Array) || this.delegatePrivateKey.length !== 32) {
+            const got = this.delegatePrivateKey instanceof Uint8Array
+                ? String(this.delegatePrivateKey.length)
+                : typeof this.delegatePrivateKey;
+            throw new Error(`Ed25519 seed must be exactly 32 bytes, got ${got}`);
+        }
         // LOW-22: default to HTTPS; warn (do not throw) on plaintext HTTP
         // against non-localhost hosts.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
