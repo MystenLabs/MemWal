@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fetchAdminQuality, type QualitySource } from '../utils/admin-api'
+import { Drawer } from './Drawer'
 import { formatCount } from './metrics'
 
 const LABEL: Record<string, string> = {
@@ -27,6 +28,29 @@ const LABEL: Record<string, string> = {
 function label(value: string) {
   return LABEL[value] ?? value
 }
+
+export function measurementMethod(source: QualitySource) {
+  return source.classification === 'measured' ? 'Direct measurement' : label(source.classification)
+}
+
+export function collectionStatus(source: QualitySource) {
+  if (source.observed === 0 && source.capability === 'implemented') return 'No samples recorded'
+  return label(source.health)
+}
+
+export function sourceSummary(source: QualitySource) {
+  if (source.observed === 0 && source.capability === 'implemented') {
+    return 'Storage is available. Collection has not yet been verified by a sample.'
+  }
+  return source.limitation
+}
+
+export function sampleStamp(value: string | null, source: QualitySource) {
+  if (value) return value
+  if (source.observed === 0) return 'Not yet observed'
+  return 'Unknown'
+}
+
 
 function Fail({ message, detail, onRetry }: { message: string; detail?: string; onRetry: () => void }) {
   return (
@@ -110,20 +134,22 @@ export function QualityPage({ adminKey, onInvalidKey, onOpenView }: { adminKey: 
         </div>
       </section>
       {selected && (
-        <>
-          <button className="wa-drawer-back" aria-label="Close source detail" onClick={() => setSelected(null)} />
-          <aside className="wa-drawer" role="dialog" aria-label={selected.name}>
-            <button className="wa-btn" type="button" onClick={() => setSelected(null)}>Close</button>
-            <h3>{selected.name}</h3>
-            <p className="wa-note">{selected.limitation}</p>
-            <div className="wa-split"><span>Population</span><b>{selected.population}</b></div>
-            <div className="wa-split"><span>Evidence</span><b>{label(selected.classification)}</b></div>
-            <div className="wa-split"><span>Since</span><b>{selected.since ?? 'None'}</b></div>
-            <div className="wa-split"><span>Last success</span><b>{selected.lastSuccess ?? 'None'}</b></div>
+        <Drawer title={selected.name} onClose={() => setSelected(null)}>
+          <p className="wa-note">{sourceSummary(selected)}</p>
+          <dl className="wa-dl">
+            <div><dt>Measurement method</dt><dd>{measurementMethod(selected)}</dd></div>
+            <div><dt>Collection status</dt><dd>{collectionStatus(selected)}</dd></div>
+            <div><dt>Population</dt><dd>{selected.population}</dd></div>
+            <div><dt>First sample</dt><dd>{sampleStamp(selected.since, selected)}</dd></div>
+            <div><dt>Last sample</dt><dd>{sampleStamp(selected.lastSuccess, selected)}</dd></div>
+            <div><dt>Last source check</dt><dd>{inventory.data?.checkedAt ?? 'Unknown'}</dd></div>
+          </dl>
+          <details>
+            <summary>Technical details</summary>
             <p className="wa-note">{selected.detail}</p>
-            {selected.view && <button className="wa-btn" type="button" onClick={() => onOpenView(selected.view as string)}>Open related page</button>}
-          </aside>
-        </>
+          </details>
+          {selected.view && <button className="wa-btn" type="button" onClick={() => { onOpenView(selected.view as string); setSelected(null) }}>Open related page</button>}
+        </Drawer>
       )}
     </div>
   )

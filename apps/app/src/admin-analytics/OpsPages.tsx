@@ -15,6 +15,7 @@ import {
   type AdminInventory,
   type UploadError,
 } from '../utils/admin-api'
+import { Drawer } from './Drawer'
 import { formatBytes, formatCount, toCsv } from './metrics'
 import { baselineChange, investigationWindows } from './range'
 
@@ -232,17 +233,18 @@ export function UploadJobsPage({ adminKey, onInvalidKey, periodLabel, start, end
         </div>
       </section>
       {selected && (
-        <aside className="wa-drawer" role="dialog" aria-label={`Job ${selected.id}`}>
-          <button className="wa-btn" type="button" onClick={() => setSelected(null)}>Close</button>
-          <h3 className="wa-mono">{selected.id}</h3>
-          <div className="wa-split"><span>Owner</span><b className="wa-mono">{selected.owner}</b></div>
-          <div className="wa-split"><span>Namespace</span><b>{selected.namespace || '—'}</b></div>
-          <div className="wa-split"><span>Status</span><b>{selected.status}</b></div>
-          <div className="wa-split"><span>Queued</span><b>{new Date(selected.createdAt).toLocaleString()}</b></div>
-          <div className="wa-split"><span>Updated</span><b>{new Date(selected.timestamp).toLocaleString()}</b></div>
+        <Drawer title={selected.id.slice(0, 8)} label={`Job ${selected.id}`} onClose={() => setSelected(null)}>
+          <p className="wa-mono">{selected.id}</p>
+          <dl className="wa-dl">
+            <div><dt>Owner</dt><dd className="wa-mono">{selected.owner}</dd></div>
+            <div><dt>Namespace</dt><dd>{selected.namespace || '—'}</dd></div>
+            <div><dt>Status</dt><dd>{selected.status}</dd></div>
+            <div><dt>Queued</dt><dd>{new Date(selected.createdAt).toLocaleString()}</dd></div>
+            <div><dt>Updated</dt><dd>{new Date(selected.timestamp).toLocaleString()}</dd></div>
+          </dl>
           <p className="wa-note">{selected.rawErrorMessage ?? selected.errorMessage}</p>
           <p className="wa-note">Stage history, retry counts, and blob ids are not on this response. Retry and cancel are not offered because this route is read-only.</p>
-        </aside>
+        </Drawer>
       )}
     </div>
   )

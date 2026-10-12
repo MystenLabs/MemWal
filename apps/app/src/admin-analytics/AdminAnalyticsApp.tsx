@@ -6,6 +6,7 @@ import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
 import { ActivityPage, ConfigPage, IncidentLivePage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage } from './OpsPages'
 import { QualityPage } from './QualityPage'
+import { Drawer, useNarrow } from './Drawer'
 import { DateRangeControl } from './DateRangeControl'
 import { comparisonWindow, formatSpan, isRangeId, resolveRange, type CompareId, type RangeId } from './range'
 import { config } from '../config'
@@ -139,6 +140,7 @@ export function AdminAnalyticsApp({
   const showAll = params.get('all') === '1'
   const [requestId, setRequestId] = useState<string | null>(null)
   const [navOpen, setNavOpen] = useState(false)
+  const narrow = useNarrow()
   const [moreOpen, setMoreOpen] = useState(false)
   const menuButton = useRef<HTMLButtonElement>(null)
   const [sort, setSort] = useState<'egress' | 'requests' | 'latency'>('egress')
@@ -257,11 +259,11 @@ export function AdminAnalyticsApp({
   }
   return (
     <div className={`wa${navOpen ? ' wa-nav-open' : ''}`}>
-      {navOpen && <button className="wa-nav-back" aria-label="Close navigation" onClick={() => { setNavOpen(false); menuButton.current?.focus() }} />}
-      <aside id="admin-nav" className="wa-side" aria-label="Admin">
+      {navOpen && <button className="wa-nav-back" type="button" aria-label="Dismiss navigation" tabIndex={-1} onClick={() => { setNavOpen(false); menuButton.current?.focus() }} />}
+      <aside id="admin-nav" className="wa-side" aria-label="Admin" aria-hidden={narrow && !navOpen ? true : undefined} inert={narrow && !navOpen ? true : undefined}>
         <div className="wa-brand">
           <img className="wa-logo" src="/walrus-memory-logo.svg?v=3" alt="Walrus Memory" />
-          <button className="wa-btn wa-drawer-close" type="button" onClick={() => { setNavOpen(false); menuButton.current?.focus() }}><X size={16} /> Close</button>
+          <button className="wa-icon-btn wa-drawer-close" type="button" aria-label="Close navigation" title="Close navigation" onClick={() => { setNavOpen(false); menuButton.current?.focus() }}><X size={18} /></button>
         </div>
         {['Analytics', 'Operations', 'Administration'].map((group) => (
           <div key={group}>
@@ -415,12 +417,8 @@ export function AdminAnalyticsApp({
         )}
 
         {selected && (
-          <>
-            <button className="wa-drawer-back" aria-label="Close account detail" onClick={() => setParam('account', '')} />
-            <aside className="wa-drawer" role="dialog" aria-label={`${selected.id} day detail`}>
-              <button className="wa-btn" onClick={() => setParam('account', '')}>Close</button>
-              <h3>{selected.id}</h3>
-              <p className="wa-mono">{selected.owner}</p>
+          <Drawer title={selected.id} label={`${selected.id} day detail`} onClose={() => setParam('account', '')}>
+            <p className="wa-mono">{selected.owner}</p>
               <p className="wa-note">Status now: {selected.status}. Historical status for this day is the same in the demo fixture because no chain checkpoint ledger is connected. Registered keys {selected.registeredKeys}. Used keys {new Set(selectedRequests.map((request) => request.delegateId ?? 'owner-session')).size}.</p>
               <div className="wa-split"><span>Plaintext</span><b>{formatMetric(selected.plaintext)}</b></div>
               <div className="wa-split"><span>Encrypted</span><b>{formatMetric(selected.encrypted)}</b></div>
@@ -444,8 +442,7 @@ export function AdminAnalyticsApp({
                 </button>
               ))}
               {selectedRequests.length > 40 && <p className="wa-note">Showing 40 of {selectedRequests.length}. Export the view for the full list. This page does not pretend the truncated rows are the population.</p>}
-            </aside>
-          </>
+          </Drawer>
         )}
         {openRequest && <RequestDrawer request={openRequest} onClose={() => setRequestId(null)} />}
       </main>
@@ -917,9 +914,7 @@ function QualityView({ demo }: { demo: boolean }) {
 
 function RequestDrawer({ request, onClose }: { request: DemoRequest; onClose: () => void }) {
   return (
-    <aside className="wa-drawer" role="dialog" aria-label={`Request ${request.id}`}>
-      <button className="wa-btn" onClick={onClose}>Close request</button>
-      <h3>{request.id}</h3>
+    <Drawer title={request.id} label={`Request ${request.id}`} onClose={onClose}>
       <p className="wa-mono">{request.at}</p>
       <div className="wa-split"><span>Actor</span><b>{request.delegateId ?? 'owner/session'}</b></div>
       <div className="wa-split"><span>Operation</span><b>{request.operation}</b></div>
@@ -935,6 +930,6 @@ function RequestDrawer({ request, onClose }: { request: DemoRequest; onClose: ()
           <div>{attempt.bytes == null ? <span className="wa-unavailable">Bytes unavailable</span> : formatBytes(BigInt(attempt.bytes))}</div>
         </div>
       ))}
-    </aside>
+    </Drawer>
   )
 }
