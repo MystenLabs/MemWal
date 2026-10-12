@@ -590,11 +590,17 @@ export class MemWal {
         let lastSeen: RememberJobStatus | undefined;
         let lastRefusal: number | undefined;
 
-        while (Date.now() < deadline) {
+        while (true) {
             // A retry-after the server just gave us wins over our own curve;
             // the backoff resumes from where it was on the next normal poll.
-            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            // Clamped to remaining budget so we never sleep past deadline (#1081).
+            const remainingBeforeSleep = Math.max(0, deadline - Date.now());
+            const requestedDelay = retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++);
             retryAfterMs = 0;
+            const delay = Math.min(requestedDelay, remainingBeforeSleep);
+            if (delay > 0) {
+                await sleep(delay);
+            }
 
             let status: RememberStatusResponse;
 
@@ -621,6 +627,9 @@ export class MemWal {
                 if (isTransientPollingStatus(httpStatus)) {
                     lastRefusal = httpStatus;
                     if (httpStatus === 429) sawRateLimit = true;
+                    if (Date.now() >= deadline) {
+                        break;
+                    }
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
@@ -651,6 +660,10 @@ export class MemWal {
                     ),
                     { status: 500, jobId },
                 );
+            }
+
+            if (Date.now() >= deadline) {
+                break;
             }
         }
 
@@ -835,11 +848,17 @@ export class MemWal {
             if (terminal) pending.delete(jobId);
         };
 
-        while (pending.size > 0 && Date.now() < deadline) {
+        while (pending.size > 0) {
             // A retry-after the server just gave us wins over our own curve;
             // the backoff resumes from where it was on the next normal poll.
-            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            // Clamped to remaining budget so we never sleep past deadline (#1081).
+            const remainingBeforeSleep = Math.max(0, deadline - Date.now());
+            const requestedDelay = retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++);
             retryAfterMs = 0;
+            const delay = Math.min(requestedDelay, remainingBeforeSleep);
+            if (delay > 0) {
+                await sleep(delay);
+            }
 
             const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
             if (pendingIds.length === 0) {
@@ -858,6 +877,9 @@ export class MemWal {
                 if (isTransientPollingStatus(httpStatus)) {
                     lastRefusal = httpStatus;
                     if (httpStatus === 429) sawRateLimit = true;
+                    if (Date.now() >= deadline) {
+                        break;
+                    }
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
@@ -882,6 +904,10 @@ export class MemWal {
                 }
 
                 settle(jobId, status);
+            }
+
+            if (pending.size === 0 || Date.now() >= deadline) {
+                break;
             }
         }
 
@@ -1784,9 +1810,16 @@ export class MemWal {
      * one stalled socket there hangs every method on the client, not just one.
      */
     /** Deadline for one status poll: the client deadline, clamped so it can
-     * never outlive the wait budget it belongs to. */
+     * never outlive the wait budget it belongs to, but given a usable minimum
+     * at or past the deadline so a boundary check does not fail with an
+     * artificial 1ms AbortError (#1081). */
     private pollDeadlineMs(deadline: number): number {
-        return Math.max(1, Math.min(this.requestTimeoutMs, deadline - Date.now()));
+        const remaining = deadline - Date.now();
+        const minPollTimeout = Math.min(this.requestTimeoutMs, 1_000);
+        if (remaining <= 0) {
+            return minPollTimeout;
+        }
+        return Math.min(this.requestTimeoutMs, Math.max(remaining, minPollTimeout));
     }
 
     private async fetchWithDeadline<T>(
