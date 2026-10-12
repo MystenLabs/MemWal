@@ -105,6 +105,20 @@ def _find_last_user_message(messages: Any) -> Optional[str]:
     return None
 
 
+def _is_last_message_user(messages: Any) -> bool:
+    """Return True if the last message in `messages` is a user/human turn."""
+    if not isinstance(messages, (list, tuple)) or not messages:
+        return False
+    last = messages[-1]
+    if isinstance(last, dict):
+        return last.get("role") == "user"
+    if hasattr(last, "type"):
+        return getattr(last, "type") in ("human", "user")
+    if hasattr(last, "role"):
+        return getattr(last, "role") == "user"
+    return False
+
+
 def _format_memories(
     memories: List[RecallMemory],
     nonce: Optional[str] = None,
@@ -426,6 +440,9 @@ def with_memwal_langchain(
 
     async def _inject_memories(messages: List[BaseMessage]) -> List[BaseMessage]:
         """Recall memories and inject them without granting system priority."""
+        if not _is_last_message_user(messages):
+            return messages
+
         user_text = _find_last_user_message(messages)
         if not user_text:
             return messages
@@ -484,7 +501,7 @@ def with_memwal_langchain(
 
     async def _post_analyze(messages: List[BaseMessage]) -> None:
         """Analyze user message for new facts."""
-        if not auto_save:
+        if not auto_save or not _is_last_message_user(messages):
             return
         user_text = _find_last_user_message(messages)
         if user_text:
@@ -633,37 +650,40 @@ def _wrap_async_openai(
             return await original_create(*args, **kwargs)
 
         # Inject memories
-        user_text = _find_last_user_message(messages)
-        if user_text:
-            try:
-                recall_result = await memwal.recall(user_text, max_memories, namespace)
-                relevant = [
-                    m for m in recall_result.results
-                    if (1 - m.distance) >= min_relevance
-                ]
-                if relevant:
-                    memory_context = _format_memories(relevant)
-                    log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
-                    messages = _inject_openai_memory(list(messages), memory_context)
-                    if "messages" in kwargs:
-                        kwargs["messages"] = messages
-                    elif args:
-                        args = (messages,) + args[1:]
-            except Exception as e:
-                log(f"[Walrus Memory] Memory search failed: {e}")
+        if _is_last_message_user(messages):
+            user_text = _find_last_user_message(messages)
+            if user_text:
+                try:
+                    recall_result = await memwal.recall(user_text, max_memories, namespace)
+                    relevant = [
+                        m for m in recall_result.results
+                        if (1 - m.distance) >= min_relevance
+                    ]
+                    if relevant:
+                        memory_context = _format_memories(relevant)
+                        log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
+                        messages = _inject_openai_memory(list(messages), memory_context)
+                        if "messages" in kwargs:
+                            kwargs["messages"] = messages
+                        elif args:
+                            args = (messages,) + args[1:]
+                except Exception as e:
+                    log(f"[Walrus Memory] Memory search failed: {e}")
 
         result = await original_create(*args, **kwargs)
 
         # Fire-and-forget analyze
-        if auto_save and user_text:
-            async def _analyze() -> None:
-                try:
-                    await memwal.analyze(user_text, namespace)
-                except Exception as e:
-                    log(f"[Walrus Memory] Auto-save failed: {e}")
-                    pending.note_error(e)
+        if auto_save and _is_last_message_user(messages):
+            user_text = _find_last_user_message(messages)
+            if user_text:
+                async def _analyze() -> None:
+                    try:
+                        await memwal.analyze(user_text, namespace)
+                    except Exception as e:
+                        log(f"[Walrus Memory] Auto-save failed: {e}")
+                        pending.note_error(e)
 
-            _fire_and_forget(_analyze(), pending)
+                _fire_and_forget(_analyze(), pending)
 
         return result
 
@@ -693,39 +713,42 @@ def _wrap_sync_openai(
             return original_create(*args, **kwargs)
 
         # Inject memories (sync)
-        user_text = _find_last_user_message(messages)
-        if user_text:
-            try:
-                recall_result = _run_memwal(
-                    lambda: memwal.recall(user_text, max_memories, namespace)
-                )
-                relevant = [
-                    m for m in recall_result.results
-                    if (1 - m.distance) >= min_relevance
-                ]
-                if relevant:
-                    memory_context = _format_memories(relevant)
-                    log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
-                    messages = _inject_openai_memory(list(messages), memory_context)
-                    if "messages" in kwargs:
-                        kwargs["messages"] = messages
-                    elif args:
-                        args = (messages,) + args[1:]
-            except Exception as e:
-                log(f"[Walrus Memory] Memory search failed: {e}")
+        if _is_last_message_user(messages):
+            user_text = _find_last_user_message(messages)
+            if user_text:
+                try:
+                    recall_result = _run_memwal(
+                        lambda: memwal.recall(user_text, max_memories, namespace)
+                    )
+                    relevant = [
+                        m for m in recall_result.results
+                        if (1 - m.distance) >= min_relevance
+                    ]
+                    if relevant:
+                        memory_context = _format_memories(relevant)
+                        log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
+                        messages = _inject_openai_memory(list(messages), memory_context)
+                        if "messages" in kwargs:
+                            kwargs["messages"] = messages
+                        elif args:
+                            args = (messages,) + args[1:]
+                except Exception as e:
+                    log(f"[Walrus Memory] Memory search failed: {e}")
 
         result = original_create(*args, **kwargs)
 
         # Fire-and-forget analyze
-        if auto_save and user_text:
-            def _analyze() -> None:
-                try:
-                    _run_memwal(lambda: memwal.analyze(user_text, namespace))
-                except Exception as e:
-                    log(f"[Walrus Memory] Auto-save failed: {e}")
-                    pending.note_error(e)
+        if auto_save and _is_last_message_user(messages):
+            user_text = _find_last_user_message(messages)
+            if user_text:
+                def _analyze() -> None:
+                    try:
+                        _run_memwal(lambda: memwal.analyze(user_text, namespace))
+                    except Exception as e:
+                        log(f"[Walrus Memory] Auto-save failed: {e}")
+                        pending.note_error(e)
 
-            pending.spawn_thread(_analyze)
+                pending.spawn_thread(_analyze)
 
         return result
 

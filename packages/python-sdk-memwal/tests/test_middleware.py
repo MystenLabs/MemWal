@@ -671,6 +671,50 @@ class TestWithMemWalLangChain:
         assert callable(smart_llm.memwal_flush)
         assert callable(smart_llm.memwal_flush_sync)
 
+    @respx.mock
+    async def test_tool_steps_do_not_retrigger_recall_or_analyze(self) -> None:
+        """LangChain tool messages do not retrigger recall or auto-save."""
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+        _mock_seal_session_prereqs()
+        llm = self._make_llm()
+
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([]))
+        analyze_route = respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
+
+        smart = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=True
+        )
+
+        # Step 1: User turn starts
+        messages = [HumanMessage(content="What is the weather?")]
+        await smart._agenerate([messages])
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 1
+        assert analyze_route.call_count == 1
+
+        # Step 2: Tool step (ends with ToolMessage)
+        messages.extend([
+            AIMessage(content="", tool_calls=[{"name": "weather", "args": {}, "id": "1"}]),
+            ToolMessage(content="Sunny 20C", tool_call_id="1"),
+        ])
+        await smart._agenerate([messages])
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 1, "recall must NOT be called again on tool step"
+        assert analyze_route.call_count == 1, "analyze must NOT be called again on tool step"
+
+        # Step 3: Next user turn starts
+        messages.extend([
+            AIMessage(content="It is sunny!"),
+            HumanMessage(content="Thanks!"),
+        ])
+        await smart._agenerate([messages])
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 2
+        assert analyze_route.call_count == 2
+
 
 # ============================================================
 # OpenAI middleware tests
@@ -881,6 +925,52 @@ class TestWithMemWalOpenAI:
 
         system_msgs = [m for m in captured if isinstance(m, dict) and m.get("role") == "system"]
         assert len(system_msgs) == 0
+
+    @respx.mock
+    async def test_tool_execution_steps_do_not_retrigger_recall_or_analyze(self) -> None:
+        """Tool response messages (role: tool) do not retrigger recall or auto-save."""
+        _mock_seal_session_prereqs()
+        client = self._make_async_client()
+
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([]))
+        analyze_route = respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
+
+        smart = with_memwal_openai(
+            client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=True
+        )
+
+        # Step 1: User turn starts
+        messages = [{"role": "user", "content": "What is the weather in Lisbon?"}]
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 1
+        assert analyze_route.call_count == 1
+
+        # Step 2: Intermediate tool execution step (last message role: tool)
+        messages.extend([
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call_1", "function": {"name": "get_weather"}}],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "22C sunny"},
+        ])
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 1, "recall must NOT be called again on tool step"
+        assert analyze_route.call_count == 1, "analyze must NOT be called again on tool step"
+
+        # Step 3: Next user turn starts
+        messages.extend([
+            {"role": "assistant", "content": "It is 22C and sunny in Lisbon."},
+            {"role": "user", "content": "And in Porto?"},
+        ])
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 2
+        assert analyze_route.call_count == 2
 
     @respx.mock
     def test_sync_client_wraps_create(self) -> None:
