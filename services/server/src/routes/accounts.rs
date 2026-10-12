@@ -89,8 +89,9 @@ pub async fn account_exists(
 /// holding a valid delegate key but none of the surrounding metadata, so it
 /// cannot write a usable `credentials.json`. Everything needed to rebuild one
 /// is already resolved during authentication — `account_id` and `owner` from
-/// the registry scan, `package_id` from config — so this endpoint hands back
-/// what the middleware already computed rather than doing new work.
+/// the signed account id (or the delegate-key cache), `package_id` from
+/// config — so this endpoint hands back what the middleware already computed
+/// rather than doing new work.
 pub async fn whoami(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthInfo>,

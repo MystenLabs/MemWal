@@ -108,7 +108,9 @@ These are not all enforced at boot, but most real deployments need them.
 | `RUST_LOG` | `memwal_server=info,tower_http=info` | Rust tracing filter for relayer logs |
 | `LOG_FORMAT` | pretty text | Set to `json` for machine-parseable structured logs |
 | `ALERT_TO_SLACK` | none | Slack incoming webhook URL. When set, the relayer posts an alert after a Walrus upload job exhausts all 5 wallet attempts without producing a blob |
-| `SIDECAR_URL` | `http://localhost:9000` | Sidecar HTTP endpoint |
+| `SIDECAR_URL` | `http://localhost:9000` | Walrus upload sidecar. Recall does not use this port |
+| `SIDECAR_SEAL_URL` | `http://127.0.0.1:<upload port + 1>` | Seal encrypt/decrypt. `localhost` is rewritten to `127.0.0.1` even when no listener is forked. A non-loopback value is dialed and no local process is forked. An unparseable value refuses to boot |
+| `SIDECAR_SEAL_LISTENER` | on | Set to `0` to keep seal on the upload sidecar instead of forking a process |
 | `SIDECAR_WATCHDOG_INTERVAL_SECS` | `30` | Interval between relayer health checks against the local sidecar |
 | `SIDECAR_WATCHDOG_TIMEOUT_SECS` | `2` | Timeout for each sidecar watchdog health check |
 | `SIDECAR_WATCHDOG_MAX_FAILURES` | `6` | Consecutive failed sidecar health checks before the relayer exits so the platform restarts the container |

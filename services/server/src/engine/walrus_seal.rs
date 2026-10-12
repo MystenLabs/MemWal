@@ -344,7 +344,7 @@ impl MemoryEngine for WalrusSealEngine {
         // Step 2: SEAL decrypt via sidecar.
         let plaintext_bytes = match seal::seal_decrypt(
             &self.http_client,
-            &self.config.sidecar_url,
+            &self.config.seal_sidecar_url,
             self.config.sidecar_secret.as_deref(),
             &ciphertext,
             &credential,
@@ -460,7 +460,7 @@ impl MemoryEngine for WalrusSealEngine {
         for chunk in batch_input.chunks(SEAL_DECRYPT_BATCH_SIZE) {
             match seal::seal_decrypt_batch(
                 &self.http_client,
-                &self.config.sidecar_url,
+                &self.config.seal_sidecar_url,
                 self.config.sidecar_secret.as_deref(),
                 chunk,
                 &credential,
@@ -478,6 +478,11 @@ impl MemoryEngine for WalrusSealEngine {
                         chunk.len(),
                         e
                     );
+                    // Nothing decrypted yet: an empty 200 looks like no memories.
+                    // A later chunk must not throw away plaintext already in hand.
+                    if decrypted.is_empty() {
+                        return Err(e);
+                    }
                     decrypted.extend((0..chunk.len()).map(|_| DecryptOutcome::Missing));
                 }
             }

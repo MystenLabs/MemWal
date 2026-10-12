@@ -204,7 +204,7 @@ fn spawn_prepare_remember_job(
                 let embed_fut = state.embedder.embed(&embed_input);
                 let encrypt_fut = crate::storage::seal::seal_encrypt(
                     &state.http_client,
-                    &state.config.sidecar_url,
+                    &state.config.seal_sidecar_url,
                     state.config.sidecar_secret.as_deref(),
                     text.as_bytes(),
                     &owner,
@@ -362,7 +362,7 @@ fn spawn_prepare_bulk_remember_job(
                             let embed_fut = state.embedder.embed(&embed_input);
                             let encrypt_fut = crate::storage::seal::seal_encrypt(
                                 &state.http_client,
-                                &state.config.sidecar_url,
+                                &state.config.seal_sidecar_url,
                                 state.config.sidecar_secret.as_deref(),
                                 item.text.as_bytes(),
                                 &owner,
@@ -758,7 +758,7 @@ pub async fn remember(
     Json(body): Json<RememberRequest>,
 ) -> Result<(StatusCode, Json<RememberAcceptedResponse>), AppError> {
     reject_if_writes_paused(state.config.writes_paused)?;
-    if body.text.is_empty() {
+    if text_is_blank(&body.text) {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
     // Reject oversize plaintext before spending embed + encrypt compute.
@@ -836,14 +836,15 @@ pub async fn remember(
                 // than asserting "pending" on its behalf: answering with a
                 // state we did not reach is what told callers a dead job was
                 // queued.
-                let actual: String = sqlx::query_scalar(
-                    "SELECT status FROM remember_jobs WHERE id = $1",
-                )
-                .bind(&existing_id)
-                .fetch_optional(state.db.pool())
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to re-read job status: {}", e)))?
-                .unwrap_or_else(|| existing_status.clone());
+                let actual: String =
+                    sqlx::query_scalar("SELECT status FROM remember_jobs WHERE id = $1")
+                        .bind(&existing_id)
+                        .fetch_optional(state.db.pool())
+                        .await
+                        .map_err(|e| {
+                            AppError::Internal(format!("Failed to re-read job status: {}", e))
+                        })?
+                        .unwrap_or_else(|| existing_status.clone());
 
                 return Ok((
                     StatusCode::ACCEPTED,
@@ -1314,7 +1315,7 @@ pub async fn remember_bulk(
         )));
     }
     for (i, item) in body.items.iter().enumerate() {
-        if item.text.is_empty() {
+        if text_is_blank(&item.text) {
             return Err(AppError::BadRequest(format!(
                 "items[{}].text cannot be empty",
                 i
@@ -1445,14 +1446,21 @@ pub async fn remember_bulk(
     ))
 }
 
-type BulkStatusRow = (String, String, String, Option<String>, Option<String>);
+type BulkStatusRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
 
 fn build_bulk_status_results(
     job_ids: Vec<String>,
     rows: Vec<BulkStatusRow>,
 ) -> Vec<RememberBulkStatusItem> {
     let mut by_id = std::collections::HashMap::with_capacity(rows.len());
-    for (id, _owner_db, status, blob_id, error_msg) in rows {
+    for (id, _owner_db, status, blob_id, error_msg, namespace) in rows {
         by_id.insert(
             id.clone(),
             RememberBulkStatusItem {
@@ -1460,6 +1468,7 @@ fn build_bulk_status_results(
                 error: sanitize_job_error_for_client(&status, error_msg),
                 status,
                 blob_id,
+                namespace: Some(namespace),
             },
         );
     }
@@ -1474,6 +1483,7 @@ fn build_bulk_status_results(
                 status: "not_found".to_string(),
                 blob_id: None,
                 error: None,
+                namespace: None,
             });
         results.push(item);
     }
@@ -1483,7 +1493,7 @@ fn build_bulk_status_results(
 
 /// POST /api/remember/bulk/status  — poll multiple job statuses at once
 ///
-/// Returns `{ results: [{ job_id, status, blob_id?, error? }] }` preserving the
+/// Returns `{ results: [{ job_id, status, namespace?, blob_id?, error? }] }` preserving the
 /// same order as `job_ids[]` in the request. All jobs must belong to the
 /// authenticated owner.
 pub async fn remember_bulk_status(
@@ -1503,7 +1513,7 @@ pub async fn remember_bulk_status(
 
     let rows: Vec<BulkStatusRow> =
         sqlx::query_as(
-            "SELECT id, owner, status, blob_id, error_msg FROM remember_jobs WHERE id = ANY($1) AND owner = $2",
+            "SELECT id, owner, status, blob_id, error_msg, namespace FROM remember_jobs WHERE id = ANY($1) AND owner = $2",
         )
         .bind(&body.job_ids)
         .bind(&auth.owner)
@@ -1705,7 +1715,11 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(straggler.rows_affected(), 0, "the old claim must be fenced out");
+        assert_eq!(
+            straggler.rows_affected(),
+            0,
+            "the old claim must be fenced out"
+        );
     }
 
     /// The TTL still does its real job: a claim on a job that is genuinely
@@ -1724,7 +1738,10 @@ mod tests {
         .unwrap();
 
         assert!(
-            claim_remember_preparation(&pool, &job_id).await.unwrap().is_none(),
+            claim_remember_preparation(&pool, &job_id)
+                .await
+                .unwrap()
+                .is_none(),
             "a preparation still running must keep its claim",
         );
     }
@@ -2258,6 +2275,7 @@ mod tests {
                     "done".to_string(),
                     Some("blob-1".to_string()),
                     None,
+                    "profile".to_string(),
                 ),
                 (
                     "job-2".to_string(),
@@ -2265,6 +2283,7 @@ mod tests {
                     "failed".to_string(),
                     None,
                     Some("boom".to_string()),
+                    "notes".to_string(),
                 ),
             ],
         );
@@ -2273,13 +2292,17 @@ mod tests {
         assert_eq!(results[0].job_id, "job-2");
         assert_eq!(results[0].status, "failed");
         assert_eq!(results[0].error.as_deref(), Some("boom"));
+        assert_eq!(results[0].namespace.as_deref(), Some("notes"));
         assert_eq!(results[1].job_id, "missing");
         assert_eq!(results[1].status, "not_found");
+        assert_eq!(results[1].namespace, None);
         assert_eq!(results[2].job_id, "job-1");
         assert_eq!(results[2].status, "done");
         assert_eq!(results[2].blob_id.as_deref(), Some("blob-1"));
+        assert_eq!(results[2].namespace.as_deref(), Some("profile"));
         assert_eq!(results[3].job_id, "job-2");
         assert_eq!(results[3].status, "failed");
+        assert_eq!(results[3].namespace.as_deref(), Some("notes"));
     }
 
     // ── Text size limit ──────────────────────────────────────────
@@ -2357,14 +2380,15 @@ mod tests {
             package_id: "0xpackage".to_string(),
             seal_policy_package_id: "0xpackage".to_string(),
             registry_id: "0xregistry".to_string(),
-            registry_scan_max_pages: crate::types::DEFAULT_REGISTRY_SCAN_MAX_PAGES,
             sidecar_url: "http://localhost:9003".to_string(),
+            seal_sidecar_url: "http://localhost:9004".to_string(),
             sidecar_secret: None,
             seal_expected_committee_identity: None,
             rate_limit: crate::rate_limit::RateLimitConfig::default(),
             sponsor_rate_limit: crate::types::SponsorRateLimitConfig::default(),
             read_api_rate_limit: crate::types::ReadApiRateLimitConfig::default(),
             accounts_rate_limit: crate::types::AccountsRateLimitConfig::default(),
+            mcp_rate_limit: crate::types::McpRateLimitConfig::default(),
             trusted_proxy_hops: 0,
             allowed_origins: String::new(),
             benchmark_mode: false,
@@ -2499,6 +2523,28 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_metadata_dry_run_is_the_enoki_error_not_the_sweep_sentence() {
+        let raw = "wallet job error (transient): Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\",\"message\":\"Error checking transaction input objects: Could not find the referenced object 0xa2cf3a6d91952320d2f8262826e9f56b9520829934b8405e90ccb1963103a472 at version Some(SequenceNumber(1025755045))\"}]}";
+        for status in ["failed", "uploaded"] {
+            let out = sanitize_job_error_for_client(status, Some(raw.to_string()))
+                .expect("metadata failure keeps an error");
+            assert!(out.contains("dry_run_failed"), "{status}: {out}");
+            assert!(
+                out.contains("Could not find the referenced object"),
+                "{status}: {out}"
+            );
+            assert_ne!(out, INFRA_JOB_ERROR_MESSAGE, "{status}");
+            assert_ne!(out, INFRA_JOB_RETRYING_MESSAGE, "{status}");
+            assert!(!out.contains("stale/orphaned"), "{status}: {out}");
+            assert!(out.contains("0xa2cf3a6d…[redacted]"), "{status}: {out}");
+            assert!(
+                !out.contains("9520829934b8405e90ccb1963103a472"),
+                "{status}: {out}"
+            );
+        }
+    }
+
+    #[test]
     fn successful_job_has_no_error_to_sanitize() {
         assert_eq!(sanitize_job_error_for_client("done", None), None);
     }
@@ -2526,6 +2572,21 @@ mod tests {
             assert!(!out.contains("Insufficient balance"));
             assert!(!out.contains("::wal::WAL"));
         }
+    }
+
+    #[test]
+    fn dropped_upload_connection_is_infra_and_hides_the_sidecar_url() {
+        let raw = "Internal Error: durable Walrus upload request failed: error sending request for url (http://localhost:9000/walrus/upload-step-v3): connection reset by peer";
+        let waiting = format!("{}{}", crate::jobs::CONGESTION_WAIT_ERROR_PREFIX, raw);
+        let failed = sanitize_job_error_for_client("failed", Some(raw.to_string()))
+            .expect("failed job keeps an error");
+        assert_eq!(failed, INFRA_JOB_ERROR_MESSAGE);
+        assert!(!failed.contains("localhost"));
+        let running = sanitize_job_error_for_client("running", Some(waiting))
+            .expect("waiting job keeps an error");
+        assert_eq!(running, INFRA_JOB_RETRYING_MESSAGE);
+        assert!(!running.contains("localhost"));
+        assert!(!running.contains("was not stored"));
     }
 
     #[test]

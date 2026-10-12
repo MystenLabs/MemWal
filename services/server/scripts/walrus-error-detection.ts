@@ -29,16 +29,27 @@ export function isWalrusPackageVersionMismatch(message: string): boolean {
 }
 
 /**
+ * Enoki percent-encodes the dry-run `message` (`Could%20not%20find…`).
+ * `decodeURIComponent` throws on a truncated `%` sequence, so only complete
+ * `%HH` bytes are expanded. One pass is enough: production encodes once.
+ */
+function decodePercentEscapes(message: string): string {
+    return message.replace(/%([0-9a-fA-F]{2})/g, (_match, hex: string) =>
+        String.fromCharCode(Number.parseInt(hex, 16)),
+    );
+}
+
+/**
  * Detect Enoki dry-run failures caused by a transaction that references a
  * Walrus/Sui object version that is no longer available. This is recoverable
- * when the sidecar rebuilds the Walrus client and the Apalis worker retries
- * the upload from a fresh writeBlobFlow.
+ * when the sidecar rebuilds the transaction and resubmits it.
  */
 export function isWalrusReferencedObjectStale(message: string): boolean {
     if (!message) return false;
-    return /dry_run_failed/i.test(message)
-        && /could not find the referenced object/i.test(message)
-        && /at version/i.test(message);
+    const decoded = decodePercentEscapes(message);
+    return /dry_run_failed/i.test(decoded)
+        && /could not find the referenced object/i.test(decoded)
+        && /at version/i.test(decoded);
 }
 
 export type EnokiSponsoredTransactionInvalidation = "expired" | "referenced_object_stale";
@@ -70,6 +81,16 @@ export function classifyEnokiSponsoredTransactionInvalidation(
 export function isWalrusBlobObjectMissingFromEffects(message: string): boolean {
     if (!message) return false;
     return /blob object not found in transaction effects/i.test(message);
+}
+
+/**
+ * A gRPC `getObject` miss for one id. `@mysten/walrus` stores that Error in
+ * its DataLoader, so the next `getBlobObject` for the same id fails without
+ * asking the RPC again. Distinct from the effects message above.
+ */
+export function isUnseenSuiObject(message: string): boolean {
+    if (!message) return false;
+    return /\bobject 0x[0-9a-f]{64} not found\b/i.test(message);
 }
 
 /**

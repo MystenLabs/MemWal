@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- `remember`, `remember_bulk`, `analyze`, and `embed` reject whitespace-only text before the request. A blank body used to be accepted and then sit until the caller timed out. (#1129)
+- A 401 `AUTH_REJECTED` now says a wallet address is not a MemWal account ID. (#1132)
 - `wait_for_remember_jobs` / `remember_bulk_and_wait` no longer return a batch they could not read as if it were still uploading. When every status poll is rate-limited, the wait makes one confirming read and raises `MemWalRateLimited` (`status` 429, `job_ids`, `retry_after`) if that is refused too. An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)
 
 ## 0.1.12

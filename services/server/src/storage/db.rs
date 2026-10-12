@@ -3,10 +3,47 @@ use std::sync::Arc;
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 
 use crate::alerts::AlertManager;
 use crate::types::{AppError, SearchHit};
+
+/// Keep the first hit for each `blob_id` (closest: callers already order by
+/// cosine distance). `vector_entries` has no UNIQUE on blob_id, so a
+/// remember retry or restore can insert a second row for the same Walrus
+/// blob; returning both spends `limit` on one memory (WALM-594 / GH #694).
+pub(crate) fn unique_hits_by_blob_id(hits: Vec<SearchHit>) -> Vec<SearchHit> {
+    let mut seen = HashSet::with_capacity(hits.len());
+    hits.into_iter()
+        .filter(|hit| seen.insert(hit.blob_id.clone()))
+        .collect()
+}
+
+/// ANN over-fetch ceiling: `fetch_limit <= limit * this`. Stops a
+/// single heavily duplicated nearest blob from walking the whole
+/// namespace one unique-shortfall at a time.
+const SEARCH_SIMILAR_OVERFETCH_FACTOR: usize = 4;
+
+/// Next ANN `LIMIT` after collapsing `dropped` duplicate rows from a
+/// full page. Grows by the observed duplicate count in the current
+/// window (not `limit + dropped`, which only adds the unique shortfall).
+/// `None` means stop: no dups, no growth, or the cap is hit.
+pub(crate) fn next_search_fetch_limit(
+    limit: usize,
+    fetch_limit: usize,
+    dropped: usize,
+) -> Option<usize> {
+    if dropped == 0 {
+        return None;
+    }
+    let cap = limit.saturating_mul(SEARCH_SIMILAR_OVERFETCH_FACTOR).max(limit);
+    if fetch_limit >= cap {
+        return None;
+    }
+    let next = fetch_limit.saturating_add(dropped).min(cap);
+    (next > fetch_limit).then_some(next)
+}
 
 /// Tombstone retention for both the read-API `must_resync` clock and the
 /// background sweep. Keep a single constant so the two cannot drift.
@@ -242,6 +279,33 @@ pub struct VectorDb {
 #[cfg(test)]
 static DB_SETUP_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
 
+/// Builds a test `VectorDb`, retrying when Postgres aborts the migration
+/// replay with a deadlock (40P01).
+///
+/// `DB_SETUP_LOCK` only orders setups against each other. Migration 020 locks
+/// `memory_tombstones` then `vector_entries`, while `insert_vector` from a test
+/// that is already running locks them in the opposite order, so CI sometimes
+/// aborts the setup (`stale_sweep_tests::orphaned_preparation_is_failed`).
+/// Every migration is idempotent, so replaying the setup is safe.
+#[cfg(test)]
+pub(crate) async fn test_vector_db(database_url: &str) -> VectorDb {
+    let _guard = DB_SETUP_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let mut attempt = 0u64;
+    loop {
+        match VectorDb::new(database_url).await {
+            Ok(db) => return db,
+            Err(err) if attempt < 5 && err.to_string().contains("deadlock detected") => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
+            }
+            Err(err) => panic!("test database must be reachable with pgvector installed: {err:?}"),
+        }
+    }
+}
+
 impl VectorDb {
     pub fn with_storage_alerts(self, alerts: Arc<AlertManager>, sui_network: String) -> Self {
         Self {
@@ -292,6 +356,40 @@ mod tests {
             .find(|(n, _)| *n == name)
             .map(|(_, sql)| *sql)
             .unwrap_or_else(|| panic!("migration {name} is not wired into the pipeline"))
+    }
+
+    fn is_pg_deadlock(error: &sqlx::Error) -> bool {
+        error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .is_some_and(|code| code.as_ref() == "40P01")
+    }
+
+    /// Replays an idempotent migration while other tests are writing.
+    ///
+    /// A multi-statement file holds every lock until it commits. Migration
+    /// 020 locks `memory_tombstones` and then `vector_entries`.
+    /// `insert_vector` locks those tables in the opposite order, so Postgres
+    /// aborts one side with `40P01`. Each statement is idempotent, so the
+    /// aborted setup is safe to run again.
+    async fn execute_idempotent_migration(pool: &sqlx::PgPool, sql: &str) {
+        let mut conn = pool.acquire().await.expect("test database connection");
+        let mut last_err = None;
+        for attempt in 0..5 {
+            match sqlx::raw_sql(sql).execute(&mut *conn).await {
+                Ok(_) => return,
+                Err(err) if is_pg_deadlock(&err) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(25 * (attempt as u64 + 1))).await;
+                }
+                Err(err) => panic!("test migration failed: {err}"),
+            }
+        }
+        panic!(
+            "test migration deadlocked after retries: {}",
+            last_err.expect("deadlock error")
+        );
     }
 
     /// Every `.sql` file in `services/server/migrations` must be wired
@@ -454,7 +552,7 @@ mod tests {
             migration_sql("010_restore_failed_blobs.sql"),
             migration_sql("014_memory_read_api_columns.sql"),
         ] {
-            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+            execute_idempotent_migration(&pool, migration).await;
         }
 
         // Mirrors the ordering in VectorDb::new(): batched Rust backfill
@@ -463,10 +561,11 @@ mod tests {
         // CONCURRENTLY IF NOT EXISTS.
         super::backfill_updated_at(&pool).await.unwrap();
 
-        sqlx::raw_sql(migration_sql("015_memory_read_api_updated_at_not_null.sql"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        execute_idempotent_migration(
+            &pool,
+            migration_sql("015_memory_read_api_updated_at_not_null.sql"),
+        )
+        .await;
 
         super::recover_invalid_concurrent_indexes(&pool)
             .await
@@ -479,7 +578,7 @@ mod tests {
             migration_sql("019_memory_read_api_updated_at_set_not_null.sql"),
             migration_sql("020_read_api_followups.sql"),
         ] {
-            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+            execute_idempotent_migration(&pool, migration).await;
         }
 
         let db = VectorDb {
@@ -755,6 +854,276 @@ mod tests {
             vec![(other_namespace, blob_id)],
             "the cleanup must not delete an identical blob_id in another namespace"
         );
+    }
+
+    fn hit(blob_id: &str, distance: f64) -> crate::types::SearchHit {
+        crate::types::SearchHit {
+            blob_id: blob_id.to_string(),
+            distance,
+            created_at: chrono::Utc::now(),
+            importance: 0.5,
+        }
+    }
+
+    #[test]
+    fn unique_hits_by_blob_id_keeps_first_and_distinct() {
+        let unique = super::unique_hits_by_blob_id(vec![
+            hit("dup", 0.10),
+            hit("dup", 0.10),
+            hit("other", 0.20),
+            hit("dup", 0.30),
+        ]);
+        let ids: Vec<&str> = unique.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(ids, vec!["dup", "other"]);
+        assert_eq!(unique[0].distance, 0.10);
+    }
+
+    #[test]
+    fn unique_hits_by_blob_id_empty() {
+        assert!(super::unique_hits_by_blob_id(vec![]).is_empty());
+    }
+
+    #[test]
+    fn next_search_fetch_limit_grows_by_dropped_not_unique_shortfall() {
+        // limit=2, two copies of A: first page unique=1, dropped=1 → LIMIT 3.
+        assert_eq!(super::next_search_fetch_limit(2, 2, 1), Some(3));
+        // Three copies of A: LIMIT 3 is still all A (dropped=2) → LIMIT 5,
+        // not stop after the first widen.
+        assert_eq!(super::next_search_fetch_limit(2, 3, 2), Some(5));
+        // Cap at limit * 4.
+        assert_eq!(super::next_search_fetch_limit(2, 5, 4), Some(8));
+        assert_eq!(super::next_search_fetch_limit(2, 8, 7), None);
+    }
+
+    #[test]
+    fn next_search_fetch_limit_uniform_2x_at_http_cap() {
+        // limit=100, half the page duplicate: grow by dropped (50), not
+        // by unique shortfall alone. 100 → 150, then 150 → 225.
+        assert_eq!(super::next_search_fetch_limit(100, 100, 50), Some(150));
+        assert_eq!(super::next_search_fetch_limit(100, 150, 75), Some(225));
+        assert_eq!(super::next_search_fetch_limit(100, 400, 50), None);
+    }
+
+    #[tokio::test]
+    async fn search_similar_returns_each_blob_id_once() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrecall-dedupe-owner-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let blob_id = format!("dup-blob-{suffix}");
+        let other_blob = format!("other-blob-{suffix}");
+        let query = vec![1.0_f32; 1536];
+        let near = vec![1.0_f32; 1536];
+        let far = {
+            let mut v = vec![0.0_f32; 1536];
+            v[0] = 1.0;
+            v
+        };
+
+        db.insert_vector(
+            &format!("row-a-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_id,
+            &near,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("row-b-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_id,
+            &near,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("row-c-{suffix}"),
+            &owner,
+            &namespace,
+            &other_blob,
+            &far,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let hits = db
+            .search_similar(&query, &owner, &namespace, 10)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = hits.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(
+            ids.iter().filter(|id| **id == blob_id).count(),
+            1,
+            "the remembered blob must appear once, not once per index row"
+        );
+        assert!(ids.contains(&blob_id.as_str()));
+        assert!(ids.contains(&other_blob.as_str()));
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_similar_fills_limit_when_duplicate_rows_crowd_the_window() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrecall-dedupe-limit-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let blob_a = format!("blob-a-{suffix}");
+        let blob_b = format!("blob-b-{suffix}");
+        let query = vec![1.0_f32; 1536];
+        let near = vec![1.0_f32; 1536];
+        let far = {
+            let mut v = vec![0.0_f32; 1536];
+            v[0] = 1.0;
+            v
+        };
+
+        db.insert_vector(
+            &format!("row-a1-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_a,
+            &near,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("row-a2-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_a,
+            &near,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.insert_vector(
+            &format!("row-b-{suffix}"),
+            &owner,
+            &namespace,
+            &blob_b,
+            &far,
+            1,
+            0.5,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let hits = db
+            .search_similar(&query, &owner, &namespace, 2)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = hits.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "limit=2 must refill after collapsing blob A");
+        assert!(ids.contains(&blob_a.as_str()));
+        assert!(ids.contains(&blob_b.as_str()));
+    }
+
+    #[tokio::test]
+    async fn search_similar_widens_again_when_three_copies_crowd_limit_two() {
+        let Some(db) = test_db().await else {
+            eprintln!("skipping DB integration test: DATABASE_URL is not configured");
+            return;
+        };
+        let suffix = uuid::Uuid::new_v4();
+        let owner = format!("0xrecall-dedupe-triple-{suffix}");
+        let namespace = format!("ns-{suffix}");
+        let blob_a = format!("blob-a-{suffix}");
+        let blob_b = format!("blob-b-{suffix}");
+        let query = vec![1.0_f32; 1536];
+        let near = vec![1.0_f32; 1536];
+        let far = {
+            let mut v = vec![0.0_f32; 1536];
+            v[0] = 1.0;
+            v
+        };
+
+        for (row, blob, embedding) in [
+            ("a1", blob_a.as_str(), &near),
+            ("a2", blob_a.as_str(), &near),
+            ("a3", blob_a.as_str(), &near),
+            ("b", blob_b.as_str(), &far),
+        ] {
+            db.insert_vector(
+                &format!("row-{row}-{suffix}"),
+                &owner,
+                &namespace,
+                blob,
+                embedding,
+                1,
+                0.5,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        let hits = db
+            .search_similar(&query, &owner, &namespace, 2)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM vector_entries WHERE owner = $1")
+            .bind(&owner)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = hits.iter().map(|h| h.blob_id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "first widen (LIMIT 3) is still all A; second widen must include B"
+        );
+        assert!(ids.contains(&blob_a.as_str()));
+        assert!(ids.contains(&blob_b.as_str()));
     }
 
     #[tokio::test]
@@ -1514,7 +1883,7 @@ mod tests {
             migration_sql("012_remember_write_idempotency.sql"),
             migration_sql("013_remember_write_idempotency_index.sql"),
         ] {
-            sqlx::raw_sql(migration).execute(db.pool()).await.unwrap();
+            execute_idempotent_migration(db.pool(), migration).await;
         }
         Some(db)
     }
@@ -2607,7 +2976,8 @@ impl VectorDb {
         if let Err(e) = &result {
             self.maybe_alert_storage_exhausted(e).await;
         }
-        let result = result.map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
+        let result =
+            result.map_err(|e| AppError::Internal(format!("Failed to insert vector: {}", e)));
         crate::observability::observe_db("vector.insert", db_status(&result), started.elapsed());
         result?;
         sqlx::query("DELETE FROM memory_tombstones WHERE memory_id = $1")
@@ -2739,14 +3109,51 @@ impl VectorDb {
         Ok(row.and_then(|(plaintext,)| plaintext))
     }
 
-    /// Search for similar vectors using pgvector cosine distance (<=>)
-    /// Returns blob_id and distance for each match
+    /// Search for similar vectors using pgvector cosine distance (<=>).
+    /// Each `blob_id` appears at most once (closest row wins). Duplicate
+    /// index rows are over-fetched so `limit` still fills with distinct blobs.
     pub async fn search_similar(
         &self,
         query_vector: &[f32],
         owner: &str,
         namespace: &str,
         limit: usize,
+    ) -> Result<Vec<SearchHit>, AppError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+
+        // First-wins unique after ANN `LIMIT` is HNSW-friendly, but duplicate
+        // index rows consume that window. Widen by the dropped count in the
+        // current window (duplicate factor), capped at `limit * 4`.
+        let mut fetch_limit = limit;
+        loop {
+            let rows = self
+                .search_similar_rows(query_vector, owner, namespace, fetch_limit)
+                .await?;
+            let fetched = rows.len();
+            let mut unique = unique_hits_by_blob_id(rows);
+            if unique.len() >= limit {
+                unique.truncate(limit);
+                return Ok(unique);
+            }
+            if fetched < fetch_limit {
+                return Ok(unique);
+            }
+            let dropped = fetched - unique.len();
+            let Some(next) = next_search_fetch_limit(limit, fetch_limit, dropped) else {
+                return Ok(unique);
+            };
+            fetch_limit = next;
+        }
+    }
+
+    async fn search_similar_rows(
+        &self,
+        query_vector: &[f32],
+        owner: &str,
+        namespace: &str,
+        fetch_limit: usize,
     ) -> Result<Vec<SearchHit>, AppError> {
         let embedding = Vector::from(query_vector.to_vec());
 
@@ -2772,7 +3179,7 @@ impl VectorDb {
             .bind(embedding)
             .bind(owner)
             .bind(namespace)
-            .bind(limit as i64)
+            .bind(fetch_limit as i64)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to search vectors: {}", e)));
@@ -2783,7 +3190,7 @@ impl VectorDb {
         );
         let rows = result?;
 
-        let results = rows
+        Ok(rows
             .into_iter()
             .map(|(blob_id, distance, created_at, importance)| SearchHit {
                 blob_id,
@@ -2791,9 +3198,7 @@ impl VectorDb {
                 created_at,
                 importance,
             })
-            .collect();
-
-        Ok(results)
+            .collect())
     }
 
     /// Get all blob_ids for a given owner + namespace (used by restore flow)
@@ -3204,15 +3609,28 @@ impl VectorDb {
         stale_after: std::time::Duration,
     ) -> Result<u64, AppError> {
         let stale_after_secs = stale_after.as_secs().min(i64::MAX as u64) as i64;
+        // A congestion requeue parks the row on `running` for minutes while
+        // the next attempt is already scheduled. The normal 10-minute sweep
+        // would mark that wait failed and the client would send the fact
+        // again. Only a prefix that has not been refreshed for 45 minutes is
+        // a lost job.
+        let congestion_wait_stale_secs: i64 = 45 * 60;
         let result = sqlx::query(
             "UPDATE remember_jobs
              SET status = 'failed',
                  error_msg = COALESCE(error_msg, 'stale/orphaned remember job'),
                  updated_at = NOW()
              WHERE status IN ('running', 'uploaded')
-               AND updated_at < NOW() - ($1 * INTERVAL '1 second')",
+               AND updated_at < NOW() - ($1 * INTERVAL '1 second')
+               AND (
+                    error_msg IS NULL
+                    OR error_msg NOT LIKE ($2 || '%')
+                    OR updated_at < NOW() - ($3 * INTERVAL '1 second')
+               )",
         )
         .bind(stale_after_secs)
+        .bind(crate::jobs::CONGESTION_WAIT_ERROR_PREFIX)
+        .bind(congestion_wait_stale_secs)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to fail stale remember jobs: {}", e)))?;
@@ -4371,13 +4789,7 @@ mod quota_admission_tests {
     }
 
     async fn test_db() -> VectorDb {
-        let _guard = super::DB_SETUP_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
-        VectorDb::new(&test_database_url())
-            .await
-            .expect("test database must be reachable with pgvector installed")
+        super::test_vector_db(&test_database_url()).await
     }
 
     /// Unique per test so concurrent runs cannot see each other's rows, and so
@@ -4794,13 +5206,7 @@ mod stale_sweep_tests {
     }
 
     async fn test_db() -> VectorDb {
-        let _guard = super::DB_SETUP_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
-        VectorDb::new(&test_database_url())
-            .await
-            .expect("test database must be reachable with pgvector installed")
+        super::test_vector_db(&test_database_url()).await
     }
 
     /// Unique per test so concurrent runs cannot see each other's rows.
@@ -4949,6 +5355,74 @@ mod stale_sweep_tests {
             0,
             "a late preparation must be fenced out, or it would queue a paid write for a dead job",
         );
+    }
+
+    /// A congestion requeue leaves the row `running` with a prefixed
+    /// error while the next attempt is already scheduled. The 10-minute
+    /// sweep must not fail that wait. 45 minutes without a refresh is the
+    /// lost-job backstop.
+    #[tokio::test]
+    async fn a_congestion_wait_survives_the_normal_sweep_and_dies_when_abandoned() {
+        let db = test_db().await;
+        let owner = unique_owner("congestion-wait");
+        let waiting = seed_job(&db, &owner, "running", true, Some("claim-1"), 20 * 60).await;
+        let abandoned = seed_job(&db, &owner, "running", true, Some("claim-2"), 50 * 60).await;
+        let plain = seed_job(&db, &owner, "running", true, None, 20 * 60).await;
+        let prefix = crate::jobs::CONGESTION_WAIT_ERROR_PREFIX;
+        for id in [&waiting, &abandoned] {
+            sqlx::query("UPDATE remember_jobs SET error_msg = $2 WHERE id = $1")
+                .bind(id)
+                .bind(format!(
+                    "{prefix}timed out waiting for wallet 1 upload slot"
+                ))
+                .execute(&db.pool)
+                .await
+                .expect("stamp congestion wait");
+        }
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        assert_eq!(status_of(&db, &waiting).await, "running");
+        assert_eq!(status_of(&db, &abandoned).await, "failed");
+        assert_eq!(status_of(&db, &plain).await, "failed");
+    }
+
+    /// A metadata retry writes the Enoki text while the row stays `uploaded`.
+    /// If that retry then goes quiet, the sweep may fail the row, but it must
+    /// keep the Enoki sentence. `COALESCE` only fills an empty `error_msg`.
+    #[tokio::test]
+    async fn an_uploaded_metadata_error_survives_the_stale_sweep() {
+        let db = test_db().await;
+        let owner = unique_owner("metadata-enoki");
+        let id = seed_job(&db, &owner, "uploaded", true, None, 900).await;
+        let enoki = "wallet job error (transient): Enoki API error (400): dry_run_failed Could not find the referenced object at version Some(SequenceNumber(1025755045))";
+        sqlx::query("UPDATE remember_jobs SET error_msg = $2 WHERE id = $1")
+            .bind(&id)
+            .bind(enoki)
+            .execute(&db.pool)
+            .await
+            .expect("stamp enoki error");
+
+        db.fail_stale_remember_jobs(Duration::from_secs(600))
+            .await
+            .expect("sweep");
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_msg FROM remember_jobs WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "failed");
+        let msg = row.1.unwrap_or_default();
+        assert!(msg.contains("dry_run_failed"), "{msg}");
+        assert!(
+            msg.contains("Could not find the referenced object"),
+            "{msg}"
+        );
+        assert!(!msg.contains("stale/orphaned"), "{msg}");
     }
 
     /// The pre-existing sweep is unchanged.

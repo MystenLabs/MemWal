@@ -468,7 +468,7 @@ pub async fn embed(
     Extension(_auth): Extension<AuthInfo>,
     Json(body): Json<EmbedRequest>,
 ) -> Result<Json<EmbedResponse>, AppError> {
-    if body.text.is_empty() {
+    if text_is_blank(&body.text) {
         return Err(AppError::BadRequest("text cannot be empty".into()));
     }
     if body.text.len() > MAX_EMBED_TEXT_BYTES {
@@ -1100,7 +1100,7 @@ async fn restore_unbounded(
     let decrypt_results: Vec<RestoreDecrypt> = stream::iter(downloaded)
         .map(|(blob_id, encrypted_data)| {
             let http_client = &state.http_client;
-            let sidecar_url = state.config.sidecar_url.clone();
+            let sidecar_url = state.config.seal_sidecar_url.clone();
             let sidecar_secret = state.config.sidecar_secret.clone();
             let credential = credential.clone();
             let package_id = state.config.package_id.clone();
