@@ -2,7 +2,7 @@
 title: Import Your Existing Memory
 description: >-
   Copy durable facts from your current session, standing context, and local agent memory
-  into Walrus Memory in batches, then keep using them from Claude Code, Codex, or Cursor.
+  into Walrus Memory in batches, then keep using them from Claude Code, Codex, Cursor, or Antigravity.
 keywords:
   - import memory
   - existing memory
@@ -29,21 +29,21 @@ goal:
     - has_answer: true
       label: Needs answer summary for AI citation
 questions:
-  - How do I import my existing Claude, Codex, or Cursor memory into Walrus Memory?
+  - How do I import my existing Claude, Codex, Cursor, or Antigravity memory into Walrus Memory?
   - How do I batch upload local memories and session history to Walrus Memory?
-  - Where do Claude Code, Codex, and Cursor store local memory on disk?
+  - Where do Claude Code, Codex, Cursor, and Antigravity store local memory on disk?
 answer: >-
   Read the durable facts already on disk — local memory files, standing context such as
-  CLAUDE.md or AGENTS.md, and recent session transcripts — then write them into the same
-  namespace your agent recalls from. Use memwal_remember_bulk or rememberBulk for facts
-  that are already one statement each, and memwal_analyze or analyze for a transcript.
+  CLAUDE.md, AGENTS.md, or GEMINI.md, and recent session transcripts — then write them
+  into the same namespace your agent recalls from. Use memwal_remember_bulk or rememberBulk
+  for facts that are already one statement each, and memwal_analyze or analyze for a transcript.
   After recall returns one of those facts, new sessions keep writing to Walrus Memory
   through the plugin.
 ---
 
 You already have memory on this machine: facts an agent saved locally, standing instructions it reads every session, and the transcript of the session you are in. Walrus Memory starts empty until those facts are written through it. This page copies the durable ones across, in batches, so the next session recalls what you already had.
 
-Connect Walrus Memory in the client first, and sign in, so the upload and the later recall use the same account. See [MCP](/mcp/overview) for Claude Code, Codex, and Cursor.
+Connect Walrus Memory in the client first, and sign in, so the upload and the later recall use the same account. See [MCP](/mcp/overview) for Claude Code, Codex, Cursor, and Antigravity.
 
 ## What to copy
 
@@ -52,7 +52,7 @@ Treat the three sources differently. Recall works best on short, self-contained 
 | Source | What it holds | What to upload |
 | --- | --- | --- |
 | Local memory | Facts the agent already decided to keep | Each fact, as its own memory |
-| Standing context | `CLAUDE.md`, `AGENTS.md`, Cursor rules | Durable preferences, decisions, and identity details pulled out of the file |
+| Standing context | `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, Cursor rules | Durable preferences, decisions, and identity details pulled out of the file |
 | Session transcript | The current chat and recent chats | Facts extracted from the transcript. The SDK can stamp the session time onto those facts |
 
 Leave repository instructions, tool routing, and one-off task notes in the original files. A whole `CLAUDE.md` or a raw transcript stored as one memory comes back as a blob recall cannot match cleanly.
@@ -65,7 +65,7 @@ The MCP tools strip credential-shaped text before a write. The SDK stores the st
 
 ## Where the files are
 
-Paths below are the ones these clients write on a developer machine. The project directory is encoded by turning `/` into `-`. Claude Code turns the leading `/` into a leading `-`, so `/Users/me/app` becomes `-Users-me-app`. Cursor drops the leading slash, so the same path becomes `Users-me-app`.
+Paths below are the ones these clients write on a developer machine. The project directory is encoded by turning `/` into `-`. Claude Code turns the leading `/` into a leading `-`, so `/Users/me/app` becomes `-Users-me-app`. Cursor drops the leading slash, so the same path becomes `Users-me-app`. A folder named `empty-window` is a Cursor window with no project open. Transcripts for a project stay under its encoded path.
 
 ### Claude Code
 
@@ -90,6 +90,16 @@ Project rules live in `.cursor/rules/`. User rules live in Cursor Settings.
 
 Transcripts live in `~/.cursor/projects/<encoded-path>/agent-transcripts/<id>/<id>.jsonl`. Each line has `role` and `message`. The words are in `message.content` blocks of type `text`.
 
+### Antigravity
+
+Standing context is `GEMINI.md` and `AGENTS.md` in the project. Install the plugin with:
+
+```bash
+npx degit MystenLabs/MemWal/packages/mcp/plugin ~/.gemini/config/plugins/memwal
+```
+
+See [Antigravity](/mcp/antigravity).
+
 ## Ask the agent to upload
 
 Once `memwal_remember_bulk` and `memwal_analyze` are available, paste this into the client that already holds the session. The agent can see the current conversation, and it can read the files above.
@@ -97,18 +107,23 @@ Once `memwal_remember_bulk` and `memwal_analyze` are available, paste this into 
 ```text
 Import my existing memory into Walrus Memory. Use the namespace this client already recalls from.
 
-1. Local memory. Read the memory files for this project (Claude: ~/.claude/projects/<encoded-cwd>/memory/*.md except MEMORY.md; Codex: raw_memory rows in ~/.codex/memories_1.sqlite; Cursor: .cursor/rules and user rules). Upload each durable fact with memwal_remember_bulk, one complete statement per entry, at most 20 per call.
-2. Standing context. Read CLAUDE.md, AGENTS.md, and Cursor rules. Extract only durable preferences, decisions, constraints, and identity details. Upload those with memwal_remember_bulk. Leave tool instructions and repo conventions in the files.
-3. This session and other recent sessions I name. Extract durable facts with memwal_analyze. Keep each call under 64 KiB. This tool has no session-time parameter, so include the date in the fact when it matters. Skip one-off tasks, the current bug, and small talk.
+1. Local memory. Read the memory files for this project (Claude: ~/.claude/projects/<encoded-cwd>/memory/*.md except MEMORY.md; Codex: raw_memory rows in ~/.codex/memories_1.sqlite; Cursor: .cursor/rules and user rules). Upload each durable fact with memwal_remember_bulk, one complete statement per entry, at most 20 per call. Wait for that call to finish before the next batch of 20.
+2. Standing context. Read CLAUDE.md, AGENTS.md, GEMINI.md, and Cursor rules. Extract only durable preferences, decisions, constraints, and identity details. Upload those with memwal_remember_bulk. Leave tool instructions and repo conventions in the files.
+3. This session and other recent sessions I name. Extract durable facts with memwal_analyze, one call per chunk of at most 64 KiB, until the transcript is covered. This tool has no session-time parameter, so include the date in the fact when it matters. Skip one-off tasks, the current bug, and small talk.
 4. Skip anything that looks like a secret.
-5. If a tool replies ACCEPTED, NOT YET SAVED, call memwal_remember_status with those job_ids and wait until they are saved. Then call memwal_recall with a fact you just imported and show me the match.
+5. If a tool replies ACCEPTED, NOT YET SAVED, call memwal_remember_status with those job_ids and wait until they are saved. If that wait times out, call memwal_remember_status again with the same job_ids. Do not upload those facts again. On HTTP 429, wait for Retry-After, then continue. Then call memwal_recall with a fact you just imported and show me the match.
+6. Do not run this import a second time. memwal_remember_bulk has no idempotency key, so a second run stores each fact again.
 ```
 
 `memwal_remember_bulk` takes 1 to 20 strings. `memwal_analyze` takes one passage of at most 64 KiB and saves each extracted fact as its own memory. It does not accept a session time. See [MCP Reference](/mcp/reference) for the parameters.
 
 ## Batch upload with the SDK
 
-Use the SDK when you want to run the copy yourself. `rememberBulk` is for facts you already have, one statement per item, at most 20 items per call. `analyze` is for a transcript: the relayer extracts facts, then stores each one. `analyze` accepts at most 64 KiB of text and returns at most 20 facts per call, so split a long session into several calls.
+Use the SDK when you want to run the copy yourself. `rememberBulk` is for facts you already have, one statement per item, at most 20 items per call. `analyze` is for a transcript: the relayer extracts facts, then stores each one. `analyze` accepts at most 64 KiB of text and returns at most 20 facts per call, so walk a long session in chunks of about 60 KB. A dense chunk can still drop facts past that cap of 20.
+
+On the hosted mainnet relayer the account budget is 120 weighted requests per minute and 1000 per hour, and each delegate key allows 60 per minute. A bulk call costs 10, and each status poll of that batch costs 1. An analyze call costs 5 plus 1 for each fact it extracts. Send a batch of 20, wait until it settles, then send the next. On HTTP 429, wait for the `Retry-After` header before the next call. The 1000-per-hour account cap is what stops a long import. A self-hosted relayer with `RATE_LIMIT_REQUESTS_PER_MINUTE`, `RATE_LIMIT_REQUESTS_PER_HOUR`, and `RATE_LIMIT_DELEGATE_KEY_PER_MINUTE` unset uses 60 per minute, 500 per hour, and 30 per minute per key.
+
+`rememberBulk` and `memwal_remember_bulk` send no idempotency key. Running the script a second time stores each bulk fact again. `analyze` of the same fact text collapses onto the copy already stored.
 
 Pass `occurredAt` as the session time. The extractor writes that date into the fact text, which is how "yesterday" in an old transcript stays attached to the day it was said. Walrus Memory does not keep a separate event-time field you can filter on.
 
@@ -133,11 +148,32 @@ function factFromMemoryFile(markdown: string): string {
   return markdown.replace(/^---[\s\S]*?---\s*/, "").trim();
 }
 
+function transcriptChunks(text: string): string[] {
+  const buf = Buffer.from(text);
+  const chunks: string[] = [];
+  let offset = 0;
+  while (offset < buf.length) {
+    let end = Math.min(offset + 60_000, buf.length);
+    while (end > offset && end < buf.length && (buf[end] & 0xc0) === 0x80) end--;
+    if (end === offset) end = Math.min(offset + 60_000, buf.length);
+    const chunk = buf.subarray(offset, end).toString("utf8").trim();
+    if (chunk) chunks.push(chunk);
+    offset = end;
+  }
+  return chunks;
+}
+
 async function uploadFacts(facts: string[]) {
   for (let i = 0; i < facts.length; i += 20) {
     const batch = facts.slice(i, i + 20).map((text) => ({ text }));
     const result = await memwal.rememberBulkAndWait(batch);
     console.log(`saved ${result.succeeded}/${result.total}`);
+    const stillRunning = result.results.filter((item) => item.status === "timeout");
+    if (stillRunning.length > 0) {
+      const ids = stillRunning.map((item) => item.id);
+      console.log("still running; poll these job ids, do not send them again");
+      console.log(await memwal.getRememberBulkStatus(ids));
+    }
   }
 }
 
@@ -153,14 +189,17 @@ for (const name of files) {
 }
 await uploadFacts(facts);
 
-// The server rejects analyze text over 64 KiB (65536 bytes).
+// The server rejects analyze text over 64 KiB (65536 bytes). Each call keeps at most 20 facts.
 const transcript = await readFile(process.env.SESSION_FILE!, "utf8");
-const chunk = Buffer.from(transcript).subarray(0, 60_000).toString("utf8");
-const analyzed = await memwal.analyzeAndWait(chunk, {
-  occurredAt: process.env.SESSION_TIME,
-});
-console.log(`extracted ${analyzed.facts.length}, saved ${analyzed.succeeded}`);
+for (const chunk of transcriptChunks(transcript)) {
+  const analyzed = await memwal.analyzeAndWait(chunk, {
+    occurredAt: process.env.SESSION_TIME,
+  });
+  console.log(`extracted ${analyzed.facts.length}, saved ${analyzed.succeeded}`);
+}
 ```
+
+`rememberBulkAndWait` stops after 120 seconds and reports `timeout` for anything still in flight. The relayer can keep a congested upload for about 25 minutes. Poll those job ids with `getRememberBulkStatus`. Sending the batch again pays for a second blob. A 429 on the bulk call itself means that batch was not accepted, so retry that same batch after `Retry-After`. `analyzeAndWait` uses the same 120 second wait.
 
 The Python SDK has the same flow: `remember_bulk_and_wait` for facts you already wrote, and `analyze_and_wait` for a transcript (`occurred_at` is the session time). See the [Python API reference](/python-sdk/api-reference).
 
@@ -177,6 +216,7 @@ Install the plugin for the client you work in, so later sessions write to Walrus
 - [Claude Code](/mcp/claude-code)
 - [Codex](/mcp/codex)
 - [Cursor](/mcp/cursor)
+- [Antigravity](/mcp/antigravity)
 
 On Claude Code, merge the Walrus Memory block into `~/.claude/CLAUDE.md` and turn off built-in memory, or the agent keeps writing `MEMORY.md` beside Walrus Memory. That step is in the Claude Code page.
 
