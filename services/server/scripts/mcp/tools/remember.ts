@@ -80,6 +80,7 @@ export function registerRememberTool(
             // Two steps rather than `rememberAndWait`, because the accept and
             // the wait need separate budgets: acceptance is the part that
             // must succeed, the wait is a courtesy we cut short.
+            const resolvedNamespace = namespace ?? session.namespace ?? "default";
             const accepted = await withAcceptDeadline(
                 withRelayerRetry(
                     () =>
@@ -89,7 +90,7 @@ export function registerRememberTool(
                             // accept-timeout message's retry promise true.
                             // Keyed on the REDACTED text, so a retry of the
                             // same fact derives the same key.
-                            idempotencyKey: derivedIdempotencyKey(namespace, safeText),
+                            idempotencyKey: derivedIdempotencyKey(resolvedNamespace, safeText),
                         }),
                     "save this fact",
                 ),

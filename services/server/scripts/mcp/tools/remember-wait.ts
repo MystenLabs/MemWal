@@ -43,9 +43,10 @@ const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
  * `idempotent: false` instead of calling this.
  */
 export function derivedIdempotencyKey(namespace: string | undefined, text: string): string {
+    const resolvedNamespace = namespace || "default";
     const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
     const digest = createHash("sha256")
-        .update(`${bucket}\0${namespace ?? ""}\0${text}`)
+        .update(`${bucket}\0${resolvedNamespace}\0${text}`)
         .digest("hex");
     return `r1-${digest}`;
 }
