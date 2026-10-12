@@ -675,17 +675,25 @@ class TestWithMemWalLangChain:
     async def test_tool_steps_do_not_retrigger_recall_or_analyze(self) -> None:
         """LangChain tool messages do not retrigger recall or auto-save."""
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
         _mock_seal_session_prereqs()
         llm = self._make_llm()
+        captured: list = []
 
-        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([]))
+        async def _capture(batch, *args, **kwargs):
+            captured.append(batch[0])
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+        llm._agenerate = _capture
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "User lives in Lisbon", "distance": 0.05}
+        ]))
         analyze_route = respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
 
         smart = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=True
         )
 
-        # Step 1: User turn starts
         messages = [HumanMessage(content="What is the weather?")]
         await smart._agenerate([messages])
         await smart.memwal_flush()
@@ -693,7 +701,6 @@ class TestWithMemWalLangChain:
         assert recall_route.call_count == 1
         assert analyze_route.call_count == 1
 
-        # Step 2: Tool step (ends with ToolMessage)
         messages.extend([
             AIMessage(content="", tool_calls=[{"name": "weather", "args": {}, "id": "1"}]),
             ToolMessage(content="Sunny 20C", tool_call_id="1"),
@@ -703,7 +710,10 @@ class TestWithMemWalLangChain:
 
         assert recall_route.call_count == 1, "recall must NOT be called again on tool step"
         assert analyze_route.call_count == 1, "analyze must NOT be called again on tool step"
-
+        assert any(
+            "User lives in Lisbon" in getattr(message, "content", "")
+            for message in captured[-1]
+        )
         # Step 3: Next user turn starts
         messages.extend([
             AIMessage(content="It is sunny!"),
@@ -931,15 +941,22 @@ class TestWithMemWalOpenAI:
         """Tool response messages (role: tool) do not retrigger recall or auto-save."""
         _mock_seal_session_prereqs()
         client = self._make_async_client()
+        captured: list = []
 
-        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([]))
+        async def _capture(*args, **kwargs):
+            captured.append(kwargs.get("messages"))
+            return MagicMock()
+
+        client.chat.completions.create = _capture
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "User lives in Lisbon", "distance": 0.05}
+        ]))
         analyze_route = respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
 
         smart = with_memwal_openai(
             client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=True
         )
 
-        # Step 1: User turn starts
         messages = [{"role": "user", "content": "What is the weather in Lisbon?"}]
         await smart.chat.completions.create(model="gpt-4o", messages=messages)
         await smart.memwal_flush()
@@ -947,7 +964,6 @@ class TestWithMemWalOpenAI:
         assert recall_route.call_count == 1
         assert analyze_route.call_count == 1
 
-        # Step 2: Intermediate tool execution step (last message role: tool)
         messages.extend([
             {
                 "role": "assistant",
@@ -960,7 +976,10 @@ class TestWithMemWalOpenAI:
 
         assert recall_route.call_count == 1, "recall must NOT be called again on tool step"
         assert analyze_route.call_count == 1, "analyze must NOT be called again on tool step"
-
+        assert any(
+            isinstance(message, dict) and "User lives in Lisbon" in str(message.get("content", ""))
+            for message in captured[-1]
+        )
         # Step 3: Next user turn starts
         messages.extend([
             {"role": "assistant", "content": "It is 22C and sunny in Lisbon."},
