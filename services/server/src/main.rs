@@ -2708,6 +2708,10 @@ async fn main() {
             get(routes::admin_dashboard::get_coverage).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
+            "/api/admin/audit",
+            get(routes::admin_dashboard::get_audit_events).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
             "/api/admin/quality",
             get(routes::quality::get_quality).layer(DefaultBodyLimit::max(16 * 1024)),
         )

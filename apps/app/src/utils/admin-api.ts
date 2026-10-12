@@ -590,6 +590,41 @@ export async function fetchAdminCoverage(adminKey: string): Promise<MeasurementC
   }
 }
 
+export interface AuditEvent {
+  id: string
+  createdAt: string
+  actor: string
+  action: string
+  target: string | null
+  outcome: string
+  summary: string | null
+}
+
+export async function fetchAdminAudit(adminKey: string, limit: number, offset: number): Promise<{ events: AuditEvent[]; total: number; limit: number; offset: number }> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  const raw = (await makeAdminRequest(`/audit?${params}`, adminKey)) as {
+    results: Array<{ id: string; created_at: string; actor: string; action: string; target: string | null; outcome: string; summary: string | null }>
+    total: number
+    limit: number
+    offset: number
+  }
+  return {
+    events: raw.results.map((event) => ({
+      id: event.id,
+      createdAt: event.created_at,
+      actor: event.actor,
+      action: event.action,
+      target: event.target,
+      outcome: event.outcome,
+      summary: event.summary,
+    })),
+    total: raw.total,
+    limit: raw.limit,
+    offset: raw.offset,
+  }
+}
+
+
 export interface RetrievalPercentiles {
   samples: number
   p50: number | null

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   fetchAdminActivity,
+  fetchAdminAudit,
   fetchAdminConfig,
   fetchAdminErrors,
   fetchAdminCoverage,
@@ -780,26 +781,51 @@ export function ConfigPage({ adminKey, onInvalidKey }: { adminKey: string; onInv
 }
 
 export function AccessPage({ adminKey, onInvalidKey, network }: { adminKey: string; onInvalidKey: () => void; network: string }) {
+  const [offset, setOffset] = useState(0)
+  const limit = 20
   const query = useQuery({
-    queryKey: ['admin', 'coverage', 'access'],
-    queryFn: () => fetchAdminCoverage(adminKey),
+    queryKey: ['admin', 'audit', limit, offset],
+    queryFn: () => fetchAdminAudit(adminKey, limit, offset),
     retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
   })
   useInvalid(query.error, onInvalidKey)
+  const total = query.data?.total ?? 0
   return (
     <section className="wa-panel" aria-busy={query.isLoading}>
       <h2>Access and audit</h2>
       <p className="wa-note">Read-only. Signed in for {network}. Admin key only.</p>
-      <span className="wa-sr" role="status">{query.isLoading ? 'Loading audit coverage' : query.isFetching ? 'Updating audit coverage' : ''}</span>
-      {query.isLoading && <Skeleton rows={3} />}
-      {query.error && !query.isLoading && <Fail message="Audit coverage failed." detail={failureDetail(query.error as Error, 'GET /api/admin/coverage')} onRetry={() => query.refetch()} />}
-      {query.data && (
-        <>
-          <p className="wa-note">{formatCount(query.data.auditEvents)} retained audit rows. The admin API returns that count, not actor, action, target, or timestamp rows.</p>
-          <p className="wa-empty">Event list unavailable. Pagination starts when the API returns those rows.</p>
-        </>
+      <span className="wa-sr" role="status">{query.isLoading ? 'Loading audit events' : query.isFetching ? 'Updating audit events' : ''}</span>
+      {query.isLoading && <Skeleton rows={5} />}
+      {query.isFetching && query.data && <p className="wa-note" role="status">Updating</p>}
+      {query.error && !query.isLoading && <Fail message="Audit events failed." detail={failureDetail(query.error as Error, 'GET /api/admin/audit')} onRetry={() => query.refetch()} />}
+      {query.data && query.data.events.length === 0 && <p className="wa-empty">No recorded administrative events.</p>}
+      {query.data && query.data.events.length > 0 && (
+        <div className="wa-table-wrap">
+          <table className="wa-table">
+            <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Outcome</th></tr></thead>
+            <tbody>
+              {query.data.events.map((event) => (
+                <tr key={event.id}>
+                  <td title={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</td>
+                  <td className="wa-clip" title={event.actor}>{event.actor}</td>
+                  <td>{event.action}</td>
+                  <td className="wa-clip" title={event.target ?? event.summary ?? ''}>{event.target || '—'}</td>
+                  <td>{event.outcome}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
+      <div className="wa-pager">
+        <p className="wa-note">{query.data ? `${total === 0 ? 0 : offset + 1}–${Math.min(offset + (query.data.events.length), total)} of ${total}` : 'Waiting for audit events'}</p>
+        <div className="wa-actions">
+          <button className="wa-btn" type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>Previous</button>
+          <button className="wa-btn" type="button" disabled={!query.data || offset + limit >= total} onClick={() => setOffset(offset + limit)}>Next</button>
+        </div>
+      </div>
     </section>
   )
 }
+
 

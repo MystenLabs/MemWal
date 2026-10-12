@@ -115,6 +115,7 @@ const undocumentedByDesign = new Set([
     "/api/admin/inventory",
     "/api/admin/upload-summary",
     "/api/admin/coverage",
+    "/api/admin/audit",
     "/api/admin/quality",
     "/api/admin/retrieval",
     // The OAuth consent flow the dashboard drives between /oauth/authorize

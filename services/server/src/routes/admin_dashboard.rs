@@ -276,6 +276,68 @@ pub async fn get_upload_errors(
 }
 
 #[derive(Debug, Serialize)]
+pub struct AuditEvent {
+    pub id: String,
+    pub created_at: String,
+    pub actor: String,
+    pub action: String,
+    pub target: Option<String>,
+    pub outcome: String,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditEventsResponse {
+    pub results: Vec<AuditEvent>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[tracing::instrument(name = "admin.audit_events", skip_all)]
+pub async fn get_audit_events(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<AdminQuery>,
+) -> Result<Json<AuditEventsResponse>, AppError> {
+    let (limit, offset) = normalized_pagination(&params);
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM admin_audit_log")
+        .fetch_one(state.db.pool())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to count audit events: {e}")))?;
+    let rows = sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>, String, String, Option<String>, Option<String>, String, Option<String>)>(
+        "SELECT id, created_at, principal, action, target_type, target_id, outcome, summary
+         FROM admin_audit_log ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(state.db.pool())
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to fetch audit events: {e}")))?;
+    let results = rows
+        .into_iter()
+        .map(|(id, created_at, actor, action, target_type, target_id, outcome, summary)| {
+            let target = match (target_type, target_id) {
+                (Some(kind), Some(value)) if !kind.is_empty() && !value.is_empty() => Some(format!("{kind} {value}")),
+                (Some(kind), _) if !kind.is_empty() => Some(kind),
+                (_, Some(value)) if !value.is_empty() => Some(value),
+                _ => None,
+            };
+            AuditEvent {
+                id,
+                created_at: created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                actor,
+                action,
+                target,
+                outcome,
+                summary,
+            }
+        })
+        .collect();
+    Ok(Json(AuditEventsResponse { results, total, limit, offset }))
+}
+
+
+#[derive(Debug, Serialize)]
 pub struct UploadSummaryResponse {
     pub generated_at: String,
     pub window_start: String,

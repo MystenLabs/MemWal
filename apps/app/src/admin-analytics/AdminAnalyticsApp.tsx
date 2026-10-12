@@ -336,7 +336,7 @@ export function AdminAnalyticsApp({
           <div className="wa-crumb">Admin / <b>{VIEWS.find((item) => item.id === view)?.label}</b></div>
           <span className="wa-clock" title={timeZone}>{new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now)} <span className="wa-tz">{timeZone}</span></span>
           <button className="wa-btn" type="button" onClick={exportView} disabled={!exportReady} aria-describedby="export-upload-counts-reason" title={exportReason}>Export upload counts</button>
-          <span id="export-upload-counts-reason" className="wa-status" role="status">{exportReason}</span>
+          <span id="export-upload-counts-reason" className="wa-sr" role="status">{exportReason}</span>
           {activityQuery.isFetching && ['overview', 'accounts', 'activity', 'wallets'].includes(view) && <span className="wa-status" role="status">{activityQuery.data ? 'Updating' : 'Loading'}</span>}
           <button className="wa-btn" type="button" onClick={onLogout}><LogOut size={14} aria-hidden="true" /> <span>Sign out</span></button>
           <div className="wa-more">
