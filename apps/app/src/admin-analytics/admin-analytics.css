@@ -507,8 +507,9 @@ a.wa-ext:hover, a.wa-ext:focus-visible { color: #fff; border-bottom-color: var(-
 .wa-count-host { position: relative; }
 .wa-count-chart .wa-legend { margin: 0 0 12px; }
 .wa-chart-dialog { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); background: #1a1a1a; }
-.wa-chart-dialog-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; background: #1a1a1a; }
-.wa-chart-dialog .wa-count-host { flex: 1; min-height: 0; }
-.wa-chart-dialog .wa-chart-tall { height: 100%; }
+.wa-chart-dialog-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; overflow: hidden; background: #1a1a1a; }
+.wa-chart-dialog .wa-count-host { flex: 1 1 auto; min-height: 240px; }
+.wa-chart-dialog .wa-chart-tall { height: 100%; min-height: 240px; }
+.wa-chart-dialog .wa-table-wrap { flex: 0 1 28vh; overflow: auto; }
 
 
