@@ -6,6 +6,7 @@ import {
   fetchAdminErrors,
   fetchAdminCoverage,
   fetchAdminQuality,
+  fetchAdminUploadSummary,
   fetchAdminInventory,
   fetchAdminWallets,
   formatTokenAmount,
