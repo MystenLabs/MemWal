@@ -842,6 +842,40 @@ class TestRecall:
         assert result.dropped_count == 3
 
     @respx.mock
+    async def test_recall_preserves_score_and_created_at(
+        self, memwal_client: MemWal
+    ) -> None:
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "blob_id": "b1",
+                            "text": "Fact with metadata",
+                            "distance": 0.1,
+                            "score": 0.95,
+                            "created_at": "2026-03-30T12:00:00Z",
+                        },
+                        {
+                            "blob_id": "b2",
+                            "text": "Legacy fact",
+                            "distance": 0.3,
+                        },
+                    ],
+                    "total": 2,
+                },
+            )
+        )
+        result = await memwal_client.recall("test")
+        assert len(result.results) == 2
+        assert result.results[0].score == 0.95
+        assert result.results[0].created_at == "2026-03-30T12:00:00Z"
+        assert result.results[1].score is None
+        assert result.results[1].created_at is None
+
+    @respx.mock
     async def test_accepts_recall_params_object(
         self, memwal_client: MemWal
     ) -> None:
@@ -1474,6 +1508,41 @@ class TestManualAPI:
         assert "x-delegate-key" not in headers
         assert len(result.results) == 1
         assert result.results[0].blob_id == "b1"
+
+    @respx.mock
+    async def test_recall_manual_preserves_created_at_and_importance(
+        self, memwal_client: MemWal
+    ) -> None:
+        _mock_version()
+        respx.post(f"{_TEST_SERVER}/api/recall/manual").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "blob_id": "b1",
+                            "distance": 0.15,
+                            "created_at": "2026-03-30T12:00:00Z",
+                            "importance": 0.85,
+                        },
+                        {
+                            "blob_id": "b2",
+                            "distance": 0.4,
+                        },
+                    ],
+                    "total": 2,
+                },
+            )
+        )
+
+        opts = RecallManualOptions(vector=[0.1, 0.2, 0.3], limit=5)
+        result = await memwal_client.recall_manual(opts)
+
+        assert len(result.results) == 2
+        assert result.results[0].created_at == "2026-03-30T12:00:00Z"
+        assert result.results[0].importance == 0.85
+        assert result.results[1].created_at is None
+        assert result.results[1].importance is None
 
     @respx.mock
     async def test_recall_manual_forwards_scoring_weights(self, memwal_client: MemWal) -> None:

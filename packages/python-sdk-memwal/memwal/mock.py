@@ -283,7 +283,13 @@ class MemWalMock:
         if max_distance is not None:
             page = [item for item in page if item[1] < max_distance]
         results = [
-            RecallMemory(blob_id=memory.blob_id, text=memory.text, distance=score)
+            RecallMemory(
+                blob_id=memory.blob_id,
+                text=memory.text,
+                distance=score,
+                score=1.0 - score,
+                created_at=_mock_timestamp(memory.sequence),
+            )
             for memory, score in page
         ]
         return RecallResult(results=results, total=len(ranked[:limit]))

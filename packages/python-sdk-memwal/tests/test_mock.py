@@ -39,7 +39,11 @@ async def test_mock_remember_and_recall_are_deterministic_and_offline(monkeypatc
         "I drink tea at night",
     ]
     assert recalled.results[0].distance == 0
+    assert recalled.results[0].score == 1.0
+    assert recalled.results[0].created_at == "2026-01-01T00:00:01.000Z"
     assert recalled.results[1].distance == 1
+    assert recalled.results[1].score == 0.0
+    assert recalled.results[1].created_at == "2026-01-01T00:00:02.000Z"
 
 
 @pytest.mark.asyncio

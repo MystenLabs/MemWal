@@ -1055,6 +1055,8 @@ class MemWal:
                 blob_id=m["blob_id"],
                 text=m["text"],
                 distance=m["distance"],
+                score=m.get("score"),
+                created_at=m.get("created_at"),
             )
             for m in data.get("results", [])
         ]
@@ -1453,7 +1455,12 @@ class MemWal:
             include_seal_session=False,
         )
         hits = [
-            RecallManualHit(blob_id=h["blob_id"], distance=h["distance"])
+            RecallManualHit(
+                blob_id=h["blob_id"],
+                distance=h["distance"],
+                created_at=h.get("created_at"),
+                importance=h.get("importance"),
+            )
             for h in data.get("results", [])
         ]
         return RecallManualResult(results=hits, total=data.get("total", len(hits)))
