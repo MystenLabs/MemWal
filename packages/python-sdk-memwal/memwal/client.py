@@ -875,14 +875,12 @@ class MemWal:
             dropped = int(raw_dropped)
         except (TypeError, ValueError):
             dropped = 0
+        total_count = data.get("total", len(memories))
         if max_distance is not None:
             memories = [m for m in memories if m.distance < max_distance]
-            return RecallResult(
-                results=memories, total=len(memories), dropped_count=dropped
-            )
         return RecallResult(
             results=memories,
-            total=data.get("total", len(memories)),
+            total=total_count,
             dropped_count=dropped,
         )
 
