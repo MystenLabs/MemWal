@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MemWalManual } from "../dist/manual.js";
-import { RESTORE_REQUEST_TIMEOUT_MS } from "../dist/utils.js";
+
 
 const originalFetch = globalThis.fetch;
 
