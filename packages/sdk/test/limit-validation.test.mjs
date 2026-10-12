@@ -142,3 +142,32 @@ test("MemWalManual.recallManual() rejects non-positive or non-integer limit befo
     }
     assert.equal(requests, 0);
 });
+
+test("MemWalManual.restore() rejects non-positive or non-integer limit before signing", async () => {
+    const manual = manualClient();
+    let requests = 0;
+    manual.signedRequest = async () => {
+        requests += 1;
+        return {
+            restored: 0,
+            skipped: 0,
+            failed: 0,
+            total: 0,
+            namespace: "default",
+            owner: "0x1",
+            truncated: false,
+        };
+    };
+
+    const invalidLimits = [0, -1, 2.5, NaN, "10", null];
+    for (const bad of invalidLimits) {
+        await assert.rejects(
+            () => manual.restore("default", bad),
+            {
+                name: "TypeError",
+                message: /limit must be a positive integer/,
+            },
+        );
+    }
+    assert.equal(requests, 0);
+});
