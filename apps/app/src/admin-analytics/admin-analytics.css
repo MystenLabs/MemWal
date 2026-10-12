@@ -46,7 +46,7 @@
 }
 .wa-brand strong { display: block; font-size: 14px; font-weight: 560; }
 
-.wa-logo { height: 22px; width: auto; display: block; }
+.wa-logo { height: 18px; width: auto; max-width: 148px; display: block; }
 .wa-mobile-bar, .wa-nav-back, .wa-more { display: none; }
 .wa-mobile-bar {
   align-items: center;
@@ -356,9 +356,10 @@ a.wa-ext:hover, a.wa-ext:focus-visible { color: #fff; border-bottom-color: var(-
     width: min(280px, calc(100vw - 48px));
     height: 100dvh;
     transform: translateX(-105%);
+    visibility: hidden;
     transition: transform 160ms ease;
   }
-  .wa-nav-open .wa-side { transform: none; }
+  .wa-nav-open .wa-side { transform: none; visibility: visible; }
   .wa-nav-open .wa-nav-back { display: block; }
   .wa-mobile-bar { display: flex; }
   .wa-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }

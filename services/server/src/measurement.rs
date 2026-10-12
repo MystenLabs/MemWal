@@ -37,6 +37,7 @@ static RESPONSE_BODY_DURATION_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
 });
 
 pub fn response_body_sample_count() -> u64 {
+    let _ = &*RESPONSE_BODY_DURATION_SECONDS;
     RESPONSE_BODY_BYTES.get_sample_count()
 }
 
