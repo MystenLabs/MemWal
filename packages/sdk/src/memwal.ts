@@ -921,7 +921,12 @@ export class MemWal {
             } else if (typeof limitOrOptions === "number") {
                 options = { limit: limitOrOptions, namespace };
             } else {
-                options = limitOrOptions;
+                // Positional namespace fills an options object that omitted it.
+                // An explicit options.namespace still wins. (#1038)
+                options = { ...limitOrOptions };
+                if (options.namespace === undefined && namespace !== undefined) {
+                    options.namespace = namespace;
+                }
             }
         }
         const limit = options.topK ?? options.limit ?? 10;

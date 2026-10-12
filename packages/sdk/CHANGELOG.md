@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- `MemWalMock.listNamespaces` rejects a non-positive or non-integer `limit` with `limit must be positive`, matching the relayer. `limit: 0` used to return `has_more: true` and `next_cursor: null`, so the documented pagination loop never finished, and `limit: -1` silently dropped the last namespace. (#1144, #1145)
+- `MemWalMock.rememberBulkAsync` rejects an empty or non-array batch with the same error as `MemWal`. (#1146)
+- `MemWalMock` honors `idempotencyKey`. A retry of the same text and namespace returns the original job, a different payload throws, and `forget` / `clear` release the key so the text can be written again. (#1147)
+- `MemWalMock.recall({ sort: "recent" })` orders a bounded semantic window (5× `limit`, at least `limit`, at most 50) by write time before truncating. Relevance order is unchanged. (#1124)
+- Positional `recall(query, options, namespace)` uses that namespace when `options.namespace` is omitted, on both `MemWal` and `MemWalMock`. An explicit `options.namespace` still wins. (#1038)
 - `rememberBulkAndWait` / `waitForRememberJobs` no longer resolve a batch they could not read as if it were still uploading. The status endpoint counts against the delegate-key budget, and a 429 on every poll used to be retried silently until the wait ran out, leaving each item as `timeout` with "polling timed out", even when nothing had been stored. When no poll got through, the wait now makes one confirming read. If that is rate-limited too, it throws `MemWalRateLimited` (`status: 429`, `jobIds`, `retryAfterSeconds`). An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)
 
 ## 0.1.9
