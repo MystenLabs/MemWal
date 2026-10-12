@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, AlertTriangle, Database, KeyRound, LayoutDashboard, LogOut, Settings, Shield, Users, Wallet } from 'lucide-react'
+import { Activity, AlertTriangle, Database, KeyRound, LayoutDashboard, LogOut, Menu, Settings, Shield, Users, Wallet, X } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
@@ -138,6 +138,9 @@ export function AdminAnalyticsApp({
   const query = params.get('q') || ''
   const showAll = params.get('all') === '1'
   const [requestId, setRequestId] = useState<string | null>(null)
+  const [navOpen, setNavOpen] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const menuButton = useRef<HTMLButtonElement>(null)
   const [sort, setSort] = useState<'egress' | 'requests' | 'latency'>('egress')
   const [series, setSeries] = useState<'bytes' | 'requests' | 'latency'>('bytes')
   const now = useMemo(() => new Date(), [])
@@ -156,7 +159,11 @@ export function AdminAnalyticsApp({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setRequestId(null)
+      if (event.key !== 'Escape') return
+      setRequestId(null)
+      setNavOpen(false)
+      setMoreOpen(false)
+      menuButton.current?.focus()
     }
     globalThis.addEventListener('keydown', onKey)
     return () => globalThis.removeEventListener('keydown', onKey)
@@ -248,17 +255,13 @@ export function AdminAnalyticsApp({
     link.click()
     URL.revokeObjectURL(url)
   }
-
-
   return (
-    <div className="wa">
-      <aside className="wa-side" aria-label="Admin">
+    <div className={`wa${navOpen ? ' wa-nav-open' : ''}`}>
+      {navOpen && <button className="wa-nav-back" aria-label="Close navigation" onClick={() => { setNavOpen(false); menuButton.current?.focus() }} />}
+      <aside id="admin-nav" className="wa-side" aria-label="Admin">
         <div className="wa-brand">
-          <span className="wa-mark" aria-hidden="true" />
-          <div>
-            <strong>Walrus Memory</strong>
-            <span>Administration</span>
-          </div>
+          <img className="wa-logo" src="/walrus-memory-logo.svg?v=3" alt="Walrus Memory" />
+          <button className="wa-btn wa-drawer-close" type="button" onClick={() => { setNavOpen(false); menuButton.current?.focus() }}><X size={16} /> Close</button>
         </div>
         {['Analytics', 'Operations', 'Administration'].map((group) => (
           <div key={group}>
@@ -266,7 +269,7 @@ export function AdminAnalyticsApp({
             {VIEWS.filter((item) => item.group === group).map((item) => {
               const Icon = item.id === 'overview' ? LayoutDashboard : item.id === 'storage' ? Database : item.id === 'retrieval' ? Activity : item.id === 'accounts' ? Users : item.id === 'incidents' ? AlertTriangle : item.id === 'wallets' ? Wallet : item.id === 'config' ? Settings : item.id === 'access' ? Shield : KeyRound
               return (
-              <button key={item.id} className="wa-navbtn" aria-current={view === item.id ? 'page' : undefined} onClick={() => setParam('view', item.id)}>
+              <button key={item.id} className="wa-navbtn" aria-current={view === item.id ? 'page' : undefined} onClick={() => { setParam('view', item.id); setNavOpen(false); menuButton.current?.focus() }}>
                 <Icon className="wa-ico" size={14} />
                 {item.label}
               </button>
@@ -276,12 +279,27 @@ export function AdminAnalyticsApp({
         ))}
       </aside>
       <main className="wa-main">
+        <div className="wa-mobile-bar">
+          <button ref={menuButton} className="wa-btn wa-menu-btn" type="button" aria-expanded={navOpen} aria-controls="admin-nav" onClick={() => setNavOpen(true)}>
+            <Menu size={16} /> Menu
+          </button>
+          <strong>{VIEWS.find((item) => item.id === view)?.label}</strong>
+        </div>
         <div className="wa-util">
           <div className="wa-crumb">Admin / <b>{VIEWS.find((item) => item.id === view)?.label}</b></div>
-          <span className="wa-clock">{new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now)} {timeZone}</span>
+          <span className="wa-clock" title={timeZone}>{new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now)} <span className="wa-tz">{timeZone}</span></span>
           <button className="wa-btn" onClick={exportView} disabled={!demo && !activityQuery.data} title={demo ? 'Download the fixture account summary' : 'Download the live owner upload counts. Request-byte export is not stored.'}>Export</button>
           <span className="wa-env" title={demo ? 'Demo data. Node egress unavailable. Incident year not verified.' : 'Live request egress is unavailable. Wallet and activity routes are separate.'}>Notices</span>
           <button className="wa-btn" onClick={onLogout}><LogOut size={14} /> Sign out</button>
+          <div className="wa-more">
+            <button className="wa-more-btn wa-btn" type="button" aria-expanded={moreOpen} onClick={() => setMoreOpen((open) => !open)}>More</button>
+            {moreOpen && (
+              <div className="wa-more-list">
+                <button className="wa-btn" type="button" onClick={() => { exportView(); setMoreOpen(false) }}>Export</button>
+                <button className="wa-btn" type="button" onClick={onLogout}>Sign out</button>
+              </div>
+            )}
+          </div>
         </div>
         <div className="wa-head">
           <div className="wa-title">

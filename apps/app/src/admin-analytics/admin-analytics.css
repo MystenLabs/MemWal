@@ -45,6 +45,43 @@
   background: linear-gradient(160deg, #9b8cff, #5b4ad6);
 }
 .wa-brand strong { display: block; font-size: 14px; font-weight: 560; }
+
+.wa-logo { height: 22px; width: auto; display: block; }
+.wa-mobile-bar, .wa-nav-back, .wa-more { display: none; }
+.wa-mobile-bar {
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--wa-line);
+}
+.wa-mobile-bar strong { font-size: 14px; }
+.wa-menu-btn, .wa-navbtn { min-height: 44px; }
+.wa-nav-back {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  border: 0;
+  background: rgba(0, 0, 0, 0.5);
+}
+.wa-more { position: relative; }
+.wa-more-list {
+  position: absolute;
+  right: 0;
+  top: 40px;
+  z-index: 20;
+  min-width: 180px;
+  background: #1e1e1e;
+  border: 1px solid var(--wa-line);
+  border-radius: 8px;
+  padding: 6px;
+}
+.wa-nav-open { overflow: hidden; }
+
+.wa-drawer-close { display: none; }
+@media (max-width: 1100px) {
+  .wa-drawer-close { display: inline-flex; }
+}
 .wa-brand span { color: var(--wa-muted); font-size: 12px; }
 .wa-group {
   margin: 14px 8px 4px;
@@ -310,15 +347,34 @@ a.wa-ext:hover, a.wa-ext:focus-visible { color: #fff; border-bottom-color: var(-
 .wa-hop { border: 1px solid var(--wa-line); border-radius: 6px; padding: 8px 10px; margin-top: 8px; }
 
 @media (max-width: 1100px) {
-  .wa { grid-template-columns: 1fr; }
-  .wa-side { position: relative; height: auto; }
+  .wa { grid-template-columns: minmax(0, 1fr); }
+  .wa-side {
+    position: fixed;
+    z-index: 40;
+    top: 0;
+    left: 0;
+    width: min(280px, calc(100vw - 48px));
+    height: 100dvh;
+    transform: translateX(-105%);
+    transition: transform 160ms ease;
+  }
+  .wa-nav-open .wa-side { transform: none; }
+  .wa-nav-open .wa-nav-back { display: block; }
+  .wa-mobile-bar { display: flex; }
   .wa-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .wa-board { grid-template-columns: 1fr; }
   .wa-rail { grid-column: 1; }
+  .wa-menu { width: min(300px, calc(100vw - 16px)); }
 }
 @media (max-width: 720px) {
   .wa-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .wa-head, .wa-util { flex-wrap: wrap; height: auto; padding-top: 8px; padding-bottom: 8px; }
+  .wa-tz { display: none; }
+  .wa-util .wa-btn:not(.wa-more-btn), .wa-env { display: none; }
+  .wa-more { display: inline-flex; }
+}
+@media (max-width: 420px) {
+  .wa-kpis { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   .wa * { transition: none !important; }
