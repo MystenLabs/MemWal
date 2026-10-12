@@ -103,7 +103,7 @@ function CountPlot({
   const height = tall ? 420 : 220
   const peak = Math.max(0, ...buckets.map((bucket) => bucket.count))
   const scaleMax = peak === 0 ? 1 : Math.ceil(peak * 1.15)
-  const ticks = visibleTickIndexes(buckets.length, width - 56)
+  const ticks = visibleTickIndexes(buckets.length, width - 56).filter((index, position, all) => position === 0 || shortDate(buckets[index].label) !== shortDate(buckets[all[position - 1]].label))
   const plotLeft = 44
   const plotRight = width - 12
   const plotTop = 16
@@ -114,7 +114,7 @@ function CountPlot({
   const inspect = (index: number) => setHover(index)
   return (
     <div ref={host} className="wa-count-host">
-      <svg className="wa-chart" viewBox={`0 0 ${width} ${height}`} role="img" tabIndex={0} aria-label={`${title}, ${grain}, ${buckets.length} buckets, peak ${peak} ${unit}. Arrow keys inspect a bucket.`} onKeyDown={(event) => {
+      <svg className={tall ? 'wa-chart wa-chart-tall' : 'wa-chart'} viewBox={`0 0 ${width} ${height}`} role="img" tabIndex={0} aria-label={`${title}, ${grain}, ${buckets.length} buckets, peak ${peak} ${unit}. Arrow keys inspect a bucket.`} onKeyDown={(event) => {
         if (event.key === 'ArrowRight') { event.preventDefault(); setHover((index) => Math.min(buckets.length - 1, (index ?? -1) + 1)) }
         if (event.key === 'ArrowLeft') { event.preventDefault(); setHover((index) => Math.max(0, (index ?? 1) - 1)) }
         if (event.key === 'Enter' && hover != null && onOpen) onOpen(buckets[hover])
