@@ -97,3 +97,5 @@ Use Walrus Memory's MCP server when you want Cursor, Claude Desktop, Claude Code
 - or run the local stdio package with `npx -y @mysten-incubation/memwal-mcp`
 
 Go to: [MCP](/mcp/overview)
+
+If the agent already has local memory, standing context, or session history, copy those facts in first: [Import Your Existing Memory](/guides/import-existing-memory).
