@@ -420,6 +420,95 @@ pub async fn get_coverage(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RetrievalWindowQuery {
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub end: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PercentileBody {
+    pub samples: usize,
+    pub p50: Option<i64>,
+    pub p90: Option<i64>,
+    pub p99: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RetrievalSummaryResponse {
+    pub generated_at: String,
+    pub window_start: String,
+    pub window_end: String,
+    pub clamped: bool,
+    pub requests: usize,
+    pub population: &'static str,
+    pub method: &'static str,
+    pub latency_ms: PercentileBody,
+    pub relayer_body_bytes: PercentileBody,
+    pub upstream_bytes: PercentileBody,
+    pub node_bytes: PercentileBody,
+    pub node_reason: &'static str,
+    pub body_definition: &'static str,
+}
+
+fn pack(set: crate::measurement::PercentileSet) -> PercentileBody {
+    PercentileBody { samples: set.samples, p50: set.p50, p90: set.p90, p99: set.p99 }
+}
+
+#[tracing::instrument(name = "admin.retrieval", skip_all)]
+pub async fn get_retrieval_summary(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RetrievalWindowQuery>,
+) -> Result<Json<RetrievalSummaryResponse>, AppError> {
+    let now = chrono::Utc::now();
+    let resolved = super::admin_activity::resolve_window(
+        now,
+        None,
+        query.start.as_deref(),
+        query.end.as_deref(),
+        None,
+    )
+    .map_err(AppError::BadRequest)?;
+    let rows: Vec<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT duration_ms, relayer_body_bytes, upstream_bytes, node_bytes
+         FROM retrieval_requests
+         WHERE completed_at >= $1 AND completed_at < $2",
+    )
+    .bind(resolved.start)
+    .bind(resolved.end)
+    .fetch_all(state.db.pool())
+    .await
+    .map_err(|error| AppError::Internal(format!("Failed to read retrieval requests: {error}")))?;
+    let summary = crate::measurement::summarize_retrievals(
+        &rows
+            .into_iter()
+            .map(|row| crate::measurement::RetrievalObservation {
+                duration_ms: row.0,
+                relayer_body_bytes: row.1,
+                upstream_bytes: row.2,
+                node_bytes: row.3,
+            })
+            .collect::<Vec<_>>(),
+    );
+    Ok(Json(RetrievalSummaryResponse {
+        generated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        window_start: resolved.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        window_end: resolved.end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        clamped: resolved.clamped,
+        requests: summary.requests,
+        population: "logical /api/recall requests completed in the half-open window, including timeouts",
+        method: "nearest rank on the non-null field population, not an average of daily percentiles",
+        latency_ms: pack(summary.latency_ms),
+        relayer_body_bytes: pack(summary.relayer_body_bytes),
+        upstream_bytes: pack(summary.upstream_bytes),
+        node_bytes: pack(summary.node_bytes),
+        node_reason: "node_bytes is written null. Storage-node telemetry is not correlated to the request id.",
+        body_definition: "relayer_body_bytes is encoded JSON length, not wire bytes, TLS overhead, or proof of client receipt",
+    }))
+}
+
 
 
 #[tracing::instrument(name = "admin.config", skip_all)]

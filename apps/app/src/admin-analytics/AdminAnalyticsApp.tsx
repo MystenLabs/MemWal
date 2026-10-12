@@ -437,7 +437,7 @@ export function AdminAnalyticsApp({
             upstream={upstream}
             onOpen={setRequestId}
           />
-        ) : <RetrievalLivePage adminKey={adminKey} onInvalidKey={onInvalidKey} onOpenQuality={() => setParam('view', 'quality')} />)}
+        ) : <RetrievalLivePage adminKey={adminKey} start={period.start} end={period.end} onInvalidKey={onInvalidKey} onOpenQuality={() => setParam('view', 'quality')} />)}
         {view === 'accounts' && (demo ? (
           <AccountTable rows={rows} sort={sort} onSort={setSort} onOpen={(id) => setParam('account', id)} query={query} onQuery={(value) => setParam('q', value)} showAll={showAll} onShowAll={(value) => setParam('all', value ? '1' : '')} />
         ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} comparing={compare !== 'none'} windowHours={(period.end.getTime() - period.start.getTime()) / 3_600_000} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />)}

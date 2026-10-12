@@ -590,6 +590,59 @@ export async function fetchAdminCoverage(adminKey: string): Promise<MeasurementC
   }
 }
 
+export interface RetrievalPercentiles {
+  samples: number
+  p50: number | null
+  p90: number | null
+  p99: number | null
+}
+
+export interface RetrievalSummary {
+  generatedAt: string
+  windowStart: string
+  windowEnd: string
+  requests: number
+  population: string
+  method: string
+  latencyMs: RetrievalPercentiles
+  relayerBodyBytes: RetrievalPercentiles
+  upstreamBytes: RetrievalPercentiles
+  nodeBytes: RetrievalPercentiles
+  nodeReason: string
+  bodyDefinition: string
+}
+
+export async function fetchAdminRetrieval(adminKey: string, start: Date, end: Date): Promise<RetrievalSummary> {
+  const raw = (await makeAdminRequest(`/retrieval?start=${encodeURIComponent(start.toISOString())}&end=${encodeURIComponent(end.toISOString())}`, adminKey)) as {
+    generated_at: string
+    window_start: string
+    window_end: string
+    requests: number
+    population: string
+    method: string
+    latency_ms: RetrievalPercentiles
+    relayer_body_bytes: RetrievalPercentiles
+    upstream_bytes: RetrievalPercentiles
+    node_bytes: RetrievalPercentiles
+    node_reason: string
+    body_definition: string
+  }
+  return {
+    generatedAt: raw.generated_at,
+    windowStart: raw.window_start,
+    windowEnd: raw.window_end,
+    requests: raw.requests,
+    population: raw.population,
+    method: raw.method,
+    latencyMs: raw.latency_ms,
+    relayerBodyBytes: raw.relayer_body_bytes,
+    upstreamBytes: raw.upstream_bytes,
+    nodeBytes: raw.node_bytes,
+    nodeReason: raw.node_reason,
+    bodyDefinition: raw.body_definition,
+  }
+}
+
 export interface QualitySource {
   id: string
   name: string

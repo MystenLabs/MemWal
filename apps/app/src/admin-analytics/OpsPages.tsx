@@ -6,6 +6,7 @@ import {
   fetchAdminErrors,
   fetchAdminCoverage,
   fetchAdminQuality,
+  fetchAdminRetrieval,
   fetchAdminUploadSummary,
   fetchAdminInventory,
   fetchAdminWallets,
@@ -442,13 +443,33 @@ export function boundaryCopy(source: { capability: string; health: string; obser
   return { status: 'Aggregate only', why: 'A process histogram is available. It is not a per-account request history.', samples: source.observed }
 }
 
-export function RetrievalLivePage({ adminKey, onInvalidKey, onOpenQuality }: { adminKey: string | null; onInvalidKey: () => void; onOpenQuality: () => void }) {
+function percentileValue(set: { samples: number; p50: number | null; p90: number | null; p99: number | null } | undefined, rank: 'p50' | 'p90' | 'p99', failed: boolean, loading: boolean, unit = 'B') {
+  if (failed || loading || !set || set.samples === 0 || set[rank] == null) return '—'
+  return unit === 'B' ? formatBytes(BigInt(set[rank] as number)) : `${set[rank]} ${unit}`
+}
+
+function percentileDelta(set: { samples: number } | undefined, failed: boolean, loading: boolean) {
+  if (failed) return 'Request failed'
+  if (loading || !set) return 'Loading'
+  if (set.samples === 0) return 'No samples recorded'
+  return `${set.samples} samples`
+}
+
+
+export function RetrievalLivePage({ adminKey, start, end, onInvalidKey, onOpenQuality }: { adminKey: string | null; start: Date; end: Date; onInvalidKey: () => void; onOpenQuality: () => void }) {
   const inventory = useQuery({
     queryKey: ['admin', 'quality'],
     queryFn: () => fetchAdminQuality(adminKey as string),
     enabled: Boolean(adminKey),
     retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
   })
+  const summary = useQuery({
+    queryKey: ['admin', 'retrieval', start.toISOString(), end.toISOString()],
+    queryFn: () => fetchAdminRetrieval(adminKey as string, start, end),
+    enabled: Boolean(adminKey),
+    retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
+  })
+  useInvalid(summary.error, onInvalidKey)
   useInvalid(inventory.error, onInvalidKey)
   const sources = inventory.data?.sources ?? []
   const byId = (id: string) => sources.find((source) => source.id === id)
@@ -462,15 +483,15 @@ export function RetrievalLivePage({ adminKey, onInvalidKey, onOpenQuality }: { a
     ['Aggregator → relayer', boundaryCopy(aggregator, 'Upstream body bytes are not collected.')],
     ['Storage node → aggregator', boundaryCopy(node, 'Node telemetry is not correlated to a request id.')],
   ] as const
-  const samples = failed ? null : records?.observed ?? null
+  const samples = summary.isError ? null : summary.data ? summary.data.requests : failed ? null : records?.observed ?? null
   return (
     <div className="wa-page">
       <div className="wa-kpis">
-        <Kpi label="p50 bytes" value="—" delta="Unavailable" title="Percentiles are not on the quality inventory. A sample count is not a percentile." />
-        <Kpi label="p90 bytes" value="—" delta="Unavailable" />
-        <Kpi label="p99 bytes" value="—" delta="Unavailable" />
-        <Kpi label="p50 latency" value="—" delta="Unavailable" />
-        <Kpi label="p99 latency" value="—" delta="Unavailable" />
+        <Kpi label="p50 bytes" value={percentileValue(summary.data?.relayerBodyBytes, 'p50', summary.isError, summary.isLoading)} delta={percentileDelta(summary.data?.relayerBodyBytes, summary.isError, summary.isLoading)} title={summary.data?.bodyDefinition} />
+        <Kpi label="p90 bytes" value={percentileValue(summary.data?.relayerBodyBytes, 'p90', summary.isError, summary.isLoading)} delta={percentileDelta(summary.data?.relayerBodyBytes, summary.isError, summary.isLoading)} />
+        <Kpi label="p99 bytes" value={percentileValue(summary.data?.relayerBodyBytes, 'p99', summary.isError, summary.isLoading)} delta={percentileDelta(summary.data?.relayerBodyBytes, summary.isError, summary.isLoading)} />
+        <Kpi label="p50 latency" value={percentileValue(summary.data?.latencyMs, 'p50', summary.isError, summary.isLoading, 'ms')} delta={percentileDelta(summary.data?.latencyMs, summary.isError, summary.isLoading)} />
+        <Kpi label="p99 latency" value={percentileValue(summary.data?.latencyMs, 'p99', summary.isError, summary.isLoading, 'ms')} delta={percentileDelta(summary.data?.latencyMs, summary.isError, summary.isLoading)} />
         <Kpi label="Request records" value={samples == null ? '—' : formatCount(samples)} delta={samples === 0 ? 'No samples recorded' : samples == null ? 'Unknown' : 'Recorded requests'} />
       </div>
       <section className="wa-panel">

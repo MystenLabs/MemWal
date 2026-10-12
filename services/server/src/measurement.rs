@@ -68,6 +68,51 @@ pub fn nearest_rank(sorted: &[i64], percentile: u8) -> Option<i64> {
     sorted.get(index.min(sorted.len() - 1)).copied()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PercentileSet {
+    pub samples: usize,
+    pub p50: Option<i64>,
+    pub p90: Option<i64>,
+    pub p99: Option<i64>,
+}
+
+pub fn percentiles_of(values: impl IntoIterator<Item = i64>) -> PercentileSet {
+    let mut values: Vec<i64> = values.into_iter().filter(|value| *value >= 0).collect();
+    values.sort_unstable();
+    PercentileSet {
+        samples: values.len(),
+        p50: nearest_rank(&values, 50),
+        p90: nearest_rank(&values, 90),
+        p99: nearest_rank(&values, 99),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RetrievalObservation {
+    pub duration_ms: Option<i64>,
+    pub relayer_body_bytes: Option<i64>,
+    pub upstream_bytes: Option<i64>,
+    pub node_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalSummary {
+    pub requests: usize,
+    pub latency_ms: PercentileSet,
+    pub relayer_body_bytes: PercentileSet,
+    pub upstream_bytes: PercentileSet,
+    pub node_bytes: PercentileSet,
+}
+
+pub fn summarize_retrievals(rows: &[RetrievalObservation]) -> RetrievalSummary {
+    RetrievalSummary {
+        requests: rows.len(),
+        latency_ms: percentiles_of(rows.iter().filter_map(|row| row.duration_ms)),
+        relayer_body_bytes: percentiles_of(rows.iter().filter_map(|row| row.relayer_body_bytes)),
+        upstream_bytes: percentiles_of(rows.iter().filter_map(|row| row.upstream_bytes)),
+        node_bytes: percentiles_of(rows.iter().filter_map(|row| row.node_bytes)),
+    }
+}
 pub fn record_retrieval(
     pool: PgPool,
     owner: String,
@@ -235,7 +280,7 @@ fn stamp(at: DateTime<Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::nearest_rank;
+    use super::{nearest_rank, summarize_retrievals, RetrievalObservation};
 
     #[test]
     fn percentile_uses_the_population_not_an_average_of_tails() {
@@ -243,5 +288,21 @@ mod tests {
         assert_eq!(nearest_rank(&values, 50), Some(30));
         assert_eq!(nearest_rank(&values, 99), Some(100));
         assert_eq!(nearest_rank(&[], 50), None);
+    }
+
+    #[test]
+    fn missing_fields_stay_out_of_the_percentile_population() {
+        let summary = summarize_retrievals(&[
+            RetrievalObservation { duration_ms: Some(10), relayer_body_bytes: Some(100), upstream_bytes: Some(0), node_bytes: None },
+            RetrievalObservation { duration_ms: Some(20), relayer_body_bytes: Some(200), upstream_bytes: Some(50), node_bytes: None },
+            RetrievalObservation { duration_ms: Some(90), relayer_body_bytes: None, upstream_bytes: None, node_bytes: None },
+        ]);
+        assert_eq!(summary.requests, 3);
+        assert_eq!(summary.latency_ms.samples, 3);
+        assert_eq!(summary.latency_ms.p50, Some(20));
+        assert_eq!(summary.relayer_body_bytes.samples, 2);
+        assert_eq!(summary.upstream_bytes.p50, Some(0));
+        assert_eq!(summary.node_bytes.samples, 0);
+        assert_eq!(summary.node_bytes.p99, None);
     }
 }
