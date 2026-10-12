@@ -266,6 +266,7 @@ from memwal import (
     MemWalRememberJobNotFound,
     MemWalRememberJobFailed,
     MemWalRememberJobTimeout,
+    MemWalRateLimited,
 )
 ```
 
@@ -275,6 +276,7 @@ from memwal import (
 | `MemWalRememberJobNotFound` | `404` | Job unknown or not owned by the caller |
 | `MemWalRememberJobFailed` | `500` | Job reached terminal `failed` (`.error`) |
 | `MemWalRememberJobTimeout` | `504` | Polling exceeded `.timeout_ms` |
+| `MemWalRateLimited` | `429` | Every bulk status read, the confirming one included, was rate-limited; `.job_ids` are unconfirmed (`.retry_after`) |
 
 ## Utility Functions
 

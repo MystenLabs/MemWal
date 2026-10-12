@@ -4,6 +4,26 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use std::time::Duration;
 
 const SIDECAR_WALRUS_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// `Display` for `reqwest::Error` stops at "error sending request for url".
+/// Append the source chain so a dropped upload says reset, refused, or timed out.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = err.source();
+    while let Some(next) = source {
+        let text = next.to_string();
+        if parts.last().is_some_and(|prev| prev == &text) {
+            break;
+        }
+        parts.push(text);
+        if parts.len() == 4 {
+            break;
+        }
+        source = next.source();
+    }
+    parts.join(": ")
+}
+
 const WALRUS_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const DURABLE_UPLOAD_PROTOCOL_VERSION: u32 = 3;
 
@@ -548,6 +568,25 @@ fn should_reset_prepared_register(
     ) && prepared.is_some()
 }
 
+/// An `encoded` checkpoint is a local hash of the bytes from that attempt.
+/// Re-encrypting the fact produces a new blob id. Walrus then refuses the
+/// resume and reports `NO_SIDE_EFFECT`, so nothing was submitted. Dropping
+/// the checkpoint lets the same bytes be encoded again. A later step owns a
+/// blob object and must not be discarded here.
+fn should_drop_stale_encoded_resume(
+    body: &str,
+    error_code: Option<&str>,
+    resume_step: Option<&serde_json::Value>,
+) -> bool {
+    let encoded = resume_step
+        .and_then(|step| step.get("step"))
+        .and_then(serde_json::Value::as_str)
+        == Some("encoded");
+    encoded
+        && error_code == Some("NO_SIDE_EFFECT")
+        && body.to_ascii_lowercase().contains("resume blobid mismatch")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn advance_durable_upload(
     client: &reqwest::Client,
@@ -586,13 +625,39 @@ pub async fn advance_durable_upload(
         .timeout(SIDECAR_WALRUS_TIMEOUT)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("durable Walrus upload request failed: {}", e)))?;
+        .map_err(|e| {
+            // reqwest's Display is only "error sending request for url (...)".
+            // The reset, refusal, or timeout is on the source chain, and that
+            // is what an exhausted-retry alert has to show.
+            AppError::Internal(format!(
+                "durable Walrus upload request failed: {}",
+                error_chain(&e)
+            ))
+        })?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.text().await.map_err(|e| {
+        AppError::Internal(format!(
+            "durable Walrus upload response failed for {url}: {}",
+            error_chain(&e)
+        ))
+    })?;
     if !status.is_success() {
         let error_code = serde_json::from_str::<DurableUploadErrorResponse>(&body)
             .ok()
             .and_then(|error| error.code);
+        if should_drop_stale_encoded_resume(
+            &body,
+            error_code.as_deref(),
+            journal.resume_step.as_ref(),
+        ) {
+            // The encoded checkpoint names a blob id the current bytes do not
+            // hash to. The sidecar submitted nothing, so the next loop pass
+            // encodes these bytes from scratch. The prepared register, if any,
+            // belongs to the old blob id.
+            journal.resume_step = None;
+            journal.register_transaction = None;
+            return Ok(DurableUploadAdvance::Prepared(journal));
+        }
         let reset_safe = should_reset_prepared_register(
             error_code.as_deref(),
             journal.register_transaction.as_ref(),
@@ -1239,9 +1304,9 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_download_errors, is_valid_blob_id, register_transaction_for_resume,
-        should_reset_prepared_register, PreparedRegisterTransaction, QueryBlobsResponse,
-        WalrusUploadErrorResponse,
+        aggregate_download_errors, error_chain, is_valid_blob_id, register_transaction_for_resume,
+        should_drop_stale_encoded_resume, should_reset_prepared_register,
+        PreparedRegisterTransaction, QueryBlobsResponse, WalrusUploadErrorResponse,
     };
     use crate::types::AppError;
 
@@ -1251,6 +1316,38 @@ mod tests {
     // declare the field, so serde silently dropped it despite the
     // sidecar sending it. This pins the deserialize directly against the
     // sidecar's real response shape, without needing a live sidecar.
+    #[test]
+    fn error_chain_keeps_the_source_reqwest_hides() {
+        #[derive(Debug)]
+        struct Leaf;
+        impl std::fmt::Display for Leaf {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("connection reset by peer")
+            }
+        }
+        impl std::error::Error for Leaf {}
+
+        #[derive(Debug)]
+        struct Wrap(Leaf);
+        impl std::fmt::Display for Wrap {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "error sending request for url (http://localhost:9000/walrus/upload-step-v3)",
+                )
+            }
+        }
+        impl std::error::Error for Wrap {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        assert_eq!(
+            error_chain(&Wrap(Leaf)),
+            "error sending request for url (http://localhost:9000/walrus/upload-step-v3): connection reset by peer"
+        );
+    }
+
     #[test]
     fn walrus_upload_error_response_captures_end_epoch() {
         let body = r#"{
@@ -1320,6 +1417,36 @@ mod tests {
         assert!(!should_reset_prepared_register(
             Some("DURABLE_SIDE_EFFECT_VERIFY_FAILED"),
             Some(&sponsored),
+        ));
+    }
+
+    #[test]
+    fn encoded_resume_drops_only_on_blob_id_mismatch() {
+        let encoded = serde_json::json!({
+            "step": "encoded",
+            "blobId": "Y8n5tChPgigsw_ptMHoDxIqbVzYqJRdpNDcbs84s4Fc"
+        });
+        let mismatch = r#"{"error":"Resume blobId mismatch: expected Y8n5tChP, got IRQ1QmKp. The blob content may have changed.","code":"NO_SIDE_EFFECT"}"#;
+        assert!(should_drop_stale_encoded_resume(
+            mismatch,
+            Some("NO_SIDE_EFFECT"),
+            Some(&encoded),
+        ));
+        let registered = serde_json::json!({ "step": "registered" });
+        assert!(!should_drop_stale_encoded_resume(
+            mismatch,
+            Some("NO_SIDE_EFFECT"),
+            Some(&registered),
+        ));
+        assert!(!should_drop_stale_encoded_resume(
+            r#"{"error":"fetch failed","code":"NO_SIDE_EFFECT"}"#,
+            Some("NO_SIDE_EFFECT"),
+            Some(&encoded),
+        ));
+        assert!(!should_drop_stale_encoded_resume(
+            mismatch,
+            Some("SHARED_SERVICE_UNAVAILABLE"),
+            Some(&encoded),
         ));
     }
 
@@ -1500,6 +1627,73 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{}", addr), handle, seen)
+    }
+
+    #[tokio::test]
+    async fn durable_upload_shared_outage_preserves_request_for_retry() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = axum::Router::new().route(
+            "/walrus/upload-step-v3",
+            axum::routing::post({
+                let seen = seen.clone();
+                move |axum::Json(request): axum::Json<serde_json::Value>| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(request);
+                        (
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            axum::Json(serde_json::json!({
+                                "code": "SHARED_SERVICE_UNAVAILABLE", "error": "connection reset"
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let journal = super::UploadJournal {
+            wallet_index: 3,
+            wallet_address: Some("0xsigner".into()),
+            execution_identity: None,
+            resume_step: Some(serde_json::json!({"step":"encoded","blobId":"blob"})),
+            register_transaction: Some(super::PreparedRegisterTransaction {
+                transaction_bytes: "bytes".into(),
+                signature: "signature".into(),
+                digest: "digest".into(),
+                sponsor_digest: None,
+            }),
+        };
+        for _ in 0..2 {
+            let result = super::advance_durable_upload(
+                &reqwest::Client::new(),
+                &url,
+                None,
+                b"ciphertext",
+                1,
+                "0xowner",
+                "test",
+                "0xpackage",
+                "job",
+                journal.clone(),
+            )
+            .await;
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("outage must not advance journal"),
+            };
+            assert!(matches!(
+                crate::jobs::WalletJobError::classify_sidecar_error(&error.to_string()),
+                crate::jobs::WalletJobError::UploadSlotCongestion(_)
+            ));
+        }
+        server.abort();
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[0]["keyIndex"], 3);
+        assert_eq!(requests[0]["registerTransaction"]["digest"], "digest");
     }
 
     #[tokio::test]

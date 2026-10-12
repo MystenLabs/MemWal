@@ -38,6 +38,11 @@
     "typescript": "^5"
   },
   "packageManager": "pnpm@9.12.3",
+  "pnpm": {
+    "overrides": {
+      "protobufjs": "^7.5.5"
+    }
+  },
   "workspaces": [
     "packages/*",
     "apps/*",

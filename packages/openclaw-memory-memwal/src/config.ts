@@ -127,6 +127,24 @@ export function resolveAgent(defaultNamespace: string, sessionKey?: string): Res
   return { namespace, legacyNamespace, agentName };
 }
 
+/**
+ * Namespace a memory tool may use for this session.
+ * Omitted or empty uses the calling agent. A supplied value must be that
+ * agent's namespace or, when present, its legacy namespace. Anything else
+ * (including the main namespace from a sub-agent) is rejected.
+ */
+export function resolveToolNamespace(
+  defaultNamespace: string,
+  sessionKey: string | undefined,
+  requested: unknown,
+): string | undefined {
+  const { namespace, legacyNamespace } = resolveAgent(defaultNamespace, sessionKey);
+  if (requested == null || requested === "") return namespace;
+  if (typeof requested !== "string") return undefined;
+  if (requested === namespace || requested === legacyNamespace) return requested;
+  return undefined;
+}
+
 export function keyPreview(key: string): string {
   return key.length > 8 ? `${key.slice(0, 4)}...${key.slice(-4)}` : "****";
 }

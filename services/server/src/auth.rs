@@ -10,9 +10,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::owner_token_auth;
-use crate::storage::sui::{
-    find_account_by_delegate_key, verify_delegate_key_cached, OnchainVerifyError,
-};
+use crate::storage::sui::{verify_delegate_key_cached, OnchainVerifyError};
 use crate::types::{AppState, AuthInfo};
 
 /// Maximum signed-JSON body the auth middleware will buffer before computing
@@ -33,7 +31,9 @@ pub(crate) const PROTECTED_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 /// Flow:
 /// 1. Verify Ed25519 signature:
 ///    `{timestamp}.{method}.{path_and_query}.{body_sha256}.{nonce}.{account_id}`
-/// 2. Resolve account: cache → signed header hint/config fallback → registry scan
+/// 2. Resolve account: cache → signed `x-account-id` or `MEMWAL_ACCOUNT_ID`.
+///    A cold key with neither is rejected. The relayer does not scan
+///    AccountRegistry.
 /// 3. Verify onchain: public_key ∈ MemWalAccount.delegate_keys
 /// 4. Cache the mapping for future requests
 /// 5. Store AuthInfo { public_key, owner } in request extensions
@@ -390,7 +390,8 @@ pub async fn verify_signature(
         }
     }
 
-    // Step 2: Resolve account — cache → signed header hint/config fallback → registry scan
+    // Step 2: Resolve account — cache, then the signed account id or
+    // MEMWAL_ACCOUNT_ID. No registry scan.
     // Identity failures stay on constant_time_reject (bare 401) so "account not
     // found" vs "key not in account" cannot be timed. RPC/scan unavailability
     // is 503: a Sui 429 is not a revoke (WALM-429).
@@ -424,12 +425,36 @@ pub async fn verify_signature(
     Ok(next.run(request).await)
 }
 
-/// Resolve a delegate key to its account using multiple strategies:
-/// 1. PostgreSQL cache (fastest)
-/// 2. Signed header hint or config fallback (single-object verification)
-/// 3. On-chain registry scan (slower, auto-discovery fallback)
+/// Whether the cached row for a delegate key may answer *this* request.
 ///
-/// After successful resolution, the mapping is cached for future requests.
+/// `delegate_key_cache.public_key` is the primary key, so the cache holds one
+/// account per delegate key: whichever resolved last. A key can be registered
+/// on several accounts, so that row is not necessarily the account the caller
+/// asked for.
+///
+/// `x-account-id` is covered by the signed canonical message, so when it is
+/// present it is the caller's unforgeable statement of which account this
+/// request is for — it selects the account, it does not merely hint at one. A
+/// row naming a different account must not answer, or the request runs against
+/// an account the caller never asked for (WALM-681).
+///
+/// With no signed account id there is nothing to contradict: legacy discovery
+/// keeps its existing behaviour.
+fn cached_row_answers_request(cached_account_id: &str, requested_account_id: Option<&str>) -> bool {
+    match requested_account_id {
+        Some(requested) => requested == cached_account_id,
+        None => true,
+    }
+}
+
+/// Resolve a delegate key to its account.
+///
+/// 1. PostgreSQL cache.
+/// 2. Signed `x-account-id`, or `MEMWAL_ACCOUNT_ID` when the header is absent.
+///    Either way this is one object read, not a registry walk.
+///
+/// A cold key with no account id is rejected. A successful resolution is
+/// cached for later requests.
 #[tracing::instrument(name = "auth.resolve_account", skip_all)]
 async fn resolve_account(
     state: &AppState,
@@ -437,10 +462,40 @@ async fn resolve_account(
     pk_bytes: &[u8; 32],
     account_id_hint: Option<String>,
 ) -> Result<(String, String), AccountResolveError> {
-    // Strategy 1: Check PostgreSQL cache
-    if let Ok(Some((cached_account_id, _cached_owner))) =
-        state.db.get_cached_account(public_key_hex).await
-    {
+    // Strategy 1: Check PostgreSQL cache.
+    //
+    // The cache is keyed by delegate key alone (`delegate_key_cache.public_key`
+    // is the primary key), so it holds exactly one account per key: whichever
+    // one resolved last. A key may be registered on several accounts, and
+    // `x-account-id` is part of the signed canonical message, so the caller has
+    // told us — unforgeably — which of those accounts this request is for.
+    // Answering from a row that names a *different* account would run the
+    // request against an account the caller did not ask for, and the write
+    // routes take their owner and account id from this result: B's data would
+    // land in A (WALM-681).
+    //
+    // So a mismatched row is not a hit. Fall through to Strategy 2, which
+    // verifies the requested account directly and then overwrites this row.
+    // The extra work is one delegate verify, which the in-memory verify cache
+    // absorbs within its TTL. Requests with no signed hint keep the old
+    // behaviour: legacy account discovery is a separate path, unchanged here.
+    let cached_mapping = match state.db.get_cached_account(public_key_hex).await {
+        Ok(Some((cached_account_id, cached_owner))) => {
+            if cached_row_answers_request(&cached_account_id, account_id_hint.as_deref()) {
+                Some((cached_account_id, cached_owner))
+            } else {
+                tracing::debug!(
+                    "cached account {} does not match the signed x-account-id; \
+                     verifying the requested account instead of answering from cache",
+                    cached_account_id
+                );
+                None
+            }
+        }
+        _ => None,
+    };
+
+    if let Some((cached_account_id, _cached_owner)) = cached_mapping {
         // Re-verify the cached mapping, through the in-memory verify cache.
         // A hit inside `DELEGATE_VERIFY_CACHE_TTL` answers without touching
         // Sui at all — including during an outage — so the fail-closed rule
@@ -492,12 +547,9 @@ async fn resolve_account(
         }
     }
 
-    // Strategy 2: Use exact account hint/config fallback before any registry scan.
-    //
-    // Modern SDKs always send x-account-id and sign it in the
-    // canonical signature, so an intermediary cannot swap this hint. Verifying
-    // the signed object directly avoids an expensive AccountRegistry scan that
-    // fetches many account objects on cache miss.
+    // Strategy 2: signed x-account-id, or MEMWAL_ACCOUNT_ID when the header
+    // is absent. The id is part of the canonical signature, so an
+    // intermediary cannot swap it. This reads that one account object.
     if let Some(exact_account_id) = account_id_hint
         .as_deref()
         .or(state.config.memwal_account_id.as_deref())
@@ -541,69 +593,12 @@ async fn resolve_account(
         }
     }
 
-    // Strategy 3: The legacy registry scan uses JSON-RPC. Testnet no longer
-    // serves JSON-RPC, so fail closed when a modern signed x-account-id hint
-    // is absent instead of silently contacting a retired endpoint.
-    if state.config.sui_network == "testnet" {
-        return Err(AccountResolveError::Unauthorized(
-            "x-account-id is required for delegate-key authentication on testnet".to_string(),
-        ));
-    }
-
-    // Non-testnet compatibility path: scan AccountRegistry only when no exact
-    // account id is available. The scan runs before the rate limiter, so use
-    // an in-process concurrency permit so
-    // unknown-key floods can't stack unbounded scans, and a per-scan page
-    // cap (MEMWAL_REGISTRY_SCAN_MAX_PAGES) inside the scan itself. Both
-    // rejection messages name the x-account-id remediation, but they surface
-    // only in server logs: the middleware collapses identity failures to a
-    // bare 401 (no oracle) and RPC/scan unavailability to 503. A key past the
-    // page cap therefore cannot self-resolve — operators must diagnose the
-    // lockout from the warn logs and either raise the cap or have the client
-    // send the header hint, which Strategy 2 verifies directly without any
-    // scan.
-    let _scan_permit = match state.registry_scan_semaphore.try_acquire() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return Err(AccountResolveError::Unavailable(
-                "registry scan concurrency limit reached; retry, or send the x-account-id \
-                 header hint to skip the registry scan"
-                    .to_string(),
-            ));
-        }
-    };
-    match find_account_by_delegate_key(
-        &state.http_client,
-        &state.config.sui_rpc_url,
-        &state.config.registry_id,
-        pk_bytes,
-        &state.config.package_id,
-        state.config.registry_scan_max_pages,
-    )
-    .await
-    {
-        Ok((account_id, owner)) => {
-            // Cache for future requests
-            let _ = state
-                .db
-                .cache_delegate_key(public_key_hex, &account_id, &owner)
-                .await;
-            return Ok((account_id, owner));
-        }
-        Err(e) if e.is_unavailable() => {
-            tracing::warn!("registry scan unavailable: {}", e);
-            return Err(AccountResolveError::Unavailable(format!(
-                "{}; send the x-account-id header hint to authenticate without a scan",
-                e
-            )));
-        }
-        Err(e) => {
-            tracing::debug!("registry scan did not find key: {}", e);
-        }
-    }
-
+    // No signed account id and no MEMWAL_ACCOUNT_ID. Do not scan
+    // AccountRegistry. A cached key already returned above. Every network
+    // takes this path: testnet has no JSON-RPC, and mainnet's registry is
+    // too long for a sequential scan to finish inside a client timeout.
     Err(AccountResolveError::Unauthorized(
-        "no account found: not in cache, exact account id, or registry".to_string(),
+        "x-account-id is required for delegate-key authentication".to_string(),
     ))
 }
 
@@ -1008,6 +1003,66 @@ mod tests {
             action,
             CacheReverifyAction::UnavailableKeepCache { .. }
         ));
+    }
+
+    // ── signed x-account-id selects the account, cache cannot override ──
+
+    #[test]
+    fn cached_row_answers_request_when_signed_account_matches() {
+        assert!(cached_row_answers_request(
+            "0xaccount_a",
+            Some("0xaccount_a")
+        ));
+    }
+
+    #[test]
+    fn cached_row_is_ignored_when_signed_account_differs() {
+        // WALM-681: one delegate key may be registered on several accounts, but
+        // the cache holds only the one that resolved last. Answering from it
+        // would run a request signed for B against A, and the write routes take
+        // their owner/account id from this result — B's memory would be stored
+        // under A. A mismatched row is not a hit; Strategy 2 verifies the
+        // account that was actually requested.
+        assert!(!cached_row_answers_request(
+            "0xaccount_a",
+            Some("0xaccount_b")
+        ));
+    }
+
+    #[test]
+    fn cached_row_answers_request_when_no_account_was_signed() {
+        // Legacy clients that send no x-account-id keep the old behaviour:
+        // there is no signed statement to contradict the cached row.
+        assert!(cached_row_answers_request("0xaccount_a", None));
+    }
+
+    #[test]
+    fn cached_row_match_is_exact_not_prefix() {
+        // Account ids are compared whole. A longer id that merely starts with a
+        // cached one is a different object.
+        assert!(!cached_row_answers_request(
+            "0xaccount",
+            Some("0xaccount_b")
+        ));
+        assert!(!cached_row_answers_request(
+            "0xaccount_b",
+            Some("0xaccount")
+        ));
+    }
+
+    #[test]
+    fn alternating_accounts_each_resolve_to_the_requested_one() {
+        // The account switch the ticket asks to cover: with the cache warm on A,
+        // a request for B must not be answered from it, and once the row has
+        // been overwritten with B, a request for A must not be answered either.
+        // Neither direction may inherit the other's account.
+        let warm_on_a = "0xaccount_a";
+        assert!(cached_row_answers_request(warm_on_a, Some("0xaccount_a")));
+        assert!(!cached_row_answers_request(warm_on_a, Some("0xaccount_b")));
+
+        let warm_on_b = "0xaccount_b";
+        assert!(cached_row_answers_request(warm_on_b, Some("0xaccount_b")));
+        assert!(!cached_row_answers_request(warm_on_b, Some("0xaccount_a")));
     }
 
     #[test]

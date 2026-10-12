@@ -81,10 +81,31 @@ export async function fetchAccountIdForOwner(
     }
 
     if (isGrpcClient(suiClient)) {
-        const dynFieldRes = await suiClient.getDynamicField({
-            parentId: tableId,
-            name: { type: 'address', bcs: fromHex(normalizeSuiAddress(ownerAddress)) },
-        })
+        let dynFieldRes: Awaited<ReturnType<SuiGrpcClient['getDynamicField']>>
+        try {
+            dynFieldRes = await suiClient.getDynamicField({
+                parentId: tableId,
+                name: { type: 'address', bcs: fromHex(normalizeSuiAddress(ownerAddress)) },
+            })
+        } catch (err) {
+            // getDynamicField throws when the field object doesn't exist —
+            // the normal "no Account yet" case. grpc/core.mjs represents
+            // that specific case as `new Error("Object <id> not found")`
+            // (verified against the shipped @mysten/sui build) — match that
+            // shape exactly. Any other per-object failure it can throw (e.g.
+            // "Unexpected result type") is a genuine anomaly, not a missing
+            // account, and a real transport failure throws a different error
+            // class entirely (e.g. RpcError) — both must still propagate for
+            // the caller to treat as a real failure.
+            if (
+                err instanceof Error &&
+                err.constructor === Error &&
+                /^Object 0x[0-9a-f]+ not found$/.test(err.message)
+            ) {
+                return null
+            }
+            throw err
+        }
         const valueBytes = dynFieldRes?.dynamicField?.value?.bcs
         if (!valueBytes || valueBytes.length !== 32) return null
         return '0x' + toHex(valueBytes)

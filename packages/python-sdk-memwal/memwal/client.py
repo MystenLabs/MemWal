@@ -96,7 +96,8 @@ PACKAGE_VERSION_CHECK_TIMEOUT_S = 10.0
 SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
 AUTH_REJECTED_MESSAGE = (
     "401 from relayer: typically wrong private key, key not registered on this "
-    "account, account ID mismatch, or staging/mainnet mismatch. Check .env.local "
+    "account, account ID mismatch (a wallet address is not a MemWal account ID), "
+    "or staging/mainnet mismatch. Check .env.local "
     "and dashboard credentials. Full troubleshooting: "
     "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
@@ -119,6 +120,18 @@ def _server_url_for_log(parsed: ParseResult) -> str:
     if parsed.port is not None:
         return f"{parsed.scheme}://{host}:{parsed.port}"
     return f"{parsed.scheme}://{host}"
+
+
+def _reject_blank_text(text: object, message: str = "Text cannot be empty") -> None:
+    """Reject empty and whitespace-only text before a request is sent.
+
+    The relayer does the same (#1129). Failing here means an older relayer
+    cannot accept the job and leave the caller polling until timeout.
+    Non-blank text is not trimmed.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(message)
 
 
 def normalize_server_url(url: str) -> str:
@@ -414,6 +427,7 @@ class MemWal:
             :class:`RememberAcceptedResult` with ``job_id`` and initial
             status (``"pending"``).
         """
+        _reject_blank_text(text)
         resolved_namespace = namespace or self._namespace
         request_identity = f"{resolved_namespace}\0{text}"
         generated_key = idempotency_key is None
@@ -569,6 +583,8 @@ class MemWal:
 
         if not items:
             raise ValueError("remember_bulk_async: items must be a non-empty array")
+        for index, item in enumerate(items):
+            _reject_blank_text(item.text, f"items[{index}].text cannot be empty")
 
         payload_items: List[Dict[str, Any]] = [
             {
@@ -662,6 +678,31 @@ class MemWal:
         attempt = 0
         saw_rate_limit = False
         retry_after_ms = 0
+        last_seen: Dict[str, RememberBulkStatusItem] = {}
+        last_refusal: Optional[int] = None
+        # Whether any status read got through. An item missing from an answer
+        # was not refused, so it must not be reported as if it had been.
+        answered = False
+
+        def settle(item: RememberBulkStatusItem) -> bool:
+            last_seen[item.job_id] = item
+            if item.status == "done":
+                results[item.job_id] = RememberBulkItemResult(
+                    id=item.job_id,
+                    blob_id=item.blob_id or "",
+                    status="done",
+                    error=None,
+                )
+                return True
+            if item.status in ("failed", "not_found"):
+                results[item.job_id] = RememberBulkItemResult(
+                    id=item.job_id,
+                    blob_id=item.blob_id or "",
+                    status="failed",
+                    error=item.error,
+                )
+                return True
+            return False
 
         while pending and _now_ms() < deadline_ms:
             if retry_after_ms > 0:
@@ -675,40 +716,66 @@ class MemWal:
                 batch = await self.get_remember_bulk_status(pending)
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
+                    last_refusal = err.status
                     if err.status == 429:
                         saw_rate_limit = True
                         retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
                     continue
                 raise
+            answered = True
 
-            terminal_ids: Set[str] = set()
-            for item in batch.results:
-                if item.status == "done":
-                    results[item.job_id] = RememberBulkItemResult(
-                        id=item.job_id,
-                        blob_id=item.blob_id or "",
-                        status="done",
-                        error=None,
-                    )
-                    terminal_ids.add(item.job_id)
-                elif item.status in ("failed", "not_found"):
-                    results[item.job_id] = RememberBulkItemResult(
-                        id=item.job_id,
-                        blob_id=item.blob_id or "",
-                        status="failed",
-                        error=item.error,
-                    )
-                    terminal_ids.add(item.job_id)
+            terminal_ids: Set[str] = {
+                item.job_id
+                for item in batch.results
+                if item.job_id in pending and settle(item)
+            }
             pending = [jid for jid in pending if jid not in terminal_ids]
 
+        if opts.timeout_ms > 0 and len(pending) == len(job_ids) and not last_seen:
+            # Nothing settled and nothing was seen: the polls may all have been
+            # refused. Confirm with one direct read before reporting anything.
+            try:
+                probed = await self.get_remember_bulk_status(list(job_ids))
+            except _HttpStatusError as err:
+                if err.status == 429:
+                    # Header first, else the body's retry_after_seconds, so a
+                    # proxy that strips Retry-After does not lose the hint.
+                    wait_ms = _retry_after_ms(err)
+                    retry_after = f"{wait_ms / 1000:g}" if wait_ms else None
+                    raise MemWalRateLimited(job_ids, retry_after) from err
+                # Any other probe failure is not evidence about the jobs.
+            else:
+                answered = True
+                settled = {
+                    item.job_id
+                    for item in probed.results
+                    if item.job_id in pending and settle(item)
+                }
+                pending = [jid for jid in pending if jid not in settled]
+
+        for job_id in pending:
+            seen = last_seen.get(job_id)
+            if seen is not None:
+                suffix = f": {_redact_internal_urls(seen.error)}" if seen.error else ""
+                error = f"still {seen.status} after {opts.timeout_ms}ms{suffix}"
+            elif answered:
+                error = "not in the relayer's status answer; this item may not be stored"
+            elif last_refusal is not None:
+                error = (
+                    f"no status read got through (last poll: HTTP {last_refusal}); "
+                    "this item may not be stored"
+                )
+            else:
+                error = f"polling timed out after {opts.timeout_ms}ms"
+            # Only the "no status read got through" message already names the 429.
+            names_rate_limit = seen is None and not answered and last_refusal == 429
+            if saw_rate_limit and not names_rate_limit:
+                error += "; wait hit a rate limit (429)"
+            results[job_id] = RememberBulkItemResult(
+                id=job_id, blob_id="", status="timeout", error=error
+            )
+
         ordered = [results[job_id] for job_id in job_ids]
-        if saw_rate_limit:
-            for item in ordered:
-                if item.status == "timeout":
-                    item.error = (
-                        f"polling timed out after {opts.timeout_ms}ms; "
-                        "wait hit a rate limit (429)"
-                    )
         succeeded = sum(1 for r in ordered if r.status == "done")
         failed = sum(1 for r in ordered if r.status == "failed")
         timed_out = sum(1 for r in ordered if r.status == "timeout")
@@ -847,6 +914,7 @@ class MemWal:
             :class:`AnalyzeResult` with extracted ``facts`` + per-fact
             ``job_ids`` for downstream polling.
         """
+        _reject_blank_text(text)
         body: Dict[str, Any] = {
             "text": text,
             "namespace": namespace or self._namespace,
@@ -919,6 +987,7 @@ class MemWal:
         :meth:`remember` (server handles embed + encrypt + upload).
         """
 
+        _reject_blank_text(text, "text cannot be empty")
         data = await self._signed_request(
             "POST",
             "/api/embed",
@@ -1599,6 +1668,24 @@ class MemWalRememberJobFailed(MemWalError):
         self.status = 500
         self.job_id = job_id
         self.error = error
+
+
+class MemWalRateLimited(MemWalError):
+    """Every status read for a bulk wait was rate-limited, the confirming read
+    included, so none of its writes could be confirmed (GH #967). Status reads
+    count against the same delegate-key budget as writes."""
+
+    def __init__(self, job_ids: Sequence[str], retry_after: Optional[str] = None) -> None:
+        wait = f" after ~{retry_after}s" if retry_after else ""
+        super().__init__(
+            f"Walrus Memory rate-limited every status read for this batch, so none of its "
+            f"{len(job_ids)} writes could be confirmed. Do not treat them as stored: check them "
+            f"with get_remember_bulk_status(job_ids){wait}. Status reads count against the same "
+            "delegate-key budget as writes."
+        )
+        self.status = 429
+        self.job_ids = list(job_ids)
+        self.retry_after = retry_after
 
 
 class MemWalRememberJobTimeout(MemWalError):

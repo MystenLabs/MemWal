@@ -243,4 +243,39 @@ describe("authenticated", { skip: requiresKey, concurrency: 1 }, () => {
         assert.equal(typeof restored.truncated, "boolean");
         assert.ok(restored.owner.startsWith("0x"));
     });
+
+    test("recall maxDistance drops distant hits and keeps close ones", async () => {
+        const namespace = `${E2E_NAMESPACE}-cutoff`;
+        const mw = client(namespace);
+        const unique = randomUUID().replaceAll("-", "").slice(0, 8);
+
+        const written = await mw.rememberBulkAndWait(
+            [
+                { text: `SDK e2e cutoff ${unique}: my mother takes lisinopril for blood pressure` },
+                { text: `SDK e2e cutoff ${unique}: the pharmacy is on 5th street next to the bakery` },
+            ],
+            { timeoutMs: REMEMBER_TIMEOUT_MS },
+        );
+        assert.equal(written.succeeded, 2, `expected 2 writes, got ${JSON.stringify(written)}`);
+
+        const query = "What medication does my mother take?";
+
+        // No cutoff: both hits come back, however distant.
+        const all = await mw.recall({ query, limit: 5 });
+        assert.equal(all.results.length, 2);
+        const [near, far] = [...all.results].sort((a, b) => a.distance - b.distance);
+        assert.ok(near.text.includes("lisinopril"), `closest hit should be the medication: ${near.text}`);
+        assert.ok(far.distance > near.distance, "the two hits must be at different distances");
+
+        // Cutoff between the two: only the close hit survives.
+        const cutoff = (near.distance + far.distance) / 2;
+        const filtered = await mw.recall({ query, limit: 5, maxDistance: cutoff });
+        assert.deepEqual(filtered.results.map((r) => r.blob_id), [near.blob_id]);
+        assert.equal(filtered.total, 1);
+
+        // Cutoff at the closest distance: `>=` drops it too.
+        const none = await mw.recall({ query, limit: 5, maxDistance: near.distance });
+        assert.deepEqual(none.results, []);
+        assert.equal(none.total, 0);
+    });
 });

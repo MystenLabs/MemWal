@@ -139,5 +139,6 @@ async def test_bulk_timeout_names_429_and_keeps_unreturned_jobs_pending(
     assert settled.results[0].status == "done"
     assert settled.results[1].status == "timeout"
     assert settled.results[1].error == (
-        "polling timed out after 800ms; wait hit a rate limit (429)"
+        "not in the relayer's status answer; this item may not be stored; "
+        "wait hit a rate limit (429)"
     )

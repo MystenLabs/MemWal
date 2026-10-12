@@ -64,6 +64,7 @@ import {
     bytesToHex,
     normalizePrivateKey,
     normalizeServerUrl,
+    assertNonBlankText,
     sanitizeServerError,
     redactInternalUrls,
     clockDriftErrorFromResponse,
@@ -75,6 +76,7 @@ import {
 } from "./compatibility.js";
 import { applyTokenBudget, estimateTokens } from "./tokens.js";
 import { pollingDelayMs } from "./polling-delay.js";
+import { resolveRecallCall } from "./recall-args.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -151,6 +153,45 @@ async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
  * so one stalled read ran past `timeoutMs` entirely. 30s mirrors the relayer's
  * own outbound client. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/** The one confirming read a bulk wait makes after its budget is spent. It
+ * runs past the caller's deadline by design, so it gets a short bound of its
+ * own rather than the 30s default a stalled socket would hold it for. */
+const CONFIRM_READ_TIMEOUT_MS = 5_000;
+
+/** Matches the relayer's `MAX_BULK_ITEMS`. Reject before a signed request. */
+const MAX_BULK_ITEMS = 20;
+
+interface RememberCallOptions {
+    idempotencyKey?: string;
+    pollIntervalMs?: number;
+    timeoutMs?: number;
+}
+
+/**
+ * `remember(text, { idempotencyKey })` is the natural call when the namespace
+ * stays at the client default. A plain object in the namespace slot is those
+ * options, not a namespace name. (#1142)
+ */
+function splitRememberArgs(
+    namespaceOrOptions?: string | RememberCallOptions,
+    options?: RememberCallOptions,
+): { namespace?: string; options: RememberCallOptions } {
+    // The third argument is the dedicated options bag. When the namespace
+    // slot is also an object, keep both and let the bag win on a clash.
+    // `rememberAndWait(text, { timeoutMs }, { idempotencyKey })` is typed
+    // and used to drop the key, so a retry minted a second blob. (#1142)
+    if (typeof namespaceOrOptions === "object" && namespaceOrOptions !== null) {
+        return { namespace: undefined, options: { ...namespaceOrOptions, ...options } };
+    }
+    return { namespace: namespaceOrOptions, options: options ?? {} };
+}
+
+function destroyedClientError(): Error {
+    return new Error(
+        "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
+    );
+}
 
 /** `POST /api/restore` bounds itself at 55s server-side and answers with an
  * error rather than going quiet, so the client must outlast that or it would
@@ -256,6 +297,28 @@ function retryAfterDelayMs(err: unknown, deadline: number): number {
         ?? retryAfterSecondsFromBody((err as { cause?: unknown }).cause);
     if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) return 0;
     return Math.max(0, Math.min(seconds * 1000, deadline - Date.now()));
+}
+
+/**
+ * Thrown when a bulk wait could not read a single status, the confirming read
+ * included. The status endpoint counts against the same delegate-key budget
+ * as writes, so a batch sent near the limit can have every poll refused. The
+ * old result then read as "still uploading" even when nothing had landed
+ * (GH #967). A refusal says nothing about the jobs, so do not report it as
+ * progress.
+ */
+function bulkRateLimitedError(err: unknown, jobIds: string[]): Error {
+    const retryAfterSeconds =
+        (err as { retryAfterSeconds?: number }).retryAfterSeconds
+        ?? retryAfterSecondsFromBody((err as { cause?: unknown }).cause);
+    const wait = retryAfterSeconds ? ` after ~${Math.ceil(retryAfterSeconds)}s` : "";
+    const e = new Error(
+        `Walrus Memory rate-limited every status read for this batch, so none of its ${jobIds.length} writes ` +
+            `could be confirmed. Do not treat them as stored: check them with getRememberBulkStatus(jobIds)${wait}. ` +
+            `Status reads count against the same delegate-key budget as writes.`,
+    );
+    e.name = "MemWalRateLimited";
+    return Object.assign(e, { status: 429, jobIds, retryAfterSeconds });
 }
 
 /**
@@ -411,13 +474,15 @@ export class MemWal {
      */
     async rememberAsync(
         text: string,
-        namespace?: string,
-        options: { idempotencyKey?: string } = {},
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        const resolvedNamespace = namespace ?? this.namespace;
+        assertNonBlankText(text);
+        const split = splitRememberArgs(namespaceOrOptions, options);
+        const resolvedNamespace = split.namespace ?? this.namespace;
         const requestIdentity = `${resolvedNamespace}\0${text}`;
-        const generatedKey = options.idempotencyKey === undefined;
-        const idempotencyKey = options.idempotencyKey
+        const generatedKey = split.options.idempotencyKey === undefined;
+        const idempotencyKey = split.options.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
             ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
@@ -442,11 +507,22 @@ export class MemWal {
      * resolves at the terminal state and hides progress.
      */
     async getRememberStatus(jobId: string): Promise<RememberJobStatus> {
+        // `GET /api/remember/` is not a route. The relayer answers 404 with an
+        // empty body, and parsing that threw SyntaxError. (#1087)
+        if (typeof jobId !== "string" || jobId.length === 0) {
+            return {
+                job_id: jobId,
+                status: "not_found",
+                error: `Job ${jobId} not found`,
+            };
+        }
         const status = await this.signedRequest<RememberStatusResponse>(
             "GET",
             `/api/remember/${jobId}`,
             {},
             [200, 404],
+            // Status is metadata. No SEAL decrypt, so no session. (#1135)
+            { includeDelegateKey: false },
         );
 
         if (!("status" in status)) {
@@ -467,6 +543,12 @@ export class MemWal {
         jobId: string,
         opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
     ): Promise<RememberResult> {
+        if (typeof jobId !== "string" || jobId.length === 0) {
+            throw Object.assign(new Error(`remember job not found: ${jobId}`), {
+                status: 404,
+                jobId,
+            });
+        }
         const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
@@ -497,7 +579,7 @@ export class MemWal {
                     // and the client deadline keeps ONE stalled poll from
                     // swallowing the entire budget, so the loop still gets to
                     // retry. An expired poll surfaces as a transient 504.
-                    { timeoutMs: this.pollDeadlineMs(deadline) },
+                    { timeoutMs: this.pollDeadlineMs(deadline), includeDelegateKey: false },
                 );
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
@@ -549,19 +631,22 @@ export class MemWal {
      */
     async rememberAndWait(
         text: string,
-        namespace?: string,
-        opts: { pollIntervalMs?: number; timeoutMs?: number; idempotencyKey?: string } = {},
+        namespaceOrOptions?: string | RememberCallOptions,
+        opts?: RememberCallOptions,
     ): Promise<RememberResult> {
-        const resolvedNamespace = namespace ?? this.namespace;
+        const split = splitRememberArgs(namespaceOrOptions, opts);
+        const resolvedNamespace = split.namespace ?? this.namespace;
         const requestIdentity = `${resolvedNamespace}\0${text}`;
-        const generatedKey = opts.idempotencyKey === undefined;
-        const idempotencyKey = opts.idempotencyKey
+        const generatedKey = split.options.idempotencyKey === undefined;
+        const idempotencyKey = split.options.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
             ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
+        // Pass the resolved string. rememberAsync would otherwise read the
+        // options object in this slot as a namespace. (#1142)
         const accepted = await this.rememberAsync(text, resolvedNamespace, { idempotencyKey });
-        const completed = await this.waitForRememberJob(accepted.job_id, opts);
+        const completed = await this.waitForRememberJob(accepted.job_id, split.options);
         // Clear only after terminal success. A polling timeout/transport failure
         // keeps the key so retrying the high-level operation reuses the same job.
         if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
@@ -574,15 +659,15 @@ export class MemWal {
      * The relayer continues embedding, encrypting, uploading, and indexing in the background.
      * Use rememberAndWait() when the caller needs the final blob_id before continuing.
      *
-     * @param text - The text to remember
-     * @param namespace - Optional namespace override
+     * A plain object in the namespace position is options, so
+     * `remember(text, { idempotencyKey })` keeps the client namespace. (#1142)
      */
     async remember(
         text: string,
-        namespace?: string,
-        options: { idempotencyKey?: string } = {},
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        return this.rememberAsync(text, namespace, options);
+        return this.rememberAsync(text, namespaceOrOptions, options);
     }
 
     /**
@@ -610,6 +695,15 @@ export class MemWal {
         if (!Array.isArray(items) || items.length === 0) {
             throw new Error("rememberBulkAsync: items must be a non-empty array");
         }
+        // The relayer rejects this after the request is signed. Say so first. (#1104)
+        if (items.length > MAX_BULK_ITEMS) {
+            throw new Error(
+                `rememberBulkAsync: items exceeds maximum of ${MAX_BULK_ITEMS} per bulk request`,
+            );
+        }
+        items.forEach((item, i) => {
+            assertNonBlankText(item?.text, `items[${i}].text cannot be empty`);
+        });
 
         const normalised = items.map((item) => ({
             text: item.text,
@@ -641,7 +735,8 @@ export class MemWal {
             "/api/remember/bulk/status",
             { job_ids: jobIds },
             [200],
-            { timeoutMs: opts.timeoutMs },
+            // Status is metadata. No SEAL decrypt, so no session. (#1135)
+            { timeoutMs: opts.timeoutMs, includeDelegateKey: false },
         );
     }
 
@@ -663,6 +758,51 @@ export class MemWal {
         let attempt = 0;
         let retryAfterMs = 0;
         let sawRateLimit = false;
+        const lastSeen = new Map<string, RememberBulkStatusItem>();
+        let lastRefusal: number | undefined;
+        // Whether any status read got through. An item missing from an answer
+        // was not refused, so it must not be reported as if it had been.
+        let answered = false;
+
+        const settle = (jobId: string, status: RememberBulkStatusItem) => {
+            lastSeen.set(jobId, status);
+            // The same id can occupy more than one slot. `indexOf` updated only
+            // the first, and `pending` is a Set, so the copies stayed `timeout`.
+            // (#1121, #1084)
+            const terminal =
+                status.status === "done" ||
+                status.status === "failed" ||
+                status.status === "not_found";
+            for (let idx = 0; idx < jobIds.length; idx++) {
+                if (jobIds[idx] !== jobId) continue;
+                if (namespaces[idx] === undefined && status.namespace) {
+                    results[idx].namespace = status.namespace;
+                }
+                if (!terminal) continue;
+                // Caller namespace, then the job's own, then the client default. (#1136)
+                const namespace = namespaces[idx] ?? status.namespace ?? this.namespace;
+                if (status.status === "done") {
+                    results[idx] = {
+                        id: jobId,
+                        blob_id: status.blob_id ?? "",
+                        status: "done",
+                        namespace,
+                    };
+                } else {
+                    results[idx] = {
+                        id: jobId,
+                        blob_id: "",
+                        status: "failed",
+                        namespace,
+                        error:
+                            status.status === "not_found"
+                                ? "job not found"
+                                : redactInternalUrls(status.error ?? "unknown error"),
+                    };
+                }
+            }
+            if (terminal) pending.delete(jobId);
+        };
 
         while (pending.size > 0 && Date.now() < deadline) {
             // A retry-after the server just gave us wins over our own curve;
@@ -685,12 +825,14 @@ export class MemWal {
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    lastRefusal = httpStatus;
                     if (httpStatus === 429) sawRateLimit = true;
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
                 throw err;
             }
+            answered = true;
 
             const statusById = new Map<string, RememberBulkStatusItem[]>();
             for (const item of batchStatus.results) {
@@ -708,36 +850,43 @@ export class MemWal {
                     continue;
                 }
 
-                const idx = jobIds.indexOf(jobId);
-                if (status.status === "done") {
-                    results[idx] = {
-                        id: jobId,
-                        blob_id: status.blob_id ?? "",
-                        status: "done",
-                        namespace: namespaces[idx] ?? this.namespace,
-                    };
-                    pending.delete(jobId);
-                } else if (status.status === "failed" || status.status === "not_found") {
-                    results[idx] = {
-                        id: jobId,
-                        blob_id: "",
-                        status: "failed",
-                        namespace: namespaces[idx] ?? this.namespace,
-                        error:
-                            status.status === "not_found"
-                                ? "job not found"
-                                : redactInternalUrls(status.error ?? "unknown error"),
-                    };
-                    pending.delete(jobId);
-                }
+                settle(jobId, status);
             }
         }
 
-        if (sawRateLimit) {
-            for (const result of results) {
-                if (result.status === "timeout" && result.error) {
-                    result.error = `${result.error}; wait hit a rate limit (429)`;
+        // Nothing settled and nothing was even seen: the polls may all have been
+        // refused rather than the jobs being slow. Confirm with one direct read,
+        // as the MCP bridge does, before reporting anything.
+        if (timeoutMs > 0 && pending.size === jobIds.length && lastSeen.size === 0) {
+            try {
+                const probed = await this.getRememberBulkStatus(jobIds, {
+                    timeoutMs: Math.min(this.requestTimeoutMs, CONFIRM_READ_TIMEOUT_MS),
+                });
+                answered = true;
+                for (const item of probed.results) {
+                    if (pending.has(item.job_id)) settle(item.job_id, item);
                 }
+            } catch (err) {
+                if ((err as { status?: number }).status === 429) throw bulkRateLimitedError(err, jobIds);
+                // Any other probe failure is not evidence about the jobs.
+            }
+        }
+
+        for (let idx = 0; idx < jobIds.length; idx++) {
+            const jobId = jobIds[idx];
+            if (!pending.has(jobId)) continue;
+            const seen = lastSeen.get(jobId);
+            results[idx].error = seen
+                ? `still ${seen.status} after ${timeoutMs}ms` + (seen.error ? `: ${redactInternalUrls(seen.error)}` : "")
+                : answered
+                  ? "not in the relayer's status answer; this item may not be stored"
+                  : lastRefusal !== undefined
+                    ? `no status read got through (last poll: HTTP ${lastRefusal}); this item may not be stored`
+                    : `polling timed out after ${timeoutMs}ms`;
+            // Only the "no status read got through" message already names the 429.
+            const namesRateLimit = !seen && !answered && lastRefusal === 429;
+            if (sawRateLimit && !namesRateLimit) {
+                results[idx].error += "; wait hit a rate limit (429)";
             }
         }
 
@@ -771,6 +920,25 @@ export class MemWal {
     }
 
     /**
+     * Estimate the token cost of a string using the SDK's default
+     * character-based approximation (~chars/4, code-point aware). Useful to weigh
+     * a recall payload before injecting it into a model context:
+     *
+     * ```ts
+     * const hits = await memwal.recall({ query, limit: 8 });
+     * const joined = hits.results.map((h) => h.text).join("\n---\n");
+     * if (memwal.countTokens(joined) > 2048) { /* re-query with maxTokens *\/ }
+     * ```
+     *
+     * This is an estimate, not an exact tokenizer count — see `estimateTokens`
+     * for accuracy caveats. For exact counts, pass your own counter to
+     * `recall({ maxTokens, countTokens })`.
+     */
+    countTokens(text: string): number {
+        return estimateTokens(text);
+    }
+
+    /**
      * Recall memories similar to a query — server handles:
      * verify → embed query → search → Walrus download → decrypt → return plaintext.
      *
@@ -785,6 +953,8 @@ export class MemWal {
      * - `recall(query, limit)`
      * - `recall(query, limit, namespace)`
      * - `recall(query, { limit, namespace, maxDistance, topK })`
+     *
+     * `recall(query, namespace)` is invalid and throws `TypeError`.
      *
      * `topK` and `limit` are aliases; if both are set, `topK` wins.
      *
@@ -806,35 +976,23 @@ export class MemWal {
      * const result2 = await memwal.recall("food allergies", 5, "profile");
      * ```
      */
-    /**
-     * Estimate the token cost of a string using the SDK's default
-     * character-based approximation (~chars/4, code-point aware). Useful to weigh
-     * a recall payload before injecting it into a model context:
-     *
-     * ```ts
-     * const hits = await memwal.recall({ query, limit: 8 });
-     * const joined = hits.results.map((h) => h.text).join("\n---\n");
-     * if (memwal.countTokens(joined) > 2048) { /* re-query with maxTokens *\/ }
-     * ```
-     *
-     * This is an estimate, not an exact tokenizer count — see `estimateTokens`
-     * for accuracy caveats. For exact counts, pass your own counter to
-     * `recall({ maxTokens, countTokens })`.
-     */
-    countTokens(text: string): number {
-        return estimateTokens(text);
-    }
-
     async recall(params: RecallParams): Promise<RecallResult>;
     /**
      * @deprecated Positional `recall(query, limit, namespace)` is easy to
-     * misread as `recall(query, namespace)`. Prefer the object form
+     * misread as `recall(query, namespace)`, which throws `TypeError`. Prefer
+     * `recall({ query, limit, namespace })`. Positional will be removed in a
+     * future major version of the SDK.
+     */
+    async recall(query: string, options: RecallOptions): Promise<RecallResult>;
+    /**
+     * @deprecated Positional `recall(query, limit, namespace)` is easy to
+     * misread as `recall(query, namespace)`, which throws `TypeError`. Prefer
      * `recall({ query, limit, namespace })`. Positional will be removed in a
      * future major version of the SDK.
      */
     async recall(
         query: string,
-        limitOrOptions?: number | RecallOptions,
+        limit?: number,
         namespace?: string,
     ): Promise<RecallResult>;
     async recall(
@@ -842,22 +1000,11 @@ export class MemWal {
         limitOrOptions: number | RecallOptions | undefined = 10,
         namespace?: string,
     ): Promise<RecallResult> {
-        let query: string;
-        let options: RecallOptions;
-        if (typeof queryOrParams === "object") {
-            const { query: q, ...rest } = queryOrParams;
-            query = q;
-            options = rest;
-        } else {
-            query = queryOrParams;
-            if (limitOrOptions == null) {
-                options = { limit: 10, namespace };
-            } else if (typeof limitOrOptions === "number") {
-                options = { limit: limitOrOptions, namespace };
-            } else {
-                options = limitOrOptions;
-            }
-        }
+        const { query, options } = resolveRecallCall(
+            queryOrParams,
+            limitOrOptions,
+            namespace,
+        );
         const limit = options.topK ?? options.limit ?? 10;
         const resolvedNamespace = options.namespace ?? this.namespace;
 
@@ -1003,6 +1150,7 @@ export class MemWal {
      * @returns EmbedResult with vector
      */
     async embed(text: string): Promise<EmbedResult> {
+        assertNonBlankText(text, "text cannot be empty");
         return this.signedRequest<EmbedResult>(
             "POST",
             "/api/embed",
@@ -1030,6 +1178,7 @@ export class MemWal {
         text: string,
         namespaceOrOptions?: string | AnalyzeOptions,
     ): Promise<AnalyzeResult> {
+        assertNonBlankText(text);
         const options = normalizeAnalyzeOptions(namespaceOrOptions);
         const body: Record<string, unknown> = {
             text,
@@ -1233,6 +1382,10 @@ export class MemWal {
      */
     async getPublicKeyHex(): Promise<string> {
         const pk = await this.getPublicKey();
+        // `await` yields even when the key was already cached. destroy()
+        // zero-fills that cache in place, so encode only after a fresh check
+        // or this resolves to 64 zero hex chars. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         return bytesToHex(pk);
     }
 
@@ -1241,11 +1394,18 @@ export class MemWal {
     // ============================================================
 
     private async getPublicKey(): Promise<Uint8Array> {
+        // destroy() zero-fills the cache in place, and an uncached key would
+        // otherwise derive the well-known key of the all-zero seed. Re-check
+        // after every await, and never cache a key derived once wiped. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         if (!this.publicKey) {
             const ed = await getEd();
-            this.publicKey = await ed.getPublicKeyAsync(this.privateKey);
+            if (this.destroyed) throw destroyedClientError();
+            const derived = await ed.getPublicKeyAsync(this.privateKey);
+            if (this.destroyed) throw destroyedClientError();
+            this.publicKey = derived;
         }
-        return this.publicKey;
+        return this.publicKey.slice();
     }
 
     private async ensureCompatibleRelayer(): Promise<RelayerVersionMetadata> {
@@ -1581,6 +1741,8 @@ export class MemWal {
         const options = Array.isArray(acceptedStatusesOrOptions)
             ? requestOptions
             : acceptedStatusesOrOptions;
+        // Before the version probe. A destroyed client must not open GET /version. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         await this.ensureCompatibleRelayer();
         const ed = await getEd();
 
@@ -1599,14 +1761,16 @@ export class MemWal {
         const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
         const msgBytes = new TextEncoder().encode(message);
 
-        if (this.destroyed) {
-            throw new Error(
-                "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
-            );
-        }
+        // Again after the version await. A destroy that lands while that
+        // request is in flight must still refuse to sign. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         // Sign with Ed25519
         const signature = await ed.signAsync(msgBytes, this.privateKey);
+        // destroy() during the sign, or during public-key derivation, must
+        // not reach fetch with the wiped seed's well-known key. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         const publicKey = await this.getPublicKey();
+        if (this.destroyed) throw destroyedClientError();
 
         // Make HTTP request
         const url = `${this.serverUrl}${path}`;

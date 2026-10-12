@@ -63,20 +63,18 @@ test("a remember wait that only sees 429 names the rate limit on timeout", async
     assert.ok(Date.now() - started < 3_000, "a 600s Retry-After must stay inside the wait budget");
 });
 
-test("a bulk remember wait that only sees 429 names the rate limit on timeout", async () => {
+test("a bulk remember wait that only sees 429 throws instead of timing out", async () => {
     stub((path) => {
         if (path === "/api/remember/bulk/status") return rateLimit();
         throw new Error(`unexpected request ${path}`);
     });
 
-    const settled = await client().waitForRememberJobs(["job-1"], ["default"], {
-        pollIntervalMs: 1,
-        timeoutMs: 400,
-    });
-
-    assert.equal(settled.results[0].status, "timeout");
-    assert.match(
-        settled.results[0].error,
-        /polling timed out after 400ms; wait hit a rate limit \(429\)/,
+    // Every read, including the confirming one, was refused (WALM-671).
+    await assert.rejects(
+        client().waitForRememberJobs(["job-1"], ["default"], {
+            pollIntervalMs: 1,
+            timeoutMs: 400,
+        }),
+        (err) => err.status === 429 && err.jobIds?.[0] === "job-1",
     );
 });
