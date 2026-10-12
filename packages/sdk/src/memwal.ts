@@ -76,6 +76,7 @@ import {
     derivedBulkIdempotencyKey,
     DEFAULT_PREFLIGHT_TIMEOUT_MS,
     DEFAULT_RECALL_TIMEOUT_MS,
+    RESTORE_REQUEST_TIMEOUT_MS,
 } from "./utils.js";
 import {
     assertCompatibleRelayer,
@@ -212,11 +213,6 @@ function destroyedClientError(): Error {
         "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
     );
 }
-
-/** `POST /api/restore` bounds itself at 55s server-side and answers with an
- * error rather than going quiet, so the client must outlast that or it would
- * abandon a response already on its way. */
-const RESTORE_REQUEST_TIMEOUT_MS = 60_000;
 
 /** `POST /api/analyze` runs the extractor LLM inline before it accepts, so it
  * is the one write that legitimately outruns the default. */
