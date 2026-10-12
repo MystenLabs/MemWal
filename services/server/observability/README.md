@@ -13,9 +13,14 @@ collector.
 ## Contents
 
 | File | Purpose |
-|------|---------|
+| --- | --- |
 | `docker-compose.observability.yml` | OpenObserve + OTel Collector services |
 | `otel-collector-config.yaml` | metrics scrape + OTLP in → OpenObserve |
+| `prometheus-scrape.example.yml` | Example scrape. Not an ML deployment. |
+| `alerts.example.yml` | Provisional rules. No notification receiver. |
+| `RUNBOOK.md` | What each provisional alert means. |
+| `grafana/` | Dashboards that query metrics seen on the dev scrape. |
+| `event-contract.md` | Future export of `retrieval_requests`. Not a second pipeline. |
 
 ## Run
 

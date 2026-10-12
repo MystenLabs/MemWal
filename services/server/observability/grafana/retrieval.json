@@ -1,0 +1,28 @@
+{
+  "uid": "memwal-retrieval",
+  "title": "MemWal retrieval body bytes",
+  "schemaVersion": 39,
+  "tags": ["memwal", "provisional"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Encoded JSON body observations",
+      "description": "Unit: observations. Population: memwal_http_response_body_bytes. This is encoded JSON length, not wire bytes and not client receipt. A missing series means the process has not registered the histogram.",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "targets": [{ "expr": "memwal_http_response_body_bytes_count", "legendFormat": "samples" }]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Body-byte p50 p90 p99",
+      "description": "Unit: bytes. histogram_quantile on the process histogram. Not account-level and not node egress. Do not average percentiles.",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(memwal_http_response_body_bytes_bucket[15m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.90, sum by (le) (rate(memwal_http_response_body_bytes_bucket[15m])))", "legendFormat": "p90" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(memwal_http_response_body_bytes_bucket[15m])))", "legendFormat": "p99" }
+      ]
+    }
+  ]
+}

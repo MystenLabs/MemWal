@@ -1,0 +1,37 @@
+{
+  "uid": "memwal-service-health",
+  "title": "MemWal relayer service health",
+  "schemaVersion": 39,
+  "tags": ["memwal", "provisional"],
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request rate",
+      "description": "Unit: requests/second. Population: all scraped HTTP requests. Missing series means the scrape failed, not that traffic is zero.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum(rate(memwal_http_requests_total[5m]))", "legendFormat": "req/s" }]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "5xx ratio",
+      "description": "Unit: ratio. Population: HTTP status label 5xx over all requests. Low volume makes this noisy.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [{ "expr": "sum(rate(memwal_http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(memwal_http_requests_total[5m])), 0.001)", "legendFormat": "5xx ratio" }]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Latency p50 p90 p99",
+      "description": "Unit: seconds. histogram_quantile over summed buckets. Do not average daily percentiles. Empty buckets are missing data.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(memwal_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.90, sum by (le) (rate(memwal_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p90" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(memwal_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ]
+    }
+  ]
+}

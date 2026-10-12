@@ -1,0 +1,36 @@
+# Provisional. Thresholds are not from a measured baseline.
+# No Alertmanager receiver is configured. Do not enable paging until
+# an owner and destination are confirmed.
+groups:
+  - name: memwal-relayer
+    rules:
+      - alert: MemwalMetricsScrapeMissing
+        expr: absent(memwal_http_requests_total)
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Relayer metrics are missing, which is not the same as no traffic.
+          runbook: services/server/observability/RUNBOOK.md#scrape-missing
+      - alert: MemwalHttp5xxRatioHigh
+        expr: |
+          (
+            sum(rate(memwal_http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(memwal_http_requests_total[5m])), 0.001)
+          ) > 0.05
+          and sum(rate(memwal_http_requests_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Provisional 5xx ratio above 5% with enough traffic to trust the ratio.
+          runbook: services/server/observability/RUNBOOK.md#http-5xx
+      - alert: MemwalSidecarFailures
+        expr: sum(rate(memwal_sidecar_failures_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Sidecar failures are incrementing. Confirm the series exists before paging.
+          runbook: services/server/observability/RUNBOOK.md#sidecar
