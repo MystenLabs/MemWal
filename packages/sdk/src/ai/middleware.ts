@@ -95,6 +95,9 @@ export function withMemWal(
     const pendingSaves = new Set<Promise<unknown>>();
     const saveFailures: string[] = [];
     let notingFailure = 0;
+    // Tool steps rebuild the prompt without the memory injected on step 1.
+    // Keep that recall and put it back, instead of calling recall again.
+    let cachedRecall: { key: string; context: string } | null = null;
 
     function saveInBackground(userMessage: string): void {
         const savePromise = memwal
@@ -126,33 +129,38 @@ export function withMemWal(
             // ============================================================
             // BEFORE: Search memories + inject into prompt
             // ============================================================
-            transformParams: async ({ params }: any) => {
+            transformParams: async ({ params }: { params: { prompt?: unknown } }) => {
                 try {
-                    // Only recall on the first step of a user turn, not on
-                    // intermediate tool steps where the last message is tool/assistant.
-                    if (!isPromptEndingWithUser(params.prompt)) return params;
+                    const turnKey = lastUserTurnKey(params.prompt);
+                    if (!turnKey) return params;
+
+                    if (!isPromptEndingWithUser(params.prompt)) {
+                        if (!cachedRecall || cachedRecall.key !== turnKey) return params;
+                        return {
+                            ...params,
+                            prompt: injectMemoryContext(params.prompt, cachedRecall.context),
+                        };
+                    }
 
                     const lastUserMessage = findLastUserMessage(params.prompt);
                     if (!lastUserMessage) return params;
 
                     const recallResult = await memwal.recall(lastUserMessage, maxMemories);
-
-                    // Filter by minimum relevance (distance < 1 - minRelevance)
                     const relevant = recallResult.results.filter(
                         (m: RecallMemory) => (1 - m.distance) >= minRelevance
                     );
-
-                    if (relevant.length === 0) return params;
+                    if (relevant.length === 0) {
+                        cachedRecall = null;
+                        return params;
+                    }
 
                     const memoryContext = formatUntrustedMemories(relevant);
-                    const enrichedPrompt = injectMemoryContext(
-                        params.prompt,
-                        memoryContext
-                    );
-
+                    cachedRecall = { key: turnKey, context: memoryContext };
                     log(`🔍 Found ${relevant.length} relevant memories`);
-
-                    return { ...params, prompt: enrichedPrompt };
+                    return {
+                        ...params,
+                        prompt: injectMemoryContext(params.prompt, memoryContext),
+                    };
                 } catch (error) {
                     console.warn("[Walrus Memory] Recall failed during transformParams:", error);
                     try {
@@ -248,6 +256,17 @@ function isPromptEndingWithUser(prompt: unknown): boolean {
     if (!Array.isArray(prompt) || prompt.length === 0) return false;
     const lastMsg = prompt[prompt.length - 1] as { role?: string; content?: unknown };
     return lastMsg?.role === "user";
+}
+
+function lastUserTurnKey(prompt: unknown): string | null {
+    if (!Array.isArray(prompt)) return null;
+    for (let i = prompt.length - 1; i >= 0; i--) {
+        const msg = prompt[i] as { role?: string };
+        if (msg?.role !== "user") continue;
+        const text = findLastUserMessage(prompt);
+        return text ? `${i}\0${text}` : null;
+    }
+    return null;
 }
 
 export function injectMemoryContext(

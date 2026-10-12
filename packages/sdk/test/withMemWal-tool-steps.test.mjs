@@ -7,22 +7,26 @@ import { withMemWal } from "../dist/ai/middleware.js";
 const TEST_KEY = "11".repeat(32);
 const TEST_ACCOUNT_ID = "0x1";
 
+const generatedPrompts = [];
+
 function fakeLanguageModel() {
     return {
         specificationVersion: "v2",
         provider: "test",
         modelId: "test-model",
         supportedUrls: {},
-        doGenerate: async () => ({
-            content: [{ type: "text", text: "hi" }],
-            finishReason: "stop",
-            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-            warnings: [],
-        }),
+        doGenerate: async (options) => {
+            generatedPrompts.push(options?.prompt);
+            return {
+                content: [{ type: "text", text: "hi" }],
+                finishReason: "stop",
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                warnings: [],
+            };
+        },
         doStream: async () => ({ stream: new ReadableStream() }),
     };
 }
-
 test("withMemWal does not re-recall or re-analyze during multi-step tool calls", async () => {
     const originalRecall = MemWal.prototype.recall;
     const originalAnalyze = MemWal.prototype.analyze;
@@ -42,6 +46,7 @@ test("withMemWal does not re-recall or re-analyze during multi-step tool calls",
     };
 
     try {
+        generatedPrompts.length = 0;
         const model = withMemWal(fakeLanguageModel(), {
             key: TEST_KEY,
             accountId: TEST_ACCOUNT_ID,
@@ -71,11 +76,17 @@ test("withMemWal does not re-recall or re-analyze during multi-step tool calls",
             },
         ];
 
-        await model.doGenerate({ prompt: step2Prompt });
+        const step2 = await model.doGenerate({ prompt: step2Prompt });
         await model.flush();
 
         assert.equal(recallCount, 1, "recall must NOT be called again during intermediate tool step");
         assert.equal(analyzeCount, 1, "analyze must NOT be called again during intermediate tool step");
+        assert.equal(step2.finishReason, "stop");
+        assert.match(
+            JSON.stringify(generatedPrompts.at(-1)),
+            /Tokyo is in Japan/,
+            "the answer step must still contain the cached memory",
+        );
 
         // Step 3: Next user turn starts (prompt ends with new user message)
         const step3Prompt = [
