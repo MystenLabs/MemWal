@@ -29,11 +29,13 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import random
 import re
 import time
 import uuid
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, TypeVar, Union
 from urllib.parse import ParseResult, urlencode, urlparse
 
@@ -199,18 +201,49 @@ def _positive_retry_ms(raw: object) -> Optional[int]:
         seconds = float(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
+    if seconds <= 0 or math.isnan(seconds) or math.isinf(seconds):
         return None
-    return int(seconds * 1000)
+    try:
+        ms = seconds * 1000.0
+        if math.isinf(ms) or math.isnan(ms):
+            return None
+        return int(ms)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _http_date_retry_ms(raw: object) -> Optional[int]:
+    if not isinstance(raw, str):
+        return None
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        target_ts = dt.timestamp()
+        now_ts = time.time()
+        diff = target_ts - now_ts
+        if diff <= 0 or math.isnan(diff) or math.isinf(diff):
+            return None
+        ms = diff * 1000.0
+        if math.isinf(ms) or math.isnan(ms):
+            return None
+        return int(ms)
+    except Exception:
+        return None
 
 
 def _retry_after_ms(err: "_HttpStatusError") -> int:
-    """Retry-After seconds, else JSON ``retry_after_seconds``, in ms."""
+    """Retry-After seconds or HTTP-date, else JSON ``retry_after_seconds``, in ms."""
 
     if err.retry_after:
         header_ms = _positive_retry_ms(err.retry_after)
         if header_ms is not None:
             return header_ms
+        date_ms = _http_date_retry_ms(err.retry_after)
+        if date_ms is not None:
+            return date_ms
     if not err.body:
         return 0
     try:
