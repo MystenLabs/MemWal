@@ -1,4 +1,5 @@
 .wa {
+  color-scheme: dark;
   overflow-x: clip;
   --wa-bg: #1a1a1a;
   --wa-surface: #232323;
@@ -30,6 +31,11 @@
   font-variant-numeric: tabular-nums;
 }
 
+.wa, .wa-side, .wa-drawer, .wa-menu, .wa-table-wrap {
+  scrollbar-color: #6a6a6a var(--wa-bg);
+}
+
+
 .wa * { box-sizing: border-box; }
 
 .wa-side {
@@ -45,9 +51,10 @@
   display: flex;
   gap: 10px;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  min-height: 72px;
+  padding: 16px 12px 20px;
   width: 100%;
-  padding: 8px 8px 14px;
 }
 .wa-mark {
   width: 28px;
@@ -56,8 +63,9 @@
   background: linear-gradient(160deg, #9b8cff, #5b4ad6);
 }
 .wa-brand strong { display: block; font-size: 14px; font-weight: 560; }
+.wa-status { color: var(--wa-muted); font-size: 12px; }
 
-.wa-logo { height: 20px; width: auto; max-width: calc(100% - 52px); display: block; }
+.wa-logo { height: 40px; width: auto; max-width: min(168px, 100%); display: block; }
 .wa-icon-btn { width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 8px; background: transparent; color: #ededed; flex: none; cursor: pointer; }
 .wa-icon-btn:focus-visible { outline: 2px solid var(--wa-accent); outline-offset: 2px; }
 .wa-overlay-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; position: sticky; top: -16px; margin: -16px -16px 12px; padding: 12px 16px; background: #171717; border-bottom: 1px solid var(--wa-line); z-index: 1; }
@@ -144,21 +152,22 @@
 .wa-ico { width: 14px; height: 14px; opacity: 0.8; flex: none; }
 
 .wa-main { min-width: 0; }
-.wa-util, .wa-head {
+.wa-util, .wa-head, .wa-mobile-bar {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 0 16px;
   border-bottom: 1px solid var(--wa-line);
+  background: var(--wa-bg);
 }
 .wa-util { height: 48px; }
-.wa-head { min-height: 66px; padding-top: 10px; padding-bottom: 10px; }
+.wa-head { min-height: 72px; padding-top: 12px; padding-bottom: 12px; }
 .wa-crumb { margin-right: auto; color: var(--wa-muted); font-size: 13px; }
 .wa-crumb b { color: var(--wa-text); font-weight: 500; }
 .wa-clock { color: var(--wa-muted); font-size: 12px; }
 .wa-title { margin-right: auto; }
-.wa-title h1 { margin: 0; font-size: 18px; font-weight: 500; letter-spacing: 0; }
-.wa-title p { margin: 2px 0 0; color: var(--wa-muted); font-size: 13px; }
+.wa-title h1 { margin: 0; font-size: 24px; font-weight: 560; letter-spacing: 0; }
+.wa-title p { margin: 8px 0 0; color: var(--wa-muted); font-size: 14px; }
 .wa-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .wa-btn, .wa-select, .wa-input, .wa-env {
@@ -277,11 +286,11 @@ a.wa-ext:hover, a.wa-ext:focus-visible { color: #fff; border-bottom-color: var(-
   margin: 0 16px 24px;
   border-bottom: 1px solid var(--wa-line);
 }
-.wa-chart-panel { grid-column: 1; grid-row: 1; }
-.wa-table-panel { grid-column: 1; grid-row: 2; }
+.wa-panel { padding: 16px 16px 20px; min-width: 0; border-right: 1px solid var(--wa-line); border-bottom: 1px solid var(--wa-line); background: var(--wa-bg); }
+.wa-panel h2 { margin: 0 0 8px; font-size: 18px; font-weight: 560; }
+.wa-panel h2 + .wa-note, .wa-chart-head + .wa-note { margin: 0 0 16px; }
 .wa-rail { grid-column: 2; grid-row: 1 / span 2; border-right: 0; padding: 0; display: flex; flex-direction: column; }
-.wa-panel { padding: 14px 16px 16px; min-width: 0; border-right: 1px solid var(--wa-line); border-bottom: 1px solid var(--wa-line); }
-.wa-panel h2 { margin: 0 0 4px; font-size: 15px; font-weight: 500; }
+
 .wa-note { color: var(--wa-muted); font-size: 12px; line-height: 1.4; }
 .wa-chart-head, .wa-table-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .wa-legend { display: flex; gap: 12px; color: var(--wa-muted); font-size: 12px; }
@@ -410,7 +419,8 @@ a.wa-ext:hover, a.wa-ext:focus-visible { color: #fff; border-bottom-color: var(-
   }
   .wa-nav-open .wa-side { left: 0; visibility: visible; }
   .wa-side { transition: left 160ms ease; }
-  .wa-side .wa-brand { position: sticky; top: 0; z-index: 2; background: #161616; border-bottom: 1px solid var(--wa-line); margin-bottom: 8px; padding: 4px 8px; }
+  .wa-side .wa-brand { position: sticky; top: 0; z-index: 2; justify-content: space-between; background: #161616; border-bottom: 1px solid var(--wa-line); margin-bottom: 8px; padding: 8px; }
+  .wa-side .wa-logo { height: 28px; }
   .wa-nav-open .wa-nav-back { display: block; }
   .wa-mobile-bar { display: flex; }
   .wa-board { grid-template-columns: 1fr; }
