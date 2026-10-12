@@ -40,8 +40,11 @@ export function CountChart({
     if (expanded) { wasOpen.current = true; return }
     if (!wasOpen.current) return
     wasOpen.current = false
-    expandRef.current?.focus({ preventScroll: true })
-    window.scrollTo(0, savedScroll.current)
+    const y = savedScroll.current
+    window.setTimeout(() => {
+      expandRef.current?.focus({ preventScroll: true })
+      window.scrollTo(0, y)
+    }, 0)
   }, [expanded])
   const plot = (tall: boolean) => (
     <CountPlot title={title} unit={unit} grain={grain} timeZone={timeZone} buckets={buckets} tall={tall} onOpen={onOpen} />

@@ -179,7 +179,7 @@
 .wa-ico { width: 14px; height: 14px; opacity: 0.8; flex: none; }
 
 .wa-main { min-width: 0; }
-.wa-util, .wa-head, .wa-mobile-bar {
+.wa-util, .wa-head {
   display: flex;
   align-items: center;
   gap: 8px;
