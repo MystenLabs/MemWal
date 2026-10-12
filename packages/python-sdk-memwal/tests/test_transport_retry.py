@@ -1,4 +1,7 @@
-"""Tests for network transport error retry and deadline bounding during polling (WALM-696, GH #1000)."""
+"""Tests for network transport error retry and deadline bounding.
+
+Covers WALM-696 and GH #1000.
+"""
 
 from __future__ import annotations
 

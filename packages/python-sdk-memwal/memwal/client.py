@@ -511,13 +511,16 @@ class MemWal:
                         accepted_statuses=(200, 404),
                         timeout=poll_timeout,
                     )
-                except TypeError:
-                    data = await self._signed_request(
-                        "GET",
-                        f"/api/remember/{job_id}",
-                        {},
-                        accepted_statuses=(200, 404),
-                    )
+                except TypeError as err:
+                    if "unexpected keyword argument" in str(err) and "timeout" in str(err):
+                        data = await self._signed_request(
+                            "GET",
+                            f"/api/remember/{job_id}",
+                            {},
+                            accepted_statuses=(200, 404),
+                        )
+                    else:
+                        raise
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
                     last_refusal = err.status
@@ -527,6 +530,8 @@ class MemWal:
                     continue
                 raise
             except httpx.TransportError:
+                # Network drops retry as status 0; continuing next loop iteration
+                # increments `attempt` so exponential backoff delay continues to grow.
                 last_refusal = 0
                 continue
 
@@ -749,8 +754,11 @@ class MemWal:
                 poll_timeout = self._poll_deadline_s(deadline_ms)
                 try:
                     batch = await self.get_remember_bulk_status(pending, timeout=poll_timeout)
-                except TypeError:
-                    batch = await self.get_remember_bulk_status(pending)
+                except TypeError as err:
+                    if "unexpected keyword argument" in str(err) and "timeout" in str(err):
+                        batch = await self.get_remember_bulk_status(pending)
+                    else:
+                        raise
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
                     last_refusal = err.status
@@ -760,6 +768,8 @@ class MemWal:
                     continue
                 raise
             except httpx.TransportError:
+                # Network drops retry as status 0; continuing next loop iteration
+                # increments `attempt` so exponential backoff delay continues to grow.
                 last_refusal = 0
                 continue
             answered = True
