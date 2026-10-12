@@ -463,6 +463,10 @@ class MemWal:
     ) -> RememberAcceptedResult:
         return await self.remember(text, namespace, idempotency_key)
 
+    def _poll_deadline_s(self, deadline_ms: int) -> float:
+        remaining_s = (deadline_ms - _now_ms()) / 1000.0
+        return max(0.001, min(60.0, remaining_s))
+
     async def wait_for_remember_job(
         self,
         job_id: str,
@@ -498,12 +502,22 @@ class MemWal:
             retry_after_ms = 0
 
             try:
-                data = await self._signed_request(
-                    "GET",
-                    f"/api/remember/{job_id}",
-                    {},
-                    accepted_statuses=(200, 404),
-                )
+                poll_timeout = self._poll_deadline_s(deadline_ms)
+                try:
+                    data = await self._signed_request(
+                        "GET",
+                        f"/api/remember/{job_id}",
+                        {},
+                        accepted_statuses=(200, 404),
+                        timeout=poll_timeout,
+                    )
+                except TypeError:
+                    data = await self._signed_request(
+                        "GET",
+                        f"/api/remember/{job_id}",
+                        {},
+                        accepted_statuses=(200, 404),
+                    )
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
                     last_refusal = err.status
@@ -512,6 +526,9 @@ class MemWal:
                         retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
                     continue
                 raise
+            except httpx.TransportError:
+                last_refusal = 0
+                continue
 
             status_str = data.get("status")
             if status_str is None or status_str == "not_found":
@@ -632,7 +649,9 @@ class MemWal:
         return await self.remember_bulk_async(items)
 
     async def get_remember_bulk_status(
-        self, job_ids: Sequence[str]
+        self,
+        job_ids: Sequence[str],
+        timeout: Optional[float] = None,
     ) -> RememberBulkStatusResult:
         """Poll the bulk-status endpoint for a batch of job_ids.
 
@@ -644,6 +663,7 @@ class MemWal:
             "POST",
             "/api/remember/bulk/status",
             {"job_ids": list(job_ids)},
+            timeout=timeout,
         )
         return RememberBulkStatusResult(
             results=[
@@ -726,7 +746,11 @@ class MemWal:
             retry_after_ms = 0
 
             try:
-                batch = await self.get_remember_bulk_status(pending)
+                poll_timeout = self._poll_deadline_s(deadline_ms)
+                try:
+                    batch = await self.get_remember_bulk_status(pending, timeout=poll_timeout)
+                except TypeError:
+                    batch = await self.get_remember_bulk_status(pending)
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
                     last_refusal = err.status
@@ -735,6 +759,9 @@ class MemWal:
                         retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
                     continue
                 raise
+            except httpx.TransportError:
+                last_refusal = 0
+                continue
             answered = True
 
             terminal_ids: Set[str] = {
@@ -757,6 +784,8 @@ class MemWal:
                     retry_after = f"{wait_ms / 1000:g}" if wait_ms else None
                     raise MemWalRateLimited(job_ids, retry_after) from err
                 # Any other probe failure is not evidence about the jobs.
+            except httpx.TransportError:
+                pass
             else:
                 answered = True
                 settled = {
@@ -1515,6 +1544,7 @@ class MemWal:
         body: Dict[str, Any],
         accepted_statuses: tuple = (200,),
         include_seal_session: bool = True,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Make a signed request to the server.
 
@@ -1575,6 +1605,7 @@ class MemWal:
             url=url,
             headers=headers,
             content=None if method_upper == "GET" else body_str,
+            timeout=timeout,
         )
 
         if response.status_code not in accepted_statuses:
