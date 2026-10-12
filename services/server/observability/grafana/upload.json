@@ -1,0 +1,25 @@
+{
+  "uid": "memwal-upload",
+  "title": "MemWal upload pipeline",
+  "schemaVersion": 39,
+  "tags": ["memwal", "provisional"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Queue metrics are not collected",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "content": "The 2026-10-12 dev scrape of /metrics did not include queue depth, oldest queued-job age, or a worker heartbeat. Do not graph those as zero. Upload completion counts are in the admin activity API, not in this Prometheus scrape."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Sidecar failures",
+      "description": "Unit: failures/second. Population: memwal_sidecar_failures_total. A missing series means the metric was not registered, not that uploads succeeded.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "targets": [{ "expr": "sum(rate(memwal_sidecar_failures_total[5m]))", "legendFormat": "sidecar failures/s" }]
+    }
+  ]
+}

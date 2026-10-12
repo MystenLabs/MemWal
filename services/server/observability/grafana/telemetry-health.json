@@ -1,0 +1,24 @@
+{
+  "uid": "memwal-telemetry-health",
+  "title": "MemWal telemetry health",
+  "schemaVersion": 39,
+  "tags": ["memwal", "provisional"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Scrape present",
+      "description": "1 means memwal_http_requests_total is being scraped. 0 means telemetry is missing, not that the product had no traffic.",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "targets": [{ "expr": "absent(memwal_http_requests_total) == 0", "legendFormat": "present" }]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "In-flight requests",
+      "description": "Unit: requests. Gauge memwal_http_requests_in_flight. This is current handler concurrency, not queue age.",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 },
+      "targets": [{ "expr": "memwal_http_requests_in_flight", "legendFormat": "in flight" }]
+    }
+  ]
+}

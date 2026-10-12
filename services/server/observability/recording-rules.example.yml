@@ -1,0 +1,11 @@
+# Provisional recording rules. They sum histogram buckets before quantile.
+# They do not average p99 values and they do not add percentiles across hops.
+groups:
+  - name: memwal-recording
+    rules:
+      - record: memwal:http_requests:rate5m
+        expr: sum(rate(memwal_http_requests_total[5m]))
+      - record: memwal:http_latency:p99_5m
+        expr: histogram_quantile(0.99, sum by (le) (rate(memwal_http_request_duration_seconds_bucket[5m])))
+      - record: memwal:response_body_bytes:p99_15m
+        expr: histogram_quantile(0.99, sum by (le) (rate(memwal_http_response_body_bytes_bucket[15m])))

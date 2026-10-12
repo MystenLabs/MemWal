@@ -1,0 +1,10 @@
+# Template only. Datasource UID and scrape host are not confirmed.
+apiVersion: 1
+datasources:
+  - name: MemWal Prometheus
+    uid: ${GRAFANA_PROMETHEUS_UID}
+    type: prometheus
+    access: proxy
+    url: ${PROMETHEUS_URL}
+    isDefault: false
+    editable: false
