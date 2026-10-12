@@ -79,4 +79,8 @@ export type {
     NamespaceSummary,
     NamespacesResult,
     ListNamespacesOptions,
+    MemorySummary,
+    DeletedMemorySummary,
+    MemoriesResult,
+    ListMemoriesOptions,
 } from "./types.js";

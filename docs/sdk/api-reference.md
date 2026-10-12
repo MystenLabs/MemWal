@@ -312,6 +312,54 @@ while (more) {
 }
 ```
 
+### `listMemories(options?): Promise<MemoriesResult>`
+
+List the memories this account holds, without a semantic query. Use it to confirm a write landed, count a namespace exactly, or find a bulk write that went to the wrong namespace. Returns metadata only, with no blob fetch or decryption; use `recall()` for content.
+
+- `options.cursor`: The previous page's `next_cursor`, to continue a walk or poll incrementally
+- `options.limit`: Page size, counted before the `namespace` filter; the relayer defaults to `100` and clamps to `500`
+- `options.namespace`: Keep only this namespace. Filtered client-side, so a page can be short or empty while `has_more` is still `true`
+
+**Returns:**
+
+```ts
+{
+  memories: Array<{
+    memory_id: string;
+    namespace_id: string;   // the namespace name
+    blob_id: string;
+    created_at: string;
+    updated_at: string;
+    size: number;           // encrypted bytes
+    agent_id: string | null;
+    package_id: string | null;
+    status: string;
+    end_epoch: number | null;
+    expires_at: string | null;
+    importance: number | null;
+  }>;
+  next_cursor: string | null;
+  has_more: boolean;
+  snapshot_version: number;
+  deleted: Array<{ memory_id: string; namespace_id: string; deleted_at: string }>;
+  must_resync: boolean;     // cursor too old: restart without one
+}
+```
+
+Paginate on `has_more`, not on page length:
+
+```ts
+let cursor: string | undefined;
+let more = true;
+let count = 0;
+while (more) {
+  const page = await memwal.listMemories({ cursor, namespace: "work" });
+  count += page.memories.length;
+  cursor = page.next_cursor ?? undefined;
+  more = page.has_more;
+}
+```
+
 ### `health(): Promise<HealthResult>`
 
 Check relayer health. Does not require authentication — a successful response confirms the relayer is reachable, not that your `key`/`accountId` are valid. A signed call (e.g. `remember()`, `recall()`) can still fail with `401` immediately after a passing `health()`.
