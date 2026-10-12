@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { nearestBucket } from './AdminAnalyticsApp'
 import { Drawer } from './Drawer'
 import { collectionStatus, measurementMethod, sampleStamp, sourceSummary } from './QualityPage'
 import type { QualitySource } from '../utils/admin-api'
@@ -47,4 +48,25 @@ test('a drawer puts the title and close action in one header and restores focus'
   expect(close).toHaveFocus()
   await user.keyboard('{Escape}')
   expect(onClose).toHaveBeenCalledOnce()
+})
+
+test('a tap on the right half selects the last bucket', () => {
+  expect(nearestBucket(90, 0, 100, 5)).toBe(4)
+  expect(nearestBucket(0, 0, 100, 5)).toBe(0)
+  expect(nearestBucket(50, 0, 0, 5)).toBe(0)
+})
+
+test('tabbing from the last drawer control returns to Close', async () => {
+  const user = userEvent.setup()
+  render(
+    <Drawer title="A very long retrieval request record title that must wrap beside Close" onClose={() => {}}>
+      <button type="button">Open related page</button>
+    </Drawer>,
+  )
+  const close = screen.getByRole('button', { name: /Close A very long/ })
+  const action = screen.getByRole('button', { name: 'Open related page' })
+  expect(close.parentElement).toBe(screen.getByRole('heading', { name: /A very long/ }).parentElement)
+  action.focus()
+  await user.tab()
+  expect(close).toHaveFocus()
 })

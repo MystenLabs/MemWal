@@ -193,6 +193,18 @@ pub async fn recall(
         Budget::Unbounded => None,
         Budget::Run(left) => Some(tokio::time::Instant::now() + left),
         Budget::Exhausted => {
+            crate::measurement::record_retrieval(
+                state.db.pool().clone(),
+                owner.clone(),
+                namespace.clone(),
+                "recall",
+                "timeout",
+                0,
+                i32::try_from(body.limit).unwrap_or(0),
+                i64::try_from(already.as_millis()).unwrap_or(i64::MAX),
+                0,
+                0,
+            );
             return Err(recall_timed_out(
                 owner,
                 namespace,

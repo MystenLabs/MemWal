@@ -78,6 +78,12 @@ function Spark({ points }: { points: number[] }) {
   )
 }
 
+export function nearestBucket(clientX: number, left: number, width: number, count: number) {
+  if (count <= 1 || width <= 0) return 0
+  const ratio = (clientX - left) / width
+  return Math.max(0, Math.min(count - 1, Math.round(ratio * (count - 1))))
+}
+
 function Chart({
   points,
   series,
@@ -95,9 +101,19 @@ function Chart({
   const line = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${x(index).toFixed(1)} ${y(pick(point)).toFixed(1)}`).join(' ')
   const area = points.length ? `${line} L${x(points.length - 1).toFixed(1)} ${height - 26} L${x(0).toFixed(1)} ${height - 26} Z` : ''
   const unit = series === 'latency' ? 'ms' : series === 'requests' ? 'requests' : 'bytes'
+  const inspect = (clientX: number, target: SVGSVGElement) => {
+    const box = target.getBoundingClientRect()
+    const index = nearestBucket(clientX, box.left, box.width, points.length)
+    setHover((current) => current === index ? null : index)
+  }
+  const selected = hover != null ? points[hover] : null
   return (
     <div style={{ position: 'relative' }}>
-      <svg className="wa-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${series} trend, ${points.length} buckets, peak ${max} ${unit}`}>
+      <svg className="wa-chart" viewBox={`0 0 ${width} ${height}`} role="img" tabIndex={0} aria-label={`${series} trend, ${points.length} buckets, peak ${max} ${unit}. Arrow keys inspect a bucket.`} onPointerUp={(event) => inspect(event.clientX, event.currentTarget)} onKeyDown={(event) => {
+        if (event.key === 'Escape') setHover(null)
+        if (event.key === 'ArrowRight') { event.preventDefault(); setHover((index) => Math.min(points.length - 1, (index ?? -1) + 1)) }
+        if (event.key === 'ArrowLeft') { event.preventDefault(); setHover((index) => Math.max(0, (index ?? 1) - 1)) }
+      }}>
         {[0, 0.5, 1].map((step) => (
           <g key={step}>
             <line x1="36" x2={width - 12} y1={y(max * (1 - step))} y2={y(max * (1 - step))} stroke="#2e2e2e" />
@@ -107,14 +123,14 @@ function Chart({
         <path d={area} fill="rgba(124, 106, 247, 0.08)" />
         <path d={line} fill="none" stroke="#7c6af7" strokeWidth="2" />
         {points.map((point, index) => (
-          <circle key={point.label} cx={x(index)} cy={y(pick(point))} r={hover === index ? 4 : 2.5} fill="#7c6af7" onMouseEnter={() => setHover(index)} onMouseLeave={() => setHover(null)} />
+          <circle key={point.label} cx={x(index)} cy={y(pick(point))} r={hover === index ? 4 : 2.5} fill="#7c6af7" />
         ))}
         {points.map((point, index) => index % Math.ceil(points.length / 6) === 0 ? (
           <text key={`${point.label}-x`} x={x(index)} y={height - 8} fill="#9a9a9a" fontSize="11" textAnchor="middle">{/^\d{4}-\d{2}-\d{2}T/.test(point.label) ? point.label.slice(11, 16) : /^\d{4}-\d{2}-\d{2}/.test(point.label) ? point.label.slice(5, 10) : point.label}</text>
         ) : null)}
       </svg>
-      {hover != null && points[hover] && (
-        <div className="wa-tip" style={{ left: 48, top: 8 }}>{points[hover].label}: {series === 'bytes' ? formatBytes(BigInt(pick(points[hover]))) : pick(points[hover])} {series === 'requests' ? 'memories' : unit}</div>
+      {selected && (
+        <div className="wa-tip" role="status" style={{ left: 8, right: 8, top: 8 }}>{selected.label}: {series === 'bytes' ? formatBytes(BigInt(pick(selected))) : pick(selected)} {series === 'requests' ? 'memories' : unit}</div>
       )}
     </div>
   )
@@ -170,6 +186,28 @@ export function AdminAnalyticsApp({
     globalThis.addEventListener('keydown', onKey)
     return () => globalThis.removeEventListener('keydown', onKey)
   }, [])
+
+  useEffect(() => {
+    if (!navOpen) return
+    const overflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const panel = document.getElementById('admin-nav')
+    panel?.querySelector<HTMLElement>("button[aria-label='Close navigation']")?.focus()
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || !panel) return
+      const nodes = [...panel.querySelectorAll<HTMLElement>('button')].filter((node) => !node.hasAttribute('disabled'))
+      const first = nodes[0]
+      const last = nodes[nodes.length - 1]
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = overflow
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [navOpen])
 
   const setParam = (key: string, value: string) => {
     const next = new URLSearchParams(params)
