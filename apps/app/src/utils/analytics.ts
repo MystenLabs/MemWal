@@ -30,12 +30,33 @@ declare global {
         dataLayer?: unknown[]
         gtag?: (...args: unknown[]) => void
         posthog?: PostHogClient
+        Statsig?: {
+            StatsigClient: new (
+                sdkKey: string,
+                user: Record<string, unknown>,
+                options?: { environment?: { tier: string } },
+            ) => StatsigClientInstance
+        }
     }
+}
+
+type StatsigMetadata = Record<string, string>
+type StatsigClientInstance = {
+    initializeAsync: () => Promise<unknown>
+    logEvent: (eventName: string, value?: string | number | null, metadata?: StatsigMetadata) => void
 }
 
 const GA_SCRIPT_ID = 'memwal-ga4-script'
 const GTM_SCRIPT_ID = 'memwal-gtm-script'
 const POSTHOG_SCRIPT_ID = 'memwal-posthog-script'
+const STATSIG_SCRIPT_ID = 'memwal-statsig-script'
+const STATSIG_SCRIPT_SRC = 'https://cdn.jsdelivr.net/npm/@statsig/js-client@3.33.5/build/statsig-js-client.min.js'
+// Subresource integrity for exactly that file. The script runs in the same
+// origin that keeps the delegate key and the admin API key in sessionStorage,
+// so a changed CDN response must not execute. Checked against jsDelivr's own
+// published hash for 3.33.5. Bumping the version means recomputing this:
+//   curl -sL <src> | openssl dgst -sha384 -binary | openssl base64 -A
+const STATSIG_SCRIPT_INTEGRITY = 'sha384-7qruGDfkOFQkUBVMV2NVuQW0wVZ5vvvFzTt5iGPZVO4bXwb+4DqbsRa40UXMJqP9'
 const SENSITIVE_ANALYTICS_SELECTOR = '[data-analytics-sensitive], [data-analytics-redact]'
 const MAX_ANALYTICS_STRING_LENGTH = 160
 const SENSITIVE_PARAM_NAME_RE = /(?:private|secret|password|token|authorization|credential)/i
@@ -74,6 +95,9 @@ const POSTHOG_STUB_METHODS = [
 
 let googleAnalyticsInitialized = false
 let posthogInitialized = false
+let statsigStartup: Promise<void> | null = null
+let statsigClient: StatsigClientInstance | null = null
+const statsigQueue: Array<{ name: string; metadata: StatsigMetadata }> = []
 let sensitiveClickGuardInstalled = false
 
 function normalizeAllowedHost(allowedHost: string): string {
@@ -96,9 +120,20 @@ function hostMatchesAllowed(currentHost: string, allowedHost: string): boolean {
     return currentHost === normalizedAllowedHost
 }
 
+/**
+ * No third-party analytics on the admin page: it holds the admin API key in
+ * sessionStorage, and nothing there needs measuring. Checked when analytics
+ * initialises and on every event, so opening /admin directly never loads GTM,
+ * PostHog or Statsig.
+ */
+export function pathAllowsAnalytics(pathname: string): boolean {
+    return !(pathname === '/admin' || pathname.startsWith('/admin/'))
+}
+
 function analyticsHostAllowed(): boolean {
     if (typeof window === 'undefined') return false
     if (!config.analyticsAllowedHosts.length) return false
+    if (!pathAllowsAnalytics(window.location.pathname)) return false
 
     const currentHost = window.location.hostname.toLowerCase()
     return config.analyticsAllowedHosts.some(host => hostMatchesAllowed(currentHost, host))
@@ -120,13 +155,21 @@ function posthogEnabled(): boolean {
     return analyticsHostAllowed() && Boolean(config.posthogProjectApiKey)
 }
 
+function statsigEnabled(): boolean {
+    return analyticsHostAllowed() && Boolean(config.statsigClientKey)
+}
+
 function analyticsEnabled(): boolean {
-    return googleTagsEnabled() || posthogEnabled()
+    return googleTagsEnabled() || posthogEnabled() || statsigEnabled()
 }
 
 function redactStringForAnalytics(key: string, value: string): string {
     const normalized = value.replace(/\s+/g, ' ').trim()
     if (!normalized) return ''
+    // No per-key exemptions. A 32-byte public key has the same shape as a
+    // seed, so letting one key name through lets a private key through under
+    // that name; and a transaction digest resolves on-chain to the sender's
+    // wallet, which would tie every analytics profile to an address.
     if (SENSITIVE_PARAM_NAME_RE.test(key)) return '[redacted]'
     if (SENSITIVE_VALUE_PATTERNS.some(pattern => pattern.test(normalized))) return '[redacted]'
     if (normalized.length > MAX_ANALYTICS_STRING_LENGTH) {
@@ -141,7 +184,7 @@ function sanitizeAnalyticsValue(key: string, value: AnalyticsValue): AnalyticsVa
     return value
 }
 
-function withDefaultParams(params: AnalyticsParams = {}): Record<string, AnalyticsValue> {
+export function analyticsEventProperties(params: AnalyticsParams = {}): Record<string, AnalyticsValue> {
     const next: Record<string, AnalyticsValue> = {
         app: 'memwal_web_app',
         sui_network: config.suiNetwork,
@@ -296,15 +339,95 @@ function initPostHog() {
     posthogInitialized = true
 }
 
+function statsigMetadata(params: Record<string, AnalyticsValue>): StatsigMetadata {
+    const metadata: StatsigMetadata = {}
+    for (const [key, value] of Object.entries(params)) {
+        metadata[key] = String(value)
+    }
+    return metadata
+}
+
+function loadStatsigScript(): Promise<void> {
+    if (window.Statsig?.StatsigClient) return Promise.resolve()
+
+    return new Promise((resolve, reject) => {
+        const existing = document.getElementById(STATSIG_SCRIPT_ID)
+        const finish = () => {
+            if (window.Statsig?.StatsigClient) resolve()
+            else reject(new Error('Statsig client did not load'))
+        }
+        if (existing) {
+            existing.addEventListener('load', finish, { once: true })
+            existing.addEventListener('error', () => reject(new Error('Statsig script failed')), { once: true })
+            return
+        }
+
+        const script = document.createElement('script')
+        script.id = STATSIG_SCRIPT_ID
+        script.async = true
+        script.crossOrigin = 'anonymous'
+        script.integrity = STATSIG_SCRIPT_INTEGRITY
+        script.src = STATSIG_SCRIPT_SRC
+        script.onload = finish
+        script.onerror = () => reject(new Error('Statsig script failed'))
+        document.head.appendChild(script)
+    })
+}
+
+function flushStatsigQueue() {
+    if (!statsigClient) return
+    while (statsigQueue.length > 0) {
+        const event = statsigQueue.shift()
+        if (!event) break
+        statsigClient.logEvent(event.name, null, event.metadata)
+    }
+}
+
+function initStatsig() {
+    if (!statsigEnabled() || statsigStartup) return
+
+    const tier = window.location.hostname === 'walrus.xyz' || window.location.hostname === 'www.walrus.xyz'
+        ? 'production'
+        : 'development'
+    statsigStartup = loadStatsigScript()
+        .then(() => {
+            const Ctor = window.Statsig?.StatsigClient
+            if (!Ctor) {
+                statsigQueue.length = 0
+                return
+            }
+            const client = new Ctor(config.statsigClientKey, {}, { environment: { tier } })
+            return client.initializeAsync().then(() => {
+                statsigClient = client
+                flushStatsigQueue()
+            })
+        })
+        .catch(() => {
+            statsigQueue.length = 0
+        })
+}
+
+function trackStatsig(eventName: string, params: Record<string, AnalyticsValue>) {
+    if (!statsigEnabled()) return
+    initStatsig()
+    const metadata = statsigMetadata(params)
+    if (statsigClient) {
+        statsigClient.logEvent(eventName, null, metadata)
+        return
+    }
+    statsigQueue.push({ name: eventName, metadata })
+}
+
 export function initAnalytics() {
     initGoogleAnalytics()
     initPostHog()
+    initStatsig()
 }
 
 export function trackPageView(path: string) {
     if (!analyticsEnabled()) return
     initAnalytics()
-    const params = withDefaultParams({
+    const params = analyticsEventProperties({
         page_path: path,
         page_location: window.location.href,
         page_title: document.title,
@@ -327,12 +450,14 @@ export function trackPageView(path: string) {
             $current_url: window.location.href,
         })
     }
+
+    trackStatsig('page_view', params)
 }
 
 export function trackEvent(eventName: string, params: AnalyticsParams = {}) {
     if (!analyticsEnabled()) return
     initAnalytics()
-    const eventParams = withDefaultParams(params)
+    const eventParams = analyticsEventProperties(params)
 
     if (googleTagManagerEnabled()) {
         window.dataLayer?.push({
@@ -348,6 +473,8 @@ export function trackEvent(eventName: string, params: AnalyticsParams = {}) {
     if (posthogEnabled()) {
         window.posthog?.capture?.(eventName, eventParams)
     }
+
+    trackStatsig(eventName, eventParams)
 }
 
 export function getAnalyticsErrorType(err: unknown): string {

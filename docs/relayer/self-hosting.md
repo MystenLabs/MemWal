@@ -168,8 +168,8 @@ Use the IDs that match your target network.
 
 ```env
 SUI_NETWORK=testnet
-MEMWAL_PACKAGE_ID=0xcf6ad755a1cdff7217865c796778fabe5aa399cb0cf2eba986f4b582047229c6
-MEMWAL_REGISTRY_ID=0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f75864437
+MEMWAL_PACKAGE_ID=0x0a625e2db2af6f591a4c80a3d8551ddf11656089cc3a20c5e9e7f8fb75b9265c
+MEMWAL_REGISTRY_ID=0x736aef9906798fca4460490ccdf8e8502ef170122dc26ecae32111b78c6b42dd
 
 ```
 
@@ -177,8 +177,8 @@ MEMWAL_REGISTRY_ID=0xe80f2feec1c139616a86c9f71210152e2a7ca552b20841f2e192f99f758
 
 ```env
 SUI_NETWORK=mainnet
-MEMWAL_PACKAGE_ID=0xcee7a6fd8de52ce645c38332bde23d4a30fd9426bc4681409733dd50958a24c6
-MEMWAL_REGISTRY_ID=0x0da982cefa26864ae834a8a0504b904233d49e20fcc17c373c8bed99c75a7edd
+MEMWAL_PACKAGE_ID=0xe7c16fbea0560e7057e2bf7422feaa4fb313749fc69c9e9092fac7a33b81d7f5
+MEMWAL_REGISTRY_ID=0x8bf82c9e09e36b8d1c38298f68b7cb68e7b8762887e7592add9986d5e9cf199f
 ```
 
 If neither `SEAL_SERVER_CONFIGS` nor `SEAL_KEY_SERVERS` is set, the sidecar uses built-in defaults for the selected `SUI_NETWORK`. On `testnet`, the default remains Mysten's original independent key server pair so existing encrypted memories remain decryptable:
@@ -230,6 +230,6 @@ See [Database Sync](/indexer/database-sync) for the full schema.
 - DB migrations run automatically on boot (`pgvector` must already be installed as a PostgreSQL extension).
 - Connection pool: 10 max connections (relayer), 3 max connections (indexer).
 - `/health` is the basic service check, `/metrics` exposes Prometheus metrics, and API routes live under `/api/*`.
-- The indexer is recommended for fast account lookup in production. Without it, the relayer falls back to onchain registry scans.
+- The indexer records which owner has an account. Delegate-key authentication does not scan `AccountRegistry`; a cold key needs `x-account-id` or `MEMWAL_ACCOUNT_ID`.
 - Without `OPENAI_API_KEY`, the server uses deterministic mock embeddings (hash-based), useful for local testing but not production.
 - Use `LOG_FORMAT=json` in production and see [Observability](/relayer/observability) for dashboards and alerts.

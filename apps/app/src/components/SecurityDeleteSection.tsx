@@ -229,7 +229,7 @@ export default function SecurityDeleteSection({ accountObjectId }: { accountObje
     }, [accountObjectId, address, preview, signer, suiClient])
 
     if (!config.securityDeleteEnabled || !address) return null
-    return <Card id="cleanup" className="dashboard-cleanup-card sd-card" title="Delete Pre-Migration Memories" subtitle={`Applies only to memories written before ${config.migrationCompletedDate}`} action={
+    return <Card id="cleanup" className="dashboard-cleanup-card sd-card" title="Delete pre-migration memories" subtitle={`Applies only to memories written before ${config.migrationCompletedDate}`} action={
         visibleActivated && <button className="btn btn-secondary" disabled={loading || busy} onClick={refresh}><RefreshCw size={16}/> Refresh</button>
     }>
         <div className="sd-warning">

@@ -144,8 +144,8 @@ test("recovery never rolls back a newer sign-in", async (t) => {
 
 test("a rejected key is reported but never deleted", async (t) => {
     const home = freshHome();
-    // 401 is ambiguous — on testnet even a valid registered key is rejected
-    // for want of an account hint. Deleting here would destroy a paid key.
+    // 401 is ambiguous — a valid registered key is rejected when the request
+    // has no account id. Deleting here would destroy a paid key.
     const { server, url } = await startWhoami((_req, res) => {
         res.writeHead(401).end("{}");
     });

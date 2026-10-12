@@ -110,8 +110,8 @@ sends the signature in `x-signature`:
 Server-side verification flow (`auth.rs::verify_signature`): validate the
 Ed25519 signature against the canonical string → check the nonce hasn't
 been seen before (Redis, fail-closed on Redis outage) → resolve the account
-(cache, then the `x-account-id` hint, then a bounded onchain registry scan
-as a last resort) → verify the public key is a registered delegate key on
+(cache, then the signed `x-account-id` or `MEMWAL_ACCOUNT_ID`; a cold key
+with neither is `401` — there is no registry scan) → verify the public key is a registered delegate key on
 that account's onchain `MemWalAccount.delegate_keys` (cached in
 `delegate_key_cache`, revoked entries evicted).
 

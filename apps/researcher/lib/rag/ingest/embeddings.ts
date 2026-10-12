@@ -9,7 +9,10 @@ const BATCH_SIZE = 100; // OpenAI embedding API max batch size
  * Embed an array of text strings in batches.
  * Returns embeddings in the same order as input.
  */
-export async function batchEmbed(texts: string[]): Promise<number[][]> {
+export async function batchEmbed(
+  texts: string[],
+  options: { abortSignal?: AbortSignal } = {}
+): Promise<number[][]> {
   if (texts.length === 0) return [];
 
   const allEmbeddings: number[][] = [];
@@ -19,6 +22,7 @@ export async function batchEmbed(texts: string[]): Promise<number[][]> {
     const { embeddings } = await embedMany({
       model: getEmbeddingModel(),
       values: batch,
+      abortSignal: options.abortSignal,
     });
     allEmbeddings.push(...embeddings);
   }

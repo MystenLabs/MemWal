@@ -1,24 +1,62 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Copy, ChevronLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react'
 import { Card } from './Card'
-import { fetchAdminErrors } from '../utils/admin-api'
+import { CopyButton } from './CopyButton'
+import { CopyableText } from './CopyableText'
+import {
+  fetchAdminErrors,
+  shortAddress,
+  suiExplorerAccountUrl,
+  type UploadError,
+} from '../utils/admin-api'
 
 interface AdminUploadErrorsProps {
   adminKey: string
   onInvalidKey: () => void
 }
 
-interface ExpandedError {
-  timestamp: string
-  fullMessage: string
+/** "4m 12s" between two ISO times; null when either is unreadable. */
+function describeDuration(fromIso: string, toIso: string): string | null {
+  const ms = Date.parse(toIso) - Date.parse(fromIso)
+  if (!Number.isFinite(ms) || ms < 0) return null
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/** Everything about one failed job, for pasting into a ticket or chat. */
+function errorDetailsText(error: UploadError): string {
+  return JSON.stringify(
+    {
+      job_id: error.id,
+      owner: error.owner,
+      namespace: error.namespace,
+      status: error.status,
+      created_at: error.createdAt,
+      failed_at: error.timestamp,
+      error_message: error.rawErrorMessage,
+    },
+    null,
+    2,
+  )
+}
+
+function DetailRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="admin-error-detail-row">
+      <dt>{label}</dt>
+      <dd>{children}</dd>
+    </div>
+  )
 }
 
 export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsProps) {
   const [limit, setLimit] = useState(20)
   const [offset, setOffset] = useState(0)
-  const [expanded, setExpanded] = useState<ExpandedError | null>(null)
-  const [copied, setCopied] = useState(false)
+  const [expanded, setExpanded] = useState<UploadError | null>(null)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['admin', 'errors', limit, offset],
@@ -44,18 +82,8 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [expanded])
 
-  const handleCopy = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch (err) {
-      console.error('Failed to copy:', err)
-    }
-  }
-
-  const openError = (timestamp: string, message: string) => {
-    setExpanded({ timestamp, fullMessage: message })
+  const openError = (error: UploadError) => {
+    setExpanded(error)
   }
 
   const closeError = () => {
@@ -76,7 +104,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   if (isLoading) {
     return (
-      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card sept-section admin-errors-card">
         <div className="admin-loading">Loading error data...</div>
       </Card>
     )
@@ -84,7 +112,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   if (error) {
     return (
-      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card sept-section admin-errors-card">
         <div className="admin-error">
           {isInvalidKey ? 'Invalid API key — signing out...' : 'Failed to load errors'}
         </div>
@@ -94,7 +122,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   if (!data) {
     return (
-      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card sept-section admin-errors-card">
         <div className="admin-error">No data available</div>
       </Card>
     )
@@ -105,7 +133,7 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
 
   return (
     <>
-      <Card title="Upload Errors" className="dashboard-keys-card admin-errors-card">
+      <Card title="Upload Errors" className="dashboard-keys-card sept-section admin-errors-card">
         <div className="admin-errors-controls">
           <label htmlFor="error-limit" className="admin-limit-label">
             Show:
@@ -148,27 +176,23 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
                     <td className="admin-table-monospace admin-error-timestamp">
                       {new Date(error.timestamp).toLocaleString()}
                     </td>
-                    <td className="admin-table-monospace" title={error.owner}>
-                      {error.owner.slice(0, 6)}
+                    <td className="admin-table-monospace">
+                      <CopyableText
+                        value={error.owner}
+                        display={shortAddress(error.owner)}
+                        label="Copy owner address"
+                      />
                     </td>
                     <td>{error.namespace}</td>
                     <td className="admin-error-message">
                       <button
                         className="admin-error-msg-btn"
-                        onClick={() => openError(error.timestamp, error.errorMessage)}
-                        title="View full error message"
+                        onClick={() => openError(error)}
+                        title="View error details"
                       >
                         {error.errorMessage.length > 50
                           ? `${error.errorMessage.slice(0, 50)}...`
                           : error.errorMessage}
-                      </button>
-                      <button
-                        className="admin-copy-btn"
-                        onClick={() => handleCopy(error.errorMessage)}
-                        title="Copy error message"
-                        aria-label="Copy error message"
-                      >
-                        <Copy size={14} />
                       </button>
                     </td>
                   </tr>
@@ -225,19 +249,78 @@ export function AdminUploadErrors({ adminKey, onInvalidKey }: AdminUploadErrorsP
               </button>
             </div>
             <div className="admin-error-modal-content">
-              <p className="admin-error-modal-timestamp">
-                {new Date(expanded.timestamp).toLocaleString()}
-              </p>
-              <pre className="admin-error-modal-message">{expanded.fullMessage}</pre>
+              <dl className="admin-error-details">
+                <DetailRow label="Job ID">
+                  <CopyableText value={expanded.id} label="Copy job ID" className="admin-detail-mono" />
+                </DetailRow>
+                <DetailRow label="Owner">
+                  <CopyableText
+                    value={expanded.owner}
+                    label="Copy owner address"
+                    wrap
+                    className="admin-detail-mono"
+                  />
+                  <a
+                    className="admin-detail-link"
+                    href={suiExplorerAccountUrl(expanded.owner)}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    aria-label="Open owner on Sui explorer"
+                    title="Open on Sui explorer"
+                  >
+                    <ExternalLink size={14} />
+                  </a>
+                </DetailRow>
+                <DetailRow label="Namespace">
+                  <CopyableText
+                    value={expanded.namespace}
+                    label="Copy namespace"
+                    className="admin-detail-mono"
+                  />
+                </DetailRow>
+                <DetailRow label="Status">
+                  <span className="admin-status-badge admin-status-badge--critical">
+                    {expanded.status}
+                  </span>
+                </DetailRow>
+                <DetailRow label="Queued">
+                  {new Date(expanded.createdAt).toLocaleString()}
+                </DetailRow>
+                <DetailRow label="Failed">
+                  {new Date(expanded.timestamp).toLocaleString()}
+                  {describeDuration(expanded.createdAt, expanded.timestamp) && (
+                    <span className="admin-detail-muted">
+                      {' '}
+                      · after {describeDuration(expanded.createdAt, expanded.timestamp)}
+                    </span>
+                  )}
+                </DetailRow>
+              </dl>
+
+              <div className="admin-error-detail-message-head">
+                <span>Error message</span>
+                {expanded.rawErrorMessage && (
+                  <CopyButton text={expanded.rawErrorMessage} ariaLabel="Copy error message" />
+                )}
+              </div>
+              {expanded.rawErrorMessage ? (
+                <pre className="admin-error-modal-message">{expanded.rawErrorMessage}</pre>
+              ) : (
+                <p className="admin-error-modal-message admin-error-modal-message--empty">
+                  The server recorded no error message for this job. Use the job ID to look it up
+                  in the relayer logs.
+                </p>
+              )}
             </div>
             <div className="admin-error-modal-footer">
-              <button
-                onClick={() => handleCopy(expanded.fullMessage)}
+              <CopyButton
+                text={() => errorDetailsText(expanded)}
+                ariaLabel="Copy all details"
+                size="sm"
                 className="admin-copy-full-btn"
               >
-                <Copy size={14} />
-                {copied ? 'Copied!' : 'Copy to clipboard'}
-              </button>
+                Copy all details
+              </CopyButton>
             </div>
           </div>
         </div>

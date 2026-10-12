@@ -16,6 +16,7 @@
  *   routes/          — one module per endpoint group
  *   app.ts           — Express app assembly (route/middleware order)
  *   server.ts        — bootstrap + graceful shutdown
+ *   seal-listener.ts — separate process for /seal/*, so uploads cannot stall recall
  *
  * Endpoints:
  *   GET  /health                     → local liveness (no auth)

@@ -150,7 +150,7 @@ const stored = await memwal.waitForRememberJob(accepted.job_id, {
 
 | Method | Description | Returns |
 |---|---|---|
-| `remember(text, namespace?)` | Accept one memory job immediately | `{ job_id, status }` |
+| `remember(text, namespaceOrOptions?, options?)` | Accept one memory job immediately. A plain object in the namespace slot is options (`{ idempotencyKey }`), not a namespace | `{ job_id, status }` |
 | `rememberAndWait(text, namespace?, opts?)` | Store one memory and wait for completion | `{ id, job_id, blob_id, owner, namespace }` |
 | `recall({ query, limit?, topK?, namespace?, maxDistance? })` *(preferred)* or `recall(query, limit?, namespace?)` | Semantic search for memories | `{ results: [{ blob_id, text, distance }], total }` |
 | `analyze(text, namespace?)` | Extract facts and accept one memory job per fact | `{ job_ids, facts, fact_count, status, owner }` |
@@ -236,6 +236,7 @@ interface AnalyzeResult {
 interface RememberBulkStatusItem {
   job_id: string;
   status: "pending" | "running" | "uploaded" | "done" | "failed" | "not_found";
+  namespace?: string; // present when the job row exists; omitted for not_found
   blob_id?: string;
   error?: string;
 }
@@ -574,7 +575,7 @@ Lifecycle hooks run automatically:
 | `health()` returns error | Check relayer URL is correct and reachable |
 | `recall()` returns empty | Verify namespace matches what was used in `remember()` |
 | `recall()` returns unrelated filler | Recall is top-K without a default relevance threshold; filter by `distance`, for example `distance < 0.8`, and calibrate the cutoff against your data |
-| `401 Unauthorized` | Usually wrong `MEMWAL_PRIVATE_KEY`, key not registered on the account, account ID mismatch, or staging/mainnet mismatch. Check `.env.local` and dashboard credentials |
+| `401 Unauthorized` | Usually wrong `MEMWAL_PRIVATE_KEY`, key not registered on the account, account ID mismatch (a wallet address is not a MemWal account ID), or staging/mainnet mismatch. Check `.env.local` and dashboard credentials |
 | SDK import errors | Run `pnpm add @mysten-incubation/memwal` — check Node.js ≥ 18 |
 | Manual client errors | Install peer deps: `@mysten/sui @mysten/seal @mysten/walrus` |
 | Direct Sui reads fail or examples look stale | Prefer `SuiGrpcClient` from `@mysten/sui/grpc`; JSON-RPC snippets using `SuiClient` / `getFullnodeUrl` may be stale |

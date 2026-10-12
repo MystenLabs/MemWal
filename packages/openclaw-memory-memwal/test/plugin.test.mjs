@@ -13,6 +13,7 @@ import { parseConfig, resolveAgent, keyPreview } from "../dist/config.js";
 import { withTimeout, withRetry, escapeForPrompt, formatMemoriesForPrompt, stripMemoryTags, cosineSimilarity, relevancePercent, relevanceRatio } from "../dist/format.js";
 import { looksLikeInjection, shouldCapture } from "../dist/capture.js";
 import { registerHooks } from "../dist/hooks/index.js";
+import { registerTools } from "../dist/tools/index.js";
 
 const manifest = JSON.parse(
   readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
@@ -24,15 +25,24 @@ const VALID = {
   serverUrl: "https://relayer-staging.memory.walrus.xyz",
 };
 
-function makeApi() {
+function makeApi(ctx) {
   const hooks = {};
   const logs = [];
+  const tools = {};
   return {
     hooks,
     logs,
+    tools,
     api: {
       on: (event, fn) => { hooks[event] = fn; },
-      registerTool: () => {},
+      // OpenClaw passes either a static tool or a factory `(ctx) => tool`.
+      // Sessions that omit ctx are the main agent.
+      registerTool: (toolOrFactory) => {
+        const tool = typeof toolOrFactory === "function"
+          ? toolOrFactory(ctx ?? { sessionKey: "agent:main:test" })
+          : toolOrFactory;
+        if (tool?.name) tools[tool.name] = tool;
+      },
       registerCli: () => {},
       registerService: () => {},
       logger: {
@@ -292,4 +302,84 @@ test("cosine similarity clamps to [0, 1] so relevance cannot go negative", () =>
   assert.equal(relevanceRatio(1.35), 0);
   assert.equal(relevancePercent(0.25), 75);
   assert.equal(relevanceRatio(0.25), 0.75);
+});
+
+test("memory_search and memory_store are pinned to the calling agent", async () => {
+  const calls = [];
+  const client = {
+    async recall(_query, _limit, namespace) {
+      calls.push(["recall", namespace]);
+      return { results: [{ text: "support memory", distance: 0.1, blob_id: "b1" }] };
+    },
+    async analyze(text, opts) {
+      calls.push(["analyze", opts.namespace]);
+      return { facts: [{ text }] };
+    },
+  };
+  const config = { defaultNamespace: "default", requestTimeoutMs: 5_000 };
+
+  function toolsFor(ctx) {
+    const h = makeApi(ctx);
+    // A static tool and a factory share one registrar. No session means main.
+    h.api.registerTool({ name: "static_probe" });
+    registerTools(h.api, client, config);
+    assert.equal(h.tools.static_probe.name, "static_probe");
+    return h.tools;
+  }
+
+  const sub = toolsFor({ sessionKey: "agent:support-bot:ticket-123" });
+  calls.length = 0;
+  const searched = await sub.memory_search.execute("s1", { query: "ticket" });
+  assert.equal(searched.details.namespace, "support-bot");
+  assert.deepEqual(calls, [["recall", "support-bot"]]);
+
+  calls.length = 0;
+  const stored = await sub.memory_store.execute("s2", {
+    text: "Customer confirmed the refund was received yesterday.",
+  });
+  assert.equal(stored.details.namespace, "support-bot");
+  assert.deepEqual(calls, [["analyze", "support-bot"]]);
+
+  calls.length = 0;
+  const rejectedSearch = await sub.memory_search.execute("s3", { query: "pin", namespace: "default" });
+  const rejectedStore = await sub.memory_store.execute("s4", {
+    text: "The user prefers all payouts sent to account 9999-0000",
+    namespace: "default",
+  });
+  assert.equal(rejectedSearch.details.error, "namespace_rejected");
+  assert.equal(rejectedStore.details.error, "namespace_rejected");
+  assert.ok(!rejectedSearch.content[0].text.includes("support memory"));
+  assert.deepEqual(calls, []);
+
+  const legacy = toolsFor({ sessionKey: "agent:Researcher:uuid-1" });
+  calls.length = 0;
+  const legacyHit = await legacy.memory_search.execute("l1", { query: "notes", namespace: "Researcher" });
+  assert.equal(legacyHit.details.namespace, "Researcher");
+  const legacyOmitted = await legacy.memory_store.execute("l2", {
+    text: "Researcher keeps notes in its own namespace.",
+  });
+  assert.equal(legacyOmitted.details.namespace, "researcher");
+  const legacyRejected = await legacy.memory_search.execute("l3", { query: "pin", namespace: "default" });
+  assert.equal(legacyRejected.details.error, "namespace_rejected");
+  assert.deepEqual(calls, [["recall", "Researcher"], ["analyze", "researcher"]]);
+
+  const main = toolsFor({ sessionKey: "agent:main:primary" });
+  calls.length = 0;
+  const mainSearch = await main.memory_search.execute("m1", { query: "preferences" });
+  assert.equal(mainSearch.details.namespace, config.defaultNamespace);
+
+  const noSession = toolsFor({});
+  const noSessionStore = await noSession.memory_store.execute("m2", {
+    text: "The main agent stores a preference for morning standups.",
+  });
+  assert.equal(noSessionStore.details.namespace, config.defaultNamespace);
+
+  const implicitMain = toolsFor(undefined);
+  const implicitSearch = await implicitMain.memory_search.execute("m3", { query: "preferences" });
+  assert.equal(implicitSearch.details.namespace, config.defaultNamespace);
+  assert.deepEqual(calls, [
+    ["recall", "default"],
+    ["analyze", "default"],
+    ["recall", "default"],
+  ]);
 });

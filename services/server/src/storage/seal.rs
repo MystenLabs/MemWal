@@ -411,18 +411,24 @@ pub async fn seal_decrypt_batch(
         started.elapsed(),
     );
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
         crate::observability::record_sidecar_failure("seal_decrypt_batch", "http_error");
         let body_text = resp.text().await.unwrap_or_default();
-        if let Ok(err) = serde_json::from_str::<SidecarError>(&body_text) {
-            return Err(AppError::Internal(format!(
+        let detail = serde_json::from_str::<SidecarError>(&body_text)
+            .map(|err| err.error)
+            .unwrap_or(body_text);
+        // 503 is the sidecar's shared-outage signal. Recall retries that;
+        // Internal becomes a non-retryable 500.
+        if status.as_u16() == 503 {
+            return Err(AppError::UpstreamUnavailable(format!(
                 "seal decrypt-batch failed: {}",
-                err.error
+                detail
             )));
         }
         return Err(AppError::Internal(format!(
             "seal decrypt-batch failed: {}",
-            body_text
+            detail
         )));
     }
 

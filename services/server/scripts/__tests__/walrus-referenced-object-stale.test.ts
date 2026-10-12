@@ -27,6 +27,32 @@ test("detects Enoki dry-run referenced object stale at version None", () => {
     assert.equal(isWalrusReferencedObjectStale(message), true);
 });
 
+test("detects a percent-encoded Enoki dry-run referenced object stale message", () => {
+    // Production job fa5f9506: Enoki returned the dry-run sentence with
+    // spaces as %20, so the literal-space regex never armed the rebuild loop.
+    const message =
+        "Enoki API error (400): {\"errors\":[{\"code\":\"dry_run_failed\"," +
+        "\"message\":\"Error%20checking%20transaction%20input%20objects:%20Could%20not%20find%20the%20" +
+        "referenced%20object%200xa2cf3a6d91952320d2f8262826e9f56b9520829934b8405e90ccb1963103a472%20" +
+        "at%20version%20Some(SequenceNumber(1025755045))\"}]}";
+
+    assert.equal(isWalrusReferencedObjectStale(message), true);
+    assert.equal(
+        classifyEnokiSponsoredTransactionInvalidation(message),
+        "referenced_object_stale",
+    );
+});
+
+test("leaves a truncated percent escape in place instead of throwing", () => {
+    const message =
+        "dry_run_failed Could%20not%20find%20the%20referenced%20object 0xabc at%20version %";
+    assert.equal(isWalrusReferencedObjectStale(message), true);
+    assert.equal(
+        isWalrusReferencedObjectStale("dry_run_failed Could+not+find+the+referenced+object at+version"),
+        false,
+    );
+});
+
 test("does not match unrelated dry-run or object errors", () => {
     assert.equal(isWalrusReferencedObjectStale("dry_run_failed: MoveAbort in balance::split"), false);
     assert.equal(isWalrusReferencedObjectStale("Could not find the referenced object 0xabc"), false);
