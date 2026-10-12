@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Maximize2, X } from 'lucide-react'
-import { shortDate, visibleTickIndexes } from './chartTicks'
+import { bucketInterval, shortDate, visibleTickIndexes } from './chartTicks'
 
 export interface CountBucket {
   id: string
@@ -53,7 +54,7 @@ export function CountChart({
         <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
       </details>
       {expanded && (
-        <ChartDialog title={title} context={`${grain} · ${timeZone}`} onClose={() => { setExpanded(false); expandRef.current?.focus() }}>
+        <ChartDialog title={title} context={`${grain} · ${unit} · ${timeZone.replace(/_/g, ' ')}`} onClose={() => { setExpanded(false); expandRef.current?.focus() }}>
           {showRegions && <ChartLegend />}
           {plot(true)}
           <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
@@ -148,7 +149,7 @@ function CountPlot({
         })}
       </svg>
       {selected && (
-        <div className="wa-tip" role="status">{shortDate(selected.label)} · {timeZone.replace(/_/g, ' ')} · {selected.count} {unit} · {selected.region === 'during' ? 'Selected period' : selected.region}{selected.partial ? ' · partial bucket' : ''}</div>
+        <div className="wa-tip" role="status">{bucketInterval(selected.label)} · {timeZone.replace(/_/g, ' ')} · {selected.count} {unit} · {selected.region === 'during' ? 'Selected period' : selected.region}{selected.partial ? ' · partial bucket' : ''}</div>
       )}
     </div>
   )
@@ -162,7 +163,10 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
   onCloseRef.current = onClose
   useEffect(() => {
     const overflow = document.body.style.overflow
+    const scrollY = window.scrollY
+    const root = document.querySelector('.wa')
     document.body.style.overflow = 'hidden'
+    root?.setAttribute('inert', '')
     closeRef.current?.focus()
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { event.preventDefault(); onCloseRef.current(); return }
@@ -177,10 +181,12 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
     document.addEventListener('keydown', onKey)
     return () => {
       document.body.style.overflow = overflow
+      root?.removeAttribute('inert')
+      window.scrollTo(0, scrollY)
       document.removeEventListener('keydown', onKey)
     }
   }, [])
-  return (
+  return createPortal(
     <div className="wa-chart-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
       <div ref={panelRef} className="wa-chart-dialog-panel">
         <div className="wa-overlay-head">
@@ -192,7 +198,8 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 

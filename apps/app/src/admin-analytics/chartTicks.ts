@@ -24,3 +24,14 @@ export function shortDate(value: string): string {
   if (!match) return value.length > 8 ? value.slice(0, 8) : value
   return `${Number(match[3])} ${MONTHS[Number(match[2]) - 1]}`
 }
+
+export function bucketInterval(label: string): string {
+  const hour = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(label)
+  if (hour) {
+    const start = Number(hour[4])
+    const end = String((start + 1) % 24).padStart(2, '0')
+    return `${Number(hour[3])} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(hour[2]) - 1]}, ${hour[4]}:${hour[5]}–${end}:${hour[5]}`
+  }
+  return shortDate(label)
+}
+
