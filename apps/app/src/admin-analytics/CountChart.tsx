@@ -190,3 +190,24 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
     </div>
   )
 }
+
+function CountTable({ buckets, unit, timeZone, onOpen }: { buckets: CountBucket[]; unit: string; timeZone: string; onOpen?: (bucket: CountBucket) => void }) {
+  return (
+    <div className="wa-table-wrap">
+      <table className="wa-table">
+        <caption className="wa-sr">{unit} by {timeZone}</caption>
+        <thead><tr><th>Bucket</th><th>Window</th><th className="wa-num">{unit}</th></tr></thead>
+        <tbody>
+          {buckets.map((bucket) => (
+            <tr key={bucket.id} onClick={() => onOpen?.(bucket)}>
+              <td>{bucket.label}</td>
+              <td>{bucket.region === 'during' ? 'Selected period' : bucket.region}{bucket.partial ? ' · partial' : ''}</td>
+              <td className="wa-num">{bucket.count}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+

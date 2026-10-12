@@ -638,7 +638,6 @@ export function IncidentLivePage({
     ...(actions?.memoriesByDay ?? []).map((day) => ({ ...day, region: 'during' as const })),
     ...(after.data?.actions.memoriesByDay ?? []).map((day) => ({ ...day, region: 'after' as const })),
   ]
-  const peak = Math.max(1, ...points.map((point) => point.count))
   const duringHours = Math.max(1 / 60, (period.end.getTime() - period.start.getTime()) / 3_600_000)
   const beforeHours = Math.max(1 / 60, (before.end.getTime() - before.start.getTime()) / 3_600_000)
   const unequal = Math.abs(duringHours - beforeHours) > 0.05
