@@ -12,6 +12,7 @@ import { DateRangeControl } from './DateRangeControl'
 import { comparisonWindow, formatSpan, isRangeId, resolveRange, type CompareId, type RangeId } from './range'
 import { config } from '../config'
 import './admin-analytics.css'
+import { ChartDialog } from './CountChart'
 import {
   buildDemo,
   bytePopulation,
@@ -93,6 +94,8 @@ function Chart({
   series: 'bytes' | 'requests' | 'latency'
 }) {
   const [hover, setHover] = useState<number | null>(null)
+  const [expanded, setExpanded] = useState(false)
+  const expandRef = useRef<HTMLButtonElement>(null)
   const width = 640
   const height = 230
   const pick = (point: typeof points[number]) => series === 'requests' ? point.requests : series === 'latency' ? point.latency : point.relayer
@@ -108,7 +111,7 @@ function Chart({
     setHover((current) => current === index ? null : index)
   }
   const selected = hover != null ? points[hover] : null
-  return (
+  const plot = (
     <div style={{ position: 'relative' }}>
       <svg className="wa-chart" viewBox={`0 0 ${width} ${height}`} role="img" tabIndex={0} aria-label={`${series} trend, ${points.length} buckets, peak ${max} ${unit}. Arrow keys inspect a bucket.`} onPointerUp={(event) => inspect(event.clientX, event.currentTarget)} onKeyDown={(event) => {
         if (event.key === 'Escape') setHover(null)
@@ -133,6 +136,15 @@ function Chart({
       {selected && (
         <div className="wa-tip" role="status" style={{ left: 8, right: 8, top: 8 }}>{selected.label}: {series === 'bytes' ? formatBytes(BigInt(pick(selected))) : pick(selected)} {series === 'requests' ? 'memories' : unit}</div>
       )}
+    </div>
+  )
+  return (
+    <div>
+      <div className="wa-actions" style={{ justifyContent: 'flex-end', marginBottom: 8 }}>
+        <button ref={expandRef} className="wa-btn" type="button" onClick={() => setExpanded(true)}>Expand chart</button>
+      </div>
+      {plot}
+      {expanded && <ChartDialog title={`${series} trend`} context={`${points.length} buckets · ${unit}`} onClose={() => { setExpanded(false); expandRef.current?.focus() }}>{plot}</ChartDialog>}
     </div>
   )
 }

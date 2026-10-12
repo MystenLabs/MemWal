@@ -19,6 +19,7 @@ import {
   type UploadError,
 } from '../utils/admin-api'
 import { Drawer } from './Drawer'
+import { CountChart } from './CountChart'
 import { formatBytes, formatCount, toCsv } from './metrics'
 import { baselineChange, investigationWindows } from './range'
 
@@ -613,7 +614,6 @@ export function IncidentLivePage({
     enabled: Boolean(adminKey),
     retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
   })
-  const [hover, setHover] = useState<number | null>(null)
   const [ownerSort, setOwnerSort] = useState<'uploads' | 'owner'>('uploads')
   useInvalid(during.error, onInvalidKey)
   if (!adminKey) return null
@@ -727,31 +727,15 @@ export function IncidentLivePage({
       </div>
       <div className="wa-invest">
         <section className="wa-panel">
-          <div className="wa-chart-head">
-            <h2>Memories created</h2>
-            <span className="wa-note">Count · {timeZone} · not retrieval bytes</span>
-          </div>
-          {points.length === 0 ? <p className="wa-empty">No memories created in these measured windows.</p> : (
-            <div className="wa-timeline">
-              <svg viewBox="0 0 640 220" role="img" aria-label="Memories created by day">
-                {points.map((point, index) => {
-                  const bar = Math.max(8, 600 / points.length - 6)
-                  const height = Math.max(2, (point.count / peak) * 160)
-                  const x = 20 + index * (bar + 6)
-                  return (
-                    <g key={`${point.region}-${point.day}`}>
-                      <rect x={x} y={180 - height} width={bar} height={height} rx="2" fill={point.region === 'during' ? '#8055ff' : point.region === 'before' ? '#3a3a3a' : '#6a5acd'} onMouseEnter={() => setHover(index)} onMouseLeave={() => setHover(null)} onClick={() => onOpenDay(point.day)} />
-                      <text x={x} y="198" fill="#8a8a8a" fontSize="10">{point.day.slice(5)}</text>
-                    </g>
-                  )
-                })}
-              </svg>
-              {hover != null && points[hover] && (
-                <div className="wa-tip">{points[hover].day} · {timeZone} · memories created · {points[hover].count} · {points[hover].region} · sample is the day count · no deployment annotation</div>
-              )}
-              <p className="wa-note">Gray is before, violet is during, lighter violet is after. Click a day to open that calendar day. Missing retrieval series are omitted, not drawn as zero.</p>
-            </div>
-          )}
+          <CountChart
+            title="Completed writes"
+            unit="jobs"
+            grain="Daily"
+            timeZone={timeZone}
+            notice="Completed remember jobs by local day. Not retrieval bytes."
+            buckets={points.map((point) => ({ id: `${point.region}-${point.day}`, label: point.day, count: point.count, region: point.region }))}
+            onOpen={(bucket) => onOpenDay(bucket.label)}
+          />
         </section>
         <section className="wa-panel">
           <h2>Observed change</h2>

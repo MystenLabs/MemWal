@@ -502,3 +502,10 @@ a.wa-ext:hover, a.wa-ext:focus-visible { color: #fff; border-bottom-color: var(-
 @media (max-width: 720px) { .wa-windows { grid-template-columns: 1fr; } }
 
 
+.wa-count-host { position: relative; }
+.wa-count-chart .wa-legend { margin: 0 0 12px; }
+.wa-chart-dialog { position: fixed; inset: 0; z-index: 50; background: #1a1a1a; display: flex; padding: 16px; }
+.wa-chart-dialog-panel { width: min(1100px, 100%); margin: 0 auto; overflow: auto; background: #1a1a1a; }
+@media (prefers-reduced-motion: reduce) { .wa-chart-dialog { transition: none; } }
+
+

@@ -1,0 +1,192 @@
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { Maximize2, X } from 'lucide-react'
+import { shortDate, visibleTickIndexes } from './chartTicks'
+
+export interface CountBucket {
+  id: string
+  label: string
+  count: number
+  region: 'before' | 'during' | 'after'
+  partial?: boolean
+}
+
+const FILL = { before: '#6e6e6e', during: '#8055ff', after: '#c4b6ff' }
+
+export function CountChart({
+  title,
+  unit,
+  grain,
+  timeZone,
+  buckets,
+  notice,
+  onOpen,
+}: {
+  title: string
+  unit: string
+  grain: string
+  timeZone: string
+  buckets: CountBucket[]
+  notice?: string
+  onOpen?: (bucket: CountBucket) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const expandRef = useRef<HTMLButtonElement>(null)
+  const plot = (tall: boolean) => (
+    <CountPlot title={title} unit={unit} grain={grain} timeZone={timeZone} buckets={buckets} tall={tall} onOpen={onOpen} />
+  )
+  return (
+    <section className="wa-count-chart">
+      <div className="wa-chart-head">
+        <div>
+          <h2>{title}</h2>
+          <p className="wa-note">{grain} · {timeZone.replace(/_/g, ' ')}</p>
+        </div>
+        <button ref={expandRef} className="wa-btn" type="button" onClick={() => setExpanded(true)}><Maximize2 size={14} aria-hidden="true" /> Expand chart</button>
+      </div>
+      <ChartLegend />
+      {plot(false)}
+      {notice && <p className="wa-note">{notice}</p>}
+      <details className="wa-disclosure">
+        <summary>Values</summary>
+        <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
+      </details>
+      {expanded && (
+        <ChartDialog title={title} context={`${grain} · ${timeZone}`} onClose={() => { setExpanded(false); expandRef.current?.focus() }}>
+          <ChartLegend />
+          {plot(true)}
+          <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
+        </ChartDialog>
+      )}
+    </section>
+  )
+}
+
+function ChartLegend() {
+  return (
+    <div className="wa-legend" aria-hidden="false">
+      <span><i className="wa-swatch" style={{ background: FILL.before }} /> Before</span>
+      <span><i className="wa-swatch" style={{ background: FILL.during }} /> Selected period</span>
+      <span><i className="wa-swatch" style={{ background: FILL.after }} /> After</span>
+    </div>
+  )
+}
+
+function CountPlot({
+  title,
+  unit,
+  grain,
+  timeZone,
+  buckets,
+  tall,
+  onOpen,
+}: {
+  title: string
+  unit: string
+  grain: string
+  timeZone: string
+  buckets: CountBucket[]
+  tall: boolean
+  onOpen?: (bucket: CountBucket) => void
+}) {
+  const host = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(640)
+  const [hover, setHover] = useState<number | null>(null)
+  useEffect(() => {
+    const node = host.current
+    if (!node) return
+    const measure = () => setWidth(Math.max(280, Math.floor(node.clientWidth)))
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+  const height = tall ? 420 : 220
+  const peak = Math.max(0, ...buckets.map((bucket) => bucket.count))
+  const scaleMax = peak === 0 ? 1 : Math.ceil(peak * 1.15)
+  const ticks = visibleTickIndexes(buckets.length, width - 56)
+  const plotLeft = 44
+  const plotRight = width - 12
+  const plotTop = 16
+  const plotBottom = height - 28
+  const slot = buckets.length ? (plotRight - plotLeft) / buckets.length : 0
+  const y = (value: number) => plotBottom - (value / scaleMax) * (plotBottom - plotTop)
+  const selected = hover != null ? buckets[hover] : null
+  const inspect = (index: number) => setHover(index)
+  return (
+    <div ref={host} className="wa-count-host">
+      <svg className="wa-chart" viewBox={`0 0 ${width} ${height}`} role="img" tabIndex={0} aria-label={`${title}, ${grain}, ${buckets.length} buckets, peak ${peak} ${unit}. Arrow keys inspect a bucket.`} onKeyDown={(event) => {
+        if (event.key === 'ArrowRight') { event.preventDefault(); setHover((index) => Math.min(buckets.length - 1, (index ?? -1) + 1)) }
+        if (event.key === 'ArrowLeft') { event.preventDefault(); setHover((index) => Math.max(0, (index ?? 1) - 1)) }
+        if (event.key === 'Enter' && hover != null && onOpen) onOpen(buckets[hover])
+        if (event.key === 'Escape') setHover(null)
+      }}>
+        <text x="4" y="12" fill="#8d8d8d" fontSize="11">{unit}</text>
+        {[0, 0.5, 1].map((step) => {
+          const value = Math.round(scaleMax * (1 - step))
+          return (
+            <g key={step}>
+              <line x1={plotLeft} x2={plotRight} y1={y(value)} y2={y(value)} stroke="#2e2e2e" />
+              <text x="4" y={y(value) + 4} fill="#8d8d8d" fontSize="11">{value}</text>
+            </g>
+          )
+        })}
+        {buckets.map((bucket, index) => {
+          const barWidth = Math.max(2, slot - 4)
+          const x = plotLeft + index * slot + 2
+          const barHeight = bucket.count === 0 ? 0 : Math.max(1, y(0) - y(bucket.count))
+          return (
+            <g key={bucket.id}>
+              <rect x={x} y={y(bucket.count)} width={barWidth} height={barHeight} rx="2" fill={FILL[bucket.region]} onPointerEnter={() => inspect(index)} onPointerLeave={() => setHover(null)} onClick={() => onOpen?.(bucket)} />
+              {ticks.includes(index) && <text x={x + barWidth / 2} y={height - 8} fill="#bdbdbd" fontSize="12" textAnchor="middle">{shortDate(bucket.label)}</text>}
+            </g>
+          )
+        })}
+      </svg>
+      {selected && (
+        <div className="wa-tip" role="status">{shortDate(selected.label)} · {timeZone.replace(/_/g, ' ')} · {selected.count} {unit} · {selected.region === 'during' ? 'Selected period' : selected.region}{selected.partial ? ' · partial bucket' : ''}</div>
+      )}
+    </div>
+  )
+}
+
+export function ChartDialog({ title, context, onClose, children }: { title: string; context: string; onClose: () => void; children: ReactNode }) {
+  const titleId = useId()
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  useEffect(() => {
+    const overflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    closeRef.current?.focus()
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); onCloseRef.current(); return }
+      if (event.key !== 'Tab' || !panelRef.current) return
+      const nodes = [...panelRef.current.querySelectorAll<HTMLElement>('button, a, summary, [tabindex]:not([tabindex="-1"])')].filter((node) => !node.hasAttribute('disabled'))
+      if (nodes.length === 0) return
+      const first = nodes[0]
+      const last = nodes[nodes.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = overflow
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [])
+  return (
+    <div className="wa-chart-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <div ref={panelRef} className="wa-chart-dialog-panel">
+        <div className="wa-overlay-head">
+          <div>
+            <h2 id={titleId}>{title}</h2>
+            <p className="wa-note">{context}</p>
+          </div>
+          <button ref={closeRef} className="wa-icon-btn" type="button" aria-label="Close chart" onClick={onClose}><X size={18} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  )
+}
