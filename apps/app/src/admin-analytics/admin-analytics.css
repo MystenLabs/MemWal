@@ -151,7 +151,7 @@
 .wa-title { margin-right: auto; }
 .wa-title h1 { margin: 0; font-size: 18px; font-weight: 500; letter-spacing: 0; }
 .wa-title p { margin: 2px 0 0; color: var(--wa-muted); font-size: 13px; }
-.wa-actions { display: flex; align-items: center; gap: 8px; }
+.wa-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .wa-btn, .wa-select, .wa-input, .wa-env {
   height: 32px;
@@ -162,14 +162,29 @@
   padding: 0 10px;
   font: inherit;
   font-size: 13px;
+  line-height: 1;
+  box-sizing: border-box;
+}
+.wa-btn, .wa-env {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.wa-btn svg, .wa-chevron {
+  display: block;
+  flex: none;
+  width: 14px;
+  height: 14px;
 }
 .wa-env { display: inline-flex; align-items: center; }
-.wa-btn, .wa-select { cursor: pointer; }
 .wa-page { display: flex; flex-direction: column; gap: 12px; padding: 0 16px 24px; }
 .wa-skel { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
 .wa-skel-row { height: 36px; border-radius: 6px; background: #2a2a2a; }
 .wa-empty { color: var(--wa-muted); padding: 12px 0; }
 
+.wa-btn, .wa-select { cursor: pointer; }
 .wa-btn:hover, .wa-select:hover { background: #2b2b2b; }
 .wa-btn.icon { width: 32px; padding: 0; }
 .wa-btn:focus-visible, .wa-select:focus-visible, .wa-input:focus-visible, .wa-navbtn:focus-visible {

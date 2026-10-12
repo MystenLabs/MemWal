@@ -321,7 +321,7 @@ export function AdminAnalyticsApp({
       <main className="wa-main">
         <div className="wa-mobile-bar">
           <button ref={menuButton} className="wa-btn wa-menu-btn" type="button" aria-expanded={navOpen} aria-controls="admin-nav" onClick={() => setNavOpen(true)}>
-            <Menu size={16} /> Menu
+            <Menu size={14} aria-hidden="true" /> <span>Menu</span>
           </button>
           <strong>{VIEWS.find((item) => item.id === view)?.label}</strong>
         </div>
@@ -330,7 +330,7 @@ export function AdminAnalyticsApp({
           <span className="wa-clock" title={timeZone}>{new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now)} <span className="wa-tz">{timeZone}</span></span>
           <button className="wa-btn" onClick={exportView} disabled={!demo && !activityQuery.data} title={demo ? 'Download the fixture account summary' : 'Download the live owner upload counts. Request-byte export is not stored.'}>Export</button>
           <span className="wa-env" title={demo ? 'Demo data. Node egress unavailable. Incident year not verified.' : 'Live request egress is unavailable. Wallet and activity routes are separate.'}>Notices</span>
-          <button className="wa-btn" onClick={onLogout}><LogOut size={14} /> Sign out</button>
+          <button className="wa-btn" type="button" onClick={onLogout}><LogOut size={14} aria-hidden="true" /> <span>Sign out</span></button>
           <div className="wa-more">
             <button className="wa-more-btn wa-btn" type="button" aria-expanded={moreOpen} onClick={() => setMoreOpen((open) => !open)}>More</button>
             {moreOpen && (

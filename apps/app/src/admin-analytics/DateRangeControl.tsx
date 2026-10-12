@@ -132,10 +132,12 @@ export function DateRangeControl({
   return (
     <>
       <button ref={trigger} className="wa-btn" type="button" aria-haspopup="dialog" aria-expanded={open !== null && open !== 'compare'} aria-controls={menuId} onClick={() => setOpen(open && open !== 'compare' ? null : 'range')}>
-        {label} <ChevronDown size={14} aria-hidden="true" />
+        <span>{label}</span>
+        <ChevronDown className="wa-chevron" size={14} aria-hidden="true" />
       </button>
       <button ref={compareTrigger} className="wa-btn" type="button" aria-haspopup="listbox" aria-expanded={open === 'compare'} onClick={() => setOpen(open === 'compare' ? null : 'compare')}>
-        {compareLabel} <ChevronDown size={14} aria-hidden="true" />
+        <span>{compareLabel}</span>
+        <ChevronDown className="wa-chevron" size={14} aria-hidden="true" />
       </button>
       {open && createPortal(
         <div ref={ref} id={menuId} className="wa-menu" role="dialog" aria-label="Date range" style={{ top: box.top, left: box.left, position: 'fixed' }}>

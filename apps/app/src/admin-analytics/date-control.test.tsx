@@ -23,6 +23,27 @@ test('Cancel closes the day picker without committing', async () => {
   expect(screen.queryByRole('dialog', { name: 'Date range' })).not.toBeInTheDocument()
 })
 
+test('range and comparison triggers use the same chevron slot', () => {
+  render(
+    <DateRangeControl
+      range="week"
+      label="This week"
+      compare="previous"
+      compareLabel="11 Oct 2026"
+      selected={{}}
+      onCommit={() => {}}
+      onCompare={() => {}}
+    />,
+  )
+  const triggers = screen.getAllByRole('button').filter((button) => button.querySelector('.wa-chevron'))
+  expect(triggers).toHaveLength(2)
+  for (const trigger of triggers) {
+    expect(trigger.className).toContain('wa-btn')
+    expect(trigger.querySelector('.wa-chevron')).toHaveAttribute('aria-hidden', 'true')
+  }
+})
+
+
 test('Apply commits the selected month and closes the menu', async () => {
   const user = userEvent.setup()
   const onCommit = vi.fn()
