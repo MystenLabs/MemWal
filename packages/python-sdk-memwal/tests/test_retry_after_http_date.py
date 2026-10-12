@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from typing import Optional
@@ -122,7 +121,9 @@ def test_clamped_retry_after_ms_with_http_date(monkeypatch: pytest.MonkeyPatch) 
 async def test_wait_for_remember_job_honors_http_date_retry_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    clock = {"now": int(time.time() * 1000)}
+    fixed_ts = 1700000000.0
+    monkeypatch.setattr("time.time", lambda: fixed_ts)
+    clock = {"now": int(fixed_ts * 1000)}
     slept: list[int] = []
 
     def fake_now_ms() -> int:
@@ -139,7 +140,7 @@ async def test_wait_for_remember_job_honors_http_date_retry_after(
     calls = {"n": 0}
 
     # 429 Retry-After is 2 seconds into future
-    future_dt = datetime.now(timezone.utc) + timedelta(seconds=2)
+    future_dt = datetime.fromtimestamp(fixed_ts, tz=timezone.utc) + timedelta(seconds=2)
     http_date = format_datetime(future_dt, usegmt=True)
 
     async def status(*_args: object, **_kwargs: object) -> dict:
@@ -153,7 +154,7 @@ async def test_wait_for_remember_job_honors_http_date_retry_after(
     res = await client.wait_for_remember_job("job-1", timeout_ms=10_000)
     assert res.blob_id == "b-1"
     assert calls["n"] == 2
-    # First sleep is attempt 0 (0 ms), second sleep should be ~2000 ms from Retry-After
+    # First sleep is attempt 0 (0 ms), second sleep should be 2000 ms from Retry-After
     assert len(slept) == 2
     assert slept[0] == 0
-    assert 1500 <= slept[1] <= 2500
+    assert slept[1] == 2000
