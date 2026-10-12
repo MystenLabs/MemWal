@@ -34,6 +34,15 @@ export function CountChart({
 }) {
   const [expanded, setExpanded] = useState(false)
   const expandRef = useRef<HTMLButtonElement>(null)
+  const savedScroll = useRef(0)
+  const wasOpen = useRef(false)
+  useEffect(() => {
+    if (expanded) { wasOpen.current = true; return }
+    if (!wasOpen.current) return
+    wasOpen.current = false
+    expandRef.current?.focus({ preventScroll: true })
+    window.scrollTo(0, savedScroll.current)
+  }, [expanded])
   const plot = (tall: boolean) => (
     <CountPlot title={title} unit={unit} grain={grain} timeZone={timeZone} buckets={buckets} tall={tall} onOpen={onOpen} />
   )
@@ -44,7 +53,7 @@ export function CountChart({
           <h2>{title}</h2>
           <p className="wa-note">{grain} · {unit} · {timeZone.replace(/_/g, ' ')}</p>
         </div>
-        <button ref={expandRef} className="wa-btn" type="button" onClick={() => setExpanded(true)}><Maximize2 size={14} aria-hidden="true" /> Expand chart</button>
+        <button ref={expandRef} className="wa-btn" type="button" onClick={() => { savedScroll.current = window.scrollY; setExpanded(true) }}><Maximize2 size={14} aria-hidden="true" /> Expand chart</button>
       </div>
       {showRegions && <ChartLegend />}
       {plot(false)}
@@ -54,7 +63,7 @@ export function CountChart({
         <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
       </details>
       {expanded && (
-        <ChartDialog title={title} context={`${grain} · ${unit} · ${timeZone.replace(/_/g, ' ')}`} onClose={() => { setExpanded(false); expandRef.current?.focus({ preventScroll: true }) }}>
+        <ChartDialog title={title} context={`${grain} · ${unit} · ${timeZone.replace(/_/g, ' ')}`} onClose={() => setExpanded(false)}>
           {showRegions && <ChartLegend />}
           {plot(true)}
           <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
@@ -170,11 +179,9 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
     root?.setAttribute('inert', '')
     closeRef.current?.focus()
     const finish = () => {
-      const y = scrollRef.current
       root?.removeAttribute('inert')
       document.body.style.overflow = overflow
       onCloseRef.current()
-      requestAnimationFrame(() => window.scrollTo(0, y))
     }
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { event.preventDefault(); finish(); return }
