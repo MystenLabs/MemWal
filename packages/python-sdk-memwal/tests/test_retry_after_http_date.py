@@ -5,16 +5,14 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
-from types import SimpleNamespace
 from typing import Optional
 
 import pytest
 
 from memwal.client import (
     MemWal,
-    MemWalRememberJobTimeout,
-    _HttpStatusError,
     _clamped_retry_after_ms,
+    _HttpStatusError,
     _positive_retry_ms,
     _retry_after_ms,
 )

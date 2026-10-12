@@ -222,6 +222,8 @@ def _http_date_retry_ms(raw: object) -> Optional[int]:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         target_ts = dt.timestamp()
+        # HTTP-date is absolute wall-clock time, so we deliberately compare against
+        # time.time() rather than monotonic _now_ms().
         now_ts = time.time()
         diff = target_ts - now_ts
         if diff <= 0 or math.isnan(diff) or math.isinf(diff):
