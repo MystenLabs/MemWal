@@ -33,6 +33,29 @@ export const CHARS_PER_TOKEN = 4;
 export type TokenCounter = (text: string) => number;
 
 /**
+ * Validate `maxTokens` budget input.
+ *
+ * Rejects negative budgets with `RangeError` (a negative budget silently drops
+ * all memories and reports `truncated: true`, mimicking amnesia).
+ * Rejects non-numeric budgets with `TypeError` (e.g. `"400"` or `null` which
+ * would otherwise silently disable budgeting).
+ *
+ * `undefined` is allowed (budgeting disabled).
+ * Non-finite numbers (`NaN` / `Infinity`) pass validation and are treated as
+ * "no budget" by `applyTokenBudget` per documented contract.
+ * Zero is allowed (`maxTokens: 0` returns empty results with `truncated: true`).
+ */
+export function validateMaxTokens(maxTokens: unknown): void {
+    if (maxTokens === undefined) return;
+    if (typeof maxTokens !== "number") {
+        throw new TypeError("maxTokens must be a number");
+    }
+    if (maxTokens < 0) {
+        throw new RangeError("maxTokens must be non-negative");
+    }
+}
+
+/**
  * Estimate the number of tokens in `text` using a documented character-based
  * approximation (~`chars / 4`). Deterministic and dependency-free. See the
  * module docs for accuracy caveats.
@@ -127,6 +150,7 @@ export function applyTokenBudget(
     strategy: TruncationStrategy = "high-relevance-only",
     countTokens: TokenCounter = estimateTokens,
 ): { results: RecallMemory[]; meta: RecallTokenMeta } {
+    validateMaxTokens(maxTokens);
     const originalCount = results.length;
 
     // A non-finite budget (NaN/Infinity) is not a real budget — never truncate,
@@ -135,7 +159,7 @@ export function applyTokenBudget(
         return { results, meta: { tokenEstimate: payloadTokens(results, countTokens), truncated: false } };
     }
 
-    // Non-positive budget → empty payload; truncated if there was anything.
+    // Zero budget → empty payload; truncated if there was anything.
     if (maxTokens <= 0) {
         return { results: [], meta: { tokenEstimate: 0, truncated: originalCount > 0 } };
     }

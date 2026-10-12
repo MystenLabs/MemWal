@@ -89,7 +89,7 @@ test("recall without maxTokens: response unchanged, NO meta (backward compatible
     assert.deepEqual(result.results, hits);
 });
 
-test("recall with maxTokens: budget applied, total recomputed, meta present", async () => {
+test("recall with maxTokens: budget applied, matching total preserved, meta present", async () => {
     // two 10-token hits (40 chars each); budget 10 → high-relevance-only keeps 1.
     const hits = [
         { blob_id: "b1", text: chars(40), distance: 0.1 },
@@ -99,7 +99,7 @@ test("recall with maxTokens: budget applied, total recomputed, meta present", as
 
     const result = await client().recall({ query: "x", maxTokens: 10 });
     assert.equal(result.results.length, 1, "second hit dropped to fit budget");
-    assert.equal(result.total, 1, "total recomputed to the trimmed count");
+    assert.equal(result.total, 2, "total preserves matching count rather than trimmed count");
     assert.equal(result.results[0].blob_id, "b1", "kept the lowest-distance hit");
     assert.ok(result.meta, "meta attached");
     assert.equal(result.meta.truncated, true);

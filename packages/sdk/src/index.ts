@@ -28,6 +28,7 @@ export {
     estimateTokens,
     truncateToTokenBudget,
     applyTokenBudget,
+    validateMaxTokens,
     CHARS_PER_TOKEN,
 } from "./tokens.js";
 export type { TokenCounter } from "./tokens.js";

@@ -76,7 +76,7 @@ import {
     assertCompatibleRelayer,
     compatibilityErrorFromStatus,
 } from "./compatibility.js";
-import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { applyTokenBudget, estimateTokens, validateMaxTokens } from "./tokens.js";
 import { pollingDelayMs } from "./polling-delay.js";
 import { resolveRecallCall } from "./recall-args.js";
 
@@ -1036,6 +1036,7 @@ export class MemWal {
             limitOrOptions,
             namespace,
         );
+        validateMaxTokens(options.maxTokens);
         const limit = options.topK ?? options.limit ?? 10;
         const resolvedNamespace = options.namespace ?? this.namespace;
 
@@ -1075,8 +1076,8 @@ export class MemWal {
             // Under high-relevance-only, lowest-distance hits are retained and
             // returned in the caller's requested order (WALM-756).
             // Omitting maxTokens leaves the result byte-identical to the pre-budget
-            // behavior (no meta).
-            if (typeof options.maxTokens === "number") {
+            // behavior (no meta). Total preserves the matching hit count (#1068).
+            if (options.maxTokens !== undefined) {
                 const { results: budgeted, meta } = applyTokenBudget(
                     processed.results,
                     options.maxTokens,
@@ -1086,7 +1087,6 @@ export class MemWal {
                 processed = {
                     ...processed,
                     results: budgeted,
-                    total: budgeted.length,
                     meta,
                 };
             }

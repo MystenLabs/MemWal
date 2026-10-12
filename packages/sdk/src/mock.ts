@@ -21,7 +21,7 @@ import type {
     NamespacesResult,
     ListNamespacesOptions,
 } from "./types.js";
-import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { applyTokenBudget, estimateTokens, validateMaxTokens } from "./tokens.js";
 import { resolveRecallCall } from "./recall-args.js";
 
 /** Matches the relayer's `MAX_BULK_ITEMS`. */
@@ -332,6 +332,7 @@ export class MemWalMock {
             namespace
         );
         validateText(query, "query");
+        validateMaxTokens(options.maxTokens);
         const resolvedNamespace = options.namespace ?? this.namespace;
         const resolvedLimit = options.topK ?? options.limit ?? 10;
         if (!Number.isInteger(resolvedLimit) || resolvedLimit < 0) {
@@ -374,14 +375,14 @@ export class MemWalMock {
                 distance: memoryDistance,
             }));
 
-        if (typeof options.maxTokens === "number") {
+        if (options.maxTokens !== undefined) {
             const { results, meta } = applyTokenBudget(
                 ranked,
                 options.maxTokens,
                 options.truncationStrategy,
                 options.countTokens
             );
-            return { results, total: results.length, meta };
+            return { results, total: ranked.length, meta };
         }
 
         return { results: ranked, total: ranked.length };
