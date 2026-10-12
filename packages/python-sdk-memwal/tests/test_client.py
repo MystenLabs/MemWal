@@ -903,6 +903,17 @@ class TestErrorHandling:
             await memwal_client.recall("test")
 
     @respx.mock
+    async def test_empty_200_recall_is_an_sdk_error(self, memwal_client: MemWal) -> None:
+        """An empty success body is not an empty result set."""
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(200, text="")
+        )
+
+        with pytest.raises(MemWalError, match="empty body"):
+            await memwal_client.recall("test")
+
+    @respx.mock
     async def test_500_strips_localhost_sidecar_urls(self, memwal_client: MemWal) -> None:
         mock_seal_session_prereqs()
         respx.post(f"{_TEST_SERVER}/api/recall").mock(

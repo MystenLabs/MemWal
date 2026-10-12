@@ -1634,13 +1634,17 @@ class MemWal:
         if not response.content:
             if response.status_code == 404:
                 return {"status": "not_found", "error": "not found"}
-            return {}
+            raise MemWalError(
+                f"HTTP {response.status_code} response had an empty body; expected JSON"
+            )
         try:
             return response.json()
         except (ValueError, json.JSONDecodeError):
             if response.status_code == 404:
                 return {"status": "not_found", "error": "not found"}
-            raise
+            raise MemWalError(
+                f"HTTP {response.status_code} response was not JSON"
+            ) from None
 
 
 class MemWalError(Exception):
