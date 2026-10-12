@@ -21,5 +21,7 @@ describe('visibleTickIndexes', () => {
 describe('shortDate', () => {
   it('formats a day bucket without the year', () => {
     expect(shortDate('2026-10-05')).toBe('5 Oct')
+    expect(shortDate('2026-10-05')).toBe('5 Oct')
+    expect(shortDate('2026-10-12T15:00')).toBe('15:00')
   })
 })

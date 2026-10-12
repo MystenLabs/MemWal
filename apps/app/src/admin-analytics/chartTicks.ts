@@ -18,6 +18,8 @@ export function visibleTickIndexes(count: number, width: number, minGap = 72): n
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 export function shortDate(value: string): string {
+  const hour = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value)
+  if (hour) return `${hour[4]}:${hour[5]}`
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value)
   if (!match) return value.length > 8 ? value.slice(0, 8) : value
   return `${Number(match[3])} ${MONTHS[Number(match[2]) - 1]}`

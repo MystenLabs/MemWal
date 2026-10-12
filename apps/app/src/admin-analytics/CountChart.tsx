@@ -41,7 +41,7 @@ export function CountChart({
       <div className="wa-chart-head">
         <div>
           <h2>{title}</h2>
-          <p className="wa-note">{grain} · {timeZone.replace(/_/g, ' ')}</p>
+          <p className="wa-note">{grain} · {unit} · {timeZone.replace(/_/g, ' ')}</p>
         </div>
         <button ref={expandRef} className="wa-btn" type="button" onClick={() => setExpanded(true)}><Maximize2 size={14} aria-hidden="true" /> Expand chart</button>
       </div>
@@ -126,7 +126,6 @@ function CountPlot({
         if (event.key === 'Enter' && hover != null && onOpen) onOpen(buckets[hover])
         if (event.key === 'Escape') setHover(null)
       }}>
-        <text x="4" y="12" fill="#8d8d8d" fontSize="11">{unit}</text>
         {[0, 0.5, 1].map((step) => {
           const value = Math.round(scaleMax * (1 - step))
           return (
