@@ -86,3 +86,39 @@ test("a wrapped v2 model still reports its finish reason", async () => {
         MemWal.prototype.analyze = originalAnalyze;
     }
 });
+
+test("flush() rejects when auto-save analyze() fails, and onSaveError runs", async () => {
+    const originalRecall = MemWal.prototype.recall;
+    const originalAnalyze = MemWal.prototype.analyze;
+    const seen = [];
+
+    MemWal.prototype.recall = async () => ({ results: [] });
+    MemWal.prototype.analyze = async () => {
+        throw new Error("analyze down");
+    };
+
+    try {
+        const model = withMemWal(fakeLanguageModel(), {
+            key: TEST_KEY,
+            accountId: TEST_ACCOUNT_ID,
+            onSaveError(err) {
+                seen.push(err);
+            },
+        });
+
+        const result = await model.doGenerate({
+            prompt: [{ role: "user", content: [{ type: "text", text: "remember this" }] }],
+        });
+        assert.equal(result.finishReason, "stop");
+
+        await assert.rejects(
+            () => model.flush(),
+            /auto-save failed/,
+        );
+        assert.equal(seen.length, 1);
+        assert.match(String(seen[0]), /analyze down/);
+    } finally {
+        MemWal.prototype.recall = originalRecall;
+        MemWal.prototype.analyze = originalAnalyze;
+    }
+});

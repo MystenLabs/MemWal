@@ -140,10 +140,31 @@ class _PendingSaves:
     run — this keeps a strong reference until each one is done.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        on_save_error: Optional[Callable[[BaseException], None]] = None,
+    ) -> None:
         self._tasks: "set[asyncio.Task[Any]]" = set()
         self._threads: List[threading.Thread] = []
+        self._errors: List[BaseException] = []
+        self._on_save_error = on_save_error
         self._lock = threading.Lock()
+
+    def note_error(self, err: BaseException) -> None:
+        """Remember a background analyze failure so flush does not report success."""
+        with self._lock:
+            self._errors.append(err)
+        if self._on_save_error is not None:
+            self._on_save_error(err)
+
+    def _raise_if_failed(self) -> None:
+        with self._lock:
+            errors, self._errors = self._errors, []
+        if not errors:
+            return
+        raise RuntimeError(
+            f"Walrus Memory auto-save failed ({len(errors)} call(s))"
+        ) from errors[0]
 
     def track_task(self, task: "asyncio.Task[Any]") -> None:
         self._tasks.add(task)
@@ -169,10 +190,15 @@ class _PendingSaves:
         thread.start()
 
     async def flush(self) -> None:
-        """Await every pending task, then join every pending thread."""
+        """Await every pending task, then join every pending thread.
+
+        Raises when any background auto-save failed. The chat call itself
+        still returned; this is the signal for a caller that waited.
+        """
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
         self._join_threads()
+        self._raise_if_failed()
 
     def flush_sync(self) -> None:
         """Join every pending thread. A pending Task belongs to the loop
@@ -197,6 +223,7 @@ class _PendingSaves:
                     len(self._tasks),
                 )
         self._join_threads()
+        self._raise_if_failed()
 
     def _join_threads(self) -> None:
         with self._lock:
@@ -291,6 +318,7 @@ def with_memwal_langchain(
     min_relevance: float = 0.3,
     debug: bool = False,
     env: Optional[str] = None,
+    on_save_error: Optional[Callable[[BaseException], None]] = None,
 ) -> "BaseChatModel":
     """Wrap a LangChain ``BaseChatModel`` with Walrus Memory management.
 
@@ -335,7 +363,7 @@ def with_memwal_langchain(
     )
 
     log = logger.debug if not debug else logger.warning
-    pending = _PendingSaves()
+    pending = _PendingSaves(on_save_error)
 
     original_agenerate = llm._agenerate
     original_generate = llm._generate
@@ -408,6 +436,7 @@ def with_memwal_langchain(
                 await memwal.analyze(user_text, namespace)
             except Exception as e:
                 log(f"[Walrus Memory] Auto-save failed: {e}")
+                pending.note_error(e)
 
     async def patched_agenerate(
         messages: List[List[BaseMessage]], *args: Any, **kwargs: Any
@@ -470,6 +499,7 @@ def with_memwal_openai(
     min_relevance: float = 0.3,
     debug: bool = False,
     env: Optional[str] = None,
+    on_save_error: Optional[Callable[[BaseException], None]] = None,
 ) -> Any:
     """Wrap an OpenAI client with Walrus Memory management.
 
@@ -507,7 +537,7 @@ def with_memwal_openai(
     )
 
     log = logger.debug if not debug else logger.warning
-    pending = _PendingSaves()
+    pending = _PendingSaves(on_save_error)
 
     is_async = hasattr(client, "_async_client") or type(client).__name__ == "AsyncOpenAI"
 
@@ -572,6 +602,7 @@ def _wrap_async_openai(
                     await memwal.analyze(user_text, namespace)
                 except Exception as e:
                     log(f"[Walrus Memory] Auto-save failed: {e}")
+                    pending.note_error(e)
 
             _fire_and_forget(_analyze(), pending)
 
@@ -633,6 +664,7 @@ def _wrap_sync_openai(
                     _run_memwal(lambda: memwal.analyze(user_text, namespace))
                 except Exception as e:
                     log(f"[Walrus Memory] Auto-save failed: {e}")
+                    pending.note_error(e)
 
             pending.spawn_thread(_analyze)
 

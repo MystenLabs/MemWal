@@ -54,6 +54,9 @@ export interface WithMemWalOptions extends MemWalConfig {
     debug?: boolean;
     /** Optional callback invoked when memory recall fails during transformParams */
     onRecallError?: (error: unknown) => void;
+    /** Called when a background auto-save fails. The chat turn still returns.
+     * `flush()` also rejects, so a caller waiting on the write can see it. */
+    onSaveError?: (error: unknown) => void;
 }
 
 // ============================================================
@@ -90,11 +93,16 @@ export function withMemWal(
     // callers (CLI scripts, serverless handlers) can await them via
     // flush() before the process exits, instead of losing them silently.
     const pendingSaves = new Set<Promise<unknown>>();
+    const saveFailures: unknown[] = [];
 
     function saveInBackground(userMessage: string): void {
         const savePromise = memwal
             .analyze(userMessage)
-            .catch((err: unknown) => log("Auto-save failed:", err));
+            .catch((err: unknown) => {
+                log("Auto-save failed:", err);
+                saveFailures.push(err);
+                options.onSaveError?.(err);
+            });
         pendingSaves.add(savePromise);
         savePromise.finally(() => pendingSaves.delete(savePromise));
     }
@@ -178,6 +186,13 @@ export function withMemWal(
     // exiting, e.g. `await model.flush()` right before `process.exit()`.
     wrapped.flush = async (): Promise<void> => {
         await Promise.allSettled([...pendingSaves]);
+        if (saveFailures.length === 0) return;
+        const errors = saveFailures.splice(0, saveFailures.length);
+        const failure = new Error(
+            `MemWal auto-save failed (${errors.length} call(s))`,
+        );
+        (failure as Error & { cause?: unknown }).cause = errors[0];
+        throw failure;
     };
 
     return wrapped;

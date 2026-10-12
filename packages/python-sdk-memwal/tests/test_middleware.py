@@ -1000,3 +1000,29 @@ class TestPendingSaves:
 
         time.sleep(0.05)
         assert len(pending._threads) == 0
+
+    def test_flush_raises_when_a_background_save_failed(self) -> None:
+        seen: list[BaseException] = []
+        pending = _PendingSaves(seen.append)
+        pending.note_error(RuntimeError("analyze down"))
+
+        async def go() -> None:
+            await pending.flush()
+
+        try:
+            asyncio.run(go())
+        except RuntimeError as err:
+            assert "auto-save failed" in str(err)
+        else:
+            raise AssertionError("flush did not raise")
+        assert len(seen) == 1
+
+    def test_flush_sync_raises_when_a_background_save_failed(self) -> None:
+        pending = _PendingSaves()
+        pending.note_error(RuntimeError("analyze down"))
+        try:
+            pending.flush_sync()
+        except RuntimeError as err:
+            assert "auto-save failed" in str(err)
+        else:
+            raise AssertionError("flush_sync did not raise")
