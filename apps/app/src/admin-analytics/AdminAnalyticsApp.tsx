@@ -7,6 +7,7 @@ import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
 import { ActivityPage, ConfigPage, IncidentLivePage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage } from './OpsPages'
 import { QualityPage } from './QualityPage'
 import { Drawer, useNarrow } from './Drawer'
+import { Chevron } from './Controls'
 import { DateRangeControl } from './DateRangeControl'
 import { comparisonWindow, formatSpan, isRangeId, resolveRange, type CompareId, type RangeId } from './range'
 import { config } from '../config'
@@ -332,7 +333,7 @@ export function AdminAnalyticsApp({
           <span className="wa-env" title={demo ? 'Demo data. Node egress unavailable. Incident year not verified.' : 'Live request egress is unavailable. Wallet and activity routes are separate.'}>Notices</span>
           <button className="wa-btn" type="button" onClick={onLogout}><LogOut size={14} aria-hidden="true" /> <span>Sign out</span></button>
           <div className="wa-more">
-            <button className="wa-more-btn wa-btn" type="button" aria-expanded={moreOpen} onClick={() => setMoreOpen((open) => !open)}>More</button>
+            <button className="wa-more-btn wa-btn" type="button" aria-expanded={moreOpen} onClick={() => setMoreOpen((open) => !open)}><span>More</span><Chevron /></button>
             {moreOpen && (
               <div className="wa-more-list">
                 <button className="wa-btn" type="button" onClick={() => { exportView(); setMoreOpen(false) }}>Export</button>

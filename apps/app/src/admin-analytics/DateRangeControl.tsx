@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, ChevronDown } from 'lucide-react'
+import { Check } from 'lucide-react'
+import { Chevron } from './Controls'
 import { RANGE_PRESETS, type CompareId, type RangeId } from './range'
 
 const GROUPS = ['Days', 'Calendar', 'Rolling', 'Custom'] as const
@@ -133,11 +134,11 @@ export function DateRangeControl({
     <>
       <button ref={trigger} className="wa-btn" type="button" aria-haspopup="dialog" aria-expanded={open !== null && open !== 'compare'} aria-controls={menuId} onClick={() => setOpen(open && open !== 'compare' ? null : 'range')}>
         <span>{label}</span>
-        <ChevronDown className="wa-chevron" size={14} aria-hidden="true" />
+        <Chevron />
       </button>
       <button ref={compareTrigger} className="wa-btn" type="button" aria-haspopup="listbox" aria-expanded={open === 'compare'} onClick={() => setOpen(open === 'compare' ? null : 'compare')}>
         <span>{compareLabel}</span>
-        <ChevronDown className="wa-chevron" size={14} aria-hidden="true" />
+        <Chevron />
       </button>
       {open && createPortal(
         <div ref={ref} id={menuId} className="wa-menu" role="dialog" aria-label="Date range" style={{ top: box.top, left: box.left, position: 'fixed' }}>

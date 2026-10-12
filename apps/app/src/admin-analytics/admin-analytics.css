@@ -12,7 +12,11 @@
   --wa-yellow: #e6c15a;
   --wa-red: #f07178;
   --wa-green: #3dd68c;
-  min-height: 100vh;
+  --wa-control-h: 32px;
+  --wa-control-px: 10px;
+  --wa-icon: 14px;
+  --wa-gap: 6px;
+  --wa-radius: 6px;
   display: grid;
   grid-template-columns: 238px minmax(0, 1fr);
   background: var(--wa-bg);
@@ -154,30 +158,33 @@
 .wa-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .wa-btn, .wa-select, .wa-input, .wa-env {
-  height: 32px;
+  height: var(--wa-control-h);
   background: var(--wa-surface);
   color: #dadada;
   border: 1px solid var(--wa-line);
-  border-radius: 6px;
-  padding: 0 10px;
+  border-radius: var(--wa-radius);
+  padding: 0 var(--wa-control-px);
   font: inherit;
   font-size: 13px;
   line-height: 1;
   box-sizing: border-box;
 }
-.wa-btn, .wa-env {
+.wa-btn, .wa-env, .wa-select-wrap {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
+  gap: var(--wa-gap);
   white-space: nowrap;
 }
-.wa-btn svg, .wa-chevron {
+.wa-btn { justify-content: center; }
+.wa-btn svg, .wa-chevron, .wa-menu button svg, .wa-navbtn .wa-ico {
   display: block;
   flex: none;
-  width: 14px;
-  height: 14px;
+  width: var(--wa-icon);
+  height: var(--wa-icon);
 }
+.wa-select-wrap { position: relative; }
+.wa-select { appearance: none; padding-right: 28px; }
+.wa-select-wrap .wa-chevron { position: absolute; right: calc(var(--wa-control-px) + 1px); pointer-events: none; }
 .wa-env { display: inline-flex; align-items: center; }
 .wa-page { display: flex; flex-direction: column; gap: 12px; padding: 0 16px 24px; }
 .wa-skel { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
@@ -204,7 +211,9 @@
   padding: 6px;
 }
 .wa-menu-group { color: var(--wa-faint); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; padding: 8px 8px 4px; }
-.wa-menu button { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: #ddd; text-align: left; border-radius: 6px; padding: 7px 8px; font: inherit; font-size: 13px; cursor: pointer; }
+.wa-menu button { width: 100%; display: flex; align-items: center; justify-content: flex-start; gap: 8px; border: 0; background: transparent; color: #ddd; text-align: left; border-radius: 6px; padding: 7px 8px; font: inherit; font-size: 13px; cursor: pointer; min-height: 32px; }
+.wa-cal button, .wa-months button { justify-content: center; }
+.wa-drawer summary { display: flex; align-items: center; min-height: 32px; cursor: pointer; }
 .wa-menu button.active, .wa-menu button:hover { background: #2a2a2a; }
 .wa-menu button[aria-selected="true"] { color: #fff; }
 .wa-menu button:focus-visible { outline: 2px solid var(--wa-accent); outline-offset: -2px; }

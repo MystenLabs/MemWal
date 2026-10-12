@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fetchAdminQuality, type QualitySource } from '../utils/admin-api'
 import { Drawer } from './Drawer'
+import { SelectControl } from './Controls'
 import { formatCount } from './metrics'
 
 const LABEL: Record<string, string> = {
@@ -106,14 +107,14 @@ export function QualityPage({ adminKey, onInvalidKey, onOpenView }: { adminKey: 
         <p className="wa-note">Checked {inventory.data?.checkedAt ?? '—'}. Counts come from this inventory. {inventory.isError ? 'Refresh failed. Showing the last successful inventory.' : ''}</p>
         <div className="wa-top">
           <input className="wa-input wa-search" aria-label="Search sources" placeholder="Search source" value={queryText} onChange={(event) => setQueryText(event.target.value)} />
-          <select className="wa-select" aria-label="Health" value={health} onChange={(event) => setHealth(event.target.value)}>
+          <SelectControl label="Health" value={health} onChange={(event) => setHealth(event.target.value)}>
             <option value="all">All health</option>
             {['healthy', 'collection_path_unverified', 'collecting_no_samples', 'failed', 'disabled', 'unknown'].map((value) => <option key={value} value={value}>{label(value)}</option>)}
-          </select>
-          <select className="wa-select" aria-label="Capability" value={capability} onChange={(event) => setCapability(event.target.value)}>
+          </SelectControl>
+          <SelectControl label="Capability" value={capability} onChange={(event) => setCapability(event.target.value)}>
             <option value="all">All capabilities</option>
             {['implemented', 'not_implemented', 'external_dependency', 'unsupported_by_source'].map((value) => <option key={value} value={value}>{label(value)}</option>)}
-          </select>
+          </SelectControl>
         </div>
         <div className="wa-table-wrap">
           <table className="wa-table">
