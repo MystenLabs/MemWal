@@ -237,6 +237,7 @@ export class MemWalMock {
             validateText(item?.text, `items[${i}].text`);
         });
 
+        validateIdempotencyKey(options.idempotencyKey);
         const normalised = items.map((item) => ({
             text: item.text,
             namespace: item.namespace ?? this.namespace,
@@ -245,7 +246,7 @@ export class MemWalMock {
         const bulkKey = options.idempotencyKey ?? (await derivedBulkIdempotencyKey(requestIdentity));
         const jobIds = normalised.map(
             (item, index) =>
-                this.store(item.text, item.namespace, undefined, `bulk:${bulkKey}:${index}`).jobId
+                this.store(item.text, item.namespace, undefined, `bulk:${bulkKey}:${index}`, true).jobId
         );
         return { job_ids: jobIds, total: jobIds.length, status: "done" };
     }
@@ -591,9 +592,12 @@ export class MemWalMock {
         namespace?: string,
         blobId?: string,
         idempotencyKey?: string,
+        skipKeyValidation: boolean = false,
     ): MockMemory {
         validateText(text);
-        validateIdempotencyKey(idempotencyKey);
+        if (!skipKeyValidation) {
+            validateIdempotencyKey(idempotencyKey);
+        }
         const resolvedNamespace = namespace ?? this.namespace;
         if (!resolvedNamespace) throw new Error("namespace cannot be empty");
         if (idempotencyKey !== undefined) {

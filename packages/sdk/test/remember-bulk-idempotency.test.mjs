@@ -148,3 +148,26 @@ test("MemWalMock derives stable idempotency key for identical items when idempot
     const recall = await mock.recall({ query: "derived", limit: 10 });
     assert.equal(recall.total, 2);
 });
+
+test("MemWalMock validates caller bulk idempotencyKey and allows valid keys up to 255 bytes", async () => {
+    const mock = MemWalMock.create();
+    const items = [{ text: "fact 1" }, { text: "fact 2" }];
+
+    // Empty key should reject
+    await assert.rejects(
+        () => mock.rememberBulk(items, { idempotencyKey: "" }),
+        /idempotency_key cannot be empty/,
+    );
+
+    // 250-byte key should succeed on mock (matching relayer) despite derived item key being >255 bytes
+    const validLongKey = "k".repeat(250);
+    const result = await mock.rememberBulk(items, { idempotencyKey: validLongKey });
+    assert.equal(result.job_ids.length, 2);
+
+    // > 255-byte key should reject
+    await assert.rejects(
+        () => mock.rememberBulk(items, { idempotencyKey: "k".repeat(256) }),
+        /idempotency_key exceeds maximum length of 255 bytes/,
+    );
+});
+
