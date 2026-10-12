@@ -108,10 +108,11 @@ function payloadTokens(results: RecallMemory[], countTokens: TokenCounter): numb
  * claim it truncated.
  *
  * Strategies:
- *  - `high-relevance-only`: keep WHOLE hits from the front while they fit; the
- *    first hit that would overflow (and everything after it) is dropped. A
- *    single leading hit larger than the whole budget is itself dropped. No hit
- *    is ever partially shown. Deterministic.
+ *  - `high-relevance-only`: keep WHOLE hits in order of relevance (lowest distance
+ *    first) while they fit within the budget; the first hit that would overflow
+ *    (and everything after it) is dropped. Retained hits are returned in the
+ *    caller's requested order. A single most-relevant hit larger than the whole
+ *    budget is itself dropped. No hit is ever partially shown. Deterministic.
  *  - `drop-tail`: preserve order, keep whole hits from the front, then TRUNCATE
  *    the single boundary hit that straddles the budget so the payload fills to
  *    (about) `maxTokens` — modelling "cut the end of the concatenated payload".
@@ -188,15 +189,30 @@ export function applyTokenBudget(
         return { results: kept, meta: { tokenEstimate: running, truncated: true } };
     }
 
-    // high-relevance-only: keep whole hits from the front while the running total
-    // stays within budget; stop at the first hit that would overflow.
-    const kept: RecallMemory[] = [];
+    // high-relevance-only: select whole hits in order of highest relevance (lowest
+    // distance) while they fit in the budget, then preserve the caller's original
+    // returned order for the retained set (WALM-756).
+    const indexed = results.map((m, index) => ({
+        memory: m,
+        index,
+        cost: countTokens(m.text),
+    }));
+
+    const byRelevance = [...indexed].sort((a, b) => {
+        const distA = a.memory.distance ?? 0;
+        const distB = b.memory.distance ?? 0;
+        if (distA !== distB) return distA - distB;
+        return a.index - b.index;
+    });
+
+    const selectedIndices = new Set<number>();
     let running = 0;
-    for (const m of results) {
-        const cost = countTokens(m.text);
-        if (running + cost > maxTokens) break;
-        kept.push(m);
-        running += cost;
+    for (const item of byRelevance) {
+        if (running + item.cost > maxTokens) break;
+        selectedIndices.add(item.index);
+        running += item.cost;
     }
+
+    const kept = results.filter((_, idx) => selectedIndices.has(idx));
     return { results: kept, meta: { tokenEstimate: running, truncated: true } };
 }

@@ -1070,10 +1070,12 @@ export class MemWal {
                 };
             }
 
-            // Client-side token budgeting: trim the (already distance-sorted)
-            // payload to fit maxTokens per the chosen strategy, and attach the
-            // token estimate + truncated flag. Omitting maxTokens leaves the
-            // result byte-identical to the pre-budget behavior (no meta).
+            // Client-side token budgeting: trim the payload to fit maxTokens per
+            // the chosen strategy, and attach the token estimate + truncated flag.
+            // Under high-relevance-only, lowest-distance hits are retained and
+            // returned in the caller's requested order (WALM-756).
+            // Omitting maxTokens leaves the result byte-identical to the pre-budget
+            // behavior (no meta).
             if (typeof options.maxTokens === "number") {
                 const { results: budgeted, meta } = applyTokenBudget(
                     processed.results,
