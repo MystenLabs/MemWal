@@ -98,7 +98,7 @@ export function afterCell(partial: boolean, hours: number, loading: boolean, val
   if (loading) return '…'
   return String(value ?? 0)
 }
-export function ActivityPage({ activity, loading, error, periodLabel, comparing, windowHours, onInvalidKey, onRetry }: {
+export function ActivityPage({ activity, loading, error, periodLabel, comparing, windowHours, onInvalidKey, onRetry, refreshing = false, onExport, exportReady = false }: {
   activity: AdminActivity | undefined
   loading: boolean
   error: Error | null
@@ -107,6 +107,9 @@ export function ActivityPage({ activity, loading, error, periodLabel, comparing,
   windowHours: number
   onInvalidKey: () => void
   onRetry: () => void
+  refreshing?: boolean
+  onExport?: () => void
+  exportReady?: boolean
 }) {
   useInvalid(error, onInvalidKey)
   const actions = activity?.actions
@@ -114,7 +117,7 @@ export function ActivityPage({ activity, loading, error, periodLabel, comparing,
   const written = buckets.rows.reduce((sum, row) => sum + row.value, 0)
   const sameCount = actions != null && written === actions.uploadsCompleted
   return (
-    <div className="wa-page">
+    <div className="wa-page" aria-busy={loading}>
       <div className="wa-kpis">
         <Kpi label="Successful writes" value={actions ? formatCount(written) : '—'} delta={periodLabel} title="Completed remember jobs in the chart buckets for the selected window." />
         <Kpi label="Uploads completed" value={actions ? formatCount(actions.uploadsCompleted) : '—'} delta={actions ? priorText(comparing, actions.uploadsCompletedPrior) : 'Waiting'} title={sameCount ? 'Matches the chart total for this window. Both count remember jobs marked done.' : 'Jobs whose status became done in the selected window. The chart counts the same jobs by bucket.'} />
@@ -154,8 +157,12 @@ export function ActivityPage({ activity, loading, error, periodLabel, comparing,
           </section>
         </aside>
         <section className="wa-panel wa-table-panel">
-          <h2>Completed uploads by owner</h2>
-          <p className="wa-note">Top owners only. This is not every account.</p>
+          <div className="wa-section-title">
+            <h2>Completed uploads by owner</h2>
+            {onExport && <button className="wa-btn" type="button" onClick={onExport} disabled={!exportReady}>Export upload counts</button>}
+          </div>
+          <p className="wa-note">Top owners only. This is not every account. The file uses the selected dates, timezone, and comparison.</p>
+          {refreshing && <p className="wa-note" role="status">Updating</p>}
           <div className="wa-table-wrap">
             <table className="wa-table">
               <thead><tr><th>Owner</th><th className="wa-num">Uploads</th>{comparing && <th>Prior window</th>}</tr></thead>
@@ -207,28 +214,33 @@ export function UploadJobsPage({ adminKey, onInvalidKey, periodLabel, start, end
   const rate = data && data.successDenominator > 0 ? `${Math.round((data.successNumerator / data.successDenominator) * 100)}%` : data ? 'No completed outcomes' : '—'
   const oldest = data?.oldestQueuedAt ? `${Math.max(0, Math.round((Date.now() - Date.parse(data.oldestQueuedAt)) / 60000))} min` : data ? 'None queued' : '—'
   return (
-    <div className="wa-page">
+    <div className="wa-page" aria-busy={summary.isLoading || query.isLoading}>
+      <span className="wa-sr" role="status">{summary.isLoading || query.isLoading ? 'Loading upload jobs' : query.isFetching ? 'Updating upload jobs' : ''}</span>
       <div className="wa-kpis">
-        <Kpi label="Queued now" value={data ? formatCount(data.queuedNow) : '—'} delta="Now" title="remember_jobs status pending. Not a historical queue." />
-        <Kpi label="Processing now" value={data ? formatCount(data.processingNow) : '—'} delta={data?.staleProcessing ? `${data.staleProcessing} quiet past 10 min` : 'Heartbeat under 10 min'} title="running or uploaded with a fresh updated_at. Quiet rows are excluded until the stale sweep fails them." />
-        <Kpi label="Completed" value={data ? formatCount(data.completed) : '—'} delta={periodLabel} title="status done. updated_at is the completion transition." />
-        <Kpi label="Failed" value={data ? formatCount(data.failed) : '—'} delta={data ? `Prior ${formatCount(data.failedPrior)}` : periodLabel} title="Terminal status failed in the selected window." />
-        <Kpi label="Success rate" value={rate} delta={data && data.successDenominator > 0 ? `${data.successNumerator}/${data.successDenominator}` : 'No terminal outcomes'} title="Completed / (completed + terminally failed). Queued and processing are excluded." />
-        <Kpi label="Oldest queued" value={oldest} delta="Created time" />
+        <Kpi label="Queued now" value={data ? formatCount(data.queuedNow) : '—'} delta="Current state" title="Jobs waiting now. Not a historical queue." />
+        <Kpi label="Processing now" value={data ? formatCount(data.processingNow) : '—'} delta={data?.staleProcessing ? `${data.staleProcessing} quiet past 10 min` : 'Heartbeat under 10 min'} title="Running or uploaded with a fresh update. Quiet rows are excluded until the stale sweep fails them." />
+        <Kpi label="Completed" value={data ? formatCount(data.completed) : '—'} delta={periodLabel} title="Finished in the selected window." />
+        <Kpi label="Failed" value={data ? formatCount(data.failed) : '—'} delta={data ? `Prior ${formatCount(data.failedPrior)}` : periodLabel} title="Terminal failures in the selected window." />
+        <Kpi label="Success rate" value={rate} delta={data && data.successDenominator > 0 ? `${data.successNumerator}/${data.successDenominator}` : 'No terminal outcomes'} title="Completed divided by completed plus terminally failed. Queued and processing are excluded." />
+        <Kpi label="Oldest queued" value={oldest} delta="Current state" />
       </div>
+      {summary.isLoading && <Skeleton rows={2} />}
       {summary.error && !summary.isLoading && <Fail message="Upload summary failed." detail={failureDetail(summary.error as Error, 'GET /api/admin/upload-summary')} onRetry={() => summary.refetch()} />}
-      <section className="wa-panel">
-        <div className="wa-chart-head">
-          <h2>Upload failures</h2>
-          <div className="wa-actions">
-            <input className="wa-input" aria-label="Filter this page" placeholder="Filter this page" value={filter} onChange={(event) => setFilter(event.target.value)} />
-            <button className="wa-btn" type="button" onClick={() => query.refetch()} disabled={query.isFetching}>{query.isFetching ? 'Refreshing' : 'Refresh'}</button>
+      <section className="wa-panel" aria-busy={query.isLoading}>
+        <div className="wa-section-stack">
+          <div className="wa-section-title">
+            <h2>Upload failures</h2>
+            <div className="wa-actions">
+              <input className="wa-input" aria-label="Filter this page" placeholder="Filter this page" value={filter} onChange={(event) => setFilter(event.target.value)} />
+              <button className="wa-btn" type="button" onClick={() => query.refetch()} disabled={query.isFetching}>{query.isFetching ? 'Refreshing' : 'Refresh'}</button>
+            </div>
           </div>
+          <p className="wa-note">Recorded upload failures. Summary counts cover the selected period. This list is the latest recorded pages and is not limited to that window.</p>
         </div>
-        <p className="wa-note">This table is the recorded failure list. Completed and queued counts above come from remember_jobs, not from this page.</p>
         {query.isLoading && <Skeleton rows={5} />}
+        {query.isFetching && query.data && <p className="wa-note" role="status">Updating</p>}
         {query.error && !query.isLoading && <Fail message="Failed to load upload errors." detail={failureDetail(query.error as Error, 'GET /api/admin/upload-errors')} onRetry={() => query.refetch()} />}
-        {query.data && rows.length === 0 && <p className="wa-empty">No failed uploads in this period.</p>}
+        {query.data && rows.length === 0 && <p className="wa-empty">{needle ? 'No failures on this page match the filter.' : 'No recorded upload failures.'}</p>}
         {rows.length > 0 && (
           <div className="wa-table-wrap">
             <table className="wa-table">
@@ -236,21 +248,24 @@ export function UploadJobsPage({ adminKey, onInvalidKey, periodLabel, start, end
               <tbody>
                 {rows.map((job) => (
                   <tr key={job.id} onClick={() => setSelected(job)}>
-                    <td className="wa-mono">{job.id.slice(0, 8)}</td>
+                    <td className="wa-mono" title={job.id}>{job.id.slice(0, 8)}</td>
                     <td className="wa-mono" title={job.owner}>{shortAddress(job.owner)}</td>
                     <td>{job.namespace || '—'}</td>
                     <td>{job.status}</td>
                     <td>{new Date(job.timestamp).toLocaleString()}</td>
-                    <td>{job.errorMessage}</td>
+                    <td className="wa-clip" title={job.errorMessage}>{shortError(job.errorMessage)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-        <div className="wa-actions" style={{ marginTop: 12 }}>
-          <button className="wa-btn" type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>Previous</button>
-          <button className="wa-btn" type="button" disabled={!query.data || offset + limit >= query.data.total} onClick={() => setOffset(offset + limit)}>Next</button>
+        <div className="wa-pager">
+          <p className="wa-note">{query.data ? `${query.data.total === 0 ? 0 : offset + 1}–${Math.min(offset + rows.length, query.data.total)} of ${query.data.total} recorded failures` : 'Waiting for the failure list'}</p>
+          <div className="wa-actions">
+            <button className="wa-btn" type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>Previous</button>
+            <button className="wa-btn" type="button" disabled={!query.data || offset + limit >= query.data.total} onClick={() => setOffset(offset + limit)}>Next</button>
+          </div>
         </div>
       </section>
       {selected && (
@@ -285,6 +300,12 @@ function CopyAddress({ address }: { address: string }) {
     }}>{copied ? 'Copied' : 'Copy'}</button>
   )
 }
+
+function shortError(message: string) {
+  const line = message.split('\n')[0]?.trim() || 'No error message'
+  return line.length > 72 ? `${line.slice(0, 69)}…` : line
+}
+
 
 function AddressLink({ address }: { address: string }) {
   return (
@@ -359,13 +380,17 @@ export function WalletsPage({ adminKey, onInvalidKey, activity }: {
         </section>
       )}
       <section className="wa-panel">
-        <h2>Measured spend</h2>
+        <h2>Observed balance outflow</h2>
         {activity ? (
           <>
-            <p className="wa-note">Outflow is the sum of balance-sample decreases in the selected activity window. A top-up does not cancel it. This is not provider bandwidth cost.</p>
-            <div className="wa-split"><span>Uploader WAL outflow</span><b>{activity.uploaderWal.comparable ? formatTokenAmount(activity.uploaderWal.outflow) : 'Not comparable'}</b></div>
-            <div className="wa-split"><span>Uploader SUI outflow</span><b>{activity.uploaderSui.comparable ? formatTokenAmount(activity.uploaderSui.outflow) : 'Not comparable'}</b></div>
-            <div className="wa-split"><span>Sponsor SUI outflow</span><b>{activity.sponsorSui.comparable ? formatTokenAmount(activity.sponsorSui.outflow) : 'Not comparable'}</b></div>
+            <p className="wa-note">Sum of balance-sample decreases in the selected window. A top-up does not cancel it.</p>
+            <div className="wa-split"><span>Uploader WAL outflow</span><b>{activity.uploaderWal.comparable ? `${formatTokenAmount(activity.uploaderWal.outflow)} WAL` : 'Not comparable'}</b></div>
+            <div className="wa-split"><span>Uploader SUI outflow</span><b>{activity.uploaderSui.comparable ? `${formatTokenAmount(activity.uploaderSui.outflow)} SUI` : 'Not comparable'}</b></div>
+            <div className="wa-split"><span>Sponsor SUI outflow</span><b>{activity.sponsorSui.comparable ? `${formatTokenAmount(activity.sponsorSui.outflow)} SUI` : 'Not comparable'}</b></div>
+            <details>
+              <summary>Provider cost</summary>
+              <p className="wa-note">This is not provider bandwidth cost.</p>
+            </details>
           </>
         ) : (
           <p className="wa-empty">Cost tracking unavailable. Current balances are not historical spend.</p>
@@ -614,8 +639,8 @@ export function IncidentLivePage({
     const body = [
       ['window', 'start', before.start.toISOString(), period.start.toISOString(), adjacent.after?.start.toISOString() ?? '', '', 'UTC half-open', 'resolved URL range'],
       ['window', 'end', before.end.toISOString(), period.end.toISOString(), adjacent.after?.end.toISOString() ?? '', '', timeZone, 'resolved URL range'],
-      ['write', 'uploads_completed', String(beforeUploads), String(duringUploads), adjacent.after ? String(after.data?.actions.uploadsCompleted ?? '') : 'not_yet_available', baselineChange(duringUploads, beforeUploads), 'remember_jobs completed in the window', 'GET /api/admin/activity'],
-      ['write', 'uploads_failed', String(actions?.uploadsFailedPrior ?? 0), String(actions?.uploadsFailed ?? 0), adjacent.after ? String(after.data?.actions.uploadsFailed ?? '') : 'not_yet_available', baselineChange(actions?.uploadsFailed ?? 0, actions?.uploadsFailedPrior ?? 0), 'remember_jobs failed in the window', 'GET /api/admin/activity'],
+      ['write', 'uploads_completed', String(beforeUploads), String(duringUploads), adjacent.after ? String(after.data?.actions.uploadsCompleted ?? '') : 'not_yet_available', baselineChange(duringUploads, beforeUploads), 'completed uploads in the window', 'GET /api/admin/activity'],
+      ['write', 'uploads_failed', String(actions?.uploadsFailedPrior ?? 0), String(actions?.uploadsFailed ?? 0), adjacent.after ? String(after.data?.actions.uploadsFailed ?? '') : 'not_yet_available', baselineChange(actions?.uploadsFailed ?? 0, actions?.uploadsFailedPrior ?? 0), 'failed uploads in the window', 'GET /api/admin/activity'],
       ['retrieval', 'requests', '', '', '', '', retrievalReason, coverage.data ? 'GET /api/admin/coverage' : 'coverage unavailable'],
       ['retrieval', 'node_bytes', '', '', '', '', 'Node provider correlation unavailable', 'not measured'],
       ['reported', '2026-10-10 cold read', '', '', '', '', 'Reported, verification pending. Not a request percentile for this window.', 'separate snapshot'],
@@ -635,8 +660,11 @@ export function IncidentLivePage({
           <h2>No saved incidents</h2>
           <button className="wa-btn" type="button" onClick={exportInvestigation}>Export investigation</button>
         </div>
-        <p className="wa-note">Choose a time window to investigate traffic and performance. This is a custom investigation, not a confirmed incident window. April and May are not guessed.</p>
-        <p className="wa-note">During: {period.label}, {formatWhen(period.start, timeZone)} – {formatWhen(period.end, timeZone)} ({timeZone}){period.partial || adjacent.ongoing ? ' · partial' : ''}. Before: {before.label}, {formatWhen(before.start, timeZone)} – {formatWhen(before.end, timeZone)}. After: {adjacent.after ? `${adjacent.after.label}, ${formatWhen(adjacent.after.start, timeZone)} – ${formatWhen(adjacent.after.end, timeZone)}` : 'Not yet available. The during window is still open.'}</p>
+        <p className="wa-note">Custom investigation, not a confirmed incident. Window: {period.label}, {formatWhen(period.start, timeZone)} – {formatWhen(period.end, timeZone)} ({timeZone}){period.partial || adjacent.ongoing ? ' · partial' : ''}.</p>
+        <details>
+          <summary>Measurement details</summary>
+          <p className="wa-note">Before: {before.label}, {formatWhen(before.start, timeZone)} – {formatWhen(before.end, timeZone)}. After: {adjacent.after ? `${adjacent.after.label}, ${formatWhen(adjacent.after.start, timeZone)} – ${formatWhen(adjacent.after.end, timeZone)}` : 'Not yet available. The during window is still open.'} April and May are not guessed.</p>
+        </details>
         <button className="wa-btn" type="button" onClick={onOpenQuality}>View measurement coverage</button>
       </section>
       <div className="wa-kpis">
@@ -678,12 +706,16 @@ export function IncidentLivePage({
         <section className="wa-panel">
           <h2>Coverage and evidence</h2>
           <p className="wa-note">{coverage.isError ? 'Coverage request failed. Write counts on the left are still usable.' : retrievalReason}</p>
-          <p className="wa-note">Earliest request detail: {coverage.data?.retrievalSince ?? 'none'}. Complete through: {during.data?.generatedAt ?? 'unknown'}. Aggregate retrieval histograms: not registered. Known gap: no per-request byte, latency, cache, or retry series.</p>
-          <p className="wa-note">10 Oct 2026 snapshot, reported, verification pending: 239.6 MiB plain, 10.11 TiB encoded accounting, 168,376 blobs, one cold-read node transfer of 445,556 B, aggregator-to-relayer p50/p90/p99 of 555 / 1,537 / 20,412 B. It does not fill this timeline or April/May percentiles.</p>
-          <h3>What changed</h3>
-          <p className="wa-note">Observed: uploads completed moved from {formatCount(beforeUploads)} to {formatCount(duringUploads)} ({baselineChange(duringUploads, beforeUploads)}). {owners[0] ? `${shortAddress(owners[0].owner)} completed ${formatCount(owners[0].uploadsCompleted)} of ${formatCount(duringUploads)} during uploads.` : 'No owner completed an upload in the during window.'}</p>
-          <p className="wa-note">Evidence: activity counts for the resolved windows. Retrieval volume, payload size, cache misses, retries, and latency are not in this response.</p>
-          <p className="wa-note">Hypothesis: none. Confirmed cause: none. An upload change is not a retrieval-incident cause.</p>
+          <p className="wa-note">Observed: uploads completed moved from {formatCount(beforeUploads)} to {formatCount(duringUploads)} ({baselineChange(duringUploads, beforeUploads)}). Sample: {formatCount(owners.length)} owner rows.</p>
+          <p className="wa-note">Window: {period.label}, {formatWhen(period.start, timeZone)} – {formatWhen(period.end, timeZone)} ({timeZone}).</p>
+          <details>
+            <summary>Measurement details</summary>
+            <p className="wa-note">Earliest request detail: {coverage.data?.retrievalSince ?? 'none'}. Complete through: {during.data?.generatedAt ?? 'unknown'}. Histograms are not registered. No per-request byte, latency, cache, or retry series. No confirmed cause.</p>
+          </details>
+          <details>
+            <summary>10 October 2026 cold read</summary>
+            <p className="wa-note">Reported, verification pending: 239.6 MiB plain, 10.11 TiB encoded accounting, 168,376 blobs, one node transfer of 445,556 B, aggregator-to-relayer p50/p90/p99 of 555 / 1,537 / 20,412 B. It does not fill this timeline.</p>
+          </details>
           {coverage.isError && <button className="wa-btn" type="button" onClick={() => coverage.refetch()}>Retry coverage</button>}
         </section>
       </div>
@@ -736,13 +768,38 @@ export function ConfigPage({ adminKey, onInvalidKey }: { adminKey: string; onInv
   if (query.error || !query.data) return <Fail message="Failed to load configuration." detail={query.error ? failureDetail(query.error as Error, 'GET /api/admin/config') : undefined} onRetry={() => query.refetch()} />
   const data = query.data
   return (
-    <section className="wa-panel">
-      <h2>Read-only thresholds</h2>
-      <div className="wa-split"><span>Balance monitor</span><b>{data.balanceMonitorIntervalSecs}s</b></div>
+    <section className="wa-panel" aria-busy={false}>
+      <h2>Settings</h2>
+      <p className="wa-note">Read-only. These values come from the relayer and cannot be changed here.</p>
+      <div className="wa-split"><span>Balance monitor</span><b>{data.balanceMonitorIntervalSecs} seconds</b></div>
       <div className="wa-split"><span>Uploader WAL low</span><b>{formatTokenAmount(data.uploaderWalLowThresholdFrost)} WAL</b></div>
       <div className="wa-split"><span>Uploader SUI low</span><b>{formatTokenAmount(data.uploaderSuiLowThresholdMist)} SUI</b></div>
       <div className="wa-split"><span>Sponsor SUI low</span><b>{formatTokenAmount(data.sponsorSuiLowThresholdMist)} SUI</b></div>
-      <p className="wa-note">These values are read from the relayer. This page does not save changes.</p>
     </section>
   )
 }
+
+export function AccessPage({ adminKey, onInvalidKey, network }: { adminKey: string; onInvalidKey: () => void; network: string }) {
+  const query = useQuery({
+    queryKey: ['admin', 'coverage', 'access'],
+    queryFn: () => fetchAdminCoverage(adminKey),
+    retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
+  })
+  useInvalid(query.error, onInvalidKey)
+  return (
+    <section className="wa-panel" aria-busy={query.isLoading}>
+      <h2>Access and audit</h2>
+      <p className="wa-note">Read-only. Signed in for {network}. Admin key only.</p>
+      <span className="wa-sr" role="status">{query.isLoading ? 'Loading audit coverage' : query.isFetching ? 'Updating audit coverage' : ''}</span>
+      {query.isLoading && <Skeleton rows={3} />}
+      {query.error && !query.isLoading && <Fail message="Audit coverage failed." detail={failureDetail(query.error as Error, 'GET /api/admin/coverage')} onRetry={() => query.refetch()} />}
+      {query.data && (
+        <>
+          <p className="wa-note">{formatCount(query.data.auditEvents)} retained audit rows. The admin API returns that count, not actor, action, target, or timestamp rows.</p>
+          <p className="wa-empty">Event list unavailable. Pagination starts when the API returns those rows.</p>
+        </>
+      )}
+    </section>
+  )
+}
+

@@ -4,7 +4,7 @@ import { Activity, AlertTriangle, ClipboardCheck, Database, KeyRound, LayoutDash
 import { useSearchParams } from 'react-router-dom'
 import { AdminKeyEntry } from '../components/AdminKeyEntry'
 import { fetchAdminActivity, type AdminActivity } from '../utils/admin-api'
-import { ActivityPage, ConfigPage, IncidentLivePage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage, priorText } from './OpsPages'
+import { AccessPage, ActivityPage, ConfigPage, IncidentLivePage, RetrievalLivePage, StorageLivePage, UploadJobsPage, WalletsPage, priorText } from './OpsPages'
 import { QualityPage } from './QualityPage'
 import { Drawer, useNarrow } from './Drawer'
 import { Chevron } from './Controls'
@@ -263,36 +263,42 @@ export function AdminAnalyticsApp({
   const selectedRequests = selected ? requestsInRange(model, period.start, period.end, selected.id) : []
   const openRequest = selectedRequests.find((request) => request.id === requestId) ?? scoped.find((request) => request.id === requestId) ?? null
 
+  const uploadOwners = activityQuery.data?.actions.topOwners ?? []
+  const exportReady = !demo && uploadOwners.length > 0
+  const exportReason = demo
+    ? 'No upload counts in the demo.'
+    : activityQuery.isError
+      ? 'Upload counts failed to load.'
+      : activityQuery.isFetching && !activityQuery.data
+        ? 'Loading upload counts.'
+        : !['overview', 'accounts', 'activity', 'wallets'].includes(view)
+          ? 'Open Activity to export counts.'
+          : !activityQuery.data
+            ? 'Loading upload counts.'
+            : uploadOwners.length === 0
+              ? 'No upload counts in this window.'
+              : 'Owner upload counts only. Not retrieval bytes.'
   const exportView = () => {
-    const live = activityQuery.data
-    const header = demo
-      ? ['definition_version', 'source', 'timezone', 'start', 'end', 'account', 'owner', 'requests', 'relayer_bytes']
-      : ['source', 'generated_at', 'window_hours', 'owner', 'uploads_completed']
-    const body = demo
-      ? rows.map((row) => [
-        model.definitionVersion,
-        'demo-fixture',
-        timeZone,
-        period.start.toISOString(),
-        period.end.toISOString(),
-        row.account.id,
-        row.account.owner,
-        String(row.mine.length),
-        row.bytes.total.toString(),
-      ])
-      : (live?.actions.topOwners ?? []).map((owner) => [
-        'dev-relayer-activity',
-        live?.generatedAt ?? '',
-        period.label,
-        owner.owner,
-        String(owner.uploadsCompleted),
-      ])
-    if (!demo && body.length === 0) return
+    if (!exportReady || !activityQuery.data) return
+    const header = ['source', 'generated_at', 'timezone', 'start', 'end', 'range', 'compare', 'owner', 'uploads_completed', 'coverage']
+    const coverage = 'Top owners returned by the activity API. Not every account. Not retrieval bytes or provider billing.'
+    const body = uploadOwners.map((owner) => [
+      'dev-relayer-activity',
+      activityQuery.data?.generatedAt ?? '',
+      timeZone,
+      period.start.toISOString(),
+      period.end.toISOString(),
+      period.label,
+      compare,
+      owner.owner,
+      String(owner.uploadsCompleted),
+      coverage,
+    ])
     const blob = new Blob([toCsv([header, ...body])], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `walrus-admin-${view}.csv`
+    link.download = 'upload-counts.csv'
     link.click()
     URL.revokeObjectURL(url)
   }
@@ -329,14 +335,16 @@ export function AdminAnalyticsApp({
         <div className="wa-util">
           <div className="wa-crumb">Admin / <b>{VIEWS.find((item) => item.id === view)?.label}</b></div>
           <span className="wa-clock" title={timeZone}>{new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now)} <span className="wa-tz">{timeZone}</span></span>
-          {(demo || activityQuery.data) && <button className="wa-btn" type="button" onClick={exportView} title="Download the owner upload counts for the selected window. Request-byte export is not stored.">Export</button>}
-          {activityQuery.isFetching && <span className="wa-status" role="status">{activityQuery.data ? 'Updating' : 'Loading'}</span>}
+          <button className="wa-btn" type="button" onClick={exportView} disabled={!exportReady} aria-describedby="export-upload-counts-reason" title={exportReason}>Export upload counts</button>
+          <span id="export-upload-counts-reason" className="wa-status" role="status">{exportReason}</span>
+          {activityQuery.isFetching && ['overview', 'accounts', 'activity', 'wallets'].includes(view) && <span className="wa-status" role="status">{activityQuery.data ? 'Updating' : 'Loading'}</span>}
           <button className="wa-btn" type="button" onClick={onLogout}><LogOut size={14} aria-hidden="true" /> <span>Sign out</span></button>
           <div className="wa-more">
             <button className="wa-more-btn wa-btn" type="button" aria-expanded={moreOpen} onClick={() => setMoreOpen((open) => !open)}><span>More</span><Chevron /></button>
             {moreOpen && (
               <div className="wa-more-list">
-                <button className="wa-btn" type="button" onClick={() => { exportView(); setMoreOpen(false) }}>Export</button>
+                <button className="wa-btn" type="button" disabled={!exportReady} onClick={() => { exportView(); setMoreOpen(false) }}>Export upload counts</button>
+                <p className="wa-note">{exportReason}</p>
                 <button className="wa-btn" type="button" onClick={onLogout}>Sign out</button>
               </div>
             )}
@@ -399,6 +407,8 @@ export function AdminAnalyticsApp({
             timeZone={timeZone}
             onInvalidKey={onInvalidKey}
             onRetry={() => activityQuery.refetch()}
+            onExport={exportView}
+            exportReady={exportReady}
           />
         )}
         {view === 'overview' && demo && (
@@ -440,21 +450,21 @@ export function AdminAnalyticsApp({
         ) : <RetrievalLivePage adminKey={adminKey} start={period.start} end={period.end} onInvalidKey={onInvalidKey} onOpenQuality={() => setParam('view', 'quality')} />)}
         {view === 'accounts' && (demo ? (
           <AccountTable rows={rows} sort={sort} onSort={setSort} onOpen={(id) => setParam('account', id)} query={query} onQuery={(value) => setParam('q', value)} showAll={showAll} onShowAll={(value) => setParam('all', value ? '1' : '')} />
-        ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} comparing={compare !== 'none'} windowHours={(period.end.getTime() - period.start.getTime()) / 3_600_000} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />)}
-        {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} comparing={compare !== 'none'} windowHours={(period.end.getTime() - period.start.getTime()) / 3_600_000} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />}
+        ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} refreshing={activityQuery.isFetching && Boolean(activityQuery.data)} error={activityQuery.error as Error | null} periodLabel={period.label} comparing={compare !== 'none'} windowHours={(period.end.getTime() - period.start.getTime()) / 3_600_000} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} onExport={exportView} exportReady={exportReady} />)}
+        {view === 'activity' && <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} refreshing={activityQuery.isFetching && Boolean(activityQuery.data)} error={activityQuery.error as Error | null} periodLabel={period.label} comparing={compare !== 'none'} windowHours={(period.end.getTime() - period.start.getTime()) / 3_600_000} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} onExport={exportView} exportReady={exportReady} />}
         {view === 'uploads' && adminKey && <UploadJobsPage adminKey={adminKey} onInvalidKey={onInvalidKey} periodLabel={period.label} start={period.start} end={period.end} priorStart={compared?.start ?? null} />}
         {view === 'wallets' && adminKey && <WalletsPage adminKey={adminKey} onInvalidKey={onInvalidKey} activity={activityQuery.data} />}
         {view === 'incidents' && (demo ? <IncidentView modelStart={model.incident} requests={scoped} now={now} timeZone={timeZone} /> : <IncidentLivePage adminKey={adminKey} period={period} timeZone={timeZone} baseline={compared} onInvalidKey={onInvalidKey} onOpenDay={(ymd) => { const next = new URLSearchParams(params); next.set('range', 'day'); next.set('day', ymd); setParams(next) }} onOpenQuality={() => setParam('view', 'quality')} />)}
         {view === 'quality' && (demo ? <QualityView demo /> : <QualityPage adminKey={adminKey} onInvalidKey={onInvalidKey} onOpenView={(id) => setParam('view', id)} />)}
         {view === 'config' && adminKey && <ConfigPage adminKey={adminKey} onInvalidKey={onInvalidKey} />}
         {view === 'access' && (
+          adminKey ? <AccessPage adminKey={adminKey} onInvalidKey={onInvalidKey} network={config.suiNetwork} /> : (
           <section className="wa-panel">
-            <h3>Access & audit</h3>
-            <p className="wa-note">Admin key only. Builder, insider, owner, and delegate credentials do not open this site. Analytics do not include plaintext memories or private keys.</p>
-            {adminKey ? <p className="wa-note">Signed in for {config.suiNetwork}. Exports from this browser session are labeled {demo ? 'demo-fixture' : 'unavailable'}.</p> : (
-              <AdminKeyEntry onKeySubmit={onSignIn} isLoading={isSubmitting} banner={banner} />
-            )}
+            <h2>Access and audit</h2>
+            <p className="wa-note">Admin key only. Builder, insider, owner, and delegate credentials do not open this site.</p>
+            <AdminKeyEntry onKeySubmit={onSignIn} isLoading={isSubmitting} banner={banner} />
           </section>
+          )
         )}
 
         {selected && (
@@ -501,6 +511,8 @@ function LiveOverview({
   comparing,
   onInvalidKey,
   onRetry,
+  onExport,
+  exportReady,
 }: {
   activity: AdminActivity | undefined
   loading: boolean
@@ -511,10 +523,12 @@ function LiveOverview({
   comparing: boolean
   onInvalidKey: () => void
   onRetry: () => void
+  onExport: () => void
+  exportReady: boolean
 }) {
   if (error?.message === 'INVALID_KEY') onInvalidKey()
   if (!activity) {
-    return <ActivityPage activity={activity} loading={loading} error={error} periodLabel={periodLabel} comparing={comparing} windowHours={0} onInvalidKey={onInvalidKey} onRetry={onRetry} />
+    return <ActivityPage activity={activity} loading={loading} error={error} periodLabel={periodLabel} comparing={comparing} windowHours={0} onInvalidKey={onInvalidKey} onRetry={onRetry} onExport={onExport} exportReady={exportReady} />
   }
   const days = activity.actions.memoriesByDay.filter((day) => day.day < formatYmd(windowEnd, timeZone) || formatYmd(new Date(windowEnd.getTime() - 1), timeZone) === day.day)
   const buckets = activity.actions.memoriesByHour?.map((row) => ({ label: row.hour, relayer: 0, upstream: 0, requests: row.count, latency: 0 }))
@@ -567,7 +581,11 @@ function LiveOverview({
           </section>
         </aside>
         <section className="wa-panel wa-table-panel">
-          <h2>Completed uploads</h2>
+          <div className="wa-section-title">
+            <h2>Completed uploads</h2>
+            <button className="wa-btn" type="button" onClick={onExport} disabled={!exportReady}>Export upload counts</button>
+          </div>
+          <p className="wa-note">Top owners in the selected window. Not retrieval bytes.</p>
           <div className="wa-table-wrap">
             <table className="wa-table">
               <thead><tr><th>Owner</th><th>Uploads</th><th>Vs leader</th></tr></thead>

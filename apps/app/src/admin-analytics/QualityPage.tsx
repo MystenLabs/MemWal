@@ -125,7 +125,7 @@ export function QualityPage({ adminKey, onInvalidKey, onOpenView }: { adminKey: 
                 <tr key={source.id}>
                   <td><button type="button" className="wa-btn" onClick={() => setSelected(source)}>{source.name}</button></td>
                   <td>{label(source.capability)}</td>
-                  <td>{label(source.health)}</td>
+                  <td><span className={source.health === 'healthy' ? 'wa-badge' : 'wa-badge off'}>{label(source.health)}</span></td>
                   <td>{label(source.coverage)}{source.coveragePercent == null ? '' : ` · ${source.coveragePercent.toFixed(0)}%`}</td>
                   <td className="num">{source.observed == null ? '—' : formatCount(source.observed)}</td>
                 </tr>
