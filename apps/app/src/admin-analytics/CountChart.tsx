@@ -19,6 +19,7 @@ export function CountChart({
   timeZone,
   buckets,
   notice,
+  showRegions = true,
   onOpen,
 }: {
   title: string
@@ -27,6 +28,7 @@ export function CountChart({
   timeZone: string
   buckets: CountBucket[]
   notice?: string
+  showRegions?: boolean
   onOpen?: (bucket: CountBucket) => void
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -43,7 +45,7 @@ export function CountChart({
         </div>
         <button ref={expandRef} className="wa-btn" type="button" onClick={() => setExpanded(true)}><Maximize2 size={14} aria-hidden="true" /> Expand chart</button>
       </div>
-      <ChartLegend />
+      {showRegions && <ChartLegend />}
       {plot(false)}
       {notice && <p className="wa-note">{notice}</p>}
       <details className="wa-disclosure">
@@ -52,7 +54,7 @@ export function CountChart({
       </details>
       {expanded && (
         <ChartDialog title={title} context={`${grain} · ${timeZone}`} onClose={() => { setExpanded(false); expandRef.current?.focus() }}>
-          <ChartLegend />
+          {showRegions && <ChartLegend />}
           {plot(true)}
           <CountTable buckets={buckets} unit={unit} timeZone={timeZone} onOpen={onOpen} />
         </ChartDialog>
@@ -90,17 +92,21 @@ function CountPlot({
 }) {
   const host = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(640)
+  const [plotHeight, setPlotHeight] = useState(tall ? 480 : 280)
   const [hover, setHover] = useState<number | null>(null)
   useEffect(() => {
     const node = host.current
     if (!node) return
-    const measure = () => setWidth(Math.max(280, Math.floor(node.clientWidth)))
+    const measure = () => {
+      setWidth(Math.max(280, Math.floor(node.clientWidth)))
+      if (tall) setPlotHeight(Math.max(280, Math.floor(node.clientHeight)))
+    }
     measure()
     const observer = new ResizeObserver(measure)
     observer.observe(node)
     return () => observer.disconnect()
   }, [])
-  const height = tall ? 420 : 220
+  const height = tall ? plotHeight : 280
   const peak = Math.max(0, ...buckets.map((bucket) => bucket.count))
   const scaleMax = peak === 0 ? 1 : Math.ceil(peak * 1.15)
   const ticks = visibleTickIndexes(buckets.length, width - 56).filter((index, position, all) => position === 0 || shortDate(buckets[index].label) !== shortDate(buckets[all[position - 1]].label))

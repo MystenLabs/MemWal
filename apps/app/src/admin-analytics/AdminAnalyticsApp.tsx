@@ -12,7 +12,7 @@ import { DateRangeControl } from './DateRangeControl'
 import { comparisonWindow, formatSpan, isRangeId, resolveRange, type CompareId, type RangeId } from './range'
 import { config } from '../config'
 import './admin-analytics.css'
-import { ChartDialog } from './CountChart'
+import { ChartDialog, CountChart } from './CountChart'
 import {
   buildDemo,
   bytePopulation,
@@ -89,9 +89,13 @@ export function nearestBucket(clientX: number, left: number, width: number, coun
 function Chart({
   points,
   series,
+  title,
+  unit,
 }: {
   points: Array<{ label: string; relayer: number; upstream: number; requests: number; latency: number }>
   series: 'bytes' | 'requests' | 'latency'
+  title: string
+  unit: string
 }) {
   const [hover, setHover] = useState<number | null>(null)
   const [expanded, setExpanded] = useState(false)
@@ -104,7 +108,7 @@ function Chart({
   const y = (value: number) => 16 + (1 - value / max) * (height - 42)
   const line = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${x(index).toFixed(1)} ${y(pick(point)).toFixed(1)}`).join(' ')
   const area = points.length ? `${line} L${x(points.length - 1).toFixed(1)} ${height - 26} L${x(0).toFixed(1)} ${height - 26} Z` : ''
-  const unit = series === 'latency' ? 'ms' : series === 'requests' ? 'requests' : 'bytes'
+  const unitLabel = unit
   const inspect = (clientX: number, target: SVGSVGElement) => {
     const box = target.getBoundingClientRect()
     const index = nearestBucket(clientX, box.left, box.width, points.length)
@@ -113,7 +117,7 @@ function Chart({
   const selected = hover != null ? points[hover] : null
   const plot = (
     <div style={{ position: 'relative' }}>
-      <svg className="wa-chart" viewBox={`0 0 ${width} ${height}`} role="img" tabIndex={0} aria-label={`${series} trend, ${points.length} buckets, peak ${max} ${unit}. Arrow keys inspect a bucket.`} onPointerUp={(event) => inspect(event.clientX, event.currentTarget)} onKeyDown={(event) => {
+      <svg className={expanded ? 'wa-chart wa-chart-tall' : 'wa-chart'} viewBox={`0 0 ${width} ${height}`} role="img" tabIndex={0} aria-label={`${title}, ${points.length} buckets, peak ${max} ${unitLabel}. Arrow keys inspect a bucket.`} onPointerUp={(event) => inspect(event.clientX, event.currentTarget)} onKeyDown={(event) => {
         if (event.key === 'Escape') setHover(null)
         if (event.key === 'ArrowRight') { event.preventDefault(); setHover((index) => Math.min(points.length - 1, (index ?? -1) + 1)) }
         if (event.key === 'ArrowLeft') { event.preventDefault(); setHover((index) => Math.max(0, (index ?? 1) - 1)) }
@@ -134,7 +138,7 @@ function Chart({
         ) : null)}
       </svg>
       {selected && (
-        <div className="wa-tip" role="status" style={{ left: 8, right: 8, top: 8 }}>{selected.label}: {series === 'bytes' ? formatBytes(BigInt(pick(selected))) : pick(selected)} {series === 'requests' ? 'memories' : unit}</div>
+        <div className="wa-tip" role="status" style={{ left: 8, right: 8, top: 8 }}>{selected.label}: {series === 'bytes' ? formatBytes(BigInt(pick(selected))) : pick(selected)} {unitLabel}</div>
       )}
     </div>
   )
@@ -144,7 +148,7 @@ function Chart({
         <button ref={expandRef} className="wa-btn" type="button" onClick={() => setExpanded(true)}>Expand chart</button>
       </div>
       {plot}
-      {expanded && <ChartDialog title={`${series} trend`} context={`${points.length} buckets · ${unit}`} onClose={() => { setExpanded(false); expandRef.current?.focus() }}>{plot}</ChartDialog>}
+      {expanded && <ChartDialog title={title} context={`${points.length} buckets · ${unitLabel}`} onClose={() => { setExpanded(false); expandRef.current?.focus() }}>{plot}</ChartDialog>}
     </div>
   )
 }
@@ -439,7 +443,7 @@ export function AdminAnalyticsApp({
                     ))}
                   </div>
                 </div>
-                <Chart points={buckets} series={series} />
+                <Chart points={buckets} series={series} title={series === 'bytes' ? 'Retrieval bytes' : series === 'latency' ? 'Latency' : 'Retrieval requests'} unit={series === 'latency' ? 'ms' : series === 'bytes' ? 'bytes' : 'requests'} />
               </section>
               <aside className="wa-rail">
                 <Lifecycle requests={scoped} />
@@ -564,8 +568,15 @@ function LiveOverview({
       </div>
       <div className="wa-board">
         <section className="wa-panel wa-chart-panel">
-          <div className="wa-chart-head"><h2>Memories written</h2><span className="wa-note">{activity.windowStart ? periodLabel : `${periodLabel} requested. Relayer has not applied that window.`}{activity.clamped ? ' · shortened to the query limit' : ''}</span></div>
-          <Chart points={buckets} series="requests" />
+          <CountChart
+            title="Memories written"
+            unit="memories"
+            grain={activity.actions.memoriesByHour ? `Hourly · ${periodLabel}` : `Daily · ${periodLabel}`}
+            timeZone={timeZone}
+            showRegions={false}
+            notice={activity.clamped ? 'Shortened to the query limit. Completed remember jobs, not retrieval requests.' : 'Completed remember jobs. Not retrieval requests.'}
+            buckets={buckets.map((bucket) => ({ id: bucket.label, label: bucket.label, count: bucket.requests, region: 'during' as const }))}
+          />
         </section>
         <aside className="wa-rail">
           <section>
