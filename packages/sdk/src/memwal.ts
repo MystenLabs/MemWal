@@ -1971,11 +1971,24 @@ export class MemWal {
         const deadline = deadlineSignal(ms);
         try {
             const res = await fetch(url, { ...init, signal: deadline.signal });
-            return {
-                ok: res.ok,
-                status: res.status,
-                body: res.ok ? ((await res.json()) as T) : undefined,
-            };
+            let body: T | undefined;
+            if (res.ok) {
+                const raw = await res.text();
+                if (raw.trim() === "") {
+                    throw new Error(
+                        `MemWal: HTTP ${res.status} response had an empty body; expected JSON`,
+                    );
+                }
+                try {
+                    body = JSON.parse(raw) as T;
+                } catch (err) {
+                    if (err instanceof SyntaxError) {
+                        throw new Error(`MemWal: HTTP ${res.status} response was not JSON`);
+                    }
+                    throw err;
+                }
+            }
+            return { ok: res.ok, status: res.status, body };
         } catch (err) {
             if (deadline.timedOut()) {
                 throw requestTimeoutError(init.method ?? "GET", url, ms, phase);
@@ -2108,7 +2121,20 @@ export class MemWal {
                 throw err;
             }
 
-            return (await res.json()) as T;
+            const rawBody = await res.text();
+            if (rawBody.trim() === "") {
+                throw new Error(
+                    `MemWal: HTTP ${res.status} response had an empty body; expected JSON`,
+                );
+            }
+            try {
+                return JSON.parse(rawBody) as T;
+            } catch (err) {
+                if (err instanceof SyntaxError) {
+                    throw new Error(`MemWal: HTTP ${res.status} response was not JSON`);
+                }
+                throw err;
+            }
         } catch (err) {
             // Translate our own expiry into something a caller can classify.
             // An abort the CALLER asked for is theirs and propagates untouched.
