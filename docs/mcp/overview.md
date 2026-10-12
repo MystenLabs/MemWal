@@ -34,6 +34,8 @@ answer: >-
 
 The **MemWal MCP server** exposes your portable Walrus Memory as Model Context Protocol tools, so an AI agent can decide when to save and recall memories on its own. It works with any MCP-aware client, and on **Claude Code**, **Codex**, **Cursor**, and **Antigravity** it can be installed as a **plugin** that adds automatic memory through lifecycle hooks.
 
+If you already have local memory, standing context, or session history, [import those facts](/guides/import-existing-memory) so the account starts with what you have.
+
 ## MCP vs Plugin
 
 There are two ways to use MemWal. The difference is whether you also get the **lifecycle hooks**:
