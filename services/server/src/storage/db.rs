@@ -160,6 +160,8 @@ const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
     // deleted_at range index for the admin activity delete counts.
     // CONCURRENTLY, own file -- see 024's header.
     migration!("024_memory_tombstones_deleted_at_index.sql"),
+    // Drop the legacy account-wide idempotency index (WALM-781).
+    migration!("025_drop_owner_idempotency_key_index.sql"),
 ];
 
 /// Every migration the pipeline applies, in the order it applies them.
@@ -2035,7 +2037,7 @@ mod tests {
         let rewritten = sqlx::query(
             "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key)
              VALUES ($1, $2, 'notes', 'pending', $3)
-             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
         )
         .bind(format!("rewrite-job-{suffix}"))
         .bind(&owner)
@@ -2370,8 +2372,8 @@ fn db_status<T>(result: &Result<T, AppError>) -> &'static str {
 /// hitting the GUC. Recovery still exists for a crash or kill mid-build.
 ///
 /// Only indexes whose loss is SILENT belong here. Migration 013's
-/// `uq_remember_jobs_owner_idempotency_key` is deliberately absent: it is
-/// a unique index backing `ON CONFLICT (owner, idempotency_key)`, and an
+/// `uq_remember_jobs_owner_namespace_idempotency_key` is deliberately absent: it is
+/// a unique index backing `ON CONFLICT (owner, namespace, idempotency_key)`, and an
 /// invalid one makes that upsert ERROR outright rather than quietly
 /// degrade, so it reports itself. It also runs in
 /// `MIGRATIONS_BEFORE_BACKFILL`, ahead of the single recovery pass below.

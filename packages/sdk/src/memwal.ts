@@ -165,6 +165,13 @@ const CONFIRM_READ_TIMEOUT_MS = 5_000;
 const MAX_BULK_ITEMS = 20;
 
 interface RememberCallOptions {
+    /**
+     * Optional idempotency key to prevent duplicate writes on retries.
+     * Idempotency keys are scoped per (owner, namespace), so identical
+     * keys across different namespaces will not collide. Retrying within
+     * the same namespace with the same key dedupes, while reusing a key
+     * with different text in the same namespace produces HTTP 409 Conflict.
+     */
     idempotencyKey?: string;
     pollIntervalMs?: number;
     timeoutMs?: number;
