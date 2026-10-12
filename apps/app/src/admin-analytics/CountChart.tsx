@@ -161,15 +161,22 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
   const panelRef = useRef<HTMLDivElement>(null)
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
+  const scrollRef = useRef(0)
   useEffect(() => {
     const overflow = document.body.style.overflow
-    const scrollY = window.scrollY
     const root = document.querySelector('.wa')
+    scrollRef.current = window.scrollY
     document.body.style.overflow = 'hidden'
     root?.setAttribute('inert', '')
     closeRef.current?.focus()
+    const finish = () => {
+      root?.removeAttribute('inert')
+      document.body.style.overflow = overflow
+      window.scrollTo(0, scrollRef.current)
+      onCloseRef.current()
+    }
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); onCloseRef.current(); return }
+      if (event.key === 'Escape') { event.preventDefault(); finish(); return }
       if (event.key !== 'Tab' || !panelRef.current) return
       const nodes = [...panelRef.current.querySelectorAll<HTMLElement>('button, a, summary, [tabindex]:not([tabindex="-1"])')].filter((node) => !node.hasAttribute('disabled'))
       if (nodes.length === 0) return
@@ -179,11 +186,12 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
     }
     document.addEventListener('keydown', onKey)
+    closeRef.current?.addEventListener('click', finish)
     return () => {
-      document.body.style.overflow = overflow
       root?.removeAttribute('inert')
-      window.scrollTo(0, scrollY)
+      document.body.style.overflow = overflow
       document.removeEventListener('keydown', onKey)
+      closeRef.current?.removeEventListener('click', finish)
     }
   }, [])
   return createPortal(
@@ -194,7 +202,7 @@ export function ChartDialog({ title, context, onClose, children }: { title: stri
             <h2 id={titleId}>{title}</h2>
             <p className="wa-note">{context}</p>
           </div>
-          <button ref={closeRef} className="wa-icon-btn" type="button" aria-label="Close chart" onClick={onClose}><X size={18} /></button>
+          <button ref={closeRef} className="wa-icon-btn" type="button" aria-label="Close chart"><X size={18} /></button>
         </div>
         {children}
       </div>
