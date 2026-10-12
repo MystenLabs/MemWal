@@ -96,6 +96,10 @@ export function DateRangeControl({
     ;(open === 'compare' ? compareTrigger : trigger).current?.focus()
   }
   const ref = useMenu(open !== null, close, [trigger.current, compareTrigger.current])
+  useEffect(() => {
+    if (!open) return
+    ref.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest' })
+  }, [open, ref])
   const box = place(open === 'compare' ? compareTrigger.current : trigger.current)
 
   const chooseRange = (id: RangeId) => {

@@ -353,7 +353,7 @@ export function AdminAnalyticsApp({
                 range={range}
                 label={period.label}
                 compare={compare}
-                compareLabel={compared ? `${formatSpan(compared.start, compared.end, timeZone)}` : 'No comparison'}
+                compareLabel={compared ? `Comparison · ${formatSpan(compared.start, compared.end, timeZone)}` : 'No comparison'}
                 selected={{ day, month: params.get('month') || undefined, year: params.get('year') || undefined }}
                 onCommit={(patch) => {
                   const next = new URLSearchParams(params)
@@ -435,7 +435,7 @@ export function AdminAnalyticsApp({
             upstream={upstream}
             onOpen={setRequestId}
           />
-        ) : <RetrievalLivePage />)}
+        ) : <RetrievalLivePage adminKey={adminKey} onInvalidKey={onInvalidKey} onOpenQuality={() => setParam('view', 'quality')} />)}
         {view === 'accounts' && (demo ? (
           <AccountTable rows={rows} sort={sort} onSort={setSort} onOpen={(id) => setParam('account', id)} query={query} onQuery={(value) => setParam('q', value)} showAll={showAll} onShowAll={(value) => setParam('all', value ? '1' : '')} />
         ) : <ActivityPage activity={activityQuery.data} loading={activityQuery.isLoading} error={activityQuery.error as Error | null} periodLabel={period.label} onInvalidKey={onInvalidKey} onRetry={() => activityQuery.refetch()} />)}

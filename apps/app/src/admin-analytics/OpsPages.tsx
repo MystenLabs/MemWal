@@ -5,7 +5,7 @@ import {
   fetchAdminConfig,
   fetchAdminErrors,
   fetchAdminCoverage,
-  fetchAdminUploadSummary,
+  fetchAdminQuality,
   fetchAdminInventory,
   fetchAdminWallets,
   formatTokenAmount,
@@ -409,36 +409,63 @@ export function StorageLivePage({ adminKey, onInvalidKey }: { adminKey: string; 
   )
 }
 
-const BOUNDARIES = [
-  ['Relayer → client', 'Not stored', 'Response-body bytes are not retained per request.'],
-  ['Aggregator → relayer', 'Not stored', 'Upstream body bytes are not a histogram.'],
-  ['Storage node → aggregator', 'Unsupported', 'Node telemetry is not correlated to a request id.'],
-] as const
+export function boundaryCopy(source: { capability: string; health: string; observed: number | null; limitation: string } | undefined, missing: string) {
+  if (!source) return { status: 'Unknown', why: missing, samples: null as number | null }
+  if (source.capability === 'not_implemented') return { status: 'Not implemented', why: source.limitation, samples: null }
+  if (source.capability === 'unsupported_by_source') return { status: 'Unsupported', why: source.limitation, samples: null }
+  if (source.health === 'failed') return { status: 'Query failed', why: source.limitation, samples: null }
+  if (source.observed === 0) return { status: 'No samples', why: 'Instrumentation is deployed. No sample has been recorded in this process.', samples: 0 }
+  return { status: 'Aggregate only', why: source.limitation, samples: source.observed }
+}
 
-export function RetrievalLivePage() {
+export function RetrievalLivePage({ adminKey, onInvalidKey, onOpenQuality }: { adminKey: string | null; onInvalidKey: () => void; onOpenQuality: () => void }) {
+  const inventory = useQuery({
+    queryKey: ['admin', 'quality'],
+    queryFn: () => fetchAdminQuality(adminKey as string),
+    enabled: Boolean(adminKey),
+    retry: (count, error) => (error as Error).message !== 'INVALID_KEY' && count < 1,
+  })
+  useInvalid(inventory.error, onInvalidKey)
+  const sources = inventory.data?.sources ?? []
+  const byId = (id: string) => sources.find((source) => source.id === id)
+  const records = byId('retrieval_requests')
+  const body = byId('response_bytes')
+  const aggregator = byId('aggregator_bytes')
+  const node = byId('node_egress')
+  const failed = Boolean(inventory.error)
+  const rows = [
+    ['Relayer → client', body ? boundaryCopy(body, '') : { status: failed ? 'Query failed' : 'Loading', why: failed ? 'The quality inventory did not load.' : 'Waiting for the quality inventory.', samples: null }],
+    ['Aggregator → relayer', boundaryCopy(aggregator, 'Upstream body bytes are not collected.')],
+    ['Storage node → aggregator', boundaryCopy(node, 'Node telemetry is not correlated to a request id.')],
+  ] as const
+  const samples = failed ? null : records?.observed ?? null
   return (
     <div className="wa-page">
       <div className="wa-kpis">
-        <Kpi label="p50 bytes" value="—" delta="Unavailable" title="No per-request byte population." />
+        <Kpi label="p50 bytes" value="—" delta="Unavailable" title="Percentiles are not on the quality inventory. A sample count is not a percentile." />
         <Kpi label="p90 bytes" value="—" delta="Unavailable" />
         <Kpi label="p99 bytes" value="—" delta="Unavailable" />
         <Kpi label="p50 latency" value="—" delta="Unavailable" />
         <Kpi label="p99 latency" value="—" delta="Unavailable" />
-        <Kpi label="Sample count" value="—" delta="No request records" />
+        <Kpi label="Request records" value={samples == null ? '—' : formatCount(samples)} delta={samples === 0 ? 'No samples recorded' : samples == null ? 'Unknown' : 'Recorded requests'} />
       </div>
       <section className="wa-panel">
-        <h2>Transfer boundaries</h2>
+        <div className="wa-chart-head">
+          <h2>Storage nodes → aggregator → relayer → client</h2>
+          <button className="wa-btn" type="button" onClick={onOpenQuality}>View source details</button>
+        </div>
+        <p className="wa-note">Relayer → client is outbound body bytes. Aggregator → relayer is relayer ingress. A process histogram is not a per-account request history, and an empty table is not zero traffic.</p>
+        {failed && <button className="wa-btn" type="button" onClick={() => inventory.refetch()}>Retry</button>}
         <div className="wa-table-wrap">
           <table className="wa-table">
-            <thead><tr><th>Boundary</th><th>Status</th><th>Why</th></tr></thead>
+            <thead><tr><th>Boundary</th><th>Status</th><th className="wa-prose">Why</th></tr></thead>
             <tbody>
-              {BOUNDARIES.map((row) => (
-                <tr key={row[0]}><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>
+              {rows.map((row) => (
+                <tr key={row[0]}><td>{row[0]}</td><td>{row[1].status}</td><td className="wa-prose">{row[1].why}</td></tr>
               ))}
             </tbody>
           </table>
         </div>
-        <p className="wa-note">Percentiles are not calculated from upload counters. A missing node series is unavailable, not zero traffic.</p>
       </section>
     </div>
   )
