@@ -11,7 +11,21 @@ function hex(bytes: Uint8Array): string {
 }
 
 function fromHex(s: string): Uint8Array {
-    const clean = s.startsWith("0x") ? s.slice(2) : s;
+    if (typeof s !== "string") {
+        throw new TypeError("hexToBytes: expected string input");
+    }
+    const clean = s.startsWith("0x") || s.startsWith("0X") ? s.slice(2) : s;
+    if (clean.length === 0) {
+        throw new Error("hexToBytes: empty hex string");
+    }
+    if (clean.length % 2 !== 0) {
+        throw new Error(
+            `hexToBytes: odd-length hex string (length=${clean.length}); hex must have an even number of digits`,
+        );
+    }
+    if (!/^[0-9a-fA-F]+$/.test(clean)) {
+        throw new Error("hexToBytes: input contains non-hex characters");
+    }
     const out = new Uint8Array(clean.length / 2);
     for (let i = 0; i < out.length; i++) {
         out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
