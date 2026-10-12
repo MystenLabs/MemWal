@@ -154,8 +154,12 @@ class _PendingSaves:
         """Remember a background analyze failure so flush does not report success."""
         with self._lock:
             self._errors.append(err)
-        if self._on_save_error is not None:
+        if self._on_save_error is None:
+            return
+        try:
             self._on_save_error(err)
+        except Exception:
+            logger.warning("Walrus Memory on_save_error raised", exc_info=True)
 
     def _raise_if_failed(self) -> None:
         with self._lock:

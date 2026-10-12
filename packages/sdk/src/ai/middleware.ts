@@ -101,7 +101,11 @@ export function withMemWal(
             .catch((err: unknown) => {
                 log("Auto-save failed:", err);
                 saveFailures.push(err);
-                options.onSaveError?.(err);
+                try {
+                    options.onSaveError?.(err);
+                } catch (callbackError) {
+                    log("onSaveError threw:", callbackError);
+                }
             });
         pendingSaves.add(savePromise);
         savePromise.finally(() => pendingSaves.delete(savePromise));
