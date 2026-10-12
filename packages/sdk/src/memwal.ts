@@ -449,6 +449,11 @@ export class MemWal {
     private pendingRememberKeys = new Map<string, string>();
 
     private constructor(config: MemWalConfig) {
+        if (config.key === undefined || config.key === null || (typeof config.key !== "string" && !(config.key instanceof Uint8Array))) {
+            throw new TypeError(
+                `MemWal.create: "key" is required (64-char hex delegate key, suiprivkey1..., or Uint8Array); got ${config.key}`,
+            );
+        }
         this.privateKey =
             typeof config.key === "string"
                 ? hexToBytes(normalizePrivateKey(config.key))

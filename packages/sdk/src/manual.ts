@@ -172,6 +172,11 @@ export class MemWalManual {
         if (config.suiPrivateKey && config.walletSigner) {
             throw new Error("MemWalManual: provide suiPrivateKey OR walletSigner, not both");
         }
+        if (config.key === undefined || config.key === null || (typeof config.key !== "string" && !(config.key instanceof Uint8Array))) {
+            throw new TypeError(
+                `MemWalManual.create: "key" is required (64-char hex delegate key, suiprivkey1..., or Uint8Array); got ${config.key}`,
+            );
+        }
         this.delegatePrivateKey =
             typeof config.key === "string"
                 ? hexToBytes(normalizePrivateKey(config.key))
