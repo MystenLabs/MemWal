@@ -490,6 +490,11 @@ export class MemWal {
                 : typeof this.privateKey;
             throw new Error(`Ed25519 seed must be exactly 32 bytes, got ${got}`);
         }
+        if (typeof config.accountId !== "string" || config.accountId.trim().length === 0) {
+            throw new TypeError(
+                `MemWal.create: "accountId" is required (Walrus Memory object ID, e.g. 0x...); got ${config.accountId}`,
+            );
+        }
         this.accountId = config.accountId;
         // LOW-22: default to HTTPS for production usage; normalizeServerUrl
         // warns (does not throw) if a user passes plain http:// for a

@@ -191,6 +191,11 @@ export class MemWalManual {
         // against non-localhost hosts.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
         this.walletSigner = config.walletSigner ?? null;
+        if (typeof config.accountId !== "string" || config.accountId.trim().length === 0) {
+            throw new TypeError(
+                `MemWalManual.create: "accountId" is required (Walrus Memory object ID, e.g. 0x...); got ${config.accountId}`,
+            );
+        }
         this.config = config;
         if (config.namespace !== undefined && !config.namespace) {
             throw new Error("namespace cannot be empty");
