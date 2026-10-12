@@ -371,13 +371,27 @@ test("MemWalMock collapses a repeated idempotency key onto the original job", as
         (await mock.recall({ query: "other", namespace: "ns", maxDistance: 0.5 })).total,
         0,
     );
-    await assert.rejects(
-        () => mock.rememberAsync("dedupe me", "other-ns", { idempotencyKey: "key-123" }),
-        /different content/,
-    );
+    // WALM-781: Idempotency keys are scoped per namespace.
+    // The same key used in another namespace must succeed and not collide.
+    const otherNs = await mock.rememberAsync("dedupe me", "other-ns", {
+        idempotencyKey: "key-123",
+    });
+    assert.notEqual(first.job_id, otherNs.job_id);
     assert.equal(
         (await mock.recall({ query: "dedupe", namespace: "other-ns", maxDistance: 0.5 })).total,
-        0,
+        1,
+    );
+
+    // Retrying with the same key in other-ns collapses.
+    const otherNsRetry = await mock.rememberAsync("dedupe me", "other-ns", {
+        idempotencyKey: "key-123",
+    });
+    assert.equal(otherNs.job_id, otherNsRetry.job_id);
+
+    // Reusing the key with different content in other-ns rejects.
+    await assert.rejects(
+        () => mock.rememberAsync("different content text", "other-ns", { idempotencyKey: "key-123" }),
+        /different content/,
     );
 
     const viaRemember = await mock.remember("via remember", "ns", {

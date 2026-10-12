@@ -582,7 +582,8 @@ export class MemWalMock {
         const resolvedNamespace = namespace ?? this.namespace;
         if (!resolvedNamespace) throw new Error("namespace cannot be empty");
         if (idempotencyKey !== undefined) {
-            const existingId = this.idempotency.get(idempotencyKey);
+            const mapKey = `${resolvedNamespace}\0${idempotencyKey}`;
+            const existingId = this.idempotency.get(mapKey);
             const existing = existingId ? this.jobs.get(existingId) : undefined;
             if (existing) {
                 if (existing.text !== text || existing.namespace !== resolvedNamespace) {
@@ -592,7 +593,7 @@ export class MemWalMock {
                 }
                 return existing;
             }
-            if (existingId) this.idempotency.delete(idempotencyKey);
+            if (existingId) this.idempotency.delete(mapKey);
         }
         this.sequence += 1;
         const suffix = this.sequence.toString().padStart(6, "0");
@@ -606,7 +607,9 @@ export class MemWalMock {
         };
         this.memories.push(memory);
         this.jobs.set(memory.jobId, memory);
-        if (idempotencyKey !== undefined) this.idempotency.set(idempotencyKey, memory.jobId);
+        if (idempotencyKey !== undefined) {
+            this.idempotency.set(`${resolvedNamespace}\0${idempotencyKey}`, memory.jobId);
+        }
         return memory;
     }
 

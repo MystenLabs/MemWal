@@ -777,15 +777,15 @@ pub async fn remember(
     let namespace_owned = namespace.clone();
     let text = body.text;
 
-    // Idempotent retry: if this owner already has a job under the same key,
-    // return it instead of minting a new (paid) write. Insert-then-check under
-    // the partial unique index (owner, idempotency_key) so two concurrent
-    // requests with the same key can't both create a job — the loser's insert
-    // conflicts and it reads back the winner's row.
+    // Idempotent retry: if this owner already has a job under the same key in this
+    // namespace, return it instead of minting a new (paid) write. Insert-then-check
+    // under the partial unique index (owner, namespace, idempotency_key) so two
+    // concurrent requests with the same key can't both create a job — the loser's
+    // insert conflicts and it reads back the winner's row.
     let fingerprint = request_fingerprint(&text, namespace);
     if let Some(ref key) = body.idempotency_key {
         if let Some((existing_id, existing_status, existing_blob_id, existing_fingerprint)) =
-            find_remember_job_by_key(state.db.pool(), owner, key).await?
+            find_remember_job_by_key(state.db.pool(), owner, namespace, key).await?
         {
             // Same key, different content → the caller reused an idempotency key
             // for a different write. Reject rather than silently collapsing onto
@@ -825,7 +825,7 @@ pub async fn remember(
     // "running" for API compatibility — see below.)
     let inserted = match sqlx::query(
         "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, $3, 'pending', $4, $5)
-         ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+         ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
     )
     .bind(&job_id)
     .bind(owner)
@@ -852,7 +852,7 @@ pub async fn remember(
     if inserted.rows_affected() == 0 {
         if let Some(key) = body.idempotency_key.as_deref() {
             if let Some((existing_id, existing_status, existing_blob_id, existing_fingerprint)) =
-                find_remember_job_by_key(state.db.pool(), owner, key).await?
+                find_remember_job_by_key(state.db.pool(), owner, namespace, key).await?
             {
                 // Lost the race to a concurrent same-key request with DIFFERENT
                 // content → reject, same as the pre-lookup path.
@@ -1280,18 +1280,20 @@ fn request_fingerprint(text: &str, namespace: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Look up an existing remember job for `(owner, idempotency_key)`. Returns
+/// Look up an existing remember job for `(owner, namespace, idempotency_key)`. Returns
 /// `(job_id, status, blob_id, request_fingerprint)` when one exists, so a retry
 /// can collapse onto it — or be rejected if its content fingerprint differs.
 async fn find_remember_job_by_key(
     pool: &sqlx::PgPool,
     owner: &str,
+    namespace: &str,
     key: &str,
 ) -> Result<Option<(String, String, Option<String>, Option<String>)>, AppError> {
     sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
-        "SELECT id, status, blob_id, request_fingerprint FROM remember_jobs WHERE owner = $1 AND idempotency_key = $2",
+        "SELECT id, status, blob_id, request_fingerprint FROM remember_jobs WHERE owner = $1 AND namespace = $2 AND idempotency_key = $3",
     )
     .bind(owner)
+    .bind(namespace)
     .bind(key)
     .fetch_optional(pool)
     .await
@@ -1414,7 +1416,7 @@ pub async fn remember_bulk(
             // path; only a retry of an in-flight job (worker-set `running`)
             // triggers the crash-window reconcile. See the single-remember insert.
             "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, $3, 'pending', $4, $5)
-             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
         )
         .bind(&job_id)
         .bind(owner)
@@ -1441,7 +1443,7 @@ pub async fn remember_bulk(
 
         if inserted.rows_affected() == 0 {
             let existing = match item_key.as_deref() {
-                Some(key) => find_remember_job_by_key(state.db.pool(), owner, key).await?,
+                Some(key) => find_remember_job_by_key(state.db.pool(), owner, &item.namespace, key).await?,
                 None => None,
             };
             let (existing_id, _, _, existing_fingerprint) = existing.ok_or_else(|| {
@@ -2004,7 +2006,7 @@ mod tests {
         .await
         .unwrap();
 
-        let found = find_remember_job_by_key(&pool, &owner, key)
+        let found = find_remember_job_by_key(&pool, &owner, "ns", key)
             .await
             .unwrap()
             .unwrap();
@@ -2057,6 +2059,9 @@ mod tests {
         assert!(validate_idempotency_key(Some(&ok)).is_ok());
     }
 
+    static IDEM_SCHEMA_SETUP_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+
     async fn idem_test_pool() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://memwal:memwal_secret@localhost:5432/memwal".into());
@@ -2066,6 +2071,10 @@ mod tests {
             .connect(&url)
             .await
             .unwrap();
+        let _guard = IDEM_SCHEMA_SETUP_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         sqlx::raw_sql(include_str!("../../migrations/005_remember_jobs.sql"))
             .execute(&pool)
             .await
@@ -2093,7 +2102,7 @@ mod tests {
         let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
 
         // No job yet for this key.
-        assert!(find_remember_job_by_key(&pool, &owner, key)
+        assert!(find_remember_job_by_key(&pool, &owner, "ns", key)
             .await
             .unwrap()
             .is_none());
@@ -2110,7 +2119,7 @@ mod tests {
         .unwrap();
 
         // Lookup now finds it (this is what a retry hits → collapse, no new write).
-        let found = find_remember_job_by_key(&pool, &owner, key).await.unwrap();
+        let found = find_remember_job_by_key(&pool, &owner, "ns", key).await.unwrap();
         assert_eq!(
             found,
             Some((job_id.clone(), "running".to_string(), None, None))
@@ -2119,7 +2128,7 @@ mod tests {
         // A concurrent same-(owner,key) insert with a fresh id must DO NOTHING.
         let dup = sqlx::query(
             "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key) VALUES ($1, $2, 'ns', 'running', $3)
-             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
         )
         .bind(format!("remember-job-{}", uuid::Uuid::new_v4()))
         .bind(&owner)
@@ -2134,11 +2143,81 @@ mod tests {
         );
 
         // Original row is still the one that survives.
-        let still = find_remember_job_by_key(&pool, &owner, key).await.unwrap();
+        let still = find_remember_job_by_key(&pool, &owner, "ns", key).await.unwrap();
         assert_eq!(
             still,
             Some((job_id.clone(), "running".to_string(), None, None))
         );
+
+        let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
+            .bind(&owner)
+            .execute(&pool)
+            .await;
+    }
+
+    // WALM-781: Idempotency keys are scoped per (owner, namespace).
+    // The same key used for identical (or different) text in two different
+    // namespaces of one account produces two successful writes, and retries
+    // within a namespace still dedupe.
+    #[tokio::test]
+    async fn idempotency_key_is_scoped_per_namespace() {
+        let pool = idem_test_pool().await;
+        let owner = format!("0xowner-{}", uuid::Uuid::new_v4());
+        let key = "shared-idem-key";
+        let text = "Identical fact for two users.";
+        let fp_a = request_fingerprint(text, "ns-a");
+        let fp_b = request_fingerprint(text, "ns-b");
+        let job_a = format!("job-a-{}", uuid::Uuid::new_v4());
+        let job_b = format!("job-b-{}", uuid::Uuid::new_v4());
+
+        // 1. First write in ns-a succeeds.
+        let insert_a = sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, 'ns-a', 'pending', $3, $4)
+             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+        )
+        .bind(&job_a)
+        .bind(&owner)
+        .bind(key)
+        .bind(&fp_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(insert_a.rows_affected(), 1);
+
+        // 2. Second write in ns-b with the SAME key and text also succeeds (does not collide).
+        let insert_b = sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, 'ns-b', 'pending', $3, $4)
+             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+        )
+        .bind(&job_b)
+        .bind(&owner)
+        .bind(key)
+        .bind(&fp_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(insert_b.rows_affected(), 1, "same key in different namespace must succeed");
+
+        // 3. Retry within ns-a collides and collapses (insert DO NOTHING).
+        let retry_a = sqlx::query(
+            "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, 'ns-a', 'pending', $3, $4)
+             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+        )
+        .bind(format!("job-retry-{}", uuid::Uuid::new_v4()))
+        .bind(&owner)
+        .bind(key)
+        .bind(&fp_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retry_a.rows_affected(), 0, "retry within namespace must collapse");
+
+        // 4. Lookup returns the respective job per namespace.
+        let found_a = find_remember_job_by_key(&pool, &owner, "ns-a", key).await.unwrap();
+        assert_eq!(found_a.unwrap().0, job_a);
+
+        let found_b = find_remember_job_by_key(&pool, &owner, "ns-b", key).await.unwrap();
+        assert_eq!(found_b.unwrap().0, job_b);
 
         let _ = sqlx::query("DELETE FROM remember_jobs WHERE owner = $1")
             .bind(&owner)
@@ -2155,7 +2234,7 @@ mod tests {
         let job_id = format!("remember-job-{}", uuid::Uuid::new_v4());
 
         let insert = "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint) VALUES ($1, $2, 'ns', 'pending', $3, $4)
-             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING";
+             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING";
 
         sqlx::query(insert)
             .bind(&job_id)
@@ -2180,7 +2259,7 @@ mod tests {
             "retried bulk item must not mint a second job"
         );
 
-        let found = find_remember_job_by_key(&pool, &owner, item_key)
+        let found = find_remember_job_by_key(&pool, &owner, "ns", item_key)
             .await
             .unwrap()
             .unwrap();
@@ -2223,7 +2302,7 @@ mod tests {
             "fixture must start in the orphan state"
         );
 
-        let existing = find_remember_job_by_key(&pool, &owner, item_key)
+        let existing = find_remember_job_by_key(&pool, &owner, "ns", item_key)
             .await
             .unwrap()
             .unwrap();
@@ -2260,7 +2339,7 @@ mod tests {
         for _ in 0..2 {
             sqlx::query(
                 "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key) VALUES ($1, $2, 'ns', 'running', NULL)
-                 ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+                 ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
             )
             .bind(format!("remember-job-{}", uuid::Uuid::new_v4()))
             .bind(&owner)
@@ -2316,7 +2395,7 @@ mod tests {
 
         // Retry #1 after the terminal failure: the key resolves to the failed
         // row, which is restartable now, not after the TTL.
-        let (found_id, status, blob, _) = find_remember_job_by_key(&pool, &owner, key)
+        let (found_id, status, blob, _) = find_remember_job_by_key(&pool, &owner, "ns", key)
             .await
             .unwrap()
             .expect("row bound to key");
@@ -2344,7 +2423,7 @@ mod tests {
 
         // Retry #2 while that restart is in flight: same row, no new claim, and
         // the insert path cannot mint a second job for the key.
-        let (again_id, again_status, again_blob, _) = find_remember_job_by_key(&pool, &owner, key)
+        let (again_id, again_status, again_blob, _) = find_remember_job_by_key(&pool, &owner, "ns", key)
             .await
             .unwrap()
             .unwrap();
@@ -2362,7 +2441,7 @@ mod tests {
         );
         let dup = sqlx::query(
             "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key) VALUES ($1, $2, 'ns', 'pending', $3)
-             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&owner)
