@@ -248,7 +248,8 @@ export function investigationWindows(during: { start: Date; end: Date }, now: Da
     end: during.start,
     label: 'Equal duration immediately before',
   }
-  if (during.end.getTime() >= now.getTime()) {
+  // A few milliseconds between the range clock and this page clock is not an after period.
+  if (during.end.getTime() + 2_000 >= now.getTime()) {
     return { before, after: null, ongoing: true }
   }
   const afterEnd = new Date(during.end.getTime() + duration)
@@ -260,7 +261,7 @@ export function investigationWindows(during: { start: Date; end: Date }, now: Da
       start: during.end,
       end: partial ? now : afterEnd,
       partial,
-      label: partial ? 'Partial window after the investigation' : 'Equal duration immediately after',
+      label: partial ? 'Still collecting' : 'Equal duration immediately after',
     },
   }
 }

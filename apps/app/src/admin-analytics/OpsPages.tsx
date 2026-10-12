@@ -77,7 +77,7 @@ function Kpi({ label, value, delta, title }: { label: string; value: string; del
     <article className="wa-kpi" title={title}>
       <div className="label">{label}</div>
       <div className={`value${value === '—' ? ' wa-unavailable' : ''}`}>{value}</div>
-      <div className="delta">{delta}</div>
+      {delta ? <div className="delta">{delta}</div> : null}
     </article>
   )
 }
@@ -90,14 +90,15 @@ export function activityBuckets(windowHours: number, hourly: Array<{ hour: strin
 }
 
 export function priorText(comparing: boolean, value: number) {
-  return comparing ? `Prior ${value}` : 'No comparison'
+  return comparing ? `Prior ${value}` : ''
 }
 
 
 export function afterCell(partial: boolean, hours: number, loading: boolean, value: number | undefined) {
-  if (partial && hours < 1) return 'Still collecting'
+  if (partial) return `Still collecting · ${hours < 1 ? `${Math.max(1, Math.round(hours * 60))} min` : `${hours.toFixed(1)} h`}`
   if (loading) return '…'
-  return String(value ?? 0)
+  if (value == null) return '—'
+  return String(value)
 }
 export function ActivityPage({ activity, loading, error, periodLabel, comparing, windowHours, onInvalidKey, onRetry, refreshing = false, onExport, exportReady = false }: {
   activity: AdminActivity | undefined
@@ -559,6 +560,15 @@ function formatWhen(value: Date, timeZone: string) {
   }).format(value)
 }
 
+function formatDuration(ms: number) {
+  const minutes = Math.max(0, Math.round(ms / 60_000))
+  if (minutes < 60) return `${minutes} min`
+  const hours = minutes / 60
+  if (hours < 48) return `${hours.toFixed(1)} h`
+  return `${(hours / 24).toFixed(1)} d`
+}
+
+
 export function IncidentLivePage({
   adminKey,
   period,
@@ -658,15 +668,54 @@ export function IncidentLivePage({
     <div className="wa-page">
       <section className="wa-panel">
         <div className="wa-chart-head">
-          <h2>No saved incidents</h2>
+          <div>
+            <h2>Custom investigation</h2>
+            <p className="wa-note">Explore activity and performance during a selected period.</p>
+          </div>
           <button className="wa-btn" type="button" onClick={exportInvestigation}>Export investigation</button>
         </div>
-        <p className="wa-note">Custom investigation, not a confirmed incident. Window: {period.label}, {formatWhen(period.start, timeZone)} – {formatWhen(period.end, timeZone)} ({timeZone}){period.partial || adjacent.ongoing ? ' · partial' : ''}.</p>
-        <details>
+        <p className="wa-note">Exploratory. Not a saved incident.</p>
+        <div className="wa-saved">
+          <h3>Saved incidents</h3>
+          <p className="wa-empty">None saved. This page does not store an incident.</p>
+        </div>
+        <p className="wa-note">Times shown in {timeZone}.</p>
+        <div className="wa-windows">
+          <article className="wa-window">
+            <h3>Before</h3>
+            <p>{formatWhen(before.start, timeZone)} – {formatWhen(before.end, timeZone)}</p>
+            <p className="wa-note">{formatDuration(before.end.getTime() - before.start.getTime())}. Equal length immediately before.</p>
+          </article>
+          <article className="wa-window">
+            <h3>Selected period</h3>
+            <p>{formatWhen(period.start, timeZone)} – {formatWhen(period.end, timeZone)}</p>
+            <p className="wa-note">{formatDuration(period.end.getTime() - period.start.getTime())}. {period.partial || adjacent.ongoing ? 'Selected period is still open.' : 'Selected period is complete.'}</p>
+          </article>
+          <article className="wa-window">
+            <h3>After</h3>
+            {adjacent.after ? (
+              <>
+                <p>{formatWhen(adjacent.after.start, timeZone)} – {formatWhen(adjacent.after.end, timeZone)}</p>
+                <p className="wa-note">{formatDuration(adjacent.after.end.getTime() - adjacent.after.start.getTime())} elapsed. {adjacent.after.partial ? `Still collecting. Intended length ${formatDuration(period.end.getTime() - period.start.getTime())}.` : 'Equal length immediately after.'}</p>
+              </>
+            ) : <p className="wa-note">After period has not started. A completed selected period is needed before an after comparison.</p>}
+          </article>
+        </div>
+        <details className="wa-disclosure">
           <summary>Measurement details</summary>
-          <p className="wa-note">Before: {before.label}, {formatWhen(before.start, timeZone)} – {formatWhen(before.end, timeZone)}. After: {adjacent.after ? `${adjacent.after.label}, ${formatWhen(adjacent.after.start, timeZone)} – ${formatWhen(adjacent.after.end, timeZone)}` : 'Not yet available. The during window is still open.'} April and May are not guessed.</p>
+          <div className="wa-split"><span>Source</span><b>Upload activity</b></div>
+          <div className="wa-split"><span>Recorded samples</span><b>{coverage.data ? formatCount(coverage.data.retrievalRecords) : 'Unknown'} retrieval records</b></div>
+          <div className="wa-split"><span>Coverage start</span><b>{coverage.data?.retrievalSince ?? 'None recorded'}</b></div>
+          <div className="wa-split"><span>Last observation</span><b>{during.data?.generatedAt ?? 'Unknown'}</b></div>
+          <div className="wa-split"><span>Methodology</span><b>Completed uploads in the resolved windows. Not retrieval percentiles.</b></div>
+          <div className="wa-split"><span>Known gaps</span><b>No per-request byte, latency, cache, or retry series.</b></div>
+          <p className="wa-note">UTC start {period.start.toISOString()}. UTC end {period.end.toISOString()}.</p>
         </details>
-        <button className="wa-btn" type="button" onClick={onOpenQuality}>View measurement coverage</button>
+        <details className="wa-disclosure">
+          <summary>10 October 2026 cold read</summary>
+          <p className="wa-note">Historical incident dates and request-level coverage have not been verified. Reported, not a live measurement for this window: 239.6 MiB plain, 10.11 TiB encoded accounting, 168,376 blobs, one node transfer of 445,556 B.</p>
+        </details>
+        <button className="wa-btn wa-section-action" type="button" onClick={onOpenQuality}>View measurement coverage</button>
       </section>
       <div className="wa-kpis">
         <article className="wa-kpi"><div className="label">Uploads completed</div><div className="value">{formatCount(duringUploads)}</div><div className="delta">{baselineChange(duringUploads, beforeUploads)} vs before</div></article>
@@ -705,18 +754,8 @@ export function IncidentLivePage({
           )}
         </section>
         <section className="wa-panel">
-          <h2>Coverage and evidence</h2>
-          <p className="wa-note">{coverage.isError ? 'Coverage request failed. Write counts on the left are still usable.' : retrievalReason}</p>
-          <p className="wa-note">Observed: uploads completed moved from {formatCount(beforeUploads)} to {formatCount(duringUploads)} ({baselineChange(duringUploads, beforeUploads)}). Sample: {formatCount(owners.length)} owner rows.</p>
-          <p className="wa-note">Window: {period.label}, {formatWhen(period.start, timeZone)} – {formatWhen(period.end, timeZone)} ({timeZone}).</p>
-          <details>
-            <summary>Measurement details</summary>
-            <p className="wa-note">Earliest request detail: {coverage.data?.retrievalSince ?? 'none'}. Complete through: {during.data?.generatedAt ?? 'unknown'}. Histograms are not registered. No per-request byte, latency, cache, or retry series. No confirmed cause.</p>
-          </details>
-          <details>
-            <summary>10 October 2026 cold read</summary>
-            <p className="wa-note">Reported, verification pending: 239.6 MiB plain, 10.11 TiB encoded accounting, 168,376 blobs, one node transfer of 445,556 B, aggregator-to-relayer p50/p90/p99 of 555 / 1,537 / 20,412 B. It does not fill this timeline.</p>
-          </details>
+          <h2>Observed change</h2>
+          <p className="wa-note">Uploads completed moved from {formatCount(beforeUploads)} to {formatCount(duringUploads)} ({baselineChange(duringUploads, beforeUploads)}). Sample: {formatCount(owners.length)} owner rows. Only upload activity is available.</p>
           {coverage.isError && <button className="wa-btn" type="button" onClick={() => coverage.refetch()}>Retry coverage</button>}
         </section>
       </div>

@@ -20,6 +20,17 @@ describe('investigation windows', () => {
     expect(windows.ongoing).toBe(true)
   })
 
+  it('does not invent an after window from a few milliseconds of clock skew', () => {
+    const end = new Date('2026-10-12T08:53:22.608Z')
+    const windows = investigationWindows(
+      { start: new Date('2026-10-11T17:00:00.000Z'), end },
+      new Date('2026-10-12T08:53:22.611Z'),
+    )
+    expect(windows.after).toBeNull()
+    expect(windows.ongoing).toBe(true)
+  })
+
+
   it('marks a short after window as partial', () => {
     const windows = investigationWindows(during, new Date('2026-10-10T00:00:00Z'))
     expect(windows.after?.partial).toBe(true)

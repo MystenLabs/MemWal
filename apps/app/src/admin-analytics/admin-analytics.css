@@ -486,3 +486,19 @@ a.wa-ext:hover, a.wa-ext:focus-visible { color: #fff; border-bottom-color: var(-
   .wa-section-title { flex-direction: row; align-items: center; justify-content: space-between; }
 }
 
+.wa-windows { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.wa-window { border: 1px solid var(--wa-line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+.wa-window h3, .wa-saved h3 { margin: 0 0 8px; font-size: 14px; font-weight: 560; }
+.wa-window p { margin: 4px 0 0; }
+.wa-saved { margin-top: 16px; }
+.wa-section-action { margin-top: 16px; }
+.wa-disclosure { margin-top: 12px; }
+.wa-disclosure summary { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; list-style: none; }
+.wa-disclosure summary::-webkit-details-marker { display: none; }
+.wa-disclosure summary::before { content: ""; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); flex: none; }
+.wa-disclosure[open] summary::before { transform: rotate(45deg); }
+.wa-disclosure summary:focus-visible { outline: 2px solid var(--wa-accent); outline-offset: 2px; }
+.wa-disclosure .wa-split:first-of-type { margin-top: 12px; }
+@media (max-width: 720px) { .wa-windows { grid-template-columns: 1fr; } }
+
+
