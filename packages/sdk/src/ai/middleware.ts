@@ -128,6 +128,10 @@ export function withMemWal(
             // ============================================================
             transformParams: async ({ params }: any) => {
                 try {
+                    // Only recall on the first step of a user turn, not on
+                    // intermediate tool steps where the last message is tool/assistant.
+                    if (!isPromptEndingWithUser(params.prompt)) return params;
+
                     const lastUserMessage = findLastUserMessage(params.prompt);
                     if (!lastUserMessage) return params;
 
@@ -166,7 +170,9 @@ export function withMemWal(
             wrapGenerate: async ({ doGenerate, params }: any) => {
                 const result = await doGenerate();
 
-                if (autoSave) {
+                // Only auto-save on the first step of a user turn, not on
+                // intermediate tool steps where the last message is tool/assistant.
+                if (autoSave && isPromptEndingWithUser(params.prompt)) {
                     const userMessage = findLastUserMessage(params.prompt);
                     if (userMessage) {
                         saveInBackground(userMessage);
@@ -180,7 +186,9 @@ export function withMemWal(
             wrapStream: async ({ doStream, params }: any) => {
                 const result = await doStream();
 
-                if (autoSave) {
+                // Only auto-save on the first step of a user turn, not on
+                // intermediate tool steps where the last message is tool/assistant.
+                if (autoSave && isPromptEndingWithUser(params.prompt)) {
                     const userMessage = findLastUserMessage(params.prompt);
                     if (userMessage) {
                         saveInBackground(userMessage);
@@ -234,6 +242,12 @@ function findLastUserMessage(
         }
     }
     return null;
+}
+
+function isPromptEndingWithUser(prompt: unknown): boolean {
+    if (!Array.isArray(prompt) || prompt.length === 0) return false;
+    const lastMsg = prompt[prompt.length - 1] as { role?: string; content?: unknown };
+    return lastMsg?.role === "user";
 }
 
 export function injectMemoryContext(
