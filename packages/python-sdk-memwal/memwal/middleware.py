@@ -512,11 +512,19 @@ def with_memwal_langchain(
     async def _inject_memories(messages: List[BaseMessage]) -> List[BaseMessage]:
         """Recall memories and inject them without granting system priority."""
         turn_key = _user_turn_key(messages)
-        if turn_key:
-            cached = recall_cache.get(turn_key)
+        # Tool steps reuse this turn, including a recall that matched nothing.
+        # A user message always recalls again, so a later fact is not stuck
+        # behind the first result for the same text.
+        if (
+            turn_key
+            and not _is_last_message_user(messages)
+            and turn_key in recall_cache
+        ):
+            cached = recall_cache[turn_key]
             if cached:
                 return _with_memory(messages, cached)
-        elif not _is_last_message_user(messages):
+            return messages
+        if not turn_key and not _is_last_message_user(messages):
             return messages
 
         user_text = _find_last_user_message(messages)
@@ -531,7 +539,7 @@ def with_memwal_langchain(
             ]
             if not relevant:
                 if turn_key:
-                    recall_cache.pop(turn_key, None)
+                    _remember_recall(recall_cache, turn_key, "")
                 return messages
 
             memory_context = _format_memories(relevant)
@@ -676,18 +684,21 @@ def _wrap_async_openai(
         if messages is None:
             return await original_create(*args, **kwargs)
 
-        # Inject memories. A tool step keeps the previous user turn's recall
-        # without calling the relayer again.
+        # A tool step reuses this turn's recall, including an empty one.
+        # A user message always recalls again.
         turn_key = _user_turn_key(messages)
-        cached = None
-        if turn_key and not _is_last_message_user(messages):
-            cached = recall_cache.get(turn_key)
-        if cached:
-            messages = _inject_openai_memory(list(messages), cached)
-            if "messages" in kwargs:
-                kwargs["messages"] = messages
-            elif args:
-                args = (messages,) + args[1:]
+        if (
+            turn_key
+            and not _is_last_message_user(messages)
+            and turn_key in recall_cache
+        ):
+            cached = recall_cache[turn_key]
+            if cached:
+                messages = _inject_openai_memory(list(messages), cached)
+                if "messages" in kwargs:
+                    kwargs["messages"] = messages
+                elif args:
+                    args = (messages,) + args[1:]
         elif turn_key:
             user_text = _find_last_user_message(messages)
             if user_text:
@@ -698,7 +709,7 @@ def _wrap_async_openai(
                         if (1 - m.distance) >= min_relevance
                     ]
                     if not relevant and turn_key:
-                        recall_cache.pop(turn_key, None)
+                        _remember_recall(recall_cache, turn_key, "")
                     if relevant:
                         memory_context = _format_memories(relevant)
                         if turn_key:
@@ -754,17 +765,20 @@ def _wrap_sync_openai(
         if messages is None:
             return original_create(*args, **kwargs)
 
-        # Inject memories (sync). A tool step reuses the cached recall.
+        # A user message always recalls again.
         turn_key = _user_turn_key(messages)
-        cached = None
-        if turn_key and not _is_last_message_user(messages):
-            cached = recall_cache.get(turn_key)
-        if cached:
-            messages = _inject_openai_memory(list(messages), cached)
-            if "messages" in kwargs:
-                kwargs["messages"] = messages
-            elif args:
-                args = (messages,) + args[1:]
+        if (
+            turn_key
+            and not _is_last_message_user(messages)
+            and turn_key in recall_cache
+        ):
+            cached = recall_cache[turn_key]
+            if cached:
+                messages = _inject_openai_memory(list(messages), cached)
+                if "messages" in kwargs:
+                    kwargs["messages"] = messages
+                elif args:
+                    args = (messages,) + args[1:]
         elif turn_key:
             user_text = _find_last_user_message(messages)
             if user_text:
@@ -777,7 +791,7 @@ def _wrap_sync_openai(
                         if (1 - m.distance) >= min_relevance
                     ]
                     if not relevant and turn_key:
-                        recall_cache.pop(turn_key, None)
+                        _remember_recall(recall_cache, turn_key, "")
                     if relevant:
                         memory_context = _format_memories(relevant)
                         if turn_key:

@@ -725,6 +725,56 @@ class TestWithMemWalLangChain:
         assert recall_route.call_count == 2
         assert analyze_route.call_count == 2
 
+    @respx.mock
+    async def test_same_user_text_recalls_again(self) -> None:
+        """A later user turn with the same text must not reuse the first recall."""
+        from langchain_core.messages import HumanMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        from langchain_core.messages import AIMessage
+        _mock_seal_session_prereqs()
+        llm = self._make_llm()
+
+        async def _ok(batch, *args, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+        llm._agenerate = _ok
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "User lives in Lisbon", "distance": 0.05}
+        ]))
+        smart = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        await smart._agenerate([HumanMessage(content="what's my name?")])
+        await smart._agenerate([HumanMessage(content="what's my name?")])
+        assert recall_route.call_count == 2
+
+    @respx.mock
+    async def test_empty_recall_is_reused_on_the_tool_step(self) -> None:
+        """A recall with no relevant hit is cached, so the tool step does not call again."""
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        _mock_seal_session_prereqs()
+        llm = self._make_llm()
+
+        async def _ok(batch, *args, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+        llm._agenerate = _ok
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "unrelated", "distance": 0.99}
+        ]))
+        smart = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        messages = [HumanMessage(content="What is the weather?")]
+        await smart._agenerate(messages)
+        messages.extend([
+            AIMessage(content="", tool_calls=[{"name": "weather", "args": {}, "id": "1"}]),
+            ToolMessage(content="Sunny", tool_call_id="1"),
+        ])
+        await smart._agenerate(messages)
+        assert recall_route.call_count == 1
+
 
 # ============================================================
 # OpenAI middleware tests
@@ -990,6 +1040,57 @@ class TestWithMemWalOpenAI:
 
         assert recall_route.call_count == 2
         assert analyze_route.call_count == 2
+
+    @respx.mock
+    async def test_same_user_text_recalls_again(self) -> None:
+        _mock_seal_session_prereqs()
+        client = self._make_async_client()
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "User lives in Lisbon", "distance": 0.05}
+        ]))
+        smart = with_memwal_openai(
+            client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        await smart.chat.completions.create(
+            model="gpt-4o", messages=[{"role": "user", "content": "what's my name?"}]
+        )
+        await smart.chat.completions.create(
+            model="gpt-4o", messages=[{"role": "user", "content": "what's my name?"}]
+        )
+        assert recall_route.call_count == 2
+
+    @respx.mock
+    async def test_empty_recall_is_reused_on_the_tool_step(self) -> None:
+        _mock_seal_session_prereqs()
+        client = self._make_async_client()
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "unrelated", "distance": 0.99}
+        ]))
+        smart = with_memwal_openai(
+            client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        messages = [{"role": "user", "content": "hello"}]
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        messages = messages + [{"role": "tool", "tool_call_id": "1", "content": "ok"}]
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        assert recall_route.call_count == 1
+
+    @respx.mock
+    def test_sync_empty_recall_is_reused_on_the_tool_step(self) -> None:
+        _mock_seal_session_prereqs()
+        client = self._make_sync_client()
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "unrelated", "distance": 0.99}
+        ]))
+        smart = with_memwal_openai(
+            client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        messages = [{"role": "user", "content": "hello"}]
+        smart.chat.completions.create(model="gpt-4o", messages=messages)
+        messages = messages + [{"role": "tool", "tool_call_id": "1", "content": "ok"}]
+        smart.chat.completions.create(model="gpt-4o", messages=messages)
+        assert recall_route.call_count == 1
+
 
     @respx.mock
     def test_sync_client_wraps_create(self) -> None:
