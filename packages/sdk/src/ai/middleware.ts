@@ -134,8 +134,7 @@ export function withMemWal(
                     const turnKey = lastUserTurnKey(params.prompt);
                     if (!turnKey) return params;
 
-                    if (!isPromptEndingWithUser(params.prompt)) {
-                        if (!cachedRecall || cachedRecall.key !== turnKey) return params;
+                    if (cachedRecall && cachedRecall.key === turnKey) {
                         return {
                             ...params,
                             prompt: injectMemoryContext(params.prompt, cachedRecall.context),

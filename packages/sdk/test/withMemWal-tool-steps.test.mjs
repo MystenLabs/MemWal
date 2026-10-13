@@ -140,3 +140,34 @@ test("withMemWal stream variant does not re-analyze during tool steps", async ()
         MemWal.prototype.analyze = originalAnalyze;
     }
 });
+
+test("a fresh model recalls when its first call is already a tool step", async () => {
+    const originalRecall = MemWal.prototype.recall;
+    const originalAnalyze = MemWal.prototype.analyze;
+    let recallCount = 0;
+    MemWal.prototype.recall = async () => {
+        recallCount++;
+        return { results: [{ text: "Tokyo is in Japan", distance: 0.1 }], total: 1 };
+    };
+    MemWal.prototype.analyze = async () => {};
+    try {
+        generatedPrompts.length = 0;
+        const model = withMemWal(fakeLanguageModel(), {
+            key: TEST_KEY,
+            accountId: TEST_ACCOUNT_ID,
+            autoSave: true,
+        });
+        const prompt = [
+            { role: "user", content: [{ type: "text", text: "What is the weather in Tokyo?" }] },
+            { role: "assistant", content: [{ type: "tool-call", toolName: "getWeather", args: {} }] },
+            { role: "tool", content: [{ type: "tool-result", toolName: "getWeather", result: "22C" }] },
+        ];
+        await model.doGenerate({ prompt });
+        await model.doGenerate({ prompt });
+        assert.equal(recallCount, 1);
+        assert.match(JSON.stringify(generatedPrompts.at(-1)), /Tokyo is in Japan/);
+    } finally {
+        MemWal.prototype.recall = originalRecall;
+        MemWal.prototype.analyze = originalAnalyze;
+    }
+});
