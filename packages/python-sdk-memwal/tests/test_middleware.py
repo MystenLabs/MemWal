@@ -372,7 +372,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -395,7 +395,7 @@ class TestWithMemWalLangChain:
             AIMessage(content="Noted!"),
             HumanMessage(content="What do I like?"),
         ]
-        await smart_llm._agenerate([messages])
+        await smart_llm._agenerate(messages)
 
         assert len(captured) == 1
         injected = captured[0]
@@ -424,7 +424,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -445,7 +445,7 @@ class TestWithMemWalLangChain:
             {"type": "text", "text": "Base instructions", "cache_control": {"type": "ephemeral"}}
         ]
         sys_msg = SystemMessage(content=blocks, id="sys-123", additional_kwargs={"source": "test"})
-        await smart_llm._agenerate([[sys_msg, HumanMessage("What do I like?")]])
+        await smart_llm._agenerate([sys_msg, HumanMessage("What do I like?")])
 
         assert len(captured) == 1
         injected = captured[0]
