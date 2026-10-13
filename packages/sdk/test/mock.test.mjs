@@ -60,6 +60,13 @@ test("MemWalMock isolates namespaces and honors maxDistance", async () => {
         ["Bob likes tacos"]
     );
     assert.equal(empty.total, 0);
+    const dropped = await mock.recall({
+        query: "likes",
+        namespace: "user-a",
+        maxDistance: 0,
+    });
+    assert.equal(dropped.results.length, 0);
+    assert.equal(dropped.total, 1);
 });
 
 test("MemWalMock matches production recall overloads and topK precedence", async () => {
@@ -369,7 +376,7 @@ test("MemWalMock collapses a repeated idempotency key onto the original job", as
     );
     assert.equal(
         (await mock.recall({ query: "other", namespace: "ns", maxDistance: 0.5 })).total,
-        0,
+        1,
     );
     await assert.rejects(
         () => mock.rememberAsync("dedupe me", "other-ns", { idempotencyKey: "key-123" }),
@@ -423,7 +430,8 @@ test("MemWalMock collapses a repeated idempotency key onto the original job", as
         namespace: "ns",
         maxDistance: 0.5,
     });
-    assert.equal(after.total, 1);
+    assert.equal(after.results.length, 1);
+    assert.ok(after.total > after.results.length);
     assert.equal(after.results[0].blob_id, rewritten.blob_id);
 
     const cleared = MemWalMock.create();

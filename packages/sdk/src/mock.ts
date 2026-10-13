@@ -344,11 +344,6 @@ export class MemWalMock {
                 memory,
                 distance: distance(queryTokens, memory.text),
             }))
-            .filter((entry) =>
-                options.maxDistance === undefined
-                    ? true
-                    : entry.distance < options.maxDistance
-            )
             .sort(
                 (left, right) =>
                     left.distance - right.distance ||
@@ -366,13 +361,17 @@ export class MemWalMock {
                               left.distance - right.distance,
                       )
                 : semantic;
-        const ranked = ordered
-            .slice(0, resolvedLimit)
-            .map(({ memory, distance: memoryDistance }) => ({
-                blob_id: memory.blobId,
-                text: memory.text,
-                distance: memoryDistance,
-            }));
+        const page = ordered.slice(0, resolvedLimit);
+        const maxDistance = options.maxDistance;
+        const visible =
+            maxDistance === undefined
+                ? page
+                : page.filter((entry) => entry.distance < maxDistance);
+        const ranked = visible.map(({ memory, distance: memoryDistance }) => ({
+            blob_id: memory.blobId,
+            text: memory.text,
+            distance: memoryDistance,
+        }));
 
         if (typeof options.maxTokens === "number") {
             const { results, meta } = applyTokenBudget(
@@ -384,7 +383,7 @@ export class MemWalMock {
             return { results, total: results.length, meta };
         }
 
-        return { results: ranked, total: ranked.length };
+        return { results: ranked, total: page.length };
     }
 
     async analyze(
