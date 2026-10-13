@@ -157,16 +157,32 @@ def _derived_idempotency_key(request_identity: str) -> str:
     return f"r1-{hashlib.sha256(payload).hexdigest()}"
 
 
-def _remember_status_path(job_id: object) -> Optional[str]:
-    """``/api/remember/{job_id}`` when the id is one path segment, else None.
+def _require_remember_job_id(job_id: object) -> str:
+    """String form of a remember job id.
 
-    Empty, whitespace, ``/``, ``?``, and ``#`` rewrite the signed URL. A
+    ``uuid.UUID`` used to interpolate into the path and still does. Any other
+    non-string is a type mistake: ``not_found`` would hide a job that exists.
+    """
+
+    if isinstance(job_id, uuid.UUID):
+        return str(job_id)
+    if not isinstance(job_id, str):
+        raise TypeError(
+            f"remember job id must be a string, got {type(job_id).__name__}"
+        )
+    return job_id
+
+
+def _remember_status_path(job_id: str) -> Optional[str]:
+    """``/api/remember/{job_id}`` when the id is one safe segment, else None.
+
+    httpx rewrites the path after it is signed. ``.`` requests
+    ``/api/remember``, ``..`` requests ``/api``, and a NUL raises
+    ``InvalidURL``. An allowlist keeps those from leaving the client. A
     normal UUID is unchanged. (#1100, #1216)
     """
 
-    if not isinstance(job_id, str) or job_id == "":
-        return None
-    if any(ch.isspace() or ch in "/?#" for ch in job_id):
+    if re.fullmatch(r"[A-Za-z0-9_-]+", job_id) is None:
         return None
     return f"/api/remember/{job_id}"
 
@@ -547,22 +563,31 @@ class MemWal:
         id that is not one path segment is ``not_found`` without a request.
         """
 
+        job_id = _require_remember_job_id(job_id)
         path = _remember_status_path(job_id)
         if path is None:
-            shown = job_id if isinstance(job_id, str) else ""
             return RememberJobStatus(
-                job_id=shown,
+                job_id=job_id,
                 status="not_found",
-                error=f"Job {shown} not found",
+                error=f"Job {job_id} not found",
             )
-        data = await self._signed_request(
-            "GET",
-            path,
-            {},
-            accepted_statuses=(200, 404),
-            # Status is metadata. No SEAL decrypt, so no session. Matches TS.
-            include_seal_session=False,
-        )
+        try:
+            data = await self._signed_request(
+                "GET",
+                path,
+                {},
+                accepted_statuses=(200, 404),
+                # Status is metadata. No SEAL decrypt, so no session. Matches TS.
+                include_seal_session=False,
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            data = None
+        if not isinstance(data, dict):
+            return RememberJobStatus(
+                job_id=job_id,
+                status="not_found",
+                error=f"remember job not found: {job_id}",
+            )
         status = data.get("status")
         if not status:
             return RememberJobStatus(
@@ -597,9 +622,10 @@ class MemWal:
         - First poll is immediate; later polls grow 1.5x toward 5s.
         """
 
+        job_id = _require_remember_job_id(job_id)
         path = _remember_status_path(job_id)
         if path is None:
-            raise MemWalRememberJobNotFound(job_id if isinstance(job_id, str) else "")
+            raise MemWalRememberJobNotFound(job_id)
 
         deadline_ms = _now_ms() + timeout_ms
         attempt = 0
@@ -637,6 +663,8 @@ class MemWal:
                         )
                     else:
                         raise
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise MemWalRememberJobNotFound(job_id) from None
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
                     last_refusal = err.status
@@ -651,6 +679,8 @@ class MemWal:
                 last_refusal = 0
                 continue
 
+            if not isinstance(data, dict):
+                raise MemWalRememberJobNotFound(job_id)
             status_str = data.get("status")
             if status_str is None or status_str == "not_found":
                 raise MemWalRememberJobNotFound(job_id)
@@ -1761,15 +1791,7 @@ class MemWal:
                 retry_after=response.headers.get("retry-after"),
             )
 
-        try:
-            parsed = response.json()
-        except json.JSONDecodeError:
-            # An accepted 404 with an empty or non-JSON body is "not found".
-            # `GET /api/remember/` is the known case; do not raise JSONDecodeError. (#1100)
-            if response.status_code == 404:
-                return {}
-            raise
-        return parsed
+        return response.json()
 
 
 class MemWalError(Exception):

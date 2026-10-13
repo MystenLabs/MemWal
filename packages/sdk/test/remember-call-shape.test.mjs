@@ -170,7 +170,7 @@ test("a slash or query job id is not written into the signed path", async () => 
     };
 
     const memwal = client();
-    for (const jobId of ["abc/def?x=1", "job 1", "a\tb", "?", "/"]) {
+    for (const jobId of ["abc/def?x=1", "job 1", "a\tb", "?", "/", ".", "..", "%2e%2e", "a\\b"]) {
         const status = await memwal.getRememberStatus(jobId);
         assert.equal(status.status, "not_found");
         assert.equal(status.job_id, jobId);

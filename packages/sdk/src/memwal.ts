@@ -134,15 +134,15 @@ interface SignedRequestOptions {
 
 type RememberStatusResponse = RememberJobStatus | { error?: string };
 
-/** Path for one remember-job read, or undefined when `jobId` is not one segment.
+/** Path for one remember-job read, or undefined when `jobId` is not one safe segment.
  *
- * Empty, whitespace, `/`, `?`, and `#` are interpolated into the signed URL:
- * `/` adds a segment, `?` injects a query, `#` drops the rest as a fragment,
- * and `GET /api/remember/` is not a route (empty 404, no JSON). A UUID is
+ * `fetch` rewrites the path after the request is signed. `.` becomes
+ * `/api/remember/`, `..` and `%2e%2e` become `/api/`, and a backslash becomes
+ * a slash. An allowlist keeps those from leaving the client. A UUID is
  * unchanged. (#1087, #1216)
  */
 function rememberStatusPath(jobId: string): string | undefined {
-    if (typeof jobId !== "string" || jobId.length === 0 || /[\s/?#]/.test(jobId)) {
+    if (typeof jobId !== "string" || !/^[A-Za-z0-9_-]+$/.test(jobId)) {
         return undefined;
     }
     return `/api/remember/${jobId}`;

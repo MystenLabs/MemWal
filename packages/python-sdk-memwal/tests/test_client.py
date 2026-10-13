@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
@@ -656,7 +657,7 @@ class TestRememberJobStatus:
     @respx.mock
     async def test_unsafe_job_id_is_not_requested(self, memwal_client: MemWal) -> None:
         route = respx.route().mock(return_value=httpx.Response(500, text="nope"))
-        for job_id in ("", "abc/def?x=1", "job 1", "a\tb", "?", "/"):
+        for job_id in ("", "abc/def?x=1", "job 1", "a\tb", "?", "/", ".", "..", "%2e%2e", "a\\b"):
             status = await memwal_client.get_remember_status(job_id)
             assert status == RememberJobStatus(
                 job_id=job_id,
@@ -671,6 +672,39 @@ class TestRememberJobStatus:
             assert exc.value.job_id == job_id
             assert not isinstance(exc.value, json.JSONDecodeError)
         assert route.call_count == 0
+
+    async def test_non_string_job_id_is_a_type_error(self, memwal_client: MemWal) -> None:
+        with pytest.raises(TypeError):
+            await memwal_client.get_remember_status(1)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            await memwal_client.wait_for_remember_job(1, poll_interval_ms=0, timeout_ms=5_000)  # type: ignore[arg-type]
+
+    @respx.mock
+    async def test_uuid_object_reads_the_string_path(self, memwal_client: MemWal) -> None:
+        _mock_version()
+        job = uuid.UUID(_NORMAL_JOB_ID)
+        route = respx.get(f"{_TEST_SERVER}/api/remember/{job}").mock(
+            return_value=httpx.Response(200, json={"job_id": str(job), "status": "running"})
+        )
+        status = await memwal_client.get_remember_status(job)  # type: ignore[arg-type]
+        assert status.status == "running"
+        assert status.job_id == str(job)
+        assert route.call_count == 1
+
+    @respx.mock
+    async def test_non_object_404_body_is_not_found(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        route = respx.get(f"{_TEST_SERVER}/api/remember/job-1")
+        for body in (b"null", b"[]", b'"Not Found"', b"<html>nope</html>"):
+            route.mock(return_value=httpx.Response(404, content=body))
+            status = await memwal_client.get_remember_status("job-1")
+            assert status.status == "not_found"
+            assert status.job_id == "job-1"
+            with pytest.raises(MemWalRememberJobNotFound) as exc:
+                await memwal_client.wait_for_remember_job(
+                    "job-1", poll_interval_ms=0, timeout_ms=5_000
+                )
+            assert exc.value.status == 404
 
     @respx.mock
     async def test_empty_404_body_is_not_found(self, memwal_client: MemWal) -> None:
