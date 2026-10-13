@@ -460,6 +460,12 @@ export class MemWal {
             typeof config.key === "string"
                 ? hexToBytes(normalizePrivateKey(config.key))
                 : config.key;
+        if (!(this.privateKey instanceof Uint8Array) || this.privateKey.length !== 32) {
+            const got = this.privateKey instanceof Uint8Array
+                ? String(this.privateKey.length)
+                : typeof this.privateKey;
+            throw new Error(`Ed25519 seed must be exactly 32 bytes, got ${got}`);
+        }
         this.accountId = config.accountId;
         // LOW-22: default to HTTPS for production usage; normalizeServerUrl
         // warns (does not throw) if a user passes plain http:// for a
