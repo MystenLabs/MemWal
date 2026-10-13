@@ -187,6 +187,9 @@ export class MemWalManual {
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
         this.walletSigner = config.walletSigner ?? null;
         this.config = config;
+        if (config.namespace !== undefined && !config.namespace) {
+            throw new Error("namespace cannot be empty");
+        }
         this.namespace = config.namespace ?? "default";
     }
 

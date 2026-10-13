@@ -471,6 +471,9 @@ export class MemWal {
         // warns (does not throw) if a user passes plain http:// for a
         // non-localhost host.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
+        if (config.namespace !== undefined && !config.namespace) {
+            throw new Error("namespace cannot be empty");
+        }
         this.namespace = config.namespace ?? "default";
         // A non-positive or non-finite override would disable the backstop
         // entirely, which is the bug this exists to prevent.
