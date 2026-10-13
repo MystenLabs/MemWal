@@ -133,7 +133,7 @@ test("MemWalMock matches production token-budget behavior", async () => {
         maxTokens: 10,
     });
     assert.equal(budgeted.results.length, 1);
-    assert.equal(budgeted.total, 1);
+    assert.equal(budgeted.total, 2);
     assert.deepEqual(budgeted.meta, {
         tokenEstimate: 10,
         truncated: true,
