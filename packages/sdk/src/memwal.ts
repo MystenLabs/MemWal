@@ -134,6 +134,20 @@ interface SignedRequestOptions {
 
 type RememberStatusResponse = RememberJobStatus | { error?: string };
 
+/** Path for one remember-job read, or undefined when `jobId` is not one segment.
+ *
+ * Empty, whitespace, `/`, `?`, and `#` are interpolated into the signed URL:
+ * `/` adds a segment, `?` injects a query, `#` drops the rest as a fragment,
+ * and `GET /api/remember/` is not a route (empty 404, no JSON). A UUID is
+ * unchanged. (#1087, #1216)
+ */
+function rememberStatusPath(jobId: string): string | undefined {
+    if (typeof jobId !== "string" || jobId.length === 0 || /[\s/?#]/.test(jobId)) {
+        return undefined;
+    }
+    return `/api/remember/${jobId}`;
+}
+
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -546,9 +560,8 @@ export class MemWal {
      * resolves at the terminal state and hides progress.
      */
     async getRememberStatus(jobId: string): Promise<RememberJobStatus> {
-        // `GET /api/remember/` is not a route. The relayer answers 404 with an
-        // empty body, and parsing that threw SyntaxError. (#1087)
-        if (typeof jobId !== "string" || jobId.length === 0) {
+        const path = rememberStatusPath(jobId);
+        if (path === undefined) {
             return {
                 job_id: jobId,
                 status: "not_found",
@@ -557,7 +570,7 @@ export class MemWal {
         }
         const status = await this.signedRequest<RememberStatusResponse>(
             "GET",
-            `/api/remember/${jobId}`,
+            path,
             {},
             [200, 404],
             // Status is metadata. No SEAL decrypt, so no session. (#1135)
@@ -582,7 +595,8 @@ export class MemWal {
         jobId: string,
         opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
     ): Promise<RememberResult> {
-        if (typeof jobId !== "string" || jobId.length === 0) {
+        const path = rememberStatusPath(jobId);
+        if (path === undefined) {
             throw Object.assign(new Error(`remember job not found: ${jobId}`), {
                 status: 404,
                 jobId,
@@ -613,7 +627,7 @@ export class MemWal {
             try {
                 status = await this.signedRequest<RememberStatusResponse>(
                     "GET",
-                    `/api/remember/${jobId}`,
+                    path,
                     {},
                     [200, 404],
                     // Bound each poll by the client deadline, and never past

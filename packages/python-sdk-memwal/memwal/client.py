@@ -69,6 +69,7 @@ from .types import (
     RememberBulkResult,
     RememberBulkStatusItem,
     RememberBulkStatusResult,
+    RememberJobStatus,
     RememberManualOptions,
     RememberManualResult,
     RememberResult,
@@ -154,6 +155,20 @@ def _derived_idempotency_key(request_identity: str) -> str:
     bucket = int(time.time() * 1000) // IDEMPOTENCY_BUCKET_MS
     payload = f"{bucket}\0{request_identity}".encode("utf-8")
     return f"r1-{hashlib.sha256(payload).hexdigest()}"
+
+
+def _remember_status_path(job_id: object) -> Optional[str]:
+    """``/api/remember/{job_id}`` when the id is one path segment, else None.
+
+    Empty, whitespace, ``/``, ``?``, and ``#`` rewrite the signed URL. A
+    normal UUID is unchanged. (#1100, #1216)
+    """
+
+    if not isinstance(job_id, str) or job_id == "":
+        return None
+    if any(ch.isspace() or ch in "/?#" for ch in job_id):
+        return None
+    return f"/api/remember/{job_id}"
 
 
 def normalize_server_url(url: str) -> str:
@@ -524,6 +539,46 @@ class MemWal:
         remaining_s = (deadline_ms - _now_ms()) / 1000.0
         return max(0.001, min(60.0, remaining_s))
 
+    async def get_remember_status(self, job_id: str) -> RememberJobStatus:
+        """One-shot lookup of a remember job. Mirrors TS ``getRememberStatus``.
+
+        ``GET /api/remember/{job_id}``, accepting 200 and 404. A 404, or a
+        body with no ``status``, is ``not_found`` — not an exception. A job
+        id that is not one path segment is ``not_found`` without a request.
+        """
+
+        path = _remember_status_path(job_id)
+        if path is None:
+            shown = job_id if isinstance(job_id, str) else ""
+            return RememberJobStatus(
+                job_id=shown,
+                status="not_found",
+                error=f"Job {shown} not found",
+            )
+        data = await self._signed_request(
+            "GET",
+            path,
+            {},
+            accepted_statuses=(200, 404),
+            # Status is metadata. No SEAL decrypt, so no session. Matches TS.
+            include_seal_session=False,
+        )
+        status = data.get("status")
+        if not status:
+            return RememberJobStatus(
+                job_id=data.get("job_id") or job_id,
+                status="not_found",
+                error=data.get("error") or f"remember job not found: {job_id}",
+            )
+        return RememberJobStatus(
+            job_id=data.get("job_id", job_id),
+            status=status,
+            owner=data.get("owner"),
+            namespace=data.get("namespace"),
+            blob_id=data.get("blob_id"),
+            error=data.get("error"),
+        )
+
     async def wait_for_remember_job(
         self,
         job_id: str,
@@ -541,6 +596,10 @@ class MemWal:
           Retry-After within the timeout; the timeout error says so.
         - First poll is immediate; later polls grow 1.5x toward 5s.
         """
+
+        path = _remember_status_path(job_id)
+        if path is None:
+            raise MemWalRememberJobNotFound(job_id if isinstance(job_id, str) else "")
 
         deadline_ms = _now_ms() + timeout_ms
         attempt = 0
@@ -563,7 +622,7 @@ class MemWal:
                 try:
                     data = await self._signed_request(
                         "GET",
-                        f"/api/remember/{job_id}",
+                        path,
                         {},
                         accepted_statuses=(200, 404),
                         timeout=poll_timeout,
@@ -572,7 +631,7 @@ class MemWal:
                     if "unexpected keyword argument" in str(err) and "timeout" in str(err):
                         data = await self._signed_request(
                             "GET",
-                            f"/api/remember/{job_id}",
+                            path,
                             {},
                             accepted_statuses=(200, 404),
                         )
@@ -1702,7 +1761,15 @@ class MemWal:
                 retry_after=response.headers.get("retry-after"),
             )
 
-        return response.json()
+        try:
+            parsed = response.json()
+        except json.JSONDecodeError:
+            # An accepted 404 with an empty or non-JSON body is "not found".
+            # `GET /api/remember/` is the known case; do not raise JSONDecodeError. (#1100)
+            if response.status_code == 404:
+                return {}
+            raise
+        return parsed
 
 
 class MemWalError(Exception):
@@ -1963,6 +2030,10 @@ class MemWalSync:
         idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
         return self._run(self._inner.remember_async(text, namespace, idempotency_key))
+
+    def get_remember_status(self, job_id: str) -> RememberJobStatus:
+        """Synchronous version of :meth:`MemWal.get_remember_status`."""
+        return self._run(self._inner.get_remember_status(job_id))
 
     def wait_for_remember_job(
         self,

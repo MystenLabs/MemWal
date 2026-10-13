@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `getRememberStatus` and `waitForRememberJob` reject a job id that is not one path segment (empty, whitespace, `/`, `?`, or `#`) before signing. `abc/def?x=1` used to request `/api/remember/abc/def?x=1`. Valid UUID job ids are unchanged. (#1216)
 - `MemWalMock.listNamespaces` rejects a non-positive or non-integer `limit` with `limit must be positive`, matching the relayer. `limit: 0` used to return `has_more: true` and `next_cursor: null`, so the documented pagination loop never finished, and `limit: -1` silently dropped the last namespace. (#1144, #1145)
 - `MemWalMock.rememberBulkAsync` rejects an empty or non-array batch with the same error as `MemWal`. (#1146)
 - `MemWalMock` honors `idempotencyKey`. A retry of the same text and namespace returns the original job, a different payload throws, and `forget` / `clear` release the key so the text can be written again. (#1147)

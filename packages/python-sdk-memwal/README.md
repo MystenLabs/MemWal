@@ -201,6 +201,7 @@ Create a new async client.
 | Method | Description |
 |--------|-------------|
 | `await remember(text, namespace?)` | Accept a background remember job and return `job_id` |
+| `await get_remember_status(job_id)` | Read one remember job without waiting |
 | `await wait_for_remember_job(job_id, ...)` | Poll one remember job until it is searchable |
 | `await remember_and_wait(text, namespace?, ...)` | Store a memory and wait until it is searchable |
 | `await remember_bulk(items)` | Accept several background remember jobs |
