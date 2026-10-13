@@ -171,3 +171,31 @@ test("a fresh model recalls when its first call is already a tool step", async (
         MemWal.prototype.analyze = originalAnalyze;
     }
 });
+
+test("an empty recall is cached so the tool step does not call recall again", async () => {
+    const originalRecall = MemWal.prototype.recall;
+    const originalAnalyze = MemWal.prototype.analyze;
+    let recallCount = 0;
+    MemWal.prototype.recall = async () => {
+        recallCount++;
+        return { results: [], total: 0 };
+    };
+    MemWal.prototype.analyze = async () => {};
+    try {
+        const model = withMemWal(fakeLanguageModel(), {
+            key: TEST_KEY,
+            accountId: TEST_ACCOUNT_ID,
+        });
+        const user = [{ role: "user", content: [{ type: "text", text: "hello" }] }];
+        await model.doGenerate({ prompt: user });
+        const toolStep = [
+            ...user,
+            { role: "tool", content: [{ type: "tool-result", result: "ok" }] },
+        ];
+        await model.doGenerate({ prompt: toolStep });
+        assert.equal(recallCount, 1);
+    } finally {
+        MemWal.prototype.recall = originalRecall;
+        MemWal.prototype.analyze = originalAnalyze;
+    }
+});

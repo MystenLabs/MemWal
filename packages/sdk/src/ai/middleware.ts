@@ -135,6 +135,7 @@ export function withMemWal(
                     if (!turnKey) return params;
 
                     if (cachedRecall && cachedRecall.key === turnKey) {
+                        if (!cachedRecall.context) return params;
                         return {
                             ...params,
                             prompt: injectMemoryContext(params.prompt, cachedRecall.context),
@@ -149,7 +150,7 @@ export function withMemWal(
                         (m: RecallMemory) => (1 - m.distance) >= minRelevance
                     );
                     if (relevant.length === 0) {
-                        cachedRecall = null;
+                        cachedRecall = { key: turnKey, context: "" };
                         return params;
                     }
 
