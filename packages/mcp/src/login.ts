@@ -235,6 +235,11 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
         ...opts,
         timeoutMs: opts.timeoutMs ?? resolveLoginTimeoutMs(),
     };
+    // A newer freshKey can abort during generateKeypair, before the listener
+    // below is subscribed. Bail before this flow writes the pending record or
+    // hands out a URL whose server is already closed.
+    const superseded = (): boolean => cfg.signal?.aborted === true;
+    if (superseded()) throw loginSupersededError();
     // Adopt a still-valid record for this relayer rather than minting over it.
     // Recovery only runs at process start and is skipped for `--login`, so a
     // timed-out login followed by `memwal_login` in the same process would
@@ -279,6 +284,7 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
               suiAddress: reusable.delegateAddress,
           }
         : await generateKeypair();
+    if (superseded()) throw loginSupersededError();
     // Write-ahead (WALM-332). From the moment anything can hand this public key
     // to a browser, the private half has to survive losing this process — the
     // browser's on-chain `add_delegate_key` costs gas and cannot be undone, and
@@ -340,6 +346,10 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
         // part of a redirect_uri, so no collision there).
         `&connectState=${stateToken}`;
 
+    if (superseded()) {
+        server.close();
+        throw loginSupersededError();
+    }
     note(`Opening browser to authorize this MCP client...`);
     note(`If your browser doesn't open, visit: ${connectUrl}`);
     log.info("login.start", { port, publicKey: keypair.publicKeyHex, label: cfg.label });
@@ -388,8 +398,8 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
             if (!creds) {
                 retire(new Error(
                     `Login timed out after ${cfg.timeoutMs}ms. A restart retries the same key. ` +
-                        `If the wallet keeps rejecting it, call memwal_login with freshKey: true ` +
-                        `once no other sign-in is still open. That mints a new key; remove the old ` +
+                        `If the wallet keeps rejecting it, call memwal_login with freshKey: true. ` +
+                        `That mints a new key and closes the sign-in already open; remove the old ` +
                         `one from the dashboard if you already approved it on-chain.`,
                 ));
             }

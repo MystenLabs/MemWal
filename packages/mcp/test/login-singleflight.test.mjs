@@ -102,10 +102,11 @@ test("freshKey: true bypasses the in-flight flow and starts a new one", async (t
     };
     const first = startOrReuseLoginFlow(opts);
     const second = startOrReuseLoginFlow({ ...opts, freshKey: true });
-    const [urlA, urlB] = await Promise.all([first.url, second.url]);
-    assert.notEqual(urlA, urlB);
-    assert.match(urlA, /\/connect\/mcp\?/);
-    assert.match(urlB, /\/connect\/mcp\?/);
+    const [firstUrl, secondUrl] = await Promise.allSettled([first.url, second.url]);
+    assert.equal(firstUrl.status, "rejected");
+    assert.equal(firstUrl.reason.name, "MemWalLoginSuperseded");
+    assert.equal(secondUrl.status, "fulfilled");
+    assert.match(secondUrl.value, /\/connect\/mcp\?/);
     await Promise.allSettled([first.result, second.result]);
 });
 

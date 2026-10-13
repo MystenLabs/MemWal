@@ -132,8 +132,8 @@ export function loginSuccessNotification(info: LoginSuccessInfo): string {
  *
  * The advice splits on whether the user approved the wallet step. If they did,
  * the key is on-chain and in the write-ahead record (WALM-332). A restart
- * retries that same key. `freshKey: true` mints a new one, and only once no
- * other sign-in is still open. A key already approved on-chain has to be
+ * retries that same key. `freshKey: true` mints a new one and closes the
+ * sign-in that is already open. A key already approved on-chain has to be
  * removed from the dashboard; nothing else will use it.
  */
 export function loginFailureNotice(reason: string | null): string {
@@ -144,7 +144,7 @@ export function loginFailureNotice(reason: string | null): string {
         `Reason: ${reason}`,
         "",
         "If you approved the wallet step, that key is registered and saved on this machine.",
-        "A restart retries the same key. Once no other sign-in is still open, call",
+        "A restart retries the same key. Call",
         "`memwal_login` with `freshKey: true` to mint a new one, and remove it from the",
         "dashboard if you already approved the old key on-chain.",
         "",
