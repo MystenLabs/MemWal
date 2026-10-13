@@ -978,56 +978,53 @@ export class MemWalManual {
 
         const url = `${this.serverUrl}${path}`;
         const deadline = options.timeoutMs ? deadlineSignal(options.timeoutMs, options.signal) : undefined;
-        let res: Response;
         try {
-            res = await fetch(url, {
+            const res = await fetch(url, {
                 method,
                 headers,
                 body: bodyStr,
                 signal: deadline?.signal ?? options.signal,
             });
+
+            if (!res.ok) {
+                const raw = await res.text();
+                const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+                if (compatibilityError) throw compatibilityError;
+
+                const clockDriftError = clockDriftErrorFromResponse(res);
+                if (clockDriftError) throw clockDriftError;
+
+                const { message: sanitized, serverCode } = sanitizeServerError(
+                    res.status,
+                    raw,
+                    res.headers.get("x-auth-error"),
+                );
+                const err = new Error(sanitized) as Error & {
+                    status?: number;
+                    serverCode?: string;
+                    retryAfterSeconds?: number;
+                    cause?: string;
+                };
+                err.status = res.status;
+                if (serverCode) err.serverCode = serverCode;
+                const retryAfter = Number(res.headers.get("retry-after"));
+                if (Number.isFinite(retryAfter) && retryAfter > 0) {
+                    err.retryAfterSeconds = retryAfter;
+                }
+                err.cause = raw;
+                throw err;
+            }
+
+            return await res.json() as T;
         } catch (err) {
-            if (deadline?.timedOut()) {
+            const status = err && typeof err === "object" && "status" in err ? err.status : undefined;
+            if (deadline?.timedOut() && typeof status !== "number") {
                 throw requestTimeoutError(method, url, options.timeoutMs!);
             }
             throw err;
         } finally {
             deadline?.dispose();
         }
-
-        if (!res.ok) {
-            // LOW-26: sanitize server error bodies before re-throwing.
-            const raw = await res.text();
-            const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
-            if (compatibilityError) throw compatibilityError;
-
-            // Surface a stale-timestamp rejection (401 + x-auth-error) as an
-            // actionable clock-drift error rather than an opaque server error.
-            const clockDriftError = clockDriftErrorFromResponse(res);
-            if (clockDriftError) throw clockDriftError;
-
-            const { message: sanitized, serverCode } = sanitizeServerError(
-                res.status,
-                raw,
-                res.headers.get("x-auth-error"),
-            );
-            const err = new Error(sanitized) as Error & {
-                status?: number;
-                serverCode?: string;
-                retryAfterSeconds?: number;
-                cause?: string;
-            };
-            err.status = res.status;
-            if (serverCode) err.serverCode = serverCode;
-            const retryAfter = Number(res.headers.get("retry-after"));
-            if (Number.isFinite(retryAfter) && retryAfter > 0) {
-                err.retryAfterSeconds = retryAfter;
-            }
-            err.cause = raw;
-            throw err;
-        }
-
-        return res.json() as Promise<T>;
     }
 
     // ============================================================
