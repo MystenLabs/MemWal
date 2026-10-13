@@ -130,6 +130,51 @@ function recentCandidateLimit(limit: number): number {
     return Math.max(Math.min(limit * 5, 50), limit);
 }
 
+/** Relayer cursors are `{ updated_at, namespace, snapshot_at }`. A decode that
+ * is not that shape must fail loudly: `NaN` date comparisons otherwise filter
+ * out every namespace and a `while (has_more)` walk stops on the first page. */
+function decodeListNamespacesCursor(encoded: string): {
+    updated_at: string;
+    namespace: string;
+    snapshot_at?: string | null;
+} {
+    let decoded: unknown;
+    try {
+        decoded = JSON.parse(new TextDecoder().decode(
+            Uint8Array.from(
+                atob(encoded.replace(/-/g, "+").replace(/_/g, "/")),
+                (char) => char.charCodeAt(0),
+            ),
+        ));
+    } catch {
+        throw new Error("invalid namespace cursor");
+    }
+    if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+        throw new Error("invalid namespace cursor");
+    }
+    const cursor = decoded as {
+        updated_at?: unknown;
+        namespace?: unknown;
+        snapshot_at?: unknown;
+    };
+    const updatedAt = cursor.updated_at;
+    const namespace = cursor.namespace;
+    if (typeof updatedAt !== "string" || !Number.isFinite(Date.parse(updatedAt))) {
+        throw new Error("invalid namespace cursor");
+    }
+    if (typeof namespace !== "string") {
+        throw new Error("invalid namespace cursor");
+    }
+    const snapshotAt = cursor.snapshot_at;
+    if (snapshotAt !== undefined && snapshotAt !== null && typeof snapshotAt !== "string") {
+        throw new Error("invalid namespace cursor");
+    }
+    if (typeof snapshotAt === "string" && !Number.isFinite(Date.parse(snapshotAt))) {
+        throw new Error("invalid namespace cursor");
+    }
+    return { updated_at: updatedAt, namespace, snapshot_at: snapshotAt };
+}
+
 /**
  * Deterministic, dependency-free in-memory implementation of the core MemWal API.
  * It never opens a socket, reads credentials, or contacts Sui/Walrus. Recall uses
@@ -494,13 +539,9 @@ export class MemWalMock {
             );
 
         // Match the relayer's URL_SAFE_NO_PAD JSON cursor and snapshot walk.
-        const cursor: { updated_at: string; namespace: string; snapshot_at?: string | null } | null =
-            options.cursor === undefined ? null : JSON.parse(new TextDecoder().decode(
-                Uint8Array.from(
-                    atob(options.cursor.replace(/-/g, "+").replace(/_/g, "/")),
-                    (char) => char.charCodeAt(0),
-                ),
-            ));
+        const cursor = options.cursor === undefined
+            ? null
+            : decodeListNamespacesCursor(options.cursor);
         const snapshotAt = cursor?.snapshot_at ?? new Date(
             MOCK_NAMESPACE_EPOCH_MS + this.sequence * 1000,
         ).toISOString();
