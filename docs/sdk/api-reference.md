@@ -395,7 +395,7 @@ These exist on the `MemWal` class for advanced use cases:
 | Method | Description |
 |--------|-------------|
 | `rememberManual({ encryptedData, vector, namespace? })` | Send SEAL-encrypted bytes + a pre-computed vector; the relayer uploads to Walrus |
-| `recallManual({ vector, limit?, namespace? })` | Search with a pre-computed query vector (returns blob IDs, no decryption) |
+| `recallManual({ vector, limit?, namespace? })` | Search with a pre-computed query vector. Returns `RecallManualHitResult`: blob IDs and distances, no decrypted text |
 | `embed(text)` | Generate an embedding vector for text (no storage) |
 
 ## `MemWalManual`
@@ -410,9 +410,9 @@ See [MemWalManual usage](/sdk/usage/memwal-manual) for the full setup and flow d
 
 Embed locally, SEAL encrypt locally, send encrypted payload + vector to relayer for Walrus upload and vector registration.
 
-### `recallManual(query, limit?, namespace?): Promise<RecallManualResult>`
+### `recallManual(query, limit?, namespace?): Promise<RecallManualMemoryResult>`
 
-Embed locally, search via relayer, download from Walrus, SEAL decrypt locally. Returns decrypted text results.
+Embed locally, search via relayer, download from Walrus, SEAL decrypt locally. Returns decrypted text results. This is not the hit-only `RecallManualHitResult` returned by `MemWal.recallManual()`.
 
 - `recallManual(query, { limit?, namespace?, scoringWeights? })` is valid
 - `recallManual(query, namespace)` throws `TypeError`; namespace is not a valid second argument

@@ -3,7 +3,7 @@
  *
  * User-side flow where the SDK handles everything locally:
  * - SEAL encrypt/decrypt via @mysten/seal (user's own Sui wallet)
- * - Walrus upload/download via @mysten/walrus
+ * - Walrus upload is done by the relayer; downloads use the HTTP aggregator
  * - Embedding via OpenAI-compatible API (user's own key)
  * - Vector registration via Walrus Memory server (Ed25519 signed)
  *
@@ -32,7 +32,7 @@ import type {
     MemWalManualConfig,
     WalletSigner,
     RememberManualResult,
-    RecallManualResult,
+    RecallManualMemoryResult,
     RecallManualMemory,
     MemWalManualRecallOptions,
     RestoreResult,
@@ -175,7 +175,6 @@ export class MemWalManual {
     // Lazily initialized heavy clients (typed as any to avoid peer dep compile errors)
     private _suiClient: any = null;
     private _sealClient: any = null;
-    private _walrusClient: any = null;
     private _keypair: any = null;
 
     private constructor(config: MemWalManualConfig) {
@@ -215,7 +214,7 @@ export class MemWalManual {
     /**
      * Create a new MemWalManual client.
      *
-     * Requires peer dependencies: @mysten/sui, @mysten/seal, @mysten/walrus
+     * Requires peer dependencies: @mysten/sui, @mysten/seal
      *
      * @param config.key - Ed25519 delegate private key (hex) for server auth
      * @param config.suiPrivateKey - Sui private key (bech32) for SEAL + Walrus (OR walletSigner)
@@ -396,28 +395,6 @@ export class MemWalManual {
         return totalWeight > 0 ? Math.min(2, totalWeight) : 2;
     }
 
-    private async getWalrusClient() {
-        if (!this._walrusClient) {
-            // @ts-ignore — optional peer dependency
-            const { WalrusClient } = await import("@mysten/walrus");
-            const suiClient = await this.getSuiClient();
-            const network = this.config.suiNetwork ?? "mainnet";
-            const uploadRelayHost =
-                network === "testnet"
-                    ? "https://upload-relay.testnet.walrus.space"
-                    : "https://upload-relay.mainnet.walrus.space";
-            this._walrusClient = new WalrusClient({
-                network: network as any,
-                suiClient,
-                uploadRelay: {
-                    host: uploadRelayHost,
-                    sendTip: { max: 10_000_000 },
-                },
-            });
-        }
-        return this._walrusClient;
-    }
-
     // ============================================================
     // Core Manual API
     // ============================================================
@@ -460,13 +437,13 @@ export class MemWalManual {
      * `recallManual(query, { limit?, namespace? })` is valid.
      * `recallManual(query, namespace)` throws `TypeError`.
      */
-    async recallManual(query: string, options: MemWalManualRecallOptions): Promise<RecallManualResult>;
-    async recallManual(query: string, limit?: number, namespace?: string): Promise<RecallManualResult>;
+    async recallManual(query: string, options: MemWalManualRecallOptions): Promise<RecallManualMemoryResult>;
+    async recallManual(query: string, limit?: number, namespace?: string): Promise<RecallManualMemoryResult>;
     async recallManual(
         query: string,
         limitOrOptions: number | MemWalManualRecallOptions = 10,
         namespace?: string
-    ): Promise<RecallManualResult> {
+    ): Promise<RecallManualMemoryResult> {
         if (!query.trim()) throw new Error("Query cannot be empty");
 
         const options = resolveLimitOrOptions(
@@ -824,45 +801,11 @@ export class MemWalManual {
     }
 
     // ============================================================
-    // Internal: Walrus Upload/Download
+    // Internal: Walrus download
     // ============================================================
 
-    private async walrusUpload(data: Uint8Array): Promise<string> {
-        // Direct HTTP PUT to Walrus publisher (works in both browser and Node.js,
-        // unlike @mysten/walrus SDK which uses WASM and requires Node.js)
-        const network = this.config.suiNetwork ?? "mainnet";
-        const defaultPublisher =
-            network === "testnet"
-                ? "https://publisher.walrus-testnet.walrus.space"
-                : "https://publisher.walrus-mainnet.walrus.space";
-        const publisherUrl = this.config.walrusPublisherUrl ?? defaultPublisher;
-        const epochs = this.config.walrusEpochs ?? 50;
-
-        const resp = await fetch(`${publisherUrl}/v1/blobs?epochs=${epochs}&deletable=true`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/octet-stream" },
-            body: data as unknown as BodyInit,
-        });
-
-        if (!resp.ok) {
-            const errText = await resp.text();
-            throw new Error(`Walrus upload failed (${resp.status}): ${errText}`);
-        }
-
-        const result = (await resp.json()) as any;
-        // Response can be { newlyCreated: { blobObject: { blobId } } }
-        // or { alreadyCertified: { blobId } }
-        const blobId = result.newlyCreated?.blobObject?.blobId ?? result.alreadyCertified?.blobId;
-
-        if (!blobId) {
-            throw new Error(`Walrus upload: unexpected response: ${JSON.stringify(result)}`);
-        }
-        return blobId;
-    }
-
     private async walrusDownload(blobId: string): Promise<Uint8Array> {
-        // Direct HTTP fetch to Walrus aggregator (works in both browser and Node.js,
-        // unlike @mysten/walrus SDK which requires Node.js APIs)
+        // Direct HTTP fetch to the Walrus aggregator. Upload goes through the relayer.
         const network = this.config.suiNetwork ?? "mainnet";
         const defaultAggregator =
             network === "testnet"
