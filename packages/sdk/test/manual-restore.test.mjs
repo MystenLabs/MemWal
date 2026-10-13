@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MemWalManual } from "../dist/manual.js";
+import { RESTORE_REQUEST_TIMEOUT_MS } from "../dist/utils.js";
 
 
 const originalFetch = globalThis.fetch;
@@ -71,7 +72,8 @@ test("MemWalManual.restore() attaches x-seal-session header and applies RESTORE_
     assert.ok(hadAbortSignal, "Must pass an abort signal to bound the request");
 });
 
-test("MemWalManual.restore() times out after RESTORE_REQUEST_TIMEOUT_MS with status 504", async () => {
+test("restore() times out when the body stalls after headers", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     globalThis.fetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
         if (path === "/version") {
@@ -82,29 +84,33 @@ test("MemWalManual.restore() times out after RESTORE_REQUEST_TIMEOUT_MS with sta
             });
         }
         if (path === "/api/restore") {
-            // Simulate stalled server by awaiting abort signal
-            await new Promise((_, reject) => {
-                init.signal?.addEventListener("abort", () => {
-                    const err = new Error("The operation was aborted");
-                    err.name = "AbortError";
-                    reject(err);
-                });
-            });
+            started();
+            return {
+                ok: true,
+                status: 200,
+                headers: new Headers(),
+                json: () => new Promise((_, reject) => {
+                    const abort = () => {
+                        const err = new Error("The operation was aborted");
+                        err.name = "AbortError";
+                        reject(err);
+                    };
+                    if (init.signal?.aborted) abort();
+                    else init.signal?.addEventListener("abort", abort, { once: true });
+                }),
+            };
         }
         throw new Error(`Unexpected request: ${path}`);
     };
 
     const client = createManualClient();
     client.buildSealSession = async () => "mock-seal-session-token";
-
-    // Temporarily verify signedRequest timeout behavior with short deadline
-    const signedRequestErr = await client.signedRequest(
-        "POST",
-        "/api/restore",
-        { namespace: "default", limit: 10 },
-        { timeoutMs: 20, includeSealSession: true },
-    ).catch((err) => err);
-
-    assert.equal(signedRequestErr.name, "MemWalRequestTimeout");
-    assert.equal(signedRequestErr.status, 504);
+    let started = () => {};
+    const bodyStalled = new Promise((resolve) => { started = resolve; });
+    const pending = client.restore("default", 10).catch((err) => err);
+    await bodyStalled;
+    t.mock.timers.tick(RESTORE_REQUEST_TIMEOUT_MS);
+    const err = await pending;
+    assert.equal(err.name, "MemWalRequestTimeout");
+    assert.equal(err.status, 504);
 });

@@ -267,21 +267,25 @@ export class MemWalManual {
     }
 
     private async buildSealSessionInner(): Promise<string> {
-        const callerAddress = await this.getSignerAddress();
-        const signer = await this.createSigner(callerAddress);
+        // Same key MemWal uses. An owner wallet session prompts on every
+        // refresh and is broader than the delegate this client already holds.
+        // Dynamic imports: @mysten/sui and @mysten/seal are optional peers.
+        // Server-mode MemWal must still load when they are not installed.
+        const { Ed25519Keypair } = await import("@mysten/sui/keypairs/ed25519");
+        const keypair = Ed25519Keypair.fromSecretKey(this.delegatePrivateKey);
         const suiClient = await this.getSuiClient();
         const { SessionKey } = await import("@mysten/seal");
 
         const session = await SessionKey.create({
-            address: callerAddress,
+            address: keypair.getPublicKey().toSuiAddress(),
             packageId: this.config.packageId,
             ttlMin: SEAL_SESSION_TTL_MIN,
-            signer,
+            signer: keypair,
             suiClient,
         });
 
         const personalMessage = session.getPersonalMessage();
-        const signResult = await signer.signPersonalMessage(personalMessage);
+        const signResult = await keypair.signPersonalMessage(personalMessage);
         await session.setPersonalMessageSignature(signResult.signature);
 
         const exported = session.export();
@@ -1032,8 +1036,12 @@ export class MemWalManual {
     // ============================================================
 
     /**
-     * Restore a namespace — server downloads all blobs from Walrus,
-     * decrypts with delegate key, re-embeds, and re-indexes.
+     * Restore a namespace. The server downloads the blobs, decrypts them with
+     * the delegate key, and re-indexes them.
+     *
+     * Sends `x-seal-session` built from the delegate key, not the owner
+     * wallet. That session lets the relayer decrypt for this restore only,
+     * for the usual short TTL.
      *
      * @param namespace - Namespace to restore
      * @returns RestoreResult with count of restored entries
