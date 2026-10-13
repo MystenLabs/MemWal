@@ -240,27 +240,53 @@ class TestFormatMemories:
 class TestInjectOpenAIMemory:
     """Tests for _inject_openai_memory."""
 
-    def test_inserts_before_last_user_message(self) -> None:
+    def test_folds_guard_into_system_message_and_inserts_memory_before_user_message(self) -> None:
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "question"},
         ]
         result = _inject_openai_memory(messages, "memory context")
-        # Should be: existing-system | fixed-guard | memory-user | user
+        # Should be: existing-system-with-guard | memory-user | user
+        assert len(result) == 3
         assert result[0]["role"] == "system"
-        assert result[1]["role"] == "system"
-        assert "untrusted data" in result[1]["content"]
-        assert result[2] == {"role": "user", "content": "memory context"}
-        assert result[3]["role"] == "user"
+        assert "You are helpful." in result[0]["content"]
+        assert "untrusted data" in result[0]["content"]
+        assert result[1] == {"role": "user", "content": "memory context"}
+        assert result[2]["role"] == "user"
+        assert result[2]["content"] == "question"
+
+    def test_multi_turn_never_injects_system_message_after_index_0(self) -> None:
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second"},
+        ]
+        result = _inject_openai_memory(messages, "recalled fact")
+        # System message only at index 0
+        assert result[0]["role"] == "system"
+        assert "You are helpful." in result[0]["content"]
+        assert "untrusted data" in result[0]["content"]
+
+        # No system message after index 0
+        assert not any(m.get("role") == "system" for m in result[1:])
+
+        # Memory is injected as user message right before "second"
+        assert result[1] == {"role": "user", "content": "first"}
+        assert result[2] == {"role": "assistant", "content": "reply"}
+        assert result[3] == {"role": "user", "content": "recalled fact"}
+        assert result[4] == {"role": "user", "content": "second"}
 
     def test_inserts_at_start_when_only_user_message(self) -> None:
         messages = [{"role": "user", "content": "question"}]
         result = _inject_openai_memory(messages, "context")
-        # last_user_idx == 0, so prepend guard + memory-data messages
+        # When no system message exists, prepends guard system message at index 0
         assert result[0]["role"] == "system"
+        assert "untrusted data" in result[0]["content"]
         assert result[1]["role"] == "user"
         assert result[1]["content"] == "context"
         assert result[2]["role"] == "user"
+        assert result[2]["content"] == "question"
 
     def test_does_not_mutate_original(self) -> None:
         original = [{"role": "user", "content": "q"}]
@@ -334,6 +360,102 @@ class TestWithMemWalLangChain:
         assert len(human_msgs) == 2
         assert "User loves coffee" in human_msgs[0].content
         assert "BEGIN_UNTRUSTED_WALRUS_MEMORY_" in human_msgs[0].content
+
+    @respx.mock
+    async def test_multi_turn_never_injects_system_message_after_index_0(self) -> None:
+        """In a multi-turn conversation, SystemMessage stays strictly at index 0."""
+        _mock_seal_session_prereqs()
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        llm = self._make_llm()
+        captured: list = []
+
+        async def _capture_agenerate(messages_batch, *a, **kw):
+            captured.extend(messages_batch)
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ok"))]
+            )
+
+        llm._agenerate = _capture_agenerate
+
+        respx.post(_RECALL_URL).mock(
+            return_value=_mock_recall([
+                {"blob_id": "b1", "text": "User loves coffee", "distance": 0.05}
+            ])
+        )
+        respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
+
+        smart_llm = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        messages = [
+            SystemMessage(content="You are helpful."),
+            HumanMessage(content="I like coffee"),
+            AIMessage(content="Noted!"),
+            HumanMessage(content="What do I like?"),
+        ]
+        await smart_llm._agenerate([messages])
+
+        assert len(captured) == 1
+        injected = captured[0]
+        # SystemMessage strictly at index 0, with guard folded in
+        assert isinstance(injected[0], SystemMessage)
+        assert "You are helpful." in injected[0].content
+        assert "untrusted data" in injected[0].content
+
+        # No SystemMessage after index 0
+        assert not any(isinstance(m, SystemMessage) for m in injected[1:])
+
+        # The recalled memory is in a HumanMessage before the final query
+        assert isinstance(injected[3], HumanMessage)
+        assert "User loves coffee" in injected[3].content
+        assert isinstance(injected[4], HumanMessage)
+        assert injected[4].content == "What do I like?"
+
+    @respx.mock
+    async def test_multimodal_system_message_appends_block_and_preserves_metadata(self) -> None:
+        """A list-content SystemMessage appends a text block and retains its metadata."""
+        _mock_seal_session_prereqs()
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        llm = self._make_llm()
+        captured: list = []
+
+        async def _capture_agenerate(messages_batch, *a, **kw):
+            captured.extend(messages_batch)
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ok"))]
+            )
+
+        llm._agenerate = _capture_agenerate
+
+        respx.post(_RECALL_URL).mock(
+            return_value=_mock_recall([
+                {"blob_id": "b1", "text": "User loves coffee", "distance": 0.05}
+            ])
+        )
+        respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
+
+        smart_llm = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        blocks = [
+            {"type": "text", "text": "Base instructions", "cache_control": {"type": "ephemeral"}}
+        ]
+        sys_msg = SystemMessage(content=blocks, id="sys-123", additional_kwargs={"source": "test"})
+        await smart_llm._agenerate([[sys_msg, HumanMessage("What do I like?")]])
+
+        assert len(captured) == 1
+        injected = captured[0]
+        assert isinstance(injected[0], SystemMessage)
+        assert injected[0].id == "sys-123"
+        assert injected[0].additional_kwargs == {"source": "test"}
+        assert isinstance(injected[0].content, list)
+        assert len(injected[0].content) == 2
+        assert injected[0].content[0] == blocks[0]
+        assert "untrusted data" in injected[0].content[1]["text"]
 
     @respx.mock
     async def test_no_memories_found_no_injection(self) -> None:

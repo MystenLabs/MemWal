@@ -188,7 +188,7 @@ class _PendingSaves:
 
             try:
                 asyncio.run(_drain(list(self._tasks)))
-            except RuntimeError:
+            except (RuntimeError, ValueError):
                 logger.warning(
                     "Walrus Memory flush_sync() could not await %d pending "
                     "task(s) bound to a different event loop (mixing sync "
@@ -366,12 +366,32 @@ def with_memwal_langchain(
                     last_human_idx = i
                     break
 
-            guard_msg = SystemMessage(content=_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION)
             memory_msg = HumanMessage(content=memory_context)
             if last_human_idx > 0:
-                result[last_human_idx:last_human_idx] = [guard_msg, memory_msg]
+                result.insert(last_human_idx, memory_msg)
             else:
-                result[0:0] = [guard_msg, memory_msg]
+                result.insert(0, memory_msg)
+
+            if result and isinstance(result[0], SystemMessage):
+                existing_content = result[0].content
+                if isinstance(existing_content, list):
+                    new_content = list(existing_content) + [
+                        {"type": "text", "text": f"\n\n{_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}"}
+                    ]
+                else:
+                    text_str = str(existing_content or "")
+                    new_content = f"{text_str}\n\n{_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}".strip()
+                if hasattr(result[0], "model_copy"):
+                    result[0] = result[0].model_copy(update={"content": new_content})
+                else:
+                    result[0] = SystemMessage(
+                        content=new_content,
+                        additional_kwargs=getattr(result[0], "additional_kwargs", {}),
+                        id=getattr(result[0], "id", None),
+                        name=getattr(result[0], "name", None),
+                    )
+            else:
+                result.insert(0, SystemMessage(content=_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION))
 
             return result
         except Exception as e:
@@ -625,21 +645,36 @@ def _inject_openai_memory(
     messages: List[Dict[str, Any]],
     memory_context: str,
 ) -> List[Dict[str, Any]]:
-    """Insert a fixed system guard plus memory content in a user message."""
+    """Insert a fixed system guard at index 0 and memory content in a user message."""
+    result = [dict(m) if isinstance(m, dict) else m for m in messages]
     last_user_idx = -1
-    for i in range(len(messages) - 1, -1, -1):
-        if isinstance(messages[i], dict) and messages[i].get("role") == "user":
+    for i in range(len(result) - 1, -1, -1):
+        if isinstance(result[i], dict) and result[i].get("role") == "user":
             last_user_idx = i
             break
 
-    memory_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": _UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION},
-        {"role": "user", "content": memory_context},
-    ]
-
+    memory_message = {"role": "user", "content": memory_context}
     if last_user_idx > 0:
-        messages[last_user_idx:last_user_idx] = memory_messages
+        result.insert(last_user_idx, memory_message)
     else:
-        messages[0:0] = memory_messages
+        result.insert(0, memory_message)
 
-    return messages
+    if result and isinstance(result[0], dict) and result[0].get("role") == "system":
+        existing_content = result[0].get("content")
+        if isinstance(existing_content, list):
+            result[0] = {
+                **result[0],
+                "content": existing_content + [
+                    {"type": "text", "text": f"\n\n{_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}"}
+                ],
+            }
+        else:
+            text_str = str(existing_content or "")
+            result[0] = {
+                **result[0],
+                "content": f"{text_str}\n\n{_UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION}".strip(),
+            }
+    else:
+        result.insert(0, {"role": "system", "content": _UNTRUSTED_MEMORY_SYSTEM_INSTRUCTION})
+
+    return result
