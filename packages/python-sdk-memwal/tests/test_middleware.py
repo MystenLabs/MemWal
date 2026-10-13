@@ -1063,3 +1063,35 @@ class TestPendingSaves:
             assert "analyze down" in str(err)
         else:
             raise AssertionError("flush did not raise")
+
+    def test_worker_callback_flush_sync_keeps_the_failure(self) -> None:
+        pending = _PendingSaves()
+        callback_error: list[str] = []
+        saw_self = []
+
+        def on_error(_err: BaseException) -> None:
+            try:
+                pending.flush_sync()
+            except Exception as err:
+                callback_error.append(repr(err))
+            with pending._lock:
+                saw_self.append(threading.current_thread() in pending._threads)
+
+        pending._on_save_error = on_error
+        done = threading.Event()
+
+        def fail() -> None:
+            pending.note_error(RuntimeError("analyze down"))
+            done.set()
+
+        pending.spawn_thread(fail)
+        assert done.wait(2)
+        assert callback_error == []
+        assert saw_self == [True]
+        try:
+            pending.flush_sync()
+        except RuntimeError as err:
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush_sync did not raise")
+

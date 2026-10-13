@@ -150,19 +150,15 @@ class _PendingSaves:
         self._dropped = 0
         self._on_save_error = on_save_error
         self._lock = threading.Lock()
+        self._in_callback = 0
 
     def note_error(self, err: BaseException) -> None:
         """Remember a background analyze failure so flush does not report success.
 
-        The callback sees the original exception. The ledger keeps only a
-        type and a one-line message, so a client that never flushes does
-        not pin the request traceback.
+        The ledger is updated before the callback. A flush from that callback
+        does not clear the failure. The ledger keeps only a type and a one-line
+        message, so a client that never flushes does not pin the request traceback.
         """
-        if self._on_save_error is not None:
-            try:
-                self._on_save_error(err)
-            except Exception:
-                logger.warning("Walrus Memory on_save_error raised", exc_info=True)
         type_name = type(err).__name__
         message = str(err).splitlines()[0][:200] if str(err) else ""
         with self._lock:
@@ -170,6 +166,15 @@ class _PendingSaves:
                 self._failures.append((type_name, message))
             else:
                 self._dropped += 1
+        if self._on_save_error is None:
+            return
+        self._in_callback += 1
+        try:
+            self._on_save_error(err)
+        except Exception:
+            logger.warning("Walrus Memory on_save_error raised", exc_info=True)
+        finally:
+            self._in_callback -= 1
 
     def _note_result(self, result: Any) -> None:
         if isinstance(result, BaseException):
@@ -215,25 +220,29 @@ class _PendingSaves:
         """Await every pending task, then join every pending thread.
 
         Raises when any background auto-save failed. The chat call itself
-        still returned; this is the signal for a caller that waited.
+        still returned; this is the signal for a caller that waited. A call
+        made from ``on_save_error`` does not clear the failure being recorded.
         """
-        if self._tasks:
+        if self._in_callback == 0 and self._tasks:
             tasks = list(self._tasks)
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for result in results:
                 self._note_result(result)
         self._join_threads()
+        if self._in_callback:
+            return
         self._raise_if_failed()
 
     def flush_sync(self) -> None:
-        """Join every pending thread. A pending Task belongs to the loop
-        that created it (e.g. an earlier `await llm.ainvoke(...)` call) and
-        cannot be awaited from a different one -- if any are still pending
-        here, the caller mixed sync and async entry points on the same
-        wrapped client, and this cleanup path can't safely drain them. Log
-        and continue draining threads rather than raise out of what's
-        usually shutdown code."""
-        if self._tasks:
+        """Join every pending thread and raise when a background auto-save failed.
+
+        A pending Task belongs to the loop that created it. When this thread
+        has no running loop, those tasks are awaited here. When it does, they
+        are logged and left for :meth:`flush`. A call made from
+        ``on_save_error`` does not clear the failure being recorded, and it
+        does not join the worker it is running on.
+        """
+        if self._in_callback == 0 and self._tasks:
             tasks = list(self._tasks)
 
             async def _drain(pending_tasks: "list[asyncio.Task[Any]]") -> None:
@@ -252,11 +261,16 @@ class _PendingSaves:
                     len(self._tasks),
                 )
         self._join_threads()
+        if self._in_callback:
+            return
         self._raise_if_failed()
 
     def _join_threads(self) -> None:
+        current = threading.current_thread()
         with self._lock:
             threads, self._threads = self._threads, []
+            self._threads.extend(thread for thread in threads if thread is current)
+            threads = [thread for thread in threads if thread is not current]
         for thread in threads:
             thread.join()
 
@@ -370,6 +384,9 @@ def with_memwal_langchain(
         debug: Enable debug logging.
         env: Optional relayer preset (``"prod"`` / ``"dev"`` / ``"staging"`` /
             ``"local"``). Same precedence as :meth:`MemWal.create`.
+        on_save_error: Called with the original exception when a background
+            auto-save fails. ``flush`` / ``flush_sync`` from this callback does
+            not clear that failure.
 
     Returns:
         A wrapped ``BaseChatModel`` that automatically uses Walrus Memory.
@@ -553,6 +570,9 @@ def with_memwal_openai(
         debug: Enable debug logging.
         env: Optional relayer preset (``"prod"`` / ``"dev"`` / ``"staging"`` /
             ``"local"``). Same precedence as :meth:`MemWal.create`.
+        on_save_error: Called with the original exception when a background
+            auto-save fails. ``flush`` / ``flush_sync`` from this callback does
+            not clear that failure.
 
     Returns:
         The same client, with ``chat.completions.create`` wrapped to use Walrus Memory.

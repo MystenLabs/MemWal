@@ -94,21 +94,25 @@ export function withMemWal(
     // flush() before the process exits, instead of losing them silently.
     const pendingSaves = new Set<Promise<unknown>>();
     const saveFailures: string[] = [];
+    let notingFailure = 0;
 
     function saveInBackground(userMessage: string): void {
         const savePromise = memwal
             .analyze(userMessage)
             .catch((err: unknown) => {
                 log("Auto-save failed:", err);
-                try {
-                    options.onSaveError?.(err);
-                } catch (callbackError) {
-                    console.warn("[Walrus Memory] onSaveError threw:", callbackError);
-                }
                 if (saveFailures.length < 8) {
                     const name = err instanceof Error ? err.name : "Error";
                     const message = err instanceof Error ? err.message.split("\n")[0] : "";
                     saveFailures.push(message ? `${name}: ${message}` : name);
+                }
+                notingFailure += 1;
+                try {
+                    options.onSaveError?.(err);
+                } catch (callbackError) {
+                    console.warn("[Walrus Memory] onSaveError threw:", callbackError);
+                } finally {
+                    notingFailure -= 1;
                 }
             });
         pendingSaves.add(savePromise);
@@ -193,8 +197,10 @@ export function withMemWal(
     // Lets short-lived callers await outstanding auto-save writes before
     // exiting, e.g. `await model.flush()` right before `process.exit()`.
     wrapped.flush = async (): Promise<void> => {
-        await Promise.allSettled([...pendingSaves]);
-        if (saveFailures.length === 0) return;
+        if (notingFailure === 0) {
+            await Promise.allSettled([...pendingSaves]);
+        }
+        if (notingFailure > 0 || saveFailures.length === 0) return;
         const errors = saveFailures.splice(0, saveFailures.length);
         const failure = new Error(
             `MemWal auto-save failed (${errors.length} call(s))`,

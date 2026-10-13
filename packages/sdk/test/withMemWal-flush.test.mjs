@@ -148,3 +148,32 @@ test("a throwing onSaveError does not reject the model call", async () => {
         MemWal.prototype.analyze = originalAnalyze;
     }
 });
+
+test("flush() from onSaveError does not swallow the failure", async () => {
+    const originalRecall = MemWal.prototype.recall;
+    const originalAnalyze = MemWal.prototype.analyze;
+    MemWal.prototype.recall = async () => ({ results: [] });
+    MemWal.prototype.analyze = async () => {
+        throw new Error("analyze down");
+    };
+    try {
+        let model;
+        model = withMemWal(fakeLanguageModel(), {
+            key: TEST_KEY,
+            accountId: TEST_ACCOUNT_ID,
+            onSaveError() {
+                void model.flush();
+            },
+        });
+        const result = await model.doGenerate({
+            prompt: [{ role: "user", content: [{ type: "text", text: "remember this" }] }],
+        });
+        assert.equal(result.finishReason, "stop");
+        await new Promise((resolve) => setImmediate(resolve));
+        await assert.rejects(() => model.flush(), /auto-save failed/);
+    } finally {
+        MemWal.prototype.recall = originalRecall;
+        MemWal.prototype.analyze = originalAnalyze;
+    }
+});
+
