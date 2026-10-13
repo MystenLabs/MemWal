@@ -93,18 +93,22 @@ export function withMemWal(
     // callers (CLI scripts, serverless handlers) can await them via
     // flush() before the process exits, instead of losing them silently.
     const pendingSaves = new Set<Promise<unknown>>();
-    const saveFailures: unknown[] = [];
+    const saveFailures: string[] = [];
 
     function saveInBackground(userMessage: string): void {
         const savePromise = memwal
             .analyze(userMessage)
             .catch((err: unknown) => {
                 log("Auto-save failed:", err);
-                saveFailures.push(err);
                 try {
                     options.onSaveError?.(err);
                 } catch (callbackError) {
-                    log("onSaveError threw:", callbackError);
+                    console.warn("[Walrus Memory] onSaveError threw:", callbackError);
+                }
+                if (saveFailures.length < 8) {
+                    const name = err instanceof Error ? err.name : "Error";
+                    const message = err instanceof Error ? err.message.split("\n")[0] : "";
+                    saveFailures.push(message ? `${name}: ${message}` : name);
                 }
             });
         pendingSaves.add(savePromise);

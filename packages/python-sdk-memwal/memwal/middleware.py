@@ -146,29 +146,47 @@ class _PendingSaves:
     ) -> None:
         self._tasks: "set[asyncio.Task[Any]]" = set()
         self._threads: List[threading.Thread] = []
-        self._errors: List[BaseException] = []
+        self._failures: List[tuple[str, str]] = []
+        self._dropped = 0
         self._on_save_error = on_save_error
         self._lock = threading.Lock()
 
     def note_error(self, err: BaseException) -> None:
-        """Remember a background analyze failure so flush does not report success."""
+        """Remember a background analyze failure so flush does not report success.
+
+        The callback sees the original exception. The ledger keeps only a
+        type and a one-line message, so a client that never flushes does
+        not pin the request traceback.
+        """
+        if self._on_save_error is not None:
+            try:
+                self._on_save_error(err)
+            except Exception:
+                logger.warning("Walrus Memory on_save_error raised", exc_info=True)
+        type_name = type(err).__name__
+        message = str(err).splitlines()[0][:200] if str(err) else ""
         with self._lock:
-            self._errors.append(err)
-        if self._on_save_error is None:
-            return
-        try:
-            self._on_save_error(err)
-        except Exception:
-            logger.warning("Walrus Memory on_save_error raised", exc_info=True)
+            if len(self._failures) < 8:
+                self._failures.append((type_name, message))
+            else:
+                self._dropped += 1
+
+    def _note_result(self, result: Any) -> None:
+        if isinstance(result, BaseException):
+            self.note_error(result)
 
     def _raise_if_failed(self) -> None:
         with self._lock:
-            errors, self._errors = self._errors, []
-        if not errors:
+            failures, self._failures = self._failures, []
+            dropped, self._dropped = self._dropped, 0
+        total = len(failures) + dropped
+        if total == 0:
             return
+        type_name, message = failures[0] if failures else ("Error", "")
+        detail = f"{type_name}: {message}" if message else type_name
         raise RuntimeError(
-            f"Walrus Memory auto-save failed ({len(errors)} call(s))"
-        ) from errors[0]
+            f"Walrus Memory auto-save failed ({total} call(s)): {detail}"
+        )
 
     def track_task(self, task: "asyncio.Task[Any]") -> None:
         self._tasks.add(task)
@@ -200,7 +218,10 @@ class _PendingSaves:
         still returned; this is the signal for a caller that waited.
         """
         if self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            tasks = list(self._tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                self._note_result(result)
         self._join_threads()
         self._raise_if_failed()
 
@@ -213,11 +234,15 @@ class _PendingSaves:
         and continue draining threads rather than raise out of what's
         usually shutdown code."""
         if self._tasks:
-            async def _drain(tasks: "list[asyncio.Task[Any]]") -> None:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = list(self._tasks)
+
+            async def _drain(pending_tasks: "list[asyncio.Task[Any]]") -> None:
+                results = await asyncio.gather(*pending_tasks, return_exceptions=True)
+                for result in results:
+                    self._note_result(result)
 
             try:
-                asyncio.run(_drain(list(self._tasks)))
+                asyncio.run(_drain(tasks))
             except (RuntimeError, ValueError):
                 logger.warning(
                     "Walrus Memory flush_sync() could not await %d pending "

@@ -1026,3 +1026,40 @@ class TestPendingSaves:
             assert "auto-save failed" in str(err)
         else:
             raise AssertionError("flush_sync did not raise")
+
+    def test_flush_sees_a_failing_task_without_note_error(self) -> None:
+        pending = _PendingSaves()
+
+        async def fail() -> None:
+            raise RuntimeError("analyze down")
+
+        async def go() -> None:
+            task = asyncio.create_task(fail())
+            pending.track_task(task)
+            await pending.flush()
+
+        try:
+            asyncio.run(go())
+        except RuntimeError as err:
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush did not raise")
+
+    def test_callback_flush_does_not_swallow_the_failure(self) -> None:
+        pending = _PendingSaves()
+
+        def on_error(_err: BaseException) -> None:
+            pending.flush_sync()
+
+        pending._on_save_error = on_error
+        pending.note_error(RuntimeError("analyze down"))
+
+        async def go() -> None:
+            await pending.flush()
+
+        try:
+            asyncio.run(go())
+        except RuntimeError as err:
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush did not raise")
