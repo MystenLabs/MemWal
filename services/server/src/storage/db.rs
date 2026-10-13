@@ -160,8 +160,6 @@ const MIGRATIONS_AFTER_INDEX_RECOVERY: &[Migration] = &[
     // deleted_at range index for the admin activity delete counts.
     // CONCURRENTLY, own file -- see 024's header.
     migration!("024_memory_tombstones_deleted_at_index.sql"),
-    // Drop the legacy account-wide idempotency index (WALM-781).
-    migration!("025_drop_owner_idempotency_key_index.sql"),
 ];
 
 /// Every migration the pipeline applies, in the order it applies them.
