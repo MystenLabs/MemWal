@@ -1133,3 +1133,24 @@ class TestPendingSaves:
         else:
             raise AssertionError("flush_sync did not raise")
 
+    def test_flush_from_another_thread_still_raises_during_callback(self) -> None:
+        """The callback thread bails out. Any other flush still reports the failure."""
+        import time
+
+        pending = _PendingSaves()
+        started = threading.Event()
+
+        def on_error(_err: BaseException) -> None:
+            started.set()
+            time.sleep(0.2)
+
+        pending._on_save_error = on_error
+        pending.spawn_thread(lambda: pending.note_error(RuntimeError("analyze down")))
+        assert started.wait(2)
+        try:
+            pending.flush_sync()
+        except RuntimeError as err:
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush_sync did not raise")
+

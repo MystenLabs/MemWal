@@ -150,14 +150,16 @@ class _PendingSaves:
         self._dropped = 0
         self._on_save_error = on_save_error
         self._lock = threading.Lock()
-        self._in_callback = 0
+        self._callback_threads: set[int] = set()
 
     def note_error(self, err: BaseException) -> None:
         """Remember a background analyze failure so flush does not report success.
 
         The ledger is updated before the callback. A flush from that callback
-        does not clear the failure. The ledger keeps only a type and a one-line
-        message, so a client that never flushes does not pin the request traceback.
+        returns without draining or clearing the failure. A flush from any
+        other thread still waits and raises. The ledger keeps only a type and
+        a one-line message, so a client that never flushes does not pin the
+        request traceback.
         """
         type_name = type(err).__name__
         message = str(err).splitlines()[0][:200] if str(err) else ""
@@ -168,15 +170,20 @@ class _PendingSaves:
                 self._dropped += 1
         if self._on_save_error is None:
             return
+        ident = threading.get_ident()
         with self._lock:
-            self._in_callback += 1
+            self._callback_threads.add(ident)
         try:
             self._on_save_error(err)
         except Exception:
             logger.warning("Walrus Memory on_save_error raised", exc_info=True)
         finally:
             with self._lock:
-                self._in_callback -= 1
+                self._callback_threads.discard(ident)
+
+    def _flush_called_from_callback(self) -> bool:
+        with self._lock:
+            return threading.get_ident() in self._callback_threads
 
     def _note_result(self, result: Any) -> None:
         if isinstance(result, BaseException):
@@ -226,9 +233,8 @@ class _PendingSaves:
         made from ``on_save_error`` returns before draining, joining, or
         clearing the failure being recorded.
         """
-        with self._lock:
-            if self._in_callback:
-                return
+        if self._flush_called_from_callback():
+            return
         if self._tasks:
             tasks = list(self._tasks)
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -246,9 +252,8 @@ class _PendingSaves:
         ``on_save_error`` returns before draining, joining, or clearing the
         failure being recorded.
         """
-        with self._lock:
-            if self._in_callback:
-                return
+        if self._flush_called_from_callback():
+            return
         if self._tasks:
             tasks = list(self._tasks)
 
