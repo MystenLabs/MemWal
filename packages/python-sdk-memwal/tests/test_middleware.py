@@ -1095,3 +1095,41 @@ class TestPendingSaves:
         else:
             raise AssertionError("flush_sync did not raise")
 
+    def test_two_worker_callbacks_do_not_join_each_other(self) -> None:
+        """Overlapping on_save_error flushes must not join the other worker.
+
+        Each callback returns before drain, join, and raise. The later caller
+        flush still reports both failures.
+        """
+        pending = _PendingSaves()
+        entered = threading.Barrier(2)
+        callback_error: list[str] = []
+        done = threading.Barrier(3)
+
+        def on_error(_err: BaseException) -> None:
+            entered.wait(2)
+            try:
+                pending.flush_sync()
+            except Exception as err:
+                callback_error.append(repr(err))
+
+        pending._on_save_error = on_error
+
+        def fail(message: str):
+            def run() -> None:
+                pending.note_error(RuntimeError(message))
+                done.wait(2)
+            return run
+
+        pending.spawn_thread(fail("analyze down"))
+        pending.spawn_thread(fail("analyze also down"))
+        done.wait(2)
+        assert callback_error == []
+        try:
+            pending.flush_sync()
+        except RuntimeError as err:
+            assert "2 call" in str(err)
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush_sync did not raise")
+

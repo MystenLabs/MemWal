@@ -168,13 +168,15 @@ class _PendingSaves:
                 self._dropped += 1
         if self._on_save_error is None:
             return
-        self._in_callback += 1
+        with self._lock:
+            self._in_callback += 1
         try:
             self._on_save_error(err)
         except Exception:
             logger.warning("Walrus Memory on_save_error raised", exc_info=True)
         finally:
-            self._in_callback -= 1
+            with self._lock:
+                self._in_callback -= 1
 
     def _note_result(self, result: Any) -> None:
         if isinstance(result, BaseException):
@@ -221,16 +223,18 @@ class _PendingSaves:
 
         Raises when any background auto-save failed. The chat call itself
         still returned; this is the signal for a caller that waited. A call
-        made from ``on_save_error`` does not clear the failure being recorded.
+        made from ``on_save_error`` returns before draining, joining, or
+        clearing the failure being recorded.
         """
-        if self._in_callback == 0 and self._tasks:
+        with self._lock:
+            if self._in_callback:
+                return
+        if self._tasks:
             tasks = list(self._tasks)
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for result in results:
                 self._note_result(result)
         self._join_threads()
-        if self._in_callback:
-            return
         self._raise_if_failed()
 
     def flush_sync(self) -> None:
@@ -239,10 +243,13 @@ class _PendingSaves:
         A pending Task belongs to the loop that created it. When this thread
         has no running loop, those tasks are awaited here. When it does, they
         are logged and left for :meth:`flush`. A call made from
-        ``on_save_error`` does not clear the failure being recorded, and it
-        does not join the worker it is running on.
+        ``on_save_error`` returns before draining, joining, or clearing the
+        failure being recorded.
         """
-        if self._in_callback == 0 and self._tasks:
+        with self._lock:
+            if self._in_callback:
+                return
+        if self._tasks:
             tasks = list(self._tasks)
 
             async def _drain(pending_tasks: "list[asyncio.Task[Any]]") -> None:
@@ -261,8 +268,6 @@ class _PendingSaves:
                     len(self._tasks),
                 )
         self._join_threads()
-        if self._in_callback:
-            return
         self._raise_if_failed()
 
     def _join_threads(self) -> None:
