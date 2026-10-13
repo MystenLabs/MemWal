@@ -192,11 +192,12 @@ Submit text as an encrypted memory job. The relayer returns after creating a bac
 ```json
 {
   "text": "User prefers dark mode",
-  "namespace": "demo"
+  "namespace": "demo",
+  "idempotency_key": "my-idempotency-key"
 }
 ```
 
-`namespace` defaults to `"default"` if omitted and is limited to 255 UTF-8 bytes.
+`namespace` defaults to `"default"` if omitted and is limited to 255 UTF-8 bytes. `idempotency_key` is an optional string (up to 255 UTF-8 bytes); when supplied, repeated calls with the same key collapse onto the existing job row.
 
 **Response:** `202 Accepted`
 
@@ -234,9 +235,12 @@ Submit up to 20 memories in one request. `job_ids[i]` corresponds to `items[i]`.
   "items": [
     { "text": "User prefers dark mode", "namespace": "demo" },
     { "text": "User works in TypeScript", "namespace": "demo" }
-  ]
+  ],
+  "idempotency_key": "my-bulk-idempotency-key"
 }
 ```
+
+`idempotency_key` is an optional string (up to 255 UTF-8 bytes). When provided, each item in the batch is assigned `bulk:{idempotency_key}:{i}`, so repeated requests with the same batch key collapse onto the original jobs.
 
 **Response:** `202 Accepted`
 

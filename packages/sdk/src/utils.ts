@@ -33,6 +33,19 @@ export async function sha256hex(data: string): Promise<string> {
     return bytesToHex(sha256(new TextEncoder().encode(data)));
 }
 
+/** Window over which the same content resolves to one key (30 minutes). */
+export const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
+
+export async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
+    const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
+    return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
+}
+
+export async function derivedBulkIdempotencyKey(requestIdentity: string): Promise<string> {
+    const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
+    return `b1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
+}
+
 // ============================================================
 // Hex Encoding
 // ============================================================
