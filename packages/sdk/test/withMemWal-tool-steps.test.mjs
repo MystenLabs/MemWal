@@ -199,3 +199,31 @@ test("an empty recall is cached so the tool step does not call recall again", as
         MemWal.prototype.analyze = originalAnalyze;
     }
 });
+
+test("a later user turn with the same text recalls again", async () => {
+    const originalRecall = MemWal.prototype.recall;
+    const originalAnalyze = MemWal.prototype.analyze;
+    let recallCount = 0;
+    MemWal.prototype.recall = async () => {
+        recallCount++;
+        return {
+            results: [{ blob_id: "b1", text: "User lives in Lisbon", distance: 0.05 }],
+            total: 1,
+        };
+    };
+    MemWal.prototype.analyze = async () => {};
+    try {
+        const model = withMemWal(fakeLanguageModel(), {
+            key: TEST_KEY,
+            accountId: TEST_ACCOUNT_ID,
+            autoSave: false,
+        });
+        const user = [{ role: "user", content: [{ type: "text", text: "what's my name?" }] }];
+        await model.doGenerate({ prompt: user });
+        await model.doGenerate({ prompt: user });
+        assert.equal(recallCount, 2);
+    } finally {
+        MemWal.prototype.recall = originalRecall;
+        MemWal.prototype.analyze = originalAnalyze;
+    }
+});

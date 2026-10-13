@@ -134,7 +134,14 @@ export function withMemWal(
                     const turnKey = lastUserTurnKey(params.prompt);
                     if (!turnKey) return params;
 
-                    if (cachedRecall && cachedRecall.key === turnKey) {
+                    // Tool steps reuse this turn, including a recall that
+                    // matched nothing. A user message always recalls again, so
+                    // a later fact is not stuck behind the first result.
+                    if (
+                        cachedRecall &&
+                        cachedRecall.key === turnKey &&
+                        !isPromptEndingWithUser(params.prompt)
+                    ) {
                         if (!cachedRecall.context) return params;
                         return {
                             ...params,
