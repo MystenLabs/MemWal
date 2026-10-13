@@ -331,7 +331,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -348,7 +348,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
-        await smart_llm._agenerate([[HumanMessage("What do I drink?")]])
+        await smart_llm._agenerate([HumanMessage("What do I drink?")])
 
         assert len(captured) == 1
         injected = captured[0]
@@ -468,7 +468,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -481,7 +481,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
-        await smart_llm._agenerate([[HumanMessage("hello")]])
+        await smart_llm._agenerate([HumanMessage("hello")])
 
         injected = captured[0]
         system_msgs = [m for m in injected if isinstance(m, SystemMessage)]
@@ -498,7 +498,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -517,7 +517,7 @@ class TestWithMemWalLangChain:
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER,
             min_relevance=0.3, auto_save=False
         )
-        await smart_llm._agenerate([[HumanMessage("hello")]])
+        await smart_llm._agenerate([HumanMessage("hello")])
 
         injected = captured[0]
         system_msgs = [m for m in injected if isinstance(m, SystemMessage)]
@@ -538,7 +538,7 @@ class TestWithMemWalLangChain:
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
         # Should NOT raise — recall failure is swallowed, LLM still called
-        await smart_llm._agenerate([[HumanMessage("will this work?")]])
+        await smart_llm._agenerate([HumanMessage("will this work?")])
 
     @respx.mock
     async def test_auto_save_triggers_analyze(self) -> None:
@@ -554,7 +554,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=True
         )
-        await smart_llm._agenerate([[HumanMessage("store this")]])
+        await smart_llm._agenerate([HumanMessage("store this")])
 
         # Give fire-and-forget task time to run
         await asyncio.sleep(0.05)
@@ -572,7 +572,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
-        await smart_llm._agenerate([[SystemMessage("only system")]])
+        await smart_llm._agenerate([SystemMessage("only system")])
         assert not recall_route.called
 
     def _capturing_generate(self, captured: list):
@@ -581,7 +581,7 @@ class TestWithMemWalLangChain:
         from langchain_core.outputs import ChatGeneration, ChatResult
 
         def _generate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -607,7 +607,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
-        smart_llm._generate([[HumanMessage("What do I drink?")]])
+        smart_llm._generate([HumanMessage("What do I drink?")])
 
         assert recall_route.called
         assert any("User loves coffee" in m.content for m in captured[0])
@@ -641,7 +641,7 @@ class TestWithMemWalLangChain:
         # An async test body is itself a running loop -- the exact condition
         # that used to disable injection.
         assert asyncio.get_running_loop().is_running()
-        smart_llm._generate([[HumanMessage("What do I drink?")]])
+        smart_llm._generate([HumanMessage("What do I drink?")])
 
         assert recall_route.called, "recall was skipped inside a running loop"
         assert len(captured) == 1
@@ -681,7 +681,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture(batch, *args, **kwargs):
-            captured.append(batch[0])
+            captured.append(batch)
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
 
         llm._agenerate = _capture
@@ -695,7 +695,7 @@ class TestWithMemWalLangChain:
         )
 
         messages = [HumanMessage(content="What is the weather?")]
-        await smart._agenerate([messages])
+        await smart._agenerate(messages)
         await smart.memwal_flush()
 
         assert recall_route.call_count == 1
@@ -705,7 +705,7 @@ class TestWithMemWalLangChain:
             AIMessage(content="", tool_calls=[{"name": "weather", "args": {}, "id": "1"}]),
             ToolMessage(content="Sunny 20C", tool_call_id="1"),
         ])
-        await smart._agenerate([messages])
+        await smart._agenerate(messages)
         await smart.memwal_flush()
 
         assert recall_route.call_count == 1, "recall must NOT be called again on tool step"
@@ -719,7 +719,7 @@ class TestWithMemWalLangChain:
             AIMessage(content="It is sunny!"),
             HumanMessage(content="Thanks!"),
         ])
-        await smart._agenerate([messages])
+        await smart._agenerate(messages)
         await smart.memwal_flush()
 
         assert recall_route.call_count == 2

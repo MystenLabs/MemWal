@@ -142,6 +142,17 @@ def _user_turn_key(messages: Any) -> Optional[str]:
     return None
 
 
+_RECALL_CACHE_LIMIT = 8
+
+
+def _remember_recall(cache: dict[str, str], key: str, context: str) -> None:
+    """Keep one entry per turn, newest last, and drop the oldest past the cap."""
+    cache.pop(key, None)
+    cache[key] = context
+    while len(cache) > _RECALL_CACHE_LIMIT:
+        cache.pop(next(iter(cache)))
+
+
 def _format_memories(
     memories: List[RecallMemory],
     nonce: Optional[str] = None,
@@ -501,13 +512,11 @@ def with_memwal_langchain(
     async def _inject_memories(messages: List[BaseMessage]) -> List[BaseMessage]:
         """Recall memories and inject them without granting system priority."""
         turn_key = _user_turn_key(messages)
-        if turn_key and not _is_last_message_user(messages):
+        if turn_key:
             cached = recall_cache.get(turn_key)
-            if not cached:
-                return messages
-            return _with_memory(messages, cached)
-
-        if not _is_last_message_user(messages):
+            if cached:
+                return _with_memory(messages, cached)
+        elif not _is_last_message_user(messages):
             return messages
 
         user_text = _find_last_user_message(messages)
@@ -527,8 +536,7 @@ def with_memwal_langchain(
 
             memory_context = _format_memories(relevant)
             if turn_key:
-                recall_cache.clear()
-                recall_cache[turn_key] = memory_context
+                _remember_recall(recall_cache, turn_key, memory_context)
             log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
             return _with_memory(messages, memory_context)
         except Exception as e:
@@ -548,39 +556,22 @@ def with_memwal_langchain(
                 pending.note_error(e)
 
     async def patched_agenerate(
-        messages: List[List[BaseMessage]], *args: Any, **kwargs: Any
+        messages: List[BaseMessage], *args: Any, **kwargs: Any
     ) -> ChatResult:
-        enriched = []
-        for msg_list in messages:
-            enriched.append(await _inject_memories(msg_list))
-
+        enriched = await _inject_memories(messages)
         result = await original_agenerate(enriched, *args, **kwargs)
-
-        for msg_list in messages:
-            _fire_and_forget(_post_analyze(msg_list), pending)
-
+        _fire_and_forget(_post_analyze(messages), pending)
         return result
 
     def _run_memwal(coro_factory: Callable[[], Any]) -> Any:
-        # Keep httpx clients bound to the short-lived loop that uses them.
         return _run_blocking(lambda: _with_fresh_http_client(memwal, coro_factory()))
 
     def patched_generate(
-        messages: List[List[BaseMessage]], *args: Any, **kwargs: Any
+        messages: List[BaseMessage], *args: Any, **kwargs: Any
     ) -> ChatResult:
-        # Inject via _run_blocking so recall still runs when a loop is already
-        # running (notebooks, async hosts) — the same helper the sync OpenAI
-        # wrapper uses. Passing the messages through untouched there made
-        # Walrus Memory look connected while recall silently never ran.
-        enriched = []
-        for msg_list in messages:
-            enriched.append(_run_memwal(lambda: _inject_memories(msg_list)))
-
+        enriched = _run_memwal(lambda: _inject_memories(messages))
         result = original_generate(enriched, *args, **kwargs)
-
-        for msg_list in messages:
-            _fire_and_forget(_post_analyze(msg_list), pending)
-
+        _fire_and_forget(_post_analyze(messages), pending)
         return result
 
     # Monkey-patch the LLM instance
@@ -697,7 +688,7 @@ def _wrap_async_openai(
                 kwargs["messages"] = messages
             elif args:
                 args = (messages,) + args[1:]
-        elif _is_last_message_user(messages):
+        elif turn_key:
             user_text = _find_last_user_message(messages)
             if user_text:
                 try:
@@ -711,8 +702,7 @@ def _wrap_async_openai(
                     if relevant:
                         memory_context = _format_memories(relevant)
                         if turn_key:
-                            recall_cache.clear()
-                            recall_cache[turn_key] = memory_context
+                            _remember_recall(recall_cache, turn_key, memory_context)
                         log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
                         messages = _inject_openai_memory(list(messages), memory_context)
                         if "messages" in kwargs:
@@ -775,7 +765,7 @@ def _wrap_sync_openai(
                 kwargs["messages"] = messages
             elif args:
                 args = (messages,) + args[1:]
-        elif _is_last_message_user(messages):
+        elif turn_key:
             user_text = _find_last_user_message(messages)
             if user_text:
                 try:
@@ -791,8 +781,7 @@ def _wrap_sync_openai(
                     if relevant:
                         memory_context = _format_memories(relevant)
                         if turn_key:
-                            recall_cache.clear()
-                            recall_cache[turn_key] = memory_context
+                            _remember_recall(recall_cache, turn_key, memory_context)
                         log(f"[Walrus Memory] Found {len(relevant)} relevant memories")
                         messages = _inject_openai_memory(list(messages), memory_context)
                         if "messages" in kwargs:
