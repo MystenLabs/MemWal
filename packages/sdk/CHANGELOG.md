@@ -45,7 +45,7 @@
 ### Added
 
 - `MemWalConfig.recallTimeoutMs` and `RecallOptions.timeoutMs` make recall's abort budget configurable (default: 15000, unchanged). `MemWalConfig.preflightTimeoutMs` / `MemWalManualConfig.preflightTimeoutMs` bound each preflight round-trip (default: 5000).
-- `isTimeoutError()` and the `TimeoutError` type are exported. A blown budget now throws a `TimeoutError` whose `phase` names the round-trip that stalled (`"preflight GET /version"`, `"POST /api/recall"`) instead of an unlabeled `AbortError`.
+- `isTimeoutError()` is true for the `MemWalRequestTimeout` recall throws (status 504) and for a preflight `TimeoutError` whose `phase` names the stalled round-trip.
 - `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ### Fixed

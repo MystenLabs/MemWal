@@ -285,6 +285,40 @@ test("the default recall budget is unchanged at 15s", async () => {
     assert.equal(DEFAULT_RECALL_TIMEOUT_MS, 15_000);
 });
 
+test("recall timeoutMs 0 does not send deadline_ms", async () => {
+    let body = {};
+    globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/version") return Response.json(VERSION_BODY);
+        if (path === "/api/recall") {
+            body = JSON.parse(init.body);
+            return Response.json({ results: [], total: 0 });
+        }
+        throw new Error(path);
+    };
+    const result = await client().recall({ query: "x", timeoutMs: 0 });
+    assert.deepEqual(result, { results: [], total: 0 });
+    assert.equal(body.deadline_ms, undefined);
+    const timeout = new Error("timed out");
+    timeout.name = "MemWalRequestTimeout";
+    assert.equal(isTimeoutError(timeout), true);
+});
+
+test("a short recall budget is sent whole instead of floored at 1", async () => {
+    let body = {};
+    globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/version") return Response.json(VERSION_BODY);
+        if (path === "/api/recall") {
+            body = JSON.parse(init.body);
+            return Response.json({ results: [], total: 0 });
+        }
+        throw new Error(path);
+    };
+    await client().recall({ query: "x", timeoutMs: 400 });
+    assert.equal(body.deadline_ms, 400);
+});
+
 test("RecallOptions and MemWalConfig declare the timeout knobs", () => {
     // A .mjs test cannot catch a missing type; assert on the emitted .d.ts,
     // which is what a TypeScript consumer actually resolves.

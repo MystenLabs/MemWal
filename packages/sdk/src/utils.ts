@@ -454,9 +454,11 @@ export interface TimeoutError extends Error {
     timeoutMs: number;
 }
 
-/** True when `err` is a `TimeoutError` raised by `fetchWithDeadline`. */
-export function isTimeoutError(err: unknown): err is TimeoutError {
-    return err instanceof Error && err.name === "TimeoutError" && "phase" in err;
+/** True for a `TimeoutError` or the `MemWalRequestTimeout` recall throws. */
+export function isTimeoutError(err: unknown): err is Error {
+    if (!(err instanceof Error)) return false;
+    if (err.name === "MemWalRequestTimeout") return true;
+    return err.name === "TimeoutError" && "phase" in err;
 }
 
 function timeoutError(phase: string, timeoutMs: number, cause: unknown): TimeoutError {

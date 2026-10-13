@@ -123,10 +123,9 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 - `sort` picks the ordering: `"relevance"` (default) or `"recent"` for newest-among-matches
 - `scoringWeights` blends recency and importance into the ranking (see [Ordering](#ordering) below)
-- `timeoutMs` overrides the client's `recallTimeoutMs` for this call. On expiry
-  recall throws a `TimeoutError` whose `phase` names the round-trip that
-  stalled: `"POST /api/recall"`, or `"preflight GET /version"` when it was the
-  compatibility check. Use the exported `isTimeoutError(err)` to detect it.
+- `timeoutMs` overrides the client's `recallTimeoutMs` for this call. `0` disables the deadline. On expiry
+  recall throws `MemWalRequestTimeout` (status 504). `isTimeoutError(err)` is true for that error
+  and for a preflight `TimeoutError` whose `phase` names the stalled round-trip.
 
 **Returns:**
 

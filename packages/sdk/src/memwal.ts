@@ -133,9 +133,8 @@ interface SignedRequestOptions {
     signal?: AbortSignal;
     /**
      * Deadline for the signed request itself. The clock starts after the
-     * preflights resolve, so this is never charged for a slow `/version`,
-     * `/health` or `/config`. Omit (or pass 0) for no deadline — which is what
-     * every route other than recall does today (WALM-598).
+     * preflights resolve. Omit this to use the client `requestTimeoutMs`.
+     * `0`, a negative number, or a non-finite value disables the deadline.
      */
     timeoutMs?: number;
 }
@@ -222,7 +221,6 @@ const RECALL_REQUEST_TIMEOUT_MS = DEFAULT_RECALL_TIMEOUT_MS;
  * timer starts before `fetch`, the relayer's when the request lands, and the
  * margin the relayer keeps for its reply cannot also cover DNS, TCP and TLS. */
 const RECALL_DEADLINE_MARGIN_MS = 1_000;
-const RECALL_DEADLINE_MS = RECALL_REQUEST_TIMEOUT_MS - RECALL_DEADLINE_MARGIN_MS;
 
 /**
  * Abort signal that fires after `ms`, or when `caller` aborts — whichever is
@@ -1149,25 +1147,22 @@ export class MemWal {
             // deadlines, so a relayer whose `/health` p50 had crept to ~9s can
             // no longer eat most of recall's window and make a perfectly
             // healthy recall surface an `AbortError` (GH #438).
-            const timeoutMs = options.timeoutMs ?? this.recallTimeoutMs;
+            const requested = options.timeoutMs;
+            const optedOut = typeof requested === "number"
+                && (!Number.isFinite(requested) || requested <= 0);
+            const timeoutMs = optedOut ? 0 : (requested ?? this.recallTimeoutMs);
+            const wireDeadline = optedOut
+                ? undefined
+                : (timeoutMs > RECALL_DEADLINE_MARGIN_MS
+                    ? timeoutMs - RECALL_DEADLINE_MARGIN_MS
+                    : timeoutMs);
             const result = await this.signedRequest<RecallResult>("POST", "/api/recall", {
                 query,
                 limit,
                 namespace: resolvedNamespace,
-                // `undefined` when no weights were supplied, which
-                // JSON.stringify drops — so a default-weighted recall stays
-                // byte-identical on the wire and the relayer keeps
-                // short-circuiting to the plain pgvector cosine order.
                 scoring_weights: scoringWeightsToWire(options.scoringWeights),
-                // Same `undefined`-is-dropped trick: an unset sort leaves the
-                // request byte-identical and the relayer applies its own
-                // "relevance" default.
                 sort: options.sort,
-                // How long this call waits, so the relayer can stop just
-                // short of it and name the step it was stuck in. Derived from
-                // the budget actually in force, so a caller-supplied
-                // `timeoutMs` moves both clocks together.
-                deadline_ms: Math.max(1, timeoutMs - RECALL_DEADLINE_MARGIN_MS),
+                ...(wireDeadline === undefined ? {} : { deadline_ms: wireDeadline }),
             }, { timeoutMs });
 
             let processed = result;
@@ -1178,7 +1173,6 @@ export class MemWal {
                 processed = {
                     ...processed,
                     results: filtered,
-                    total: filtered.length,
                 };
             }
 
@@ -2022,14 +2016,21 @@ export class MemWal {
         // `fetch` never times out on its own, so this deadline is also the only
         // thing standing between a stalled socket and a call that hangs for as
         // long as the connection stays open.
-        const deadlineMs = options.timeoutMs ?? this.requestTimeoutMs;
-        const deadline = deadlineSignal(deadlineMs, options.signal);
+        const explicitTimeout = options.timeoutMs;
+        const deadlineOptOut = typeof explicitTimeout === "number"
+            && (!Number.isFinite(explicitTimeout) || explicitTimeout <= 0);
+        const deadlineMs = deadlineOptOut
+            ? undefined
+            : (explicitTimeout ?? this.requestTimeoutMs);
+        const deadline = deadlineMs === undefined
+            ? undefined
+            : deadlineSignal(deadlineMs, options.signal);
         try {
             const res = await fetch(url, {
                 method,
                 headers,
                 body: method === "GET" ? undefined : bodyStr,
-                signal: deadline.signal,
+                signal: deadline?.signal ?? options.signal,
             });
 
             if (!acceptedStatuses.includes(res.status)) {
@@ -2070,12 +2071,15 @@ export class MemWal {
         } catch (err) {
             // Translate our own expiry into something a caller can classify.
             // An abort the CALLER asked for is theirs and propagates untouched.
-            if (deadline.timedOut() && (err as { status?: number }).status === undefined) {
-                throw requestTimeoutError(method, path, deadlineMs);
+            const status = err && typeof err === "object" && "status" in err
+                ? err.status
+                : undefined;
+            if (deadline?.timedOut() && typeof status !== "number") {
+                throw requestTimeoutError(method, path, deadlineMs ?? 0);
             }
             throw err;
         } finally {
-            deadline.dispose();
+            deadline?.dispose();
         }
     }
 }

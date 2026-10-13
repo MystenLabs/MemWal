@@ -246,7 +246,7 @@ where
 /// Sidecar liveness AND Postgres can accept writes. Cached together so
 /// unsigned `/health` probes do not fan out on every load-balancer tick.
 async fn write_ready(state: &std::sync::Arc<AppState>) -> bool {
-    write_ready_cached(&WRITE_READY_CACHE, WRITE_READY_TTL, || {
+    write_ready_cached(&WRITE_READY_CACHE, WRITE_READY_CACHE_TTL, || {
         probe_write_ready(state)
     })
     .await
@@ -268,7 +268,7 @@ async fn probe_write_ready(state: &std::sync::Arc<AppState>) -> bool {
 /// timeouts fail open at `warn` so CI `wait-for-relayer` is not blocked.
 async fn postgres_write_ready(state: &std::sync::Arc<AppState>) -> bool {
     match tokio::time::timeout(
-        POSTGRES_PROBE_TIMEOUT,
+        WRITE_READY_PROBE_TIMEOUT,
         probe_postgres_write_ready(state.db.pool()),
     )
     .await
@@ -1523,7 +1523,7 @@ mod tests {
     #[test]
     fn postgres_write_ready_probe_timeout_is_one_second() {
         assert_eq!(
-            super::POSTGRES_PROBE_TIMEOUT,
+            super::WRITE_READY_PROBE_TIMEOUT,
             std::time::Duration::from_secs(1)
         );
     }
