@@ -208,12 +208,7 @@ const RESTORE_REQUEST_TIMEOUT_MS = 60_000;
  * is the one write that legitimately outruns the default. */
 const ANALYZE_REQUEST_TIMEOUT_MS = 60_000;
 
-/** `POST /api/recall` has carried its own 15s deadline since before the rest
- * had any; keeping it named makes that a decision rather than an accident.
- * WALM-598 made it configurable via `MemWalConfig.recallTimeoutMs`;
- * `DEFAULT_RECALL_TIMEOUT_MS` in utils.ts is the value that knob falls back
- * to, and this alias keeps the pre-existing call sites reading the same. */
-const RECALL_REQUEST_TIMEOUT_MS = DEFAULT_RECALL_TIMEOUT_MS;
+
 
 /** How far under the client's own abort `recall()` asks the relayer to stop,
  * so the 504 naming the stuck stage arrives before the abort rather than
