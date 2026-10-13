@@ -53,9 +53,26 @@ export interface LoginOptions {
      */
     onUrl?: (connectUrl: string) => void;
     freshKey?: boolean;
+    /** When set, `startOrReuseLoginFlow` aborts this listener so a newer
+     * sign-in can mint a key without the old timeout or callback writing
+     * over it. */
+    signal?: AbortSignal;
+    /** Fired when `freshKey` drops a pending record. The public key is no
+     * longer in the write-ahead file after the replacement is saved. */
+    onDiscarded?: (key: { publicKey: string; address: string }) => void;
 }
 
-const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl" | "freshKey">> & { label: string } = {
+function loginSupersededError(): Error {
+    const err = new Error("Sign-in was replaced by a newer login. This listener is closed.");
+    err.name = "MemWalLoginSuperseded";
+    return err;
+}
+
+function isLoginSuperseded(err: unknown): boolean {
+    return err instanceof Error && err.name === "MemWalLoginSuperseded";
+}
+
+const DEFAULTS: Required<Omit<LoginOptions, "label" | "onUrl" | "freshKey" | "signal" | "onDiscarded">> & { label: string } = {
     webUrl: process.env.MEMWAL_WEB_URL ?? "https://memory.walrus.xyz",
     relayerUrl: process.env.MEMWAL_SERVER_URL ?? "https://relayer.memory.walrus.xyz",
     label: process.env.MEMWAL_CLIENT_LABEL ?? "Walrus Memory MCP",
@@ -246,6 +263,14 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
                 `If you approved that key in your wallet, nothing will use it again — ` +
                 `remove it from the dashboard.`,
         );
+        try {
+            opts.onDiscarded?.({
+                publicKey: discarded.delegatePublicKeyHex,
+                address: discarded.delegateAddress,
+            });
+        } catch {
+            /* caller errors don't break the flow */
+        }
     }
     const keypair = reusable
         ? {
@@ -340,19 +365,49 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
     // and posting a valid-looking callback directly.
     let preflightVerified = false;
 
+    let retired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // One winner. The timeout, an abort from a newer `freshKey` login, and the
+    // callback all try to finish this listener. Claiming first closes the
+    // others out so a late callback cannot saveCreds over the replacement key.
+    const claim = (): boolean => {
+        if (retired) return false;
+        retired = true;
+        if (timer) clearTimeout(timer);
+        return true;
+    };
+
     const done = new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
+        const retire = (err: Error) => {
+            if (!claim()) return;
+            error = err;
+            server.close();
+            resolve();
+        };
+        timer = setTimeout(() => {
             if (!creds) {
-                error = new Error(
-                    `Login timed out after ${cfg.timeoutMs}ms. If you already approved the wallet transaction, that delegate key is saved on disk: the next start reclaims it, and running login again cannot register it a second time. Only remove it from the dashboard if you mean to abandon it.`,
-                );
-                server.close();
-                resolve();
+                retire(new Error(
+                    `Login timed out after ${cfg.timeoutMs}ms. A restart retries the same key. ` +
+                        `If the wallet keeps rejecting it, call memwal_login with freshKey: true ` +
+                        `once no other sign-in is still open. That mints a new key; remove the old ` +
+                        `one from the dashboard if you already approved it on-chain.`,
+                ));
             }
-        }, cfg.timeoutMs).unref?.();
-        void timer;
+        }, cfg.timeoutMs);
+        timer.unref?.();
+
+        if (cfg.signal) {
+            const onAbort = () => retire(loginSupersededError());
+            if (cfg.signal.aborted) onAbort();
+            else cfg.signal.addEventListener("abort", onAbort, { once: true });
+        }
 
         server.on("request", async (req: IncomingMessage, res: ServerResponse) => {
+            if (retired) {
+                res.writeHead(409, { "content-type": "text/html" });
+                res.end(FAIL_HTML_TEMPLATE("This sign-in was replaced by a newer login."));
+                return;
+            }
             // CORS — only the dashboard origin we control may POST. `*` would
             // let any web page on the internet talk to this localhost port.
             res.setHeader("access-control-allow-origin", expectedOrigin);
@@ -480,6 +535,14 @@ export async function loginFlow(opts: LoginOptions = {}): Promise<MemWalCredenti
                 // callback that races during the response-flush window.
                 preflightVerified = false;
 
+                // After `readBody` awaits, a newer freshKey login may already
+                // own the write-ahead record. Losing the claim must not save.
+                if (!claim()) {
+                    res.writeHead(409, { "content-type": "text/html" });
+                    res.end(FAIL_HTML_TEMPLATE("This sign-in was replaced by a newer login."));
+                    return;
+                }
+
                 creds = {
                     delegatePrivateKey: keypair.privateKeyHex,
                     delegatePublicKeyHex: keypair.publicKeyHex,
@@ -546,6 +609,7 @@ export interface InflightLogin {
 }
 
 let inflightLogin: InflightLogin | null = null;
+let inflightAbort: AbortController | null = null;
 
 /**
  * Start a login flow, or join one already in progress in this process.
@@ -568,6 +632,9 @@ export function startOrReuseLoginFlow(
         return inflightLogin;
     }
 
+    const abort = new AbortController();
+    inflightAbort = abort;
+
     let resolveUrl!: (url: string) => void;
     let rejectUrl!: (err: unknown) => void;
     const url = new Promise<string>((resolve, reject) => {
@@ -578,6 +645,7 @@ export function startOrReuseLoginFlow(
     const userOnUrl = opts.onUrl;
     const result = loginFlow({
         ...opts,
+        signal: abort.signal,
         onUrl: (connectUrl) => {
             resolveUrl(connectUrl);
             try {
@@ -594,6 +662,9 @@ export function startOrReuseLoginFlow(
     // failure twice for one flow.
     result.catch((err) => {
         rejectUrl(err);
+        // The replacement login is the one the caller was just handed. The
+        // old timeout and its onFailure must not talk over that.
+        if (isLoginSuperseded(err)) return;
         const msg = err instanceof Error ? err.message : String(err);
         // This used to be a `warn` and nothing else, which made a background
         // login failure invisible: `handleLocalLogin` has already returned the
@@ -642,7 +713,11 @@ export function startOrReuseLoginFlow(
     return session;
 }
 
-/** Drop the in-flight handle. Does not abort a listener already bound. */
+/** Drop the in-flight handle and close its listener. A late callback or
+ * timeout on that listener must not save credentials or clear the pending
+ * record a newer login just wrote. */
 export function resetInflightLogin(): void {
+    inflightAbort?.abort();
+    inflightAbort = null;
     inflightLogin = null;
 }

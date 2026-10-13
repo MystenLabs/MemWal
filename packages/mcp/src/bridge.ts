@@ -928,6 +928,7 @@ async function handleLocalLogin(
     onCredentials: (creds: MemWalCredentials) => Promise<void>,
     freshKey: boolean,
 ): Promise<{ text: string; isError: boolean }> {
+    let discardedKey: { publicKey: string; address: string } | undefined;
     const session = startOrReuseLoginFlow(
         {
             relayerUrl: config.relayerUrl,
@@ -936,6 +937,9 @@ async function handleLocalLogin(
             timeoutMs: resolveLoginTimeoutMs(),
             openBrowser: false,
             freshKey,
+            onDiscarded: (key) => {
+                discardedKey = key;
+            },
         },
         async (creds) => {
             await onCredentials(creds);
@@ -1017,6 +1021,7 @@ async function handleLocalLogin(
             url,
             credentialsPath: credsPath(),
             signedIn: loadCreds() !== null,
+            discardedKey,
         }),
     };
 }

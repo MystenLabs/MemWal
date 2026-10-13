@@ -384,6 +384,7 @@ async function handleLoginToolCall(
     // Concurrent memwal_login calls join this in-flight flow instead of
     // opening a second listener (that race hung later recall/remember).
     lastLoginFailure = null;
+    let discardedKey: { publicKey: string; address: string } | undefined;
     const session = startOrReuseLoginFlow(
         {
             relayerUrl: config.relayerUrl,
@@ -392,6 +393,9 @@ async function handleLoginToolCall(
             timeoutMs: resolveLoginTimeoutMs(),
             openBrowser: false,
             freshKey,
+            onDiscarded: (key) => {
+                discardedKey = key;
+            },
             onUrl: (url) => {
                 sendLogMessage("info", `Walrus Memory MCP login URL: ${url}`);
             },
@@ -462,6 +466,7 @@ async function handleLoginToolCall(
             url,
             credentialsPath: credsPath(),
             signedIn: loadCreds() !== null,
+            discardedKey,
         }),
     };
 }
