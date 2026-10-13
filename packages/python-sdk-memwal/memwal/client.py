@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -134,6 +135,25 @@ def _reject_blank_text(text: object, message: str = "Text cannot be empty") -> N
 
     if not isinstance(text, str) or not text.strip():
         raise ValueError(message)
+
+
+IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000
+
+
+def _derived_idempotency_key(request_identity: str) -> str:
+    """Window over which the same (namespace, text) resolves to one key.
+
+    `_pending_remember_keys` only dedupes retries that reuse one client instance,
+    and callers such as sidecars or serverless functions build a fresh client
+    per session — so a random key lets a replay mint a second paid blob. The
+    bucket bounds the collapse: `remember_jobs` rows are never pruned, so an
+    unbucketed key would dedupe against a job from any point in history.
+
+    Matches TypeScript SDK derivedIdempotencyKey contract.
+    """
+    bucket = int(time.time() * 1000) // IDEMPOTENCY_BUCKET_MS
+    payload = f"{bucket}\0{request_identity}".encode("utf-8")
+    return f"r1-{hashlib.sha256(payload).hexdigest()}"
 
 
 def normalize_server_url(url: str) -> str:
@@ -466,9 +486,11 @@ class MemWal:
         resolved_namespace = namespace or self._namespace
         request_identity = f"{resolved_namespace}\0{text}"
         generated_key = idempotency_key is None
-        resolved_key = idempotency_key or self._pending_remember_keys.get(request_identity)
-        if resolved_key is None:
-            resolved_key = str(uuid.uuid4())
+        resolved_key = (
+            idempotency_key
+            or self._pending_remember_keys.get(request_identity)
+            or _derived_idempotency_key(request_identity)
+        )
         if generated_key:
             self._pending_remember_keys[request_identity] = resolved_key
 
@@ -615,12 +637,15 @@ class MemWal:
         ``failed``). Mirrors TS ``rememberAndWait``.
         """
 
+        _reject_blank_text(text)
         resolved_namespace = namespace or self._namespace
         request_identity = f"{resolved_namespace}\0{text}"
         generated_key = idempotency_key is None
-        resolved_key = idempotency_key or self._pending_remember_keys.get(request_identity)
-        if resolved_key is None:
-            resolved_key = str(uuid.uuid4())
+        resolved_key = (
+            idempotency_key
+            or self._pending_remember_keys.get(request_identity)
+            or _derived_idempotency_key(request_identity)
+        )
         if generated_key:
             self._pending_remember_keys[request_identity] = resolved_key
 
@@ -1610,7 +1635,6 @@ class MemWal:
             - ``x-account-id``: Walrus Memory account object ID
             - ``Content-Type``: application/json
         """
-        import uuid
 
         await self._ensure_compatible_relayer()
 
