@@ -728,9 +728,8 @@ class TestWithMemWalLangChain:
     @respx.mock
     async def test_same_user_text_recalls_again(self) -> None:
         """A later user turn with the same text must not reuse the first recall."""
-        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import AIMessage, HumanMessage
         from langchain_core.outputs import ChatGeneration, ChatResult
-        from langchain_core.messages import AIMessage
         _mock_seal_session_prereqs()
         llm = self._make_llm()
 
