@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- `get_remember_status(job_id)` on `MemWal` and `MemWalSync` returns `RememberJobStatus` from `GET /api/remember/{job_id}`, accepting 200 and 404 like the TypeScript SDK. (WALM-832, #1096)
+
 ### Fixed
 
+- `get_remember_status` and `wait_for_remember_job` reject a job id outside `[A-Za-z0-9_-]+` before the request. `.`, `..`, a backslash, and encoded dot-dot used to pass a denylist and be rewritten after signing. An empty id used to call `GET /api/remember/` and raise `json.JSONDecodeError`. An unparseable 404 is `not_found` / `MemWalRememberJobNotFound`, not a JSON error. `uuid.UUID` is coerced with `str()`. Valid UUID job ids are unchanged. (WALM-833, #1100, #1216)
 - `remember`, `remember_bulk`, `analyze`, and `embed` reject whitespace-only text before the request. A blank body used to be accepted and then sit until the caller timed out. (#1129)
 - A 401 `AUTH_REJECTED` now says a wallet address is not a MemWal account ID. (#1132)
 - `wait_for_remember_jobs` / `remember_bulk_and_wait` no longer return a batch they could not read as if it were still uploading. When every status poll is rate-limited, the wait makes one confirming read and raises `MemWalRateLimited` (`status` 429, `job_ids`, `retry_after`) if that is refused too. An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)

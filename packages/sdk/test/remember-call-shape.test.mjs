@@ -162,6 +162,58 @@ test("an empty job id never requests GET /api/remember/", async () => {
     assert.equal(fetches, 0);
 });
 
+test("a slash or query job id is not written into the signed path", async () => {
+    const urls = [];
+    globalThis.fetch = async (url) => {
+        urls.push(String(url));
+        throw new Error(`must not request ${url}`);
+    };
+
+    const memwal = client();
+    for (const jobId of ["abc/def?x=1", "job 1", "a\tb", "?", "/", ".", "..", "%2e%2e", "a\\b"]) {
+        const status = await memwal.getRememberStatus(jobId);
+        assert.equal(status.status, "not_found");
+        assert.equal(status.job_id, jobId);
+        const started = Date.now();
+        await assert.rejects(memwal.waitForRememberJob(jobId), (err) => {
+            assert.equal(err.status, 404);
+            assert.match(err.message, /remember job not found/);
+            return true;
+        });
+        assert.ok(Date.now() - started < 1_000);
+    }
+    assert.deepEqual(urls, []);
+});
+
+test("getRememberStatus reads one normal job id", async () => {
+    const jobId = "550e8400-e29b-41d4-a716-446655440000";
+    const urls = [];
+    globalThis.fetch = async (url) => {
+        urls.push(String(url));
+        const path = new URL(url).pathname;
+        if (path === "/version") return versionBody();
+        if (path === `/api/remember/${jobId}` && new URL(url).search === "") {
+            return Response.json({
+                job_id: jobId,
+                status: "running",
+                namespace: "profile",
+                blob_id: "blob-1",
+            });
+        }
+        throw new Error(`unexpected request ${url}`);
+    };
+
+    const memwal = client();
+    const status = await memwal.getRememberStatus(jobId);
+    assert.equal(status.status, "running");
+    assert.equal(status.job_id, jobId);
+    assert.equal(status.namespace, "profile");
+    assert.deepEqual(urls.map((url) => new URL(url).pathname), [
+        "/version",
+        `/api/remember/${jobId}`,
+    ]);
+});
+
 test("status reads do not build a SEAL session", async () => {
     const paths = [];
     globalThis.fetch = async (url, init = {}) => {

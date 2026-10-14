@@ -84,9 +84,13 @@ Submit one memory and poll until the background job completes.
 }
 ```
 
+### `getRememberStatus(jobId): Promise<RememberJobStatus>`
+
+One `GET /api/remember/{jobId}`. Accepts 200 and 404 and returns the job state (`pending`, `running`, `uploaded`, `done`, `failed`, `not_found`) without polling. A job id that is empty or contains whitespace, `/`, `?`, or `#` is `not_found` and is not requested.
+
 ### `waitForRememberJob(jobId, opts?): Promise<RememberResult>`
 
-Poll a previously accepted remember job until it reaches `done` or `failed`.
+Poll a previously accepted remember job until it reaches `done` or `failed`. A job id outside `[A-Za-z0-9_-]+` fails immediately with status 404.
 
 ### `rememberBulk(items): Promise<RememberBulkAcceptedResult>`
 
