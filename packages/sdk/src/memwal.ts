@@ -329,6 +329,10 @@ function isTransientPollingStatus(status: number): boolean {
     return status === 0 || status === 429 || status >= 500;
 }
 
+function jsonBodyError(status: number, message: string): Error {
+    return Object.assign(new Error(message), { status });
+}
+
 /**
  * How long a transient polling rejection asked us to wait, in ms.
  *
@@ -1975,7 +1979,8 @@ export class MemWal {
             if (res.ok) {
                 const raw = await res.text();
                 if (raw.trim() === "") {
-                    throw new Error(
+                    throw jsonBodyError(
+                        res.status,
                         `MemWal: HTTP ${res.status} response had an empty body; expected JSON`,
                     );
                 }
@@ -1983,7 +1988,7 @@ export class MemWal {
                     body = JSON.parse(raw) as T;
                 } catch (err) {
                     if (err instanceof SyntaxError) {
-                        throw new Error(`MemWal: HTTP ${res.status} response was not JSON`);
+                        throw jsonBodyError(res.status, `MemWal: HTTP ${res.status} response was not JSON`);
                     }
                     throw err;
                 }
@@ -2123,7 +2128,8 @@ export class MemWal {
 
             const rawBody = await res.text();
             if (rawBody.trim() === "") {
-                throw new Error(
+                throw jsonBodyError(
+                    res.status,
                     `MemWal: HTTP ${res.status} response had an empty body; expected JSON`,
                 );
             }
@@ -2131,7 +2137,7 @@ export class MemWal {
                 return JSON.parse(rawBody) as T;
             } catch (err) {
                 if (err instanceof SyntaxError) {
-                    throw new Error(`MemWal: HTTP ${res.status} response was not JSON`);
+                    throw jsonBodyError(res.status, `MemWal: HTTP ${res.status} response was not JSON`);
                 }
                 throw err;
             }

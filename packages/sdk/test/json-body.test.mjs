@@ -58,6 +58,21 @@ test("remember() rejects an empty 202 instead of throwing SyntaxError", async ()
     );
 });
 
+test("rememberAndWait does not poll until timeout on an empty 202", async () => {
+    let polls = 0;
+    globalThis.fetch = async (url) => {
+        const path = new URL(url).pathname;
+        if (path === "/version") return versionBody();
+        polls += 1;
+        return new Response("", { status: 202 });
+    };
+    await assert.rejects(
+        () => client().rememberAndWait("hello", { timeoutMs: 5_000 }),
+        (err) => err instanceof Error && /empty body/.test(err.message) && err.status === 202,
+    );
+    assert.equal(polls, 1);
+});
+
 function manual() {
     return MemWalManual.create({
         key: "11".repeat(32),
