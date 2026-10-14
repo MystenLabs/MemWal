@@ -299,7 +299,9 @@ def normalize_private_key(key: str) -> str:
     candidate = key.strip()
     if candidate.lower().startswith("suiprivkey1"):
         return bytes_to_hex(decode_sui_private_key(candidate))
-    return candidate[2:] if candidate.startswith("0x") else candidate
+    if candidate.startswith(("0x", "0X")):
+        return candidate[2:]
+    return candidate
 
 
 def encode_sui_private_key(seed_bytes: bytes) -> str:
