@@ -122,7 +122,7 @@ Submit a bulk remember request and wait until every job reaches a terminal state
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
 - Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance?, sort?, scoringWeights? })`
-- `limit` defaults to `10`; `topK` is an alias and wins when both are set
+- `limit` defaults to `10` (relayer caps at `100`); `topK` is an alias and wins when both are set
 - Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`. `recall(query, namespace)` throws `TypeError`; namespace is not a valid second argument.
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 - `sort` picks the ordering: `"relevance"` (default) or `"recent"` for newest-among-matches
@@ -272,7 +272,7 @@ Use `analyzeAndWait(text, namespace?, opts?)` to wait for every extracted fact j
 
 Rebuild missing indexed entries for one namespace from Walrus. Incremental — only re-indexes blobs that aren't already in the local database.
 
-- `limit` defaults to `10`
+- `limit` defaults to `10` (relayer clamps to `[1, 100]`)
 
 **Returns:**
 

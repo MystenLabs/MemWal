@@ -398,7 +398,12 @@ export class MemWalManual {
             limitOrOptions,
             namespace,
         );
-        const limit = options.limit ?? 10;
+        const limit = options.limit !== undefined ? options.limit : 10;
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
         const ns = options.namespace ?? this.namespace;
 
         // Step 1: Embed query
@@ -942,6 +947,11 @@ export class MemWalManual {
      * @returns RestoreResult with count of restored entries
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
         const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
             namespace,
             limit,

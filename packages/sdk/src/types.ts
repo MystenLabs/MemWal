@@ -150,7 +150,7 @@ export type TruncationStrategy = "high-relevance-only" | "per-hit-cap" | "drop-t
 
 /** Options for recall(). */
 export interface RecallOptions {
-    /** Max number of nearest memories to request from the relayer (default: 10). */
+    /** Max number of nearest memories to request from the relayer (default: 10, relayer caps at 100). Must be a positive integer. */
     limit?: number;
     /** Alias for limit, useful when describing top-K search behaviour. */
     topK?: number;
@@ -445,7 +445,7 @@ export interface RememberManualResult {
 export interface RecallManualOptions {
     /** Pre-computed query embedding vector */
     vector: number[];
-    /** Max number of results (default: 10) */
+    /** Max number of results (default: 10, relayer caps at 100). Must be a positive integer. */
     limit?: number;
     /** Namespace (default: config namespace or "default") */
     namespace?: string;

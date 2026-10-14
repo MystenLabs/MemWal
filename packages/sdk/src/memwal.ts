@@ -1149,7 +1149,13 @@ export class MemWal {
             namespace,
         );
         validateMaxTokens(options.maxTokens);
-        const limit = options.topK ?? options.limit ?? 10;
+        const rawLimit = options.topK !== undefined ? options.topK : options.limit;
+        const limit = rawLimit !== undefined ? rawLimit : 10;
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
         const resolvedNamespace = options.namespace ?? this.namespace;
 
         {
@@ -1283,12 +1289,18 @@ export class MemWal {
      * ```
      */
     async recallManual(opts: RecallManualOptions): Promise<RecallManualResult> {
+        const limit = opts.limit !== undefined ? opts.limit : 10;
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
         return this.signedRequest<RecallManualResult>(
             "POST",
             "/api/recall/manual",
             {
                 vector: opts.vector,
-                limit: opts.limit ?? 10,
+                limit,
                 namespace: opts.namespace ?? this.namespace,
                 scoring_weights: scoringWeightsToWire(opts.scoringWeights),
             },
@@ -1410,6 +1422,11 @@ export class MemWal {
      * ```
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
         const result = await this.signedRequest<RestoreResult>(
             "POST",
             "/api/restore",
