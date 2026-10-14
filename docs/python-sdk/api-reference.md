@@ -97,7 +97,7 @@ RememberJobStatus(
 
 ### `wait_for_remember_job(job_id, poll_interval_ms=1500, timeout_ms=60_000) -> RememberResult`
 
-Poll a previously accepted job until `done` or `failed`. Raises `MemWalRememberJobNotFound` / `MemWalRememberJobFailed` / `MemWalRememberJobTimeout`. A job id that is not one path segment raises `MemWalRememberJobNotFound` before the request.
+Poll a previously accepted job until `done` or `failed`. Raises `MemWalRememberJobNotFound` / `MemWalRememberJobFailed` / `MemWalRememberJobTimeout`. A job id outside `[A-Za-z0-9_-]+` raises `MemWalRememberJobNotFound` before the request.
 
 ### `remember_bulk_async(items) -> RememberBulkAcceptedResult`
 

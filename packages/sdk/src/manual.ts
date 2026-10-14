@@ -53,6 +53,7 @@ import {
 } from "./utils.js";
 import { assertCompatibleRelayer, compatibilityErrorFromStatus } from "./compatibility.js";
 import { resolveLimitOrOptions } from "./recall-args.js";
+import { createDefaultSuiClient } from "./sui-client.js";
 
 // ============================================================
 // Constants
@@ -247,30 +248,10 @@ export class MemWalManual {
 
     private async getSuiClient() {
         if (!this._suiClient) {
-            // Prefer externally-provided client (e.g. from dapp-kit's useSuiClient())
-            if (this.config.suiClient) {
-                this._suiClient = this.config.suiClient;
-            } else {
-                // Fallback: create client via dynamic import
-                // @ts-ignore — optional peer dependency
-                const mod = await import("@mysten/sui/client");
-                const SuiClient = (mod as any).SuiClient;
-                if (typeof SuiClient !== "function") {
-                    throw new Error(
-                        "SuiClient not found in @mysten/sui/client. " +
-                            "For @mysten/sui v2.6.0+, pass suiClient in config " +
-                            "(e.g. from dapp-kit's useSuiClient())"
-                    );
-                }
-                const network = this.config.suiNetwork ?? "mainnet";
-                const urls: Record<string, string> = {
-                    testnet: "https://fullnode.testnet.sui.io:443",
-                    mainnet: "https://fullnode.mainnet.sui.io:443",
-                };
-                this._suiClient = new SuiClient({
-                    url: urls[network] ?? urls.mainnet,
-                });
-            }
+            // Prefer externally-provided client (e.g. from dapp-kit's useSuiClient()),
+            // otherwise gRPC against the public fullnode for suiNetwork.
+            this._suiClient =
+                this.config.suiClient ?? await createDefaultSuiClient(this.config.suiNetwork);
         }
         return this._suiClient;
     }

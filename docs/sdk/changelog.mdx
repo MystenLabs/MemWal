@@ -35,7 +35,7 @@ answer: >-
 
 ### Fixed
 
-- `getRememberStatus` and `waitForRememberJob` reject a job id that is not one path segment (empty, whitespace, `/`, `?`, or `#`) before signing. `abc/def?x=1` used to request `/api/remember/abc/def?x=1`. Valid UUID job ids are unchanged. (#1216)
+- `getRememberStatus` and `waitForRememberJob` reject a job id outside `[A-Za-z0-9_-]+` before signing. `.`, `..`, `\`, and `%2e%2e` used to pass a denylist and be rewritten by `fetch` after the path was signed. Valid UUID job ids are unchanged. (#1087, #1216)
 
 ## 0.1.9
 

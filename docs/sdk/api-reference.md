@@ -90,7 +90,7 @@ One `GET /api/remember/{jobId}`. Accepts 200 and 404 and returns the job state (
 
 ### `waitForRememberJob(jobId, opts?): Promise<RememberResult>`
 
-Poll a previously accepted remember job until it reaches `done` or `failed`. A job id that is not one path segment fails immediately with status 404.
+Poll a previously accepted remember job until it reaches `done` or `failed`. A job id outside `[A-Za-z0-9_-]+` fails immediately with status 404.
 
 ### `rememberBulk(items): Promise<RememberBulkAcceptedResult>`
 

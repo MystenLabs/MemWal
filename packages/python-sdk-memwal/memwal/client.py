@@ -560,7 +560,7 @@ class MemWal:
 
         ``GET /api/remember/{job_id}``, accepting 200 and 404. A 404, or a
         body with no ``status``, is ``not_found`` — not an exception. A job
-        id that is not one path segment is ``not_found`` without a request.
+        id outside ``[A-Za-z0-9_-]+`` is ``not_found`` without a request.
         """
 
         job_id = _require_remember_job_id(job_id)
