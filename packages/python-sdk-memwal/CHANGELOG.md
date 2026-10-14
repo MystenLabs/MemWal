@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- The default `server_url` is `https://relayer.memory.walrus.xyz`, matching the TypeScript SDK. `env="local"` still selects `http://127.0.0.1:8000`. (#1064)
 - `get_remember_status` and `wait_for_remember_job` reject a job id outside `[A-Za-z0-9_-]+` before the request. `.`, `..`, a backslash, and encoded dot-dot used to pass a denylist and be rewritten after signing. An empty id used to call `GET /api/remember/` and raise `json.JSONDecodeError`. An unparseable 404 is `not_found` / `MemWalRememberJobNotFound`, not a JSON error. `uuid.UUID` is coerced with `str()`. Valid UUID job ids are unchanged. (WALM-833, #1100, #1216)
 - `remember`, `remember_bulk`, `analyze`, and `embed` reject whitespace-only text before the request. A blank body used to be accepted and then sit until the caller timed out. (#1129)
 - A 401 `AUTH_REJECTED` now says a wallet address is not a MemWal account ID. (#1132)

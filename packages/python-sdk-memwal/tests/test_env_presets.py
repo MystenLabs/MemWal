@@ -41,6 +41,7 @@ def test_explicit_server_url_overrides_env():
 
 def test_no_env_keeps_default():
     cfg = MemWalConfig(key=KEY, account_id=ACCOUNT)
+    assert cfg.server_url == "https://relayer.memory.walrus.xyz"
     assert cfg.server_url == DEFAULT_SERVER_URL
 
 

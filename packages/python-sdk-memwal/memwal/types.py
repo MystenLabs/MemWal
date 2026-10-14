@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 #: Default ``server_url`` when neither an explicit URL nor an ``env`` preset
 #: is supplied. Kept as a module constant so ``__post_init__`` can tell an
 #: untouched default apart from an explicitly-passed custom URL.
-DEFAULT_SERVER_URL = "http://localhost:8000"
+DEFAULT_SERVER_URL = "https://relayer.memory.walrus.xyz"
 
 #: Named relayer environments for the public Walrus Memory deployments.
 ENV_PRESETS = {
@@ -37,7 +37,7 @@ class MemWalConfig:
         key: Ed25519 private key (hex string). This is the delegate key from the
             Walrus Memory dashboard.
         account_id: Walrus Memory account object ID on Sui.
-        server_url: Server URL (default: http://localhost:8000). An explicit
+        server_url: Server URL (default: https://relayer.memory.walrus.xyz). An explicit
             non-default value always wins over ``env``.
         namespace: Default namespace for memory isolation (default: "default").
         env: Optional relayer preset — one of ``"prod"``, ``"dev"``,

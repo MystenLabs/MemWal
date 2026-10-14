@@ -90,7 +90,7 @@ Before wiring the SDK into your app:
 | --- | --- | --- | --- | --- |
 | `key` | `str` | Yes | — | Ed25519 delegate private key in hex |
 | `account_id` | `str` | Yes | — | Walrus Memory account object ID on Sui |
-| `server_url` | `str` | No | `http://localhost:8000` | Explicit relayer URL — wins over `env` |
+| `server_url` | `str` | No | `https://relayer.memory.walrus.xyz` | Explicit relayer URL — wins over `env` |
 | `namespace` | `str` | No | `"default"` | Default namespace for memory isolation |
 | `env` | `str` | No | — | Hosted relayer preset: `staging` for testing or `prod` for production |
 
