@@ -31,7 +31,7 @@ import {
     type HealthProbe,
 } from "./health-probe.js";
 import { proactiveInstructions } from "./instructions.js";
-import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
+import { startOrReuseLoginFlow, resolveLoginTimeoutMs, isLoginSuperseded } from "./login.js";
 import { log, note } from "./logger.js";
 import {
     loginPrompt,
@@ -1005,6 +1005,9 @@ async function handleLocalLogin(
     try {
         url = await Promise.race([session.url, timeoutPromise]);
     } catch (err) {
+        if (isLoginSuperseded(err)) {
+            return { isError: true, text: "This sign-in was replaced by a newer memwal_login. Open that result instead of starting another login." };
+        }
         return {
             isError: true,
             text: `❌ Failed to start login: ${err instanceof Error ? err.message : String(err)}`,

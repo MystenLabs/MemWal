@@ -25,7 +25,7 @@ import { credsPath, loadCreds, type MemWalCredentials } from "./auth.js";
 import { rememberInitializeClientInfo } from "./client-info.js";
 import { loginFailureNotice, loginPrompt, loginSuccessNotification } from "./messages.js";
 import { log } from "./logger.js";
-import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
+import { startOrReuseLoginFlow, resolveLoginTimeoutMs, isLoginSuperseded } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
 import {
     SECRET_EXCLUSION_RULES,
@@ -441,6 +441,9 @@ async function handleLoginToolCall(
     try {
         url = await Promise.race([session.url, timeoutPromise]);
     } catch (err) {
+        if (isLoginSuperseded(err)) {
+            return { isError: true, text: "This sign-in was replaced by a newer memwal_login. Open that result instead of starting another login." };
+        }
         const msg = err instanceof Error ? err.message : String(err);
         log.error("memwal_login.tool.url_not_ready", { msg });
         return {

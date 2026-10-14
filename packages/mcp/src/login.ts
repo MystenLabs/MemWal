@@ -68,7 +68,7 @@ function loginSupersededError(): Error {
     return err;
 }
 
-function isLoginSuperseded(err: unknown): boolean {
+export function isLoginSuperseded(err: unknown): boolean {
     return err instanceof Error && err.name === "MemWalLoginSuperseded";
 }
 
