@@ -9,7 +9,7 @@
  *
  * @example
  * ```typescript
- * import { MemWalManual } from "@mysten-incubation/memwal"
+ * import { MemWalManual } from "@mysten-incubation/memwal/manual"
  *
  * const memwal = MemWalManual.create({
  *     key: process.env.MEMWAL_DELEGATE_KEY!,      // Ed25519 delegate key
@@ -52,6 +52,9 @@ import {
     scoringWeightsToWire,
     fetchWithDeadline,
     DEFAULT_PREFLIGHT_TIMEOUT_MS,
+    RESTORE_REQUEST_TIMEOUT_MS,
+    deadlineSignal,
+    requestTimeoutError,
 } from "./utils.js";
 import { assertCompatibleRelayer, compatibilityErrorFromStatus } from "./compatibility.js";
 import { resolveLimitOrOptions } from "./recall-args.js";
@@ -152,6 +155,9 @@ function bytesToBase64(bytes: Uint8Array): string {
 // MemWalManual Client
 // ============================================================
 
+const SEAL_SESSION_TTL_MIN = 5;
+const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
+
 export class MemWalManual {
     private delegatePrivateKey: Uint8Array;
     private delegatePublicKey: Uint8Array | null = null;
@@ -163,6 +169,8 @@ export class MemWalManual {
     private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
     /** Per-round-trip budget for the compatibility preflight (WALM-598). */
     private preflightTimeoutMs: number;
+    private sessionCache: { bytes: string; expiresAt: number } | null = null;
+    private sessionBuildPromise: Promise<string> | null = null;
 
     // Lazily initialized heavy clients (typed as any to avoid peer dep compile errors)
     private _suiClient: any = null;
@@ -235,6 +243,74 @@ export class MemWalManual {
         }
         this.relayerVersionMetadata = null;
         this.compatibilityPromise = null;
+        this.sessionCache = null;
+        this.sessionBuildPromise = null;
+    }
+
+    /**
+     * Build an ephemeral SEAL SessionKey, sign its personal message, and export
+     * it as a base64-encoded JSON envelope suitable for `x-seal-session`.
+     * Memoised until 30s before expiration (5m TTL).
+     */
+    async buildSealSession(): Promise<string> {
+        // Fast path: cached session still fresh.
+        if (this.sessionCache && Date.now() < this.sessionCache.expiresAt) {
+            return this.sessionCache.bytes;
+        }
+        // Single-flight: concurrent requests share one build.
+        if (this.sessionBuildPromise) return this.sessionBuildPromise;
+
+        this.sessionBuildPromise = this.buildSealSessionInner().finally(() => {
+            this.sessionBuildPromise = null;
+        });
+        return this.sessionBuildPromise;
+    }
+
+    private async buildSealSessionInner(): Promise<string> {
+        // Same key MemWal uses. An owner wallet session prompts on every
+        // refresh and is broader than the delegate this client already holds.
+        // Dynamic imports: @mysten/sui and @mysten/seal are optional peers.
+        // Server-mode MemWal must still load when they are not installed.
+        const { Ed25519Keypair } = await import("@mysten/sui/keypairs/ed25519");
+        const keypair = Ed25519Keypair.fromSecretKey(this.delegatePrivateKey);
+        const suiClient = await this.getSuiClient();
+        const { SessionKey } = await import("@mysten/seal");
+
+        const session = await SessionKey.create({
+            address: keypair.getPublicKey().toSuiAddress(),
+            packageId: this.config.packageId,
+            ttlMin: SEAL_SESSION_TTL_MIN,
+            signer: keypair,
+            suiClient,
+        });
+
+        const personalMessage = session.getPersonalMessage();
+        const signResult = await keypair.signPersonalMessage(personalMessage);
+        await session.setPersonalMessageSignature(signResult.signature);
+
+        const exported = session.export();
+        const jsonStr = JSON.stringify({
+            address: exported.address,
+            packageId: exported.packageId,
+            mvrName: exported.mvrName,
+            creationTimeMs: exported.creationTimeMs,
+            ttlMin: exported.ttlMin,
+            personalMessageSignature: exported.personalMessageSignature,
+            sessionKey: exported.sessionKey,
+        });
+        const bytes =
+            typeof btoa === "function"
+                ? btoa(jsonStr)
+                : Buffer.from(jsonStr, "utf8").toString("base64");
+
+        this.sessionCache = {
+            bytes,
+            expiresAt:
+                Date.now() +
+                SEAL_SESSION_TTL_MIN * 60_000 -
+                SEAL_SESSION_SAFETY_MARGIN_MS,
+        };
+        return bytes;
     }
 
     /**
@@ -867,7 +943,12 @@ export class MemWalManual {
      *
      * Headers sent: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id.
      */
-    private async signedRequest<T>(method: string, path: string, body: object): Promise<T> {
+    private async signedRequest<T>(
+        method: string,
+        path: string,
+        body: object,
+        options: { timeoutMs?: number; signal?: AbortSignal; includeSealSession?: boolean } = {},
+    ): Promise<T> {
         await this.ensureCompatibleRelayer();
         const ed = await import("@noble/ed25519");
 
@@ -886,53 +967,68 @@ export class MemWalManual {
         const signature = await ed.signAsync(msgBytes, this.delegatePrivateKey);
         const publicKey = await this.getDelegatePublicKey();
 
-        const url = `${this.serverUrl}${path}`;
-        const res = await fetch(url, {
-            method,
-            headers: {
-                "Content-Type": "application/json",
-                "x-public-key": bytesToHex(publicKey),
-                "x-signature": bytesToHex(signature),
-                "x-timestamp": timestamp,
-                "x-nonce": nonce,
-                "x-account-id": this.config.accountId,
-            },
-            body: bodyStr,
-        });
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "x-public-key": bytesToHex(publicKey),
+            "x-signature": bytesToHex(signature),
+            "x-timestamp": timestamp,
+            "x-nonce": nonce,
+            "x-account-id": this.config.accountId,
+        };
 
-        if (!res.ok) {
-            // LOW-26: sanitize server error bodies before re-throwing.
-            const raw = await res.text();
-            const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
-            if (compatibilityError) throw compatibilityError;
-
-            // Surface a stale-timestamp rejection (401 + x-auth-error) as an
-            // actionable clock-drift error rather than an opaque server error.
-            const clockDriftError = clockDriftErrorFromResponse(res);
-            if (clockDriftError) throw clockDriftError;
-
-            const { message: sanitized, serverCode } = sanitizeServerError(
-                res.status,
-                raw,
-                res.headers.get("x-auth-error"),
-            );
-            const err = new Error(sanitized) as Error & {
-                status?: number;
-                serverCode?: string;
-                retryAfterSeconds?: number;
-                cause?: string;
-            };
-            err.status = res.status;
-            if (serverCode) err.serverCode = serverCode;
-            const retryAfter = Number(res.headers.get("retry-after"));
-            if (Number.isFinite(retryAfter) && retryAfter > 0) {
-                err.retryAfterSeconds = retryAfter;
-            }
-            err.cause = raw;
-            throw err;
+        if (options.includeSealSession) {
+            headers["x-seal-session"] = await this.buildSealSession();
         }
 
-        return res.json() as Promise<T>;
+        const url = `${this.serverUrl}${path}`;
+        const deadline = options.timeoutMs ? deadlineSignal(options.timeoutMs, options.signal) : undefined;
+        try {
+            const res = await fetch(url, {
+                method,
+                headers,
+                body: bodyStr,
+                signal: deadline?.signal ?? options.signal,
+            });
+
+            if (!res.ok) {
+                const raw = await res.text();
+                const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+                if (compatibilityError) throw compatibilityError;
+
+                const clockDriftError = clockDriftErrorFromResponse(res);
+                if (clockDriftError) throw clockDriftError;
+
+                const { message: sanitized, serverCode } = sanitizeServerError(
+                    res.status,
+                    raw,
+                    res.headers.get("x-auth-error"),
+                );
+                const err = new Error(sanitized) as Error & {
+                    status?: number;
+                    serverCode?: string;
+                    retryAfterSeconds?: number;
+                    cause?: string;
+                };
+                err.status = res.status;
+                if (serverCode) err.serverCode = serverCode;
+                const retryAfter = Number(res.headers.get("retry-after"));
+                if (Number.isFinite(retryAfter) && retryAfter > 0) {
+                    err.retryAfterSeconds = retryAfter;
+                }
+                err.cause = raw;
+                throw err;
+            }
+
+            return await res.json() as T;
+        } catch (err) {
+            const status = err && typeof err === "object" && "status" in err ? err.status : undefined;
+            if (deadline?.timedOut() && typeof status !== "number") {
+                throw requestTimeoutError(method, url, options.timeoutMs!);
+            }
+            throw err;
+        } finally {
+            deadline?.dispose();
+        }
     }
 
     // ============================================================
@@ -940,8 +1036,12 @@ export class MemWalManual {
     // ============================================================
 
     /**
-     * Restore a namespace — server downloads all blobs from Walrus,
-     * decrypts with delegate key, re-embeds, and re-indexes.
+     * Restore a namespace. The server downloads the blobs, decrypts them with
+     * the delegate key, and re-indexes them.
+     *
+     * Sends `x-seal-session` built from the delegate key, not the owner
+     * wallet. That session lets the relayer decrypt for this restore only,
+     * for the usual short TTL.
      *
      * @param namespace - Namespace to restore
      * @returns RestoreResult with count of restored entries
@@ -952,10 +1052,18 @@ export class MemWalManual {
                 `limit must be a positive integer, got ${limit}`,
             );
         }
-        const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
-            namespace,
-            limit,
-        });
+        const result = await this.signedRequest<RestoreResult>(
+            "POST",
+            "/api/restore",
+            {
+                namespace,
+                limit,
+            },
+            {
+                includeSealSession: true,
+                timeoutMs: RESTORE_REQUEST_TIMEOUT_MS,
+            },
+        );
         // Relayers older than WALM-319 omit `truncated` entirely — treat
         // "not present" as "not known to be truncated" rather than drop
         // the field or require every relayer version to send it.

@@ -609,3 +609,60 @@ export async function delegateKeyToPublicKey(privateKeyHex: string): Promise<Uin
     const ed = await import("@noble/ed25519");
     return ed.getPublicKeyAsync(hexToBytes(normalizePrivateKey(privateKeyHex)));
 }
+
+// ============================================================
+// Request Deadline & Timeout Helpers
+// ============================================================
+
+/** Timeout applied to restore requests (60s), giving the server 55s to respond. */
+export const RESTORE_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Abort signal that fires after `ms`, or when `caller` aborts — whichever is
+ * first. Built by hand rather than with `AbortSignal.any`, which lands too
+ * recently to rely on across Node, browsers and Workers alike.
+ *
+ * Returns the signal plus a `dispose` the caller must run in a `finally`, so a
+ * pending timer never outlives its request.
+ */
+export function deadlineSignal(
+    ms: number,
+    caller?: AbortSignal,
+): { signal: AbortSignal; timedOut: () => boolean; dispose: () => void } {
+    const controller = new AbortController();
+    let expired = false;
+
+    const onCallerAbort = () => controller.abort(caller?.reason);
+    if (caller) {
+        if (caller.aborted) controller.abort(caller.reason);
+        else caller.addEventListener("abort", onCallerAbort, { once: true });
+    }
+
+    const timer = setTimeout(() => {
+        expired = true;
+        controller.abort();
+    }, ms);
+
+    return {
+        signal: controller.signal,
+        timedOut: () => expired,
+        dispose: () => {
+            clearTimeout(timer);
+            caller?.removeEventListener("abort", onCallerAbort);
+        },
+    };
+}
+
+/**
+ * The error a request deadline produces.
+ */
+export function requestTimeoutError(method: string, path: string, ms: number): Error {
+    const err = new Error(
+        `Walrus Memory request timed out after ${ms}ms (${method} ${path}). The relayer ` +
+            `accepted the connection but did not answer in time.`,
+    );
+    err.name = "MemWalRequestTimeout";
+    (err as Error & { status?: number }).status = 504;
+    return err;
+}
+
