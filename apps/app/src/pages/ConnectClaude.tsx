@@ -383,6 +383,14 @@ export default function ConnectClaude() {
             })
         } catch (err) {
             setErrorMsg(err instanceof Error ? err.message : String(err))
+            if (isRetryableComplete(err)) {
+                // The session is still pending. The terminal error has no
+                // button back, so return to consent and let the user start
+                // this request again.
+                setStep('consent')
+                trackEvent('claude_connect_failed', { error_type: 'sui_unavailable' })
+                return
+            }
             setStep('error')
             trackEvent('claude_connect_failed', { error_type: getAnalyticsErrorType(err) })
         }
@@ -430,7 +438,7 @@ export default function ConnectClaude() {
                     )}
 
                     {step === 'consent' && session && (
-                        <ConsentCard session={session} wallet={currentAccount?.address ?? null} onConnect={handleConnect} onCancel={handleCancel} />
+                        <ConsentCard session={session} wallet={currentAccount?.address ?? null} error={errorMsg} onConnect={handleConnect} onCancel={handleCancel} />
                     )}
 
                     {step === 'signing' && (
@@ -502,11 +510,13 @@ export default function ConnectClaude() {
 function ConsentCard({
     session,
     wallet,
+    error,
     onConnect,
     onCancel,
 }: {
     session: SessionView
     wallet: string | null
+    error?: string
     onConnect: () => void
     onCancel: () => void
 }) {
@@ -544,6 +554,7 @@ function ConsentCard({
                 </div>
             </div>
 
+            {error ? <p className="setup-classic-description" style={errorTextStyle}>{error}</p> : null}
             <div className="setup-classic-actions">
                 <button onClick={onConnect} className="mcp-btn">
                     {wallet ? 'Approve' : 'Connect Sui wallet'}

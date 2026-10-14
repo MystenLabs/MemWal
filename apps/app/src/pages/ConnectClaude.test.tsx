@@ -330,7 +330,7 @@ describe('ConnectClaude /complete recovery', () => {
         expect(calls.complete).toBe(0)
     })
 
-    it('does not submit a transaction when /account cannot reach Sui', async () => {
+    it('returns to consent when the /account preflight cannot reach Sui', async () => {
         const calls = stubRelayer([() => json({ redirect_url: 'https://claude.ai/callback?code=abc' })], {
             accountResponse: () =>
                 json(
@@ -341,11 +341,11 @@ describe('ConnectClaude /complete recovery', () => {
 
         await approve()
 
-        await screen.findByText('Something went wrong')
-        // Stopping beats guessing: submitting dead-ends on the masked 502 if
-        // the key is already there, and skipping burns the session as
-        // Unregistered if it is not. The preflight claims nothing, so the user
-        // can simply start again.
+        // The session is still pending. The terminal error has no way back,
+        // so the user must be able to start this request again.
+        expect(screen.queryByText('Something went wrong')).toBeNull()
+        expect(await screen.findByText('sui unavailable')).toBeTruthy()
+        expect(screen.getByRole('button', { name: 'Approve' })).toBeTruthy()
         expect(mocks.signAndExecute).not.toHaveBeenCalled()
         expect(calls.complete).toBe(0)
     })
