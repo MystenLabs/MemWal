@@ -484,9 +484,9 @@ export default function ConnectClaude() {
                                 still pending rather than spent. Nothing needs redoing — press the button to
                                 finish.
                             </p>
-                            <p className="setup-classic-description" style={errorTextStyle}>{errorMsg}</p>
+                            <p className="setup-classic-description mcp-error">{errorMsg}</p>
                             <div className="setup-classic-actions">
-                                <button type="button" className="lp-btn-yellow" onClick={handleRetryComplete}>
+                                <button type="button" className="mcp-btn" onClick={handleRetryComplete}>
                                     Finish connecting
                                 </button>
                             </div>
@@ -554,7 +554,7 @@ function ConsentCard({
                 </div>
             </div>
 
-            {error ? <p className="setup-classic-description" style={errorTextStyle}>{error}</p> : null}
+            {error ? <p className="setup-classic-description mcp-error">{error}</p> : null}
             <div className="setup-classic-actions">
                 <button onClick={onConnect} className="mcp-btn">
                     {wallet ? 'Approve' : 'Connect Sui wallet'}
