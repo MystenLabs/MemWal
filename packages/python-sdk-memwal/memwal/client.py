@@ -441,7 +441,7 @@ class MemWal:
         cls,
         key: str,
         account_id: str,
-        server_url: str = DEFAULT_SERVER_URL,
+        server_url: Optional[str] = None,
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWal":
@@ -454,7 +454,7 @@ class MemWal:
             namespace: Default namespace for memory isolation (default: ``"default"``).
             env: Optional relayer preset — ``"prod"``, ``"dev"``, ``"staging"``,
                 or ``"local"``. Resolves ``server_url`` to the matching hosted
-                relayer unless an explicit non-default ``server_url`` is given.
+                relayer unless an explicit ``server_url`` is given.
                 Precedence: explicit ``server_url`` > ``env`` > default.
 
         Returns:
@@ -2000,7 +2000,7 @@ class MemWalSync:
         cls,
         key: str,
         account_id: str,
-        server_url: str = DEFAULT_SERVER_URL,
+        server_url: Optional[str] = None,
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWalSync":

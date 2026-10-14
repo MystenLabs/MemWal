@@ -16,8 +16,8 @@ from typing import Any, Dict, List, Optional
 # ============================================================
 
 #: Default ``server_url`` when neither an explicit URL nor an ``env`` preset
-#: is supplied. Kept as a module constant so ``__post_init__`` can tell an
-#: untouched default apart from an explicitly-passed custom URL.
+#: is supplied. ``None`` means the caller omitted it. An explicit URL, including
+#: this hosted default, wins over ``env``.
 DEFAULT_SERVER_URL = "https://relayer.memory.walrus.xyz"
 
 #: Named relayer environments for the public Walrus Memory deployments.
@@ -48,7 +48,7 @@ class MemWalConfig:
 
     key: str
     account_id: str
-    server_url: str = DEFAULT_SERVER_URL
+    server_url: Optional[str] = None
     namespace: str = "default"
     env: Optional[str] = None
 
@@ -60,10 +60,10 @@ class MemWalConfig:
                 raise ValueError(
                     f"Unknown env preset {self.env!r}. Valid presets: {valid}"
                 )
-            # Explicit, non-default server_url takes precedence over the
-            # preset; only fill from the preset when server_url is untouched.
-            if self.server_url == DEFAULT_SERVER_URL:
+            if self.server_url is None:
                 self.server_url = preset
+        if self.server_url is None:
+            self.server_url = DEFAULT_SERVER_URL
 
 
 # ============================================================
