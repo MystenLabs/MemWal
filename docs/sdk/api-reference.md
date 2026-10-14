@@ -50,8 +50,15 @@ Config:
 | `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
 | `serverUrl` | `string` | No | `https://relayer.memory.walrus.xyz` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
+| `recallTimeoutMs` | `number` | No | `15000` | Deadline for the `/api/recall` request. Per-call `RecallOptions.timeoutMs` overrides it |
+| `preflightTimeoutMs` | `number` | No | `5000` | Deadline for each preflight round-trip (`GET /version`, `GET /health`, `GET /config`) |
 
 For the full config surface, see [Configuration](/reference/configuration).
+
+`recallTimeoutMs` covers the recall request alone. The preflights that run
+before it (the relayer compatibility check and the SEAL session build) are
+bounded separately by `preflightTimeoutMs`, so a slow relayer preflight cannot
+consume recall's budget.
 
 ## `MemWal` Methods
 
@@ -120,6 +127,9 @@ Search for memories matching a natural language query, scoped to `owner + namesp
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 - `sort` picks the ordering: `"relevance"` (default) or `"recent"` for newest-among-matches
 - `scoringWeights` blends recency and importance into the ranking (see [Ordering](#ordering) below)
+- `timeoutMs` overrides the client's `recallTimeoutMs` for this call. `0` disables the deadline. On expiry
+  recall throws `MemWalRequestTimeout` (status 504). `isTimeoutError(err)` is true for that error
+  and for a preflight `TimeoutError` whose `phase` names the stalled round-trip.
 
 **Returns:**
 
