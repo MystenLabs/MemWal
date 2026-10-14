@@ -1164,6 +1164,14 @@ export class MemWal {
                 }
             }
         }
+        if (
+            options.maxDistance !== undefined
+            && (typeof options.maxDistance !== "number"
+                || !Number.isFinite(options.maxDistance)
+                || options.maxDistance < 0)
+        ) {
+            throw new Error("maxDistance must be a non-negative finite number");
+        }
         const resolvedNamespace = options.namespace ?? this.namespace;
 
 
