@@ -57,6 +57,11 @@ async def test_mock_isolates_namespaces_and_honors_max_distance():
     assert [memory.text for memory in alice.results] == ["Alice likes ramen"]
     assert [memory.text for memory in bob.results] == ["Bob likes tacos"]
     assert empty.total == 0
+    dropped = await mock.recall(
+        RecallParams(query="likes", namespace="user-a", max_distance=0)
+    )
+    assert dropped.results == []
+    assert dropped.total == 1
 
 
 @pytest.mark.asyncio

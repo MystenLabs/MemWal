@@ -267,16 +267,18 @@ describe("authenticated", { skip: requiresKey, concurrency: 1 }, () => {
         assert.ok(near.text.includes("lisinopril"), `closest hit should be the medication: ${near.text}`);
         assert.ok(far.distance > near.distance, "the two hits must be at different distances");
 
-        // Cutoff between the two: only the close hit survives.
+        // Cutoff between the two: only the close hit survives. `total` stays
+        // the relayer page size, so a filtered page is not `total: 0`.
         const cutoff = (near.distance + far.distance) / 2;
         const filtered = await mw.recall({ query, limit: 5, maxDistance: cutoff });
         assert.deepEqual(filtered.results.map((r) => r.blob_id), [near.blob_id]);
-        assert.equal(filtered.total, 1);
+        assert.equal(filtered.total, all.total);
 
-        // Cutoff at the closest distance: `>=` drops it too.
+        // Cutoff at the closest distance: `>=` drops it too, but the page
+        // was not empty.
         const none = await mw.recall({ query, limit: 5, maxDistance: near.distance });
         assert.deepEqual(none.results, []);
-        assert.equal(none.total, 0);
+        assert.equal(none.total, all.total);
     });
 
     test("listMemories counts a fresh namespace exactly", async () => {

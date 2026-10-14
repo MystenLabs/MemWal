@@ -935,8 +935,32 @@ class TestRecall:
         body = json.loads(route.calls[0].request.content)
         assert body["limit"] == 10
         assert len(result.results) == 1
-        assert result.total == 1
+        assert result.total == 2
         assert result.results[0].blob_id == "b1"
+
+    @respx.mock
+    async def test_max_distance_filters_all_preserves_total(
+        self, memwal_client: MemWal
+    ) -> None:
+        """When all matches exceed max_distance, results is empty but total
+        preserves matches (#1066)."""
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"blob_id": "b1", "text": "I love coffee", "distance": 0.8},
+                        {"blob_id": "b2", "text": "I live in Tokyo", "distance": 0.9},
+                    ],
+                    "total": 2,
+                },
+            )
+        )
+
+        result = await memwal_client.recall("coffee", limit=10, max_distance=0.5)
+        assert len(result.results) == 0
+        assert result.total == 2
 
     @respx.mock
     async def test_get_signed_request_uses_empty_body_hash_and_no_wire_body(

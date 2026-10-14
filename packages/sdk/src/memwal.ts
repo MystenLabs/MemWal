@@ -1178,10 +1178,11 @@ export class MemWal {
                 const filtered = result.results.filter(
                     (memory) => memory.distance < options.maxDistance!,
                 );
+                // Keep the relayer's matching total so callers can distinguish
+                // "no memories exist" from "matches exist but were outside maxDistance" (#1066).
                 processed = {
                     ...processed,
                     results: filtered,
-                    total: filtered.length,
                 };
             }
 
