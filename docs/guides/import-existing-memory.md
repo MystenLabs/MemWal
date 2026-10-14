@@ -33,8 +33,8 @@ questions:
   - How do I batch upload local memories and session history to Walrus Memory?
   - Where do Claude Code, Codex, Cursor, and Antigravity store local memory on disk?
 answer: >-
-  Read the durable facts already on disk — local memory files, standing context such as
-  CLAUDE.md, AGENTS.md, or GEMINI.md, and recent session transcripts — then write them
+  Read the durable facts already on disk: local memory files, standing context such as
+  CLAUDE.md, AGENTS.md, or GEMINI.md, and recent session transcripts. Then write them
   into the same namespace your agent recalls from. Use memwal_analyze or analyze for a
   Claude memory file and for a transcript. Use memwal_remember_bulk or rememberBulk only for
   facts that are already one statement each.
@@ -42,26 +42,26 @@ answer: >-
   through the plugin.
 ---
 
-You already have memory on this machine: facts an agent saved locally, standing instructions it reads every session, and the transcript of the session you are in. Walrus Memory starts empty until those facts are written through it. This page copies the durable ones across, in batches, so the next session recalls what you already had.
+You already have memory on this machine: facts an agent saved locally, standing instructions it reads every session, and the transcript of the session you are in. Walrus Memory starts empty until you write those facts through it. The steps below copy the durable ones across, in batches, so the next session recalls what you already had.
 
 Connect Walrus Memory in the client first, and sign in, so the upload and the later recall use the same account. See [MCP](/mcp/overview) for Claude Code, Codex, Cursor, and Antigravity.
 
 ## What to copy
 
-Treat the three sources differently. Recall works best on short, self-contained facts.
+Treat the 3 sources differently. Recall works best on short, self-contained facts.
 
 | Source | What it holds | What to upload |
 | --- | --- | --- |
 | Local memory | Facts the agent already decided to keep | Each fact, as its own memory |
 | Standing context | `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, Cursor rules | Durable preferences, decisions, and identity details pulled out of the file |
-| Session transcript | The current chat and recent chats | Facts extracted from the transcript. The SDK can stamp the session time onto those facts |
+| Session transcript | The current chat and recent chats | Facts extracted from the transcript. The SDK can stamp the session time onto those facts. |
 
-Leave repository instructions, tool routing, and one-off task notes in the original files. A whole `CLAUDE.md` or a raw transcript stored as one memory comes back as a blob recall cannot match cleanly.
+Leave repository instructions, tool routing, and one-off task notes in the original files. Recall cannot match cleanly against a whole `CLAUDE.md` or a raw transcript stored as one memory.
 
 Write into the namespace your client already uses. With no `MEMWAL_NAMESPACE` and no `--namespace`, that is `default`. A fact imported into another namespace stays invisible to the agent that recalls `default`.
 
 <Warning>
-The MCP tools strip obvious credentials before a write. Treat that as a safety net, not a guarantee. The SDK stores the string you pass, and `analyze` sends that string to the relayer's model. Read each passage before an SDK upload, and leave out passwords, API keys, tokens, private keys, and seed phrases.
+The MCP tools strip obvious credentials before a write. Treat that as a last check, not a guarantee. The SDK stores the string you pass, and `analyze` sends that string to the relayer's model. Read each passage before an SDK upload, and leave out passwords, API keys, tokens, private keys, and seed phrases.
 </Warning>
 
 ## Where the files are
@@ -73,7 +73,7 @@ Paths below are the ones these clients write on a developer machine. The project
 Local memory for one project lives in `~/.claude/projects/<encoded-cwd>/memory/`.
 
 - `MEMORY.md` is an index of links. Skip it, or you store the index on top of the facts.
-- Every other `*.md` file is one memory. YAML frontmatter carries `name` and `description`. The body under the frontmatter often has **Why:**, **How to apply:**, and `[[links]]`. Send that body through `analyze`. Uploading the whole body as one memory comes back as a blob recall cannot match cleanly.
+- Every other `*.md` file is one memory. YAML frontmatter carries `name` and `description`. The body under the frontmatter often has **Why:**, **How to apply:**, and `[[links]]`. Send that body through `analyze` rather than storing it whole.
 
 Session transcripts are `~/.claude/projects/<encoded-cwd>/*.jsonl`. A turn has `type` of `user` or `assistant`, and a `timestamp`. The words are in `message.content`: a string, or blocks whose `type` is `text`. Skip `tool_use`, `tool_result`, and `thinking` blocks.
 
@@ -81,7 +81,7 @@ Session transcripts are `~/.claude/projects/<encoded-cwd>/*.jsonl`. A turn has `
 
 Standing context is `~/.codex/AGENTS.md` plus `AGENTS.md` in the repo.
 
-Current Codex builds keep consolidated memory in `~/.codex/memories_1.sqlite`, table `stage1_outputs`, column `raw_memory`. When that table has rows, each `raw_memory` value is one thread's summary.
+Where a Codex install has written consolidated memory, it is in `~/.codex/memories_1.sqlite`, table `stage1_outputs`, column `raw_memory`. When that table has rows, each `raw_memory` value is one thread's summary.
 
 Session transcripts are `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Each line has `timestamp` and `payload`. User text is a line whose `type` is `response_item` and whose `payload.role` is `user`; the words are in `payload.content` blocks of type `input_text`. Assistant text is the same line with `payload.role` of `assistant` and blocks of type `output_text`. Skip every other line.
 
@@ -120,15 +120,24 @@ Import my existing memory into Walrus Memory. Use the namespace this client alre
 
 ## Batch upload with the SDK
 
-Use the SDK when you want to run the copy yourself. `analyze` is for a Claude memory file and for a transcript: the relayer extracts facts, then stores each one. `rememberBulk` is only for text you have already reduced to one statement per item, at most 20 items per call. `analyze` accepts at most 64 KiB and returns at most 20 facts per call, so walk a long passage in chunks of about 60 KB. A dense chunk can still drop facts past that cap of 20.
+Use the SDK when you want to run the copy yourself. `analyze` is for a Claude memory file and for a transcript: the relayer extracts facts, then stores each one. `rememberBulk` is only for text you have already reduced to one statement per item, at most 20 items per call. `analyze` accepts at most 64 KiB and returns at most 20 facts per call, so walk a long passage in chunks of about 60,000 bytes. A dense chunk can still drop facts past that cap of 20.
 
-On the hosted mainnet relayer the account budget is the service setting: `RATE_LIMIT_REQUESTS_PER_MINUTE=120`, `RATE_LIMIT_REQUESTS_PER_HOUR=1000`, and `RATE_LIMIT_DELEGATE_KEY_PER_MINUTE=60`. A bulk call costs 10, and each status poll of that batch costs 1. An analyze call costs 5 plus 1 for each fact it extracts. Send one chunk, wait until it settles, then send the next. On HTTP 429, wait for the `Retry-After` header before retrying the call that was refused. The hourly refusal asks for 300 seconds. The 1000-per-hour account cap is what stops a long import. A self-hosted relayer with those three variables unset uses the code defaults: 60 per minute, 500 per hour, and 30 per minute per key.
+On hosted Mainnet, requests per minute, requests per hour, and delegate-key requests per minute are deployment settings (`RATE_LIMIT_REQUESTS_PER_MINUTE`, `RATE_LIMIT_REQUESTS_PER_HOUR`, and `RATE_LIMIT_DELEGATE_KEY_PER_MINUTE`). This repo does not record the hosted values. A self-hosted relayer with those 3 variables unset uses the code defaults in `services/server/src/rate_limit.rs`: 60 per minute, 500 per hour, and 30 per minute per key.
+
+| Call | Cost |
+| --- | --- |
+| `rememberBulk` | 10 |
+| `analyze` | 5, plus 1 per extracted fact |
+| Status poll | 1 |
+
+Send one chunk, wait until it settles, then send the next. On HTTP 429, wait for the `Retry-After` header before retrying the call that was refused. The hourly refusal asks for 300 seconds. The hourly account cap is what stops a long import.
 
 `rememberBulk` and `memwal_remember_bulk` send no idempotency key. Running the script a second time stores each bulk fact again. `analyze` collapses onto the copy already stored only when the extracted fact text is the same for that owner and namespace. A reworded sentence is stored again.
 
-Pass `occurredAt` as the session time for a transcript. Leave it unset for a memory file. The extractor writes that date into the fact text, which is how "yesterday" in an old transcript stays attached to the day it was said. Walrus Memory does not keep a separate event-time field you can filter on.
+Pass `occurredAt` as the session time for a transcript. Leave it unset for a memory file. The extractor writes that date into the fact text, which is how a relative date such as `yesterday` in an old transcript stays attached to the day it was said. Walrus Memory does not keep a separate event-time field you can filter on.
 
 ```ts
+// Run with: npx tsx import.ts   (ESM; top-level await)
 import { readFile, readdir } from "node:fs/promises";
 import { MemWal } from "@mysten-incubation/memwal";
 
@@ -196,6 +205,9 @@ async function confirm(jobIds: string[]) {
         .filter((item) => item.status === "timeout")
         .map((item) => item.id);
       console.log(`saved ${result.succeeded}/${result.total}`);
+      for (const item of result.results) {
+        if (item.status === "failed") console.log(`failed ${item.id}: ${item.error}`);
+      }
       if (still.length === 0) return;
       console.log("still running; polling these job ids again");
       pending = still;
