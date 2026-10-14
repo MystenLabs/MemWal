@@ -113,6 +113,15 @@ function validateText(text: string, field = "text"): void {
     }
 }
 
+function assertOccurredAt(occurredAt?: string | Date): void {
+    if (!(occurredAt instanceof Date) || !Number.isNaN(occurredAt.getTime())) return;
+    throw new TypeError(
+        "occurredAt is an Invalid Date — likely constructed from a " +
+        "malformed string. `Date` accepts garbage silently; check " +
+        "the source value before passing it as occurredAt.",
+    );
+}
+
 const MAX_IDEMPOTENCY_KEY_BYTES = 255;
 
 function validateIdempotencyKey(key: string | undefined): void {
@@ -454,6 +463,13 @@ export class MemWalMock {
         namespaceOrOptions?: string | AnalyzeOptions
     ): Promise<AnalyzeResult> {
         validateText(text);
+        // A valid occurredAt is not copied onto the result. The relayer uses
+        // it only to rewrite relative dates into the fact text, and this mock
+        // has no extractor. Invalid Dates still throw, matching MemWal.
+        const occurredAt = typeof namespaceOrOptions === "string"
+            ? undefined
+            : namespaceOrOptions?.occurredAt;
+        assertOccurredAt(occurredAt);
         const namespace =
             typeof namespaceOrOptions === "string"
                 ? namespaceOrOptions
