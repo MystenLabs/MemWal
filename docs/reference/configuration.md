@@ -46,10 +46,11 @@ Used by:
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `key` | yes | Delegate private key in hex |
+| `key` | yes | Delegate private key: hex (optionally `0x`-prefixed), `suiprivkey1...`, or `Uint8Array` |
 | `accountId` | yes | MemWalAccount object ID on Sui |
 | `serverUrl` | no | Relayer URL. Default: `https://relayer.memory.walrus.xyz` |
 | `namespace` | no | Default memory boundary. Default: `"default"` |
+| `requestTimeoutMs` | no | Deadline for one relayer request. Default: `30000`. A non-positive or non-finite value falls back to `30000`. `restore` and `analyze` use their own 60s deadlines. `recall` uses `recallTimeoutMs` |
 | `recallTimeoutMs` | no | Abort budget for the `/api/recall` request itself. Default: `15000`. `0` disables the deadline |
 | `preflightTimeoutMs` | no | Per-round-trip budget for the unauthenticated preflights (`GET /version`, `/health`, `/config`). Default: `5000` |
 
@@ -65,7 +66,7 @@ Core fields:
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `key` | yes | Delegate private key in hex |
+| `key` | yes | Delegate private key: hex (optionally `0x`-prefixed), `suiprivkey1...`, or `Uint8Array` |
 | `serverUrl` | no | Relayer URL |
 | `embeddingApiKey` | yes | OpenAI/OpenRouter-compatible embedding key |
 | `embeddingApiBase` | no | Default: `https://api.openai.com/v1` |
