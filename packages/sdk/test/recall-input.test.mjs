@@ -29,12 +29,12 @@ test("recall rejects a blank query, a bad limit, and a non-finite weight before 
         message: "query cannot be empty",
     });
     await assert.rejects(() => client().recall({ query: "coffee", limit: NaN }), {
-        name: "Error",
-        message: "limit must be a non-negative integer",
+        name: "TypeError",
+        message: "limit must be a positive integer, got NaN",
     });
     await assert.rejects(() => client().recall({ query: "coffee", limit: -3 }), {
-        name: "Error",
-        message: "limit must be a non-negative integer",
+        name: "TypeError",
+        message: "limit must be a positive integer, got -3",
     });
     await assert.rejects(
         () => client().recall({ query: "coffee", scoringWeights: { semantic: NaN } }),
