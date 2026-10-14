@@ -331,7 +331,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -348,7 +348,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
-        await smart_llm._agenerate([[HumanMessage("What do I drink?")]])
+        await smart_llm._agenerate([HumanMessage("What do I drink?")])
 
         assert len(captured) == 1
         injected = captured[0]
@@ -372,7 +372,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -395,7 +395,7 @@ class TestWithMemWalLangChain:
             AIMessage(content="Noted!"),
             HumanMessage(content="What do I like?"),
         ]
-        await smart_llm._agenerate([messages])
+        await smart_llm._agenerate(messages)
 
         assert len(captured) == 1
         injected = captured[0]
@@ -424,7 +424,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -445,7 +445,7 @@ class TestWithMemWalLangChain:
             {"type": "text", "text": "Base instructions", "cache_control": {"type": "ephemeral"}}
         ]
         sys_msg = SystemMessage(content=blocks, id="sys-123", additional_kwargs={"source": "test"})
-        await smart_llm._agenerate([[sys_msg, HumanMessage("What do I like?")]])
+        await smart_llm._agenerate([sys_msg, HumanMessage("What do I like?")])
 
         assert len(captured) == 1
         injected = captured[0]
@@ -468,7 +468,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -481,7 +481,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
-        await smart_llm._agenerate([[HumanMessage("hello")]])
+        await smart_llm._agenerate([HumanMessage("hello")])
 
         injected = captured[0]
         system_msgs = [m for m in injected if isinstance(m, SystemMessage)]
@@ -498,7 +498,7 @@ class TestWithMemWalLangChain:
         captured: list = []
 
         async def _capture_agenerate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -517,7 +517,7 @@ class TestWithMemWalLangChain:
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER,
             min_relevance=0.3, auto_save=False
         )
-        await smart_llm._agenerate([[HumanMessage("hello")]])
+        await smart_llm._agenerate([HumanMessage("hello")])
 
         injected = captured[0]
         system_msgs = [m for m in injected if isinstance(m, SystemMessage)]
@@ -538,7 +538,7 @@ class TestWithMemWalLangChain:
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
         # Should NOT raise — recall failure is swallowed, LLM still called
-        await smart_llm._agenerate([[HumanMessage("will this work?")]])
+        await smart_llm._agenerate([HumanMessage("will this work?")])
 
     @respx.mock
     async def test_auto_save_triggers_analyze(self) -> None:
@@ -554,7 +554,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=True
         )
-        await smart_llm._agenerate([[HumanMessage("store this")]])
+        await smart_llm._agenerate([HumanMessage("store this")])
 
         # Give fire-and-forget task time to run
         await asyncio.sleep(0.05)
@@ -572,7 +572,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
-        await smart_llm._agenerate([[SystemMessage("only system")]])
+        await smart_llm._agenerate([SystemMessage("only system")])
         assert not recall_route.called
 
     def _capturing_generate(self, captured: list):
@@ -581,7 +581,7 @@ class TestWithMemWalLangChain:
         from langchain_core.outputs import ChatGeneration, ChatResult
 
         def _generate(messages_batch, *a, **kw):
-            captured.extend(messages_batch)
+            captured.append(messages_batch)
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="ok"))]
             )
@@ -607,7 +607,7 @@ class TestWithMemWalLangChain:
         smart_llm = with_memwal_langchain(
             llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
         )
-        smart_llm._generate([[HumanMessage("What do I drink?")]])
+        smart_llm._generate([HumanMessage("What do I drink?")])
 
         assert recall_route.called
         assert any("User loves coffee" in m.content for m in captured[0])
@@ -641,7 +641,7 @@ class TestWithMemWalLangChain:
         # An async test body is itself a running loop -- the exact condition
         # that used to disable injection.
         assert asyncio.get_running_loop().is_running()
-        smart_llm._generate([[HumanMessage("What do I drink?")]])
+        smart_llm._generate([HumanMessage("What do I drink?")])
 
         assert recall_route.called, "recall was skipped inside a running loop"
         assert len(captured) == 1
@@ -670,6 +670,109 @@ class TestWithMemWalLangChain:
         assert smart_llm._memwal is not None
         assert callable(smart_llm.memwal_flush)
         assert callable(smart_llm.memwal_flush_sync)
+
+    @respx.mock
+    async def test_tool_steps_do_not_retrigger_recall_or_analyze(self) -> None:
+        """LangChain tool messages do not retrigger recall or auto-save."""
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        _mock_seal_session_prereqs()
+        llm = self._make_llm()
+        captured: list = []
+
+        async def _capture(batch, *args, **kwargs):
+            captured.append(batch)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+        llm._agenerate = _capture
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "User lives in Lisbon", "distance": 0.05}
+        ]))
+        analyze_route = respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
+
+        smart = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=True
+        )
+
+        messages = [HumanMessage(content="What is the weather?")]
+        await smart._agenerate(messages)
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 1
+        assert analyze_route.call_count == 1
+
+        messages.extend([
+            AIMessage(content="", tool_calls=[{"name": "weather", "args": {}, "id": "1"}]),
+            ToolMessage(content="Sunny 20C", tool_call_id="1"),
+        ])
+        await smart._agenerate(messages)
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 1, "recall must NOT be called again on tool step"
+        assert analyze_route.call_count == 1, "analyze must NOT be called again on tool step"
+        assert any(
+            "User lives in Lisbon" in getattr(message, "content", "")
+            for message in captured[-1]
+        )
+        # Step 3: Next user turn starts
+        messages.extend([
+            AIMessage(content="It is sunny!"),
+            HumanMessage(content="Thanks!"),
+        ])
+        await smart._agenerate(messages)
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 2
+        assert analyze_route.call_count == 2
+
+    @respx.mock
+    async def test_same_user_text_recalls_again(self) -> None:
+        """A later user turn with the same text must not reuse the first recall."""
+        from langchain_core.messages import AIMessage, HumanMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        _mock_seal_session_prereqs()
+        llm = self._make_llm()
+
+        async def _ok(batch, *args, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+        llm._agenerate = _ok
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "User lives in Lisbon", "distance": 0.05}
+        ]))
+        smart = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        await smart._agenerate([HumanMessage(content="what's my name?")])
+        await smart._agenerate([HumanMessage(content="what's my name?")])
+        assert recall_route.call_count == 2
+
+    @respx.mock
+    async def test_empty_recall_is_reused_on_the_tool_step(self) -> None:
+        """A recall with no relevant hit is cached, so the tool step does not call again."""
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        _mock_seal_session_prereqs()
+        llm = self._make_llm()
+
+        async def _ok(batch, *args, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+        llm._agenerate = _ok
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "unrelated", "distance": 0.99}
+        ]))
+        smart = with_memwal_langchain(
+            llm, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        messages = [HumanMessage(content="What is the weather?")]
+        await smart._agenerate(messages)
+        messages.extend([
+            AIMessage(content="", tool_calls=[{"name": "weather", "args": {}, "id": "1"}]),
+            ToolMessage(content="Sunny", tool_call_id="1"),
+        ])
+        await smart._agenerate(messages)
+        assert recall_route.call_count == 1
 
 
 # ============================================================
@@ -881,6 +984,112 @@ class TestWithMemWalOpenAI:
 
         system_msgs = [m for m in captured if isinstance(m, dict) and m.get("role") == "system"]
         assert len(system_msgs) == 0
+
+    @respx.mock
+    async def test_tool_execution_steps_do_not_retrigger_recall_or_analyze(self) -> None:
+        """Tool response messages (role: tool) do not retrigger recall or auto-save."""
+        _mock_seal_session_prereqs()
+        client = self._make_async_client()
+        captured: list = []
+
+        async def _capture(*args, **kwargs):
+            captured.append(kwargs.get("messages"))
+            return MagicMock()
+
+        client.chat.completions.create = _capture
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "User lives in Lisbon", "distance": 0.05}
+        ]))
+        analyze_route = respx.post(_ANALYZE_URL).mock(return_value=_mock_analyze())
+
+        smart = with_memwal_openai(
+            client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=True
+        )
+
+        messages = [{"role": "user", "content": "What is the weather in Lisbon?"}]
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 1
+        assert analyze_route.call_count == 1
+
+        messages.extend([
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call_1", "function": {"name": "get_weather"}}],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "22C sunny"},
+        ])
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 1, "recall must NOT be called again on tool step"
+        assert analyze_route.call_count == 1, "analyze must NOT be called again on tool step"
+        assert any(
+            isinstance(message, dict) and "User lives in Lisbon" in str(message.get("content", ""))
+            for message in captured[-1]
+        )
+        # Step 3: Next user turn starts
+        messages.extend([
+            {"role": "assistant", "content": "It is 22C and sunny in Lisbon."},
+            {"role": "user", "content": "And in Porto?"},
+        ])
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        await smart.memwal_flush()
+
+        assert recall_route.call_count == 2
+        assert analyze_route.call_count == 2
+
+    @respx.mock
+    async def test_same_user_text_recalls_again(self) -> None:
+        _mock_seal_session_prereqs()
+        client = self._make_async_client()
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "User lives in Lisbon", "distance": 0.05}
+        ]))
+        smart = with_memwal_openai(
+            client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        await smart.chat.completions.create(
+            model="gpt-4o", messages=[{"role": "user", "content": "what's my name?"}]
+        )
+        await smart.chat.completions.create(
+            model="gpt-4o", messages=[{"role": "user", "content": "what's my name?"}]
+        )
+        assert recall_route.call_count == 2
+
+    @respx.mock
+    async def test_empty_recall_is_reused_on_the_tool_step(self) -> None:
+        _mock_seal_session_prereqs()
+        client = self._make_async_client()
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "unrelated", "distance": 0.99}
+        ]))
+        smart = with_memwal_openai(
+            client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        messages = [{"role": "user", "content": "hello"}]
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        messages = messages + [{"role": "tool", "tool_call_id": "1", "content": "ok"}]
+        await smart.chat.completions.create(model="gpt-4o", messages=messages)
+        assert recall_route.call_count == 1
+
+    @respx.mock
+    def test_sync_empty_recall_is_reused_on_the_tool_step(self) -> None:
+        _mock_seal_session_prereqs()
+        client = self._make_sync_client()
+        recall_route = respx.post(_RECALL_URL).mock(return_value=_mock_recall([
+            {"blob_id": "b1", "text": "unrelated", "distance": 0.99}
+        ]))
+        smart = with_memwal_openai(
+            client, key=_KEY_HEX, account_id=_ACCOUNT_ID, server_url=_SERVER, auto_save=False
+        )
+        messages = [{"role": "user", "content": "hello"}]
+        smart.chat.completions.create(model="gpt-4o", messages=messages)
+        messages = messages + [{"role": "tool", "tool_call_id": "1", "content": "ok"}]
+        smart.chat.completions.create(model="gpt-4o", messages=messages)
+        assert recall_route.call_count == 1
+
 
     @respx.mock
     def test_sync_client_wraps_create(self) -> None:
