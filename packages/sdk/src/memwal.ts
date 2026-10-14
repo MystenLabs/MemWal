@@ -1145,6 +1145,7 @@ export class MemWal {
             namespace,
         );
         validateMaxTokens(options.maxTokens);
+        assertNonBlankText(query, "query cannot be empty");
         const rawLimit = options.topK !== undefined ? options.topK : options.limit;
         const limit = rawLimit !== undefined ? rawLimit : 10;
         if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
@@ -1152,7 +1153,16 @@ export class MemWal {
                 `limit must be a positive integer, got ${limit}`,
             );
         }
+        const weights = options.scoringWeights;
+        if (weights) {
+            for (const [name, value] of Object.entries(weights)) {
+                if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
+                    throw new Error(`scoringWeights.${name} must be a finite number`);
+                }
+            }
+        }
         const resolvedNamespace = options.namespace ?? this.namespace;
+
 
         {
             // WALM-598: this budget is handed to `signedRequest`, which starts
