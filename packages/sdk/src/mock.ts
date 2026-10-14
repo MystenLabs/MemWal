@@ -306,6 +306,9 @@ export class MemWalMock {
     async getRememberBulkStatus(
         jobIds: string[]
     ): Promise<RememberBulkStatusResult> {
+        if (!Array.isArray(jobIds)) {
+            throw new Error("getRememberBulkStatus: jobIds must be an array");
+        }
         return {
             results: jobIds.map((jobId) => {
                 const memory = this.jobs.get(jobId);

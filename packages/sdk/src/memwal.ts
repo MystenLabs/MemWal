@@ -791,6 +791,9 @@ export class MemWal {
         jobIds: string[],
         opts: { timeoutMs?: number } = {},
     ): Promise<RememberBulkStatusResult> {
+        if (!Array.isArray(jobIds)) {
+            throw new Error("getRememberBulkStatus: jobIds must be an array");
+        }
         return this.signedRequest<RememberBulkStatusResult>(
             "POST",
             "/api/remember/bulk/status",
