@@ -208,6 +208,15 @@ function splitRememberArgs(
     return { namespace: namespaceOrOptions, options: options ?? {} };
 }
 
+function requireRememberText(text: unknown): asserts text is string {
+    if (typeof text !== "string") {
+        throw new TypeError(
+            `remember() expects text as a string, received ${typeof text}. ` +
+            `Did you mean remember(text, namespace)? Unlike recall(), remember* does not take an options object.`,
+        );
+    }
+}
+
 function destroyedClientError(): Error {
     return new Error(
         "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
@@ -553,6 +562,7 @@ export class MemWal {
         namespaceOrOptions?: string | { idempotencyKey?: string },
         options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
+        requireRememberText(text);
         assertNonBlankText(text);
         const split = splitRememberArgs(namespaceOrOptions, options);
         const resolvedNamespace = split.namespace ?? this.namespace;
@@ -721,6 +731,7 @@ export class MemWal {
         namespaceOrOptions?: string | RememberCallOptions,
         opts?: RememberCallOptions,
     ): Promise<RememberResult> {
+        requireRememberText(text);
         const split = splitRememberArgs(namespaceOrOptions, opts);
         const resolvedNamespace = split.namespace ?? this.namespace;
         const requestIdentity = `${resolvedNamespace}\0${text}`;

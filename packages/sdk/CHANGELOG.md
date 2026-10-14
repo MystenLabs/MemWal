@@ -5,6 +5,7 @@
 ### Fixed
 
 - `createAccount`, `addDelegateKey`, `removeDelegateKey`, and `MemWalManual` work again without a caller-supplied `suiClient`. They looked for `SuiClient` in `@mysten/sui/client`, which current `@mysten/sui` no longer exports, and threw `SuiClient not found`. The default is now `SuiGrpcClient` against the public fullnode for `suiNetwork`, because those fullnodes no longer serve JSON-RPC. An explicit `suiClient` still wins. (WALM-164, #300)
+- `remember`, `rememberAsync`, and `rememberAndWait` reject a non-string text argument with `TypeError` before signing. An object used to be sent as `text` and the relayer answered 422. (#1058)
 - `getRememberStatus` and `waitForRememberJob` reject a job id outside `[A-Za-z0-9_-]+` before signing. `.`, `..`, `\`, and `%2e%2e` used to pass a denylist and be rewritten by `fetch` after the path was signed. Valid UUID job ids are unchanged. (#1087, #1216)
 - `/manual` no longer imports `@mysten/walrus`. `getWalrusClient()` and `walrusUpload()` had no callers, but the dynamic import still pulled the WASM client into Turbopack and Vite. Downloads stay on the HTTP aggregator. (WALM-145, #330)
 - `MemWal.recallManual()` is typed as `RecallManualHitResult` (blob id and distance, no text) and `MemWalManual.recallManual()` as `RecallManualMemoryResult` (decrypted text). `RecallManualResult` remains a deprecated alias of those two result types, not a mixed-item array. (WALM-163, #298)
