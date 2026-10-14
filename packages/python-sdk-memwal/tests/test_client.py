@@ -1607,3 +1607,25 @@ class TestSealSession:
         assert exported["ttlMin"] == 5
         assert exported["sessionKey"].startswith("suiprivkey")
         assert exported["personalMessageSignature"]
+
+
+class TestRedactInternalUrls:
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("Error at http://localhost:8080/path", "Error at [internal]"),
+            ("Error at http://127.0.0.1:3000/api", "Error at [internal]"),
+            ("Error at http://127.0.0.2:8000/status", "Error at [internal]"),
+            ("Error at http://127.128.0.1:9000/info", "Error at [internal]"),
+            ("Error at http://[::1]:9000/seal/encrypt", "Error at [internal]"),
+            ("Error at http://0.0.0.0:8000/health", "Error at [internal]"),
+            ("Error at http://sidecar.localhost:8080/v1", "Error at [internal]"),
+            ("Error at http://sub.domain.localhost:3000/test", "Error at [internal]"),
+            ("Error at https://api.wal.app/v1/remember", "Error at https://api.wal.app/v1/remember"),
+        ],
+    )
+    def test_redact_internal_urls(self, raw: str, expected: str) -> None:
+        from memwal.client import _redact_internal_urls
+
+        assert _redact_internal_urls(raw) == expected
+
