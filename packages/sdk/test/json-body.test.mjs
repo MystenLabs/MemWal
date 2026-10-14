@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MemWal } from "../dist/memwal.js";
+import { MemWalManual } from "../dist/manual.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -55,4 +56,29 @@ test("remember() rejects an empty 202 instead of throwing SyntaxError", async ()
             && !(err instanceof SyntaxError)
             && /empty body/.test(err.message),
     );
+});
+
+function manual() {
+    return MemWalManual.create({
+        key: "11".repeat(32),
+        accountId: "0x1",
+        serverUrl: "https://relayer.example",
+        walletSigner: {},
+    });
+}
+
+test("MemWalManual.restore rejects an empty 200 instead of throwing SyntaxError", async () => {
+    globalThis.fetch = async (url) => {
+        if (new URL(url).pathname === "/version") return versionBody();
+        return new Response("", { status: 200 });
+    };
+    await assert.rejects(
+        () => manual().restore("default"),
+        (err) => err instanceof Error && !(err instanceof SyntaxError) && /empty body/.test(err.message),
+    );
+});
+
+test("MemWalManual.compatibility rejects a non-JSON 200", async () => {
+    globalThis.fetch = async () => new Response("nope", { status: 200 });
+    await assert.rejects(() => manual().compatibility(), /response was not JSON/);
 });
