@@ -1142,10 +1142,9 @@ export class MemWal {
             // deadlines, so a relayer whose `/health` p50 had crept to ~9s can
             // no longer eat most of recall's window and make a perfectly
             // healthy recall surface an `AbortError` (GH #438).
-            const requested = options.timeoutMs;
-            const optedOut = typeof requested === "number"
-                && (!Number.isFinite(requested) || requested <= 0);
-            const timeoutMs = optedOut ? 0 : (requested ?? this.recallTimeoutMs);
+            const budget = options.timeoutMs ?? this.recallTimeoutMs;
+            const optedOut = typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0;
+            const timeoutMs = optedOut ? 0 : budget;
             const wireDeadline = optedOut
                 ? undefined
                 : (timeoutMs > RECALL_DEADLINE_MARGIN_MS
@@ -1168,6 +1167,7 @@ export class MemWal {
                 processed = {
                     ...processed,
                     results: filtered,
+                    total: filtered.length,
                 };
             }
 

@@ -304,6 +304,22 @@ test("recall timeoutMs 0 does not send deadline_ms", async () => {
     assert.equal(isTimeoutError(timeout), true);
 });
 
+test("client recallTimeoutMs 0 does not send deadline_ms", async () => {
+    let body = {};
+    globalThis.fetch = async (url, init = {}) => {
+        const path = new URL(url).pathname;
+        if (path === "/version") return Response.json(VERSION_BODY);
+        if (path === "/api/recall") {
+            body = JSON.parse(init.body);
+            return Response.json({ results: [], total: 0 });
+        }
+        throw new Error(path);
+    };
+    const result = await client({ recallTimeoutMs: 0 }).recall({ query: "x" });
+    assert.deepEqual(result, { results: [], total: 0 });
+    assert.equal(body.deadline_ms, undefined);
+});
+
 test("a short recall budget is sent whole instead of floored at 1", async () => {
     let body = {};
     globalThis.fetch = async (url, init = {}) => {
