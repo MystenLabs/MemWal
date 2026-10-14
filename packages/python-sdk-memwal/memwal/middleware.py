@@ -140,10 +140,67 @@ class _PendingSaves:
     run — this keeps a strong reference until each one is done.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        on_save_error: Optional[Callable[[BaseException], None]] = None,
+    ) -> None:
         self._tasks: "set[asyncio.Task[Any]]" = set()
         self._threads: List[threading.Thread] = []
+        self._failures: List[tuple[str, str]] = []
+        self._dropped = 0
+        self._on_save_error = on_save_error
         self._lock = threading.Lock()
+        self._callback_threads: set[int] = set()
+
+    def note_error(self, err: BaseException) -> None:
+        """Remember a background analyze failure so flush does not report success.
+
+        The ledger is updated before the callback. A flush from that callback
+        returns without draining or clearing the failure. A flush from any
+        other thread still waits and raises. The ledger keeps only a type and
+        a one-line message, so a client that never flushes does not pin the
+        request traceback.
+        """
+        type_name = type(err).__name__
+        message = str(err).splitlines()[0][:200] if str(err) else ""
+        with self._lock:
+            if len(self._failures) < 8:
+                self._failures.append((type_name, message))
+            else:
+                self._dropped += 1
+        if self._on_save_error is None:
+            return
+        ident = threading.get_ident()
+        with self._lock:
+            self._callback_threads.add(ident)
+        try:
+            self._on_save_error(err)
+        except Exception:
+            logger.warning("Walrus Memory on_save_error raised", exc_info=True)
+        finally:
+            with self._lock:
+                self._callback_threads.discard(ident)
+
+    def _flush_called_from_callback(self) -> bool:
+        with self._lock:
+            return threading.get_ident() in self._callback_threads
+
+    def _note_result(self, result: Any) -> None:
+        if isinstance(result, BaseException):
+            self.note_error(result)
+
+    def _raise_if_failed(self) -> None:
+        with self._lock:
+            failures, self._failures = self._failures, []
+            dropped, self._dropped = self._dropped, 0
+        total = len(failures) + dropped
+        if total == 0:
+            return
+        type_name, message = failures[0] if failures else ("Error", "")
+        detail = f"{type_name}: {message}" if message else type_name
+        raise RuntimeError(
+            f"Walrus Memory auto-save failed ({total} call(s)): {detail}"
+        )
 
     def track_task(self, task: "asyncio.Task[Any]") -> None:
         self._tasks.add(task)
@@ -169,25 +226,44 @@ class _PendingSaves:
         thread.start()
 
     async def flush(self) -> None:
-        """Await every pending task, then join every pending thread."""
+        """Await every pending task, then join every pending thread.
+
+        Raises when any background auto-save failed. The chat call itself
+        still returned; this is the signal for a caller that waited. A call
+        made from ``on_save_error`` returns before draining, joining, or
+        clearing the failure being recorded.
+        """
+        if self._flush_called_from_callback():
+            return
         if self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            tasks = list(self._tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                self._note_result(result)
         self._join_threads()
+        self._raise_if_failed()
 
     def flush_sync(self) -> None:
-        """Join every pending thread. A pending Task belongs to the loop
-        that created it (e.g. an earlier `await llm.ainvoke(...)` call) and
-        cannot be awaited from a different one -- if any are still pending
-        here, the caller mixed sync and async entry points on the same
-        wrapped client, and this cleanup path can't safely drain them. Log
-        and continue draining threads rather than raise out of what's
-        usually shutdown code."""
+        """Join every pending thread and raise when a background auto-save failed.
+
+        A pending Task belongs to the loop that created it. When this thread
+        has no running loop, those tasks are awaited here. When it does, they
+        are logged and left for :meth:`flush`. A call made from
+        ``on_save_error`` returns before draining, joining, or clearing the
+        failure being recorded.
+        """
+        if self._flush_called_from_callback():
+            return
         if self._tasks:
-            async def _drain(tasks: "list[asyncio.Task[Any]]") -> None:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = list(self._tasks)
+
+            async def _drain(pending_tasks: "list[asyncio.Task[Any]]") -> None:
+                results = await asyncio.gather(*pending_tasks, return_exceptions=True)
+                for result in results:
+                    self._note_result(result)
 
             try:
-                asyncio.run(_drain(list(self._tasks)))
+                asyncio.run(_drain(tasks))
             except (RuntimeError, ValueError):
                 logger.warning(
                     "Walrus Memory flush_sync() could not await %d pending "
@@ -197,10 +273,14 @@ class _PendingSaves:
                     len(self._tasks),
                 )
         self._join_threads()
+        self._raise_if_failed()
 
     def _join_threads(self) -> None:
+        current = threading.current_thread()
         with self._lock:
             threads, self._threads = self._threads, []
+            self._threads.extend(thread for thread in threads if thread is current)
+            threads = [thread for thread in threads if thread is not current]
         for thread in threads:
             thread.join()
 
@@ -291,6 +371,7 @@ def with_memwal_langchain(
     min_relevance: float = 0.3,
     debug: bool = False,
     env: Optional[str] = None,
+    on_save_error: Optional[Callable[[BaseException], None]] = None,
 ) -> "BaseChatModel":
     """Wrap a LangChain ``BaseChatModel`` with Walrus Memory management.
 
@@ -313,6 +394,9 @@ def with_memwal_langchain(
         debug: Enable debug logging.
         env: Optional relayer preset (``"prod"`` / ``"dev"`` / ``"staging"`` /
             ``"local"``). Same precedence as :meth:`MemWal.create`.
+        on_save_error: Called with the original exception when a background
+            auto-save fails. ``flush`` / ``flush_sync`` from this callback does
+            not clear that failure.
 
     Returns:
         A wrapped ``BaseChatModel`` that automatically uses Walrus Memory.
@@ -335,7 +419,7 @@ def with_memwal_langchain(
     )
 
     log = logger.debug if not debug else logger.warning
-    pending = _PendingSaves()
+    pending = _PendingSaves(on_save_error)
 
     original_agenerate = llm._agenerate
     original_generate = llm._generate
@@ -408,6 +492,7 @@ def with_memwal_langchain(
                 await memwal.analyze(user_text, namespace)
             except Exception as e:
                 log(f"[Walrus Memory] Auto-save failed: {e}")
+                pending.note_error(e)
 
     async def patched_agenerate(
         messages: List[List[BaseMessage]], *args: Any, **kwargs: Any
@@ -470,6 +555,7 @@ def with_memwal_openai(
     min_relevance: float = 0.3,
     debug: bool = False,
     env: Optional[str] = None,
+    on_save_error: Optional[Callable[[BaseException], None]] = None,
 ) -> Any:
     """Wrap an OpenAI client with Walrus Memory management.
 
@@ -494,6 +580,9 @@ def with_memwal_openai(
         debug: Enable debug logging.
         env: Optional relayer preset (``"prod"`` / ``"dev"`` / ``"staging"`` /
             ``"local"``). Same precedence as :meth:`MemWal.create`.
+        on_save_error: Called with the original exception when a background
+            auto-save fails. ``flush`` / ``flush_sync`` from this callback does
+            not clear that failure.
 
     Returns:
         The same client, with ``chat.completions.create`` wrapped to use Walrus Memory.
@@ -507,7 +596,7 @@ def with_memwal_openai(
     )
 
     log = logger.debug if not debug else logger.warning
-    pending = _PendingSaves()
+    pending = _PendingSaves(on_save_error)
 
     is_async = hasattr(client, "_async_client") or type(client).__name__ == "AsyncOpenAI"
 
@@ -572,6 +661,7 @@ def _wrap_async_openai(
                     await memwal.analyze(user_text, namespace)
                 except Exception as e:
                     log(f"[Walrus Memory] Auto-save failed: {e}")
+                    pending.note_error(e)
 
             _fire_and_forget(_analyze(), pending)
 
@@ -633,6 +723,7 @@ def _wrap_sync_openai(
                     _run_memwal(lambda: memwal.analyze(user_text, namespace))
                 except Exception as e:
                     log(f"[Walrus Memory] Auto-save failed: {e}")
+                    pending.note_error(e)
 
             pending.spawn_thread(_analyze)
 

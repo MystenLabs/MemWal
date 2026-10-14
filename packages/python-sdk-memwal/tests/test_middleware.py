@@ -1000,3 +1000,157 @@ class TestPendingSaves:
 
         time.sleep(0.05)
         assert len(pending._threads) == 0
+
+    def test_flush_raises_when_a_background_save_failed(self) -> None:
+        seen: list[BaseException] = []
+        pending = _PendingSaves(seen.append)
+        pending.note_error(RuntimeError("analyze down"))
+
+        async def go() -> None:
+            await pending.flush()
+
+        try:
+            asyncio.run(go())
+        except RuntimeError as err:
+            assert "auto-save failed" in str(err)
+        else:
+            raise AssertionError("flush did not raise")
+        assert len(seen) == 1
+
+    def test_flush_sync_raises_when_a_background_save_failed(self) -> None:
+        pending = _PendingSaves()
+        pending.note_error(RuntimeError("analyze down"))
+        try:
+            pending.flush_sync()
+        except RuntimeError as err:
+            assert "auto-save failed" in str(err)
+        else:
+            raise AssertionError("flush_sync did not raise")
+
+    def test_flush_sees_a_failing_task_without_note_error(self) -> None:
+        pending = _PendingSaves()
+
+        async def fail() -> None:
+            raise RuntimeError("analyze down")
+
+        async def go() -> None:
+            task = asyncio.create_task(fail())
+            pending.track_task(task)
+            await pending.flush()
+
+        try:
+            asyncio.run(go())
+        except RuntimeError as err:
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush did not raise")
+
+    def test_callback_flush_does_not_swallow_the_failure(self) -> None:
+        pending = _PendingSaves()
+
+        def on_error(_err: BaseException) -> None:
+            pending.flush_sync()
+
+        pending._on_save_error = on_error
+        pending.note_error(RuntimeError("analyze down"))
+
+        async def go() -> None:
+            await pending.flush()
+
+        try:
+            asyncio.run(go())
+        except RuntimeError as err:
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush did not raise")
+
+    def test_worker_callback_flush_sync_keeps_the_failure(self) -> None:
+        pending = _PendingSaves()
+        callback_error: list[str] = []
+        saw_self = []
+
+        def on_error(_err: BaseException) -> None:
+            try:
+                pending.flush_sync()
+            except Exception as err:
+                callback_error.append(repr(err))
+            with pending._lock:
+                saw_self.append(threading.current_thread() in pending._threads)
+
+        pending._on_save_error = on_error
+        done = threading.Event()
+
+        def fail() -> None:
+            pending.note_error(RuntimeError("analyze down"))
+            done.set()
+
+        pending.spawn_thread(fail)
+        assert done.wait(2)
+        assert callback_error == []
+        assert saw_self == [True]
+        try:
+            pending.flush_sync()
+        except RuntimeError as err:
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush_sync did not raise")
+
+    def test_two_worker_callbacks_do_not_join_each_other(self) -> None:
+        """Overlapping on_save_error flushes must not join the other worker.
+
+        Each callback returns before drain, join, and raise. The later caller
+        flush still reports both failures.
+        """
+        pending = _PendingSaves()
+        entered = threading.Barrier(2)
+        callback_error: list[str] = []
+        done = threading.Barrier(3)
+
+        def on_error(_err: BaseException) -> None:
+            entered.wait(2)
+            try:
+                pending.flush_sync()
+            except Exception as err:
+                callback_error.append(repr(err))
+
+        pending._on_save_error = on_error
+
+        def fail(message: str):
+            def run() -> None:
+                pending.note_error(RuntimeError(message))
+                done.wait(2)
+            return run
+
+        pending.spawn_thread(fail("analyze down"))
+        pending.spawn_thread(fail("analyze also down"))
+        done.wait(2)
+        assert callback_error == []
+        try:
+            pending.flush_sync()
+        except RuntimeError as err:
+            assert "2 call" in str(err)
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush_sync did not raise")
+
+    def test_flush_from_another_thread_still_raises_during_callback(self) -> None:
+        """The callback thread bails out. Any other flush still reports the failure."""
+        import time
+
+        pending = _PendingSaves()
+        started = threading.Event()
+
+        def on_error(_err: BaseException) -> None:
+            started.set()
+            time.sleep(0.2)
+
+        pending._on_save_error = on_error
+        pending.spawn_thread(lambda: pending.note_error(RuntimeError("analyze down")))
+        assert started.wait(2)
+        try:
+            pending.flush_sync()
+        except RuntimeError as err:
+            assert "analyze down" in str(err)
+        else:
+            raise AssertionError("flush_sync did not raise")
+
