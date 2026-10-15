@@ -41,7 +41,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 # Dummy env vars required for `next build` (real values injected at runtime)
 ENV POSTGRES_URL="postgresql://dummy:dummy@localhost:5432/dummy"
-ENV AUTH_SECRET="build-time-placeholder"
+ENV AUTH_SECRET="build-time-placeholder-not-a-runtime-secret"
 
 # Build Next.js (skip DB migration — runs at container start)
 RUN pnpm next build
