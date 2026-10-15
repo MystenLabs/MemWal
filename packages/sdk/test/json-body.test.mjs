@@ -45,32 +45,39 @@ test("health() rejects a non-JSON 200", async () => {
 });
 
 test("remember() rejects an empty 202 instead of throwing SyntaxError", async () => {
+    const memwal = client();
+    memwal.buildSealSession = async () => "test-session";
     globalThis.fetch = async (url) => {
         const path = new URL(url).pathname;
         if (path === "/version") return versionBody();
-        return new Response("", { status: 202 });
+        if (path === "/api/remember") return new Response("", { status: 202 });
+        throw new Error(`unexpected ${path}`);
     };
     await assert.rejects(
-        () => client().remember("hello"),
+        () => memwal.remember("hello"),
         (err) => err instanceof Error
             && !(err instanceof SyntaxError)
-            && /empty body/.test(err.message),
+            && /empty body/.test(err.message)
+            && err.status === 202,
     );
 });
 
 test("rememberAndWait does not poll until timeout on an empty 202", async () => {
+    const memwal = client();
+    memwal.buildSealSession = async () => "test-session";
     let polls = 0;
     globalThis.fetch = async (url) => {
         const path = new URL(url).pathname;
         if (path === "/version") return versionBody();
+        if (path === "/api/remember") return new Response("", { status: 202 });
         polls += 1;
         return new Response("", { status: 202 });
     };
     await assert.rejects(
-        () => client().rememberAndWait("hello", { timeoutMs: 5_000 }),
+        () => memwal.rememberAndWait("hello", { timeoutMs: 5_000 }),
         (err) => err instanceof Error && /empty body/.test(err.message) && err.status === 202,
     );
-    assert.equal(polls, 1);
+    assert.equal(polls, 0);
 });
 
 function manual() {
@@ -83,12 +90,16 @@ function manual() {
 }
 
 test("MemWalManual.restore rejects an empty 200 instead of throwing SyntaxError", async () => {
+    const c = manual();
+    c.buildSealSession = async () => "test-session";
     globalThis.fetch = async (url) => {
-        if (new URL(url).pathname === "/version") return versionBody();
-        return new Response("", { status: 200 });
+        const path = new URL(url).pathname;
+        if (path === "/version") return versionBody();
+        if (path === "/api/restore") return new Response("", { status: 200 });
+        throw new Error(`unexpected ${path}`);
     };
     await assert.rejects(
-        () => manual().restore("default"),
+        () => c.restore("default"),
         (err) => err instanceof Error && !(err instanceof SyntaxError) && /empty body/.test(err.message),
     );
 });

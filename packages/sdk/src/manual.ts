@@ -978,7 +978,7 @@ export class MemWalManual {
                 throw err;
             }
 
-            return readSuccessJson<T>(res);
+            return await readSuccessJson<T>(res);
         } catch (err) {
             const status = err && typeof err === "object" && "status" in err ? err.status : undefined;
             if (deadline?.timedOut() && typeof status !== "number") {
