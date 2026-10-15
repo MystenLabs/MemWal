@@ -150,6 +150,8 @@ export default function LandingPage() {
 
     return (
         <div className="wm-page signin-proposed">
+            <div className="signin-scroll">
+            <div className="signin-sheet">
             <div className="signin-glow signin-glow--pin" aria-hidden="true" />
             <div className="signin-bloom signin-bloom--pin" aria-hidden="true" />
             <img className="signin-logo signin-logo--pin" src="/signin/logo-wordmark.svg" alt="Walrus Memory" />
@@ -181,6 +183,8 @@ export default function LandingPage() {
                     {walletButton}
                     {terms}
                 </div>
+            </div>
+            </div>
             </div>
         </div>
     )
