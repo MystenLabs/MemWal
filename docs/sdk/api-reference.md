@@ -46,10 +46,11 @@ Config:
 
 | Property | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
+| `key` | `string \| Uint8Array` | Yes | — | Delegate private key: hex (optionally `0x`-prefixed), `suiprivkey1...`, or `Uint8Array` |
 | `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
 | `serverUrl` | `string` | No | `https://relayer.memory.walrus.xyz` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
+| `requestTimeoutMs` | `number` | No | `30000` | Deadline for one relayer request. A non-positive or non-finite value falls back to `30000`. `restore` and `analyze` use their own 60s deadlines |
 | `recallTimeoutMs` | `number` | No | `15000` | Deadline for the `/api/recall` request. Per-call `RecallOptions.timeoutMs` overrides it |
 | `preflightTimeoutMs` | `number` | No | `5000` | Deadline for each preflight round-trip (`GET /version`, `GET /health`, `GET /config`) |
 
