@@ -265,12 +265,16 @@ class MemWalMock:
             limit = query.limit
             namespace = query.namespace
             max_distance = query.max_distance
+            sort = query.sort
             query_text = query.query
         else:
+            sort = None
             query_text = query
         _validate_text(query_text, "query")
         if not isinstance(limit, int) or limit < 0:
             raise ValueError("limit must be a non-negative integer")
+        if sort not in (None, "relevance", "recent"):
+            raise ValueError("sort must be 'relevance' or 'recent'")
         resolved_namespace = namespace or self._namespace
         query_tokens = _tokens(query_text)
         ranked = [
@@ -278,7 +282,10 @@ class MemWalMock:
             for memory in self._memories
             if memory.namespace == resolved_namespace
         ]
-        ranked.sort(key=lambda item: (item[1], item[0].sequence))
+        if sort == "recent":
+            ranked.sort(key=lambda item: (-item[0].sequence, item[1]))
+        else:
+            ranked.sort(key=lambda item: (item[1], item[0].sequence))
         page = ranked[:limit]
         if max_distance is not None:
             page = [item for item in page if item[1] < max_distance]
