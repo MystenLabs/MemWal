@@ -107,8 +107,10 @@ function distance(queryTokens: Set<string>, text: string): number {
     return 1 - matches / queryTokens.size;
 }
 
+const ZERO_WIDTH_ONLY = /^[\s\u200B-\u200D\u2060\uFEFF]*$/;
+
 function validateText(text: string, field = "text"): void {
-    if (typeof text !== "string" || text.trim().length === 0) {
+    if (typeof text !== "string" || text.trim().length === 0 || ZERO_WIDTH_ONLY.test(text)) {
         throw new Error(`${field} cannot be empty`);
     }
 }
