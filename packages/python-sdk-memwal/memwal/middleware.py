@@ -55,7 +55,7 @@ from typing import (
 )
 
 from .client import MemWal, _with_fresh_http_client
-from .types import DEFAULT_SERVER_URL, RecallMemory
+from .types import RecallMemory
 
 if TYPE_CHECKING:
     from langchain_core.language_models.chat_models import BaseChatModel

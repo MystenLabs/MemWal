@@ -51,7 +51,6 @@ from .types import (
     AskMemory,
     AskResult,
     EmbedResult,
-    DEFAULT_SERVER_URL,
     HealthResult,
     MemWalConfig,
     NamespacesResult,
