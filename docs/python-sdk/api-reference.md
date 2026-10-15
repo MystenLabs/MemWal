@@ -152,9 +152,11 @@ RecallResult(
 
 `distance` is cosine distance — lower is more similar.
 
-### `analyze(text, namespace=None) -> AnalyzeResult`
+### `analyze(text, namespace=None, occurred_at=None) -> AnalyzeResult`
 
 Extract memorable facts via an LLM and enqueue one background remember job per fact.
+
+`occurred_at` is optional. Pass a timezone-aware `datetime`, or an RFC 3339 / ISO-8601 string with a `Z` suffix or a UTC offset. A naive `datetime`, or a string with no offset, raises `ValueError`. Any other type raises `TypeError`. When set, the extractor uses it as a temporal anchor and writes resolved dates into the fact text. The server stores no separate event-time field. Omit it when you have no session time; the server does not fill in the current time.
 
 ```python
 AnalyzeResult(
@@ -166,7 +168,7 @@ AnalyzeResult(
 )
 ```
 
-`AnalyzeResult.total` is a backward-compat alias for `fact_count`. Use `analyze_and_wait(text, namespace=None, opts=None) -> AnalyzeWaitResult` to wait for every fact job to settle.
+`AnalyzeResult.total` is a backward-compat alias for `fact_count`. Use `analyze_and_wait(text, namespace=None, opts=None, occurred_at=None) -> AnalyzeWaitResult` to wait for every fact job to settle. `occurred_at` means the same thing as on `analyze`.
 
 ### `ask(question, limit=5, namespace=None) -> AskResult`
 
