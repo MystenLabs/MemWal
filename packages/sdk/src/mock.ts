@@ -107,6 +107,15 @@ function distance(queryTokens: Set<string>, text: string): number {
     return 1 - matches / queryTokens.size;
 }
 
+function requireRememberText(text: unknown): asserts text is string {
+    if (typeof text !== "string") {
+        throw new TypeError(
+            `remember() expects text as a string, received ${typeof text}. ` +
+            `Did you mean remember(text, namespace)? Unlike recall(), remember* does not take an options object.`,
+        );
+    }
+}
+
 function validateText(text: string, field = "text"): void {
     if (typeof text !== "string" || text.trim().length === 0) {
         throw new Error(`${field} cannot be empty`);
@@ -224,6 +233,7 @@ export class MemWalMock {
         namespaceOrOptions?: string | { idempotencyKey?: string },
         options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
+        requireRememberText(text);
         const split = splitRememberArgs(namespaceOrOptions, options);
         const memory = this.store(
             text,
