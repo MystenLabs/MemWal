@@ -43,7 +43,7 @@ import type {
     RememberManualOptions,
     RememberManualResult,
     RecallManualOptions,
-    RecallManualResult,
+    RecallManualHitResult,
     RestoreResult,
     NamespacesResult,
     ListNamespacesOptions,
@@ -1266,7 +1266,7 @@ export class MemWal {
      * @param opts.vector - Pre-computed query embedding vector
      * @param opts.limit - Max results (default: 10)
      * @param opts.scoringWeights - Optional composite-scoring weights
-     * @returns RecallManualResult with blob_id + distance pairs (no decrypted text)
+     * @returns RecallManualHitResult with blob_id + distance pairs (no decrypted text)
      *
      * @example
      * ```typescript
@@ -1284,14 +1284,14 @@ export class MemWal {
      * }
      * ```
      */
-    async recallManual(opts: RecallManualOptions): Promise<RecallManualResult> {
+    async recallManual(opts: RecallManualOptions): Promise<RecallManualHitResult> {
         const limit = opts.limit !== undefined ? opts.limit : 10;
         if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
             throw new TypeError(
                 `limit must be a positive integer, got ${limit}`,
             );
         }
-        return this.signedRequest<RecallManualResult>(
+        return this.signedRequest<RecallManualHitResult>(
             "POST",
             "/api/recall/manual",
             {

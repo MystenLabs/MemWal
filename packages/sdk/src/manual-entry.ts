@@ -2,7 +2,7 @@
  * @mysten-incubation/memwal/manual
  *
  * Manual (client-side) mode entry point.
- * Requires: @mysten/seal, @mysten/walrus, @mysten/sui
+ * Requires: @mysten/seal, @mysten/sui. Walrus downloads use HTTP, not @mysten/walrus.
  *
  * Usage:
  *   import { MemWalManual } from "@mysten-incubation/memwal/manual";
@@ -25,6 +25,8 @@ export type {
     RememberManualResult,
     RecallManualOptions,
     MemWalManualRecallOptions,
+    RecallManualHitResult,
+    RecallManualMemoryResult,
     RecallManualResult,
     RecallManualHit,
     RecallManualMemory,

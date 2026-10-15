@@ -80,6 +80,8 @@ export type {
     RememberManualOptions,
     RememberManualResult,
     RecallManualOptions,
+    RecallManualHitResult,
+    RecallManualMemoryResult,
     RecallManualResult,
     RecallManualHit,
     MinSupportedSdk,

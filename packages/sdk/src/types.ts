@@ -721,11 +721,23 @@ export interface RecallManualMemory {
     distance: number;
 }
 
-/** Result from recallManual() — full client-side variant with decrypted text */
-export interface RecallManualResult {
-    results: (RecallManualHit | RecallManualMemory)[];
+/** `MemWal.recallManual()` — blob id and distance, no decrypted text. */
+export interface RecallManualHitResult {
+    results: RecallManualHit[];
     total: number;
 }
+
+/** `MemWalManual.recallManual()` — decrypted memories. */
+export interface RecallManualMemoryResult {
+    results: RecallManualMemory[];
+    total: number;
+}
+
+/**
+ * @deprecated Use {@link RecallManualHitResult} or {@link RecallManualMemoryResult}.
+ * Each method returns one of those, not a mixed list of hits and memories.
+ */
+export type RecallManualResult = RecallManualHitResult | RecallManualMemoryResult;
 
 // ============================================================
 // Account Management Types
