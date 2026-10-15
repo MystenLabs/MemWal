@@ -457,17 +457,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
 
       - name: Build SDK (workspace dep of the plugin)
         run: pnpm build:sdk
@@ -495,37 +486,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    env:
-      # Always staging, even on a main merge: the suite stores real memories and
-      # there is no reason to put test data on mainnet.
-      MEMWAL_SERVER_URL: https://relayer-staging.memory.walrus.xyz
-      MEMWAL_PRIVATE_KEY: ${{ secrets.MEMWAL_E2E_PRIVATE_KEY }}
-      MEMWAL_ACCOUNT_ID: ${{ secrets.MEMWAL_E2E_ACCOUNT_ID }}
-      MEMWAL_E2E_WRITE: "1"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
+      - name: Setup JS
+        uses: ./.github/actions/setup-js
 
       - name: Build SDK (workspace dep of the plugin)
         run: pnpm build:sdk
 
       # Without the two secrets the live cases skip themselves and only the
       # mock-relayer cases run, so this job is safe to land before the secrets
-      # exist and will not fail the branch.
+      # exist and will not fail the branch. The secrets stay on this step so
+      # they are not in the environment for pnpm install.
       - name: E2E (mock relayer always, live relayer when secrets are set)
+        env:
+          # Always staging, even on a main merge: the suite stores real memories and
+          # there is no reason to put test data on mainnet.
+          MEMWAL_SERVER_URL: https://relayer-staging.memory.walrus.xyz
+          MEMWAL_PRIVATE_KEY: ${{ secrets.MEMWAL_E2E_PRIVATE_KEY }}
+          MEMWAL_ACCOUNT_ID: ${{ secrets.MEMWAL_E2E_ACCOUNT_ID }}
+          MEMWAL_E2E_WRITE: "1"
         run: pnpm --filter @mysten-incubation/oc-memwal test:e2e
 
   server-checks:
