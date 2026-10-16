@@ -140,9 +140,9 @@ memwal = MemWal.create(
 | `dev` | `https://relayer.dev.memwal.ai` |
 | `staging` | `https://relayer-staging.memory.walrus.xyz` |
 
-Precedence: an explicit non-default **`server_url` wins over `env`**, which wins
-over the default. An unknown preset raises `ValueError`. `env` is also accepted
-by `MemWalSync.create`, `with_memwal_langchain`, and `with_memwal_openai`.
+Precedence: any explicit **`server_url` wins over `env`**, including the hosted
+default. `env` applies only when `server_url` is omitted (`None`). An unknown
+preset raises `ValueError`. `env` is also accepted by `MemWalSync.create`, `with_memwal_langchain`, and `with_memwal_openai`.
 
 ## AI Middleware
 
