@@ -97,13 +97,24 @@ export function isMoveAbortWalDestroyZero(message: string): boolean {
 }
 
 /**
- * Drop the process-wide Walrus client after a stale-price `destroy_zero`.
- * The durable retry rebuilds the register from that client. Waiting for the
- * max-age refresh spends the attempt budget on the same split.
+ * Drop the process-wide Walrus client when the register payment was sized
+ * from a stale cached price. `#withWal` pre-funds an exact WAL amount from
+ * `systemState`. A price drop leaves a remainder and `coin::destroy_zero`
+ * aborts. A price rise makes `system::reserve_space` split more than that
+ * coin holds, so `balance::split` aborts with ENotEnough. The next attempt
+ * rebuilds the register from a client that re-reads the live price. Waiting
+ * for the max-age refresh spends the attempt budget on the same snapshot.
+ *
+ * The two detectors stay disjoint, so one abort refreshes once.
  */
 export function refreshWalrusClientOnStaleWalPrice(message: string): void {
-    if (!isMoveAbortWalDestroyZero(message)) return;
-    refreshWalrusClient("walrus_wal_payment_destroy_zero");
+    if (isMoveAbortWalDestroyZero(message)) {
+        refreshWalrusClient("walrus_wal_payment_destroy_zero");
+        return;
+    }
+    if (isMoveAbortBalanceSplit(message)) {
+        refreshWalrusClient("walrus_wal_payment_balance_split");
+    }
 }
 
 export async function callEnoki<T>(path: string, payload: unknown): Promise<T> {

@@ -44,9 +44,8 @@ test("bare destroy_zero without MoveAbort context is rejected", () => {
     assert.equal(isMoveAbortWalDestroyZero("calling coin::destroy_zero"), false);
 });
 
-test("balance::split abort does not match this detector", () => {
-    // The stale-price destroy_zero path must stay disjoint from the gas-budget
-    // balance::split path so the two handlers never double-fire.
+test("balance::split abort does not match the destroy_zero detector", () => {
+    // The two detectors stay disjoint so one abort refreshes the client once.
     const balanceSplit =
         "MoveAbort(MoveLocation { module: balance, function_name: Some(\"split\") }, 2) in command 1";
     assert.equal(isMoveAbortWalDestroyZero(balanceSplit), false);
@@ -76,22 +75,45 @@ test("matches the careerace budget dry-run abort", () => {
     assert.equal(isMoveAbortBalanceSplit(CAREERACE_DESTROY_ZERO), false);
 });
 
-test("a stale-price abort refreshes the Walrus client and other errors do not", () => {
+// Job faa81809, Enoki sponsor dry-run, 2026-10-15. Cached storage price was
+// below the live price, so reserve_space's balance::split aborted ENotEnough
+// in the 3rd command (index 2).
+const PROD_PRICE_UP_BALANCE_SPLIT =
+    "Enoki API error (400): {\"errors\":[{\"code\":\"transaction_build_failed\",\"message\":\"Transaction resolution failed: MoveAbort in 3rd command, abort code: 2, in '0x0000000000000000000000000000000000000000000000000000000000000002::balance::split' (instruction 10)\",\"data\":{\"executionError\":{\"$kind\":\"MoveAbort\",\"command\":2,\"MoveAbort\":{\"abortCode\":\"2\",\"location\":{\"module\":\"balance\",\"functionName\":\"split\"}}}}}]}";
+
+function refreshedReasons(run: () => void): string[] {
     const warnings: string[] = [];
     const warn = console.warn;
     console.warn = (message?: unknown) => {
         warnings.push(String(message));
     };
     try {
-        refreshWalrusClientOnStaleWalPrice(CAREERACE_DESTROY_ZERO);
-        refreshWalrusClientOnStaleWalPrice("Object 0x" + "ab".repeat(32) + " not found");
-        refreshWalrusClientOnStaleWalPrice("Sponsored transaction has expired");
+        run();
     } finally {
         console.warn = warn;
     }
+    return warnings.filter((line) => line.includes("[walrus/client] refreshed"));
+}
+
+test("a stale-price abort refreshes the Walrus client and other errors do not", () => {
     assert.deepEqual(
-        warnings.filter((line) => line.includes("[walrus/client] refreshed")),
+        refreshedReasons(() => {
+            refreshWalrusClientOnStaleWalPrice(CAREERACE_DESTROY_ZERO);
+            refreshWalrusClientOnStaleWalPrice("Object 0x" + "ab".repeat(32) + " not found");
+            refreshWalrusClientOnStaleWalPrice("Sponsored transaction has expired");
+        }),
         ["[walrus/client] refreshed reason=walrus_wal_payment_destroy_zero"],
+    );
+});
+
+test("a price-up balance::split refreshes the client once", () => {
+    assert.equal(isMoveAbortBalanceSplit(PROD_PRICE_UP_BALANCE_SPLIT), true);
+    assert.equal(isMoveAbortWalDestroyZero(PROD_PRICE_UP_BALANCE_SPLIT), false);
+    assert.deepEqual(
+        refreshedReasons(() => {
+            refreshWalrusClientOnStaleWalPrice(PROD_PRICE_UP_BALANCE_SPLIT);
+        }),
+        ["[walrus/client] refreshed reason=walrus_wal_payment_balance_split"],
     );
 });
 
@@ -100,4 +122,5 @@ test("both upload routes drop the cached price on this abort", () => {
     const legacy = readFileSync(new URL("../sidecar/routes/walrus-upload.ts", import.meta.url), "utf8");
     assert.match(journal, /refreshWalrusClientOnStaleWalPrice\(message\)/);
     assert.match(legacy, /refreshWalrusClientOnStaleWalPrice\(message\)/);
+    assert.doesNotMatch(legacy, /register_sponsor_balance_split/);
 });
