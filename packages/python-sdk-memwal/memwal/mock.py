@@ -261,6 +261,13 @@ class MemWalMock:
         namespace: Optional[str] = None,
         max_distance: Optional[float] = None,
     ) -> RecallResult:
+        """Token-overlap recall over the in-memory store.
+
+        ``RecallParams.sort`` is honored: ``"recent"`` keeps the semantic top
+        ``max(min(limit * 5, 50), limit)`` and orders that window newest first,
+        like the relayer. ``RecallParams.scoring_weights`` is accepted but
+        ignored; ranking is always by token-overlap distance.
+        """
         if isinstance(query, RecallParams):
             limit = query.limit
             namespace = query.namespace
