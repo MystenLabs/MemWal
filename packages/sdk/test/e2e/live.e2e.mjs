@@ -267,15 +267,67 @@ describe("authenticated", { skip: requiresKey, concurrency: 1 }, () => {
         assert.ok(near.text.includes("lisinopril"), `closest hit should be the medication: ${near.text}`);
         assert.ok(far.distance > near.distance, "the two hits must be at different distances");
 
-        // Cutoff between the two: only the close hit survives.
+        // Cutoff between the two: only the close hit survives. `total` stays
+        // the relayer page size, so a filtered page is not `total: 0`.
         const cutoff = (near.distance + far.distance) / 2;
         const filtered = await mw.recall({ query, limit: 5, maxDistance: cutoff });
         assert.deepEqual(filtered.results.map((r) => r.blob_id), [near.blob_id]);
-        assert.equal(filtered.total, 1);
+        assert.equal(filtered.total, all.total);
 
-        // Cutoff at the closest distance: `>=` drops it too.
+        // Cutoff at the closest distance: `>=` drops it too, but the page
+        // was not empty.
         const none = await mw.recall({ query, limit: 5, maxDistance: near.distance });
         assert.deepEqual(none.results, []);
-        assert.equal(none.total, 0);
+        assert.equal(none.total, all.total);
+    });
+
+    test("listMemories counts a fresh namespace exactly", async () => {
+        const namespace = `${E2E_NAMESPACE}-list`;
+        const mw = client(namespace);
+        const unique = randomUUID().replaceAll("-", "").slice(0, 8);
+
+        const written = await mw.rememberBulkAndWait(
+            ["alpha", "beta", "gamma"].map((word) => ({ text: `SDK e2e list ${unique}: ${word}` })),
+            { timeoutMs: REMEMBER_TIMEOUT_MS },
+        );
+        assert.equal(written.succeeded, 3, `expected 3 writes, got ${JSON.stringify(written)}`);
+        const blobIds = new Set(written.results.map((r) => r.blob_id));
+
+        // Walk every page, filtered to this namespace.
+        const listed = [];
+        let cursor;
+        let more = true;
+        while (more) {
+            const page = await mw.listMemories({ cursor, namespace, limit: 100 });
+            for (const m of page.memories) {
+                assert.equal(m.namespace_id, namespace);
+                assert.equal(typeof m.memory_id, "string");
+                assert.equal(typeof m.blob_id, "string");
+                assert.equal(typeof m.size, "number");
+                assert.ok(!Number.isNaN(Date.parse(m.updated_at)));
+            }
+            listed.push(...page.memories);
+            assert.ok(Array.isArray(page.deleted));
+            assert.equal(typeof page.must_resync, "boolean");
+            cursor = page.next_cursor ?? undefined;
+            more = page.has_more;
+        }
+
+        assert.equal(listed.length, 3);
+        assert.deepEqual(new Set(listed.map((m) => m.blob_id)), blobIds);
+
+        // Cross-check against the namespace rollup.
+        const namespaces = [];
+        cursor = undefined;
+        more = true;
+        while (more) {
+            const page = await mw.listNamespaces({ cursor });
+            namespaces.push(...page.namespaces);
+            cursor = page.next_cursor ?? undefined;
+            more = page.has_more;
+        }
+        const summary = namespaces.find((ns) => ns.name === namespace);
+        assert.ok(summary, `listNamespaces must include ${namespace}`);
+        assert.equal(summary.memory_count, 3);
     });
 });

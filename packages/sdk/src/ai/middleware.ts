@@ -52,6 +52,11 @@ export interface WithMemWalOptions extends MemWalConfig {
     minRelevance?: number;
     /** Enable debug logging (default: false) */
     debug?: boolean;
+    /** Optional callback invoked when memory recall fails during transformParams */
+    onRecallError?: (error: unknown) => void;
+    /** Called when a background auto-save fails. The chat turn still returns.
+     * `flush()` also rejects, so a caller waiting on the write can see it. */
+    onSaveError?: (error: unknown) => void;
 }
 
 // ============================================================
@@ -88,11 +93,31 @@ export function withMemWal(
     // callers (CLI scripts, serverless handlers) can await them via
     // flush() before the process exits, instead of losing them silently.
     const pendingSaves = new Set<Promise<unknown>>();
+    const saveFailures: string[] = [];
+    let notingFailure = 0;
+    // Tool steps rebuild the prompt without the memory injected on step 1.
+    // Keep that recall and put it back, instead of calling recall again.
+    let cachedRecall: { key: string; context: string } | null = null;
 
     function saveInBackground(userMessage: string): void {
         const savePromise = memwal
             .analyze(userMessage)
-            .catch((err: unknown) => log("Auto-save failed:", err));
+            .catch((err: unknown) => {
+                log("Auto-save failed:", err);
+                if (saveFailures.length < 8) {
+                    const name = err instanceof Error ? err.name : "Error";
+                    const message = err instanceof Error ? err.message.split("\n")[0] : "";
+                    saveFailures.push(message ? `${name}: ${message}` : name);
+                }
+                notingFailure += 1;
+                try {
+                    options.onSaveError?.(err);
+                } catch (callbackError) {
+                    console.warn("[Walrus Memory] onSaveError threw:", callbackError);
+                } finally {
+                    notingFailure -= 1;
+                }
+            });
         pendingSaves.add(savePromise);
         savePromise.finally(() => pendingSaves.delete(savePromise));
     }
@@ -104,31 +129,52 @@ export function withMemWal(
             // ============================================================
             // BEFORE: Search memories + inject into prompt
             // ============================================================
-            transformParams: async ({ params }: any) => {
+            transformParams: async ({ params }: { params: { prompt?: unknown } }) => {
                 try {
+                    const turnKey = lastUserTurnKey(params.prompt);
+                    if (!turnKey) return params;
+
+                    // Tool steps reuse this turn, including a recall that
+                    // matched nothing. A user message always recalls again, so
+                    // a later fact is not stuck behind the first result.
+                    if (
+                        cachedRecall &&
+                        cachedRecall.key === turnKey &&
+                        !isPromptEndingWithUser(params.prompt)
+                    ) {
+                        if (!cachedRecall.context) return params;
+                        return {
+                            ...params,
+                            prompt: injectMemoryContext(params.prompt, cachedRecall.context),
+                        };
+                    }
+
                     const lastUserMessage = findLastUserMessage(params.prompt);
                     if (!lastUserMessage) return params;
 
                     const recallResult = await memwal.recall(lastUserMessage, maxMemories);
-
-                    // Filter by minimum relevance (distance < 1 - minRelevance)
                     const relevant = recallResult.results.filter(
                         (m: RecallMemory) => (1 - m.distance) >= minRelevance
                     );
-
-                    if (relevant.length === 0) return params;
+                    if (relevant.length === 0) {
+                        cachedRecall = { key: turnKey, context: "" };
+                        return params;
+                    }
 
                     const memoryContext = formatUntrustedMemories(relevant);
-                    const enrichedPrompt = injectMemoryContext(
-                        params.prompt,
-                        memoryContext
-                    );
-
+                    cachedRecall = { key: turnKey, context: memoryContext };
                     log(`🔍 Found ${relevant.length} relevant memories`);
-
-                    return { ...params, prompt: enrichedPrompt };
+                    return {
+                        ...params,
+                        prompt: injectMemoryContext(params.prompt, memoryContext),
+                    };
                 } catch (error) {
-                    log("Memory search failed:", error);
+                    console.warn("[Walrus Memory] Recall failed during transformParams:", error);
+                    try {
+                        options.onRecallError?.(error);
+                    } catch (cbError) {
+                        console.warn("[Walrus Memory] onRecallError callback threw:", cbError);
+                    }
                     return params;
                 }
             },
@@ -139,7 +185,9 @@ export function withMemWal(
             wrapGenerate: async ({ doGenerate, params }: any) => {
                 const result = await doGenerate();
 
-                if (autoSave) {
+                // Only auto-save on the first step of a user turn, not on
+                // intermediate tool steps where the last message is tool/assistant.
+                if (autoSave && isPromptEndingWithUser(params.prompt)) {
                     const userMessage = findLastUserMessage(params.prompt);
                     if (userMessage) {
                         saveInBackground(userMessage);
@@ -153,7 +201,9 @@ export function withMemWal(
             wrapStream: async ({ doStream, params }: any) => {
                 const result = await doStream();
 
-                if (autoSave) {
+                // Only auto-save on the first step of a user turn, not on
+                // intermediate tool steps where the last message is tool/assistant.
+                if (autoSave && isPromptEndingWithUser(params.prompt)) {
                     const userMessage = findLastUserMessage(params.prompt);
                     if (userMessage) {
                         saveInBackground(userMessage);
@@ -170,7 +220,16 @@ export function withMemWal(
     // Lets short-lived callers await outstanding auto-save writes before
     // exiting, e.g. `await model.flush()` right before `process.exit()`.
     wrapped.flush = async (): Promise<void> => {
-        await Promise.allSettled([...pendingSaves]);
+        if (notingFailure === 0) {
+            await Promise.allSettled([...pendingSaves]);
+        }
+        if (notingFailure > 0 || saveFailures.length === 0) return;
+        const errors = saveFailures.splice(0, saveFailures.length);
+        const failure = new Error(
+            `MemWal auto-save failed (${errors.length} call(s))`,
+        );
+        (failure as Error & { cause?: unknown }).cause = errors[0];
+        throw failure;
     };
 
     return wrapped;
@@ -196,6 +255,23 @@ function findLastUserMessage(
                 return textParts.join(" ") || null;
             }
         }
+    }
+    return null;
+}
+
+function isPromptEndingWithUser(prompt: unknown): boolean {
+    if (!Array.isArray(prompt) || prompt.length === 0) return false;
+    const lastMsg = prompt[prompt.length - 1] as { role?: string; content?: unknown };
+    return lastMsg?.role === "user";
+}
+
+function lastUserTurnKey(prompt: unknown): string | null {
+    if (!Array.isArray(prompt)) return null;
+    for (let i = prompt.length - 1; i >= 0; i--) {
+        const msg = prompt[i] as { role?: string };
+        if (msg?.role !== "user") continue;
+        const text = findLastUserMessage(prompt);
+        return text ? `${i}\0${text}` : null;
     }
     return null;
 }

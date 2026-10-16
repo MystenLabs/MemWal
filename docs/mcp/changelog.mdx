@@ -31,6 +31,12 @@ answer: >-
   The latest published MCP package on npm `latest` is 0.0.13. This branch's in-tree plugin launcher installs `@mysten-incubation/memwal-mcp@0.0.14-dev.6` because npm has no `0.0.14` yet — pinning the unpublished version would fail to resolve. 0.0.14 (unreleased) stops cold start from advertising tools an older relayer does not serve, bounds stalled relayer calls, honours `retry_after` on 429, and returns `memwal_remember` at accept by default (`MEMWAL_MCP_REMEMBER_WAIT_MS=0`; set `90000` to wait for `blob_id`). 0.0.13 stopped reporting a timed-out write as safe to retry, answers a rejected delegate key with `memwal_login` instead of a dropped-connection story, backs off on handshake 429, and pinned plugin launchers to `@0.0.13` so npx cannot keep a cached 0.0.5.
 ---
 
+## Unreleased
+
+### Fixed
+
+- `memwal_login` with `freshKey: true` closes the listener already bound. The replaced listener cannot time out into a failure notice, and a late callback cannot save credentials or clear the new write-ahead record. The tool result names the abandoned public key and address so it can be removed from the dashboard. (WALM-645)
+
 ## 0.0.14
 
 Unreleased package version. The plugin's launcher installs `@mysten-incubation/memwal-mcp@0.0.14-dev.6` (the published `dev` dist-tag), named by `mcpPackageVersion` in `plugin/plugin.json`, until `0.0.14` exists on npm. Drop that key in the same release that publishes it, so the launcher goes back to the plugin's own version, or plugin installs stay on the dev build.

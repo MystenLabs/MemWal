@@ -24,10 +24,19 @@ export {
 
 // Delegate key utilities (no @mysten/sui dependency)
 export { delegateKeyToSuiAddress, delegateKeyToPublicKey } from "./utils.js";
+// Request deadlines. `isTimeoutError` tells a blown budget apart from a
+// transport failure; `phase` says which round-trip blew it.
+export {
+    isTimeoutError,
+    DEFAULT_RECALL_TIMEOUT_MS,
+    DEFAULT_PREFLIGHT_TIMEOUT_MS,
+} from "./utils.js";
+export type { TimeoutError } from "./utils.js";
 export {
     estimateTokens,
     truncateToTokenBudget,
     applyTokenBudget,
+    validateMaxTokens,
     CHARS_PER_TOKEN,
 } from "./tokens.js";
 export type { TokenCounter } from "./tokens.js";
@@ -62,6 +71,7 @@ export type {
     RestoreResult,
     RememberBulkItem,
     RememberBulkOptions,
+    RememberBulkAsyncOptions,
     RememberBulkAcceptedResult,
     RememberBulkStatusItem,
     RememberBulkStatusResult,
@@ -70,6 +80,8 @@ export type {
     RememberManualOptions,
     RememberManualResult,
     RecallManualOptions,
+    RecallManualHitResult,
+    RecallManualMemoryResult,
     RecallManualResult,
     RecallManualHit,
     MinSupportedSdk,
@@ -79,4 +91,8 @@ export type {
     NamespaceSummary,
     NamespacesResult,
     ListNamespacesOptions,
+    MemorySummary,
+    DeletedMemorySummary,
+    MemoriesResult,
+    ListMemoriesOptions,
 } from "./types.js";

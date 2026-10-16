@@ -3,13 +3,13 @@
  *
  * User-side flow where the SDK handles everything locally:
  * - SEAL encrypt/decrypt via @mysten/seal (user's own Sui wallet)
- * - Walrus upload/download via @mysten/walrus
+ * - Walrus upload is done by the relayer; downloads use the HTTP aggregator
  * - Embedding via OpenAI-compatible API (user's own key)
  * - Vector registration via Walrus Memory server (Ed25519 signed)
  *
  * @example
  * ```typescript
- * import { MemWalManual } from "@mysten-incubation/memwal"
+ * import { MemWalManual } from "@mysten-incubation/memwal/manual"
  *
  * const memwal = MemWalManual.create({
  *     key: process.env.MEMWAL_DELEGATE_KEY!,      // Ed25519 delegate key
@@ -32,7 +32,7 @@ import type {
     MemWalManualConfig,
     WalletSigner,
     RememberManualResult,
-    RecallManualResult,
+    RecallManualMemoryResult,
     RecallManualMemory,
     MemWalManualRecallOptions,
     RestoreResult,
@@ -46,11 +46,19 @@ import {
     normalizePrivateKey,
     u64ToLeHex,
     normalizeServerUrl,
+    assertNonBlankText,
     sanitizeServerError,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
+    fetchWithDeadline,
+    DEFAULT_PREFLIGHT_TIMEOUT_MS,
+    RESTORE_REQUEST_TIMEOUT_MS,
+    deadlineSignal,
+    requestTimeoutError,
 } from "./utils.js";
 import { assertCompatibleRelayer, compatibilityErrorFromStatus } from "./compatibility.js";
+import { resolveLimitOrOptions } from "./recall-args.js";
+import { createDefaultSuiClient } from "./sui-client.js";
 
 // ============================================================
 // Constants
@@ -143,9 +151,27 @@ function bytesToBase64(bytes: Uint8Array): string {
     return btoa(chunks.join(""));
 }
 
+async function readSuccessJson<T>(res: Response): Promise<T> {
+    const raw = await res.text();
+    if (raw.trim() === "") {
+        throw Object.assign(new Error(`MemWal: HTTP ${res.status} response had an empty body; expected JSON`), { status: res.status });
+    }
+    try {
+        return JSON.parse(raw) as T;
+    } catch (err) {
+        if (err instanceof SyntaxError) {
+            throw Object.assign(new Error(`MemWal: HTTP ${res.status} response was not JSON`), { status: res.status });
+        }
+        throw err;
+    }
+}
+
 // ============================================================
 // MemWalManual Client
 // ============================================================
+
+const SEAL_SESSION_TTL_MIN = 5;
+const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
 
 export class MemWalManual {
     private delegatePrivateKey: Uint8Array;
@@ -156,11 +182,14 @@ export class MemWalManual {
     private namespace: string;
     private relayerVersionMetadata: RelayerVersionMetadata | null = null;
     private compatibilityPromise: Promise<RelayerVersionMetadata> | null = null;
+    /** Per-round-trip budget for the compatibility preflight (WALM-598). */
+    private preflightTimeoutMs: number;
+    private sessionCache: { bytes: string; expiresAt: number } | null = null;
+    private sessionBuildPromise: Promise<string> | null = null;
 
     // Lazily initialized heavy clients (typed as any to avoid peer dep compile errors)
     private _suiClient: any = null;
     private _sealClient: any = null;
-    private _walrusClient: any = null;
     private _keypair: any = null;
 
     private constructor(config: MemWalManualConfig) {
@@ -174,18 +203,33 @@ export class MemWalManual {
             typeof config.key === "string"
                 ? hexToBytes(normalizePrivateKey(config.key))
                 : config.key;
+        if (!(this.delegatePrivateKey instanceof Uint8Array) || this.delegatePrivateKey.length !== 32) {
+            const got = this.delegatePrivateKey instanceof Uint8Array
+                ? String(this.delegatePrivateKey.length)
+                : typeof this.delegatePrivateKey;
+            throw new Error(`Ed25519 seed must be exactly 32 bytes, got ${got}`);
+        }
         // LOW-22: default to HTTPS; warn (do not throw) on plaintext HTTP
         // against non-localhost hosts.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
         this.walletSigner = config.walletSigner ?? null;
+        if (typeof config.accountId !== "string" || config.accountId.trim().length === 0) {
+            throw new TypeError(
+                `MemWalManual.create: "accountId" is required (Walrus Memory object ID, e.g. 0x...); got ${config.accountId}`,
+            );
+        }
         this.config = config;
+        if (config.namespace !== undefined && !config.namespace) {
+            throw new Error("namespace cannot be empty");
+        }
         this.namespace = config.namespace ?? "default";
+        this.preflightTimeoutMs = config.preflightTimeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS;
     }
 
     /**
      * Create a new MemWalManual client.
      *
-     * Requires peer dependencies: @mysten/sui, @mysten/seal, @mysten/walrus
+     * Requires peer dependencies: @mysten/sui, @mysten/seal
      *
      * @param config.key - Ed25519 delegate private key (hex) for server auth
      * @param config.suiPrivateKey - Sui private key (bech32) for SEAL + Walrus (OR walletSigner)
@@ -213,6 +257,74 @@ export class MemWalManual {
         }
         this.relayerVersionMetadata = null;
         this.compatibilityPromise = null;
+        this.sessionCache = null;
+        this.sessionBuildPromise = null;
+    }
+
+    /**
+     * Build an ephemeral SEAL SessionKey, sign its personal message, and export
+     * it as a base64-encoded JSON envelope suitable for `x-seal-session`.
+     * Memoised until 30s before expiration (5m TTL).
+     */
+    async buildSealSession(): Promise<string> {
+        // Fast path: cached session still fresh.
+        if (this.sessionCache && Date.now() < this.sessionCache.expiresAt) {
+            return this.sessionCache.bytes;
+        }
+        // Single-flight: concurrent requests share one build.
+        if (this.sessionBuildPromise) return this.sessionBuildPromise;
+
+        this.sessionBuildPromise = this.buildSealSessionInner().finally(() => {
+            this.sessionBuildPromise = null;
+        });
+        return this.sessionBuildPromise;
+    }
+
+    private async buildSealSessionInner(): Promise<string> {
+        // Same key MemWal uses. An owner wallet session prompts on every
+        // refresh and is broader than the delegate this client already holds.
+        // Dynamic imports: @mysten/sui and @mysten/seal are optional peers.
+        // Server-mode MemWal must still load when they are not installed.
+        const { Ed25519Keypair } = await import("@mysten/sui/keypairs/ed25519");
+        const keypair = Ed25519Keypair.fromSecretKey(this.delegatePrivateKey);
+        const suiClient = await this.getSuiClient();
+        const { SessionKey } = await import("@mysten/seal");
+
+        const session = await SessionKey.create({
+            address: keypair.getPublicKey().toSuiAddress(),
+            packageId: this.config.packageId,
+            ttlMin: SEAL_SESSION_TTL_MIN,
+            signer: keypair,
+            suiClient,
+        });
+
+        const personalMessage = session.getPersonalMessage();
+        const signResult = await keypair.signPersonalMessage(personalMessage);
+        await session.setPersonalMessageSignature(signResult.signature);
+
+        const exported = session.export();
+        const jsonStr = JSON.stringify({
+            address: exported.address,
+            packageId: exported.packageId,
+            mvrName: exported.mvrName,
+            creationTimeMs: exported.creationTimeMs,
+            ttlMin: exported.ttlMin,
+            personalMessageSignature: exported.personalMessageSignature,
+            sessionKey: exported.sessionKey,
+        });
+        const bytes =
+            typeof btoa === "function"
+                ? btoa(jsonStr)
+                : Buffer.from(jsonStr, "utf8").toString("base64");
+
+        this.sessionCache = {
+            bytes,
+            expiresAt:
+                Date.now() +
+                SEAL_SESSION_TTL_MIN * 60_000 -
+                SEAL_SESSION_SAFETY_MARGIN_MS,
+        };
+        return bytes;
     }
 
     /**
@@ -236,30 +348,10 @@ export class MemWalManual {
 
     private async getSuiClient() {
         if (!this._suiClient) {
-            // Prefer externally-provided client (e.g. from dapp-kit's useSuiClient())
-            if (this.config.suiClient) {
-                this._suiClient = this.config.suiClient;
-            } else {
-                // Fallback: create client via dynamic import
-                // @ts-ignore — optional peer dependency
-                const mod = await import("@mysten/sui/client");
-                const SuiClient = (mod as any).SuiClient;
-                if (typeof SuiClient !== "function") {
-                    throw new Error(
-                        "SuiClient not found in @mysten/sui/client. " +
-                            "For @mysten/sui v2.6.0+, pass suiClient in config " +
-                            "(e.g. from dapp-kit's useSuiClient())"
-                    );
-                }
-                const network = this.config.suiNetwork ?? "mainnet";
-                const urls: Record<string, string> = {
-                    testnet: "https://fullnode.testnet.sui.io:443",
-                    mainnet: "https://fullnode.mainnet.sui.io:443",
-                };
-                this._suiClient = new SuiClient({
-                    url: urls[network] ?? urls.mainnet,
-                });
-            }
+            // Prefer externally-provided client (e.g. from dapp-kit's useSuiClient()),
+            // otherwise gRPC against the public fullnode for suiNetwork.
+            this._suiClient =
+                this.config.suiClient ?? await createDefaultSuiClient(this.config.suiNetwork);
         }
         return this._suiClient;
     }
@@ -318,28 +410,6 @@ export class MemWalManual {
         return totalWeight > 0 ? Math.min(2, totalWeight) : 2;
     }
 
-    private async getWalrusClient() {
-        if (!this._walrusClient) {
-            // @ts-ignore — optional peer dependency
-            const { WalrusClient } = await import("@mysten/walrus");
-            const suiClient = await this.getSuiClient();
-            const network = this.config.suiNetwork ?? "mainnet";
-            const uploadRelayHost =
-                network === "testnet"
-                    ? "https://upload-relay.testnet.walrus.space"
-                    : "https://upload-relay.mainnet.walrus.space";
-            this._walrusClient = new WalrusClient({
-                network: network as any,
-                suiClient,
-                uploadRelay: {
-                    host: uploadRelayHost,
-                    sendTip: { max: 10_000_000 },
-                },
-            });
-        }
-        return this._walrusClient;
-    }
-
     // ============================================================
     // Core Manual API
     // ============================================================
@@ -351,7 +421,7 @@ export class MemWalManual {
      * 3. Send {encrypted_data, vector} to server — server handles Walrus upload relay
      */
     async rememberManual(text: string, namespace?: string): Promise<RememberManualResult> {
-        if (!text) throw new Error("Text cannot be empty");
+        assertNonBlankText(text);
 
         const ns = namespace ?? this.namespace;
 
@@ -378,18 +448,30 @@ export class MemWalManual {
      * 2. Search server for matching vectors
      * 3. Download blobs from Walrus
      * 4. SEAL decrypt each blob
+     *
+     * `recallManual(query, { limit?, namespace? })` is valid.
+     * `recallManual(query, namespace)` throws `TypeError`.
      */
-    async recallManual(query: string, limit?: number, namespace?: string): Promise<RecallManualResult>;
-    async recallManual(query: string, options?: MemWalManualRecallOptions): Promise<RecallManualResult>;
+    async recallManual(query: string, options: MemWalManualRecallOptions): Promise<RecallManualMemoryResult>;
+    async recallManual(query: string, limit?: number, namespace?: string): Promise<RecallManualMemoryResult>;
     async recallManual(
         query: string,
         limitOrOptions: number | MemWalManualRecallOptions = 10,
         namespace?: string
-    ): Promise<RecallManualResult> {
+    ): Promise<RecallManualMemoryResult> {
         if (!query.trim()) throw new Error("Query cannot be empty");
 
-        const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions, namespace } : limitOrOptions;
-        const limit = options.limit ?? 10;
+        const options = resolveLimitOrOptions(
+            "recallManual",
+            limitOrOptions,
+            namespace,
+        );
+        const limit = options.limit !== undefined ? options.limit : 10;
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
         const ns = options.namespace ?? this.namespace;
 
         // Step 1: Embed query
@@ -593,7 +675,7 @@ export class MemWalManual {
             throw new Error(`Embedding API error (${resp.status}): ${errText}`);
         }
 
-        const data = (await resp.json()) as { data: { embedding: number[] }[] };
+        const data = await readSuccessJson<{ data: { embedding: number[] }[] }>(resp);
         if (!data.data?.[0]?.embedding) {
             throw new Error("Embedding API returned no data");
         }
@@ -734,45 +816,12 @@ export class MemWalManual {
     }
 
     // ============================================================
-    // Internal: Walrus Upload/Download
+    // Internal: Walrus download
     // ============================================================
 
-    private async walrusUpload(data: Uint8Array): Promise<string> {
-        // Direct HTTP PUT to Walrus publisher (works in both browser and Node.js,
-        // unlike @mysten/walrus SDK which uses WASM and requires Node.js)
-        const network = this.config.suiNetwork ?? "mainnet";
-        const defaultPublisher =
-            network === "testnet"
-                ? "https://publisher.walrus-testnet.walrus.space"
-                : "https://publisher.walrus-mainnet.walrus.space";
-        const publisherUrl = this.config.walrusPublisherUrl ?? defaultPublisher;
-        const epochs = this.config.walrusEpochs ?? 50;
-
-        const resp = await fetch(`${publisherUrl}/v1/blobs?epochs=${epochs}&deletable=true`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/octet-stream" },
-            body: data as unknown as BodyInit,
-        });
-
-        if (!resp.ok) {
-            const errText = await resp.text();
-            throw new Error(`Walrus upload failed (${resp.status}): ${errText}`);
-        }
-
-        const result = (await resp.json()) as any;
-        // Response can be { newlyCreated: { blobObject: { blobId } } }
-        // or { alreadyCertified: { blobId } }
-        const blobId = result.newlyCreated?.blobObject?.blobId ?? result.alreadyCertified?.blobId;
-
-        if (!blobId) {
-            throw new Error(`Walrus upload: unexpected response: ${JSON.stringify(result)}`);
-        }
-        return blobId;
-    }
 
     private async walrusDownload(blobId: string): Promise<Uint8Array> {
-        // Direct HTTP fetch to Walrus aggregator (works in both browser and Node.js,
-        // unlike @mysten/walrus SDK which requires Node.js APIs)
+        // Direct HTTP fetch to the Walrus aggregator. Upload goes through the relayer.
         const network = this.config.suiNetwork ?? "mainnet";
         const defaultAggregator =
             network === "testnet"
@@ -810,24 +859,32 @@ export class MemWalManual {
     }
 
     private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
-        const versionRes = await fetch(`${this.serverUrl}/version`, {
-            method: "GET",
-        });
+        // Bounded like the relayer-mode client's preflight: these run inside
+        // whatever signed request triggered them.
+        const versionRes = await fetchWithDeadline(
+            `${this.serverUrl}/version`,
+            { method: "GET" },
+            this.preflightTimeoutMs,
+            "preflight GET /version",
+        );
         let body: Partial<RelayerVersionMetadata>;
 
         if (versionRes.ok) {
-            body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
+            body = await readSuccessJson<Partial<RelayerVersionMetadata>>(versionRes);
         } else if (versionRes.status === 404 || versionRes.status === 405) {
-            const healthRes = await fetch(`${this.serverUrl}/health`, {
-                method: "GET",
-            });
+            const healthRes = await fetchWithDeadline(
+                `${this.serverUrl}/health`,
+                { method: "GET" },
+                this.preflightTimeoutMs,
+                "preflight GET /health",
+            );
             if (!healthRes.ok) {
                 throw new Error(
                     `Walrus Memory compatibility check failed: GET /version returned ` +
                         `${versionRes.status}, and GET /health returned ${healthRes.status}`
                 );
             }
-            body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
+            body = await readSuccessJson<Partial<RelayerVersionMetadata>>(healthRes);
         } else {
             throw new Error(`Walrus Memory compatibility check failed: GET /version returned ${versionRes.status}`);
         }
@@ -845,7 +902,12 @@ export class MemWalManual {
      *
      * Headers sent: x-public-key, x-signature, x-timestamp, x-nonce, x-account-id.
      */
-    private async signedRequest<T>(method: string, path: string, body: object): Promise<T> {
+    private async signedRequest<T>(
+        method: string,
+        path: string,
+        body: object,
+        options: { timeoutMs?: number; signal?: AbortSignal; includeSealSession?: boolean } = {},
+    ): Promise<T> {
         await this.ensureCompatibleRelayer();
         const ed = await import("@noble/ed25519");
 
@@ -864,53 +926,68 @@ export class MemWalManual {
         const signature = await ed.signAsync(msgBytes, this.delegatePrivateKey);
         const publicKey = await this.getDelegatePublicKey();
 
-        const url = `${this.serverUrl}${path}`;
-        const res = await fetch(url, {
-            method,
-            headers: {
-                "Content-Type": "application/json",
-                "x-public-key": bytesToHex(publicKey),
-                "x-signature": bytesToHex(signature),
-                "x-timestamp": timestamp,
-                "x-nonce": nonce,
-                "x-account-id": this.config.accountId,
-            },
-            body: bodyStr,
-        });
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "x-public-key": bytesToHex(publicKey),
+            "x-signature": bytesToHex(signature),
+            "x-timestamp": timestamp,
+            "x-nonce": nonce,
+            "x-account-id": this.config.accountId,
+        };
 
-        if (!res.ok) {
-            // LOW-26: sanitize server error bodies before re-throwing.
-            const raw = await res.text();
-            const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
-            if (compatibilityError) throw compatibilityError;
-
-            // Surface a stale-timestamp rejection (401 + x-auth-error) as an
-            // actionable clock-drift error rather than an opaque server error.
-            const clockDriftError = clockDriftErrorFromResponse(res);
-            if (clockDriftError) throw clockDriftError;
-
-            const { message: sanitized, serverCode } = sanitizeServerError(
-                res.status,
-                raw,
-                res.headers.get("x-auth-error"),
-            );
-            const err = new Error(sanitized) as Error & {
-                status?: number;
-                serverCode?: string;
-                retryAfterSeconds?: number;
-                cause?: string;
-            };
-            err.status = res.status;
-            if (serverCode) err.serverCode = serverCode;
-            const retryAfter = Number(res.headers.get("retry-after"));
-            if (Number.isFinite(retryAfter) && retryAfter > 0) {
-                err.retryAfterSeconds = retryAfter;
-            }
-            err.cause = raw;
-            throw err;
+        if (options.includeSealSession) {
+            headers["x-seal-session"] = await this.buildSealSession();
         }
 
-        return res.json() as Promise<T>;
+        const url = `${this.serverUrl}${path}`;
+        const deadline = options.timeoutMs ? deadlineSignal(options.timeoutMs, options.signal) : undefined;
+        try {
+            const res = await fetch(url, {
+                method,
+                headers,
+                body: bodyStr,
+                signal: deadline?.signal ?? options.signal,
+            });
+
+            if (!res.ok) {
+                const raw = await res.text();
+                const compatibilityError = compatibilityErrorFromStatus(res.status, raw);
+                if (compatibilityError) throw compatibilityError;
+
+                const clockDriftError = clockDriftErrorFromResponse(res);
+                if (clockDriftError) throw clockDriftError;
+
+                const { message: sanitized, serverCode } = sanitizeServerError(
+                    res.status,
+                    raw,
+                    res.headers.get("x-auth-error"),
+                );
+                const err = new Error(sanitized) as Error & {
+                    status?: number;
+                    serverCode?: string;
+                    retryAfterSeconds?: number;
+                    cause?: string;
+                };
+                err.status = res.status;
+                if (serverCode) err.serverCode = serverCode;
+                const retryAfter = Number(res.headers.get("retry-after"));
+                if (Number.isFinite(retryAfter) && retryAfter > 0) {
+                    err.retryAfterSeconds = retryAfter;
+                }
+                err.cause = raw;
+                throw err;
+            }
+
+            return await readSuccessJson<T>(res);
+        } catch (err) {
+            const status = err && typeof err === "object" && "status" in err ? err.status : undefined;
+            if (deadline?.timedOut() && typeof status !== "number") {
+                throw requestTimeoutError(method, url, options.timeoutMs!);
+            }
+            throw err;
+        } finally {
+            deadline?.dispose();
+        }
     }
 
     // ============================================================
@@ -918,17 +995,34 @@ export class MemWalManual {
     // ============================================================
 
     /**
-     * Restore a namespace — server downloads all blobs from Walrus,
-     * decrypts with delegate key, re-embeds, and re-indexes.
+     * Restore a namespace. The server downloads the blobs, decrypts them with
+     * the delegate key, and re-indexes them.
+     *
+     * Sends `x-seal-session` built from the delegate key, not the owner
+     * wallet. That session lets the relayer decrypt for this restore only,
+     * for the usual short TTL.
      *
      * @param namespace - Namespace to restore
      * @returns RestoreResult with count of restored entries
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
-        const result = await this.signedRequest<RestoreResult>("POST", "/api/restore", {
-            namespace,
-            limit,
-        });
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
+        const result = await this.signedRequest<RestoreResult>(
+            "POST",
+            "/api/restore",
+            {
+                namespace,
+                limit,
+            },
+            {
+                includeSealSession: true,
+                timeoutMs: RESTORE_REQUEST_TIMEOUT_MS,
+            },
+        );
         // Relayers older than WALM-319 omit `truncated` entirely — treat
         // "not present" as "not known to be truncated" rather than drop
         // the field or require every relayer version to send it.

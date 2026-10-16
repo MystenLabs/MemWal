@@ -4,7 +4,28 @@
 
 ### Fixed
 
+- `createAccount`, `addDelegateKey`, `removeDelegateKey`, and `MemWalManual` work again without a caller-supplied `suiClient`. They looked for `SuiClient` in `@mysten/sui/client`, which current `@mysten/sui` no longer exports, and threw `SuiClient not found`. The default is now `SuiGrpcClient` against the public fullnode for `suiNetwork`, because those fullnodes no longer serve JSON-RPC. An explicit `suiClient` still wins. (WALM-164, #300)
+- `remember`, `rememberAsync`, and `rememberAndWait` reject a non-string text argument with `TypeError` before signing. An object used to be sent as `text` and the relayer answered 422. (#1058)
+- `getRememberStatus` and `waitForRememberJob` reject a job id outside `[A-Za-z0-9_-]+` before signing. `.`, `..`, `\`, and `%2e%2e` used to pass a denylist and be rewritten by `fetch` after the path was signed. Valid UUID job ids are unchanged. (#1087, #1216)
+- `/manual` no longer imports `@mysten/walrus`. `getWalrusClient()` and `walrusUpload()` had no callers, but the dynamic import still pulled the WASM client into Turbopack and Vite. Downloads stay on the HTTP aggregator. (WALM-145, #330)
+- `MemWal.recallManual()` is typed as `RecallManualHitResult` (blob id and distance, no text) and `MemWalManual.recallManual()` as `RecallManualMemoryResult` (decrypted text). `RecallManualResult` remains a deprecated alias of those two result types, not a mixed-item array. (WALM-163, #298)
+- `MemWalMock.listNamespaces` rejects a non-positive or non-integer `limit` with `limit must be positive`, matching the relayer. `limit: 0` used to return `has_more: true` and `next_cursor: null`, so the documented pagination loop never finished, and `limit: -1` silently dropped the last namespace. (#1144, #1145)
+- `MemWalMock.rememberBulkAsync` rejects an empty or non-array batch with the same error as `MemWal`. (#1146)
+- `MemWalMock` honors `idempotencyKey`. A retry of the same text and namespace returns the original job, a different payload throws, and `forget` / `clear` release the key so the text can be written again. (#1147)
+- `MemWalMock.recall({ sort: "recent" })` orders a bounded semantic window (5× `limit`, at least `limit`, at most 50) by write time before truncating. Relevance order is unchanged. (#1124)
+- Positional `recall(query, options, namespace)` uses that namespace when `options.namespace` is omitted, on both `MemWal` and `MemWalMock`. An explicit `options.namespace` still wins. (#1038)
+- `remember(text, { idempotencyKey })` and `rememberAndWait(text, { timeoutMs }, { idempotencyKey })` treat a plain object in the namespace slot as options. A third options argument is merged, and its fields win. That call used to send the object as the namespace, or drop the third argument and mint a second blob. An explicit string namespace still wins. (#1142)
+- `getRememberStatus("")` returns `not_found` without a request, and `waitForRememberJob("")` fails immediately with status 404. `GET /api/remember/` is not a route; the empty 404 body used to throw `SyntaxError`, and the wait treated that as transient until timeout. (#1087)
+- `waitForRememberJobs` settles every slot when the same job id is listed more than once. `indexOf` plus a `Set` of ids left the later copies as `timeout`. (#1121, #1084)
+- `rememberBulkAsync` rejects more than 20 items before signing, matching the relayer's `MAX_BULK_ITEMS`. (#1104)
+- Remember-job status reads (`getRememberStatus`, `waitForRememberJob`, `getRememberBulkStatus`) no longer attach `x-seal-session`. Status is metadata and does not decrypt. (#1135)
+- Bulk status includes each job's `namespace`. `waitForRememberJobs(jobIds)` uses that value when the caller did not pass one, instead of the client default. A caller-supplied namespace still wins. (#1136)
+- `getPublicKeyHex()` and any request after `destroy()` throw, including a read already in flight. `getPublicKeyHex()` used to resolve to the zeroed key, or to the well-known key of the wiped seed, and `remember()` still sent `GET /version` before noticing the client was destroyed. (#1090)
+- `normalizeServerUrl` no longer warns about plaintext HTTP for IPv6 loopback. `URL.hostname` keeps the brackets on `[::1]`, so the `::1` exemption never matched `http://[::1]:8000`. (#1128)
+- `remember`, `rememberBulk`, `analyze`, and `embed` reject whitespace-only text immediately, with the same messages the relayer returns. A blank body used to be accepted and then sit until the client timed out. (#1129)
+- A 401 `AUTH_REJECTED` now says a wallet address is not a MemWal account ID. The relayer still returns one 401 for every credential failure, so the message names the mix-up instead of revealing which check failed. (#1132)
 - `rememberBulkAndWait` / `waitForRememberJobs` no longer resolve a batch they could not read as if it were still uploading. The status endpoint counts against the delegate-key budget, and a 429 on every poll used to be retried silently until the wait ran out, leaving each item as `timeout` with "polling timed out", even when nothing had been stored. When no poll got through, the wait now makes one confirming read. If that is rate-limited too, it throws `MemWalRateLimited` (`status: 429`, `jobIds`, `retryAfterSeconds`). An item still unsettled at the deadline names its last known status, or says no read got through. (WALM-671, #967)
+- A `rememberAndWait` / `waitForRememberJob` that runs out of time now raises `MemWalRememberJobTimeout` (still `status: 504`) carrying `lastStatus` and `serverError`, the last state the relayer reported. Under upload congestion the relayer keeps a job `running` for up to ~25 minutes and says so, but the 504 used to drop that, so a job that was still retrying looked dead and callers dropped their idempotency key to force a new paid write. When no poll got through, the message says the state is unknown instead. (WALM-670, #966)
 
 ## 0.1.9
 
@@ -28,12 +49,17 @@
 
 ### Added
 
+- `MemWalConfig.recallTimeoutMs` and `RecallOptions.timeoutMs` make recall's abort budget configurable (default: 15000, unchanged). `MemWalConfig.preflightTimeoutMs` / `MemWalManualConfig.preflightTimeoutMs` bound each preflight round-trip (default: 5000).
+- `isTimeoutError()` is true for the `MemWalRequestTimeout` recall throws (status 504) and for a preflight `TimeoutError` whose `phase` names the stalled round-trip.
 - `restore()` results include `failed` (required like `truncated`; SDK defaults omitted to `0`) for permanent decrypt/UTF-8 failures instead of folding them into `skipped` or dropping them silently.
 
 ### Fixed
 
 - Hash request bodies with `@noble/hashes` instead of WebCrypto-or-`node:crypto`, so the package no longer imports a Node builtin on a browser-reachable path. Vite externalises such an import without warning: the app builds clean and the browser crashes the first time the path runs. The fallback could never have helped a browser anyway — `crypto.subtle` is absent precisely when the page is not a secure context, where `node:crypto` is absent too — so it only served Node <19 while being the sole source of the exposure. `sha256hex` sits on the signed-request path, so every remember and recall reached it. (#322, WALM-136)
 - Declare `engines.node >= 20.0.0`, matching `memwal-mcp` and `openclaw-memory-memwal`. The SDK was the only published package without a floor. (WALM-599)
+- `recall()`'s timeout budget covers only the recall request. It previously started before `ensureCompatibleRelayer()` (`GET /version`, falling back to `GET /health`) and `buildSealSession()` (`GET /config` + Sui RPC), so a slow relayer preflight silently consumed the budget and recall raised an `AbortError` even when recall itself was healthy.
+- `GET /version`, `GET /health` and `GET /config` carry an `AbortSignal` and a deadline. They previously ran with neither and could hang indefinitely.
+- A request's deadline now covers the response body, not just its headers. `fetch()` resolves when headers arrive, so a server that then trickled the body could outlive the budget the caller named.
 - Empty-body 401s now use the same AUTH_REJECTED troubleshooting message as credential 401s instead of telling callers to run `memwal_login`. Headless SDK clients do not have that MCP tool.
 - `account.ts` and `manual.ts` PTBs use typed `tx.pure` helpers instead of the legacy untyped moveCall argument syntax that fails under modern `@mysten/sui`.
 - An explicit `sort` on `recall()`, `"relevance"` included, is now the order: the relayer ignores `scoringWeights` for that request, and weights re-rank only when `sort` is omitted. Setting both used to return neither order, so `sort: "recent"` stopped meaning newest-first once `scoringWeights` carried a recency weight. (WALM-470)
@@ -48,6 +74,7 @@
 ### Fixed
 
 - HTTP 503 with `x-auth-error: AUTH_UPSTREAM_UNAVAILABLE` is reported as a retryable credential-verification outage, not a sign-in failure. Other 503s keep the generic sanitized body. Empty-body 401s still point at `memwal_login`.
+- Positional `recall(query, namespace)` now throws `TypeError` instead of silently ignoring the namespace.
 
 ## 0.1.5
 

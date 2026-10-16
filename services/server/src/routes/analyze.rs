@@ -157,7 +157,7 @@ pub async fn analyze(
     Json(body): Json<AnalyzeRequest>,
 ) -> Result<(StatusCode, Json<AnalyzeAcceptedResponse>), AppError> {
     reject_if_writes_paused(state.config.writes_paused)?;
-    if body.text.is_empty() {
+    if text_is_blank(&body.text) {
         return Err(AppError::BadRequest("Text cannot be empty".into()));
     }
     // Reject oversize plaintext before spending an LLM call.
@@ -648,7 +648,7 @@ pub async fn analyze(
         let inserted = match sqlx::query(
             "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint)
              VALUES ($1, $2, $3, 'pending', $4, $4)
-             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
         )
         .bind(&job_id)
         .bind(owner)
@@ -670,9 +670,10 @@ pub async fn analyze(
         if inserted.rows_affected() == 0 {
             rate_limit::release_storage_quota(&state, std::slice::from_ref(&job_id)).await;
             let existing = sqlx::query_as::<_, (String, String, Option<String>)>(
-                "SELECT id, status, blob_id FROM remember_jobs WHERE owner = $1 AND idempotency_key = $2",
+                "SELECT id, status, blob_id FROM remember_jobs WHERE owner = $1 AND namespace = $2 AND idempotency_key = $3",
             )
             .bind(owner)
+            .bind(namespace)
             .bind(&idem_key)
             .fetch_optional(state.db.pool())
             .await;
@@ -777,7 +778,7 @@ pub async fn analyze(
                         let rewritten = match sqlx::query(
                             "INSERT INTO remember_jobs (id, owner, namespace, status, idempotency_key, request_fingerprint)
                              VALUES ($1, $2, $3, 'pending', $4, $4)
-                             ON CONFLICT (owner, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
+                             ON CONFLICT (owner, namespace, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING",
                         )
                         .bind(&job_id)
                         .bind(owner)
@@ -799,9 +800,10 @@ pub async fn analyze(
                         if rewritten.rows_affected() == 0 {
                             // Another retry won the key after we released it.
                             let winner = sqlx::query_scalar::<_, String>(
-                                "SELECT id FROM remember_jobs WHERE owner = $1 AND idempotency_key = $2",
+                                "SELECT id FROM remember_jobs WHERE owner = $1 AND namespace = $2 AND idempotency_key = $3",
                             )
                             .bind(owner)
+                            .bind(namespace)
                             .bind(&idem_key)
                             .fetch_optional(state.db.pool())
                             .await;

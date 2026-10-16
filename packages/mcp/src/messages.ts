@@ -25,6 +25,9 @@ export interface LoginPromptInfo {
     credentialsPath: string;
     /** True when credentials already exist, so signing in REPLACES them. */
     signedIn: boolean;
+    /** Set when `freshKey` dropped a pending delegate key. The write-ahead
+     * file no longer has it, so the prompt is the place that names it. */
+    discardedKey?: { publicKey: string; address: string };
 }
 
 /**
@@ -59,6 +62,15 @@ export function loginPrompt(info: LoginPromptInfo): string {
             ? [
                   ``,
                   `**Note:** you are already signed in. Completing this replaces the stored delegate key at \`${info.credentialsPath}\` with the new wallet's.`,
+              ]
+            : []),
+        ...(info.discardedKey
+            ? [
+                  ``,
+                  `**Abandoned key:** this sign-in replaced an unfinished delegate key.`,
+                  `Public key: \`${info.discardedKey.publicKey}\``,
+                  `Address: \`${info.discardedKey.address}\``,
+                  `If you already approved that key on-chain, remove it from the dashboard.`,
               ]
             : []),
         ``,
@@ -119,9 +131,10 @@ export function loginSuccessNotification(info: LoginSuccessInfo): string {
  * can prefix unconditionally.
  *
  * The advice splits on whether the user approved the wallet step. If they did,
- * the key is on-chain and in the write-ahead record (WALM-332), so a restart
- * reclaims it. Signing in again would reuse that same key, and the dashboard's
- * `add_delegate_key` aborts on a key that is already registered.
+ * the key is on-chain and in the write-ahead record (WALM-332). A restart
+ * retries that same key. `freshKey: true` mints a new one and closes the
+ * sign-in that is already open. A key already approved on-chain has to be
+ * removed from the dashboard; nothing else will use it.
  */
 export function loginFailureNotice(reason: string | null): string {
     if (!reason) return "";
@@ -131,8 +144,9 @@ export function loginFailureNotice(reason: string | null): string {
         `Reason: ${reason}`,
         "",
         "If you approved the wallet step, that key is registered and saved on this machine.",
-        "Restart the MCP client within 24 hours and it is reclaimed. Signing in again cannot",
-        "register the same key twice, and removing it from the dashboard abandons it.",
+        "A restart retries the same key. Call",
+        "`memwal_login` with `freshKey: true` to mint a new one, and remove it from the",
+        "dashboard if you already approved the old key on-chain.",
         "",
         "If you did not approve it, sign in again and open the new link straight away. A",
         "retry only helps once the MCP client is left running through the wallet prompt.",
