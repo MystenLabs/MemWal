@@ -46,12 +46,20 @@ Config:
 
 | Property | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `key` | `string` | Yes | — | Ed25519 delegate private key in hex |
+| `key` | `string \| Uint8Array` | Yes | — | Delegate private key: hex (optionally `0x`-prefixed), `suiprivkey1...`, or `Uint8Array` |
 | `accountId` | `string` | Yes | — | MemWalAccount object ID on Sui |
 | `serverUrl` | `string` | No | `https://relayer.memory.walrus.xyz` | Relayer URL |
 | `namespace` | `string` | No | `"default"` | Default namespace for memory isolation |
+| `requestTimeoutMs` | `number` | No | `30000` | Deadline for one relayer request. A non-positive or non-finite value falls back to `30000`. `restore` and `analyze` use their own 60s deadlines |
+| `recallTimeoutMs` | `number` | No | `15000` | Deadline for the `/api/recall` request. Per-call `RecallOptions.timeoutMs` overrides it |
+| `preflightTimeoutMs` | `number` | No | `5000` | Deadline for each preflight round-trip (`GET /version`, `GET /health`, `GET /config`) |
 
 For the full config surface, see [Configuration](/reference/configuration).
+
+`recallTimeoutMs` covers the recall request alone. The preflights that run
+before it (the relayer compatibility check and the SEAL session build) are
+bounded separately by `preflightTimeoutMs`, so a slow relayer preflight cannot
+consume recall's budget.
 
 ## `MemWal` Methods
 
@@ -84,9 +92,13 @@ Submit one memory and poll until the background job completes.
 }
 ```
 
+### `getRememberStatus(jobId): Promise<RememberJobStatus>`
+
+One `GET /api/remember/{jobId}`. Accepts 200 and 404 and returns the job state (`pending`, `running`, `uploaded`, `done`, `failed`, `not_found`) without polling. A job id that is empty or contains whitespace, `/`, `?`, or `#` is `not_found` and is not requested.
+
 ### `waitForRememberJob(jobId, opts?): Promise<RememberResult>`
 
-Poll a previously accepted remember job until it reaches `done` or `failed`.
+Poll a previously accepted remember job until it reaches `done` or `failed`. A job id outside `[A-Za-z0-9_-]+` fails immediately with status 404.
 
 ### `rememberBulk(items): Promise<RememberBulkAcceptedResult>`
 
@@ -111,11 +123,14 @@ Submit a bulk remember request and wait until every job reaches a terminal state
 Search for memories matching a natural language query, scoped to `owner + namespace`.
 
 - Preferred form: `recall({ query, limit?, topK?, namespace?, maxDistance?, sort?, scoringWeights? })`
-- `limit` defaults to `10`; `topK` is an alias and wins when both are set
-- Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`
+- `limit` defaults to `10` (relayer caps at `100`); `topK` is an alias and wins when both are set
+- Legacy positional forms still work: `recall(query)`, `recall(query, limit)`, `recall(query, limit, namespace)`, and `recall(query, options)`. `recall(query, namespace)` throws `TypeError`; namespace is not a valid second argument.
 - `maxDistance` filters weak matches client-side by dropping results where `distance >= maxDistance`
 - `sort` picks the ordering: `"relevance"` (default) or `"recent"` for newest-among-matches
 - `scoringWeights` blends recency and importance into the ranking (see [Ordering](#ordering) below)
+- `timeoutMs` overrides the client's `recallTimeoutMs` for this call. `0` disables the deadline. On expiry
+  recall throws `MemWalRequestTimeout` (status 504). `isTimeoutError(err)` is true for that error
+  and for a preflight `TimeoutError` whose `phase` names the stalled round-trip.
 
 **Returns:**
 
@@ -258,7 +273,7 @@ Use `analyzeAndWait(text, namespace?, opts?)` to wait for every extracted fact j
 
 Rebuild missing indexed entries for one namespace from Walrus. Incremental — only re-indexes blobs that aren't already in the local database.
 
-- `limit` defaults to `10`
+- `limit` defaults to `10` (relayer clamps to `[1, 100]`)
 
 **Returns:**
 
@@ -312,6 +327,54 @@ while (more) {
 }
 ```
 
+### `listMemories(options?): Promise<MemoriesResult>`
+
+List the memories this account holds, without a semantic query. Use it to confirm a write landed, count a namespace exactly, or find a bulk write that went to the wrong namespace. Returns metadata only, with no blob fetch or decryption; use `recall()` for content.
+
+- `options.cursor`: The previous page's `next_cursor`, to continue a walk or poll incrementally
+- `options.limit`: Page size, counted before the `namespace` filter; the relayer defaults to `100` and clamps to `500`
+- `options.namespace`: Keep only this namespace. Filtered client-side, so a page can be short or empty while `has_more` is still `true`
+
+**Returns:**
+
+```ts
+{
+  memories: Array<{
+    memory_id: string;
+    namespace_id: string;   // the namespace name
+    blob_id: string;
+    created_at: string;
+    updated_at: string;
+    size: number;           // encrypted bytes
+    agent_id: string | null;
+    package_id: string | null;
+    status: string;
+    end_epoch: number | null;
+    expires_at: string | null;
+    importance: number | null;
+  }>;
+  next_cursor: string | null;
+  has_more: boolean;
+  snapshot_version: number;
+  deleted: Array<{ memory_id: string; namespace_id: string; deleted_at: string }>;
+  must_resync: boolean;     // cursor too old: restart without one
+}
+```
+
+Paginate on `has_more`, not on page length:
+
+```ts
+let cursor: string | undefined;
+let more = true;
+let count = 0;
+while (more) {
+  const page = await memwal.listMemories({ cursor, namespace: "work" });
+  count += page.memories.length;
+  cursor = page.next_cursor ?? undefined;
+  more = page.has_more;
+}
+```
+
 ### `health(): Promise<HealthResult>`
 
 Check relayer health. Does not require authentication — a successful response confirms the relayer is reachable, not that your `key`/`accountId` are valid. A signed call (e.g. `remember()`, `recall()`) can still fail with `401` immediately after a passing `health()`.
@@ -333,7 +396,7 @@ These exist on the `MemWal` class for advanced use cases:
 | Method | Description |
 |--------|-------------|
 | `rememberManual({ encryptedData, vector, namespace? })` | Send SEAL-encrypted bytes + a pre-computed vector; the relayer uploads to Walrus |
-| `recallManual({ vector, limit?, namespace? })` | Search with a pre-computed query vector (returns blob IDs, no decryption) |
+| `recallManual({ vector, limit?, namespace? })` | Search with a pre-computed query vector. Returns `RecallManualHitResult`: blob IDs and distances, no decrypted text |
 | `embed(text)` | Generate an embedding vector for text (no storage) |
 
 ## `MemWalManual`
@@ -348,9 +411,12 @@ See [MemWalManual usage](/sdk/usage/memwal-manual) for the full setup and flow d
 
 Embed locally, SEAL encrypt locally, send encrypted payload + vector to relayer for Walrus upload and vector registration.
 
-### `recallManual(query, limit?, namespace?): Promise<RecallManualResult>`
+### `recallManual(query, limit?, namespace?): Promise<RecallManualMemoryResult>`
 
-Embed locally, search via relayer, download from Walrus, SEAL decrypt locally. Returns decrypted text results.
+Embed locally, search via relayer, download from Walrus, SEAL decrypt locally. Returns decrypted text results. This is not the hit-only `RecallManualHitResult` returned by `MemWal.recallManual()`.
+
+- `recallManual(query, { limit?, namespace?, scoringWeights? })` is valid
+- `recallManual(query, namespace)` throws `TypeError`; namespace is not a valid second argument
 
 ### `restore(namespace, limit?): Promise<RestoreResult>`
 

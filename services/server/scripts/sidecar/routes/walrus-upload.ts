@@ -37,7 +37,7 @@ import { acquireWalrusUploadSlots, walrusUploadLimitSnapshot, WalrusUploadLimitE
 import { requestIdFor, sanitizeRequestId, sidecarLog } from "../log.js";
 import { sidecarStartedAtMs, sidecarStateSnapshot } from "../state.js";
 import { MEMWAL_JOB_TAG_KEY, dedupeAddresses, errorMessage, parseWalrusKeySlot, shortAddress, sleep, truncateForLog } from "../util.js";
-import { isMoveAbortBalanceSplit, refreshWalrusClientOnStaleWalPrice } from "../enoki.js";
+import { refreshWalrusClientOnStaleWalPrice } from "../enoki.js";
 import {
     ADDRESS_BALANCE_WALLET_FALLBACK_POLICY,
     patchGasCoinIntents,
@@ -430,9 +430,6 @@ export function registerWalrusUploadRoute(app: Express): void {
                     })}`
                 );
                 return res.status(503).json({ error: message, traceId, jobId: jobIdForLog });
-            }
-            if (phase === "register_sponsor" && isMoveAbortBalanceSplit(message)) {
-                refreshWalrusClient("register_sponsor_balance_split");
             }
             refreshWalrusClientOnStaleWalPrice(message);
             if (isWalrusPackageVersionMismatch(message)) {

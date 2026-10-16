@@ -66,6 +66,20 @@ test("only the signed-in prompt warns that the stored key is replaced", () => {
     );
 });
 
+test("a discarded key is named so it can be removed from the dashboard", () => {
+    const publicKey = "ab".repeat(32);
+    const address = "0x" + "cd".repeat(32);
+    const text = loginPrompt({
+        url: URL_,
+        credentialsPath: CREDS,
+        signedIn: false,
+        discardedKey: { publicKey, address },
+    });
+    assert.ok(text.includes(publicKey));
+    assert.ok(text.includes(address));
+    assert.match(text, /remove it from the dashboard/);
+});
+
 test("the two prompts differ ONLY in that warning", () => {
     // Drop the warning, then collapse the blank line that separated it — the
     // claim under test is that no other CONTENT differs.

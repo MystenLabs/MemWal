@@ -77,6 +77,22 @@ beforeEach(() => {
 })
 
 describe('MCP sign-in hand-off', () => {
+    it('does not sign until the user approves, even when a wallet is already connected', async () => {
+        stubListener(async () => new Response('{}', { status: 200 }))
+        const query = `?port=${PORT}&publicKey=${PUBLIC_KEY}&relayer=${encodeURIComponent(RELAYER)}&connectState=${STATE}`
+        render(
+            <MemoryRouter initialEntries={[`/connect/mcp${query}`]}>
+                <ConnectMcp />
+            </MemoryRouter>,
+        )
+
+        const approve = await screen.findByRole('button', { name: /approve in wallet/i })
+        expect(mocks.signAndExecute).not.toHaveBeenCalled()
+        await userEvent.click(approve)
+        expect(await screen.findByText(/MCP client connected/i)).toBeInTheDocument()
+        expect(mocks.signAndExecute).toHaveBeenCalledTimes(1)
+    })
+
     it('confirms the connection when the listener accepts the callback', async () => {
         stubListener(async () => new Response('{}', { status: 200 }))
         await signIn()

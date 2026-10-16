@@ -25,7 +25,7 @@ import { credsPath, loadCreds, type MemWalCredentials } from "./auth.js";
 import { rememberInitializeClientInfo } from "./client-info.js";
 import { loginFailureNotice, loginPrompt, loginSuccessNotification } from "./messages.js";
 import { log } from "./logger.js";
-import { startOrReuseLoginFlow, resolveLoginTimeoutMs } from "./login.js";
+import { startOrReuseLoginFlow, resolveLoginTimeoutMs, isLoginSuperseded } from "./login.js";
 import { AUTH_REQUIRED_INSTRUCTIONS } from "./instructions.js";
 import {
     SECRET_EXCLUSION_RULES,
@@ -210,7 +210,14 @@ function buildToolDefinitions(proactive: boolean) {
             "Sign this MCP client into your Walrus Memory account by opening a browser. Run once when the agent reports Walrus Memory is not signed in. Opens the dashboard in the default browser, waits for wallet approval, then writes credentials to ~/.memwal/credentials.json. Other memwal_* tools become usable on the next call after a successful login.",
         inputSchema: {
             type: "object",
-            properties: {},
+            properties: {
+                freshKey: {
+                    type: "boolean",
+                    default: false,
+                    description:
+                        "Mint a new delegate key instead of reusing the one a previous unfinished sign-in left pending. Leave false for an ordinary login. Set it only after a normal sign-in has already failed on the pending key — it abandons that key, which must then be removed from the dashboard if it was approved on-chain, and the new one needs its own add_delegate_key transaction.",
+                },
+            },
             additionalProperties: false,
         },
     },
@@ -291,13 +298,17 @@ const LOGIN_INSTRUCTION = [
 /** Replaces {@link LOGIN_INSTRUCTION} after a failed attempt, which
  * {@link loginFailureNotice} has just described. The generic copy promises "no
  * client restart" and leads with `memwal_login`; for a key the user already
- * approved, a restart is the only thing that recovers it and signing in again
- * cannot register it twice. So the retry is offered only for the case it
- * actually fixes. */
+ * approved, a restart is the only thing that recovers it and a plain retry
+ * reuses it rather than registering a second one. So the retry names
+ * `freshKey` for the case the plain one cannot fix. */
 const LOGIN_RETRY_INSTRUCTION = [
-    "If you did not approve the wallet step, start a new sign-in: call the `memwal_login`",
-    "tool from this client, or run `npx -y @mysten-incubation/memwal-mcp login`. Open the",
-    "new link straight away and leave this client running through the wallet prompt.",
+    "Start a new sign-in: call the `memwal_login` tool from this client, or run",
+    "`npx -y @mysten-incubation/memwal-mcp login`. Open the new link straight away and",
+    "leave this client running through the wallet prompt.",
+    "",
+    "If that keeps failing on the same key, call `memwal_login` with `freshKey: true` to",
+    "mint a new one. That abandons the pending key: if you already approved it on-chain,",
+    "remove it from the dashboard afterwards.",
 ].join("\n");
 
 /** Set when a background `memwal_login` ends without credentials. The tool call
@@ -361,6 +372,7 @@ function sendLogMessage(level: "info" | "warning" | "error", text: string): void
 async function handleLoginToolCall(
     config: AuthRequiredConfig,
     _progressToken: unknown,
+    freshKey: boolean,
 ): Promise<{ text: string; isError: boolean }> {
     // Fire login but DO NOT await the wallet callback — it runs in the
     // background. openBrowser: false because (a) child-process spawning a
@@ -372,6 +384,7 @@ async function handleLoginToolCall(
     // Concurrent memwal_login calls join this in-flight flow instead of
     // opening a second listener (that race hung later recall/remember).
     lastLoginFailure = null;
+    let discardedKey: { publicKey: string; address: string } | undefined;
     const session = startOrReuseLoginFlow(
         {
             relayerUrl: config.relayerUrl,
@@ -379,6 +392,10 @@ async function handleLoginToolCall(
             label: config.label,
             timeoutMs: resolveLoginTimeoutMs(),
             openBrowser: false,
+            freshKey,
+            onDiscarded: (key) => {
+                discardedKey = key;
+            },
             onUrl: (url) => {
                 sendLogMessage("info", `Walrus Memory MCP login URL: ${url}`);
             },
@@ -424,6 +441,9 @@ async function handleLoginToolCall(
     try {
         url = await Promise.race([session.url, timeoutPromise]);
     } catch (err) {
+        if (isLoginSuperseded(err)) {
+            return { isError: true, text: "This sign-in was replaced by a newer memwal_login. Open that result instead of starting another login." };
+        }
         const msg = err instanceof Error ? err.message : String(err);
         log.error("memwal_login.tool.url_not_ready", { msg });
         return {
@@ -449,6 +469,7 @@ async function handleLoginToolCall(
             url,
             credentialsPath: credsPath(),
             signedIn: loadCreds() !== null,
+            discardedKey,
         }),
     };
 }
@@ -535,7 +556,7 @@ function handleAuthLine(
     if (method === "tools/call") {
         const params = (req.params ?? {}) as {
             name?: string;
-            arguments?: unknown;
+            arguments?: { freshKey?: unknown };
             _meta?: { progressToken?: unknown };
         };
         const toolName = params.name;
@@ -545,7 +566,11 @@ function handleAuthLine(
             // Returns near-instantly with the click-able URL. The listener
             // stays alive in the background — see handleLoginToolCall for the
             // rationale on not blocking.
-            void handleLoginToolCall(config, progressToken).then((result) => {
+            void handleLoginToolCall(
+                config,
+                progressToken,
+                params.arguments?.freshKey === true,
+            ).then((result) => {
                 writeStdoutMessage({
                     jsonrpc: "2.0",
                     id,

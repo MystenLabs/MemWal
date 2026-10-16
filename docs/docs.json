@@ -59,6 +59,7 @@
             "group": "Guides",
             "pages": [
               "guides/system-prompt-templates",
+              "guides/import-existing-memory",
               "guides/agent-runtimes",
               "guides/delete-old-memories",
               "guides/delete-memories-programmatically"
@@ -73,6 +74,7 @@
             "group": "Guides",
             "pages": [
               "guides/system-prompt-templates",
+              "guides/import-existing-memory",
               "guides/returning-user",
               "guides/manage-your-memory",
               "guides/delete-old-memories",

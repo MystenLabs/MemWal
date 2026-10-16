@@ -84,9 +84,20 @@ Submit one memory and poll until the job completes.
 RememberResult(id: str, blob_id: str, owner: str, namespace: str)
 ```
 
+### `get_remember_status(job_id) -> RememberJobStatus`
+
+One `GET /api/remember/{job_id}`. Accepts 200 and 404 and returns the job state (`pending`, `running`, `uploaded`, `done`, `failed`, or `not_found`) without polling. A job id that is empty or contains whitespace, `/`, `?`, or `#` is `not_found` and is not requested. `MemWalSync` has the same method.
+
+```python
+RememberJobStatus(
+    job_id: str, status: str, owner: str | None = None,
+    namespace: str | None = None, blob_id: str | None = None, error: str | None = None,
+)
+```
+
 ### `wait_for_remember_job(job_id, poll_interval_ms=1500, timeout_ms=60_000) -> RememberResult`
 
-Poll a previously accepted job until `done` or `failed`. Raises `MemWalRememberJobNotFound` / `MemWalRememberJobFailed` / `MemWalRememberJobTimeout`.
+Poll a previously accepted job until `done` or `failed`. Raises `MemWalRememberJobNotFound` / `MemWalRememberJobFailed` / `MemWalRememberJobTimeout`. A job id outside `[A-Za-z0-9_-]+` raises `MemWalRememberJobNotFound` before the request.
 
 ### `remember_bulk_async(items) -> RememberBulkAcceptedResult`
 
@@ -141,9 +152,11 @@ RecallResult(
 
 `distance` is cosine distance — lower is more similar.
 
-### `analyze(text, namespace=None) -> AnalyzeResult`
+### `analyze(text, namespace=None, occurred_at=None) -> AnalyzeResult`
 
 Extract memorable facts via an LLM and enqueue one background remember job per fact.
+
+`occurred_at` is optional. Pass a timezone-aware `datetime`, or an RFC 3339 / ISO-8601 string with a `Z` suffix or a UTC offset. A naive `datetime`, or a string with no offset, raises `ValueError`. Any other type raises `TypeError`. When set, the extractor uses it as a temporal anchor and writes resolved dates into the fact text. The server stores no separate event-time field. Omit it when you have no session time; the server does not fill in the current time.
 
 ```python
 AnalyzeResult(
@@ -155,7 +168,7 @@ AnalyzeResult(
 )
 ```
 
-`AnalyzeResult.total` is a backward-compat alias for `fact_count`. Use `analyze_and_wait(text, namespace=None, opts=None) -> AnalyzeWaitResult` to wait for every fact job to settle.
+`AnalyzeResult.total` is a backward-compat alias for `fact_count`. Use `analyze_and_wait(text, namespace=None, opts=None, occurred_at=None) -> AnalyzeWaitResult` to wait for every fact job to settle. `occurred_at` means the same thing as on `analyze`.
 
 ### `ask(question, limit=5, namespace=None) -> AskResult`
 

@@ -43,12 +43,15 @@ import type {
     RememberManualOptions,
     RememberManualResult,
     RecallManualOptions,
-    RecallManualResult,
+    RecallManualHitResult,
     RestoreResult,
     NamespacesResult,
     ListNamespacesOptions,
+    MemoriesResult,
+    ListMemoriesOptions,
     RememberBulkItem,
     RememberBulkOptions,
+    RememberBulkAsyncOptions,
     RememberBulkResult,
     RememberAcceptedResult,
     RememberJobStatus,
@@ -64,17 +67,24 @@ import {
     bytesToHex,
     normalizePrivateKey,
     normalizeServerUrl,
+    assertNonBlankText,
     sanitizeServerError,
     redactInternalUrls,
     clockDriftErrorFromResponse,
     scoringWeightsToWire,
+    derivedIdempotencyKey,
+    derivedBulkIdempotencyKey,
+    DEFAULT_PREFLIGHT_TIMEOUT_MS,
+    DEFAULT_RECALL_TIMEOUT_MS,
+    RESTORE_REQUEST_TIMEOUT_MS,
 } from "./utils.js";
 import {
     assertCompatibleRelayer,
     compatibilityErrorFromStatus,
 } from "./compatibility.js";
-import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { applyTokenBudget, estimateTokens, validateMaxTokens } from "./tokens.js";
 import { pollingDelayMs } from "./polling-delay.js";
+import { resolveRecallCall } from "./recall-args.js";
 
 // ============================================================
 // Ed25519 Signing (lazy-loaded)
@@ -116,34 +126,40 @@ const SEAL_SESSION_TTL_MIN = 5;
 // a key server that sees it as expired.
 const SEAL_SESSION_SAFETY_MARGIN_MS = 30_000;
 
-/** Per-call knobs for `signedRequest`. `timeoutMs` overrides the client-wide
- * deadline for one endpoint; `signal` is the caller's own cancellation and is
- * honoured alongside it, never replaced by it. */
+/** Per-call knobs for `MemWal.signedRequest`. */
 interface SignedRequestOptions {
+    /** ENG-1696: omit the SEAL credential on Manual-mode routes. */
     includeDelegateKey?: boolean;
+    /** Caller-owned cancellation, honoured alongside `timeoutMs`. */
     signal?: AbortSignal;
+    /**
+     * Deadline for the signed request itself. The clock starts after the
+     * preflights resolve. Omit this to use the client `requestTimeoutMs`.
+     * `0`, a negative number, or a non-finite value disables the deadline.
+     */
     timeoutMs?: number;
 }
 
 type RememberStatusResponse = RememberJobStatus | { error?: string };
 
+/** Path for one remember-job read, or undefined when `jobId` is not one safe segment.
+ *
+ * `fetch` rewrites the path after the request is signed. `.` becomes
+ * `/api/remember/`, `..` and `%2e%2e` become `/api/`, and a backslash becomes
+ * a slash. An allowlist keeps those from leaving the client. A UUID is
+ * unchanged. (#1087, #1216)
+ */
+function rememberStatusPath(jobId: string): string | undefined {
+    if (typeof jobId !== "string" || !/^[A-Za-z0-9_-]+$/.test(jobId)) {
+        return undefined;
+    }
+    return `/api/remember/${jobId}`;
+}
+
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Window over which the same (namespace, text) resolves to one key.
- *
- * `pendingRememberKeys` only dedupes retries that reuse one client instance,
- * and callers such as the MCP sidecar build a fresh client per session — so a
- * random key let a reconnect replay mint a second paid blob. The bucket bounds
- * the collapse: `remember_jobs` rows are never pruned, so an unbucketed key
- * would dedupe against a job from any point in history. */
-const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
-
-async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
-    const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
-    return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
-}
 
 /** Deadline for a request that names no other.
  *
@@ -157,26 +173,68 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
  * own rather than the 30s default a stalled socket would hold it for. */
 const CONFIRM_READ_TIMEOUT_MS = 5_000;
 
-/** `POST /api/restore` bounds itself at 55s server-side and answers with an
- * error rather than going quiet, so the client must outlast that or it would
- * abandon a response already on its way. */
-const RESTORE_REQUEST_TIMEOUT_MS = 60_000;
+/** Matches the relayer's `MAX_BULK_ITEMS`. Reject before a signed request. */
+const MAX_BULK_ITEMS = 20;
+
+interface RememberCallOptions {
+    /**
+     * Optional idempotency key to prevent duplicate writes on retries.
+     * Idempotency keys are scoped per (owner, namespace), so identical
+     * keys across different namespaces will not collide. Retrying within
+     * the same namespace with the same key dedupes, while reusing a key
+     * with different text in the same namespace produces HTTP 409 Conflict.
+     */
+    idempotencyKey?: string;
+    pollIntervalMs?: number;
+    timeoutMs?: number;
+}
+
+/**
+ * `remember(text, { idempotencyKey })` is the natural call when the namespace
+ * stays at the client default. A plain object in the namespace slot is those
+ * options, not a namespace name. (#1142)
+ */
+function splitRememberArgs(
+    namespaceOrOptions?: string | RememberCallOptions,
+    options?: RememberCallOptions,
+): { namespace?: string; options: RememberCallOptions } {
+    // The third argument is the dedicated options bag. When the namespace
+    // slot is also an object, keep both and let the bag win on a clash.
+    // `rememberAndWait(text, { timeoutMs }, { idempotencyKey })` is typed
+    // and used to drop the key, so a retry minted a second blob. (#1142)
+    if (typeof namespaceOrOptions === "object" && namespaceOrOptions !== null) {
+        return { namespace: undefined, options: { ...namespaceOrOptions, ...options } };
+    }
+    return { namespace: namespaceOrOptions, options: options ?? {} };
+}
+
+function requireRememberText(text: unknown): asserts text is string {
+    if (typeof text !== "string") {
+        throw new TypeError(
+            `remember() expects text as a string, received ${typeof text}. ` +
+            `Did you mean remember(text, namespace)? Unlike recall(), remember* does not take an options object.`,
+        );
+    }
+}
+
+function destroyedClientError(): Error {
+    return new Error(
+        "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
+    );
+}
 
 /** `POST /api/analyze` runs the extractor LLM inline before it accepts, so it
  * is the one write that legitimately outruns the default. */
 const ANALYZE_REQUEST_TIMEOUT_MS = 60_000;
 
-/** `POST /api/recall` has carried its own 15s deadline since before the rest
- * had any; keeping it named makes that a decision rather than an accident. */
-const RECALL_REQUEST_TIMEOUT_MS = 15_000;
 
-/** What `recall()` tells the relayer it will wait, so the 504 naming the stuck
- * stage arrives before the abort above rather than after it. A second under
- * that abort because the two clocks start at different moments: this timer
- * starts before `fetch`, the relayer's when the request lands, and the margin
- * the relayer keeps for its reply cannot also cover DNS, TCP and TLS. Derived
- * from the timeout so the two can never drift apart. */
-const RECALL_DEADLINE_MS = RECALL_REQUEST_TIMEOUT_MS - 1_000;
+
+/** How far under the client's own abort `recall()` asks the relayer to stop,
+ * so the 504 naming the stuck stage arrives before the abort rather than
+ * after it. A second, because the two clocks start at different moments: this
+ * timer starts before `fetch`, the relayer's when the request lands, and the
+ * margin the relayer keeps for its reply cannot also cover DNS, TCP and TLS. */
+const RECALL_DEADLINE_MARGIN_MS = 1_000;
 
 /**
  * Abort signal that fires after `ms`, or when `caller` aborts — whichever is
@@ -225,19 +283,63 @@ function deadlineSignal(
  * `status: 504` is load-bearing, not decoration: `isTransientPollingStatus`
  * treats it as retryable, so one stalled poll inside a wait loop is abandoned
  * and retried against the remaining budget instead of failing the whole wait.
+ *
+ * `phase` names the round-trip that actually stalled — `"preflight GET
+ * /version"`, `"POST /api/recall"` — so WALM-598's diagnostic question ("which
+ * step ate the budget?") is answerable from the error alone. The name stays
+ * `MemWalRequestTimeout`: that is the shipped contract callers and
+ * `isTransientPollingStatus` already key off (WALM-648).
  */
-function requestTimeoutError(method: string, path: string, ms: number): Error {
+function requestTimeoutError(method: string, path: string, ms: number, phase?: string): Error {
+    const stage = phase ?? `${method} ${path}`;
     const err = new Error(
-        `Walrus Memory request timed out after ${ms}ms (${method} ${path}). The relayer ` +
+        `Walrus Memory request timed out after ${ms}ms during ${stage}. The relayer ` +
             `accepted the connection but did not answer in time.`,
     );
     err.name = "MemWalRequestTimeout";
-    (err as Error & { status?: number }).status = 504;
+    (err as Error & { status?: number; phase?: string; timeoutMs?: number }).status = 504;
+    (err as Error & { phase?: string }).phase = stage;
+    (err as Error & { timeoutMs?: number }).timeoutMs = ms;
     return err;
+}
+
+/**
+ * The 504 a remember wait raises when its budget runs out.
+ *
+ * Under upload congestion the relayer keeps a job `running` for tens of
+ * minutes, far past a 60s wait, and says so in the job's `error`. Carrying the
+ * last status the relayer reported is what lets a caller tell "still retrying,
+ * wait on the same job" from "we never got an answer" (GH #966). The wait
+ * only times out on a job that is still pending/running/uploaded (a `failed`
+ * job throws), so the advice is always to keep waiting on the job id.
+ */
+function rememberJobTimeoutError(
+    jobId: string,
+    timeoutMs: number,
+    lastSeen: RememberJobStatus | undefined,
+    lastRefusal: number | undefined,
+    sawRateLimit: boolean,
+): Error {
+    const serverError = lastSeen?.error ? redactInternalUrls(lastSeen.error) : undefined;
+    // "no status read got through (last poll: HTTP 429)" already names the rate limit.
+    const rateLimited = sawRateLimit && (lastSeen || lastRefusal !== 429) ? "; wait hit a rate limit (429)" : "";
+    const detail = lastSeen
+        ? `last status: ${lastSeen.status}${serverError ? ` (${serverError})` : ""}. ` +
+          `The job is still in progress: call waitForRememberJob("${jobId}") to keep waiting on it. ` +
+          `Sending the text again under a new idempotency key stores it twice; a key you passed ` +
+          `as idempotencyKey is not remembered by the client, so pass it again on any retry.`
+        : `no status read got through (last poll: HTTP ${lastRefusal ?? 0}), so the job's state is unknown.`;
+    const err = new Error(`remember job timed out after ${timeoutMs}ms (job_id=${jobId})${rateLimited}; ${detail}`);
+    err.name = "MemWalRememberJobTimeout";
+    return Object.assign(err, { status: 504, jobId, lastStatus: lastSeen?.status, serverError });
 }
 
 function isTransientPollingStatus(status: number): boolean {
     return status === 0 || status === 429 || status >= 500;
+}
+
+function jsonBodyError(status: number, message: string): Error {
+    return Object.assign(new Error(message), { status });
 }
 
 /**
@@ -356,6 +458,13 @@ export class MemWal {
     private accountId: string;
     /** Deadline applied to any request that does not name its own. */
     private requestTimeoutMs: number;
+    /**
+     * Recall's abort budget, and the independent per-round-trip budget for the
+     * unauthenticated preflights that precede it. Separate so a slow
+     * `/version`, `/health` or `/config` is never charged against recall.
+     */
+    private recallTimeoutMs: number;
+    private preflightTimeoutMs: number;
 
     // ENG-1697 state — all internal, never surfaced to user code.
     // The public API (`MemWal.create({ key, accountId })`) is unchanged.
@@ -384,11 +493,25 @@ export class MemWal {
             typeof config.key === "string"
                 ? hexToBytes(normalizePrivateKey(config.key))
                 : config.key;
+        if (!(this.privateKey instanceof Uint8Array) || this.privateKey.length !== 32) {
+            const got = this.privateKey instanceof Uint8Array
+                ? String(this.privateKey.length)
+                : typeof this.privateKey;
+            throw new Error(`Ed25519 seed must be exactly 32 bytes, got ${got}`);
+        }
+        if (typeof config.accountId !== "string" || config.accountId.trim().length === 0) {
+            throw new TypeError(
+                `MemWal.create: "accountId" is required (Walrus Memory object ID, e.g. 0x...); got ${config.accountId}`,
+            );
+        }
         this.accountId = config.accountId;
         // LOW-22: default to HTTPS for production usage; normalizeServerUrl
         // warns (does not throw) if a user passes plain http:// for a
         // non-localhost host.
         this.serverUrl = normalizeServerUrl(config.serverUrl ?? "https://relayer.memory.walrus.xyz");
+        if (config.namespace !== undefined && !config.namespace) {
+            throw new Error("namespace cannot be empty");
+        }
         this.namespace = config.namespace ?? "default";
         // A non-positive or non-finite override would disable the backstop
         // entirely, which is the bug this exists to prevent.
@@ -396,6 +519,8 @@ export class MemWal {
             Number.isFinite(config.requestTimeoutMs) && (config.requestTimeoutMs as number) > 0
                 ? (config.requestTimeoutMs as number)
                 : DEFAULT_REQUEST_TIMEOUT_MS;
+        this.recallTimeoutMs = config.recallTimeoutMs ?? DEFAULT_RECALL_TIMEOUT_MS;
+        this.preflightTimeoutMs = config.preflightTimeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS;
     }
 
     /**
@@ -438,13 +563,16 @@ export class MemWal {
      */
     async rememberAsync(
         text: string,
-        namespace?: string,
-        options: { idempotencyKey?: string } = {},
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        const resolvedNamespace = namespace ?? this.namespace;
+        requireRememberText(text);
+        assertNonBlankText(text);
+        const split = splitRememberArgs(namespaceOrOptions, options);
+        const resolvedNamespace = split.namespace ?? this.namespace;
         const requestIdentity = `${resolvedNamespace}\0${text}`;
-        const generatedKey = options.idempotencyKey === undefined;
-        const idempotencyKey = options.idempotencyKey
+        const generatedKey = split.options.idempotencyKey === undefined;
+        const idempotencyKey = split.options.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
             ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
@@ -469,11 +597,21 @@ export class MemWal {
      * resolves at the terminal state and hides progress.
      */
     async getRememberStatus(jobId: string): Promise<RememberJobStatus> {
+        const path = rememberStatusPath(jobId);
+        if (path === undefined) {
+            return {
+                job_id: jobId,
+                status: "not_found",
+                error: `Job ${jobId} not found`,
+            };
+        }
         const status = await this.signedRequest<RememberStatusResponse>(
             "GET",
-            `/api/remember/${jobId}`,
+            path,
             {},
             [200, 404],
+            // Status is metadata. No SEAL decrypt, so no session. (#1135)
+            { includeDelegateKey: false },
         );
 
         if (!("status" in status)) {
@@ -494,24 +632,39 @@ export class MemWal {
         jobId: string,
         opts: { pollIntervalMs?: number; timeoutMs?: number } = {},
     ): Promise<RememberResult> {
+        const path = rememberStatusPath(jobId);
+        if (path === undefined) {
+            throw Object.assign(new Error(`remember job not found: ${jobId}`), {
+                status: 404,
+                jobId,
+            });
+        }
         const { pollIntervalMs = 1500, timeoutMs = 60_000 } = opts;
         const deadline = Date.now() + timeoutMs;
         let attempt = 0;
         let retryAfterMs = 0;
         let sawRateLimit = false;
+        let lastSeen: RememberJobStatus | undefined;
+        let lastRefusal: number | undefined;
 
-        while (Date.now() < deadline) {
+        while (true) {
             // A retry-after the server just gave us wins over our own curve;
             // the backoff resumes from where it was on the next normal poll.
-            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            // Clamped to remaining budget so we never sleep past deadline (#1081).
+            const remainingBeforeSleep = Math.max(0, deadline - Date.now());
+            const requestedDelay = retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++);
             retryAfterMs = 0;
+            const delay = Math.min(requestedDelay, remainingBeforeSleep);
+            if (delay > 0) {
+                await sleep(delay);
+            }
 
             let status: RememberStatusResponse;
 
             try {
                 status = await this.signedRequest<RememberStatusResponse>(
                     "GET",
-                    `/api/remember/${jobId}`,
+                    path,
                     {},
                     [200, 404],
                     // Bound each poll by the client deadline, and never past
@@ -524,12 +677,16 @@ export class MemWal {
                     // and the client deadline keeps ONE stalled poll from
                     // swallowing the entire budget, so the loop still gets to
                     // retry. An expired poll surfaces as a transient 504.
-                    { timeoutMs: this.pollDeadlineMs(deadline) },
+                    { timeoutMs: this.pollDeadlineMs(deadline), includeDelegateKey: false },
                 );
             } catch (err) {
                 const httpStatus = (err as { status?: number }).status ?? 0;
                 if (isTransientPollingStatus(httpStatus)) {
+                    lastRefusal = httpStatus;
                     if (httpStatus === 429) sawRateLimit = true;
+                    if (Date.now() >= deadline) {
+                        break;
+                    }
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
@@ -542,6 +699,7 @@ export class MemWal {
                     jobId,
                 });
             }
+            lastSeen = status;
 
             if (status.status === "done") {
                 return {
@@ -560,15 +718,13 @@ export class MemWal {
                     { status: 500, jobId },
                 );
             }
+
+            if (Date.now() >= deadline) {
+                break;
+            }
         }
 
-        throw Object.assign(
-            new Error(
-                `remember job timed out after ${timeoutMs}ms (job_id=${jobId})` +
-                    (sawRateLimit ? "; wait hit a rate limit (429)" : ""),
-            ),
-            { status: 504, jobId },
-        );
+        throw rememberJobTimeoutError(jobId, timeoutMs, lastSeen, lastRefusal, sawRateLimit);
     }
 
     /**
@@ -576,19 +732,23 @@ export class MemWal {
      */
     async rememberAndWait(
         text: string,
-        namespace?: string,
-        opts: { pollIntervalMs?: number; timeoutMs?: number; idempotencyKey?: string } = {},
+        namespaceOrOptions?: string | RememberCallOptions,
+        opts?: RememberCallOptions,
     ): Promise<RememberResult> {
-        const resolvedNamespace = namespace ?? this.namespace;
+        requireRememberText(text);
+        const split = splitRememberArgs(namespaceOrOptions, opts);
+        const resolvedNamespace = split.namespace ?? this.namespace;
         const requestIdentity = `${resolvedNamespace}\0${text}`;
-        const generatedKey = opts.idempotencyKey === undefined;
-        const idempotencyKey = opts.idempotencyKey
+        const generatedKey = split.options.idempotencyKey === undefined;
+        const idempotencyKey = split.options.idempotencyKey
             ?? this.pendingRememberKeys.get(requestIdentity)
             ?? (await derivedIdempotencyKey(requestIdentity));
         if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
 
+        // Pass the resolved string. rememberAsync would otherwise read the
+        // options object in this slot as a namespace. (#1142)
         const accepted = await this.rememberAsync(text, resolvedNamespace, { idempotencyKey });
-        const completed = await this.waitForRememberJob(accepted.job_id, opts);
+        const completed = await this.waitForRememberJob(accepted.job_id, split.options);
         // Clear only after terminal success. A polling timeout/transport failure
         // keeps the key so retrying the high-level operation reuses the same job.
         if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
@@ -601,15 +761,15 @@ export class MemWal {
      * The relayer continues embedding, encrypting, uploading, and indexing in the background.
      * Use rememberAndWait() when the caller needs the final blob_id before continuing.
      *
-     * @param text - The text to remember
-     * @param namespace - Optional namespace override
+     * A plain object in the namespace position is options, so
+     * `remember(text, { idempotencyKey })` keeps the client namespace. (#1142)
      */
     async remember(
         text: string,
-        namespace?: string,
-        options: { idempotencyKey?: string } = {},
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        return this.rememberAsync(text, namespace, options);
+        return this.rememberAsync(text, namespaceOrOptions, options);
     }
 
     /**
@@ -633,22 +793,42 @@ export class MemWal {
      * console.log(accepted.job_ids)
      * ```
      */
-    async rememberBulkAsync(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
+    async rememberBulkAsync(
+        items: RememberBulkItem[],
+        options: RememberBulkAsyncOptions = {},
+    ): Promise<RememberBulkAcceptedResult> {
         if (!Array.isArray(items) || items.length === 0) {
             throw new Error("rememberBulkAsync: items must be a non-empty array");
         }
+        // The relayer rejects this after the request is signed. Say so first. (#1104)
+        if (items.length > MAX_BULK_ITEMS) {
+            throw new Error(
+                `rememberBulkAsync: items exceeds maximum of ${MAX_BULK_ITEMS} per bulk request`,
+            );
+        }
+        items.forEach((item, i) => {
+            assertNonBlankText(item?.text, `items[${i}].text cannot be empty`);
+        });
 
         const normalised = items.map((item) => ({
             text: item.text,
             namespace: item.namespace ?? this.namespace,
         }));
 
+        const requestIdentity = `bulk\0${normalised.map((item) => `${item.namespace}\0${item.text}`).join("\0\0")}`;
+        const generatedKey = options.idempotencyKey === undefined;
+        const idempotencyKey = options.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? (await derivedBulkIdempotencyKey(requestIdentity));
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
+
         const accepted = await this.signedRequest<RememberBulkAcceptedResult>(
             "POST",
             "/api/remember/bulk",
-            { items: normalised },
+            { items: normalised, idempotency_key: idempotencyKey },
             [200, 202],
         );
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
 
         if (!accepted.job_ids || accepted.job_ids.length !== normalised.length) {
             throw new Error(
@@ -663,12 +843,16 @@ export class MemWal {
         jobIds: string[],
         opts: { timeoutMs?: number } = {},
     ): Promise<RememberBulkStatusResult> {
+        if (!Array.isArray(jobIds)) {
+            throw new Error("getRememberBulkStatus: jobIds must be an array");
+        }
         return this.signedRequest<RememberBulkStatusResult>(
             "POST",
             "/api/remember/bulk/status",
             { job_ids: jobIds },
             [200],
-            { timeoutMs: opts.timeoutMs },
+            // Status is metadata. No SEAL decrypt, so no session. (#1135)
+            { timeoutMs: opts.timeoutMs, includeDelegateKey: false },
         );
     }
 
@@ -697,36 +881,56 @@ export class MemWal {
         let answered = false;
 
         const settle = (jobId: string, status: RememberBulkStatusItem) => {
-            const idx = jobIds.indexOf(jobId);
             lastSeen.set(jobId, status);
-            if (status.status === "done") {
-                results[idx] = {
-                    id: jobId,
-                    blob_id: status.blob_id ?? "",
-                    status: "done",
-                    namespace: namespaces[idx] ?? this.namespace,
-                };
-                pending.delete(jobId);
-            } else if (status.status === "failed" || status.status === "not_found") {
-                results[idx] = {
-                    id: jobId,
-                    blob_id: "",
-                    status: "failed",
-                    namespace: namespaces[idx] ?? this.namespace,
-                    error:
-                        status.status === "not_found"
-                            ? "job not found"
-                            : redactInternalUrls(status.error ?? "unknown error"),
-                };
-                pending.delete(jobId);
+            // The same id can occupy more than one slot. `indexOf` updated only
+            // the first, and `pending` is a Set, so the copies stayed `timeout`.
+            // (#1121, #1084)
+            const terminal =
+                status.status === "done" ||
+                status.status === "failed" ||
+                status.status === "not_found";
+            for (let idx = 0; idx < jobIds.length; idx++) {
+                if (jobIds[idx] !== jobId) continue;
+                if (namespaces[idx] === undefined && status.namespace) {
+                    results[idx].namespace = status.namespace;
+                }
+                if (!terminal) continue;
+                // Caller namespace, then the job's own, then the client default. (#1136)
+                const namespace = namespaces[idx] ?? status.namespace ?? this.namespace;
+                if (status.status === "done") {
+                    results[idx] = {
+                        id: jobId,
+                        blob_id: status.blob_id ?? "",
+                        status: "done",
+                        namespace,
+                    };
+                } else {
+                    results[idx] = {
+                        id: jobId,
+                        blob_id: "",
+                        status: "failed",
+                        namespace,
+                        error:
+                            status.status === "not_found"
+                                ? "job not found"
+                                : redactInternalUrls(status.error ?? "unknown error"),
+                    };
+                }
             }
+            if (terminal) pending.delete(jobId);
         };
 
-        while (pending.size > 0 && Date.now() < deadline) {
+        while (pending.size > 0) {
             // A retry-after the server just gave us wins over our own curve;
             // the backoff resumes from where it was on the next normal poll.
-            await sleep(retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++));
+            // Clamped to remaining budget so we never sleep past deadline (#1081).
+            const remainingBeforeSleep = Math.max(0, deadline - Date.now());
+            const requestedDelay = retryAfterMs > 0 ? retryAfterMs : pollingDelayMs(pollIntervalMs, attempt++);
             retryAfterMs = 0;
+            const delay = Math.min(requestedDelay, remainingBeforeSleep);
+            if (delay > 0) {
+                await sleep(delay);
+            }
 
             const pendingIds = jobIds.filter((jobId) => pending.has(jobId));
             if (pendingIds.length === 0) {
@@ -745,6 +949,9 @@ export class MemWal {
                 if (isTransientPollingStatus(httpStatus)) {
                     lastRefusal = httpStatus;
                     if (httpStatus === 429) sawRateLimit = true;
+                    if (Date.now() >= deadline) {
+                        break;
+                    }
                     retryAfterMs = retryAfterDelayMs(err, deadline);
                     continue;
                 }
@@ -770,6 +977,10 @@ export class MemWal {
 
                 settle(jobId, status);
             }
+
+            if (pending.size === 0 || Date.now() >= deadline) {
+                break;
+            }
         }
 
         // Nothing settled and nothing was even seen: the polls may all have been
@@ -790,8 +1001,9 @@ export class MemWal {
             }
         }
 
-        for (const jobId of pending) {
-            const idx = jobIds.indexOf(jobId);
+        for (let idx = 0; idx < jobIds.length; idx++) {
+            const jobId = jobIds[idx];
+            if (!pending.has(jobId)) continue;
             const seen = lastSeen.get(jobId);
             results[idx].error = seen
                 ? `still ${seen.status} after ${timeoutMs}ms` + (seen.error ? `: ${redactInternalUrls(seen.error)}` : "")
@@ -820,8 +1032,11 @@ export class MemWal {
     /**
      * Remember multiple memories and return as soon as the server accepts the jobs.
      */
-    async rememberBulk(items: RememberBulkItem[]): Promise<RememberBulkAcceptedResult> {
-        return this.rememberBulkAsync(items);
+    async rememberBulk(
+        items: RememberBulkItem[],
+        options: RememberBulkAsyncOptions = {},
+    ): Promise<RememberBulkAcceptedResult> {
+        return this.rememberBulkAsync(items, options);
     }
 
     /**
@@ -831,9 +1046,53 @@ export class MemWal {
         items: RememberBulkItem[],
         opts: RememberBulkOptions = {},
     ): Promise<RememberBulkResult> {
-        const namespaces = items.map((item) => item.namespace ?? this.namespace);
-        const accepted = await this.rememberBulkAsync(items);
-        return this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
+        if (!Array.isArray(items) || items.length === 0) {
+            throw new Error("rememberBulkAsync: items must be a non-empty array");
+        }
+        if (items.length > MAX_BULK_ITEMS) {
+            throw new Error(
+                `rememberBulkAsync: items exceeds maximum of ${MAX_BULK_ITEMS} per bulk request`,
+            );
+        }
+        items.forEach((item, i) => {
+            assertNonBlankText(item?.text, `items[${i}].text cannot be empty`);
+        });
+
+        const normalised = items.map((item) => ({
+            text: item.text,
+            namespace: item.namespace ?? this.namespace,
+        }));
+        const requestIdentity = `bulk\0${normalised.map((item) => `${item.namespace}\0${item.text}`).join("\0\0")}`;
+        const generatedKey = opts.idempotencyKey === undefined;
+        const idempotencyKey = opts.idempotencyKey
+            ?? this.pendingRememberKeys.get(requestIdentity)
+            ?? (await derivedBulkIdempotencyKey(requestIdentity));
+        if (generatedKey) this.pendingRememberKeys.set(requestIdentity, idempotencyKey);
+
+        const namespaces = normalised.map((item) => item.namespace);
+        const accepted = await this.rememberBulkAsync(items, { ...opts, idempotencyKey });
+        const completed = await this.waitForRememberJobs(accepted.job_ids, namespaces, opts);
+        if (generatedKey) this.pendingRememberKeys.delete(requestIdentity);
+        return completed;
+    }
+
+    /**
+     * Estimate the token cost of a string using the SDK's default
+     * character-based approximation (~chars/4, code-point aware). Useful to weigh
+     * a recall payload before injecting it into a model context:
+     *
+     * ```ts
+     * const hits = await memwal.recall({ query, limit: 8 });
+     * const joined = hits.results.map((h) => h.text).join("\n---\n");
+     * if (memwal.countTokens(joined) > 2048) { /* re-query with maxTokens *\/ }
+     * ```
+     *
+     * This is an estimate, not an exact tokenizer count — see `estimateTokens`
+     * for accuracy caveats. For exact counts, pass your own counter to
+     * `recall({ maxTokens, countTokens })`.
+     */
+    countTokens(text: string): number {
+        return estimateTokens(text);
     }
 
     /**
@@ -851,6 +1110,8 @@ export class MemWal {
      * - `recall(query, limit)`
      * - `recall(query, limit, namespace)`
      * - `recall(query, { limit, namespace, maxDistance, topK })`
+     *
+     * `recall(query, namespace)` is invalid and throws `TypeError`.
      *
      * `topK` and `limit` are aliases; if both are set, `topK` wins.
      *
@@ -872,35 +1133,23 @@ export class MemWal {
      * const result2 = await memwal.recall("food allergies", 5, "profile");
      * ```
      */
-    /**
-     * Estimate the token cost of a string using the SDK's default
-     * character-based approximation (~chars/4, code-point aware). Useful to weigh
-     * a recall payload before injecting it into a model context:
-     *
-     * ```ts
-     * const hits = await memwal.recall({ query, limit: 8 });
-     * const joined = hits.results.map((h) => h.text).join("\n---\n");
-     * if (memwal.countTokens(joined) > 2048) { /* re-query with maxTokens *\/ }
-     * ```
-     *
-     * This is an estimate, not an exact tokenizer count — see `estimateTokens`
-     * for accuracy caveats. For exact counts, pass your own counter to
-     * `recall({ maxTokens, countTokens })`.
-     */
-    countTokens(text: string): number {
-        return estimateTokens(text);
-    }
-
     async recall(params: RecallParams): Promise<RecallResult>;
     /**
      * @deprecated Positional `recall(query, limit, namespace)` is easy to
-     * misread as `recall(query, namespace)`. Prefer the object form
+     * misread as `recall(query, namespace)`, which throws `TypeError`. Prefer
+     * `recall({ query, limit, namespace })`. Positional will be removed in a
+     * future major version of the SDK.
+     */
+    async recall(query: string, options: RecallOptions): Promise<RecallResult>;
+    /**
+     * @deprecated Positional `recall(query, limit, namespace)` is easy to
+     * misread as `recall(query, namespace)`, which throws `TypeError`. Prefer
      * `recall({ query, limit, namespace })`. Positional will be removed in a
      * future major version of the SDK.
      */
     async recall(
         query: string,
-        limitOrOptions?: number | RecallOptions,
+        limit?: number,
         namespace?: string,
     ): Promise<RecallResult>;
     async recall(
@@ -908,61 +1157,85 @@ export class MemWal {
         limitOrOptions: number | RecallOptions | undefined = 10,
         namespace?: string,
     ): Promise<RecallResult> {
-        let query: string;
-        let options: RecallOptions;
-        if (typeof queryOrParams === "object") {
-            const { query: q, ...rest } = queryOrParams;
-            query = q;
-            options = rest;
-        } else {
-            query = queryOrParams;
-            if (limitOrOptions == null) {
-                options = { limit: 10, namespace };
-            } else if (typeof limitOrOptions === "number") {
-                options = { limit: limitOrOptions, namespace };
-            } else {
-                options = limitOrOptions;
+        const { query, options } = resolveRecallCall(
+            queryOrParams,
+            limitOrOptions,
+            namespace,
+        );
+        validateMaxTokens(options.maxTokens);
+        assertNonBlankText(query, "query cannot be empty");
+        const rawLimit = options.topK !== undefined ? options.topK : options.limit;
+        const limit = rawLimit !== undefined ? rawLimit : 10;
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
+        const weights = options.scoringWeights;
+        if (weights) {
+            for (const [name, value] of Object.entries(weights)) {
+                if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
+                    throw new Error(`scoringWeights.${name} must be a finite number`);
+                }
             }
         }
-        const limit = options.topK ?? options.limit ?? 10;
+        if (
+            options.maxDistance !== undefined
+            && (typeof options.maxDistance !== "number"
+                || !Number.isFinite(options.maxDistance)
+                || options.maxDistance < 0)
+        ) {
+            throw new Error("maxDistance must be a non-negative finite number");
+        }
         const resolvedNamespace = options.namespace ?? this.namespace;
 
+
         {
+            // WALM-598: this budget is handed to `signedRequest`, which starts
+            // the clock on the `/api/recall` fetch itself — after
+            // `ensureCompatibleRelayer` (`/version`, falling back to `/health`)
+            // and `buildSealSession` (`/config` + Sui RPC) have already
+            // resolved. Those preflights carry their own independent
+            // deadlines, so a relayer whose `/health` p50 had crept to ~9s can
+            // no longer eat most of recall's window and make a perfectly
+            // healthy recall surface an `AbortError` (GH #438).
+            const budget = options.timeoutMs ?? this.recallTimeoutMs;
+            const optedOut = typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0;
+            const timeoutMs = optedOut ? 0 : budget;
+            const wireDeadline = optedOut
+                ? undefined
+                : (timeoutMs > RECALL_DEADLINE_MARGIN_MS
+                    ? timeoutMs - RECALL_DEADLINE_MARGIN_MS
+                    : timeoutMs);
             const result = await this.signedRequest<RecallResult>("POST", "/api/recall", {
                 query,
                 limit,
                 namespace: resolvedNamespace,
-                // `undefined` when no weights were supplied, which
-                // JSON.stringify drops — so a default-weighted recall stays
-                // byte-identical on the wire and the relayer keeps
-                // short-circuiting to the plain pgvector cosine order.
                 scoring_weights: scoringWeightsToWire(options.scoringWeights),
-                // Same `undefined`-is-dropped trick: an unset sort leaves the
-                // request byte-identical and the relayer applies its own
-                // "relevance" default.
                 sort: options.sort,
-                // How long this call waits, so the relayer can stop just
-                // short of it and name the step it was stuck in.
-                deadline_ms: RECALL_DEADLINE_MS,
-            }, { timeoutMs: RECALL_REQUEST_TIMEOUT_MS });
+                ...(wireDeadline === undefined ? {} : { deadline_ms: wireDeadline }),
+            }, { timeoutMs });
 
             let processed = result;
             if (typeof options.maxDistance === "number") {
                 const filtered = result.results.filter(
                     (memory) => memory.distance < options.maxDistance!,
                 );
+                // Keep the relayer's matching total so callers can distinguish
+                // "no memories exist" from "matches exist but were outside maxDistance" (#1066).
                 processed = {
                     ...processed,
                     results: filtered,
-                    total: filtered.length,
                 };
             }
 
-            // Client-side token budgeting: trim the (already distance-sorted)
-            // payload to fit maxTokens per the chosen strategy, and attach the
-            // token estimate + truncated flag. Omitting maxTokens leaves the
-            // result byte-identical to the pre-budget behavior (no meta).
-            if (typeof options.maxTokens === "number") {
+            // Client-side token budgeting: trim the payload to fit maxTokens per
+            // the chosen strategy, and attach the token estimate + truncated flag.
+            // Under high-relevance-only, lowest-distance hits are retained and
+            // returned in the caller's requested order (WALM-756).
+            // Omitting maxTokens leaves the result byte-identical to the pre-budget
+            // behavior (no meta). Total preserves the matching hit count (#1068).
+            if (options.maxTokens !== undefined) {
                 const { results: budgeted, meta } = applyTokenBudget(
                     processed.results,
                     options.maxTokens,
@@ -972,7 +1245,6 @@ export class MemWal {
                 processed = {
                     ...processed,
                     results: budgeted,
-                    total: budgeted.length,
                     meta,
                 };
             }
@@ -1030,7 +1302,7 @@ export class MemWal {
      * @param opts.vector - Pre-computed query embedding vector
      * @param opts.limit - Max results (default: 10)
      * @param opts.scoringWeights - Optional composite-scoring weights
-     * @returns RecallManualResult with blob_id + distance pairs (no decrypted text)
+     * @returns RecallManualHitResult with blob_id + distance pairs (no decrypted text)
      *
      * @example
      * ```typescript
@@ -1048,13 +1320,19 @@ export class MemWal {
      * }
      * ```
      */
-    async recallManual(opts: RecallManualOptions): Promise<RecallManualResult> {
-        return this.signedRequest<RecallManualResult>(
+    async recallManual(opts: RecallManualOptions): Promise<RecallManualHitResult> {
+        const limit = opts.limit !== undefined ? opts.limit : 10;
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
+        return this.signedRequest<RecallManualHitResult>(
             "POST",
             "/api/recall/manual",
             {
                 vector: opts.vector,
-                limit: opts.limit ?? 10,
+                limit,
                 namespace: opts.namespace ?? this.namespace,
                 scoring_weights: scoringWeightsToWire(opts.scoringWeights),
             },
@@ -1069,6 +1347,7 @@ export class MemWal {
      * @returns EmbedResult with vector
      */
     async embed(text: string): Promise<EmbedResult> {
+        assertNonBlankText(text, "text cannot be empty");
         return this.signedRequest<EmbedResult>(
             "POST",
             "/api/embed",
@@ -1096,6 +1375,7 @@ export class MemWal {
         text: string,
         namespaceOrOptions?: string | AnalyzeOptions,
     ): Promise<AnalyzeResult> {
+        assertNonBlankText(text);
         const options = normalizeAnalyzeOptions(namespaceOrOptions);
         const body: Record<string, unknown> = {
             text,
@@ -1174,6 +1454,11 @@ export class MemWal {
      * ```
      */
     async restore(namespace: string, limit: number = 10): Promise<RestoreResult> {
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError(
+                `limit must be a positive integer, got ${limit}`,
+            );
+        }
         const result = await this.signedRequest<RestoreResult>(
             "POST",
             "/api/restore",
@@ -1234,6 +1519,60 @@ export class MemWal {
     }
 
     /**
+     * List the memories this account holds, without a semantic query.
+     *
+     * Recall is similarity-ranked and limit-bounded, so it cannot confirm a
+     * write or count a namespace. This walks the full inventory instead.
+     * Returns metadata only — no blob fetch, no decryption; use `recall()`
+     * for content.
+     *
+     * `namespace` is filtered client-side: the relayer lists every namespace,
+     * so a filtered page can be short or empty while `has_more` is true.
+     * Paginate with `has_more`, NOT page length.
+     *
+     * ```ts
+     * let cursor: string | undefined;
+     * let more = true;
+     * let count = 0;
+     * while (more) {
+     *     const page = await memwal.listMemories({ cursor, namespace: "work" });
+     *     count += page.memories.length;
+     *     cursor = page.next_cursor ?? undefined;
+     *     more = page.has_more;
+     * }
+     * ```
+     */
+    async listMemories(options: ListMemoriesOptions = {}): Promise<MemoriesResult> {
+        const owner = await this.resolveOwner();
+
+        const params = new URLSearchParams();
+        if (options.cursor !== undefined) params.set("updated_after", options.cursor);
+        if (options.limit !== undefined) params.set("limit", String(options.limit));
+        const query = params.toString();
+
+        // Query string must be part of the signed path (see listNamespaces).
+        const path = `/v1/owners/${owner}/memories${query ? `?${query}` : ""}`;
+
+        const raw = await this.signedRequest<MemoriesResult>("GET", path, {}, [200], {
+            includeDelegateKey: false,
+        });
+        // Relayers older than WALM-363 omit the tombstone fields.
+        const page: MemoriesResult = {
+            ...raw,
+            deleted: raw.deleted ?? [],
+            must_resync: raw.must_resync ?? false,
+        };
+        if (options.namespace === undefined) return page;
+
+        const namespace = options.namespace;
+        return {
+            ...page,
+            memories: page.memories.filter((m) => m.namespace_id === namespace),
+            deleted: page.deleted.filter((d) => d.namespace_id === namespace),
+        };
+    }
+
+    /**
      * Resolve this account's owner address, memoised for the client's life.
      *
      * The owner-scoped read routes take the address in the path and reject a
@@ -1280,7 +1619,12 @@ export class MemWal {
      * Check server health. The endpoint is public and does not require request signing.
      */
     async health(): Promise<HealthResult> {
-        const res = await this.fetchWithDeadline<HealthResult>(`${this.serverUrl}/health`);
+        const res = await this.fetchWithDeadline<HealthResult>(
+            `${this.serverUrl}/health`,
+            {},
+            this.preflightTimeoutMs,
+            "GET /health",
+        );
         if (!res.ok) {
             throw new Error(`Health check failed: ${res.status}`);
         }
@@ -1299,6 +1643,10 @@ export class MemWal {
      */
     async getPublicKeyHex(): Promise<string> {
         const pk = await this.getPublicKey();
+        // `await` yields even when the key was already cached. destroy()
+        // zero-fills that cache in place, so encode only after a fresh check
+        // or this resolves to 64 zero hex chars. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         return bytesToHex(pk);
     }
 
@@ -1307,11 +1655,18 @@ export class MemWal {
     // ============================================================
 
     private async getPublicKey(): Promise<Uint8Array> {
+        // destroy() zero-fills the cache in place, and an uncached key would
+        // otherwise derive the well-known key of the all-zero seed. Re-check
+        // after every await, and never cache a key derived once wiped. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         if (!this.publicKey) {
             const ed = await getEd();
-            this.publicKey = await ed.getPublicKeyAsync(this.privateKey);
+            if (this.destroyed) throw destroyedClientError();
+            const derived = await ed.getPublicKeyAsync(this.privateKey);
+            if (this.destroyed) throw destroyedClientError();
+            this.publicKey = derived;
         }
-        return this.publicKey;
+        return this.publicKey.slice();
     }
 
     private async ensureCompatibleRelayer(): Promise<RelayerVersionMetadata> {
@@ -1325,9 +1680,15 @@ export class MemWal {
     }
 
     private async fetchCompatibilityMetadata(): Promise<RelayerVersionMetadata> {
+        // WALM-598: both round-trips get their own bounded budget. They run
+        // inside whatever signed request triggered the compatibility probe, so
+        // leaving them untimed let a stalled relayer silently drain that
+        // caller's deadline (and, with no signal at all, hang indefinitely).
         const versionRes = await this.fetchWithDeadline<Partial<RelayerVersionMetadata>>(
             `${this.serverUrl}/version`,
             { method: "GET" },
+            this.preflightTimeoutMs,
+            "preflight GET /version",
         );
         let body: Partial<RelayerVersionMetadata>;
 
@@ -1337,6 +1698,8 @@ export class MemWal {
             const healthRes = await this.fetchWithDeadline<Partial<RelayerVersionMetadata>>(
                 `${this.serverUrl}/health`,
                 { method: "GET" },
+                this.preflightTimeoutMs,
+                "preflight GET /health",
             );
             if (!healthRes.ok) {
                 throw new Error(
@@ -1380,9 +1743,13 @@ export class MemWal {
 
     private async fetchServerConfig(): Promise<ServerConfig> {
         if (this.serverConfig) return this.serverConfig;
+        // WALM-598: bounded like the other preflights — this one is awaited
+        // inside `buildSealSession`, itself awaited inside a caller's budget.
         const res = await this.fetchWithDeadline<Record<string, unknown>>(
             `${this.serverUrl}/config`,
             { method: "GET" },
+            this.preflightTimeoutMs,
+            "preflight GET /config",
         );
         if (!res.ok) {
             throw new Error(`GET /config returned ${res.status}`);
@@ -1605,28 +1972,50 @@ export class MemWal {
      * one stalled socket there hangs every method on the client, not just one.
      */
     /** Deadline for one status poll: the client deadline, clamped so it can
-     * never outlive the wait budget it belongs to. */
+     * never outlive the wait budget it belongs to, but given a usable minimum
+     * at or past the deadline so a boundary check does not fail with an
+     * artificial 1ms AbortError (#1081). */
     private pollDeadlineMs(deadline: number): number {
-        return Math.max(1, Math.min(this.requestTimeoutMs, deadline - Date.now()));
+        const remaining = deadline - Date.now();
+        const minPollTimeout = Math.min(this.requestTimeoutMs, 1_000);
+        if (remaining <= 0) {
+            return minPollTimeout;
+        }
+        return Math.min(this.requestTimeoutMs, Math.max(remaining, minPollTimeout));
     }
 
     private async fetchWithDeadline<T>(
         url: string,
         init: RequestInit = {},
         timeoutMs?: number,
+        phase?: string,
     ): Promise<{ ok: boolean; status: number; body: T | undefined }> {
         const ms = timeoutMs ?? this.requestTimeoutMs;
         const deadline = deadlineSignal(ms);
         try {
             const res = await fetch(url, { ...init, signal: deadline.signal });
-            return {
-                ok: res.ok,
-                status: res.status,
-                body: res.ok ? ((await res.json()) as T) : undefined,
-            };
+            let body: T | undefined;
+            if (res.ok) {
+                const raw = await res.text();
+                if (raw.trim() === "") {
+                    throw jsonBodyError(
+                        res.status,
+                        `MemWal: HTTP ${res.status} response had an empty body; expected JSON`,
+                    );
+                }
+                try {
+                    body = JSON.parse(raw) as T;
+                } catch (err) {
+                    if (err instanceof SyntaxError) {
+                        throw jsonBodyError(res.status, `MemWal: HTTP ${res.status} response was not JSON`);
+                    }
+                    throw err;
+                }
+            }
+            return { ok: res.ok, status: res.status, body };
         } catch (err) {
             if (deadline.timedOut()) {
-                throw requestTimeoutError(init.method ?? "GET", url, ms);
+                throw requestTimeoutError(init.method ?? "GET", url, ms, phase);
             }
             throw err;
         } finally {
@@ -1647,6 +2036,8 @@ export class MemWal {
         const options = Array.isArray(acceptedStatusesOrOptions)
             ? requestOptions
             : acceptedStatusesOrOptions;
+        // Before the version probe. A destroyed client must not open GET /version. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         await this.ensureCompatibleRelayer();
         const ed = await getEd();
 
@@ -1665,14 +2056,16 @@ export class MemWal {
         const message = `${timestamp}.${method}.${path}.${bodySha256}.${nonce}.${this.accountId}`;
         const msgBytes = new TextEncoder().encode(message);
 
-        if (this.destroyed) {
-            throw new Error(
-                "Walrus Memory client was destroyed; its keys are zeroed. Create a new one.",
-            );
-        }
+        // Again after the version await. A destroy that lands while that
+        // request is in flight must still refuse to sign. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         // Sign with Ed25519
         const signature = await ed.signAsync(msgBytes, this.privateKey);
+        // destroy() during the sign, or during public-key derivation, must
+        // not reach fetch with the wiped seed's well-known key. (#1090)
+        if (this.destroyed) throw destroyedClientError();
         const publicKey = await this.getPublicKey();
+        if (this.destroyed) throw destroyedClientError();
 
         // Make HTTP request
         const url = `${this.serverUrl}${path}`;
@@ -1691,17 +2084,31 @@ export class MemWal {
         if (options.includeDelegateKey !== false) {
             headers["x-seal-session"] = await this.buildSealSession();
         }
-        // Bound the request. `fetch` never times out on its own, so this is the
-        // only thing standing between a stalled socket and a call that hangs
-        // for as long as the connection stays open.
-        const deadlineMs = options.timeoutMs ?? this.requestTimeoutMs;
-        const deadline = deadlineSignal(deadlineMs, options.signal);
+        // WALM-598: the caller's deadline starts HERE, not at the top of the
+        // call. Everything above — `ensureCompatibleRelayer()` (`/version` ->
+        // `/health`) and `buildSealSession()` (`/config`, dynamic imports, a
+        // Sui RPC round-trip for `SessionKey.create`) — is preflight work that
+        // used to run inside the caller's budget while being unabortable
+        // itself. Each of those now carries its own independent deadline.
+        //
+        // `fetch` never times out on its own, so this deadline is also the only
+        // thing standing between a stalled socket and a call that hangs for as
+        // long as the connection stays open.
+        const explicitTimeout = options.timeoutMs;
+        const deadlineOptOut = typeof explicitTimeout === "number"
+            && (!Number.isFinite(explicitTimeout) || explicitTimeout <= 0);
+        const deadlineMs = deadlineOptOut
+            ? undefined
+            : (explicitTimeout ?? this.requestTimeoutMs);
+        const deadline = deadlineMs === undefined
+            ? undefined
+            : deadlineSignal(deadlineMs, options.signal);
         try {
             const res = await fetch(url, {
                 method,
                 headers,
                 body: method === "GET" ? undefined : bodyStr,
-                signal: deadline.signal,
+                signal: deadline?.signal ?? options.signal,
             });
 
             if (!acceptedStatuses.includes(res.status)) {
@@ -1738,16 +2145,33 @@ export class MemWal {
                 throw err;
             }
 
-            return (await res.json()) as T;
+            const rawBody = await res.text();
+            if (rawBody.trim() === "") {
+                throw jsonBodyError(
+                    res.status,
+                    `MemWal: HTTP ${res.status} response had an empty body; expected JSON`,
+                );
+            }
+            try {
+                return JSON.parse(rawBody) as T;
+            } catch (err) {
+                if (err instanceof SyntaxError) {
+                    throw jsonBodyError(res.status, `MemWal: HTTP ${res.status} response was not JSON`);
+                }
+                throw err;
+            }
         } catch (err) {
             // Translate our own expiry into something a caller can classify.
             // An abort the CALLER asked for is theirs and propagates untouched.
-            if (deadline.timedOut() && (err as { status?: number }).status === undefined) {
-                throw requestTimeoutError(method, path, deadlineMs);
+            const status = err && typeof err === "object" && "status" in err
+                ? err.status
+                : undefined;
+            if (deadline?.timedOut() && typeof status !== "number") {
+                throw requestTimeoutError(method, path, deadlineMs ?? 0);
             }
             throw err;
         } finally {
-            deadline.dispose();
+            deadline?.dispose();
         }
     }
 }

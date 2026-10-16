@@ -33,6 +33,19 @@ export async function sha256hex(data: string): Promise<string> {
     return bytesToHex(sha256(new TextEncoder().encode(data)));
 }
 
+/** Window over which the same content resolves to one key (30 minutes). */
+export const IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000;
+
+export async function derivedIdempotencyKey(requestIdentity: string): Promise<string> {
+    const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
+    return `r1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
+}
+
+export async function derivedBulkIdempotencyKey(requestIdentity: string): Promise<string> {
+    const bucket = Math.floor(Date.now() / IDEMPOTENCY_BUCKET_MS);
+    return `b1-${await sha256hex(`${bucket}\0${requestIdentity}`)}`;
+}
+
 // ============================================================
 // Hex Encoding
 // ============================================================
@@ -261,13 +274,16 @@ export function normalizePrivateKey(key: string): string {
  *   non-localhost host (plaintext HTTP on the open internet exposes
  *   signed requests and any server-side secrets to passive interception).
  * - Localhost / 127.0.0.1 / ::1 are exempt from the warning (common in dev).
+ *   `URL.hostname` keeps the brackets on an IPv6 address (`[::1]`), so the
+ *   comparison strips them. Otherwise `http://[::1]` warns as if it were remote.
  * - Does NOT throw — explicit user-supplied `http://` is honored.
  */
 export function normalizeServerUrl(url: string): string {
     const trimmed = url.replace(/\/$/, "");
     try {
         const parsed = new URL(trimmed);
-        const host = parsed.hostname.toLowerCase();
+        let host = parsed.hostname.toLowerCase();
+        if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
         const isLocal =
             host === "localhost" ||
             host === "127.0.0.1" ||
@@ -285,6 +301,20 @@ export function normalizeServerUrl(url: string): string {
         // invalid URL — let the fetch call surface the error at request time
     }
     return trimmed;
+}
+
+/**
+ * Reject empty and whitespace-only text before a request is sent.
+ *
+ * The relayer does the same. A blank body used to be accepted and then
+ * sit until the client timed out (#1129). Non-blank text is not trimmed.
+ */
+export function assertNonBlankText(text: string, message = "Text cannot be empty"): void {
+    if (typeof text !== "string" || text.trim().length === 0) {
+        const err = new Error(message) as Error & { status?: number };
+        err.status = 400;
+        throw err;
+    }
 }
 
 // ============================================================
@@ -317,7 +347,7 @@ export function sanitizeServerError(
         return {
             message:
                 "401 from relayer: typically wrong private key, key not registered on this account, " +
-                "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+                "account ID mismatch (a wallet address is not a MemWal account ID), or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
                 "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors",
             raw: rawBody,
             serverCode: "AUTH_REJECTED",
@@ -391,6 +421,147 @@ export function clockDriftErrorFromResponse(
 }
 
 // ============================================================
+// Bounded fetch (WALM-598)
+// ============================================================
+
+/**
+ * Default deadline for the unauthenticated preflight round-trips
+ * (`GET /version`, `GET /health`, `GET /config`) the SDK makes before it can
+ * dispatch a signed request.
+ *
+ * Each preflight carries its own budget: they are awaited inside a caller's
+ * request budget, so an unbounded one both hangs forever and spends someone
+ * else's deadline (WALM-598).
+ */
+export const DEFAULT_PREFLIGHT_TIMEOUT_MS = 5_000;
+
+/** Default deadline for the `/api/recall` request itself. */
+export const DEFAULT_RECALL_TIMEOUT_MS = 15_000;
+
+/**
+ * Error thrown when one of the SDK's bounded fetches blows its deadline.
+ *
+ * `phase` names the round-trip that actually stalled — `"preflight GET
+ * /version"`, `"POST /api/recall"` — which is the diagnostic that was missing
+ * when every stall in the chain surfaced as an unlabeled `AbortError` on the
+ * final request.
+ */
+export interface TimeoutError extends Error {
+    name: "TimeoutError";
+    /** Which round-trip exceeded its budget. */
+    phase: string;
+    /** The budget that was exceeded, in milliseconds. */
+    timeoutMs: number;
+}
+
+/** True for a `TimeoutError` or the `MemWalRequestTimeout` recall throws. */
+export function isTimeoutError(err: unknown): err is Error {
+    if (!(err instanceof Error)) return false;
+    if (err.name === "MemWalRequestTimeout") return true;
+    return err.name === "TimeoutError" && "phase" in err;
+}
+
+function timeoutError(phase: string, timeoutMs: number, cause: unknown): TimeoutError {
+    const err = new Error(
+        `Walrus Memory request timed out after ${timeoutMs}ms during ${phase}.`,
+    ) as TimeoutError;
+    err.name = "TimeoutError";
+    err.phase = phase;
+    err.timeoutMs = timeoutMs;
+    (err as Error & { cause?: unknown }).cause = cause;
+    return err;
+}
+
+/**
+ * `fetch` under an independent abort budget.
+ *
+ * A non-finite or non-positive `timeoutMs` disables the deadline (the caller
+ * opted out); an `external` signal is still honoured in that case.
+ *
+ * Aborts triggered by our own timer are rethrown as a `TimeoutError` tagged
+ * with `phase`; an abort that came from `external` is left alone so callers
+ * keep distinguishing "I cancelled this" from "this timed out".
+ */
+export async function fetchWithDeadline(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+    phase: string,
+    external?: AbortSignal,
+): Promise<Response> {
+    const bounded = Number.isFinite(timeoutMs) && timeoutMs > 0;
+    if (!bounded && !external) return fetch(url, init);
+
+    const ac = new AbortController();
+    let timedOut = false;
+    const onExternalAbort = () => ac.abort();
+    if (external) {
+        if (external.aborted) ac.abort();
+        else external.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    // Deliberately not `unref()`d: this timer is what bounds the body read
+    // below, so it has to be able to fire on an otherwise-idle loop.
+    const tid = bounded
+        ? setTimeout(() => {
+              timedOut = true;
+              ac.abort();
+          }, timeoutMs)
+        : undefined;
+
+    const release = () => {
+        if (tid !== undefined) clearTimeout(tid);
+        external?.removeEventListener("abort", onExternalAbort);
+    };
+    const relabel = (err: unknown) => (timedOut ? timeoutError(phase, timeoutMs, err) : err);
+
+    let res: Response;
+    try {
+        res = await fetch(url, { ...init, signal: ac.signal });
+    } catch (err) {
+        release();
+        throw relabel(err);
+    }
+    return armBodyDeadline(res, release, relabel);
+}
+
+/**
+ * Keep the deadline armed until the response body settles.
+ *
+ * `fetch()` resolves when the response *headers* arrive, so clearing the timer
+ * there would leave `res.json()` / `res.text()` unbounded: a server that sends
+ * headers promptly and then trickles the body could outlive the budget the
+ * caller named. The read methods carry the timer instead, and relabel an abort
+ * our own timer caused so a slow body still surfaces as a phase-tagged
+ * `TimeoutError` rather than a bare `AbortError`.
+ */
+function armBodyDeadline(
+    res: Response,
+    release: () => void,
+    relabel: (err: unknown) => unknown,
+): Response {
+    const target = res as unknown as Record<string, unknown>;
+    for (const name of ["json", "text", "arrayBuffer", "blob", "formData"]) {
+        const original = target[name];
+        if (typeof original !== "function") continue;
+        const read = (original as (...args: unknown[]) => Promise<unknown>).bind(res);
+        Object.defineProperty(target, name, {
+            configurable: true,
+            writable: true,
+            value: async (...args: unknown[]) => {
+                try {
+                    return await read(...args);
+                } catch (err) {
+                    throw relabel(err);
+                } finally {
+                    release();
+                }
+            },
+        });
+    }
+    return res;
+}
+
+// ============================================================
 // Delegate Key → Sui Address Derivation
 // ============================================================
 
@@ -438,3 +609,60 @@ export async function delegateKeyToPublicKey(privateKeyHex: string): Promise<Uin
     const ed = await import("@noble/ed25519");
     return ed.getPublicKeyAsync(hexToBytes(normalizePrivateKey(privateKeyHex)));
 }
+
+// ============================================================
+// Request Deadline & Timeout Helpers
+// ============================================================
+
+/** Timeout applied to restore requests (60s), giving the server 55s to respond. */
+export const RESTORE_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Abort signal that fires after `ms`, or when `caller` aborts — whichever is
+ * first. Built by hand rather than with `AbortSignal.any`, which lands too
+ * recently to rely on across Node, browsers and Workers alike.
+ *
+ * Returns the signal plus a `dispose` the caller must run in a `finally`, so a
+ * pending timer never outlives its request.
+ */
+export function deadlineSignal(
+    ms: number,
+    caller?: AbortSignal,
+): { signal: AbortSignal; timedOut: () => boolean; dispose: () => void } {
+    const controller = new AbortController();
+    let expired = false;
+
+    const onCallerAbort = () => controller.abort(caller?.reason);
+    if (caller) {
+        if (caller.aborted) controller.abort(caller.reason);
+        else caller.addEventListener("abort", onCallerAbort, { once: true });
+    }
+
+    const timer = setTimeout(() => {
+        expired = true;
+        controller.abort();
+    }, ms);
+
+    return {
+        signal: controller.signal,
+        timedOut: () => expired,
+        dispose: () => {
+            clearTimeout(timer);
+            caller?.removeEventListener("abort", onCallerAbort);
+        },
+    };
+}
+
+/**
+ * The error a request deadline produces.
+ */
+export function requestTimeoutError(method: string, path: string, ms: number): Error {
+    const err = new Error(
+        `Walrus Memory request timed out after ${ms}ms (${method} ${path}). The relayer ` +
+            `accepted the connection but did not answer in time.`,
+    );
+    err.name = "MemWalRequestTimeout";
+    (err as Error & { status?: number }).status = 504;
+    return err;
+}
+

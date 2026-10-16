@@ -324,10 +324,19 @@ class TestPrivateKeyFormats:
         for form in (
             self._SEED_HEX,
             f"0x{self._SEED_HEX}",
+            f"0X{self._SEED_HEX}",
+            f"  0X{self._SEED_HEX}  ",
             encode_sui_private_key(seed),
             f"  {encode_sui_private_key(seed)}  ",
         ):
             assert normalize_private_key(form) == self._SEED_HEX
+
+    def test_uppercase_0x_prefix_key_produces_valid_client(self) -> None:
+        from memwal.client import MemWal
+
+        upper_0x = f"0X{self._SEED_HEX}"
+        client = MemWal.create(key=upper_0x, account_id="0xtest")
+        assert client._private_key_hex == self._SEED_HEX
 
     def test_bech32_key_produces_the_same_client_identity(self) -> None:
         from memwal.client import MemWal

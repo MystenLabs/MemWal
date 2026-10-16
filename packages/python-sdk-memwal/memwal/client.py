@@ -27,13 +27,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import math
 import random
 import re
 import time
 import uuid
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, TypeVar, Union
 from urllib.parse import ParseResult, urlencode, urlparse
 
@@ -66,6 +69,7 @@ from .types import (
     RememberBulkResult,
     RememberBulkStatusItem,
     RememberBulkStatusResult,
+    RememberJobStatus,
     RememberManualOptions,
     RememberManualResult,
     RememberResult,
@@ -96,7 +100,8 @@ PACKAGE_VERSION_CHECK_TIMEOUT_S = 10.0
 SEAL_SESSION_SAFETY_MARGIN_MS = 30_000
 AUTH_REJECTED_MESSAGE = (
     "401 from relayer: typically wrong private key, key not registered on this "
-    "account, account ID mismatch, or staging/mainnet mismatch. Check .env.local "
+    "account, account ID mismatch (a wallet address is not a MemWal account ID), "
+    "or staging/mainnet mismatch. Check .env.local "
     "and dashboard credentials. Full troubleshooting: "
     "https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors"
 )
@@ -119,6 +124,67 @@ def _server_url_for_log(parsed: ParseResult) -> str:
     if parsed.port is not None:
         return f"{parsed.scheme}://{host}:{parsed.port}"
     return f"{parsed.scheme}://{host}"
+
+
+def _reject_blank_text(text: object, message: str = "Text cannot be empty") -> None:
+    """Reject empty and whitespace-only text before a request is sent.
+
+    The relayer does the same (#1129). Failing here means an older relayer
+    cannot accept the job and leave the caller polling until timeout.
+    Non-blank text is not trimmed.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(message)
+
+
+IDEMPOTENCY_BUCKET_MS = 30 * 60 * 1000
+
+
+def _derived_idempotency_key(request_identity: str) -> str:
+    """Window over which the same (namespace, text) resolves to one key.
+
+    `_pending_remember_keys` only dedupes retries that reuse one client instance,
+    and callers such as sidecars or serverless functions build a fresh client
+    per session — so a random key lets a replay mint a second paid blob. The
+    bucket bounds the collapse: `remember_jobs` rows are never pruned, so an
+    unbucketed key would dedupe against a job from any point in history.
+
+    Matches TypeScript SDK derivedIdempotencyKey contract.
+    """
+    bucket = int(time.time() * 1000) // IDEMPOTENCY_BUCKET_MS
+    payload = f"{bucket}\0{request_identity}".encode("utf-8")
+    return f"r1-{hashlib.sha256(payload).hexdigest()}"
+
+
+def _require_remember_job_id(job_id: object) -> str:
+    """String form of a remember job id.
+
+    ``uuid.UUID`` used to interpolate into the path and still does. Any other
+    non-string is a type mistake: ``not_found`` would hide a job that exists.
+    """
+
+    if isinstance(job_id, uuid.UUID):
+        return str(job_id)
+    if not isinstance(job_id, str):
+        raise TypeError(
+            f"remember job id must be a string, got {type(job_id).__name__}"
+        )
+    return job_id
+
+
+def _remember_status_path(job_id: str) -> Optional[str]:
+    """``/api/remember/{job_id}`` when the id is one safe segment, else None.
+
+    httpx rewrites the path after it is signed. ``.`` requests
+    ``/api/remember``, ``..`` requests ``/api``, and a NUL raises
+    ``InvalidURL``. An allowlist keeps those from leaving the client. A
+    normal UUID is unchanged. (#1100, #1216)
+    """
+
+    if re.fullmatch(r"[A-Za-z0-9_-]+", job_id) is None:
+        return None
+    return f"/api/remember/{job_id}"
 
 
 def normalize_server_url(url: str) -> str:
@@ -186,18 +252,51 @@ def _positive_retry_ms(raw: object) -> Optional[int]:
         seconds = float(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
+    if seconds <= 0 or math.isnan(seconds) or math.isinf(seconds):
         return None
-    return int(seconds * 1000)
+    try:
+        ms = seconds * 1000.0
+        if math.isinf(ms) or math.isnan(ms):
+            return None
+        return int(ms)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _http_date_retry_ms(raw: object) -> Optional[int]:
+    if not isinstance(raw, str):
+        return None
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        target_ts = dt.timestamp()
+        # HTTP-date is absolute wall-clock time, so we deliberately compare against
+        # time.time() rather than monotonic _now_ms().
+        now_ts = time.time()
+        diff = target_ts - now_ts
+        if diff <= 0 or math.isnan(diff) or math.isinf(diff):
+            return None
+        ms = diff * 1000.0
+        if math.isinf(ms) or math.isnan(ms):
+            return None
+        return int(ms)
+    except Exception:
+        return None
 
 
 def _retry_after_ms(err: "_HttpStatusError") -> int:
-    """Retry-After seconds, else JSON ``retry_after_seconds``, in ms."""
+    """Retry-After seconds or HTTP-date, else JSON ``retry_after_seconds``, in ms."""
 
     if err.retry_after:
         header_ms = _positive_retry_ms(err.retry_after)
         if header_ms is not None:
             return header_ms
+        date_ms = _http_date_retry_ms(err.retry_after)
+        if date_ms is not None:
+            return date_ms
     if not err.body:
         return 0
     try:
@@ -414,12 +513,15 @@ class MemWal:
             :class:`RememberAcceptedResult` with ``job_id`` and initial
             status (``"pending"``).
         """
+        _reject_blank_text(text)
         resolved_namespace = namespace or self._namespace
         request_identity = f"{resolved_namespace}\0{text}"
         generated_key = idempotency_key is None
-        resolved_key = idempotency_key or self._pending_remember_keys.get(request_identity)
-        if resolved_key is None:
-            resolved_key = str(uuid.uuid4())
+        resolved_key = (
+            idempotency_key
+            or self._pending_remember_keys.get(request_identity)
+            or _derived_idempotency_key(request_identity)
+        )
         if generated_key:
             self._pending_remember_keys[request_identity] = resolved_key
 
@@ -449,6 +551,59 @@ class MemWal:
     ) -> RememberAcceptedResult:
         return await self.remember(text, namespace, idempotency_key)
 
+    def _poll_deadline_s(self, deadline_ms: int) -> float:
+        remaining_s = (deadline_ms - _now_ms()) / 1000.0
+        return max(0.001, min(60.0, remaining_s))
+
+    async def get_remember_status(self, job_id: str) -> RememberJobStatus:
+        """One-shot lookup of a remember job. Mirrors TS ``getRememberStatus``.
+
+        ``GET /api/remember/{job_id}``, accepting 200 and 404. A 404, or a
+        body with no ``status``, is ``not_found`` — not an exception. A job
+        id outside ``[A-Za-z0-9_-]+`` is ``not_found`` without a request.
+        """
+
+        job_id = _require_remember_job_id(job_id)
+        path = _remember_status_path(job_id)
+        if path is None:
+            return RememberJobStatus(
+                job_id=job_id,
+                status="not_found",
+                error=f"Job {job_id} not found",
+            )
+        try:
+            data = await self._signed_request(
+                "GET",
+                path,
+                {},
+                accepted_statuses=(200, 404),
+                # Status is metadata. No SEAL decrypt, so no session. Matches TS.
+                include_seal_session=False,
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            data = None
+        if not isinstance(data, dict):
+            return RememberJobStatus(
+                job_id=job_id,
+                status="not_found",
+                error=f"remember job not found: {job_id}",
+            )
+        status = data.get("status")
+        if not status:
+            return RememberJobStatus(
+                job_id=data.get("job_id") or job_id,
+                status="not_found",
+                error=data.get("error") or f"remember job not found: {job_id}",
+            )
+        return RememberJobStatus(
+            job_id=data.get("job_id", job_id),
+            status=status,
+            owner=data.get("owner"),
+            namespace=data.get("namespace"),
+            blob_id=data.get("blob_id"),
+            error=data.get("error"),
+        )
+
     async def wait_for_remember_job(
         self,
         job_id: str,
@@ -467,10 +622,18 @@ class MemWal:
         - First poll is immediate; later polls grow 1.5x toward 5s.
         """
 
+        job_id = _require_remember_job_id(job_id)
+        path = _remember_status_path(job_id)
+        if path is None:
+            raise MemWalRememberJobNotFound(job_id)
+
         deadline_ms = _now_ms() + timeout_ms
         attempt = 0
         saw_rate_limit = False
         retry_after_ms = 0
+        last_status: Optional[str] = None
+        server_error: Optional[str] = None
+        last_refusal: Optional[int] = None
 
         while _now_ms() < deadline_ms:
             if retry_after_ms > 0:
@@ -481,23 +644,48 @@ class MemWal:
             retry_after_ms = 0
 
             try:
-                data = await self._signed_request(
-                    "GET",
-                    f"/api/remember/{job_id}",
-                    {},
-                    accepted_statuses=(200, 404),
-                )
+                poll_timeout = self._poll_deadline_s(deadline_ms)
+                try:
+                    data = await self._signed_request(
+                        "GET",
+                        path,
+                        {},
+                        accepted_statuses=(200, 404),
+                        timeout=poll_timeout,
+                    )
+                except TypeError as err:
+                    if "unexpected keyword argument" in str(err) and "timeout" in str(err):
+                        data = await self._signed_request(
+                            "GET",
+                            path,
+                            {},
+                            accepted_statuses=(200, 404),
+                        )
+                    else:
+                        raise
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise MemWalRememberJobNotFound(job_id) from None
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
+                    last_refusal = err.status
                     if err.status == 429:
                         saw_rate_limit = True
                         retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
                     continue
                 raise
+            except httpx.TransportError:
+                # Network drops retry as status 0; continuing next loop iteration
+                # increments `attempt` so exponential backoff delay continues to grow.
+                last_refusal = 0
+                continue
 
+            if not isinstance(data, dict):
+                raise MemWalRememberJobNotFound(job_id)
             status_str = data.get("status")
             if status_str is None or status_str == "not_found":
                 raise MemWalRememberJobNotFound(job_id)
+            last_status = status_str
+            server_error = data.get("error")
 
             if status_str == "done":
                 return RememberResult(
@@ -514,7 +702,14 @@ class MemWal:
 
             # pending / running / uploaded — keep polling.
 
-        raise _remember_job_timeout(job_id, timeout_ms, saw_rate_limit)
+        raise MemWalRememberJobTimeout(
+            job_id=job_id,
+            timeout_ms=timeout_ms,
+            last_status=last_status,
+            server_error=server_error,
+            last_refusal=last_refusal,
+            saw_rate_limit=saw_rate_limit,
+        )
 
     async def remember_and_wait(
         self,
@@ -531,12 +726,15 @@ class MemWal:
         ``failed``). Mirrors TS ``rememberAndWait``.
         """
 
+        _reject_blank_text(text)
         resolved_namespace = namespace or self._namespace
         request_identity = f"{resolved_namespace}\0{text}"
         generated_key = idempotency_key is None
-        resolved_key = idempotency_key or self._pending_remember_keys.get(request_identity)
-        if resolved_key is None:
-            resolved_key = str(uuid.uuid4())
+        resolved_key = (
+            idempotency_key
+            or self._pending_remember_keys.get(request_identity)
+            or _derived_idempotency_key(request_identity)
+        )
         if generated_key:
             self._pending_remember_keys[request_identity] = resolved_key
 
@@ -569,6 +767,8 @@ class MemWal:
 
         if not items:
             raise ValueError("remember_bulk_async: items must be a non-empty array")
+        for index, item in enumerate(items):
+            _reject_blank_text(item.text, f"items[{index}].text cannot be empty")
 
         payload_items: List[Dict[str, Any]] = [
             {
@@ -603,7 +803,9 @@ class MemWal:
         return await self.remember_bulk_async(items)
 
     async def get_remember_bulk_status(
-        self, job_ids: Sequence[str]
+        self,
+        job_ids: Sequence[str],
+        timeout: Optional[float] = None,
     ) -> RememberBulkStatusResult:
         """Poll the bulk-status endpoint for a batch of job_ids.
 
@@ -615,6 +817,7 @@ class MemWal:
             "POST",
             "/api/remember/bulk/status",
             {"job_ids": list(job_ids)},
+            timeout=timeout,
         )
         return RememberBulkStatusResult(
             results=[
@@ -697,7 +900,14 @@ class MemWal:
             retry_after_ms = 0
 
             try:
-                batch = await self.get_remember_bulk_status(pending)
+                poll_timeout = self._poll_deadline_s(deadline_ms)
+                try:
+                    batch = await self.get_remember_bulk_status(pending, timeout=poll_timeout)
+                except TypeError as err:
+                    if "unexpected keyword argument" in str(err) and "timeout" in str(err):
+                        batch = await self.get_remember_bulk_status(pending)
+                    else:
+                        raise
             except _HttpStatusError as err:
                 if _is_transient_polling_status(err.status):
                     last_refusal = err.status
@@ -706,6 +916,11 @@ class MemWal:
                         retry_after_ms = _clamped_retry_after_ms(err, deadline_ms)
                     continue
                 raise
+            except httpx.TransportError:
+                # Network drops retry as status 0; continuing next loop iteration
+                # increments `attempt` so exponential backoff delay continues to grow.
+                last_refusal = 0
+                continue
             answered = True
 
             terminal_ids: Set[str] = {
@@ -728,6 +943,8 @@ class MemWal:
                     retry_after = f"{wait_ms / 1000:g}" if wait_ms else None
                     raise MemWalRateLimited(job_ids, retry_after) from err
                 # Any other probe failure is not evidence about the jobs.
+            except httpx.TransportError:
+                pass
             else:
                 answered = True
                 settled = {
@@ -838,6 +1055,8 @@ class MemWal:
                 blob_id=m["blob_id"],
                 text=m["text"],
                 distance=m["distance"],
+                score=m.get("score"),
+                created_at=m.get("created_at"),
             )
             for m in data.get("results", [])
         ]
@@ -846,14 +1065,12 @@ class MemWal:
             dropped = int(raw_dropped)
         except (TypeError, ValueError):
             dropped = 0
+        total_count = data.get("total", len(memories))
         if max_distance is not None:
             memories = [m for m in memories if m.distance < max_distance]
-            return RecallResult(
-                results=memories, total=len(memories), dropped_count=dropped
-            )
         return RecallResult(
             results=memories,
-            total=data.get("total", len(memories)),
+            total=total_count,
             dropped_count=dropped,
         )
 
@@ -898,6 +1115,7 @@ class MemWal:
             :class:`AnalyzeResult` with extracted ``facts`` + per-fact
             ``job_ids`` for downstream polling.
         """
+        _reject_blank_text(text)
         body: Dict[str, Any] = {
             "text": text,
             "namespace": namespace or self._namespace,
@@ -970,6 +1188,7 @@ class MemWal:
         :meth:`remember` (server handles embed + encrypt + upload).
         """
 
+        _reject_blank_text(text, "text cannot be empty")
         data = await self._signed_request(
             "POST",
             "/api/embed",
@@ -1236,7 +1455,12 @@ class MemWal:
             include_seal_session=False,
         )
         hits = [
-            RecallManualHit(blob_id=h["blob_id"], distance=h["distance"])
+            RecallManualHit(
+                blob_id=h["blob_id"],
+                distance=h["distance"],
+                created_at=h.get("created_at"),
+                importance=h.get("importance"),
+            )
             for h in data.get("results", [])
         ]
         return RecallManualResult(results=hits, total=data.get("total", len(hits)))
@@ -1484,6 +1708,7 @@ class MemWal:
         body: Dict[str, Any],
         accepted_statuses: tuple = (200,),
         include_seal_session: bool = True,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Make a signed request to the server.
 
@@ -1504,7 +1729,6 @@ class MemWal:
             - ``x-account-id``: Walrus Memory account object ID
             - ``Content-Type``: application/json
         """
-        import uuid
 
         await self._ensure_compatible_relayer()
 
@@ -1544,6 +1768,7 @@ class MemWal:
             url=url,
             headers=headers,
             content=None if method_upper == "GET" else body_str,
+            timeout=timeout,
         )
 
         if response.status_code not in accepted_statuses:
@@ -1597,7 +1822,7 @@ class MemWalClockDriftError(MemWalError):
 
 def _redact_internal_urls(text: str) -> str:
     return re.sub(
-        r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s)\]>'\"]*",
+        r"https?://(?:(?:[\w-]+\.)*localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|0\.0\.0\.0)(?::\d+)?[^\s)\]>'\"]*",
         "[internal]",
         text,
         flags=re.IGNORECASE,
@@ -1671,24 +1896,52 @@ class MemWalRateLimited(MemWalError):
 
 
 class MemWalRememberJobTimeout(MemWalError):
-    """Polling loop exceeded the configured timeout."""
+    """Polling loop exceeded the configured timeout.
 
-    def __init__(self, job_id: str, timeout_ms: int) -> None:
+    Carries the last status the relayer reported (GH #966): under upload
+    congestion a job stays ``running`` for tens of minutes, and without it a
+    job that is still retrying looks dead.
+    """
+
+    def __init__(
+        self,
+        job_id: str,
+        timeout_ms: int,
+        last_status: Optional[str] = None,
+        server_error: Optional[str] = None,
+        last_refusal: Optional[int] = None,
+        saw_rate_limit: bool = False,
+    ) -> None:
+        # "no status read got through (last poll: HTTP 429)" already names the rate limit.
+        named = last_status is None and last_refusal == 429
+        rate_limited = "; wait hit a rate limit (429)" if saw_rate_limit and not named else ""
+        # Redacted once, for both the message and the attribute.
+        server_error = _redact_internal_urls(server_error) if server_error else None
+        if last_status is not None:
+            # The wait only times out on a job still pending/running/uploaded
+            # (a failed job raises), so the advice is to keep waiting on it.
+            suffix = f" ({server_error})" if server_error else ""
+            detail = (
+                f"last status: {last_status}{suffix}. The job is still in progress: "
+                f"call wait_for_remember_job({job_id!r}) to keep waiting on it. Sending "
+                "the text again under a new idempotency key stores it twice; a key you "
+                "passed as idempotency_key is not remembered by the client, so pass it "
+                "again on any retry."
+            )
+        else:
+            detail = (
+                f"no status read got through (last poll: HTTP {last_refusal or 0}), "
+                "so the job's state is unknown."
+            )
         super().__init__(
-            f"remember job timed out after {timeout_ms}ms (job_id={job_id})"
+            f"remember job timed out after {timeout_ms}ms (job_id={job_id}){rate_limited}; {detail}"
         )
         self.status = 504
         self.job_id = job_id
         self.timeout_ms = timeout_ms
-
-
-def _remember_job_timeout(
-    job_id: str, timeout_ms: int, saw_rate_limit: bool
-) -> MemWalRememberJobTimeout:
-    exc = MemWalRememberJobTimeout(job_id, timeout_ms)
-    if saw_rate_limit:
-        exc.args = (f"{exc.args[0]}; wait hit a rate limit (429)",)
-    return exc
+        self.last_status = last_status
+        self.server_error = server_error
+        self.last_refusal = last_refusal
 
 
 async def _discard_http_client(memwal: MemWal) -> None:
@@ -1804,6 +2057,10 @@ class MemWalSync:
         idempotency_key: Optional[str] = None,
     ) -> RememberAcceptedResult:
         return self._run(self._inner.remember_async(text, namespace, idempotency_key))
+
+    def get_remember_status(self, job_id: str) -> RememberJobStatus:
+        """Synchronous version of :meth:`MemWal.get_remember_status`."""
+        return self._run(self._inner.get_remember_status(job_id))
 
     def wait_for_remember_job(
         self,

@@ -93,3 +93,24 @@ test("the signature the client produces verifies against its public key", async 
     );
     assert.equal(tampered, false, "a different path must not verify");
 });
+
+test("hexToBytes round-trips even hex with 0x and 0X prefixes", () => {
+    assert.deepEqual(hexToBytes("deadbeef"), Uint8Array.from([0xde, 0xad, 0xbe, 0xef]));
+    assert.deepEqual(hexToBytes("0xdeadbeef"), Uint8Array.from([0xde, 0xad, 0xbe, 0xef]));
+    assert.deepEqual(hexToBytes("0XDEADBEEF"), Uint8Array.from([0xde, 0xad, 0xbe, 0xef]));
+});
+
+test("hexToBytes rejects empty, odd-length, non-hex, and non-string inputs", () => {
+    assert.throws(() => hexToBytes(null), /expected string input/);
+    assert.throws(() => hexToBytes(123), /expected string input/);
+    assert.throws(() => hexToBytes(""), /empty hex string/);
+    assert.throws(() => hexToBytes("0x"), /empty hex string/);
+    assert.throws(() => hexToBytes("0X"), /empty hex string/);
+    assert.throws(() => hexToBytes("abc"), /odd-length/);
+    assert.throws(() => hexToBytes("0xabc"), /odd-length/);
+    assert.throws(() => hexToBytes("zz"), /non-hex/);
+    assert.throws(() => hexToBytes("0Xzz"), /non-hex/);
+    assert.throws(() => hexToBytes("deadbeefzz"), /non-hex/);
+    assert.throws(() => hexToBytes("ab  cd"), /non-hex/);
+});
+

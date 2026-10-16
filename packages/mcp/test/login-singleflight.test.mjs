@@ -75,3 +75,96 @@ test("onFailure runs once when a concurrent call joins the in-flight flow", asyn
     await Promise.allSettled([first.result, second.result]);
     assert.equal(failures, 1);
 });
+
+test("freshKey: true bypasses the in-flight flow and starts a new one", async (t) => {
+    const home = mkdtempSync(join(tmpdir(), "memwal-test-"));
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    resetInflightLogin();
+
+    t.after(() => {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = prevProfile;
+        resetInflightLogin();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    const opts = {
+        openBrowser: false,
+        timeoutMs: 1500,
+        webUrl: "http://127.0.0.1:9",
+        relayerUrl: "http://127.0.0.1:9",
+        label: "singleflight-fresh-test",
+    };
+    const first = startOrReuseLoginFlow(opts);
+    const second = startOrReuseLoginFlow({ ...opts, freshKey: true });
+    const [firstUrl, secondUrl] = await Promise.allSettled([first.url, second.url]);
+    assert.equal(firstUrl.status, "rejected");
+    assert.equal(firstUrl.reason.name, "MemWalLoginSuperseded");
+    assert.equal(secondUrl.status, "fulfilled");
+    assert.match(secondUrl.value, /\/connect\/mcp\?/);
+    await Promise.allSettled([first.result, second.result]);
+});
+
+test("freshKey closes the previous listener so its timeout is not a failure", async (t) => {
+    const home = mkdtempSync(join(tmpdir(), "memwal-test-"));
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    resetInflightLogin();
+
+    t.after(() => {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = prevProfile;
+        resetInflightLogin();
+        rmSync(home, { recursive: true, force: true });
+    });
+
+    const opts = {
+        openBrowser: false,
+        timeoutMs: 300,
+        webUrl: "http://127.0.0.1:9",
+        relayerUrl: "http://127.0.0.1:9",
+        label: "singleflight-supersede-test",
+    };
+    let failures = 0;
+    const first = startOrReuseLoginFlow(opts, undefined, () => {
+        failures += 1;
+    });
+    const urlA = await first.url;
+    const port = new URL(urlA).searchParams.get("port");
+    const second = startOrReuseLoginFlow(
+        { ...opts, freshKey: true, timeoutMs: 10_000 },
+        undefined,
+        () => {
+            failures += 1;
+        },
+    );
+    await second.url;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(failures, 0);
+    await assert.rejects(first.result, (err) => {
+        assert.equal(err.name, "MemWalLoginSuperseded");
+        return true;
+    });
+    await assert.rejects(
+        fetch(`http://127.0.0.1:${port}/callback`, {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                origin: "http://127.0.0.1:9",
+            },
+            body: "{}",
+            signal: AbortSignal.timeout(1000),
+        }),
+    );
+    resetInflightLogin();
+    await Promise.allSettled([second.result]);
+});
