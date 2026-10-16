@@ -1,7 +1,7 @@
 """Tests for the relayer environment presets (prod/dev/staging/local).
 
-Pure config resolution — no network. Mirrors the precedence rule documented
-in the README: explicit non-default ``server_url`` > ``env`` > default.
+Pure config resolution — no network. Any explicit ``server_url`` wins,
+including the hosted default. ``env`` applies only when ``server_url`` is ``None``.
 """
 
 import pytest

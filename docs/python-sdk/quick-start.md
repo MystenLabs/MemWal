@@ -103,7 +103,7 @@ Instead of hardcoding a URL, pass `env`. The public docs and Colab example use `
 | `prod` | `https://relayer.memory.walrus.xyz` |
 | `staging` | `https://relayer-staging.memory.walrus.xyz` |
 
-Precedence: an explicit non-default `server_url` > `env` > the default. An unknown preset raises `ValueError`.
+Precedence: any explicit `server_url` wins, including the hosted default. `env` applies only when `server_url` is omitted (`None`). An unknown preset raises `ValueError`.
 
 ## First Memory
 

@@ -37,13 +37,13 @@ class MemWalConfig:
         key: Ed25519 private key (hex string). This is the delegate key from the
             Walrus Memory dashboard.
         account_id: Walrus Memory account object ID on Sui.
-        server_url: Server URL (default: https://relayer.memory.walrus.xyz). An explicit
-            non-default value always wins over ``env``.
+        server_url: Server URL. ``None`` means omitted. Any explicit URL,
+            including the hosted default, wins over ``env``.
         namespace: Default namespace for memory isolation (default: "default").
         env: Optional relayer preset — one of ``"prod"``, ``"dev"``,
-            ``"staging"``, ``"local"``. Resolves ``server_url`` to the matching
-            hosted relayer when ``server_url`` is left at its default.
-            Precedence: explicit ``server_url`` > ``env`` > default.
+            ``"staging"``, ``"local"``. Used only when ``server_url`` is
+            omitted (``None``). Precedence: explicit ``server_url`` > ``env``
+            > ``DEFAULT_SERVER_URL``.
     """
 
     key: str
