@@ -43,12 +43,32 @@ export const ADDRESS_BALANCE_WALLET_FALLBACK_POLICY: EnokiFallbackPolicy = {
     gasMode: "addressBalance",
 };
 
+function executionFailureText(error: unknown): string {
+    if (typeof error === "string") return error.trim();
+    if (!error || typeof error !== "object") return "";
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+    try {
+        const text = JSON.stringify(error, (_key, value) => (
+            typeof value === "bigint" ? value.toString() : value
+        ));
+        return text === "{}" ? "" : text;
+    } catch {
+        return "";
+    }
+}
+
 export function assertFinalizedTransactionSuccess(result: any, label: string): any {
     if (
         result?.$kind === "FailedTransaction"
         && result.FailedTransaction?.status?.success === false
     ) {
-        throw new FinalizedTransactionFailure(`${label} was not successful`);
+        // A landed register still throws the no-side-effect failure, but the
+        // MoveAbort text has to survive so a stale WAL price can refresh the client.
+        const detail = executionFailureText(result.FailedTransaction.status?.error);
+        throw new FinalizedTransactionFailure(
+            detail ? `${label} was not successful: ${detail}` : `${label} was not successful`,
+        );
     }
     if (
         result?.$kind === "Transaction"

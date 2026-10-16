@@ -734,6 +734,15 @@ export function resetUploadStepFlightsForTests(): void {
     uploadStepFlights.clear();
 }
 
+/** Drop this job's cached steps after a stale-price refresh. A cached prepare would replay the same bytes for 60s. Other jobs stay. */
+export function dropUploadStepFlightsForJob(jobId: string | null): void {
+    if (!jobId) return;
+    const prefix = `${jobId}|`;
+    for (const key of uploadStepFlights.keys()) {
+        if (key.startsWith(prefix)) uploadStepFlights.delete(key);
+    }
+}
+
 export function registerWalrusUploadJournalRoute(app: Express): void {
     app.post(
         "/walrus/upload-step-v3",
@@ -1078,9 +1087,13 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                     return;
                 }
                 const message = errorMessage(error);
-                // Sponsor dry-run aborts before a register is journaled. The
-                // next attempt builds a new transaction from this client.
-                refreshWalrusClientOnStaleWalPrice(message);
+                // destroy_zero (price down) and balance::split (price up) both
+                // mean the cached WAL price is stale, including after the
+                // register has already landed. Refresh the client and drop this
+                // job's cached prepare so the next call builds new bytes.
+                if (refreshWalrusClientOnStaleWalPrice(message)) {
+                    dropUploadStepFlightsForJob(sanitizeRequestId(req.body?.jobId));
+                }
                 sidecarLog("error", "walrus_upload_step_failed", {
                     requestId: traceId,
                     phase,
