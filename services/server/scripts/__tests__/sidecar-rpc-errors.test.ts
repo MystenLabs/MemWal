@@ -145,6 +145,33 @@ test("a landed price abort keeps the failure class and carries the MoveAbort tex
     }
 });
 
+test("a landed certify or metadata abort does not carry MoveAbort text", () => {
+    const abort = "MoveAbort in 3rd command, abort code: 2, in '0x2::balance::split' (instruction 10)";
+    const failed = {
+        $kind: "FailedTransaction",
+        FailedTransaction: {
+            status: {
+                success: false,
+                error: { $kind: "MoveAbort", message: abort },
+            },
+        },
+    };
+    for (const label of [
+        "certification transaction 0xabc",
+        "metadata transfer transaction 0xabc",
+    ]) {
+        assert.throws(
+            () => assertFinalizedTransactionSuccess(failed, label),
+            (err: Error) => {
+                assert.ok(err instanceof FinalizedTransactionFailure);
+                assert.equal(err.message, `${label} was not successful`);
+                assert.equal(isMoveAbortBalanceSplit(err.message), false);
+                return true;
+            },
+        );
+    }
+});
+
 test("an unexpected finalization response remains ambiguous", () => {
     assert.throws(
         () => assertFinalizedTransactionSuccess({ Transaction: { digest: "0xcommitted" } }, "upload"),

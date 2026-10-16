@@ -734,10 +734,15 @@ export function resetUploadStepFlightsForTests(): void {
     uploadStepFlights.clear();
 }
 
-/** Drop this job's cached steps after a stale-price refresh. A cached prepare would replay the same bytes for 60s. Other jobs stay. */
-export function dropUploadStepFlightsForJob(jobId: string | null): void {
-    if (!jobId) return;
-    const prefix = `${jobId}|`;
+/** Drop this checkpoint's cached prepare after a stale-price refresh.
+ *  The flight key is job|step|blob|digest. Stripping the digest forgets that
+ *  prepare and leaves another step of the same job running.
+ */
+export function dropUploadStepFlightsForCheckpoint(flightKey: string | undefined): void {
+    if (!flightKey) return;
+    const digestAt = flightKey.lastIndexOf("|");
+    if (digestAt <= 0) return;
+    const prefix = flightKey.slice(0, digestAt + 1);
     for (const key of uploadStepFlights.keys()) {
         if (key.startsWith(prefix)) uploadStepFlights.delete(key);
     }
@@ -1090,9 +1095,9 @@ export function registerWalrusUploadJournalRoute(app: Express): void {
                 // destroy_zero (price down) and balance::split (price up) both
                 // mean the cached WAL price is stale, including after the
                 // register has already landed. Refresh the client and drop this
-                // job's cached prepare so the next call builds new bytes.
+                // checkpoint's cached prepare so the next call builds new bytes.
                 if (refreshWalrusClientOnStaleWalPrice(message)) {
-                    dropUploadStepFlightsForJob(sanitizeRequestId(req.body?.jobId));
+                    dropUploadStepFlightsForCheckpoint(flightKey);
                 }
                 sidecarLog("error", "walrus_upload_step_failed", {
                     requestId: traceId,

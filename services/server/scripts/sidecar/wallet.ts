@@ -63,9 +63,13 @@ export function assertFinalizedTransactionSuccess(result: any, label: string): a
         result?.$kind === "FailedTransaction"
         && result.FailedTransaction?.status?.success === false
     ) {
-        // A landed register still throws the no-side-effect failure, but the
-        // MoveAbort text has to survive so a stale WAL price can refresh the client.
-        const detail = executionFailureText(result.FailedTransaction.status?.error);
+        // Only the register label keeps the MoveAbort text. A stale WAL price
+        // has to refresh the client and drop that prepare. Certify and metadata
+        // transfer have no prepared register left, and Rust treats any MoveAbort
+        // in the message as Permanent instead of retrying.
+        const detail = label === "registration transaction"
+            ? executionFailureText(result.FailedTransaction.status?.error)
+            : "";
         throw new FinalizedTransactionFailure(
             detail ? `${label} was not successful: ${detail}` : `${label} was not successful`,
         );

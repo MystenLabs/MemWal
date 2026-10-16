@@ -126,9 +126,9 @@ test("both upload routes drop the cached price on this abort", () => {
     assert.match(journal, /refreshWalrusClientOnStaleWalPrice\(message\)/);
     assert.match(
         journal,
-        /if \(refreshWalrusClientOnStaleWalPrice\(message\)\) \{\s*dropUploadStepFlightsForJob\(sanitizeRequestId\(req\.body\?\.jobId\)\);/,
+        /if \(refreshWalrusClientOnStaleWalPrice\(message\)\) \{\s*dropUploadStepFlightsForCheckpoint\(flightKey\);/,
     );
     assert.match(legacy, /refreshWalrusClientOnStaleWalPrice\(message\)/);
     assert.doesNotMatch(legacy, /register_sponsor_balance_split/);
-    assert.doesNotMatch(legacy, /dropUploadStepFlightsForJob/);
+    assert.doesNotMatch(legacy, /dropUploadStepFlightsForCheckpoint/);
 });
