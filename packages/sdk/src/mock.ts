@@ -411,6 +411,15 @@ export class MemWalMock {
         if (!Number.isInteger(resolvedLimit) || resolvedLimit < 0) {
             throw new Error("limit must be a non-negative integer");
         }
+        if (
+            options.maxDistance !== undefined
+            && (typeof options.maxDistance !== "number"
+                || !Number.isFinite(options.maxDistance)
+                || options.maxDistance < 0)
+        ) {
+            throw new Error("maxDistance must be a non-negative finite number");
+        }
+
         const queryTokens = tokenize(query);
         const semantic = this.memories
             .filter((memory) => memory.namespace === resolvedNamespace)
