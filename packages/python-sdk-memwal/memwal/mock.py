@@ -282,10 +282,12 @@ class MemWalMock:
             for memory in self._memories
             if memory.namespace == resolved_namespace
         ]
+        ranked.sort(key=lambda item: (item[1], item[0].sequence))
         if sort == "recent":
-            ranked.sort(key=lambda item: (-item[0].sequence, item[1]))
-        else:
-            ranked.sort(key=lambda item: (item[1], item[0].sequence))
+            # Same window as the TypeScript mock and RecallSort::candidate_limit.
+            # A newer memory outside that semantic window must not win.
+            window = max(min(limit * 5, 50), limit)
+            ranked = sorted(ranked[:window], key=lambda item: (-item[0].sequence, item[1]))
         page = ranked[:limit]
         if max_distance is not None:
             page = [item for item in page if item[1] < max_distance]
