@@ -151,6 +151,21 @@ function bytesToBase64(bytes: Uint8Array): string {
     return btoa(chunks.join(""));
 }
 
+async function readSuccessJson<T>(res: Response): Promise<T> {
+    const raw = await res.text();
+    if (raw.trim() === "") {
+        throw Object.assign(new Error(`MemWal: HTTP ${res.status} response had an empty body; expected JSON`), { status: res.status });
+    }
+    try {
+        return JSON.parse(raw) as T;
+    } catch (err) {
+        if (err instanceof SyntaxError) {
+            throw Object.assign(new Error(`MemWal: HTTP ${res.status} response was not JSON`), { status: res.status });
+        }
+        throw err;
+    }
+}
+
 // ============================================================
 // MemWalManual Client
 // ============================================================
@@ -660,7 +675,7 @@ export class MemWalManual {
             throw new Error(`Embedding API error (${resp.status}): ${errText}`);
         }
 
-        const data = (await resp.json()) as { data: { embedding: number[] }[] };
+        const data = await readSuccessJson<{ data: { embedding: number[] }[] }>(resp);
         if (!data.data?.[0]?.embedding) {
             throw new Error("Embedding API returned no data");
         }
@@ -804,6 +819,7 @@ export class MemWalManual {
     // Internal: Walrus download
     // ============================================================
 
+
     private async walrusDownload(blobId: string): Promise<Uint8Array> {
         // Direct HTTP fetch to the Walrus aggregator. Upload goes through the relayer.
         const network = this.config.suiNetwork ?? "mainnet";
@@ -854,7 +870,7 @@ export class MemWalManual {
         let body: Partial<RelayerVersionMetadata>;
 
         if (versionRes.ok) {
-            body = (await versionRes.json()) as Partial<RelayerVersionMetadata>;
+            body = await readSuccessJson<Partial<RelayerVersionMetadata>>(versionRes);
         } else if (versionRes.status === 404 || versionRes.status === 405) {
             const healthRes = await fetchWithDeadline(
                 `${this.serverUrl}/health`,
@@ -868,7 +884,7 @@ export class MemWalManual {
                         `${versionRes.status}, and GET /health returned ${healthRes.status}`
                 );
             }
-            body = (await healthRes.json()) as Partial<RelayerVersionMetadata>;
+            body = await readSuccessJson<Partial<RelayerVersionMetadata>>(healthRes);
         } else {
             throw new Error(`Walrus Memory compatibility check failed: GET /version returned ${versionRes.status}`);
         }
@@ -962,7 +978,7 @@ export class MemWalManual {
                 throw err;
             }
 
-            return await res.json() as T;
+            return await readSuccessJson<T>(res);
         } catch (err) {
             const status = err && typeof err === "object" && "status" in err ? err.status : undefined;
             if (deadline?.timedOut() && typeof status !== "number") {
