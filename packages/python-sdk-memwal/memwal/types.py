@@ -88,6 +88,8 @@ class RecallMemory:
     blob_id: str
     text: str
     distance: float
+    score: Optional[float] = None
+    created_at: Optional[str] = None
 
 
 @dataclass
@@ -328,6 +330,8 @@ class RecallManualHit:
 
     blob_id: str
     distance: float
+    created_at: Optional[str] = None
+    importance: Optional[float] = None
 
 
 @dataclass

@@ -13,6 +13,7 @@ import type {
     RememberBulkItem,
     RememberBulkItemResult,
     RememberBulkOptions,
+    RememberBulkAsyncOptions,
     RememberBulkResult,
     RememberBulkStatusResult,
     RememberJobStatus,
@@ -21,7 +22,30 @@ import type {
     NamespacesResult,
     ListNamespacesOptions,
 } from "./types.js";
-import { applyTokenBudget, estimateTokens } from "./tokens.js";
+import { applyTokenBudget, estimateTokens, validateMaxTokens } from "./tokens.js";
+import { resolveRecallCall } from "./recall-args.js";
+import { derivedBulkIdempotencyKey } from "./utils.js";
+
+/** Matches the relayer's `MAX_BULK_ITEMS`. */
+const MAX_BULK_ITEMS = 20;
+
+interface RememberCallOptions {
+    idempotencyKey?: string;
+    pollIntervalMs?: number;
+    timeoutMs?: number;
+}
+
+/** A plain object in the namespace slot is options, not a namespace.
+ * A third options argument is merged, and its fields win. (#1142) */
+function splitRememberArgs(
+    namespaceOrOptions?: string | RememberCallOptions,
+    options?: RememberCallOptions,
+): { namespace?: string; options: RememberCallOptions } {
+    if (typeof namespaceOrOptions === "object" && namespaceOrOptions !== null) {
+        return { namespace: undefined, options: { ...namespaceOrOptions, ...options } };
+    }
+    return { namespace: namespaceOrOptions, options: options ?? {} };
+}
 
 export interface MemWalMockSeed {
     text: string;
@@ -83,10 +107,92 @@ function distance(queryTokens: Set<string>, text: string): number {
     return 1 - matches / queryTokens.size;
 }
 
+function requireRememberText(text: unknown): asserts text is string {
+    if (typeof text !== "string") {
+        throw new TypeError(
+            `remember() expects text as a string, received ${typeof text}. ` +
+            `Did you mean remember(text, namespace)? Unlike recall(), remember* does not take an options object.`,
+        );
+    }
+}
+
 function validateText(text: string, field = "text"): void {
     if (typeof text !== "string" || text.trim().length === 0) {
         throw new Error(`${field} cannot be empty`);
     }
+}
+
+function assertOccurredAt(occurredAt?: string | Date): void {
+    if (!(occurredAt instanceof Date) || !Number.isNaN(occurredAt.getTime())) return;
+    throw new TypeError(
+        "occurredAt is an Invalid Date — likely constructed from a " +
+        "malformed string. `Date` accepts garbage silently; check " +
+        "the source value before passing it as occurredAt.",
+    );
+}
+
+const MAX_IDEMPOTENCY_KEY_BYTES = 255;
+
+function validateIdempotencyKey(key: string | undefined): void {
+    if (key === undefined) return;
+    if (key.length === 0) {
+        throw new Error("idempotency_key cannot be empty (omit it instead)");
+    }
+    if (new TextEncoder().encode(key).length > MAX_IDEMPOTENCY_KEY_BYTES) {
+        throw new Error(
+            `idempotency_key exceeds maximum length of ${MAX_IDEMPOTENCY_KEY_BYTES} bytes`,
+        );
+    }
+}
+
+/** How many semantic candidates `sort: "recent"` reorders. Mirrors `RecallSort::candidate_limit`. */
+function recentCandidateLimit(limit: number): number {
+    return Math.max(Math.min(limit * 5, 50), limit);
+}
+
+/** Relayer cursors are `{ updated_at, namespace, snapshot_at }`. A decode that
+ * is not that shape must fail loudly: `NaN` date comparisons otherwise filter
+ * out every namespace and a `while (has_more)` walk stops on the first page. */
+function decodeListNamespacesCursor(encoded: string): {
+    updated_at: string;
+    namespace: string;
+    snapshot_at?: string | null;
+} {
+    let decoded: unknown;
+    try {
+        decoded = JSON.parse(new TextDecoder().decode(
+            Uint8Array.from(
+                atob(encoded.replace(/-/g, "+").replace(/_/g, "/")),
+                (char) => char.charCodeAt(0),
+            ),
+        ));
+    } catch {
+        throw new Error("invalid namespace cursor");
+    }
+    if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+        throw new Error("invalid namespace cursor");
+    }
+    const cursor = decoded as {
+        updated_at?: unknown;
+        namespace?: unknown;
+        snapshot_at?: unknown;
+    };
+    const updatedAt = cursor.updated_at;
+    const namespace = cursor.namespace;
+    if (typeof updatedAt !== "string" || !Number.isFinite(Date.parse(updatedAt))) {
+        throw new Error("invalid namespace cursor");
+    }
+    if (typeof namespace !== "string") {
+        throw new Error("invalid namespace cursor");
+    }
+    const snapshotAt = cursor.snapshot_at;
+    if (snapshotAt !== undefined && snapshotAt !== null && typeof snapshotAt !== "string") {
+        throw new Error("invalid namespace cursor");
+    }
+    if (typeof snapshotAt === "string" && !Number.isFinite(Date.parse(snapshotAt))) {
+        throw new Error("invalid namespace cursor");
+    }
+    return { updated_at: updatedAt, namespace, snapshot_at: snapshotAt };
 }
 
 /**
@@ -99,6 +205,8 @@ export class MemWalMock {
     private readonly namespace: string;
     private readonly memories: MockMemory[] = [];
     private readonly jobs = new Map<string, MockMemory>();
+    /** idempotency key → job id. Released when that job's memory is forgotten. */
+    private readonly idempotency = new Map<string, string>();
     private sequence = 0;
 
     private constructor(config: MemWalMockConfig = {}) {
@@ -117,23 +225,31 @@ export class MemWalMock {
     destroy(): void {
         this.memories.length = 0;
         this.jobs.clear();
+        this.idempotency.clear();
     }
 
     async rememberAsync(
         text: string,
-        namespace?: string,
-        _options: { idempotencyKey?: string } = {}
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        const memory = this.store(text, namespace);
+        requireRememberText(text);
+        const split = splitRememberArgs(namespaceOrOptions, options);
+        const memory = this.store(
+            text,
+            split.namespace,
+            undefined,
+            split.options.idempotencyKey,
+        );
         return { job_id: memory.jobId, status: "done" };
     }
 
     async remember(
         text: string,
-        namespace?: string,
-        options: { idempotencyKey?: string } = {}
+        namespaceOrOptions?: string | { idempotencyKey?: string },
+        options?: { idempotencyKey?: string },
     ): Promise<RememberAcceptedResult> {
-        return this.rememberAsync(text, namespace, options);
+        return this.rememberAsync(text, namespaceOrOptions, options);
     }
 
     async getRememberStatus(jobId: string): Promise<RememberJobStatus> {
@@ -159,38 +275,69 @@ export class MemWalMock {
 
     async rememberAndWait(
         text: string,
-        namespace?: string,
-        opts: { pollIntervalMs?: number; timeoutMs?: number; idempotencyKey?: string } = {}
+        namespaceOrOptions?: string | RememberCallOptions,
+        opts?: RememberCallOptions,
     ): Promise<RememberResult> {
-        const accepted = await this.rememberAsync(text, namespace, {
-            idempotencyKey: opts.idempotencyKey,
+        const split = splitRememberArgs(namespaceOrOptions, opts);
+        const accepted = await this.rememberAsync(text, split.namespace, {
+            idempotencyKey: split.options.idempotencyKey,
         });
-        return this.waitForRememberJob(accepted.job_id, opts);
+        return this.waitForRememberJob(accepted.job_id, split.options);
     }
 
     async rememberBulkAsync(
-        items: RememberBulkItem[]
+        items: RememberBulkItem[],
+        options: RememberBulkAsyncOptions = {}
     ): Promise<RememberBulkAcceptedResult> {
-        const jobIds = items.map(
-            (item) => this.store(item.text, item.namespace).jobId
+        if (!Array.isArray(items) || items.length === 0) {
+            throw new Error("rememberBulkAsync: items must be a non-empty array");
+        }
+        if (items.length > MAX_BULK_ITEMS) {
+            throw new Error(
+                `rememberBulkAsync: items exceeds maximum of ${MAX_BULK_ITEMS} per bulk request`,
+            );
+        }
+        items.forEach((item, i) => {
+            validateText(item?.text, `items[${i}].text`);
+        });
+
+        validateIdempotencyKey(options.idempotencyKey);
+        const normalised = items.map((item) => ({
+            text: item.text,
+            namespace: item.namespace ?? this.namespace,
+        }));
+        const requestIdentity = `bulk\0${normalised.map((item) => `${item.namespace}\0${item.text}`).join("\0\0")}`;
+        const bulkKey = options.idempotencyKey ?? (await derivedBulkIdempotencyKey(requestIdentity));
+        const jobIds = normalised.map(
+            (item, index) =>
+                this.store(item.text, item.namespace, undefined, `bulk:${bulkKey}:${index}`, true).jobId
         );
         return { job_ids: jobIds, total: jobIds.length, status: "done" };
     }
 
     async rememberBulk(
-        items: RememberBulkItem[]
+        items: RememberBulkItem[],
+        options: RememberBulkAsyncOptions = {}
     ): Promise<RememberBulkAcceptedResult> {
-        return this.rememberBulkAsync(items);
+        return this.rememberBulkAsync(items, options);
     }
 
     async getRememberBulkStatus(
         jobIds: string[]
     ): Promise<RememberBulkStatusResult> {
+        if (!Array.isArray(jobIds)) {
+            throw new Error("getRememberBulkStatus: jobIds must be an array");
+        }
         return {
             results: jobIds.map((jobId) => {
                 const memory = this.jobs.get(jobId);
                 return memory
-                    ? { job_id: jobId, status: "done", blob_id: memory.blobId }
+                    ? {
+                          job_id: jobId,
+                          status: "done",
+                          blob_id: memory.blobId,
+                          namespace: memory.namespace,
+                      }
                     : { job_id: jobId, status: "not_found" };
             }),
         };
@@ -233,7 +380,7 @@ export class MemWalMock {
         items: RememberBulkItem[],
         opts: RememberBulkOptions = {}
     ): Promise<RememberBulkResult> {
-        const accepted = await this.rememberBulkAsync(items);
+        const accepted = await this.rememberBulkAsync(items, opts);
         const namespaces = items.map(
             (item) => item.namespace ?? this.namespace
         );
@@ -245,9 +392,16 @@ export class MemWalMock {
     }
 
     async recall(params: RecallParams): Promise<RecallResult>;
+    /**
+     * @deprecated Prefer `recall({ query, limit, namespace })`.
+     */
+    async recall(query: string, options: RecallOptions): Promise<RecallResult>;
+    /**
+     * @deprecated Prefer `recall({ query, limit, namespace })`.
+     */
     async recall(
         query: string,
-        limitOrOptions?: number | RecallOptions,
+        limit?: number,
         namespace?: string
     ): Promise<RecallResult>;
     async recall(
@@ -255,63 +409,74 @@ export class MemWalMock {
         limitOrOptions: number | RecallOptions | undefined = 10,
         namespace?: string
     ): Promise<RecallResult> {
-        let query: string;
-        let options: RecallOptions;
-        if (typeof queryOrParams === "object") {
-            const { query: objectQuery, ...rest } = queryOrParams;
-            query = objectQuery;
-            options = rest;
-        } else {
-            query = queryOrParams;
-            if (limitOrOptions == null) {
-                options = { limit: 10, namespace };
-            } else if (typeof limitOrOptions === "number") {
-                options = { limit: limitOrOptions, namespace };
-            } else {
-                options = limitOrOptions;
-            }
-        }
+        const { query, options } = resolveRecallCall(
+            queryOrParams,
+            limitOrOptions,
+            namespace
+        );
         validateText(query, "query");
+        validateMaxTokens(options.maxTokens);
         const resolvedNamespace = options.namespace ?? this.namespace;
         const resolvedLimit = options.topK ?? options.limit ?? 10;
         if (!Number.isInteger(resolvedLimit) || resolvedLimit < 0) {
             throw new Error("limit must be a non-negative integer");
         }
+        if (
+            options.maxDistance !== undefined
+            && (typeof options.maxDistance !== "number"
+                || !Number.isFinite(options.maxDistance)
+                || options.maxDistance < 0)
+        ) {
+            throw new Error("maxDistance must be a non-negative finite number");
+        }
+
         const queryTokens = tokenize(query);
-        const ranked = this.memories
+        const semantic = this.memories
             .filter((memory) => memory.namespace === resolvedNamespace)
             .map((memory) => ({
                 memory,
                 distance: distance(queryTokens, memory.text),
             }))
-            .filter((entry) =>
-                options.maxDistance === undefined
-                    ? true
-                    : entry.distance < options.maxDistance
-            )
             .sort(
                 (left, right) =>
                     left.distance - right.distance ||
                     left.memory.sequence - right.memory.sequence
-            )
-            .slice(0, resolvedLimit)
-            .map(({ memory, distance: memoryDistance }) => ({
-                blob_id: memory.blobId,
-                text: memory.text,
-                distance: memoryDistance,
-            }));
+            );
+        // `recent` reorders a bounded semantic window by write time, then
+        // truncates. Relevance keeps the cosine order. (#1124)
+        const ordered =
+            options.sort === "recent"
+                ? semantic
+                      .slice(0, recentCandidateLimit(resolvedLimit))
+                      .sort(
+                          (left, right) =>
+                              right.memory.sequence - left.memory.sequence ||
+                              left.distance - right.distance,
+                      )
+                : semantic;
+        const page = ordered.slice(0, resolvedLimit);
+        const maxDistance = options.maxDistance;
+        const visible =
+            maxDistance === undefined
+                ? page
+                : page.filter((entry) => entry.distance < maxDistance);
+        const ranked = visible.map(({ memory, distance: memoryDistance }) => ({
+            blob_id: memory.blobId,
+            text: memory.text,
+            distance: memoryDistance,
+        }));
 
-        if (typeof options.maxTokens === "number") {
+        if (options.maxTokens !== undefined) {
             const { results, meta } = applyTokenBudget(
                 ranked,
                 options.maxTokens,
                 options.truncationStrategy,
                 options.countTokens
             );
-            return { results, total: results.length, meta };
+            return { results, total: ranked.length, meta };
         }
 
-        return { results: ranked, total: ranked.length };
+        return { results: ranked, total: page.length };
     }
 
     async analyze(
@@ -319,6 +484,13 @@ export class MemWalMock {
         namespaceOrOptions?: string | AnalyzeOptions
     ): Promise<AnalyzeResult> {
         validateText(text);
+        // A valid occurredAt is not copied onto the result. The relayer uses
+        // it only to rewrite relative dates into the fact text, and this mock
+        // has no extractor. Invalid Dates still throw, matching MemWal.
+        const occurredAt = typeof namespaceOrOptions === "string"
+            ? undefined
+            : namespaceOrOptions?.occurredAt;
+        assertOccurredAt(occurredAt);
         const namespace =
             typeof namespaceOrOptions === "string"
                 ? namespaceOrOptions
@@ -386,6 +558,15 @@ export class MemWalMock {
     }
 
     async listNamespaces(options: ListNamespacesOptions = {}): Promise<NamespacesResult> {
+        // The relayer rejects limit < 1 with this message. slice(0, 0) would
+        // otherwise report has_more with a null cursor, and slice(0, -1)
+        // would drop the last namespace. (#1144, #1145)
+        if (
+            options.limit !== undefined &&
+            (!Number.isInteger(options.limit) || options.limit < 1)
+        ) {
+            throw new Error("limit must be positive");
+        }
         const grouped = new Map<string, { count: number; bytes: number; sequence: number }>();
         for (const memory of this.memories) {
             const entry = grouped.get(memory.namespace) ?? { count: 0, bytes: 0, sequence: 0 };
@@ -412,13 +593,9 @@ export class MemWalMock {
             );
 
         // Match the relayer's URL_SAFE_NO_PAD JSON cursor and snapshot walk.
-        const cursor: { updated_at: string; namespace: string; snapshot_at?: string | null } | null =
-            options.cursor === undefined ? null : JSON.parse(new TextDecoder().decode(
-                Uint8Array.from(
-                    atob(options.cursor.replace(/-/g, "+").replace(/_/g, "/")),
-                    (char) => char.charCodeAt(0),
-                ),
-            ));
+        const cursor = options.cursor === undefined
+            ? null
+            : decodeListNamespacesCursor(options.cursor);
         const snapshotAt = cursor?.snapshot_at ?? new Date(
             MOCK_NAMESPACE_EPOCH_MS + this.sequence * 1000,
         ).toISOString();
@@ -464,6 +641,7 @@ export class MemWalMock {
         if (index < 0) return false;
         const [memory] = this.memories.splice(index, 1);
         this.jobs.delete(memory.jobId);
+        this.releaseIdempotency(memory.jobId);
         return true;
     }
 
@@ -481,18 +659,40 @@ export class MemWalMock {
                     this.memories.splice(index, 1);
             }
         }
-        for (const memory of removed) this.jobs.delete(memory.jobId);
+        for (const memory of removed) {
+            this.jobs.delete(memory.jobId);
+            this.releaseIdempotency(memory.jobId);
+        }
         return removed.length;
     }
 
     private store(
         text: string,
         namespace?: string,
-        blobId?: string
+        blobId?: string,
+        idempotencyKey?: string,
+        skipKeyValidation: boolean = false,
     ): MockMemory {
         validateText(text);
+        if (!skipKeyValidation) {
+            validateIdempotencyKey(idempotencyKey);
+        }
         const resolvedNamespace = namespace ?? this.namespace;
         if (!resolvedNamespace) throw new Error("namespace cannot be empty");
+        if (idempotencyKey !== undefined) {
+            const mapKey = `${resolvedNamespace}\0${idempotencyKey}`;
+            const existingId = this.idempotency.get(mapKey);
+            const existing = existingId ? this.jobs.get(existingId) : undefined;
+            if (existing) {
+                if (existing.text !== text || existing.namespace !== resolvedNamespace) {
+                    throw new Error(
+                        "idempotency_key was already used for a request with different content",
+                    );
+                }
+                return existing;
+            }
+            if (existingId) this.idempotency.delete(mapKey);
+        }
         this.sequence += 1;
         const suffix = this.sequence.toString().padStart(6, "0");
         const memory: MockMemory = {
@@ -505,7 +705,16 @@ export class MemWalMock {
         };
         this.memories.push(memory);
         this.jobs.set(memory.jobId, memory);
+        if (idempotencyKey !== undefined) {
+            this.idempotency.set(`${resolvedNamespace}\0${idempotencyKey}`, memory.jobId);
+        }
         return memory;
+    }
+
+    private releaseIdempotency(jobId: string): void {
+        for (const [key, id] of this.idempotency) {
+            if (id === jobId) this.idempotency.delete(key);
+        }
     }
 
     private toRememberResult(memory: MockMemory): RememberResult {

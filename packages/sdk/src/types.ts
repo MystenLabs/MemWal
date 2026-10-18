@@ -33,6 +33,23 @@ export interface MemWalConfig {
      * Raise it only for a genuinely slow link; it is a backstop, not a budget.
      */
     requestTimeoutMs?: number;
+    /**
+     * Deadline for the `/api/recall` request itself, in milliseconds
+     * (default: 15000). Per-call `RecallOptions.timeoutMs` overrides it.
+     *
+     * This budget covers only the recall round-trip. The preflights that
+     * precede it (`/version`, `/config`, the SEAL session build) are bounded
+     * separately by `preflightTimeoutMs`, so a slow relayer preflight can no
+     * longer consume recall's budget and surface as a spurious abort.
+     */
+    recallTimeoutMs?: number;
+    /**
+     * Deadline for each unauthenticated preflight fetch — `GET /version`,
+     * `GET /health`, `GET /config` — in milliseconds (default: 5000).
+     *
+     * Applied per round-trip, not to the preflight phase as a whole.
+     */
+    preflightTimeoutMs?: number;
 }
 
 // ============================================================
@@ -133,7 +150,7 @@ export type TruncationStrategy = "high-relevance-only" | "per-hit-cap" | "drop-t
 
 /** Options for recall(). */
 export interface RecallOptions {
-    /** Max number of nearest memories to request from the relayer (default: 10). */
+    /** Max number of nearest memories to request from the relayer (default: 10, relayer caps at 100). Must be a positive integer. */
     limit?: number;
     /** Alias for limit, useful when describing top-K search behaviour. */
     topK?: number;
@@ -198,6 +215,19 @@ export interface RecallOptions {
      * Setting `sort` at all makes the relayer ignore `scoringWeights`.
      */
     sort?: "relevance" | "recent";
+    /**
+     * Deadline for the `/api/recall` request, in milliseconds. Defaults to
+     * `MemWalConfig.recallTimeoutMs`, itself 15000.
+     *
+     * The clock starts once the preflights (`/version`, `/config`, the SEAL
+     * session build) have completed, so this is a budget for recall alone.
+     * Pass `0` (or `Infinity`) to opt out of the deadline entirely.
+     *
+     * On expiry recall throws a `TimeoutError` whose `phase` is
+     * `"POST /api/recall"`; a preflight that blows its own budget throws one
+     * naming that preflight instead.
+     */
+    timeoutMs?: number;
 }
 
 /** Recommended object-style recall input — preferred over positional args. */
@@ -229,6 +259,8 @@ export interface RememberBulkAcceptedResult {
 export interface RememberBulkStatusItem {
     job_id: string;
     status: "pending" | "running" | "uploaded" | "done" | "failed" | "not_found";
+    /** Set when the relayer found the job. Absent for `not_found`. */
+    namespace?: string;
     blob_id?: string;
     error?: string;
 }
@@ -246,8 +278,14 @@ export interface RememberBulkItem {
     namespace?: string;
 }
 
+/** Options for rememberBulk / rememberBulkAsync requests */
+export interface RememberBulkAsyncOptions {
+    /** Optional caller-supplied idempotency key (defaults to derived key based on items) */
+    idempotencyKey?: string;
+}
+
 /** Options for remember bulk polling behaviour */
-export interface RememberBulkOptions {
+export interface RememberBulkOptions extends RememberBulkAsyncOptions {
     /** How often to poll each job_id (default: 1500ms) */
     pollIntervalMs?: number;
     /** Max total wait time before throwing (default: 120_000ms) */
@@ -407,7 +445,7 @@ export interface RememberManualResult {
 export interface RecallManualOptions {
     /** Pre-computed query embedding vector */
     vector: number[];
-    /** Max number of results (default: 10) */
+    /** Max number of results (default: 10, relayer caps at 100). Must be a positive integer. */
     limit?: number;
     /** Namespace (default: config namespace or "default") */
     namespace?: string;
@@ -460,6 +498,66 @@ export interface ListNamespacesOptions {
     cursor?: string;
     /** Page size. Server defaults to 100 and clamps to 500. */
     limit?: number;
+}
+
+/** One memory in a `listMemories()` page. Mirrors the relayer wire shape. */
+export interface MemorySummary {
+    memory_id: string;
+    /** The namespace name (the same string passed to `remember()` / `recall()`). */
+    namespace_id: string;
+    blob_id: string;
+    created_at: string;
+    /** The row's `updated_at` — the value the keyset cursor is built from. */
+    updated_at: string;
+    /** Encrypted blob size in bytes. */
+    size: number;
+    agent_id: string | null;
+    package_id: string | null;
+    status: string;
+    end_epoch: number | null;
+    expires_at: string | null;
+    importance: number | null;
+}
+
+/** A memory removed since the cursor. Never mixed into `memories`. */
+export interface DeletedMemorySummary {
+    memory_id: string;
+    namespace_id: string;
+    deleted_at: string;
+}
+
+/** Result from listMemories() */
+export interface MemoriesResult {
+    memories: MemorySummary[];
+    /** Watermark to hand back as `cursor` on the next call. */
+    next_cursor: string | null;
+    /**
+     * Authoritative "keep paginating" signal. Do NOT infer this from page
+     * length: the server clamps `limit`, and a `namespace` filter can leave a
+     * page short or empty while more pages remain.
+     */
+    has_more: boolean;
+    snapshot_version: number;
+    /** Tombstones since the cursor, for incremental sync. */
+    deleted: DeletedMemorySummary[];
+    /**
+     * True when the cursor is too old for the relayer to know what was
+     * deleted since; restart the walk without a cursor.
+     */
+    must_resync: boolean;
+}
+
+/** Options for listMemories() */
+export interface ListMemoriesOptions {
+    /** Previous page's `next_cursor`, to continue a walk or poll incrementally. */
+    cursor?: string;
+    /** Page size, counted before any `namespace` filter. Server defaults to 100 and clamps to 500. */
+    limit?: number;
+    /**
+     * Keep only this namespace. Applied client-side: the relayer lists every
+     * namespace, so a filtered page can be empty while `has_more` is true.
+     */
+    namespace?: string;
 }
 
 /** Result from restore() */
@@ -532,8 +630,8 @@ export interface MemWalManualConfig {
     walletSigner?: WalletSigner;
     /**
      * Pre-configured Sui client instance (e.g. from dapp-kit's useSuiClient()).
-     * If omitted, the SDK will try to create one internally.
-     * Recommended for browser environments where @mysten/sui v2.x removed SuiClient.
+     * If omitted, the SDK creates a gRPC client against the public fullnode
+     * for `suiNetwork`. Pass one to use a different endpoint or transport.
      */
     suiClient?: any;
     /** OpenAI/OpenRouter API key for embeddings (required for client-side embedding) */
@@ -577,6 +675,12 @@ export interface MemWalManualConfig {
     walrusPublisherUrl?: string;
     /** Default namespace for memory isolation (default: "default") */
     namespace?: string;
+    /**
+     * Deadline for the unauthenticated compatibility preflight (`GET /version`,
+     * falling back to `GET /health`), in milliseconds (default: 5000).
+     * Applied per round-trip.
+     */
+    preflightTimeoutMs?: number;
 }
 
 /**
@@ -617,11 +721,23 @@ export interface RecallManualMemory {
     distance: number;
 }
 
-/** Result from recallManual() — full client-side variant with decrypted text */
-export interface RecallManualResult {
-    results: (RecallManualHit | RecallManualMemory)[];
+/** `MemWal.recallManual()` — blob id and distance, no decrypted text. */
+export interface RecallManualHitResult {
+    results: RecallManualHit[];
     total: number;
 }
+
+/** `MemWalManual.recallManual()` — decrypted memories. */
+export interface RecallManualMemoryResult {
+    results: RecallManualMemory[];
+    total: number;
+}
+
+/**
+ * @deprecated Use {@link RecallManualHitResult} or {@link RecallManualMemoryResult}.
+ * Each method returns one of those, not a mixed list of hits and memories.
+ */
+export type RecallManualResult = RecallManualHitResult | RecallManualMemoryResult;
 
 // ============================================================
 // Account Management Types
@@ -643,7 +759,8 @@ interface AccountTxOpts {
     walletSigner?: WalletSigner;
     /**
      * Pre-configured Sui client instance.
-     * If omitted, the SDK will create one internally.
+     * If omitted, the SDK creates a gRPC client against the public fullnode
+     * for `suiNetwork`. Pass one to use a different endpoint or transport.
      */
     suiClient?: any;
     /** Sui network (default: mainnet) */

@@ -55,20 +55,21 @@ test("recall with maxDistance keeps hits inside the cutoff and drops the rest", 
     stubRecall(hits);
     const result = await client().recall({ query: "meds", maxDistance: 0.7 });
     assert.deepEqual(result.results.map((h) => h.blob_id), ["meds"]);
-    assert.equal(result.total, 1);
+    assert.equal(result.total, 3, "total preserves relayer count");
 });
 
 test("recall with maxDistance drops a hit exactly at the cutoff", async () => {
     stubRecall(hits);
     const result = await client().recall({ query: "meds", maxDistance: 0.75 });
     assert.deepEqual(result.results.map((h) => h.blob_id), ["meds"]);
+    assert.equal(result.total, 3, "total preserves relayer count");
 });
 
-test("recall with maxDistance can return nothing", async () => {
+test("recall with maxDistance can return nothing while preserving total", async () => {
     stubRecall(hits);
     const result = await client().recall({ query: "weather?", maxDistance: 0.5 });
     assert.deepEqual(result.results, []);
-    assert.equal(result.total, 0);
+    assert.equal(result.total, 3, "total preserves relayer count so caller distinguishes from empty namespace");
 });
 
 test("recall without maxDistance returns every hit, including distant ones", async () => {
@@ -81,4 +82,12 @@ test("positional recall(query, { maxDistance }) applies the same cutoff", async 
     stubRecall(hits);
     const result = await client().recall("meds", { maxDistance: 0.8 });
     assert.deepEqual(result.results.map((h) => h.blob_id), ["meds", "pharmacy"]);
+    assert.equal(result.total, 3, "total preserves relayer count");
+});
+
+test("recall on genuinely empty namespace returns 0 total and empty results", async () => {
+    stubRecall([]);
+    const result = await client().recall({ query: "anything", maxDistance: 0.5 });
+    assert.deepEqual(result.results, []);
+    assert.equal(result.total, 0, "genuinely empty namespace reports total 0");
 });

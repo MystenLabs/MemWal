@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
@@ -24,6 +25,8 @@ from memwal.client import (
     MemWalCompatibilityError,
     MemWalError,
     MemWalRateLimited,
+    MemWalRememberJobNotFound,
+    MemWalRememberJobTimeout,
     MemWalSync,
     _HttpStatusError,
 )
@@ -35,6 +38,7 @@ from memwal.types import (
     RememberBulkOptions,
     RememberBulkStatusItem,
     RememberBulkStatusResult,
+    RememberJobStatus,
     RememberManualOptions,
     ScoringWeights,
 )
@@ -558,6 +562,234 @@ class TestBulkWaitUnderRateLimit:
         )
 
 
+class TestRememberJobTimeoutDetail:
+    async def test_reports_last_status_and_server_message(
+        self, memwal_client: MemWal
+    ) -> None:
+        async def running(*_args: Any, **_kwargs: Any) -> dict:
+            return {
+                "job_id": "slow-job",
+                "status": "running",
+                "error": "the hosted relayer is still retrying this upload",
+            }
+
+        memwal_client._signed_request = running  # type: ignore[method-assign]
+        with pytest.raises(MemWalRememberJobTimeout) as exc:
+            await memwal_client.wait_for_remember_job(
+                "slow-job", poll_interval_ms=0, timeout_ms=300
+            )
+        assert exc.value.status == 504
+        assert exc.value.last_status == "running"
+        assert "still retrying" in (exc.value.server_error or "")
+        assert str(exc.value).startswith("remember job timed out after 300ms")
+        assert "last status: running" in str(exc.value)
+        # The job is still live, so the advice is to wait on its id, not to
+        # POST again: `remember` drops its key once accepted, so a re-send
+        # would mint a new key and a second paid write.
+        assert "call wait_for_remember_job('slow-job')" in str(exc.value)
+        assert "idempotency_key is not remembered" in str(exc.value)
+
+    async def test_timeout_attribute_carries_the_redacted_server_error(
+        self, memwal_client: MemWal
+    ) -> None:
+        async def running(*_args: Any, **_kwargs: Any) -> dict:
+            return {
+                "job_id": "slow-job",
+                "status": "running",
+                "error": "sidecar http://localhost:9000/upload unreachable",
+            }
+
+        memwal_client._signed_request = running  # type: ignore[method-assign]
+        with pytest.raises(MemWalRememberJobTimeout) as exc:
+            await memwal_client.wait_for_remember_job(
+                "slow-job", poll_interval_ms=0, timeout_ms=300
+            )
+        assert exc.value.server_error == "sidecar [internal] unreachable"
+        assert "localhost" not in str(exc.value)
+
+    async def test_every_poll_refused_reports_unknown_state(
+        self, memwal_client: MemWal
+    ) -> None:
+        async def refused(*_args: Any, **_kwargs: Any) -> dict:
+            raise _HttpStatusError(429, '{"error":"rate limited"}')
+
+        memwal_client._signed_request = refused  # type: ignore[method-assign]
+        with pytest.raises(MemWalRememberJobTimeout) as exc:
+            await memwal_client.wait_for_remember_job(
+                "hidden-job", poll_interval_ms=0, timeout_ms=300
+            )
+        assert exc.value.last_status is None
+        assert exc.value.last_refusal == 429
+        assert "no status read got through (last poll: HTTP 429)" in str(exc.value)
+
+    async def test_seen_then_rate_limited_keeps_both(
+        self, memwal_client: MemWal
+    ) -> None:
+        calls = 0
+
+        async def running_then_refused(*_args: Any, **_kwargs: Any) -> dict:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {"job_id": "slow-job", "status": "running"}
+            raise _HttpStatusError(429, '{"error":"rate limited"}')
+
+        memwal_client._signed_request = running_then_refused  # type: ignore[method-assign]
+        with pytest.raises(MemWalRememberJobTimeout) as exc:
+            await memwal_client.wait_for_remember_job(
+                "slow-job", poll_interval_ms=0, timeout_ms=300
+            )
+        assert exc.value.last_status == "running"
+        assert "(job_id=slow-job); wait hit a rate limit (429); last status: running." in str(
+            exc.value
+        )
+
+
+# ============================================================
+# one-job remember status
+# ============================================================
+
+
+_NORMAL_JOB_ID = "550e8400-e29b-41d4-a716-446655440000"
+
+
+class TestRememberJobStatus:
+    @respx.mock
+    async def test_unsafe_job_id_is_not_requested(self, memwal_client: MemWal) -> None:
+        route = respx.route().mock(return_value=httpx.Response(500, text="nope"))
+        for job_id in ("", "abc/def?x=1", "job 1", "a\tb", "?", "/", ".", "..", "%2e%2e", "a\\b"):
+            status = await memwal_client.get_remember_status(job_id)
+            assert status == RememberJobStatus(
+                job_id=job_id,
+                status="not_found",
+                error=f"Job {job_id} not found",
+            )
+            with pytest.raises(MemWalRememberJobNotFound) as exc:
+                await memwal_client.wait_for_remember_job(
+                    job_id, poll_interval_ms=0, timeout_ms=5_000
+                )
+            assert exc.value.status == 404
+            assert exc.value.job_id == job_id
+            assert not isinstance(exc.value, json.JSONDecodeError)
+        assert route.call_count == 0
+
+    async def test_non_string_job_id_is_a_type_error(self, memwal_client: MemWal) -> None:
+        with pytest.raises(TypeError):
+            await memwal_client.get_remember_status(1)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            await memwal_client.wait_for_remember_job(1, poll_interval_ms=0, timeout_ms=5_000)  # type: ignore[arg-type]
+
+    @respx.mock
+    async def test_uuid_object_reads_the_string_path(self, memwal_client: MemWal) -> None:
+        _mock_version()
+        job = uuid.UUID(_NORMAL_JOB_ID)
+        route = respx.get(f"{_TEST_SERVER}/api/remember/{job}").mock(
+            return_value=httpx.Response(200, json={"job_id": str(job), "status": "running"})
+        )
+        status = await memwal_client.get_remember_status(job)  # type: ignore[arg-type]
+        assert status.status == "running"
+        assert status.job_id == str(job)
+        assert route.call_count == 1
+
+    @respx.mock
+    async def test_non_object_404_body_is_not_found(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        route = respx.get(f"{_TEST_SERVER}/api/remember/job-1")
+        for body in (b"null", b"[]", b'"Not Found"', b"<html>nope</html>"):
+            route.mock(return_value=httpx.Response(404, content=body))
+            status = await memwal_client.get_remember_status("job-1")
+            assert status.status == "not_found"
+            assert status.job_id == "job-1"
+            with pytest.raises(MemWalRememberJobNotFound) as exc:
+                await memwal_client.wait_for_remember_job(
+                    "job-1", poll_interval_ms=0, timeout_ms=5_000
+                )
+            assert exc.value.status == 404
+
+    @respx.mock
+    async def test_empty_404_body_is_not_found(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        respx.get(f"{_TEST_SERVER}/api/remember/job-1").mock(
+            return_value=httpx.Response(404, content=b"")
+        )
+        status = await memwal_client.get_remember_status("job-1")
+        assert status.status == "not_found"
+        assert status.job_id == "job-1"
+        with pytest.raises(MemWalRememberJobNotFound) as exc:
+            await memwal_client.wait_for_remember_job(
+                "job-1", poll_interval_ms=0, timeout_ms=5_000
+            )
+        assert exc.value.status == 404
+
+    @respx.mock
+    async def test_reads_a_normal_job_id(self, memwal_client: MemWal) -> None:
+        mock_seal_session_prereqs()
+        route = respx.get(f"{_TEST_SERVER}/api/remember/{_NORMAL_JOB_ID}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "job_id": _NORMAL_JOB_ID,
+                    "status": "done",
+                    "blob_id": "blob-1",
+                    "owner": "0xowner",
+                    "namespace": "profile",
+                },
+            )
+        )
+
+        status = await memwal_client.get_remember_status(_NORMAL_JOB_ID)
+        assert status == RememberJobStatus(
+            job_id=_NORMAL_JOB_ID,
+            status="done",
+            owner="0xowner",
+            namespace="profile",
+            blob_id="blob-1",
+        )
+        assert "x-seal-session" not in route.calls[0].request.headers
+
+        result = await memwal_client.wait_for_remember_job(
+            _NORMAL_JOB_ID, poll_interval_ms=0, timeout_ms=5_000
+        )
+        assert result.blob_id == "blob-1"
+        assert result.namespace == "profile"
+        assert [str(call.request.url) for call in route.calls] == [
+            f"{_TEST_SERVER}/api/remember/{_NORMAL_JOB_ID}",
+            f"{_TEST_SERVER}/api/remember/{_NORMAL_JOB_ID}",
+        ]
+
+    @respx.mock
+    def test_sync_reads_a_normal_job_id(self) -> None:
+        _mock_version()
+        route = respx.get(f"{_TEST_SERVER}/api/remember/{_NORMAL_JOB_ID}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "job_id": _NORMAL_JOB_ID,
+                    "status": "running",
+                    "namespace": "profile",
+                },
+            )
+        )
+        client = MemWalSync.create(
+            key=_TEST_KEY_HEX,
+            account_id=_TEST_ACCOUNT_ID,
+            server_url=_TEST_SERVER,
+        )
+        try:
+            missing = client.get_remember_status("")
+            assert missing.status == "not_found"
+            with pytest.raises(MemWalRememberJobNotFound):
+                client.wait_for_remember_job("abc/def?x=1", poll_interval_ms=0, timeout_ms=5_000)
+            status = client.get_remember_status(_NORMAL_JOB_ID)
+            assert status.status == "running"
+            assert status.namespace == "profile"
+            assert str(route.calls[0].request.url) == (
+                f"{_TEST_SERVER}/api/remember/{_NORMAL_JOB_ID}"
+            )
+        finally:
+            client.close()
+
+
 # ============================================================
 # recall() tests
 # ============================================================
@@ -608,6 +840,40 @@ class TestRecall:
         result = await memwal_client.recall("coffee")
         assert result.results == []
         assert result.dropped_count == 3
+
+    @respx.mock
+    async def test_recall_preserves_score_and_created_at(
+        self, memwal_client: MemWal
+    ) -> None:
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "blob_id": "b1",
+                            "text": "Fact with metadata",
+                            "distance": 0.1,
+                            "score": 0.95,
+                            "created_at": "2026-03-30T12:00:00Z",
+                        },
+                        {
+                            "blob_id": "b2",
+                            "text": "Legacy fact",
+                            "distance": 0.3,
+                        },
+                    ],
+                    "total": 2,
+                },
+            )
+        )
+        result = await memwal_client.recall("test")
+        assert len(result.results) == 2
+        assert result.results[0].score == 0.95
+        assert result.results[0].created_at == "2026-03-30T12:00:00Z"
+        assert result.results[1].score is None
+        assert result.results[1].created_at is None
 
     @respx.mock
     async def test_accepts_recall_params_object(
@@ -703,8 +969,32 @@ class TestRecall:
         body = json.loads(route.calls[0].request.content)
         assert body["limit"] == 10
         assert len(result.results) == 1
-        assert result.total == 1
+        assert result.total == 2
         assert result.results[0].blob_id == "b1"
+
+    @respx.mock
+    async def test_max_distance_filters_all_preserves_total(
+        self, memwal_client: MemWal
+    ) -> None:
+        """When all matches exceed max_distance, results is empty but total
+        preserves matches (#1066)."""
+        mock_seal_session_prereqs()
+        respx.post(f"{_TEST_SERVER}/api/recall").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"blob_id": "b1", "text": "I love coffee", "distance": 0.8},
+                        {"blob_id": "b2", "text": "I live in Tokyo", "distance": 0.9},
+                    ],
+                    "total": 2,
+                },
+            )
+        )
+
+        result = await memwal_client.recall("coffee", limit=10, max_distance=0.5)
+        assert len(result.results) == 0
+        assert result.total == 2
 
     @respx.mock
     async def test_get_signed_request_uses_empty_body_hash_and_no_wire_body(
@@ -1220,6 +1510,41 @@ class TestManualAPI:
         assert result.results[0].blob_id == "b1"
 
     @respx.mock
+    async def test_recall_manual_preserves_created_at_and_importance(
+        self, memwal_client: MemWal
+    ) -> None:
+        _mock_version()
+        respx.post(f"{_TEST_SERVER}/api/recall/manual").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "blob_id": "b1",
+                            "distance": 0.15,
+                            "created_at": "2026-03-30T12:00:00Z",
+                            "importance": 0.85,
+                        },
+                        {
+                            "blob_id": "b2",
+                            "distance": 0.4,
+                        },
+                    ],
+                    "total": 2,
+                },
+            )
+        )
+
+        opts = RecallManualOptions(vector=[0.1, 0.2, 0.3], limit=5)
+        result = await memwal_client.recall_manual(opts)
+
+        assert len(result.results) == 2
+        assert result.results[0].created_at == "2026-03-30T12:00:00Z"
+        assert result.results[0].importance == 0.85
+        assert result.results[1].created_at is None
+        assert result.results[1].importance is None
+
+    @respx.mock
     async def test_recall_manual_forwards_scoring_weights(self, memwal_client: MemWal) -> None:
         _mock_version()
         route = respx.post(f"{_TEST_SERVER}/api/recall/manual").mock(
@@ -1351,3 +1676,25 @@ class TestSealSession:
         assert exported["ttlMin"] == 5
         assert exported["sessionKey"].startswith("suiprivkey")
         assert exported["personalMessageSignature"]
+
+
+class TestRedactInternalUrls:
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("Error at http://localhost:8080/path", "Error at [internal]"),
+            ("Error at http://127.0.0.1:3000/api", "Error at [internal]"),
+            ("Error at http://127.0.0.2:8000/status", "Error at [internal]"),
+            ("Error at http://127.128.0.1:9000/info", "Error at [internal]"),
+            ("Error at http://[::1]:9000/seal/encrypt", "Error at [internal]"),
+            ("Error at http://0.0.0.0:8000/health", "Error at [internal]"),
+            ("Error at http://sidecar.localhost:8080/v1", "Error at [internal]"),
+            ("Error at http://sub.domain.localhost:3000/test", "Error at [internal]"),
+            ("Error at https://api.wal.app/v1/remember", "Error at https://api.wal.app/v1/remember"),
+        ],
+    )
+    def test_redact_internal_urls(self, raw: str, expected: str) -> None:
+        from memwal.client import _redact_internal_urls
+
+        assert _redact_internal_urls(raw) == expected
+

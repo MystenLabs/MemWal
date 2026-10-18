@@ -278,14 +278,21 @@ class MemWalMock:
             for memory in self._memories
             if memory.namespace == resolved_namespace
         ]
-        if max_distance is not None:
-            ranked = [item for item in ranked if item[1] < max_distance]
         ranked.sort(key=lambda item: (item[1], item[0].sequence))
+        page = ranked[:limit]
+        if max_distance is not None:
+            page = [item for item in page if item[1] < max_distance]
         results = [
-            RecallMemory(blob_id=memory.blob_id, text=memory.text, distance=score)
-            for memory, score in ranked[:limit]
+            RecallMemory(
+                blob_id=memory.blob_id,
+                text=memory.text,
+                distance=score,
+                score=1.0 - score,
+                created_at=_mock_timestamp(memory.sequence),
+            )
+            for memory, score in page
         ]
-        return RecallResult(results=results, total=len(results))
+        return RecallResult(results=results, total=len(ranked[:limit]))
 
     async def analyze(
         self,

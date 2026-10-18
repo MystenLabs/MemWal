@@ -5,7 +5,7 @@ import { sanitizeServerError } from "../dist/utils.js";
 
 const AUTH_REJECTED =
     "401 from relayer: typically wrong private key, key not registered on this account, " +
-    "account ID mismatch, or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
+    "account ID mismatch (a wallet address is not a MemWal account ID), or staging/mainnet mismatch. Check .env.local and dashboard credentials. " +
     "Full troubleshooting: https://docs.wal.app/walrus-memory/troubleshooting/overview#401-auth_rejected-errors";
 
 test("empty-body 401 uses AUTH_REJECTED troubleshooting instead of memwal_login", () => {

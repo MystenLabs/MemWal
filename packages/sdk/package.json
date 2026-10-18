@@ -10,20 +10,24 @@
     "types": "./dist/index.d.ts",
     "exports": {
         ".": {
+            "types": "./dist/index.d.ts",
             "import": "./dist/index.js",
-            "types": "./dist/index.d.ts"
+            "default": "./dist/index.js"
         },
         "./account": {
+            "types": "./dist/account-entry.d.ts",
             "import": "./dist/account-entry.js",
-            "types": "./dist/account-entry.d.ts"
+            "default": "./dist/account-entry.js"
         },
         "./manual": {
+            "types": "./dist/manual-entry.d.ts",
             "import": "./dist/manual-entry.js",
-            "types": "./dist/manual-entry.d.ts"
+            "default": "./dist/manual-entry.js"
         },
         "./ai": {
+            "types": "./dist/ai/index.d.ts",
             "import": "./dist/ai/index.js",
-            "types": "./dist/ai/index.d.ts"
+            "default": "./dist/ai/index.js"
         }
     },
     "scripts": {

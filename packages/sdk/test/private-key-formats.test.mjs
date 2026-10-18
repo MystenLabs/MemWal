@@ -82,6 +82,7 @@ test("MemWalManual signs with the same delegate key whether given hex or bech32"
             serverUrl: "https://relayer.example",
             sealServerConfigs: [{ objectId: "0xserver", weight: 1 }],
         });
+        manual.buildSealSession = async () => "test-session";
 
         let captured = null;
         const originalFetch = globalThis.fetch;
