@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Letter-spaced prompt injection is rejected before capture and recall. Separators between single characters (`i-g-n-o-r-e`, `i g n o r e`, `r.e.v.e.a.l`) are joined; hyphenated words such as `e-mail` and `built-in` stay as written.
+- Letter-spaced prompt injection is rejected before capture and recall. Punctuation, symbols, or spaces between single letters (`i-g-n-o-r-e`, `i g n o r e`, `r.e.v.e.a.l`) are joined; hyphenated words such as `e-mail` and `built-in` stay as written.
 
 ## 0.0.7
 
