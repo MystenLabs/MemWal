@@ -88,14 +88,14 @@ export function normalizeForInjectionCheck(text: string): string {
     mapped += VISUAL_CONFUSABLES[char] ?? char;
   }
 
-  // Join only a single character on each side ("i-g-n-o-r-e", not "e-mail"). U+2011 is U+2010 after NFKD.
+  // One separator or one whitespace between single characters, before the final collapse, so U+1680 cannot be respaced. A run of spaces stays split.
   const joined = mapped
     .replace(
-      /(?<=(?:^|[^A-Za-z0-9])[A-Za-z0-9]) ?[-._/*~\\\u2022\u2010\u2011\u2013\u2014|] ?(?=[A-Za-z0-9](?:[^A-Za-z0-9]|$))/gu,
+      /(?<=(?:^|[^A-Za-z0-9])[A-Za-z0-9])\s?[-._/*~\\\u2022\u2010\u2011\u2012\u2013\u2014\u2212|]\s?(?=[A-Za-z0-9](?:[^A-Za-z0-9]|$))/gu,
       "",
     )
     .replace(
-      /(?<=(?:^|[^A-Za-z0-9])[A-Za-z]) (?=[A-Za-z](?:[^A-Za-z0-9]|$))/gu,
+      /(?<=(?:^|[^A-Za-z0-9])[A-Za-z])\s(?=[A-Za-z](?:[^A-Za-z0-9]|$))/gu,
       "",
     );
   return joined.replace(/\s+/g, " ").trim();
