@@ -1,5 +1,10 @@
 import { auth } from "@/app/(auth)/auth";
-import { getChatById, getVotesByChatId, voteMessage } from "@/lib/db/queries";
+import {
+  getChatById,
+  getMessageById,
+  getVotesByChatId,
+  voteMessage,
+} from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
 
 export async function GET(request: Request) {
@@ -63,6 +68,15 @@ export async function PATCH(request: Request) {
 
   if (chat.userId !== session.user.id) {
     return new ChatbotError("forbidden:vote").toResponse();
+  }
+
+  // The vote row references the message, so a message from another chat
+  // would block that chat's owner from deleting it. Same response for a
+  // missing message and a foreign one, so ids from shared chats leak nothing.
+  const [votedMessage] = await getMessageById({ id: messageId });
+
+  if (!votedMessage || votedMessage.chatId !== chatId) {
+    return new ChatbotError("not_found:vote").toResponse();
   }
 
   await voteMessage({
