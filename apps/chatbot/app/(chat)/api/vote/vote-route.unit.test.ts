@@ -27,12 +27,8 @@ function makeMessage(chatId = CHAT_ID) {
   };
 }
 
-const getChatById = vi.fn(async ({ id }: { id: string }) =>
-  id === CHAT_ID ? makeChat() : null
-);
-const getMessageById = vi.fn(async ({ id }: { id: string }) =>
-  id === MESSAGE_ID ? [makeMessage()] : []
-);
+const getChatById = vi.fn();
+const getMessageById = vi.fn();
 const getVotesByChatId = vi.fn(async () => []);
 const voteMessage = vi.fn(async () => undefined);
 
