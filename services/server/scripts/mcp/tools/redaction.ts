@@ -273,7 +273,7 @@ const HEX_CREDENTIAL_LABEL =
  * in whatever sentence happens to come next.
  */
 const HEX_LABEL_AFTER =
-    /^[^A-Za-z0-9]{0,4}(?:is|was)?[^A-Za-z0-9]{0,4}(?:my|the|our|his|her|their)?[^A-Za-z0-9]{0,4}(?:delegate[\s_-]*)?(?:private[\s_-]*key|secret[\s_-]*key|priv[\s_-]*key|encryption[\s_-]*keys?(?![A-Za-z0-9])|enc[\s_-]*keys?(?![A-Za-z0-9])|seed|mnemonic|passphrase|api[\s_-]*key|db[\s_-]*pass(?:word)?s?(?![A-Za-z0-9])|pass(?![A-Za-z0-9]))/i;
+    /^[^A-Za-z0-9]{0,4}(?:is|was)?[^A-Za-z0-9]{0,4}(?:my|the|our|his|her|their)?[^A-Za-z0-9]{0,4}(?:delegate[\s_-]*)?(?:private[\s_-]*key|secret[\s_-]*key|priv[\s_-]*key|encryption[\s_-]*keys?(?![A-Za-z0-9])|enc[\s_-]*keys?(?![A-Za-z0-9])|seed|mnemonic|passphrase|api[\s_-]*key|db[\s_-]*pass(?:word)?s?(?![A-Za-z0-9])|(?<![A-Za-z0-9])pass(?![A-Za-z0-9]))/i;
 
 /** Placeholders this module writes, for stripping out of a context window. */
 const PLACEHOLDER_RUN = /\[redacted:[a-z-]+\]/g;

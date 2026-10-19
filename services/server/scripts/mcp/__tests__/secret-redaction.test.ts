@@ -832,6 +832,15 @@ test("hex beside the new credential labels is key material too (#1052)", () => {
         }
     }
 
+    for (const fact of [
+        `Notes from setup: ${HEX} is mypass for this laptop`,
+        `Pin the build to commit ${HEX.slice(0, 40)} mypass`,
+    ]) {
+        const out = sanitizeFact(fact);
+        assert.equal(out.text, fact, `mypass must not label the preceding id: ${fact}`);
+        assert.equal(out.changed, false);
+    }
+
     const split = sanitizeFactBatch([
         "my encryption_key for the staging box",
         HEX,
