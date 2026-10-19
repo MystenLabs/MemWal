@@ -1,5 +1,11 @@
 # @mysten-incubation/oc-memwal
 
+## 0.0.8
+
+### Fixed
+
+- Letter-spaced prompt injection is rejected before capture and recall. Separators between single characters (`i-g-n-o-r-e`, `i g n o r e`, `r.e.v.e.a.l`) are joined; hyphenated words such as `e-mail` and `built-in` stay as written.
+
 ## 0.0.7
 
 ### Fixed

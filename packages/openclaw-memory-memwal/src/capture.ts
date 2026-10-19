@@ -76,7 +76,7 @@ const TRIGGER_PATTERNS = [
   /[\w.-]+@[\w.-]+\.\w+/,
 ];
 
-/** Normalize text by stripping invisible/format characters, decomposing Unicode, and mapping confusable scripts. */
+/** Normalize text by stripping invisible/format characters, decomposing Unicode, mapping confusable scripts, and joining single-character letter spacing. */
 export function normalizeForInjectionCheck(text: string): string {
   const noInvisible = text.replace(/[\p{Cf}\p{Cc}\p{Co}\p{Cs}]/gu, "");
   const decomposed = noInvisible
@@ -87,7 +87,18 @@ export function normalizeForInjectionCheck(text: string): string {
   for (const char of decomposed) {
     mapped += VISUAL_CONFUSABLES[char] ?? char;
   }
-  return mapped.replace(/\s+/g, " ").trim();
+
+  // Join only a single character on each side ("i-g-n-o-r-e", not "e-mail"). U+2011 is U+2010 after NFKD.
+  const joined = mapped
+    .replace(
+      /(?<=(?:^|[^A-Za-z0-9])[A-Za-z0-9]) ?[-._/*~\\\u2022\u2010\u2011\u2013\u2014|] ?(?=[A-Za-z0-9](?:[^A-Za-z0-9]|$))/gu,
+      "",
+    )
+    .replace(
+      /(?<=(?:^|[^A-Za-z0-9])[A-Za-z]) (?=[A-Za-z](?:[^A-Za-z0-9]|$))/gu,
+      "",
+    );
+  return joined.replace(/\s+/g, " ").trim();
 }
 
 /** Check if text matches known prompt injection patterns. */
