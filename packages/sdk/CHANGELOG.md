@@ -5,6 +5,18 @@
 ### Fixed
 
 - `rememberBulk` and `rememberBulkAsync` send an idempotency key derived from the batch (a 30-minute bucket plus each item's namespace and text). A retry inside that window returns the same jobs instead of storing the batch again. An explicit `idempotencyKey` still wins. (#1080)
+- `listMemories()` pages every stored memory without a similarity query. It returns metadata only: no blob download and no decrypt. An optional namespace filter runs on the client, so a filtered page can be empty while `has_more` is true. (WALM-388)
+- `withMemWal` does not recall or auto-save on a tool-execution step. A later tool step reuses the recall cached for that user message. Auto-save still runs only on a user turn. (#1079)
+- `flush()` raises when a background auto-save failed, and `onSaveError` runs. The chat turn itself still does not fail. (#1117)
+- `withMemWal` warns when recall fails and accepts `onRecallError`. (WALM-764)
+- `MemWal.create` and `MemWalManual.create` reject a blank `accountId`, an empty namespace string, and a private key that is not a 32-byte Ed25519 seed. An omitted namespace still defaults to `"default"`. (#1155, #1200, #1204)
+- `recall`, `recallManual`, and `restore` reject a `limit` that is not a positive integer before signing. `recall` also rejects a blank query, a non-finite scoring weight, and a non-finite or negative `maxDistance`. A bad `maxDistance` used to drop every hit and look like an empty namespace. (#1086, #1227, #1228)
+- A `maxDistance` filter keeps the relayer's matching `total`. `total` is no longer replaced by the filtered row count, including when every row is dropped. (WALM-840)
+- When a token budget keeps only high-relevance hits, the lowest-distance hits are kept and the caller's sort order is preserved. (WALM-756)
+- `waitForRememberJob` and `waitForRememberJobs` do not sleep past the deadline. If the budget runs out during the sleep, they make one more status read. (#1081)
+- Package `exports` include a `default` condition and list `types` first, so Next.js, Turbopack, and Node `require(esm)` resolve the subpaths. (WALM-721)
+- A success response with an empty or non-JSON body raises an SDK error that names the HTTP status, instead of a raw `SyntaxError`. `MemWalManual.restore` sends the SEAL session and keeps its deadline armed across the body read. (#1201, #1137)
+- `getRememberBulkStatus` rejects a job id list that is not an array before any request. `MemWalMock.analyze` rejects an invalid date, and `MemWalMock.listNamespaces` rejects a cursor that is not `{updated_at, namespace}` instead of ending the page early. (#1226, #1229, #1203)
 - `createAccount`, `addDelegateKey`, `removeDelegateKey`, and `MemWalManual` work again without a caller-supplied `suiClient`. They looked for `SuiClient` in `@mysten/sui/client`, which current `@mysten/sui` no longer exports, and threw `SuiClient not found`. The default is now `SuiGrpcClient` against the public fullnode for `suiNetwork`, because those fullnodes no longer serve JSON-RPC. An explicit `suiClient` still wins. (WALM-164, #300)
 - `remember`, `rememberAsync`, and `rememberAndWait` reject a non-string text argument with `TypeError` before signing. An object used to be sent as `text` and the relayer answered 422. (#1058)
 - `getRememberStatus` and `waitForRememberJob` reject a job id outside `[A-Za-z0-9_-]+` before signing. `.`, `..`, `\`, and `%2e%2e` used to pass a denylist and be rewritten by `fetch` after the path was signed. Valid UUID job ids are unchanged. (#1087, #1216)
