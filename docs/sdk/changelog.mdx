@@ -28,7 +28,7 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.9. `listMemories()` pages every memory without a similarity query, `rememberBulk` sends a 30-minute idempotency key, and invalid recall input is rejected before signing. `waitForRememberJob` grows its poll delay toward a 5 second cap and names a 429 on timeout. Earlier releases are in the sections below.
+  The latest TypeScript SDK release is 0.1.9. `listMemories()` pages every memory without a similarity query, `rememberBulk` and `rememberBulkAsync` send a 30-minute idempotency key (#1080), and invalid recall input is rejected before signing. `waitForRememberJob` grows its poll delay toward a 5 second cap and names a 429 on timeout. Earlier releases are in the sections below.
 ---
 
 ## 0.1.9
