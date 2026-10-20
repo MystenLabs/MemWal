@@ -1037,19 +1037,28 @@ class MemWal:
         Returns:
             :class:`RecallResult` with decrypted text results.
         """
+        scoring_weights = None
+        sort = None
         if isinstance(query, RecallParams):
             params = query
             query_text = params.query
             limit = params.limit
             namespace = params.namespace
             max_distance = params.max_distance
+            scoring_weights = params.scoring_weights
+            sort = params.sort
         else:
             query_text = query
-        data = await self._signed_request("POST", "/api/recall", {
+        body = {
             "query": query_text,
             "limit": limit,
             "namespace": namespace or self._namespace,
-        })
+        }
+        if scoring_weights is not None:
+            body["scoring_weights"] = scoring_weights.to_wire()
+        if sort is not None:
+            body["sort"] = sort
+        data = await self._signed_request("POST", "/api/recall", body)
         memories = [
             RecallMemory(
                 blob_id=m["blob_id"],

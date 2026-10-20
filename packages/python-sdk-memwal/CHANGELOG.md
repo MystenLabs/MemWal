@@ -6,6 +6,7 @@
 
 - `get_remember_status(job_id)` on `MemWal` and `MemWalSync` returns `RememberJobStatus` from `GET /api/remember/{job_id}`, accepting 200 and 404 like the TypeScript SDK. (WALM-832, #1096)
 - `RecallMemory` and `RecallManualHit` include `created_at` and `score`. (#1178)
+- `RecallParams` accepts `scoring_weights` and `sort`. `recall()` forwards them on `POST /api/recall`. (#1062)
 
 ### Fixed
 
