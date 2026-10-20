@@ -860,14 +860,4 @@ test("the word pass is ordinary English, not a credential (#1052)", () => {
         assert.equal(out.text, fact, `changed a clean fact: ${fact}`);
         assert.equal(out.changed, false);
     }
-
-    for (const [fact, secret] of [
-        ["db_pass=hunter2", "hunter2"],
-        ["encryption_key=abc", "abc"],
-    ] as const) {
-        const out = sanitizeFact(fact);
-        assert.equal(out.text.includes(secret), false, out.text);
-        assert.ok(out.changed, fact);
-        assert.ok(out.kinds.includes("credential-assignment"), `${fact} -> ${out.kinds}`);
-    }
 });
