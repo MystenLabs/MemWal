@@ -59,5 +59,6 @@ const memwal = MemWal.create({
 - **Trust assumption** - the relayer sees plaintext during encryption and embedding. By using the managed relayer, you're trusting the Walrus Foundation-hosted instance with that data. See [Trust and Security Model](/fundamentals/architecture/data-flow-security-model) for details.
 - **Availability** - the Walrus Foundation provides the managed relayer as a public good without SLA guarantees.
 - **Storage costs** - the server wallet covers Walrus storage fees. The service can apply usage limits.
+- **No direct browser access** - the managed relayer only allows cross-origin requests from Walrus Memory's own apps. For any other origin, preflight and `GET` responses carry no `Access-Control-Allow-Origin`, so the browser blocks them. Call the relayer from your server, or through a same-origin proxy, and keep the delegate key server-side. A self-hosted relayer can allow your origins with `ALLOWED_ORIGINS`.
 
 If you need full control over the trust boundary or your own dedicated instance, see [Self-Hosting](/relayer/self-hosting).

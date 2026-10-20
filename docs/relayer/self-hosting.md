@@ -116,6 +116,7 @@ The relayer reads its configuration from environment variables, grouped below by
 
 - `OPENAI_API_KEY`: Enables real embeddings (falls back to mock embeddings without it).
 - `OPENAI_API_BASE`: Point to an OpenAI-compatible provider like OpenRouter.
+- `ALLOWED_ORIGINS`: Comma-separated browser origins allowed to call the relayer directly, for example `https://app.example.com`. Unset means deny-all: no `Access-Control-Allow-Origin` header is sent, so browsers block every direct request, while server-side callers are unaffected.
 
 ### Optional rate limits and storage
 
