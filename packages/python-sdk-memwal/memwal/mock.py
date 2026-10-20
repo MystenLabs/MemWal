@@ -265,8 +265,9 @@ class MemWalMock:
 
         ``RecallParams.sort`` is honored: ``"recent"`` keeps the semantic top
         ``max(min(limit * 5, 50), limit)`` and orders that window newest first,
-        like the relayer. ``RecallParams.scoring_weights`` is accepted but
-        ignored; ranking is always by token-overlap distance.
+        like the relayer. Otherwise results are ordered by token-overlap
+        distance. ``RecallParams.scoring_weights`` is accepted but ignored and
+        does not re-rank; ``distance`` is always token overlap.
         """
         if isinstance(query, RecallParams):
             limit = query.limit
