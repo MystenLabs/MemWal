@@ -746,7 +746,7 @@ test("a clean passage is forwarded byte-for-byte", () => {
     assert.equal(droppedSpanNotice(out.dropped, out.segments), "");
 });
 
-test("db_pass, encryption_key, priv_key, and a bare pass assignment are redacted (#1052)", () => {
+test("db_pass, encryption_key, and priv_key assignments are redacted (#1052)", () => {
     const V = "hunter2-prod-9xQ";
     const labels = [
         "db_pass",
@@ -757,7 +757,6 @@ test("db_pass, encryption_key, priv_key, and a bare pass assignment are redacted
         "ENCRYPTION_KEY",
         "priv_key",
         "privkey",
-        "pass",
         "private_key",
         "db_password",
     ];
@@ -818,7 +817,6 @@ test("hex beside the new credential labels is key material too (#1052)", () => {
         "ENCRYPTION_KEY",
         "priv_key",
         "privkey",
-        "pass",
     ];
     for (const label of labels) {
         for (const fact of [
@@ -848,4 +846,28 @@ test("hex beside the new credential labels is key material too (#1052)", () => {
     assert.ok(!split.map((r) => r.text).join("\n").includes(HEX));
     assert.equal(split[1].refusal, "credential-only");
     assert.equal(split[0].refusal, undefined);
+});
+
+test("the word pass is ordinary English, not a credential (#1052)", () => {
+    const sha = "4f2b8c1e9d7a3f5b6c0e2d4a8b1f3c5e7d9a0b2c";
+    const hex = "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b";
+    for (const fact of [
+        "Our CI config has pass: true for the smoke suite",
+        `I need to pass this commit sha ${sha} to the team`,
+        `${hex} is my pass`,
+    ]) {
+        const out = sanitizeFact(fact);
+        assert.equal(out.text, fact, `changed a clean fact: ${fact}`);
+        assert.equal(out.changed, false);
+    }
+
+    for (const [fact, secret] of [
+        ["db_pass=hunter2", "hunter2"],
+        ["encryption_key=abc", "abc"],
+    ] as const) {
+        const out = sanitizeFact(fact);
+        assert.equal(out.text.includes(secret), false, out.text);
+        assert.ok(out.changed, fact);
+        assert.ok(out.kinds.includes("credential-assignment"), `${fact} -> ${out.kinds}`);
+    }
 });
