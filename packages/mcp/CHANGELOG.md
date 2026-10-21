@@ -1,6 +1,6 @@
 # @mysten-incubation/memwal-mcp
 
-## Unreleased
+## 0.0.15
 
 ### Security
 
@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- The plugin launcher installs `@mysten-incubation/memwal-mcp@0.0.15` instead of `0.0.14-dev.6`.
 - `memwal_login` with `freshKey: true` closes the listener already bound. The replaced listener cannot time out into a failure notice, and a late callback cannot save credentials or clear the new write-ahead record. The tool result names the abandoned public key and address so it can be removed from the dashboard. (WALM-645)
 
 ## 0.0.14
