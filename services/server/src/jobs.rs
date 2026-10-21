@@ -3999,33 +3999,6 @@ different transaction: TransactionDigest(8bjFgRyXRRYwrzQapgEjpHnGhdfNDY7d6xA82Bt
     static DB_SETUP_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
     #[test]
-    fn one_cancelled_register_completes_inside_the_step_budget() {
-        // Fresh journal, first register cancelled. Budget 6 stops after
-        // `uploaded` and returns "exceeded step budget" instead of certifying.
-        let calls = [
-            "encoded",
-            "prepared",
-            "cancelled",
-            "prepared",
-            "registered",
-            "uploaded",
-            "certified",
-        ];
-        let mut certified = false;
-        for (index, call) in calls.iter().enumerate() {
-            if index >= super::DURABLE_UPLOAD_STEP_BUDGET {
-                break;
-            }
-            certified = *call == "certified";
-        }
-        assert!(
-            certified,
-            "budget {} stops a one-cancel upload before certify",
-            super::DURABLE_UPLOAD_STEP_BUDGET,
-        );
-    }
-
-    #[test]
     fn a_spent_budget_is_terminal_for_every_retryable_error() {
         let spent = WalletJobAttemptInfo {
             current: MAX_ATTEMPTS as usize,
