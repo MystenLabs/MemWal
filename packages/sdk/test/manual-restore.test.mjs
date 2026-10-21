@@ -85,19 +85,21 @@ test("restore() times out when the body stalls after headers", async (t) => {
         }
         if (path === "/api/restore") {
             started();
+            const stall = () => new Promise((_, reject) => {
+                const abort = () => {
+                    const err = new Error("The operation was aborted");
+                    err.name = "AbortError";
+                    reject(err);
+                };
+                if (init.signal?.aborted) abort();
+                else init.signal?.addEventListener("abort", abort, { once: true });
+            });
             return {
                 ok: true,
                 status: 200,
                 headers: new Headers(),
-                json: () => new Promise((_, reject) => {
-                    const abort = () => {
-                        const err = new Error("The operation was aborted");
-                        err.name = "AbortError";
-                        reject(err);
-                    };
-                    if (init.signal?.aborted) abort();
-                    else init.signal?.addEventListener("abort", abort, { once: true });
-                }),
+                text: stall,
+                json: stall,
             };
         }
         throw new Error(`Unexpected request: ${path}`);

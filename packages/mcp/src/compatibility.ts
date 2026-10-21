@@ -38,6 +38,21 @@ let compatibilityCache: RelayerVersionMetadata | null = null;
 let compatibilityCacheUrl: string | null = null;
 let compatibilityPromise: Promise<void> | null = null;
 
+async function readSuccessJson<T>(res: Response): Promise<T> {
+    const raw = await res.text();
+    if (raw.trim() === "") {
+        throw new Error(`MemWal: HTTP ${res.status} response had an empty body; expected JSON`);
+    }
+    try {
+        return JSON.parse(raw) as T;
+    } catch (err) {
+        if (err instanceof SyntaxError) {
+            throw new Error(`MemWal: HTTP ${res.status} response was not JSON`);
+        }
+        throw err;
+    }
+}
+
 /**
  * @param signal Optional abort signal bounding the whole check. The caller
  *   passes ONE signal shared with the subsequent SSE connect so a single
@@ -71,7 +86,7 @@ async function fetchAndValidate(relayerUrl: string, signal?: AbortSignal): Promi
     let metadata: RelayerVersionMetadata;
 
     if (versionResp.ok) {
-        metadata = (await versionResp.json()) as RelayerVersionMetadata;
+        metadata = await readSuccessJson<RelayerVersionMetadata>(versionResp);
     } else if (versionResp.status === 404 || versionResp.status === 405) {
         const healthResp = await fetch(`${base}/health`, {
             method: "GET",
@@ -83,7 +98,7 @@ async function fetchAndValidate(relayerUrl: string, signal?: AbortSignal): Promi
                     `${versionResp.status}, and GET /health returned ${healthResp.status}`
             );
         }
-        metadata = (await healthResp.json()) as RelayerVersionMetadata;
+        metadata = await readSuccessJson<RelayerVersionMetadata>(healthResp);
     } else {
         throw new Error(
             `Walrus Memory MCP compatibility check failed: GET /version returned ${versionResp.status}`

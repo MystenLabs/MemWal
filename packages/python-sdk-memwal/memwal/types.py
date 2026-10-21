@@ -108,6 +108,8 @@ class RecallParams:
     limit: int = 10
     namespace: Optional[str] = None
     max_distance: Optional[float] = None
+    scoring_weights: Optional["ScoringWeights"] = None
+    sort: Optional[str] = None
 
 
 @dataclass

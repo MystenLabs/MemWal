@@ -412,6 +412,10 @@ jobs:
 
       - name: Build (Next.js, type-check inclusive)
         working-directory: apps/chatbot
+        env:
+          # next build imports auth.ts, which rejects a missing or short secret.
+          AUTH_SECRET: ci-test-secret-not-for-production
+          POSTGRES_URL: postgresql://dummy:dummy@localhost:5432/dummy
         run: pnpm exec next build
 
   noter-checks:

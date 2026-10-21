@@ -207,7 +207,7 @@ Create a new async client.
 | `await remember_bulk(items)` | Accept several background remember jobs |
 | `await wait_for_remember_jobs(job_ids, opts?)` | Poll several remember jobs together |
 | `await remember_bulk_and_wait(items, opts?)` | Store several memories and wait for completion |
-| `await recall(RecallParams(query, limit?, namespace?, max_distance?))` | Search memories, optionally filtering by distance |
+| `await recall(RecallParams(query, limit?, namespace?, max_distance?, scoring_weights?, sort?))` | Search memories, optionally filtering by distance |
 | `await analyze(text, namespace?)` | Extract and store facts |
 | `await ask(question, limit?, namespace?)` | Ask a question answered using memories |
 | `await restore(namespace, limit?)` | Restore a namespace |
