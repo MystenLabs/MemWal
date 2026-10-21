@@ -90,7 +90,7 @@ Before wiring the SDK into your app:
 | --- | --- | --- | --- | --- |
 | `key` | `str` | Yes | — | Ed25519 delegate private key in hex |
 | `account_id` | `str` | Yes | — | Walrus Memory account object ID on Sui |
-| `server_url` | `str` | No | `http://localhost:8000` | Explicit relayer URL — wins over `env` |
+| `server_url` | `str` | No | `https://relayer.memory.walrus.xyz` | Explicit relayer URL — wins over `env` |
 | `namespace` | `str` | No | `"default"` | Default namespace for memory isolation |
 | `env` | `str` | No | — | Hosted relayer preset: `staging` for testing or `prod` for production |
 
@@ -103,7 +103,7 @@ Instead of hardcoding a URL, pass `env`. The public docs and Colab example use `
 | `prod` | `https://relayer.memory.walrus.xyz` |
 | `staging` | `https://relayer-staging.memory.walrus.xyz` |
 
-Precedence: an explicit non-default `server_url` > `env` > the default. An unknown preset raises `ValueError`.
+Precedence: any explicit `server_url` wins, including the hosted default. `env` applies only when `server_url` is omitted (`None`). An unknown preset raises `ValueError`.
 
 ## First Memory
 
