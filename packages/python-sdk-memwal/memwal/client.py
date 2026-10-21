@@ -440,7 +440,7 @@ class MemWal:
         cls,
         key: str,
         account_id: str,
-        server_url: str = "http://localhost:8000",
+        server_url: Optional[str] = None,
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWal":
@@ -449,11 +449,11 @@ class MemWal:
         Args:
             key: Ed25519 private key hex string (the delegate key).
             account_id: Walrus Memory account object ID on Sui.
-            server_url: Server URL (default: ``http://localhost:8000``).
+            server_url: Server URL (default: ``https://relayer.memory.walrus.xyz``).
             namespace: Default namespace for memory isolation (default: ``"default"``).
             env: Optional relayer preset — ``"prod"``, ``"dev"``, ``"staging"``,
                 or ``"local"``. Resolves ``server_url`` to the matching hosted
-                relayer unless an explicit non-default ``server_url`` is given.
+                relayer unless an explicit ``server_url`` is given.
                 Precedence: explicit ``server_url`` > ``env`` > default.
 
         Returns:
@@ -2008,7 +2008,7 @@ class MemWalSync:
         cls,
         key: str,
         account_id: str,
-        server_url: str = "http://localhost:8000",
+        server_url: Optional[str] = None,
         namespace: str = "default",
         env: Optional[str] = None,
     ) -> "MemWalSync":

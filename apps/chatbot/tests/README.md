@@ -22,7 +22,7 @@ pnpm --filter @memwal/chatbot playwright:install
 
 # run the E2E suite
 POSTGRES_URL=postgresql://memwal:memwal_secret@localhost:5432/memwal \
-AUTH_SECRET=local-dev-secret-not-for-prod \
+AUTH_SECRET=local-dev-secret-not-for-production \
   pnpm --filter @memwal/chatbot test:e2e
 
 # same commands, interactive UI
