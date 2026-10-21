@@ -10,7 +10,7 @@ keywords:
   - Walrus Memory
   - MemWal
 goal:
-  description: "Design a multi-tenant memory architecture: create one MemWalAccount, isolate each end user with a per-wallet namespace, and secure access with scoped delegate keys."
+  description: "Design a multi-tenant memory architecture: use the operator's MemWalAccount, organize each user's memory with a namespace, and enforce access in the authenticated server."
   requires:
     - has_frontmatter:
         - title
@@ -35,12 +35,16 @@ This is the pattern for SaaS-style apps where **one operator** runs a server tha
 
 ## The pattern at a glance
 
-| Layer | What it holds | Why |
+| **Layer** | **What it holds** | **Why** |
 | --- | --- | --- |
-| **Operator** | One `MemWalAccount` + one **delegate key** | Created once on the [dashboard](https://memory.walrus.xyz). Pays for storage, owns all memory. |
+| **Operator** | One `MemWalAccount` + one **delegate key** | Created once on the [dashboard](https://memory.walrus.xyz). Owns all memory stored through this account. |
 | **Server** (API routes) | `MEMWAL_PRIVATE_KEY` + `MEMWAL_ACCOUNT_ID` as env vars | The delegate key authenticates every relayer call. Never sent to the browser. |
 | **End user** | A connected Sui wallet, used for **auth only** | The wallet proves identity. The user does **not** create a MemWalAccount. |
-| **Isolation** | One **namespace per wallet**, for example `myapp-{walletAddress}` | Keeps each user's memories in a separate logical bucket under the shared account. |
+| **Organization** | One **namespace per wallet**, for example `myapp-{walletAddress}` | Groups each user's memories under the shared account. The server enforces who can access each group. |
+
+The account registry permits one account per owner address within that registry. This pattern uses the operator's account for every end user; signing in with a wallet does not create an account for that user or transfer memory ownership to them. See [Ownership and access](/fundamentals/concepts/ownership-and-access).
+
+With the [managed relayer](/relayer/public-relayer), the relayer's funded wallets pay SUI gas and WAL storage fees. Using your own account does not make your sign-in wallet the payer. With a [self-hosted relayer](/relayer/self-hosting), you fund the relayer wallets. Usage limits still apply to the managed service; this pattern does not grant a dedicated partner quota.
 
 ```
                   ┌─────────────────────────────────────┐
@@ -156,15 +160,16 @@ export async function POST(req: Request) {
   // 3. Generate a reply with your model, injecting recalled.results as context…
   const reply = await generateReply(message, recalled.results);
 
-  // 4. Persist new memory. Use rememberAndWait when the next read must see it
-  //    immediately (for example, same-session follow-up); use remember
-  //    (fire-and-forget) when eventual indexing is fine and you don't want to
-  //    block the response.
-  await memwal.remember(`User said: ${message}`, ns);
+  // 4. Submit new memory and return after the relayer accepts the job.
+  //    Capture the job ID for a background worker to track completion.
+  //    Use rememberAndWait only when the caller needs completion before proceeding.
+  const accepted = await memwal.remember(`User said: ${message}`, ns);
 
-  return Response.json({ reply, recalled: recalled.results });
+  return Response.json({ reply, recalled: recalled.results, memoryJobId: accepted.job_id });
 }
 ```
+
+`remember` waits for acceptance, not for the upload and indexing to finish. Persist the returned job ID if completion must survive a process restart. For retries, stable operation keys, and checking completion outside the chat turn, see [Production readiness](/sdk/production-readiness).
 
 <Note>
 **Structured agent state (a single profile JSON):** semantic `recall` is built for *fuzzy* retrieval by meaning, so it is not a reliable way to fetch one authoritative "current profile" record. If you need deterministic key-based reads/upserts, follow [issue #247](https://github.com/MystenLabs/MemWal/issues/247). For now, prefer a **dedicated namespace per structured record** and treat free-form semantic lines separately.
