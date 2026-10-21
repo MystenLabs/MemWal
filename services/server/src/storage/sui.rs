@@ -83,11 +83,7 @@ pub async fn verify_delegate_key_onchain(
     let result = rpc_response
         .result
         .ok_or_else(|| partial_get_object(PARTIAL_RPC_NO_RESULT))?;
-
-    let content = result
-        .data
-        .and_then(|d| d.content)
-        .ok_or_else(|| partial_get_object(PARTIAL_RPC_NO_CONTENT))?;
+    let content = require_get_object_content(result)?;
 
     // #398: reject foreign/lookalike objects — verify the Move type against the
     // configured immutable type-origin package id before trusting any field.
@@ -725,8 +721,8 @@ pub fn verify_cache_miss_action(err: &OnchainVerifyError) -> VerifyCacheMissActi
 }
 
 /// Shared callers evict on every definitive miss. Refresh evicts only on
-/// answers that revoke the grant, so a partial read or a type mismatch is
-/// not remembered as `KeyNotFound` for the next refresh.
+/// answers that revoke the grant, so a partial read is not remembered as
+/// `KeyNotFound` for the next refresh.
 fn delegate_verify_evicts(err: &OnchainVerifyError, for_refresh: bool) -> bool {
     if for_refresh {
         err.revokes_oauth_refresh()
@@ -845,10 +841,7 @@ pub async fn list_delegate_keys_onchain(
     let result = rpc_response
         .result
         .ok_or_else(|| partial_get_object(PARTIAL_RPC_NO_RESULT))?;
-    let content = result
-        .data
-        .and_then(|d| d.content)
-        .ok_or_else(|| partial_get_object(PARTIAL_RPC_NO_CONTENT))?;
+    let content = require_get_object_content(result)?;
 
     ensure_memwal_account_type(
         content.object_type.as_deref(),
@@ -1247,6 +1240,30 @@ struct RpcError {
 #[derive(Debug, Deserialize)]
 struct RpcResult {
     data: Option<ObjectData>,
+    /// Set when the object is missing or deleted. `data` is absent in that body.
+    error: Option<ObjectReadError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObjectReadError {
+    code: String,
+}
+
+/// `notExists` and `deleted` are a real removal. Any other body with no
+/// content is a partial read (`RpcError`), not a miss.
+fn require_get_object_content(result: RpcResult) -> Result<ObjectContent, OnchainVerifyError> {
+    if let Some(error) = &result.error {
+        if error.code == "notExists" || error.code == "deleted" {
+            return Err(OnchainVerifyError::NotFound(format!(
+                "sui_getObject {}",
+                error.code
+            )));
+        }
+    }
+    result
+        .data
+        .and_then(|data| data.content)
+        .ok_or_else(|| partial_get_object(PARTIAL_RPC_NO_CONTENT))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1329,19 +1346,21 @@ impl OnchainVerifyError {
 
     /// Whether OAuth refresh may revoke the grant on this answer.
     ///
-    /// A removed key, a deactivated account, or gRPC `NotFound` for the
-    /// object. A partial body, `InvalidArgument`, a missing `object_type`,
-    /// and any unavailable RPC are not a removal. A present foreign type is
-    /// not either: revoking on it would drop every grant if the package id
-    /// were wrong.
+    /// A removed key, a deactivated account, gRPC `NotFound`, JSON-RPC
+    /// `notExists` / `deleted`, or a present foreign type. A partial body,
+    /// `InvalidArgument`, a missing `object_type`, an unparseable id, and
+    /// any unavailable RPC are not a removal.
     pub fn revokes_oauth_refresh(&self) -> bool {
         match self {
-            Self::KeyNotFound(_) | Self::AccountDeactivated(_) => true,
-            // Only the marker `map_get_object_status` writes for `Code::NotFound`.
-            // A partial body and `InvalidArgument` are `RpcError`, and a bad
-            // local id is `NotFound` without this prefix.
-            Self::NotFound(msg) => msg.starts_with(GRPC_OBJECT_NOT_FOUND_PREFIX),
-            Self::RpcError(_) | Self::WrongObjectType(_) | Self::ScanCapExceeded(_) => false,
+            Self::KeyNotFound(_) | Self::AccountDeactivated(_) | Self::WrongObjectType(_) => true,
+            // gRPC `Code::NotFound` uses the prefix. JSON-RPC removal uses
+            // the two codes. `invalid object id` is neither.
+            Self::NotFound(msg) => {
+                msg.starts_with(GRPC_OBJECT_NOT_FOUND_PREFIX)
+                    || msg == "sui_getObject notExists"
+                    || msg == "sui_getObject deleted"
+            }
+            Self::RpcError(_) | Self::ScanCapExceeded(_) => false,
         }
     }
 }
@@ -1693,16 +1712,40 @@ mod tests {
         assert!(real.revokes_oauth_refresh(), "{real}");
         assert!(delegate_verify_evicts(&real, true), "{real}");
 
-        // A present foreign type still evicts for signed auth. Refresh does
-        // not record it, or the next refresh would see a cached KeyNotFound.
+        // A present foreign type is a finished read. Refresh revokes it.
+        // Missing `object_type` is `RpcError` and is covered above.
         let foreign = OnchainVerifyError::WrongObjectType("foreign".into());
-        assert!(!foreign.revokes_oauth_refresh());
+        assert!(foreign.revokes_oauth_refresh());
         assert!(delegate_verify_evicts(&foreign, false));
-        assert!(!delegate_verify_evicts(&foreign, true));
+        assert!(delegate_verify_evicts(&foreign, true));
 
         let invalid_id = parse_object_id("not-a-sui-object-id").unwrap_err();
         assert!(!invalid_id.revokes_oauth_refresh(), "{invalid_id}");
         assert!(!delegate_verify_evicts(&invalid_id, true));
+    }
+
+    #[test]
+    fn json_rpc_not_exists_and_deleted_revoke_but_a_bare_body_does_not() {
+        for code in ["notExists", "deleted"] {
+            let body = format!(r#"{{"result":{{"error":{{"code":"{code}"}}}}}}"#);
+            let response: RpcResponse = serde_json::from_str(&body).expect(&body);
+            let err =
+                require_get_object_content(response.result.expect("result")).expect_err(&body);
+            assert!(matches!(err, OnchainVerifyError::NotFound(_)), "{err}");
+            assert!(err.to_string().contains(code), "{err}");
+            assert!(!err.is_unavailable(), "{err}");
+            assert!(err.revokes_oauth_refresh(), "{err}");
+            assert!(delegate_verify_evicts(&err, true), "{err}");
+            assert!(delegate_verify_evicts(&err, false), "{err}");
+        }
+
+        let bare: RpcResponse = serde_json::from_str(r#"{"result":{}}"#).unwrap();
+        let err = require_get_object_content(bare.result.unwrap()).unwrap_err();
+        assert!(matches!(err, OnchainVerifyError::RpcError(_)), "{err}");
+        assert!(err.to_string().contains(PARTIAL_RPC_NO_CONTENT), "{err}");
+        assert!(err.is_unavailable(), "{err}");
+        assert!(!err.revokes_oauth_refresh(), "{err}");
+        assert!(!delegate_verify_evicts(&err, true));
     }
 
     #[test]

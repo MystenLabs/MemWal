@@ -791,9 +791,8 @@ impl RefreshDelegateDecision {
 /// Classify a cached delegate verify for refresh.
 ///
 /// Revoke only when [`OnchainVerifyError::revokes_oauth_refresh`] is set, or
-/// the verified owner is not the grant owner. Unavailable errors, a partial
-/// read, and a wrong Move type are `server_error`. A Sui 429 is `RpcError`,
-/// so it cannot revoke.
+/// the verified owner is not the grant owner. A partial read and any
+/// unavailable RPC, including a Sui 429, are `server_error`.
 fn refresh_delegate_decision(
     verified: Result<String, OnchainVerifyError>,
     grant_owner: &str,
@@ -1277,9 +1276,10 @@ pub async fn token(
             }
 
             // GH #1141: refresh must not outlive `remove_delegate_key`.
-            // Revoke only when the key is gone, the account is deactivated,
-            // the owner does not match, or gRPC NotFound the object. A
-            // partial RPC read is `server_error` and does not revoke.
+            // Revoke when the key is gone, the account is deactivated, the
+            // owner does not match, gRPC NotFound or JSON-RPC notExists/
+            // deleted hits the object, or the object is a present foreign
+            // type. A partial RPC read is `server_error` and does not revoke.
             // Do not log `encrypted_private_key` or the key bytes.
             //
             // Window on this path: a positive inside `DELEGATE_VERIFY_CACHE_TTL`
@@ -1461,6 +1461,9 @@ mod tests {
             OnchainVerifyError::KeyNotFound("gone".into()),
             OnchainVerifyError::AccountDeactivated("dead".into()),
             map_get_object_status(tonic::Status::not_found("no such object")),
+            OnchainVerifyError::WrongObjectType("foreign".into()),
+            OnchainVerifyError::NotFound("sui_getObject notExists".into()),
+            OnchainVerifyError::NotFound("sui_getObject deleted".into()),
         ] {
             let label = err.to_string();
             assert!(err.revokes_oauth_refresh(), "{label}");
@@ -1481,17 +1484,6 @@ mod tests {
             .expect("owner mismatch is invalid_grant")
             .description
             .contains("no longer registered on-chain"));
-
-        // A type mismatch is not a removed key. Revoking on it would drop
-        // every grant if the configured package id were wrong.
-        let foreign = OnchainVerifyError::WrongObjectType("foreign".into());
-        assert!(!foreign.revokes_oauth_refresh());
-        assert_refresh_policy(
-            refresh_delegate_decision(Err(foreign), "0xowner"),
-            false,
-            false,
-            Some("server_error"),
-        );
     }
 
     #[test]
@@ -1520,8 +1512,8 @@ mod tests {
             );
         }
 
-        // The same five shapes, if they still arrive as NotFound / a missing
-        // type, are not a real gRPC NotFound and must not revoke either.
+        // Historical partial strings, if they still arrive as NotFound, and an
+        // unparseable object id, are not a real removal and must not revoke.
         let stale_shapes = [
             OnchainVerifyError::NotFound(PARTIAL_RPC_NO_RESULT.into()),
             OnchainVerifyError::NotFound(PARTIAL_RPC_NO_CONTENT.into()),
@@ -1530,10 +1522,7 @@ mod tests {
                 "gRPC GetObject failed: {}",
                 tonic::Status::invalid_argument("bad object id")
             )),
-            OnchainVerifyError::WrongObjectType(
-                "object 0xobj has type None, expected 0xpkg::account::MemWalAccount — foreign object rejected"
-                    .into(),
-            ),
+            OnchainVerifyError::NotFound("invalid object id: bad".into()),
         ];
         for err in stale_shapes {
             let label = err.to_string();
