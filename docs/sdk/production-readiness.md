@@ -33,7 +33,7 @@ answer: >-
 
 The SDK gives you the storage primitives. Running them in a long-lived agent, where there is no human to retry a failed write or notice a runaway bill, takes a few patterns on top. This guide collects the ones that matter most.
 
-The examples use the relayer-backed TypeScript client. See the [API reference](/sdk/api-reference) for method signatures and the [SDK changelog](/sdk/changelog) for version-specific behavior.
+The examples target the relayer-backed TypeScript client in SDK 0.1.9. See the [API reference](/sdk/api-reference) for method signatures and the [SDK changelog](/sdk/changelog) for version-specific behavior.
 
 ## Make writes idempotent
 
@@ -42,7 +42,7 @@ The SDK sends an idempotency key that lets the relayer return an existing job in
 | **Method** | **Automatic key** |
 | --- | --- |
 | `remember`, `rememberAsync`, `rememberAndWait` | Since 0.1.8, derived from the text, resolved namespace, and a fixed 30-minute time bucket. |
-| `rememberBulk`, `rememberBulkAsync`, `rememberBulkAndWait` | Since 0.1.9, derived from the ordered batch's text and resolved namespaces, plus the same time bucket. On 0.1.8, pass an explicit batch key. |
+| `rememberBulk`, `rememberBulkAsync`, `rememberBulkAndWait` | Since 0.1.9, derived from the ordered batch's text and resolved namespaces, plus the same time bucket. Upgrade from 0.1.8 for bulk idempotency: its bulk methods do not send an idempotency key, even if JavaScript callers pass an extra options argument. |
 
 The bucket is not a rolling 30-minute guarantee: two attempts a few seconds apart can cross its boundary. Changing batch order, content, or namespaces also changes the automatic key. For a durable queue or a retry that can cross a bucket boundary or process restart, persist one operation key with the payload and reuse it on every submission attempt.
 
@@ -53,7 +53,7 @@ async function rememberOnce(
   memwal: MemWal,
   text: string,
   eventId: string,
-  namespace = "default",
+  namespace?: string,
 ) {
   // eventId comes from your durable event record, not a new UUID on each retry.
   return memwal.remember(text, namespace, { idempotencyKey: `event:${eventId}` });
@@ -95,26 +95,28 @@ Submission and polling need different retry handling:
 
 Use `rememberAndWait` or `rememberBulkAndWait` when the caller needs completion before proceeding. Otherwise, persist the IDs returned at acceptance and resume with the wait helpers before depending on the stored data. A single-job wait timeout raises `MemWalRememberJobTimeout` with its `jobId`; a bulk wait can report individual items as `timeout`, which also require later checks.
 
+If no bulk status read succeeds and a confirming read is rate-limited, the bulk wait can throw `MemWalRateLimited` with `jobIds` and `retryAfterSeconds`. Keep the accepted IDs and schedule another status check after the cooldown; this error does not mean the jobs were canceled.
+
 ```ts
 // In a background worker, load the IDs persisted at acceptance.
 const settled = await memwal.waitForRememberJobs(acceptedBatch.job_ids);
 
 const unfinished = settled.results.filter((r) => r.status !== "done");
 if (unfinished.length > 0) {
-  // Keep timeout items for a later status check; inspect failed/not_found items.
+  // Keep timeout items for a later status check; inspect failed items and errors.
   console.warn("Some writes are not confirmed:", unfinished);
 }
 ```
 
 <Warning>
-A job reaching `done` confirms that the relayer stored the memory, but the vector index can briefly lag behind that signal, so a `recall` fired in the same instant might not return the memory yet. For read-after-write critical paths, tolerate a short delay or re-query rather than treating an empty first result as a missing memory.
+A job reaches `done` after its vector row is inserted. This confirms storage and indexing, but does not guarantee that every semantic query returns it: namespaces, relevance, filters, and result limits still apply. An empty recall result alone is not evidence that the write failed, so do not submit a duplicate just to make it appear.
 </Warning>
 
 For the full write, confirm, and recall sequence in context, see [Agent Storage Loop](/sdk/agent-storage-loop).
 
 ## Bound cost
 
-Every write registers storage on Walrus and consumes SUI gas and WAL. With the [managed relayer](/relayer/public-relayer), its funded wallets pay those costs; self-hosting means funding your own relayer wallets. Account ownership does not determine which wallet pays for a relayed upload. Bound usage even when the managed service pays, because the shared service applies limits.
+Every write registers storage on Walrus and consumes SUI gas and WAL. The [managed relayer](/relayer/public-relayer) covers those costs through its server wallets and configured gas sponsor; self-hosting means funding your own relayer deployment. Account ownership does not determine which wallet pays for a relayed upload. Bound usage even when the managed service pays, because the shared service applies limits.
 
 - **Batch writes.** `rememberBulk` accepts up to 20 items and reduces submission and transaction overhead. Buffer small memories and flush them as a batch instead of writing one at a time; the call does not promise that all items become one Walrus blob.
 - **Do not store what you never recall.** Ephemeral scratch state that never feeds a future `recall` does not belong in durable storage. Keep it in process memory.
@@ -124,6 +126,7 @@ Every write registers storage on Walrus and consumes SUI gas and WAL. With the [
 let writesThisCycle = 0;
 const MAX_WRITES_PER_CYCLE = 50;
 
+// Sequential, single-process example. Use an atomic shared quota across workers.
 async function budgetedRemember(memwal: MemWal, text: string, eventId: string) {
   if (writesThisCycle >= MAX_WRITES_PER_CYCLE) return false;
   await rememberOnce(memwal, text, eventId);
@@ -139,7 +142,7 @@ A headless agent holds secrets no human rotates by hand, so treat them with prod
 - The **delegate key** authenticates the agent to the relayer.
 - For client-managed encryption, the **Sui key** signs the Seal and Walrus operations. See [holding your own keys](/sdk/usage/memwal-manual#agent-state-holding-your-own-keys).
 
-Load both from a secret manager, never from source or logs. Scope each agent to its own delegate key so you can revoke one without taking down the rest, and rotate through the dashboard if a key might be exposed. If the Sui key behind client-managed encryption is lost, you cannot recover the encrypted memories, so back it up with the same care as any data-encryption key.
+Load keys from a secret manager, never from source or logs. Give each agent its own delegate key for individual revocation; these keys still grant access across the account's namespaces. The owner can replace a lost delegate key without transferring memory ownership. Revocation protects future writes but cannot erase plaintext or decryption keys already obtained for historical memories. See [Ownership and access](/fundamentals/concepts/ownership-and-access) for the account and delegate model.
 
 ## Degrade gracefully when memory is unavailable
 
@@ -157,7 +160,12 @@ try {
 
 // Guard every read and write on memory being live.
 if (memory) {
-  await budgetedRemember(memory, "Deploy completed.", "release-42-completed");
+  try {
+    await budgetedRemember(memory, "Deploy completed.", "release-42-completed");
+  } catch {
+    // Leave the durable source event unacknowledged for a later retry.
+    console.warn("Memory write deferred; continue serving this turn.");
+  }
 }
 ```
 

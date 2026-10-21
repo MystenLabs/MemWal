@@ -44,7 +44,7 @@ This is the pattern for SaaS-style apps where **one operator** runs a server tha
 
 The account registry permits one account per owner address within that registry. This pattern uses the operator's account for every end user; signing in with a wallet does not create an account for that user or transfer memory ownership to them. See [Ownership and access](/fundamentals/concepts/ownership-and-access).
 
-With the [managed relayer](/relayer/public-relayer), the relayer's funded wallets pay SUI gas and WAL storage fees. Using your own account does not make your sign-in wallet the payer. With a [self-hosted relayer](/relayer/self-hosting), you fund the relayer wallets. Usage limits still apply to the managed service; this pattern does not grant a dedicated partner quota.
+The [managed relayer](/relayer/public-relayer) covers SUI gas and WAL storage fees through its server wallets and configured gas sponsor. Using your own account does not make your sign-in wallet the payer. With a [self-hosted relayer](/relayer/self-hosting), you fund the relayer deployment. Usage limits still apply to the managed service; this pattern does not grant a dedicated partner quota.
 
 ```
                   ┌─────────────────────────────────────┐
@@ -68,7 +68,7 @@ Create the account and a delegate key once, on the [Walrus Memory dashboard](htt
 - A **delegate private key** (hex) → your `MEMWAL_PRIVATE_KEY`
 
 <Warning>
-Use a **delegate key**, never the **owner** wallet key. The owner key can transfer the account and manage delegates; a delegate key can only read and write memory. If a delegate key leaks, you revoke it without touching the owner wallet. See [Delegate Key Management](/contract/delegate-key-management).
+Use a **delegate key**, never the **owner** wallet key, in the application server. The owner manages the account and its delegates; a delegate authenticates memory operations across the account's namespaces. Revoking a leaked delegate protects future writes, but cannot erase plaintext or decryption keys already obtained for historical memories. See [Delegate key management](/contract/delegate-key-management).
 </Warning>
 
 Store both as server-side environment variables:
@@ -92,6 +92,7 @@ await removeDelegateKey({
   accountId: process.env.MEMWAL_ACCOUNT_ID!,
   publicKey: "<delegate-public-key-hex>", // the leaked key's public key
   suiPrivateKey: "suiprivkey1...",        // owner key: kept offline, NOT on the server
+  suiNetwork: "mainnet",                 // use testnet for a testnet account
 });
 ```
 
