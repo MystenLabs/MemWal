@@ -1,11 +1,13 @@
 import type { RememberJobStatus } from "./types.js";
 
 /**
- * Thrown by `waitForRememberJob` / `waitForRememberJobs` when every status
- * read in the wait's own window, including the confirming read, was
- * rate-limited (429). The status endpoint counts against the same
- * delegate-key budget as writes, so a refusal says nothing about the jobs
- * themselves — do not treat them as stored (GH #967).
+ * Thrown by `waitForRememberJobs` (and `rememberBulkAndWait`, which calls it)
+ * when every status read for the batch, including the post-deadline
+ * confirming read, was rate-limited (429). `waitForRememberJob` retries a 429
+ * instead and ends as `MemWalRememberJobTimeoutError` if the deadline runs
+ * out. The status endpoint counts against the same delegate-key budget as
+ * writes, so a refusal says nothing about the jobs themselves — do not treat
+ * them as stored (GH #967).
  */
 export class MemWalRateLimitedError extends Error {
     readonly status = 429 as const;
