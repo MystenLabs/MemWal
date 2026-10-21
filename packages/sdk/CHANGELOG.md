@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `waitForRememberJob` and `waitForRememberJobs` throw exported, `instanceof`-checkable error classes (`MemWalRememberJobNotFoundError`, `MemWalRememberJobFailedError`, `MemWalRememberJobTimeoutError`, `MemWalRateLimitedError`) instead of a plain `Error` with `status`/`jobId` bolted on. `status`, `jobId`, and `jobIds` now live on the class. (WALM-615, GH #687)
 - `rememberBulk` and `rememberBulkAsync` send an idempotency key derived from the batch (a 30-minute bucket plus each item's namespace and text). A retry inside that window returns the same jobs instead of storing the batch again. An explicit `idempotencyKey` still wins. (#1080)
 - `listMemories()` pages every stored memory without a similarity query. It returns metadata only: no blob download and no decrypt. An optional namespace filter runs on the client, so a filtered page can be empty while `has_more` is true. (WALM-388)
 - `withMemWal` does not recall or auto-save on a tool-execution step. A later tool step reuses the recall cached for that user message. Auto-save still runs only on a user turn. (#1079)

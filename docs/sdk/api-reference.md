@@ -67,6 +67,8 @@ consume recall's budget.
 
 Submit one memory through the relayer. The method returns after the relayer creates a background job; embedding, SEAL encryption, Walrus upload, and vector indexing continue asynchronously.
 
+HTTP 426 throws `MemWalCompatibilityError`.
+
 **Returns:**
 
 ```ts
@@ -98,7 +100,7 @@ One `GET /api/remember/{jobId}`. Accepts 200 and 404 and returns the job state (
 
 ### `waitForRememberJob(jobId, opts?): Promise<RememberResult>`
 
-Poll a previously accepted remember job until it reaches `done` or `failed`. A job id outside `[A-Za-z0-9_-]+` fails immediately with status 404.
+Poll a previously accepted remember job until it reaches `done` or `failed`. A job id outside `[A-Za-z0-9_-]+`, or one the relayer has no record of, throws `MemWalRememberJobNotFoundError` (`status` 404). A `failed` job throws `MemWalRememberJobFailedError` (`status` 500). If the job is still non-terminal at the deadline (default `timeoutMs` 60\_000), this throws `MemWalRememberJobTimeoutError` (`status` 504). Every status read in the wait's own window being rate-limited, confirming read included, throws `MemWalRateLimitedError` (`status` 429) — the same class `waitForRememberJobs` throws when every status read for the whole batch is refused. All four classes are exported from the SDK entry and are `instanceof`-checkable, alongside the existing `MemWalCompatibilityError`.
 
 ### `rememberBulk(items): Promise<RememberBulkAcceptedResult>`
 
