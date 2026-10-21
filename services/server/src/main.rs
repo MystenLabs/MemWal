@@ -399,6 +399,34 @@ mod cors_tests {
         );
     }
 
+    // #1119: the relayer CORS layer is an allowlist. An unlisted origin gets
+    // the supporting headers but no Access-Control-Allow-Origin, which is the
+    // documented behaviour for direct browser calls to the managed relayer.
+    #[tokio::test]
+    async fn relayer_cors_allows_only_listed_origins() {
+        let listed = "https://app.memwal.test";
+        let app = Router::new()
+            .route("/config", get(|| async {}))
+            .layer(relayer_cors(vec![listed.parse().unwrap()]));
+
+        for (origin, allowed) in [(listed, true), ("https://example.com", false)] {
+            let preflight = Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/config")
+                .header(header::ORIGIN, origin)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(preflight).await.unwrap();
+            let allow = response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN);
+            if allowed {
+                assert_eq!(allow.unwrap(), origin);
+            } else {
+                assert!(allow.is_none(), "unlisted origin {origin} was allowed");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn relayer_cors_exposes_x_auth_error_and_retry_after() {
         let origin = "https://app.memwal.test";
