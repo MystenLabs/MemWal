@@ -37,11 +37,11 @@ answer: >-
   verifies account authorization, and the Seal contract policy controls decryption-key access.
 ---
 
-Walrus Memory puts you in full control of your memory. Programmable permissions and explicit ownership define how memory is shared, accessed, and updated — with delegate access for agents and workflows.
+Walrus Memory puts you in full control of your memory. Programmable permissions and explicit ownership define how memory is shared, accessed, and updated, with delegate access for agents and workflows.
 
 ## Ownership
 
-Memory content is stored on Walrus under the owner address recorded in a `MemWalAccount`. The account registry permits one account per owner address within that registry. The SDK's `accountId` is the account object ID, not the wallet address.
+Memory content is stored on Walrus under the owner address recorded in a `MemWalAccount`. The account registry permits one account per owner address. The SDK's `accountId` is the account object ID, not the wallet address.
 
 For the relayer-backed client, `key` is a registered delegate private key used to authenticate requests. Its derived wallet address identifies the delegate, not the account owner. The relayer resolves the owner from the selected account.
 
@@ -54,15 +54,15 @@ const memwal = MemWal.create({
 });
 ```
 
-In a [multi-tenant server app](/sdk/cookbook-multi-tenant), the operator owns the account and the memories stored through it. An end user's wallet can prove their identity to that application without creating an account or granting them ownership of those memories.
+In a [multi-tenant server app](/sdk/cookbook-multi-tenant), the operator owns the account and the memories stored through it. An end user signs in with a wallet to prove identity to that application. Signing in does not create an account for the user or give the user ownership of those memories.
 
-Ownership is separate from payment: the [managed relayer](/relayer/public-relayer) covers gas and storage costs for relayed writes. Account ownership alone does not make the owner's wallet the payer.
+Ownership is separate from payment; see [Managed relayer costs](/relayer/public-relayer#storage-costs).
 
 ## Delegates
 
 A delegate is a keypair registered on the account by its owner. The delegate signs requests, and its authority comes from that registration. The owner can add and remove delegates without giving them the owner wallet key.
 
-This enables two key use cases:
+This enables 2 use cases:
 
 - **Agent access:** give each agent a separate key so you can label and revoke it individually.
 - **Service access:** authorize a backend to read and write memory under the owner's account without handing over account-management credentials.
@@ -84,7 +84,7 @@ flowchart TD
     D2 -->|reads/writes| Memory
 ```
 
-## Access Control Enforcement
+## Access control enforcement
 
 Account authorization and application-user authorization operate at different levels:
 
@@ -93,4 +93,4 @@ Account authorization and application-user authorization operate at different le
 - The [Seal](/fundamentals/architecture/data-flow-security-model) contract policy checks the owner or registered delegate before releasing decryption keys.
 - An application using one account for many users enforces each user's namespace access in its own server. The account contract does not distinguish those application users.
 
-Removing a delegate rotates the account's encryption identity for future writes. It does not retract plaintext or historical decryption keys that the delegate already obtained. Keep the owner key secure so you can manage and replace delegate keys. See [Delegate key management](/contract/delegate-key-management) for revocation steps.
+Removing a delegate rotates the account's encryption identity for future writes. It does not take back plaintext the delegate already read, or decryption keys it already obtained. Keep the owner key secure so you can manage and replace delegate keys. See [Delegate key management](/contract/delegate-key-management) for revocation steps.

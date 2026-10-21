@@ -41,10 +41,14 @@ The SDK sends an idempotency key that lets the relayer return an existing job in
 
 | **Method** | **Automatic key** |
 | --- | --- |
-| `remember`, `rememberAsync`, `rememberAndWait` | Since 0.1.8, derived from the text, resolved namespace, and a fixed 30-minute time bucket. |
-| `rememberBulk`, `rememberBulkAsync`, `rememberBulkAndWait` | Since 0.1.9, derived from the ordered batch's text and resolved namespaces, plus the same time bucket. Upgrade from 0.1.8 for bulk idempotency: its bulk methods do not send an idempotency key, even if JavaScript callers pass an extra options argument. |
+| `remember`, `rememberAsync`, `rememberAndWait` | From 0.1.8, derived from the text, resolved namespace, and a fixed 30-minute time bucket. |
+| `rememberBulk`, `rememberBulkAsync`, `rememberBulkAndWait` | From 0.1.9, derived from the ordered batch's text and resolved namespaces, plus the same time bucket. |
 
-The bucket is not a rolling 30-minute guarantee: two attempts a few seconds apart can cross its boundary. Changing batch order, content, or namespaces also changes the automatic key. For a durable queue or a retry that can cross a bucket boundary or process restart, persist one operation key with the payload and reuse it on every submission attempt.
+Upgrade from 0.1.8 for bulk idempotency; its bulk methods send no key even if a caller passes an options argument.
+
+The bucket is not a rolling 30-minute guarantee: 2 attempts a few seconds apart can cross its boundary. Changing batch order, content, or namespaces also changes the automatic key.
+
+For a durable queue, or any retry that can cross a bucket boundary or a process restart, persist one operation key with the payload. Reuse it on every submission attempt.
 
 ```ts
 import { MemWal } from "@mysten-incubation/memwal";
@@ -79,15 +83,22 @@ const acceptedBatch = await memwal.rememberBulk(
 
 ## Retry with backoff, but only retryable failures
 
-Submission and polling need different retry handling:
+Relayer requests have deadlines in SDK 0.1.8 and later; `requestTimeoutMs` defaults to 30 seconds. Submission and polling need different retry handling:
 
-- **No acceptance response:** a network failure or request timeout can occur after the relayer accepted the write. Retry the submission with the same explicit key and unchanged payload. Use bounded exponential backoff with jitter for transient failures, and stop when your overall retry budget expires. Relayer requests have deadlines in SDK 0.1.8 and later; `requestTimeoutMs` defaults to 30 seconds.
+- **No acceptance response:** a network failure or request timeout can occur after the relayer accepted the write. Retry the submission with the same explicit key and unchanged payload. Use bounded exponential backoff with jitter for transient failures, and stop when your overall retry budget expires.
 - **Accepted job ID:** persist it and poll that job. A wait timeout does not cancel the write or prove it failed. Keep the job ID and resume checking it rather than submitting the text under a new key.
 - **Rate limit (`429`):** respect the server's retry delay, exposed as `retryAfterSeconds` when available. Status reads also use the delegate-key request budget. Immediate repeated polling can exhaust that budget without speeding up uploads.
 - **Authentication or validation failure:** fix the credentials or payload before retrying. A `401 AUTH_REJECTED` or `409` key-reuse conflict does not become valid through backoff.
-- **Terminal `failed` job:** inspect the job's error before deciding how to recover. Do not treat a failed upload as an invitation to resubmit indefinitely.
+- **Terminal `failed` job:** inspect the job's error before deciding how to recover. Do not resubmit a failed upload indefinitely.
 
-`waitForRememberJob` and `waitForRememberJobs` already retry transient polling failures, including rate limits, within their timeout budget. In SDK 0.1.9, the first status poll is immediate. Subsequent delays use jitter around a base that starts at 1.5 seconds and grows toward 5 seconds; a server retry delay takes precedence. Their default wait budgets are 60 seconds for a single job and 120 seconds for a batch. Polling retries do not mean the SDK automatically retries every submission or read operation.
+`waitForRememberJob` and `waitForRememberJobs` retry transient polling failures, including rate limits, within their timeout budget. In SDK 0.1.9:
+
+| **Helper** | **First poll** | **Backoff** | **Default budget** |
+| --- | --- | --- | --- |
+| `waitForRememberJob` | Immediate | Jitter around 1.5 s, growing toward 5 s; server retry delay takes precedence | 60 s |
+| `waitForRememberJobs` | Immediate | Same | 120 s |
+
+The SDK retries polling only. It does not retry submissions or reads.
 
 ## Confirm durability before acting on a memory
 
@@ -116,7 +127,7 @@ For the full write, confirm, and recall sequence in context, see [Agent Storage 
 
 ## Bound cost
 
-Every write registers storage on Walrus and consumes SUI gas and WAL. The [managed relayer](/relayer/public-relayer) covers those costs through its server wallets and configured gas sponsor; self-hosting means funding your own relayer deployment. Account ownership does not determine which wallet pays for a relayed upload. Bound usage even when the managed service pays, because the shared service applies limits.
+The managed relayer sponsors writes; see [Managed relayer costs](/relayer/public-relayer#storage-costs). The managed service applies usage limits, so bound your writes even though it pays.
 
 - **Batch writes.** `rememberBulk` accepts up to 20 items and reduces submission and transaction overhead. Buffer small memories and flush them as a batch instead of writing one at a time; the call does not promise that all items become one Walrus blob.
 - **Do not store what you never recall.** Ephemeral scratch state that never feeds a future `recall` does not belong in durable storage. Keep it in process memory.
@@ -142,7 +153,9 @@ A headless agent holds secrets no human rotates by hand, so treat them with prod
 - The **delegate key** authenticates the agent to the relayer.
 - For client-managed encryption, the **Sui key** signs the Seal and Walrus operations. See [holding your own keys](/sdk/usage/memwal-manual#agent-state-holding-your-own-keys).
 
-Load keys from a secret manager, never from source or logs. Give each agent its own delegate key for individual revocation; these keys still grant access across the account's namespaces. The owner can replace a lost delegate key without transferring memory ownership. Revocation protects future writes but cannot erase plaintext or decryption keys already obtained for historical memories. See [Ownership and access](/fundamentals/concepts/ownership-and-access) for the account and delegate model.
+Load keys from a secret manager, never from source or logs. Give each agent its own delegate key for individual revocation; these keys still grant access across the account's namespaces. The owner can replace a lost delegate key without transferring memory ownership. Revocation does not cover already-read data; see [Ownership and access](/fundamentals/concepts/ownership-and-access#access-control-enforcement).
+
+For client-managed encryption, losing the Sui key can make memories unrecoverable. Back it up securely; replacing a delegate key does not replace the lost encryption credentials.
 
 ## Degrade gracefully when memory is unavailable
 
