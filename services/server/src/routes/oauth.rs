@@ -25,7 +25,7 @@ use crate::storage::db::oauth_rows::{
     OAuthClientRow, OAuthCodeRow, OAuthDelegateRow, OAuthGrantRow, OAuthSessionRow, OAuthTokenRow,
 };
 use crate::storage::sui::{
-    verify_delegate_key_cached, verify_delegate_key_onchain, OnchainVerifyError,
+    verify_delegate_key_cached_for_refresh, verify_delegate_key_onchain, OnchainVerifyError,
     GET_OBJECT_ATTEMPTS,
 };
 use crate::types::AppState;
@@ -754,8 +754,9 @@ fn classify_pending_key_preflight(
 /// What an OAuth refresh may do after the custodied delegate key is re-checked.
 ///
 /// The token handler acts only on this value, so the unit tests lock the
-/// policy without a database or a live chain. The revocation bound is the
-/// delegate-verify cache TTL, the same window signed auth uses (GH #1141).
+/// policy without a database or a live chain. A positive inside
+/// `DELEGATE_VERIFY_CACHE_TTL` (30s) may still mint. Refresh does not use
+/// the 600s stale grace. A cached rejection (10s) revokes (GH #1141).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefreshDelegateDecision {
     /// Key is still registered to the grant's owner. Rotate and mint.
@@ -787,21 +788,21 @@ impl RefreshDelegateDecision {
     }
 }
 
-/// Classify a cached delegate verify for refresh. Reuses
-/// `classify_delegate_verify`, which follows `OnchainVerifyError::is_unavailable()`,
-/// so a Sui 429 cannot drift from signed auth or session completion.
+/// Classify a cached delegate verify for refresh.
+///
+/// Revoke only when [`OnchainVerifyError::revokes_oauth_refresh`] is set, or
+/// the verified owner is not the grant owner. Unavailable errors, a partial
+/// read, and a wrong Move type are `server_error`. A Sui 429 is `RpcError`,
+/// so it cannot revoke.
 fn refresh_delegate_decision(
     verified: Result<String, OnchainVerifyError>,
     grant_owner: &str,
 ) -> RefreshDelegateDecision {
-    match classify_delegate_verify(verified) {
-        DelegateVerifyOutcome::Verified { owner } if owner.eq_ignore_ascii_case(grant_owner) => {
-            RefreshDelegateDecision::Rotate
-        }
-        DelegateVerifyOutcome::Retryable { .. } => RefreshDelegateDecision::Unavailable,
-        DelegateVerifyOutcome::Verified { .. } | DelegateVerifyOutcome::Unregistered { .. } => {
-            RefreshDelegateDecision::RejectAndRevoke
-        }
+    match verified {
+        Ok(owner) if owner.eq_ignore_ascii_case(grant_owner) => RefreshDelegateDecision::Rotate,
+        Ok(_) => RefreshDelegateDecision::RejectAndRevoke,
+        Err(err) if err.revokes_oauth_refresh() => RefreshDelegateDecision::RejectAndRevoke,
+        Err(_) => RefreshDelegateDecision::Unavailable,
     }
 }
 
@@ -1276,10 +1277,16 @@ pub async fn token(
             }
 
             // GH #1141: refresh must not outlive `remove_delegate_key`.
-            // Re-verify through the same cache as signed auth. A definitive
-            // miss revokes the grant so the next present fails the existing
-            // revoked-grant check; an RPC blip neither revokes nor mints.
+            // Revoke only when the key is gone, the account is deactivated,
+            // the owner does not match, or gRPC NotFound the object. A
+            // partial RPC read is `server_error` and does not revoke.
             // Do not log `encrypted_private_key` or the key bytes.
+            //
+            // Window on this path: a positive inside `DELEGATE_VERIFY_CACHE_TTL`
+            // (30s) may still mint. `DELEGATE_VERIFY_STALE_GRACE` (600s) is
+            // not used — past 30s an unreachable chain is `server_error`,
+            // not a mint and not a revoke. A rejection cached for
+            // `DELEGATE_REJECT_CACHE_TTL` (10s) is a miss and revokes.
             let Some(public_key_bytes) =
                 decode_refresh_delegate_public_key(&preview.delegate_public_key)
             else {
@@ -1287,7 +1294,7 @@ pub async fn token(
                     "stored delegate public key is invalid",
                 ));
             };
-            let verified = verify_delegate_key_cached(
+            let verified = verify_delegate_key_cached_for_refresh(
                 &state.delegate_verify_cache,
                 &state.delegate_reject_cache,
                 &state.http_client,
@@ -1388,7 +1395,10 @@ mod tests {
 
     use crate::oauth::{OAuthError, OAUTH_UPSTREAM_RETRY_AFTER_SECS};
     use crate::security_delete_auth::{NativeWalletSignatureVerifier, WalletSignatureVerifier};
-    use crate::storage::sui::OnchainVerifyError;
+    use crate::storage::sui::{
+        ensure_memwal_account_type, map_get_object_status, partial_get_object, OnchainVerifyError,
+        PARTIAL_GRPC_OBJECT_ABSENT, PARTIAL_RPC_NO_CONTENT, PARTIAL_RPC_NO_RESULT,
+    };
 
     use super::{
         classify_delegate_verify, classify_pending_key_preflight,
@@ -1449,11 +1459,11 @@ mod tests {
     fn refresh_revokes_on_definitive_miss_and_owner_mismatch() {
         for err in [
             OnchainVerifyError::KeyNotFound("gone".into()),
-            OnchainVerifyError::NotFound("missing".into()),
             OnchainVerifyError::AccountDeactivated("dead".into()),
-            OnchainVerifyError::WrongObjectType("foreign".into()),
+            map_get_object_status(tonic::Status::not_found("no such object")),
         ] {
             let label = err.to_string();
+            assert!(err.revokes_oauth_refresh(), "{label}");
             let decision = refresh_delegate_decision(Err(err), "0xowner");
             assert_refresh_policy(decision, false, true, Some("invalid_grant"));
             let err = decision
@@ -1471,6 +1481,70 @@ mod tests {
             .expect("owner mismatch is invalid_grant")
             .description
             .contains("no longer registered on-chain"));
+
+        // A type mismatch is not a removed key. Revoking on it would drop
+        // every grant if the configured package id were wrong.
+        let foreign = OnchainVerifyError::WrongObjectType("foreign".into());
+        assert!(!foreign.revokes_oauth_refresh());
+        assert_refresh_policy(
+            refresh_delegate_decision(Err(foreign), "0xowner"),
+            false,
+            false,
+            Some("server_error"),
+        );
+    }
+
+    #[test]
+    fn refresh_does_not_revoke_on_a_partial_rpc_read() {
+        let missing_type =
+            ensure_memwal_account_type(None, "0xpkg", "0xobj").expect_err("missing object_type");
+        let cases = [
+            partial_get_object(PARTIAL_RPC_NO_RESULT),
+            partial_get_object(PARTIAL_RPC_NO_CONTENT),
+            partial_get_object(PARTIAL_GRPC_OBJECT_ABSENT),
+            map_get_object_status(tonic::Status::invalid_argument("bad object id")),
+            missing_type,
+        ];
+        for err in cases {
+            let label = err.to_string();
+            assert!(
+                err.is_unavailable(),
+                "{label} is a partial read, not a missing key"
+            );
+            assert!(!err.revokes_oauth_refresh(), "{label}");
+            let decision = refresh_delegate_decision(Err(err), "0xowner");
+            assert_refresh_policy(decision, false, false, Some("server_error"));
+            assert!(
+                !decision.revokes_grant(),
+                "{label} must not revoke the grant"
+            );
+        }
+
+        // The same five shapes, if they still arrive as NotFound / a missing
+        // type, are not a real gRPC NotFound and must not revoke either.
+        let stale_shapes = [
+            OnchainVerifyError::NotFound(PARTIAL_RPC_NO_RESULT.into()),
+            OnchainVerifyError::NotFound(PARTIAL_RPC_NO_CONTENT.into()),
+            OnchainVerifyError::NotFound(PARTIAL_GRPC_OBJECT_ABSENT.into()),
+            OnchainVerifyError::NotFound(format!(
+                "gRPC GetObject failed: {}",
+                tonic::Status::invalid_argument("bad object id")
+            )),
+            OnchainVerifyError::WrongObjectType(
+                "object 0xobj has type None, expected 0xpkg::account::MemWalAccount — foreign object rejected"
+                    .into(),
+            ),
+        ];
+        for err in stale_shapes {
+            let label = err.to_string();
+            assert!(!err.revokes_oauth_refresh(), "{label}");
+            assert_refresh_policy(
+                refresh_delegate_decision(Err(err), "0xowner"),
+                false,
+                false,
+                Some("server_error"),
+            );
+        }
     }
 
     #[test]
