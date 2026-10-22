@@ -189,14 +189,15 @@ Otherwise each on-chain key is listed. `public_key` is 64 lowercase hex characte
 
 ### `GET /api/accounts/:owner/incident`
 
-Public answer for the owner in the path. The dashboard uses it to decide whether to show the quarantine banner. The response names no other owner and includes no key material.
+Public answer for the owner in the path. The dashboard uses it to decide whether to show the quarantine banner. The response names no other owner. `affected_public_keys` lists only this account's current delegate public keys that are in `MEMWAL_LEAKED_DELEGATE_PUBLIC_KEYS`. On testnet, one preview owner is reported locked. When that list is empty, the preview response pins one current key whose label contains `migrat` for the life of the process. A non-empty list does not pin a replacement.
 
 ```json
 {
   "account_id": "0x...",
   "affected": true,
   "quarantined": true,
-  "active": false
+  "active": false,
+  "affected_public_keys": ["00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"]
 }
 ```
 
@@ -222,7 +223,7 @@ HTTP 200 returns `{ "status": "requested", "requested_at": "<RFC3339>" }`. A sec
 
 ### `GET /api/admin/unblock-requests`
 
-Requires `ADMIN_API_KEY`, the same gate as the other admin routes. Returns the newest 200 requests, each with `owner`, `account_id`, and `requested_at`. Operators read this list, submit `admin_clear_quarantine`, and the owner reactivates from the dashboard.
+Requires `ADMIN_API_KEY`, the same gate as the other admin routes. Returns the newest 200 requests, each with `owner`, `account_id`, and `requested_at`. The dashboard does not call the POST route. Operators clear quarantine with `admin_clear_quarantine` after the highlighted keys are gone, and the owner reactivates from the dashboard.
 
 ## Protected routes
 

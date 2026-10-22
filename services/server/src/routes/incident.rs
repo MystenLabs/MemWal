@@ -11,9 +11,9 @@
 //! `admin_quarantined`. Both lists are comma-separated and optional. With
 //! neither set, the banner follows the on-chain quarantine flag.
 //!
-//! `POST /api/accounts/{owner}/unblock-requests` stores one request after
-//! the owner signs `unblock_request_message`. Clearing quarantine stays an
-//! `AdminCap` transaction. The owner then calls `reactivate_account`.
+//! The dashboard does not store an unblock request. It keeps the locked
+//! banner until every highlighted key is gone, then shows reactivate.
+//! Clearing the lock is an operator transaction.
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -77,6 +77,68 @@ fn affected_owners_from_env() -> HashSet<String> {
         .unwrap_or_default()
 }
 
+fn matching_leaked_keys(public_keys_hex: &[String], leaked_keys: &HashSet<String>) -> Vec<String> {
+    public_keys_hex
+        .iter()
+        .map(|key| normalize_hex(key))
+        .filter(|key| leaked_keys.contains(key))
+        .collect()
+}
+
+/// First look at a preview account: one key whose label says migrate.
+fn preview_sample(keys: &[(String, String)]) -> Vec<String> {
+    keys.iter()
+        .find(|(_, label)| label.to_ascii_lowercase().contains("migrat"))
+        .map(|(public_key, _)| vec![normalize_hex(public_key)])
+        .unwrap_or_default()
+}
+
+/// Pinned preview keys that are still on the account. Deleting one does not
+/// highlight a replacement.
+fn keys_still_present(pinned: &[String], current: &[String]) -> Vec<String> {
+    let current: HashSet<String> = current.iter().map(|key| normalize_hex(key)).collect();
+    pinned
+        .iter()
+        .filter(|key| current.contains(*key))
+        .cloned()
+        .collect()
+}
+
+fn preview_pin() -> &'static std::sync::Mutex<Option<Vec<String>>> {
+    static PIN: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+    &PIN
+}
+
+/// Leaked env keys win. The preview sample is only for an empty env, and it
+/// does not replace a key the owner already deleted.
+fn highlighted_for_owner(
+    preview: bool,
+    leaked_list_empty: bool,
+    matched: Vec<String>,
+    labeled_keys: &[(String, String)],
+) -> Vec<String> {
+    if preview && matched.is_empty() && leaked_list_empty {
+        pinned_preview_keys(labeled_keys)
+    } else {
+        matched
+    }
+}
+
+fn pinned_preview_keys(keys: &[(String, String)]) -> Vec<String> {
+    let current: Vec<String> = keys
+        .iter()
+        .map(|(public_key, _)| public_key.clone())
+        .collect();
+    let mut pin = preview_pin().lock().unwrap_or_else(|err| err.into_inner());
+    if pin.is_none() {
+        let sample = preview_sample(keys);
+        if !sample.is_empty() {
+            *pin = Some(sample);
+        }
+    }
+    keys_still_present(pin.as_deref().unwrap_or(&[]), &current)
+}
+
 fn leaked_keys_from_env() -> HashSet<String> {
     std::env::var("MEMWAL_LEAKED_DELEGATE_PUBLIC_KEYS")
         .ok()
@@ -85,8 +147,10 @@ fn leaked_keys_from_env() -> HashSet<String> {
 }
 
 /// Testnet account `0x158a…93e7`. It is active on chain. The incident
-/// response pretends it is locked so the dev deploy can walk both banners.
-/// A stored unblock request flips it to ready-to-restore. Mainnet ignores it.
+/// response pretends it is locked so a dev deploy can walk the banner.
+/// Mainnet ignores it. When the leaked-key list is empty, one current key
+/// whose label contains "migrat" is pinned for this process. A non-empty
+/// list uses only the keys that match, and deleting one does not pin another.
 const TESTNET_PREVIEW_OWNER: &str =
     "158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7";
 
@@ -127,6 +191,9 @@ pub struct IncidentResponse {
     pub affected: bool,
     pub quarantined: bool,
     pub active: bool,
+    /// This account's delegate public keys that are in the leaked set.
+    /// Hex, no `0x`. Empty when none of the current keys were leaked.
+    pub affected_public_keys: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,22 +280,32 @@ pub async fn incident_status(
             affected: account_is_affected(&owner, &[], false, &affected_owners, &leaked_keys),
             quarantined: false,
             active: false,
+            affected_public_keys: Vec::new(),
         }));
     };
-    if is_testnet_preview_owner(&state.config.sui_network, &owner) {
-        let requested = state.db.has_unblock_request(&owner).await?;
-        return Ok(Json(IncidentResponse {
-            account_id: Some(snapshot.account_id),
-            affected: true,
-            quarantined: !requested,
-            active: false,
-        }));
-    }
     let public_keys: Vec<String> = snapshot
         .keys
         .iter()
         .map(|key| key.public_key_hex.clone())
         .collect();
+    let labeled_keys: Vec<(String, String)> = snapshot
+        .keys
+        .iter()
+        .map(|key| (key.public_key_hex.clone(), key.label.clone()))
+        .collect();
+    let preview = is_testnet_preview_owner(&state.config.sui_network, &owner);
+    let matched = matching_leaked_keys(&public_keys, &leaked_keys);
+    let affected_public_keys =
+        highlighted_for_owner(preview, leaked_keys.is_empty(), matched, &labeled_keys);
+    if preview {
+        return Ok(Json(IncidentResponse {
+            account_id: Some(snapshot.account_id),
+            affected: true,
+            quarantined: true,
+            active: false,
+            affected_public_keys,
+        }));
+    }
     Ok(Json(IncidentResponse {
         account_id: Some(snapshot.account_id),
         affected: account_is_affected(
@@ -240,6 +317,7 @@ pub async fn incident_status(
         ),
         quarantined: snapshot.admin_quarantined,
         active: snapshot.active,
+        affected_public_keys,
     }))
 }
 
@@ -268,9 +346,7 @@ pub async fn request_unblock(
     };
     let preview = is_testnet_preview_owner(&state.config.sui_network, &owner);
     if !snapshot.admin_quarantined && !preview {
-        return Err(AppError::Conflict(
-            "account is not quarantined".into(),
-        ));
+        return Err(AppError::Conflict("account is not quarantined".into()));
     }
     let message = unblock_request_message(&owner, &snapshot.account_id);
     state
@@ -315,12 +391,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn leaked_keys_on_the_account_are_named() {
+        let leaked = parse_hex_set("0xAABB, cc");
+        let keys = vec!["aabb".to_string(), "dd".to_string()];
+        assert_eq!(
+            matching_leaked_keys(&keys, &leaked),
+            vec!["aabb".to_string()]
+        );
+        let labeled = vec![("aabb".to_string(), "migration-fallback".to_string())];
+        assert_eq!(
+            highlighted_for_owner(true, false, Vec::new(), &labeled),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            highlighted_for_owner(false, true, vec!["aabb".to_string()], &labeled),
+            vec!["aabb".to_string()]
+        );
+    }
+
+    #[test]
+    fn preview_sample_picks_one_migrate_key_and_does_not_refill() {
+        let keys = vec![
+            ("aa".to_string(), "Web App".to_string()),
+            ("bb".to_string(), "migration-fallback".to_string()),
+            ("cc".to_string(), "migration-decrypt".to_string()),
+        ];
+        let pinned = preview_sample(&keys);
+        assert_eq!(pinned, vec!["bb".to_string()]);
+        assert!(keys_still_present(&pinned, &["aa".to_string(), "cc".to_string()]).is_empty());
+        assert_eq!(
+            keys_still_present(&pinned, &["bb".to_string(), "cc".to_string()]),
+            vec!["bb".to_string()]
+        );
+    }
+
+    #[test]
     fn testnet_preview_owner_is_only_that_address_on_testnet() {
         let owner = format!("0x{TESTNET_PREVIEW_OWNER}");
         assert!(is_testnet_preview_owner("testnet", &owner));
-        assert!(is_testnet_preview_owner("testnet", &owner.to_ascii_uppercase()));
+        assert!(is_testnet_preview_owner(
+            "testnet",
+            &owner.to_ascii_uppercase()
+        ));
         assert!(!is_testnet_preview_owner("mainnet", &owner));
-        assert!(!is_testnet_preview_owner("testnet", &format!("0x{}", "11".repeat(32))));
+        assert!(!is_testnet_preview_owner(
+            "testnet",
+            &format!("0x{}", "11".repeat(32))
+        ));
     }
 
     #[test]
@@ -349,7 +466,13 @@ mod tests {
         let leaked = "aa".repeat(32);
         let owners = parse_hex_set(&owner);
         let keys = parse_hex_set(&leaked);
-        assert!(account_is_affected(&owner, &[], false, &owners, &HashSet::new()));
+        assert!(account_is_affected(
+            &owner,
+            &[],
+            false,
+            &owners,
+            &HashSet::new()
+        ));
         assert!(!account_is_affected(
             &other,
             &[],

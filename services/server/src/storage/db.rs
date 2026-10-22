@@ -37,7 +37,9 @@ pub(crate) fn next_search_fetch_limit(
     if dropped == 0 {
         return None;
     }
-    let cap = limit.saturating_mul(SEARCH_SIMILAR_OVERFETCH_FACTOR).max(limit);
+    let cap = limit
+        .saturating_mul(SEARCH_SIMILAR_OVERFETCH_FACTOR)
+        .max(limit);
     if fetch_limit >= cap {
         return None;
     }
@@ -4054,17 +4056,6 @@ impl VectorDb {
         .await
         .map_err(|error| AppError::Internal(format!("Failed to store unblock request: {error}")))?;
         Ok(requested_at)
-    }
-
-    pub async fn has_unblock_request(&self, owner: &str) -> Result<bool, AppError> {
-        let row: Option<(i32,)> = sqlx::query_as(
-            "SELECT 1 FROM account_unblock_requests WHERE owner = $1",
-        )
-        .bind(owner)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| AppError::Internal(format!("Failed to read unblock request: {error}")))?;
-        Ok(row.is_some())
     }
 
     /// Newest first, capped so an admin page cannot pull an unbounded table.
