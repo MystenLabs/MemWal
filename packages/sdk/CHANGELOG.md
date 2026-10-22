@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal
 
+## 0.1.10
+
+### Fixed
+
+- `remember`, `rememberBulk`, `analyze`, `embed`, and `recall` reject text made only of whitespace and zero-width format characters (U+200B, U+200C, U+200D, U+2060, U+FEFF) before signing, with the same error as blank text. The relayer still accepts that text, and the call used to sit until the client timed out. `MemWalMock` rejects the same set. (WALM-810, #1156)
+
 ## 0.1.9
 
 ### Fixed

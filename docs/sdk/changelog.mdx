@@ -28,8 +28,14 @@ questions:
   - When was bulk remember added to the Walrus Memory SDK?
   - What security improvements have been made to the MemWal SDK?
 answer: >-
-  The latest TypeScript SDK release is 0.1.9. `listMemories()` pages every memory without a similarity query, `rememberBulk` and `rememberBulkAsync` send a 30-minute idempotency key (#1080), and invalid recall input is rejected before signing. `waitForRememberJob` grows its poll delay toward a 5 second cap and names a 429 on timeout. Earlier releases are in the sections below.
+  The latest TypeScript SDK release is 0.1.10. Text made only of zero-width characters is rejected before signing (#1156). In 0.1.9, `listMemories()` pages every memory without a similarity query, `rememberBulk` and `rememberBulkAsync` send a 30-minute idempotency key (#1080), and invalid recall input is rejected before signing. `waitForRememberJob` grows its poll delay toward a 5 second cap and names a 429 on timeout. Earlier releases are in the sections below.
 ---
+
+## 0.1.10
+
+### Fixed
+
+- `remember`, `rememberBulk`, `analyze`, `embed`, and `recall` reject text made only of whitespace and zero-width format characters (U+200B, U+200C, U+200D, U+2060, U+FEFF) before signing, with the same error as blank text. The relayer still accepts that text, and the call used to sit until the client timed out. `MemWalMock` rejects the same set. (WALM-810, #1156)
 
 ## 0.1.9
 
