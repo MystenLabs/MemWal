@@ -1,5 +1,11 @@
 # @mysten-incubation/memwal
 
+## 0.1.10
+
+### Fixed
+
+- `MemWal.recallManual` and `MemWalManual.recallManual` reject a non-finite `scoringWeights` value (`NaN` or `Infinity`) before signing, with the same `scoringWeights.<name> must be a finite number` error as `recall`. `JSON.stringify` rewrote the weight to `null`, so the relayer received `{"semantic": null}` instead of the caller's value. (WALM-861, #1246)
+
 ## 0.1.9
 
 ### Fixed
