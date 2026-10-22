@@ -4,7 +4,7 @@
 # Build context: repo root
 # ============================================================
 
-FROM node:22-alpine
+FROM node:22.23.4-alpine@sha256:ebc216c22db53dbde85719a874978d5aec04e6e405ad26a3804c6f9abc4ca1a9
 
 RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
 

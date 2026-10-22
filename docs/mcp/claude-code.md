@@ -42,7 +42,7 @@ which does not require Node.js or the Claude Code CLI.
 ## Prerequisites
 
 - Confirm `claude --version` works in the terminal you will use. Installing the Desktop app does not guarantee the CLI is on your `PATH`; see [Claude Code setup](https://code.claude.com/docs/en/setup).
-- Install Node.js 20+ with `npx` on your `PATH`; check with `node --version`.
+- Install Node.js 22.23.4+ (22.x), 24.22.1+ (24.x), or 26.12.1+ (26.x) with `npx` on your `PATH`; check with `node --version`.
 - Use a Claude Code version with plugin support if you want the plugin install; the `/plugin` command confirms support, and MCP-only works on any version with `claude mcp add`.
 - Have a [Walrus Memory account](/fundamentals/concepts/ownership-and-access) ready. An unauthenticated memory-tool call returns sign-in instructions rather than signing you in, so ask the agent to run `memwal_login` and open the URL it returns. You can create the account during that flow at [memory.walrus.xyz](https://memory.walrus.xyz). Config files carry no keys: credentials land in `~/.memwal/credentials.json` after sign-in.
 
