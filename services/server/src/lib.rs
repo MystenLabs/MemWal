@@ -16,6 +16,7 @@ mod client_ip;
 mod compatibility;
 mod engine;
 mod jobs;
+mod leaked_keys;
 mod oauth;
 mod observability;
 mod owner_token_auth;

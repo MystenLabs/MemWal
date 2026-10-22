@@ -72,7 +72,7 @@ The signed message is:
 
 For `GET` requests, `body_sha256` is the SHA-256 of an empty byte string. If a raw client omits `x-account-id`, it must sign the empty string in the final `account_id` position. Official SDKs send `x-account-id`. A cold delegate key with no account id is rejected with `401`. The relayer does not search `AccountRegistry`. A key already in the relayer's delegate-key cache, or a server with `MEMWAL_ACCOUNT_ID` set, can still authenticate without the header.
 
-The relayer verifies the Ed25519 signature, then resolves the owner by looking up the public key in onchain `MemWalAccount.delegate_keys`.
+The relayer verifies the Ed25519 signature, then resolves the owner by looking up the public key in onchain `MemWalAccount.delegate_keys`. A public key listed in `MEMWAL_LEAKED_DELEGATE_PUBLIC_KEYS` is rejected with `401` before that lookup, including when a cached row would otherwise have authenticated it. The same 401 applies to an MCP bearer and to an OAuth access or refresh token for that key. Wallet-signed dashboard actions are unchanged. The owner creates a replacement key on the web.
 
 ## Public routes
 

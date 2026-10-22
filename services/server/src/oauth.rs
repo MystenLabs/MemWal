@@ -281,6 +281,16 @@ impl OAuthError {
         )
     }
 
+    /// The delegate key is on the revocation list. 401, not a prompt to
+    /// register that same key again.
+    pub fn revoked_delegate() -> Self {
+        Self::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "This delegate key has been revoked. Create a new key on the web.",
+        )
+    }
+
     pub fn invalid_target(description: impl Into<String>) -> Self {
         Self::new(
             axum::http::StatusCode::BAD_REQUEST,
@@ -858,6 +868,10 @@ pub async fn resolve_oauth_bearer(
     }
     if row.delegate_status != "active" {
         return Err(OAuthBearerError::DelegateNotActive);
+    }
+    // Before decrypt: a leaked key must not be handed to the sidecar.
+    if crate::leaked_keys::is_leaked_delegate_public_key(&row.delegate_public_key) {
+        return Err(OAuthBearerError::Revoked);
     }
 
     let delegate_private_key =

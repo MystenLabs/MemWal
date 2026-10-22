@@ -584,12 +584,16 @@ pub async fn session_account(
     // on-chain `add_delegate_key` tx entirely — this is what keeps a
     // reconnect from burning another slot toward the on-chain 20-key cap.
     if let Some(existing) = state.db.find_reusable_oauth_delegate(&account_id).await? {
-        return Ok(Json(SessionAccountResponse {
-            needs_onchain_registration: false,
-            delegate_public_key: existing.delegate_public_key,
-            delegate_sui_address: existing.delegate_address,
-            resume_pending_registration: false,
-        }));
+        // A leaked key must not be offered again. Fall through and register
+        // this session's new key instead.
+        if !crate::leaked_keys::is_leaked_delegate_public_key(&existing.delegate_public_key) {
+            return Ok(Json(SessionAccountResponse {
+                needs_onchain_registration: false,
+                delegate_public_key: existing.delegate_public_key,
+                delegate_sui_address: existing.delegate_address,
+                resume_pending_registration: false,
+            }));
+        }
     }
 
     let delegate = state
@@ -607,6 +611,9 @@ pub async fn session_account(
     // `sponsor_upstream_error` that never echoes the Move abort. So the skip has
     // to be decided here, against the chain, rather than by string-matching a
     // transaction error that does not survive the proxy.
+    if crate::leaked_keys::is_leaked_delegate_public_key(&delegate.delegate_public_key) {
+        return Err(OAuthError::revoked_delegate());
+    }
     let public_key_bytes = hex::decode(&delegate.delegate_public_key)
         .map_err(|_| OAuthError::server_error("stored delegate public key is invalid"))?;
     let resume = match classify_pending_key_preflight(
@@ -802,8 +809,10 @@ pub async fn session_complete(
     // Possession of an authorization session ID is not wallet proof and must
     // never be sufficient to select another account's custodied delegate.
     let (delegate, is_reused) = match state.db.find_reusable_oauth_delegate(&account_id).await? {
-        Some(existing) => (existing, true),
-        None => (
+        Some(existing) if !crate::leaked_keys::is_leaked_delegate_public_key(&existing.delegate_public_key) => {
+            (existing, true)
+        }
+        _ => (
             state
                 .db
                 .fetch_oauth_delegate(&pending.delegate_ref)
@@ -812,6 +821,10 @@ pub async fn session_complete(
             false,
         ),
     };
+    if crate::leaked_keys::is_leaked_delegate_public_key(&delegate.delegate_public_key) {
+        claim_oauth_session(&state, &session_id).await?;
+        return Err(OAuthError::revoked_delegate());
+    }
     let public_key_bytes = hex::decode(&delegate.delegate_public_key)
         .map_err(|_| OAuthError::server_error("stored delegate public key is invalid"))?;
     let outcome = classify_delegate_verify(
@@ -1149,6 +1162,17 @@ pub async fn token(
                     )
                 })?;
 
+            let delegate = state
+                .db
+                .fetch_oauth_delegate(&code_row.delegate_ref)
+                .await?
+                .ok_or_else(|| {
+                    OAuthError::server_error("authorization code delegate is missing")
+                })?;
+            if crate::leaked_keys::is_leaked_delegate_public_key(&delegate.delegate_public_key) {
+                return Err(OAuthError::revoked_delegate());
+            }
+
             let grant_id = oauth::random_token(oauth::GRANT_ID_PREFIX);
             state
                 .db
@@ -1205,6 +1229,9 @@ pub async fn token(
             }
             if preview.expires_at <= Utc::now() {
                 return Err(OAuthError::invalid_grant("refresh_token has expired"));
+            }
+            if crate::leaked_keys::is_leaked_delegate_public_key(&preview.delegate_public_key) {
+                return Err(OAuthError::revoked_delegate());
             }
 
             // Consume and replace the refresh token in one database

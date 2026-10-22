@@ -150,6 +150,8 @@ enum HandshakeRejection {
     MalformedDelegateKey,
     /// Well-formed key, real account, but the key is not registered on it.
     NotRegistered,
+    /// The key is on `MEMWAL_LEAKED_DELEGATE_PUBLIC_KEYS`. Still a 401.
+    Revoked,
     /// Not a delegate key, and this deployment has no OAuth configured.
     OauthNotConfigured,
     /// Not a delegate key and not an OAuth token either.
@@ -165,6 +167,7 @@ impl HandshakeRejection {
             Self::NoAccountHeader => "no_account_header",
             Self::MalformedDelegateKey => "malformed_delegate_key",
             Self::NotRegistered => "not_registered",
+            Self::Revoked => "revoked",
             Self::OauthNotConfigured => "oauth_not_configured",
             Self::NotOauthToken => "not_oauth_token",
             Self::OauthRejected => "oauth_rejected",
@@ -344,6 +347,9 @@ async fn legacy_delegate_registered(
     let Some(pk) = public_key_from_delegate_hex(token) else {
         return refuse(HandshakeRejection::MalformedDelegateKey, route, headers, None);
     };
+    if crate::leaked_keys::is_leaked_delegate_public_key(&hex::encode(pk)) {
+        return refuse(HandshakeRejection::Revoked, route, headers, None);
+    }
     // Cached: this runs on the SSE handshake and on every JSON-RPC envelope,
     // so an uncached read here is one fullnode call per envelope.
     match crate::storage::sui::verify_delegate_key_cached(
@@ -925,6 +931,7 @@ mod tests {
             NoAccountHeader,
             MalformedDelegateKey,
             NotRegistered,
+            Revoked,
             OauthNotConfigured,
             NotOauthToken,
             OauthRejected,
@@ -941,6 +948,7 @@ mod tests {
                 "no_account_header",
                 "malformed_delegate_key",
                 "not_registered",
+                "revoked",
                 "oauth_not_configured",
                 "not_oauth_token",
                 "oauth_rejected",

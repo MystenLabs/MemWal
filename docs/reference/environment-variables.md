@@ -106,7 +106,7 @@ These are not all enforced at boot, but most real deployments need them.
 | --- | --- | --- |
 | `PORT` | `8000` | Relayer port |
 | `MEMWAL_AFFECTED_OWNERS` | empty | Comma-separated owner addresses. `GET /api/accounts/:owner/incident` marks these owners affected so the dashboard banner stays off for everyone else. `0x` is optional |
-| `MEMWAL_LEAKED_DELEGATE_PUBLIC_KEYS` | empty | Comma-separated delegate public keys (64 hex chars). An owner is affected while one of these keys is still on their account. With both lists empty, the banner follows the on-chain `admin_quarantined` flag |
+| `MEMWAL_LEAKED_DELEGATE_PUBLIC_KEYS` | empty | Comma-separated delegate public keys (64 hex chars). An owner is affected while one of these keys is still on their account. A signed API request, MCP bearer, or OAuth access/refresh token that uses one returns 401. Wallet-signed dashboard actions still work, so the owner can create a replacement key on the web. With both lists empty, the banner follows the on-chain `admin_quarantined` flag |
 | `RUST_LOG` | `memwal_server=info,tower_http=info` | Rust tracing filter for relayer logs |
 | `LOG_FORMAT` | pretty text | Set to `json` for machine-parseable structured logs |
 | `ALERT_TO_SLACK` | none | Slack incoming webhook URL. When set, the relayer posts an alert after a Walrus upload job exhausts all 5 wallet attempts without producing a blob |

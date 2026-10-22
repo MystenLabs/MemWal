@@ -36,25 +36,7 @@ pub fn unblock_request_message(owner: &str, account_id: &str) -> String {
     )
 }
 
-/// Split a comma- or whitespace-separated hex list. `0x` is optional.
-/// Comparison is lowercase and unprefixed so an address and a public key
-/// use the same form.
-pub fn parse_hex_set(raw: &str) -> HashSet<String> {
-    raw.split(|c: char| c == ',' || c == '\n' || c.is_whitespace())
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(normalize_hex)
-        .filter(|part| !part.is_empty())
-        .collect()
-}
-
-pub fn normalize_hex(value: &str) -> String {
-    value
-        .trim()
-        .trim_start_matches("0x")
-        .trim_start_matches("0X")
-        .to_ascii_lowercase()
-}
+pub use crate::leaked_keys::{normalize_hex, parse_hex_set};
 
 pub fn account_is_affected(
     owner: &str,
@@ -140,10 +122,7 @@ fn pinned_preview_keys(keys: &[(String, String)]) -> Vec<String> {
 }
 
 fn leaked_keys_from_env() -> HashSet<String> {
-    std::env::var("MEMWAL_LEAKED_DELEGATE_PUBLIC_KEYS")
-        .ok()
-        .map(|raw| parse_hex_set(&raw))
-        .unwrap_or_default()
+    crate::leaked_keys::from_env()
 }
 
 /// Testnet account `0x158a…93e7`. It is active on chain. The incident

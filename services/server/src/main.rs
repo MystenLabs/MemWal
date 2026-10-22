@@ -5,6 +5,7 @@ mod compatibility;
 mod engine;
 mod jobs;
 mod jobs_security_delete;
+mod leaked_keys;
 mod mcp_proxy;
 mod oauth;
 mod observability;

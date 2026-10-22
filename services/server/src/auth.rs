@@ -462,6 +462,14 @@ async fn resolve_account(
     pk_bytes: &[u8; 32],
     account_id_hint: Option<String>,
 ) -> Result<(String, String), AccountResolveError> {
+    // A revoked key must not authenticate from the Postgres cache or from
+    // chain. The owner creates a replacement on the web with their wallet.
+    if crate::leaked_keys::is_leaked_delegate_public_key(public_key_hex) {
+        return Err(AccountResolveError::Unauthorized(
+            "delegate key is revoked".to_string(),
+        ));
+    }
+
     // Strategy 1: Check PostgreSQL cache.
     //
     // The cache is keyed by delegate key alone (`delegate_key_cache.public_key`
