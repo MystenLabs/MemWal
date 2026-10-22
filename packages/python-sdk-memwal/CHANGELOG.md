@@ -1,5 +1,15 @@
 # memwal
 
+## 0.2.0
+
+### Added
+
+- `forget(namespace=None)` on `MemWal` and `MemWalSync` wraps `POST /api/forget` and returns `ForgetResult` (`deleted`, `namespace`, `owner`). It deletes the owner's index rows for the namespace; the Walrus blobs stay in place. (WALM-739, #1061)
+
+### Changed
+
+- **Breaking (mock):** `MemWalMock.forget(blob_id)` is renamed to `forget_blob(blob_id)`. `MemWalMock.forget` now matches the client: it is async, clears a namespace, and returns `ForgetResult`. An un-awaited `assert mock.forget(blob_id)` in an existing test gets a truthy coroutine and passes without deleting anything, so move those calls to `forget_blob`. (#1061)
+
 ## 0.1.12
 
 ### Added
@@ -7,10 +17,6 @@
 - `get_remember_status(job_id)` on `MemWal` and `MemWalSync` returns `RememberJobStatus` from `GET /api/remember/{job_id}`, accepting 200 and 404 like the TypeScript SDK. (WALM-832, #1096)
 - `RecallMemory` and `RecallManualHit` include `created_at` and `score`. (#1178)
 - `RecallParams` accepts `scoring_weights` and `sort`. `recall()` forwards them on `POST /api/recall`. (#1062)
-
-### Changed
-
-- **Breaking (mock):** `MemWalMock.forget(blob_id)` is renamed to `forget_blob(blob_id)`. `MemWalMock.forget` now matches the client: it is async, clears a namespace, and returns `ForgetResult`. An un-awaited `assert mock.forget(blob_id)` in an existing test gets a truthy coroutine and passes without deleting anything, so move those calls to `forget_blob`. (#1061)
 
 ### Fixed
 
