@@ -1,5 +1,15 @@
 # memwal
 
+## 0.2.0
+
+### Added
+
+- `forget(namespace=None)` on `MemWal` and `MemWalSync` wraps `POST /api/forget` and returns `ForgetResult` (`deleted`, `namespace`, `owner`). It deletes the owner's index rows for the namespace; the Walrus blobs stay in place. (WALM-739, #1061)
+
+### Changed
+
+- **Breaking (mock):** `MemWalMock.forget(blob_id)` is renamed to `forget_blob(blob_id)`. `MemWalMock.forget` now matches the client: it is async, clears a namespace, and returns `ForgetResult`. An un-awaited `assert mock.forget(blob_id)` in an existing test gets a truthy coroutine and passes without deleting anything, so move those calls to `forget_blob`. (#1061)
+
 ## 0.1.12
 
 ### Added
