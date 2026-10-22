@@ -23,7 +23,7 @@ const releases = [
     },
     {
         name: "MCP package",
-        version: "0.0.14",
+        version: "0.0.16",
         manifests: [
             ["packages/mcp/package.json", "version"],
             [".claude-plugin/marketplace.json", "plugin-version"],
