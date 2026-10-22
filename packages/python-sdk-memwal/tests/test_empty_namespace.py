@@ -2,9 +2,10 @@
 
 The client used ``namespace or self._namespace``, so ``namespace=""`` landed
 in the default partition, while the TypeScript SDK sends "" and the relayer
-rejects it. Only ``None`` means "use the client default"; "" and blank
-strings fail before anything is signed, like the mock's empty-namespace
-check.
+rejects it. Only ``None`` means "use the client default"; "" fails before
+anything is signed, like the mock's empty-namespace check. Whitespace-only
+names are not rejected: the relayer's validate_namespace only refuses "", a
+NUL byte and over-long names, and keeps tab/newline/CR namespaces readable.
 """
 
 from __future__ import annotations
@@ -34,9 +35,19 @@ class CaptureMemWal(MemWal):
         }
 
     async def _signed_request(
-        self, method, path, body, accepted_statuses=(200,), include_seal_session=True
+        self,
+        method,
+        path,
+        body,
+        accepted_statuses=(200,),
+        include_seal_session=True,
+        timeout=None,
     ):
         self.captured.append((method, path, body))
+        if path == "/api/remember":
+            return {"job_id": "job-1", "status": "pending"}
+        if path == "/api/remember/bulk":
+            return {"job_ids": ["job"] * len(body["items"]), "total": len(body["items"])}
         if path == "/api/remember/manual":
             return {"id": "1", "blob_id": "b", "owner": "0x1", "namespace": body["namespace"]}
         if path == "/api/analyze":
@@ -53,6 +64,15 @@ def _client():
         server_url="https://relayer.example",
         namespace="work",
     )
+
+
+def _sent_namespaces(client):
+    sent = []
+    for _, _, body in client.captured:
+        sent.extend(item["namespace"] for item in body.get("items", []))
+        if "namespace" in body:
+            sent.append(body["namespace"])
+    return sent
 
 
 CALLS = [
@@ -76,13 +96,21 @@ CALLS = [
 ]
 
 
-@pytest.mark.parametrize("namespace", ["", "   "], ids=repr)
 @pytest.mark.parametrize("call", CALLS, ids=lambda x: x[0])
-async def test_empty_namespace_is_rejected_not_defaulted(call, namespace):
+async def test_empty_namespace_is_rejected_not_defaulted(call):
     c = _client()
     with pytest.raises(ValueError, match="namespace cannot be empty"):
-        await call[1](c, namespace)
+        await call[1](c, "")
     assert c.captured == []
+
+
+@pytest.mark.parametrize("namespace", [" ", "   ", "\t", "\n", "\r"], ids=repr)
+@pytest.mark.parametrize("call", CALLS, ids=lambda x: x[0])
+async def test_whitespace_namespace_is_sent_as_is(call, namespace):
+    """Whitespace names are valid for the relayer and the TypeScript SDK."""
+    c = _client()
+    await call[1](c, namespace)
+    assert _sent_namespaces(c) == [namespace]
 
 
 @pytest.mark.parametrize(
@@ -100,3 +128,17 @@ async def test_mock_rejects_empty_namespace_on_recall_too():
     mock = MemWalMock(namespace="work")
     with pytest.raises(ValueError, match="namespace cannot be empty"):
         await mock.recall("q", namespace="")
+
+
+@pytest.mark.parametrize("namespace", [" ", "\t", "\n", "\r"], ids=repr)
+async def test_mock_keeps_whitespace_namespaces_separate(namespace):
+    mock = MemWalMock(namespace="work")
+    await mock.remember("blank name fact", namespace=namespace)
+    assert len((await mock.recall("blank name fact", namespace=namespace)).results) == 1
+    assert (await mock.recall("blank name fact")).results == []
+
+
+async def test_mock_rejects_empty_namespace_on_remember():
+    mock = MemWalMock(namespace="work")
+    with pytest.raises(ValueError, match="namespace cannot be empty"):
+        await mock.remember("x", namespace="")

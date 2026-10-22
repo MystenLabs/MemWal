@@ -436,15 +436,10 @@ class MemWal:
         self._pending_remember_keys: Dict[str, str] = {}
 
     def _resolve_namespace(self, namespace: Optional[str]) -> str:
-        """``None`` means the client default; "" is an error, not the default.
-
-        ``namespace or self._namespace`` silently wrote ``namespace=""`` to
-        the default partition, while the TypeScript SDK sends it as-is and
-        the relayer rejects it (#1012).
-        """
+        """``None`` uses the client default; do not treat ``""`` as missing."""
         if namespace is None:
             return self._namespace
-        if not namespace.strip():
+        if not namespace:
             raise ValueError("namespace cannot be empty")
         return namespace
 

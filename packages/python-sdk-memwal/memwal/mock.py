@@ -284,7 +284,7 @@ class MemWalMock:
         if sort not in (None, "relevance", "recent"):
             raise ValueError("sort must be 'relevance' or 'recent'")
         resolved_namespace = self._namespace if namespace is None else namespace
-        if not resolved_namespace.strip():
+        if not resolved_namespace:
             raise ValueError("namespace cannot be empty")
         query_tokens = _tokens(query_text)
         ranked = [
@@ -512,7 +512,7 @@ class MemWalMock:
     ) -> _Memory:
         _validate_text(text)
         resolved_namespace = self._namespace if namespace is None else namespace
-        if not resolved_namespace.strip():
+        if not resolved_namespace:
             raise ValueError("namespace cannot be empty")
         self._sequence += 1
         suffix = f"{self._sequence:06d}"
