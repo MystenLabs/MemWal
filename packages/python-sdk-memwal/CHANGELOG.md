@@ -1,5 +1,11 @@
 # memwal
 
+## 0.1.13
+
+### Fixed
+
+- `health`, `ask`, `restore`, `list_namespaces`, `remember_manual`, and `recall` raise `MemWalError` naming the endpoint and field when a 2xx response omits a required field. They used to raise a bare `KeyError` that callers catching `MemWalError` never saw. (WALM-857, #1250, #1256)
+
 ## 0.1.12
 
 ### Added
