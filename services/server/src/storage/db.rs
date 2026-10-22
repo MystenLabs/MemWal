@@ -4056,6 +4056,17 @@ impl VectorDb {
         Ok(requested_at)
     }
 
+    pub async fn has_unblock_request(&self, owner: &str) -> Result<bool, AppError> {
+        let row: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 FROM account_unblock_requests WHERE owner = $1",
+        )
+        .bind(owner)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| AppError::Internal(format!("Failed to read unblock request: {error}")))?;
+        Ok(row.is_some())
+    }
+
     /// Newest first, capped so an admin page cannot pull an unbounded table.
     pub async fn list_unblock_requests(
         &self,

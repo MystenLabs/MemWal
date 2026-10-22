@@ -84,6 +84,16 @@ fn leaked_keys_from_env() -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Testnet account `0x158a…93e7`. It is active on chain. The incident
+/// response pretends it is locked so the dev deploy can walk both banners.
+/// A stored unblock request flips it to ready-to-restore. Mainnet ignores it.
+const TESTNET_PREVIEW_OWNER: &str =
+    "158a78f06e4a85cdef1a1f10bc30c41e4860c1a19f3b049a05098aca588593e7";
+
+fn is_testnet_preview_owner(network: &str, owner: &str) -> bool {
+    network == "testnet" && normalize_hex(owner) == TESTNET_PREVIEW_OWNER
+}
+
 fn normalize_owner(owner: &str) -> Result<String, AppError> {
     if !validate_sui_address(owner) {
         return Err(AppError::BadRequest(
@@ -205,6 +215,15 @@ pub async fn incident_status(
             active: false,
         }));
     };
+    if is_testnet_preview_owner(&state.config.sui_network, &owner) {
+        let requested = state.db.has_unblock_request(&owner).await?;
+        return Ok(Json(IncidentResponse {
+            account_id: Some(snapshot.account_id),
+            affected: true,
+            quarantined: !requested,
+            active: false,
+        }));
+    }
     let public_keys: Vec<String> = snapshot
         .keys
         .iter()
@@ -247,7 +266,8 @@ pub async fn request_unblock(
     let Some(snapshot) = snapshot else {
         return Err(AppError::BadRequest("owner has no MemWalAccount".into()));
     };
-    if !snapshot.admin_quarantined {
+    let preview = is_testnet_preview_owner(&state.config.sui_network, &owner);
+    if !snapshot.admin_quarantined && !preview {
         return Err(AppError::Conflict(
             "account is not quarantined".into(),
         ));
@@ -293,6 +313,15 @@ pub async fn list_unblock_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn testnet_preview_owner_is_only_that_address_on_testnet() {
+        let owner = format!("0x{TESTNET_PREVIEW_OWNER}");
+        assert!(is_testnet_preview_owner("testnet", &owner));
+        assert!(is_testnet_preview_owner("testnet", &owner.to_ascii_uppercase()));
+        assert!(!is_testnet_preview_owner("mainnet", &owner));
+        assert!(!is_testnet_preview_owner("testnet", &format!("0x{}", "11".repeat(32))));
+    }
 
     #[test]
     fn unblock_message_is_stable() {
