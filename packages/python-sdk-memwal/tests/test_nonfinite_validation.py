@@ -12,7 +12,14 @@ import math
 import httpx
 import pytest
 
-from memwal import MemWal, RecallManualOptions, RecallParams, RememberManualOptions
+from memwal import (
+    MemWal,
+    MemWalError,
+    MemWalMock,
+    RecallManualOptions,
+    RecallParams,
+    RememberManualOptions,
+)
 
 
 class CaptureMemWal(MemWal):
@@ -31,7 +38,13 @@ class CaptureMemWal(MemWal):
         return "0xowner"
 
     async def _signed_request(
-        self, method, path, body, accepted_statuses=(200,), include_seal_session=True
+        self,
+        method,
+        path,
+        body,
+        accepted_statuses=(200,),
+        include_seal_session=True,
+        timeout=None,
     ):
         self.captured.append((method, path, body))
         if path.startswith("/v1/owners"):
@@ -41,6 +54,37 @@ class CaptureMemWal(MemWal):
         if path == "/api/restore":
             return {"restored": 0, "skipped": 0, "total": 0, "namespace": "ns", "owner": "0x1"}
         return {"results": [], "total": 0}
+
+
+class FreshOwnerMemWal(MemWal):
+    """Keeps the real ``_resolve_owner``, so owner lookup goes through signing.
+
+    Every signed request is recorded and then fails, like a relayer outage:
+    a bad limit must surface as ValueError, not as this error.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.signed = []
+
+    async def _ensure_compatible_relayer(self):
+        return {
+            "apiVersion": "1.0.0",
+            "relayerVersion": "capture",
+            "minSupportedSdk": {"python": "0.0.0"},
+        }
+
+    async def _signed_request(
+        self,
+        method,
+        path,
+        body,
+        accepted_statuses=(200,),
+        include_seal_session=True,
+        timeout=None,
+    ):
+        self.signed.append((method, path))
+        raise MemWalError("relayer unavailable")
 
 
 def _client():
@@ -142,3 +186,53 @@ async def test_signed_request_never_emits_nan_tokens(monkeypatch):
         )
     assert sent == []
     await client.close()
+
+
+@pytest.mark.parametrize("limit", BAD_LIMITS, ids=repr)
+async def test_list_namespaces_bad_limit_raises_before_owner_lookup(limit):
+    """The owner lookup is a signed POST /api/stats; a bad limit must not reach it."""
+    c = FreshOwnerMemWal.create(
+        key="11" * 32, account_id="0x" + "ab" * 32, server_url="https://relayer.example"
+    )
+    with pytest.raises(ValueError, match="limit"):
+        await c.list_namespaces(limit=limit)
+    assert c.signed == []
+    await c.close()
+
+
+async def test_list_namespaces_valid_limit_still_resolves_owner():
+    c = FreshOwnerMemWal.create(
+        key="11" * 32, account_id="0x" + "ab" * 32, server_url="https://relayer.example"
+    )
+    with pytest.raises(MemWalError, match="relayer unavailable"):
+        await c.list_namespaces(limit=5)
+    assert c.signed == [("POST", "/api/stats")]
+    await c.close()
+
+
+@pytest.mark.parametrize("limit", BAD_LIMITS, ids=repr)
+@pytest.mark.parametrize(
+    "call",
+    [
+        ("recall", lambda m, n: m.recall("q", limit=n)),
+        ("recall_params", lambda m, n: m.recall(RecallParams(query="q", limit=n))),
+        ("ask", lambda m, n: m.ask("q", limit=n)),
+        ("restore", lambda m, n: m.restore("ns", limit=n)),
+        ("list_namespaces", lambda m, n: m.list_namespaces(limit=n)),
+    ],
+    ids=lambda x: x[0],
+)
+async def test_mock_rejects_the_same_bad_limits_as_the_client(call, limit):
+    mock = MemWalMock.create()
+    await mock.remember("a fact")
+    with pytest.raises(ValueError, match="limit"):
+        await call[1](mock, limit)
+
+
+async def test_mock_accepts_positive_integer_limits():
+    mock = MemWalMock.create()
+    await mock.remember("a fact")
+    assert len((await mock.recall("fact", limit=1)).results) == 1
+    assert (await mock.restore("ns", limit=1)).restored == 0
+    assert len((await mock.list_namespaces(limit=1)).namespaces) == 1
+    assert len((await mock.list_namespaces()).namespaces) == 1

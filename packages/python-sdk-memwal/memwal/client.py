@@ -1371,13 +1371,16 @@ class MemWal:
         Returns:
             :class:`NamespacesResult`.
         """
+        # Validate before resolving the owner: on a fresh client that lookup is
+        # a signed POST /api/stats, so a bad limit must not reach it (#1218).
+        if limit is not None:
+            _check_limit(limit)
         owner = await self._resolve_owner()
 
         params: Dict[str, str] = {}
         if cursor is not None:
             params["updated_after"] = cursor
         if limit is not None:
-            _check_limit(limit)
             params["limit"] = str(limit)
         query = urlencode(params)
 
