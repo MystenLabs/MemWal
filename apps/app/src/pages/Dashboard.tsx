@@ -27,6 +27,7 @@ import { useCopyFeedback } from '../hooks/useCopyFeedback'
 import { apiGet } from '../utils/api'
 import { assertDelegateKeyRegistered, deriveDelegatePublicKeyHex, normalizeDelegatePrivateKey } from '../utils/delegateKeyImport'
 import { fetchAccountIdForOwner, fetchObjectJson, publicKeyToHex } from '../utils/suiClientCompat'
+import { unblockRequestMessage } from '../utils/unblockRequest'
 import ConnectWalrusMemory, { type ConnectPath } from './ConnectWalrusMemory'
 
 // ============================================================
@@ -123,6 +124,13 @@ function DelegateKeySkeletonList() {
             </table>
         </div>
     )
+}
+
+type IncidentStatus = {
+    account_id: string | null
+    affected: boolean
+    quarantined: boolean
+    active: boolean
 }
 
 // ============================================================
@@ -224,6 +232,9 @@ export default function Dashboard({
     const [importingExistingKey, setImportingExistingKey] = useState(false)
     const [newPrivateKey, setNewPrivateKey] = useState<string | null>(null)
     const addKeyFormCloseTimerRef = useRef<number | null>(null)
+    const [incident, setIncident] = useState<IncidentStatus | null>(null)
+    const [incidentAction, setIncidentAction] = useState<'unblock' | 'reactivate' | null>(null)
+    const [incidentError, setIncidentError] = useState('')
     const [accountReadyDismissed, setAccountReadyDismissed] = useState(false)
     // One-shot signal from SetupWizard's navigate() state — set only when the
     // /setup visit carried Console's "Set up" (COMG-1081) `from` marker.
@@ -264,6 +275,81 @@ export default function Dashboard({
                 signPersonalMsg({ message }),
         }
     }, [currentAccount, signAndExecuteTx, signPersonalMsg])
+
+    const reloadIncident = useCallback(async (owner: string) => {
+        const base = config.memwalServerUrl.replace(/\/+$/, '')
+        const response = await fetch(`${base}/api/accounts/${owner.toLowerCase()}/incident`)
+        if (!response.ok) throw new Error(`incident status ${response.status}`)
+        const body = await response.json() as IncidentStatus
+        setIncident(body)
+    }, [])
+
+    useEffect(() => {
+        if (!address || previewMode) {
+            setIncident(null)
+            return
+        }
+        let cancelled = false
+        reloadIncident(address)
+            .catch((err: unknown) => {
+                if (!cancelled) {
+                    console.error('Failed to load incident status:', err)
+                    setIncident(null)
+                }
+            })
+        return () => { cancelled = true }
+    }, [address, previewMode, reloadIncident])
+
+    const requestUnblock = useCallback(async () => {
+        if (!address || !incident?.account_id) return
+        setIncidentAction('unblock')
+        setIncidentError('')
+        try {
+            const message = new TextEncoder().encode(unblockRequestMessage(address, incident.account_id))
+            const { signature } = await signPersonalMsg({ message })
+            const base = config.memwalServerUrl.replace(/\/+$/, '')
+            const response = await fetch(
+                `${base}/api/accounts/${address.toLowerCase()}/unblock-requests`,
+                {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ signature }),
+                },
+            )
+            if (!response.ok) {
+                const body = await response.json().catch(() => null) as { error?: string } | null
+                throw new Error(body?.error || `unblock request failed (${response.status})`)
+            }
+            await reloadIncident(address)
+        } catch (err: unknown) {
+            setIncidentError(err instanceof Error ? err.message : 'failed to request unblock')
+        } finally {
+            setIncidentAction(null)
+        }
+    }, [address, incident?.account_id, reloadIncident, signPersonalMsg])
+
+    const reactivateAccount = useCallback(async () => {
+        if (!incident?.account_id) return
+        setIncidentAction('reactivate')
+        setIncidentError('')
+        try {
+            const tx = new Transaction()
+            tx.moveCall({
+                target: `${config.memwalPackageId}::account::reactivate_account`,
+                arguments: [
+                    tx.object(incident.account_id),
+                    tx.object(config.memwalRegistryId),
+                ],
+            })
+            const result = await signAndExecuteTx({ transaction: tx })
+            await suiClient.waitForTransaction({ digest: result.digest })
+            await reloadIncident(address)
+        } catch (err: unknown) {
+            setIncidentError(err instanceof Error ? err.message : 'failed to reactivate account')
+        } finally {
+            setIncidentAction(null)
+        }
+    }, [address, incident?.account_id, signAndExecuteTx, suiClient, reloadIncident])
 
     const copyToClipboard = useCallback(async (text: string, label: string) => {
         if (!(await copyText(text, label))) return
@@ -978,6 +1064,54 @@ asyncio.run(main())`
                     onSdkKindChange={(kind) => setQuickstartLanguage(kind === 'python' ? 'py' : 'ts')}
                     sdkSnippet={sdkSnippet}
                 />
+
+                {incident?.affected && (
+                    <div className="dash-alert" style={{ marginBottom: 24 }} role="status">
+                        <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
+                        <div>
+                            {incident.quarantined ? (
+                                <p>
+                                    This account is quarantined after a delegate-key exposure.
+                                    Remove any delegate key you do not control, then request an unblock.
+                                    After an operator clears the quarantine, reactivate the account here.
+                                </p>
+                            ) : incident.active ? (
+                                <p>
+                                    A delegate key on this account was exposed.
+                                    Remove any delegate key you do not control.
+                                </p>
+                            ) : (
+                                <p>
+                                    The quarantine on this account has been cleared.
+                                    Reactivate the account to use it again.
+                                </p>
+                            )}
+                            {incident.quarantined && (
+                                <button
+                                    type="button"
+                                    className="btn btn-primary btn-sm"
+                                    style={{ marginTop: 12 }}
+                                    onClick={requestUnblock}
+                                    disabled={incidentAction !== null}
+                                >
+                                    {incidentAction === 'unblock' ? 'Requesting...' : 'Request unblock'}
+                                </button>
+                            )}
+                            {!incident.quarantined && !incident.active && incident.account_id && (
+                                <button
+                                    type="button"
+                                    className="btn btn-primary btn-sm"
+                                    style={{ marginTop: 12 }}
+                                    onClick={reactivateAccount}
+                                    disabled={incidentAction !== null}
+                                >
+                                    {incidentAction === 'reactivate' ? 'Reactivating...' : 'Reactivate account'}
+                                </button>
+                            )}
+                            {incidentError && <p>{incidentError}</p>}
+                        </div>
+                    </div>
+                )}
 
                 {showNoBrowserKeyNotice && (
                     <div className="dash-alert dash-alert--info">

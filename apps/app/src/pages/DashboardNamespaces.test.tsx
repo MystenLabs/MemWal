@@ -115,6 +115,17 @@ beforeEach(() => {
     mocks.apiGet.mockReset()
     // Non-namespace calls (delegate keys etc.) get a harmless empty payload.
     mocks.apiGet.mockResolvedValue({})
+    // Incident status uses global fetch. A clean miss keeps the banner off
+    // and never dials the relayer.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+            account_id: null,
+            affected: false,
+            quarantined: false,
+            active: false,
+        }),
+    }))
 })
 
 describe('Dashboard namespaces pagination', () => {
@@ -287,5 +298,22 @@ describe('Dashboard namespaces pagination', () => {
         const card = await namespacesCard()
         const link = await within(card).findByTitle('Open this namespace in the playground')
         expect(link.getAttribute('href')).toBe('/playground?namespace=my%20ns')
+    })
+})
+
+describe('Dashboard incident banner', () => {
+    it('asks a quarantined account to request an unblock', async () => {
+        mocks.apiGet.mockResolvedValue({})
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                account_id: '0xaccount',
+                affected: true,
+                quarantined: true,
+                active: false,
+            }),
+        }))
+        const { findByRole } = renderDashboard()
+        expect(await findByRole('button', { name: 'Request unblock' })).toBeTruthy()
     })
 })

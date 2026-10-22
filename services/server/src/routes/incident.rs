@@ -1,0 +1,418 @@
+//! Delegate-key revocation notice.
+//!
+//! `GET /api/accounts/{owner}/delegate-keys` reads that owner's
+//! `MemWalAccount` from Sui RPC (registry dynamic field, then the account
+//! object). It does not use the indexer or the delegate-key cache.
+//!
+//! `GET /api/accounts/{owner}/incident` answers only for the owner in the
+//! path: affected, quarantined, active. Affected means the owner is in
+//! `MEMWAL_AFFECTED_OWNERS`, a current delegate public key is in
+//! `MEMWAL_LEAKED_DELEGATE_PUBLIC_KEYS`, or the account is
+//! `admin_quarantined`. Both lists are comma-separated and optional. With
+//! neither set, the banner follows the on-chain quarantine flag.
+//!
+//! `POST /api/accounts/{owner}/unblock-requests` stores one request after
+//! the owner signs `unblock_request_message`. Clearing quarantine stays an
+//! `AdminCap` transaction. The owner then calls `reactivate_account`.
+
+use axum::extract::{Path, State};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use crate::routes::sponsor::validate_sui_address;
+use crate::security_delete_error::SdCode;
+use crate::storage::sui::OnchainVerifyError;
+use crate::types::*;
+
+/// Canonical personal-message text. The dashboard builds the same string
+/// in `apps/app/src/utils/unblockRequest.ts`.
+pub fn unblock_request_message(owner: &str, account_id: &str) -> String {
+    format!(
+        "Walrus Memory unblock request\nowner:{}\naccount:{}",
+        owner.to_ascii_lowercase(),
+        account_id.to_ascii_lowercase(),
+    )
+}
+
+/// Split a comma- or whitespace-separated hex list. `0x` is optional.
+/// Comparison is lowercase and unprefixed so an address and a public key
+/// use the same form.
+pub fn parse_hex_set(raw: &str) -> HashSet<String> {
+    raw.split(|c: char| c == ',' || c == '\n' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(normalize_hex)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+pub fn normalize_hex(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X")
+        .to_ascii_lowercase()
+}
+
+pub fn account_is_affected(
+    owner: &str,
+    public_keys_hex: &[String],
+    quarantined: bool,
+    affected_owners: &HashSet<String>,
+    leaked_keys: &HashSet<String>,
+) -> bool {
+    quarantined
+        || affected_owners.contains(&normalize_hex(owner))
+        || public_keys_hex
+            .iter()
+            .any(|key| leaked_keys.contains(&normalize_hex(key)))
+}
+
+fn affected_owners_from_env() -> HashSet<String> {
+    std::env::var("MEMWAL_AFFECTED_OWNERS")
+        .ok()
+        .map(|raw| parse_hex_set(&raw))
+        .unwrap_or_default()
+}
+
+fn leaked_keys_from_env() -> HashSet<String> {
+    std::env::var("MEMWAL_LEAKED_DELEGATE_PUBLIC_KEYS")
+        .ok()
+        .map(|raw| parse_hex_set(&raw))
+        .unwrap_or_default()
+}
+
+fn normalize_owner(owner: &str) -> Result<String, AppError> {
+    if !validate_sui_address(owner) {
+        return Err(AppError::BadRequest(
+            "owner must be a 0x-prefixed 32-byte Sui address (66 characters)".into(),
+        ));
+    }
+    Ok(owner.to_ascii_lowercase())
+}
+
+fn map_chain_error(err: OnchainVerifyError) -> AppError {
+    AppError::UpstreamUnavailable(err.to_string())
+}
+
+#[derive(Debug, Serialize)]
+pub struct DelegateKeyView {
+    pub public_key: String,
+    pub sui_address: String,
+    pub label: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DelegateKeysResponse {
+    pub account_id: Option<String>,
+    pub keys: Vec<DelegateKeyView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IncidentResponse {
+    pub account_id: Option<String>,
+    pub affected: bool,
+    pub quarantined: bool,
+    pub active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UnblockRequestBody {
+    pub signature: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnblockRequestResponse {
+    pub status: &'static str,
+    pub requested_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnblockRequestListResponse {
+    pub requests: Vec<UnblockRequestItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnblockRequestItem {
+    pub owner: String,
+    pub account_id: String,
+    pub requested_at: String,
+}
+
+/// GET /api/accounts/{owner}/delegate-keys
+pub async fn delegate_keys(
+    State(state): State<Arc<AppState>>,
+    Path(owner): Path<String>,
+) -> Result<Json<DelegateKeysResponse>, AppError> {
+    let owner = normalize_owner(&owner)?;
+    let snapshot = crate::storage::sui::load_owner_account_onchain(
+        &state.http_client,
+        &state.config.sui_rpc_url,
+        state.sui_grpc_client.as_ref(),
+        &state.config.registry_id,
+        &state.config.package_id,
+        &owner,
+    )
+    .await
+    .map_err(map_chain_error)?;
+    let Some(snapshot) = snapshot else {
+        return Ok(Json(DelegateKeysResponse {
+            account_id: None,
+            keys: Vec::new(),
+        }));
+    };
+    Ok(Json(DelegateKeysResponse {
+        account_id: Some(snapshot.account_id),
+        keys: snapshot
+            .keys
+            .into_iter()
+            .map(|key| DelegateKeyView {
+                public_key: key.public_key_hex,
+                sui_address: key.sui_address,
+                label: key.label,
+                created_at: key.created_at,
+            })
+            .collect(),
+    }))
+}
+
+/// GET /api/accounts/{owner}/incident
+pub async fn incident_status(
+    State(state): State<Arc<AppState>>,
+    Path(owner): Path<String>,
+) -> Result<Json<IncidentResponse>, AppError> {
+    let owner = normalize_owner(&owner)?;
+    let snapshot = crate::storage::sui::load_owner_account_onchain(
+        &state.http_client,
+        &state.config.sui_rpc_url,
+        state.sui_grpc_client.as_ref(),
+        &state.config.registry_id,
+        &state.config.package_id,
+        &owner,
+    )
+    .await
+    .map_err(map_chain_error)?;
+    let affected_owners = affected_owners_from_env();
+    let leaked_keys = leaked_keys_from_env();
+    let Some(snapshot) = snapshot else {
+        return Ok(Json(IncidentResponse {
+            account_id: None,
+            affected: account_is_affected(&owner, &[], false, &affected_owners, &leaked_keys),
+            quarantined: false,
+            active: false,
+        }));
+    };
+    let public_keys: Vec<String> = snapshot
+        .keys
+        .iter()
+        .map(|key| key.public_key_hex.clone())
+        .collect();
+    Ok(Json(IncidentResponse {
+        account_id: Some(snapshot.account_id),
+        affected: account_is_affected(
+            &owner,
+            &public_keys,
+            snapshot.admin_quarantined,
+            &affected_owners,
+            &leaked_keys,
+        ),
+        quarantined: snapshot.admin_quarantined,
+        active: snapshot.active,
+    }))
+}
+
+/// POST /api/accounts/{owner}/unblock-requests
+pub async fn request_unblock(
+    State(state): State<Arc<AppState>>,
+    Path(owner): Path<String>,
+    Json(body): Json<UnblockRequestBody>,
+) -> Result<Json<UnblockRequestResponse>, AppError> {
+    let owner = normalize_owner(&owner)?;
+    if body.signature.trim().is_empty() || body.signature.len() > 4096 {
+        return Err(AppError::BadRequest("signature is invalid".into()));
+    }
+    let snapshot = crate::storage::sui::load_owner_account_onchain(
+        &state.http_client,
+        &state.config.sui_rpc_url,
+        state.sui_grpc_client.as_ref(),
+        &state.config.registry_id,
+        &state.config.package_id,
+        &owner,
+    )
+    .await
+    .map_err(map_chain_error)?;
+    let Some(snapshot) = snapshot else {
+        return Err(AppError::BadRequest("owner has no MemWalAccount".into()));
+    };
+    if !snapshot.admin_quarantined {
+        return Err(AppError::Conflict(
+            "account is not quarantined".into(),
+        ));
+    }
+    let message = unblock_request_message(&owner, &snapshot.account_id);
+    state
+        .security_delete_wallet_verifier
+        .verify_personal(&owner, message.as_bytes(), body.signature.trim())
+        .await
+        .map_err(|error| match error.code {
+            SdCode::RpcUnavailable | SdCode::InternalError => AppError::UpstreamUnavailable(
+                format!("unblock signature check unavailable: {}", error.message),
+            ),
+            _ => AppError::Unauthorized("invalid unblock signature".into()),
+        })?;
+    let requested_at = state
+        .db
+        .upsert_unblock_request(&owner, &snapshot.account_id)
+        .await?;
+    Ok(Json(UnblockRequestResponse {
+        status: "requested",
+        requested_at: requested_at.to_rfc3339(),
+    }))
+}
+
+/// GET /api/admin/unblock-requests
+pub async fn list_unblock_requests(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<UnblockRequestListResponse>, AppError> {
+    let rows = state.db.list_unblock_requests().await?;
+    Ok(Json(UnblockRequestListResponse {
+        requests: rows
+            .into_iter()
+            .map(|(owner, account_id, requested_at)| UnblockRequestItem {
+                owner,
+                account_id,
+                requested_at: requested_at.to_rfc3339(),
+            })
+            .collect(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unblock_message_is_stable() {
+        let owner = format!("0x{}", "ab".repeat(32));
+        let account = format!("0x{}", "cd".repeat(32));
+        assert_eq!(
+            unblock_request_message(&owner.to_ascii_uppercase(), &account.to_ascii_uppercase()),
+            format!("Walrus Memory unblock request\nowner:{owner}\naccount:{account}")
+        );
+    }
+
+    #[test]
+    fn hex_set_ignores_prefix_case_and_separators() {
+        let set = parse_hex_set("0xAa, BB\n0Xcc");
+        assert!(set.contains("aa"));
+        assert!(set.contains("bb"));
+        assert!(set.contains("cc"));
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn affected_matches_owner_leaked_key_or_quarantine() {
+        let owner = format!("0x{}", "11".repeat(32));
+        let other = format!("0x{}", "22".repeat(32));
+        let leaked = "aa".repeat(32);
+        let owners = parse_hex_set(&owner);
+        let keys = parse_hex_set(&leaked);
+        assert!(account_is_affected(&owner, &[], false, &owners, &HashSet::new()));
+        assert!(!account_is_affected(
+            &other,
+            &[],
+            false,
+            &owners,
+            &HashSet::new()
+        ));
+        assert!(account_is_affected(
+            &other,
+            &[leaked.clone()],
+            false,
+            &HashSet::new(),
+            &keys
+        ));
+        assert!(account_is_affected(
+            &other,
+            &[],
+            true,
+            &HashSet::new(),
+            &HashSet::new()
+        ));
+        assert!(!account_is_affected(
+            &other,
+            &["bb".repeat(32)],
+            false,
+            &HashSet::new(),
+            &keys
+        ));
+    }
+
+    #[test]
+    fn address_dynamic_field_id_matches_blake2b() {
+        use sui_sdk_types::Address;
+        let parent = Address::new([0x11; 32]);
+        let key = Address::new([0x22; 32]);
+        let id = crate::storage::sui::derive_address_dynamic_field_id(&parent, &key);
+        assert_eq!(
+            hex::encode(id.inner()),
+            "107ab86fa49690f6d51066c936ee6ed15810f1a7cff0f258caa2b0b73c4dce17"
+        );
+    }
+
+    #[test]
+    fn registry_and_account_json_accept_flat_and_wrapped_shapes() {
+        let table = format!("0x{}", "ab".repeat(32));
+        let account = format!("0x{}", "cd".repeat(32));
+        let mut flat_registry = serde_json::Map::new();
+        flat_registry.insert(
+            "accounts".into(),
+            serde_json::json!({ "id": table, "size": "1" }),
+        );
+        assert_eq!(
+            crate::storage::sui::registry_table_id(&flat_registry).as_deref(),
+            Some(table.as_str())
+        );
+
+        let mut wrapped_field = serde_json::Map::new();
+        wrapped_field.insert(
+            "fields".into(),
+            serde_json::json!({ "value": { "id": account } }),
+        );
+        assert_eq!(
+            crate::storage::sui::dynamic_field_account_id(&wrapped_field).as_deref(),
+            Some(account.as_str())
+        );
+
+        let public_key: Vec<u64> = (0u64..32).collect();
+        let mut account_fields = serde_json::Map::new();
+        account_fields.insert("active".into(), serde_json::json!(false));
+        account_fields.insert("admin_quarantined".into(), serde_json::json!(true));
+        account_fields.insert(
+            "delegate_keys".into(),
+            serde_json::json!([{
+                "fields": {
+                    "public_key": public_key,
+                    "sui_address": "0xABCD",
+                    "label": "Noter",
+                    "created_at": "10"
+                }
+            }]),
+        );
+        let (active, quarantined, keys) =
+            crate::storage::sui::parse_owner_account_fields(&account_fields).unwrap();
+        assert!(!active);
+        assert!(quarantined);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            keys[0].public_key_hex,
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        );
+        assert_eq!(keys[0].sui_address, "0xabcd");
+        assert_eq!(keys[0].label, "Noter");
+        assert_eq!(keys[0].created_at, 10);
+    }
+}

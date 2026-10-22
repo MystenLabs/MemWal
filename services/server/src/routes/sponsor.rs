@@ -15,8 +15,8 @@
 //!
 //! `validate_sponsor_transaction_kind` is the sponsorship allowlist: a
 //! sponsored transaction may only call `account::create_account`,
-//! `account::add_delegate_key`, or `account::remove_delegate_key` on the
-//! configured MemWal package. Batching is allowed for delegate-key **removal**
+//! `account::add_delegate_key`, `account::remove_delegate_key`, or
+//! `account::reactivate_account` on the configured MemWal package. Batching is allowed for delegate-key **removal**
 //! only, up to `MAX_SPONSORED_DELEGATE_REMOVALS` — the dashboard removes a
 //! multi-key selection in one transaction, so a one-command-only rule would
 //! reject every bulk revoke. Every other shape stays single-command.
@@ -250,7 +250,10 @@ fn validate_sponsor_transaction_kind(
                     && call.type_arguments.is_empty()
                     && matches!(
                         call.function.as_str(),
-                        "create_account" | "add_delegate_key" | "remove_delegate_key"
+                        "create_account"
+                            | "add_delegate_key"
+                            | "remove_delegate_key"
+                            | "reactivate_account"
                     ) =>
             {
                 Some(call.function.as_str())
@@ -276,6 +279,7 @@ fn validate_sponsor_transaction_kind(
             "create_account" => Ok("create_account"),
             "add_delegate_key" => Ok("add_delegate_key"),
             "remove_delegate_key" => Ok("remove_delegate_key"),
+            "reactivate_account" => Ok("reactivate_account"),
             _ => Err(AppError::BadRequest(
                 "Transaction kind is not permitted for sponsorship".into(),
             )),
@@ -722,7 +726,12 @@ nonce: 00000000-0000-4000-8000-000000000000"
     #[test]
     fn sponsor_allowlist_accepts_a_single_memwal_account_call() {
         let package = format!("0x{}", "a".repeat(64));
-        for function in ["create_account", "add_delegate_key", "remove_delegate_key"] {
+        for function in [
+            "create_account",
+            "add_delegate_key",
+            "remove_delegate_key",
+            "reactivate_account",
+        ] {
             let bytes = move_call_kind(&package, "account", function);
             assert_eq!(
                 validate_sponsor_transaction_kind(&bytes, &package).unwrap(),
