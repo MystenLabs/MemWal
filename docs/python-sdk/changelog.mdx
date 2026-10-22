@@ -29,12 +29,18 @@ questions:
   - What changes were made in memwal 0.1.4?
   - Where can I find the release history for the Walrus Memory Python SDK?
 answer: >-
-  The latest Python SDK release is 0.1.12. `remember` derives a 30-minute idempotency key, `get_remember_status` reads one job, recall results include `created_at` and `score`, and remember-job polls back off toward 5 seconds. 0.1.11 adds `list_namespaces()` so an agent can discover which namespaces hold memories instead of guessing. 0.1.10 adds `failed` to `restore()` results for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. 0.1.9 reports HTTP 503 as a retryable upstream outage instead of a credential failure, rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`, aligns restore `truncated` docs with WALM-431 retryable semantics, and warns when `server_url` uses plaintext HTTP on a non-localhost host without logging URL credentials.
+  The latest Python SDK release is 0.1.13, a patch release with client-side fixes listed in its entry below. 0.1.12: `remember` derives a 30-minute idempotency key, `get_remember_status` reads one job, recall results include `created_at` and `score`, and remember-job polls back off toward 5 seconds. 0.1.11 adds `list_namespaces()` so an agent can discover which namespaces hold memories instead of guessing. 0.1.10 adds `failed` to `restore()` results for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. 0.1.9 reports HTTP 503 as a retryable upstream outage instead of a credential failure, rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`, aligns restore `truncated` docs with WALM-431 retryable semantics, and warns when `server_url` uses plaintext HTTP on a non-localhost host without logging URL credentials.
 ---
 
 Track what's new, changed, and fixed in `memwal` (Python).
 
 For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
+
+## 0.1.13
+
+### Fixed
+
+- `recall()` rejects a blank `query` and a `max_distance` that is NaN, infinite, negative, or not a number before it signs the request, and `MemWalMock.recall()` rejects the same `max_distance`. A NaN or negative threshold used to return an empty page that looked like an empty namespace. (WALM-859, #1248, #1254)
 
 ## 0.1.12
 
