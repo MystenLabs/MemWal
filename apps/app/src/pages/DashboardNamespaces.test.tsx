@@ -314,6 +314,8 @@ describe('Dashboard incident banner', () => {
             }),
         }))
         const { findByRole } = renderDashboard()
-        expect(await findByRole('button', { name: 'Request unblock' })).toBeTruthy()
+        const button = await findByRole('button', { name: 'request an unblock' })
+        expect(button.className).toContain('dash-alert-link')
+        expect(button.closest('.dash-alert')?.classList.contains('dash-alert--info')).toBe(true)
     })
 })

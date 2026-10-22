@@ -1066,50 +1066,48 @@ asyncio.run(main())`
                 />
 
                 {incident?.affected && (
-                    <div className="dash-alert" style={{ marginBottom: 24 }} role="status">
+                    <div className="dash-alert dash-alert--info" role="status">
                         <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
-                        <div>
-                            {incident.quarantined ? (
-                                <p>
-                                    This account is quarantined after a delegate-key exposure.
-                                    Remove any delegate key you do not control, then request an unblock.
-                                    After an operator clears the quarantine, reactivate the account here.
-                                </p>
-                            ) : incident.active ? (
-                                <p>
-                                    A delegate key on this account was exposed.
-                                    Remove any delegate key you do not control.
-                                </p>
-                            ) : (
-                                <p>
-                                    The quarantine on this account has been cleared.
-                                    Reactivate the account to use it again.
-                                </p>
-                            )}
-                            {incident.quarantined && (
+                        {incident.quarantined ? (
+                            <p>
+                                This account is quarantined after a delegate-key exposure.
+                                Remove any delegate key you do not control, then{' '}
                                 <button
                                     type="button"
-                                    className="btn btn-primary btn-sm"
-                                    style={{ marginTop: 12 }}
+                                    className="dash-alert-link"
                                     onClick={requestUnblock}
                                     disabled={incidentAction !== null}
                                 >
-                                    {incidentAction === 'unblock' ? 'Requesting...' : 'Request unblock'}
+                                    {incidentAction === 'unblock' ? 'requesting an unblock' : 'request an unblock'}
                                 </button>
-                            )}
-                            {!incident.quarantined && !incident.active && incident.account_id && (
-                                <button
-                                    type="button"
-                                    className="btn btn-primary btn-sm"
-                                    style={{ marginTop: 12 }}
-                                    onClick={reactivateAccount}
-                                    disabled={incidentAction !== null}
-                                >
-                                    {incidentAction === 'reactivate' ? 'Reactivating...' : 'Reactivate account'}
-                                </button>
-                            )}
-                            {incidentError && <p>{incidentError}</p>}
-                        </div>
+                                . After an operator clears the quarantine, reactivate the account here.
+                                {incidentError ? ` ${incidentError}` : null}
+                            </p>
+                        ) : incident.active ? (
+                            <p>
+                                A delegate key on this account was exposed.
+                                Remove any delegate key you do not control.
+                                {incidentError ? ` ${incidentError}` : null}
+                            </p>
+                        ) : (
+                            <p>
+                                The quarantine on this account has been cleared.{' '}
+                                {incident.account_id ? (
+                                    <button
+                                        type="button"
+                                        className="dash-alert-link"
+                                        onClick={reactivateAccount}
+                                        disabled={incidentAction !== null}
+                                    >
+                                        {incidentAction === 'reactivate' ? 'Reactivating the account' : 'Reactivate the account'}
+                                    </button>
+                                ) : (
+                                    'Reactivate the account'
+                                )}
+                                {' '}to use it again.
+                                {incidentError ? ` ${incidentError}` : null}
+                            </p>
+                        )}
                     </div>
                 )}
 
