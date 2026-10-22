@@ -1065,13 +1065,13 @@ asyncio.run(main())`
                     sdkSnippet={sdkSnippet}
                 />
 
-                {incident?.affected && (
+                {incident?.affected && (incident.quarantined || !incident.active) && (
                     <div className="dash-alert dash-alert--info" role="status">
                         <TriangleAlert className="dash-alert-icon" size={24} strokeWidth={2.3} aria-hidden="true" />
                         {incident.quarantined ? (
                             <p>
-                                This account is quarantined after a delegate-key exposure.
-                                Remove any delegate key you do not control, then{' '}
+                                Your account has been temporarily locked following a security disclosure by Railway, our third-party hosting provider.
+                                To restore your account,{' '}
                                 <button
                                     type="button"
                                     className="dash-alert-link"
@@ -1080,18 +1080,12 @@ asyncio.run(main())`
                                 >
                                     {incidentAction === 'unblock' ? 'requesting an unblock' : 'request an unblock'}
                                 </button>
-                                . After an operator clears the quarantine, reactivate the account here.
-                                {incidentError ? ` ${incidentError}` : null}
-                            </p>
-                        ) : incident.active ? (
-                            <p>
-                                A delegate key on this account was exposed.
-                                Remove any delegate key you do not control.
+                                .
                                 {incidentError ? ` ${incidentError}` : null}
                             </p>
                         ) : (
                             <p>
-                                The quarantine on this account has been cleared.{' '}
+                                Your account is ready to restore.{' '}
                                 {incident.account_id ? (
                                     <button
                                         type="button"
@@ -1104,7 +1098,7 @@ asyncio.run(main())`
                                 ) : (
                                     'Reactivate the account'
                                 )}
-                                {' '}to use it again.
+                                .
                                 {incidentError ? ` ${incidentError}` : null}
                             </p>
                         )}

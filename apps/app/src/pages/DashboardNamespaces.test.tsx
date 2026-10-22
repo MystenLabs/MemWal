@@ -317,5 +317,22 @@ describe('Dashboard incident banner', () => {
         const button = await findByRole('button', { name: 'request an unblock' })
         expect(button.className).toContain('dash-alert-link')
         expect(button.closest('.dash-alert')?.classList.contains('dash-alert--info')).toBe(true)
+        expect(button.closest('p')?.textContent).toContain('temporarily locked following a security disclosure by Railway')
+    })
+
+    it('asks a cleared account to reactivate', async () => {
+        mocks.apiGet.mockResolvedValue({})
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                account_id: '0xaccount',
+                affected: true,
+                quarantined: false,
+                active: false,
+            }),
+        }))
+        const { findByRole } = renderDashboard()
+        const button = await findByRole('button', { name: 'Reactivate the account' })
+        expect(button.closest('p')?.textContent).toContain('Your account is ready to restore.')
     })
 })
