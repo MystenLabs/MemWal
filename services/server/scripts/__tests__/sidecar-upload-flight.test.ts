@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 const {
     beginOrJoinUploadStepFlight,
+    dropUploadStepFlight,
     resetUploadStepFlightsForTests,
     settleUploadStepFlight,
     uploadStepFlightKey,
@@ -36,4 +37,27 @@ test("a different checkpoint is a different step", () => {
         uploadStepFlightKey("job-1", "encoded", "blob-1", undefined),
         uploadStepFlightKey("job-1", "registered", "blob-1", undefined),
     );
+});
+
+test("dropping a dead prepare flight makes the next register a new transaction", async () => {
+    resetUploadStepFlightsForTests();
+    const prepareKey = uploadStepFlightKey("job-1", "encoded", "blob-1", undefined);
+    const executeKey = uploadStepFlightKey("job-1", "encoded", "blob-1", "cancelled-digest");
+    const prepared = beginOrJoinUploadStepFlight(prepareKey);
+    settleUploadStepFlight(prepareKey, prepared.flight, {
+        status: 200,
+        body: { registerTransaction: { digest: "cancelled-digest" } },
+    });
+    await prepared.flight.promise;
+    const replay = beginOrJoinUploadStepFlight(prepareKey);
+    assert.equal(replay.leader, false);
+
+    dropUploadStepFlight(prepareKey);
+
+    const rebuilt = beginOrJoinUploadStepFlight(prepareKey);
+    assert.equal(rebuilt.leader, true);
+    const execute = beginOrJoinUploadStepFlight(executeKey);
+    assert.equal(execute.leader, true);
+    assert.notEqual(prepareKey, executeKey);
+    resetUploadStepFlightsForTests();
 });

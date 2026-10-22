@@ -699,6 +699,12 @@ fn congestion_resume_wallet(current: usize, pool: usize, transport: bool) -> usi
 /// parks on the congestion requeue and frees the worker.
 const SAME_JOURNAL_ATTACHES: u32 = 3;
 
+/// Sidecar calls one fresh upload may spend, including a register Sui
+/// cancelled. Encode, prepare, the cancelled execute, the rebuild prepare,
+/// register, upload, certify. Six stops on "exceeded step budget" before
+/// certify.
+const DURABLE_UPLOAD_STEP_BUDGET: usize = 7;
+
 fn wallet_upload_gates(pool_len: usize) -> &'static Vec<tokio::sync::Semaphore> {
     use std::sync::OnceLock;
     static GATES: OnceLock<Vec<tokio::sync::Semaphore>> = OnceLock::new();
@@ -1991,7 +1997,8 @@ async fn execute_durable_upload(
 
     // Each sidecar call advances one checkpointable step. Persist the returned
     // checkpoint before asking the sidecar to perform the next side effect.
-    for _ in 0..6 {
+    // The bound includes one cancelled register; see `DURABLE_UPLOAD_STEP_BUDGET`.
+    for _ in 0..DURABLE_UPLOAD_STEP_BUDGET {
         let mut attaches = 0u32;
         let advanced = loop {
             let _ = sqlx::query(

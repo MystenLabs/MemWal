@@ -71,8 +71,8 @@ pub enum DurableUploadAdvance {
     /// Two producers:
     /// - sidecar returned a prepared register (`register_transaction` is Some)
     /// - a proven reset cleared the journal (`register_transaction` is None);
-    ///   the next loop iteration re-prepares. That reset consumes one of the
-    ///   six advance-loop slots; overflowing the loop is `WalletJobError::Transient`.
+    ///   the next loop iteration re-prepares. That reset consumes one slot of
+    ///   the step budget; overflowing it is `WalletJobError::Transient`.
     Prepared(UploadJournal),
     Step {
         journal: UploadJournal,
@@ -568,6 +568,30 @@ fn should_reset_prepared_register(
     ) && prepared.is_some()
 }
 
+/// Drop a prepared register that must not be executed again, and name its
+/// digest on the encoded checkpoint. The sidecar mixes that digest into the
+/// direct-signed nonce, so the rebuild is not the cancelled bytes.
+fn discard_cancelled_register(journal: &mut UploadJournal) {
+    if let Some(digest) = journal
+        .register_transaction
+        .as_ref()
+        .map(|prepared| prepared.digest.clone())
+        .filter(|digest| !digest.is_empty())
+    {
+        if let Some(step) = journal
+            .resume_step
+            .as_mut()
+            .and_then(|step| step.as_object_mut())
+        {
+            step.insert(
+                "registerRebuild".to_string(),
+                serde_json::Value::String(digest),
+            );
+        }
+    }
+    journal.register_transaction = None;
+}
+
 /// An `encoded` checkpoint is a local hash of the bytes from that attempt.
 /// Re-encrypting the fact produces a new blob id. Walrus then refuses the
 /// resume and reports `NO_SIDE_EFFECT`, so nothing was submitted. Dropping
@@ -667,7 +691,9 @@ pub async fn advance_durable_upload(
             // bytes. NO_SIDE_EFFECT proved the digest absent. INVALID_PREPARED
             // means this replica refused the bytes before execute (mixed-version
             // or incompatible sponsorship) and can rebuild compatible ones.
-            journal.register_transaction = None;
+            // The discarded digest is stamped on the checkpoint so the next
+            // direct-signed prepare is a new transaction, not those same bytes.
+            discard_cancelled_register(&mut journal);
             return Ok(DurableUploadAdvance::Prepared(journal));
         }
         return Err(AppError::Internal(format!(
@@ -1304,9 +1330,10 @@ fn aggregate_download_errors(blob_id: &str, errors: &[(String, AppError)]) -> Ap
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_download_errors, error_chain, is_valid_blob_id, register_transaction_for_resume,
-        should_drop_stale_encoded_resume, should_reset_prepared_register,
-        PreparedRegisterTransaction, QueryBlobsResponse, WalrusUploadErrorResponse,
+        aggregate_download_errors, discard_cancelled_register, error_chain, is_valid_blob_id,
+        register_transaction_for_resume, should_drop_stale_encoded_resume,
+        should_reset_prepared_register, PreparedRegisterTransaction, QueryBlobsResponse,
+        UploadJournal, WalrusUploadErrorResponse,
     };
     use crate::types::AppError;
 
@@ -1418,6 +1445,32 @@ mod tests {
             Some("DURABLE_SIDE_EFFECT_VERIFY_FAILED"),
             Some(&sponsored),
         ));
+    }
+
+    #[test]
+    fn a_cancelled_register_rebuild_names_the_discarded_digest() {
+        let mut journal = UploadJournal {
+            wallet_index: 0,
+            wallet_address: None,
+            execution_identity: None,
+            resume_step: Some(serde_json::json!({
+                "step": "encoded",
+                "blobId": "blob",
+            })),
+            register_transaction: Some(PreparedRegisterTransaction {
+                transaction_bytes: "bytes".into(),
+                signature: "signature".into(),
+                digest: "cancelled-digest".into(),
+                sponsor_digest: None,
+            }),
+        };
+        discard_cancelled_register(&mut journal);
+        assert!(journal.register_transaction.is_none());
+        assert_eq!(
+            journal.resume_step.as_ref().unwrap()["registerRebuild"],
+            "cancelled-digest"
+        );
+        assert_eq!(journal.resume_step.as_ref().unwrap()["blobId"], "blob");
     }
 
     #[test]
