@@ -37,6 +37,7 @@ from .types import (
     RememberResult,
     RestoreResult,
 )
+from .utils import validate_max_distance
 
 _MOCK_NAMESPACE_EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -279,6 +280,7 @@ class MemWalMock:
             sort = None
             query_text = query
         _validate_text(query_text, "query")
+        validate_max_distance(max_distance)
         if not isinstance(limit, int) or limit < 0:
             raise ValueError("limit must be a non-negative integer")
         if sort not in (None, "relevance", "recent"):

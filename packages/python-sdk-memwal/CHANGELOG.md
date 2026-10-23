@@ -1,5 +1,11 @@
 # memwal
 
+## 0.1.13
+
+### Fixed
+
+- `recall()` rejects a blank `query` and a `max_distance` that is NaN, infinite, negative, or not a number before it signs the request, and `MemWalMock.recall()` rejects the same `max_distance`. A NaN or negative threshold used to return an empty page that looked like an empty namespace. (WALM-859, #1248, #1254)
+
 ## 0.1.12
 
 ### Added
