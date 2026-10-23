@@ -126,7 +126,8 @@ jobs:
         run: pnpm build:sdk
 
       - name: Setup Playwright
-        timeout-minutes: 8
+        # Slow package mirrors can spend eight minutes on OS deps alone.
+        timeout-minutes: 12
         uses: ./.github/actions/setup-playwright
         with:
           package: "@memwal/chatbot"
@@ -190,7 +191,7 @@ jobs:
         run: pnpm --filter researcher test:unit
 
       - name: Setup Playwright
-        timeout-minutes: 8
+        timeout-minutes: 12
         uses: ./.github/actions/setup-playwright
         with:
           package: researcher
@@ -247,7 +248,7 @@ jobs:
         run: pnpm build:sdk
 
       - name: Setup Playwright
-        timeout-minutes: 8
+        timeout-minutes: 12
         uses: ./.github/actions/setup-playwright
         with:
           package: "@memwal/noter"
