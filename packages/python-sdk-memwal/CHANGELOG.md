@@ -1,5 +1,17 @@
 # memwal
 
+## 0.2.0
+
+Unreleased.
+
+### Changed
+
+- Python 3.11 or later is required. Python 3.9 and 3.10 have reached end of life; recreate existing virtual environments on a supported patched interpreter before upgrading.
+
+### Security
+
+- Require certifi 2026.10.19 or newer to remove trust in the compromised emSign certificate chain, and AnyIO 4.14.2 or newer for its TLS hostname fix. Update pip separately to 26.2.2 or newer; the SDK cannot replace pip's vendored trust store.
+
 ## 0.1.12
 
 ### Added

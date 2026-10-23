@@ -1,5 +1,14 @@
 # @mysten-incubation/memwal-mcp
 
+## 0.0.16
+
+Unreleased. Package and plugin manifests are bumped manually to 0.0.16. The launcher still installs the published 0.0.15 through `mcpPackageVersion` until 0.0.16 is available on npm; retarget that pin after publishing.
+
+### Security
+
+- Update `@modelcontextprotocol/sdk` to 1.32.1 for its transport security fixes.
+- Authenticated SSE GET/POST requests refuse redirects, and the server-supplied message endpoint must stay on the configured relayer origin. Custom authentication headers and tool arguments cannot be forwarded to a redirected origin. Deployments that relied on redirects must configure their final relayer URL directly.
+
 ## 0.0.15
 
 ### Security
