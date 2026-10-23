@@ -1,5 +1,11 @@
 # memwal
 
+## 0.1.13
+
+### Fixed
+
+- `ask()` rejects a blank `question` and a `limit` that is not a positive integer before it signs the request. A NaN `limit` used to serialize as an invalid-JSON `NaN` token, and negative or fractional values were sent as-is. (WALM-858, #1249, #1255)
+
 ## 0.1.12
 
 ### Added
