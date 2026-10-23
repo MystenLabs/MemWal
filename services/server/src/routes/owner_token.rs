@@ -216,8 +216,7 @@ pub async fn issue_token(
         owner_token_auth::mint_token(state.config.owner_token_secret.as_bytes(), &owner, ttl, now);
     // `to_rfc3339_opts(_, use_z=true)`, not the plain `to_rfc3339()` used
     // previously: chrono's `to_rfc3339()` always renders the UTC offset as
-    // `+00:00`, never as the `Z` this response's own doc comment and
-    // docs-internal/api/owner-token-auth.md's example both promise.
+    // `+00:00`, never as the `Z` this response's own doc comment promises.
     //
     // `OWNER_TOKEN_TTL_SECS` is clamped to `MAX_OWNER_TOKEN_TTL_SECS` at
     // config-load time (types.rs), so `now + ttl` cannot exceed chrono's

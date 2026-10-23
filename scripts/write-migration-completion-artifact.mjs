@@ -8,7 +8,6 @@
  *     --approver user:alice --out artifact.json
  *
  * Flags override env of the same name. Missing required fields exit 1.
- * See docs-internal/ops/migration-completion-artifact.md.
  */
 
 import { spawnSync } from "node:child_process";
