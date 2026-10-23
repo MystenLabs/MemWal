@@ -146,3 +146,6 @@ temp/
 
 # Devstack local state (private keys, docker/container state — never commit)
 .devstack/
+
+# Python bytecode
+__pycache__/

@@ -71,7 +71,7 @@ pip install memwal[all]
 
 </CodeGroup>
 
-Requires Python 3.9+. Core dependencies are `httpx` and `PyNaCl` (Ed25519 signing).
+Requires a supported, patched Python 3.11+ runtime: 3.11.17, 3.12.15, 3.13.17, or 3.14.9 and newer patches in those series. Version 0.2.0 drops Python 3.9/3.10 support. The SDK requires patched `certifi` and `anyio` alongside `httpx` and `PyNaCl`. Update pip separately to 26.2.2+ in every venv; see [Security updates](/contributing/security-updates).
 
 ## Configuration
 

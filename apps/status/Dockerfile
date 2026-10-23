@@ -3,7 +3,7 @@
 # Build context: repo root (Railway Root Directory = /)
 # ============================================================
 
-FROM node:22.23.4-alpine@sha256:ebc216c22db53dbde85719a874978d5aec04e6e405ad26a3804c6f9abc4ca1a9 AS builder
+FROM node:22.23.4-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS builder
 
 RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
 
@@ -18,7 +18,7 @@ COPY apps/status/ ./apps/status/
 
 RUN pnpm --filter @memwal/status build
 
-FROM node:22.23.4-alpine@sha256:ebc216c22db53dbde85719a874978d5aec04e6e405ad26a3804c6f9abc4ca1a9 AS runtime
+FROM node:22.23.4-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS runtime
 
 WORKDIR /app/apps/status
 

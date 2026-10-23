@@ -7,7 +7,7 @@ OpenRouter.
 
 ## Prerequisites
 
-- Node 22 (or 20) + pnpm 9.
+- Node 22.23.4+ (or 24.22.1+ / 26.12.1+) + pnpm 9.
 - PostgreSQL with the schema migrations applied. The simplest way is to run
   the repo's Postgres container:
   ```bash

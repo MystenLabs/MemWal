@@ -42,7 +42,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.23.4"
+          node-version-file: .nvmrc
 
       - name: Run check
         run: node ${{ matrix.script }}
@@ -319,7 +319,7 @@ jobs:
       - name: Setup Node (for TS sidecar auto-spawned by server)
         uses: actions/setup-node@v4
         with:
-          node-version: "22.23.4"
+          node-version-file: .nvmrc
 
       - name: Install sidecar deps
         working-directory: services/server/scripts
@@ -331,9 +331,9 @@ jobs:
           fi
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: ./.github/actions/setup-python
         with:
-          python-version: "3.11"
+          python-version: "3.11.17"
 
       - name: Install Python deps
         run: pip install -r services/server/tests/requirements.txt

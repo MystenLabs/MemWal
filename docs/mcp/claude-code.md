@@ -180,7 +180,7 @@ Work through these three checks in order; each one isolates a different layer.
 ## Troubleshooting FAQ
 
 **`/mcp` reports memwal as failed or missing.**
-Restart Claude Code first; MCP servers load at startup. If it still fails, run `npx -y @mysten-incubation/memwal-mcp --help` in a plain terminal: that surfaces the real error, most often a Node version below 20 or a `PATH` without `npx` in the environment Claude Code inherits. For a full trace, add `MEMWAL_MCP_DEBUG=1` to the server's environment.
+Restart Claude Code first; MCP servers load at startup. If it still fails, run `npx -y @mysten-incubation/memwal-mcp --help` in a plain terminal: that surfaces the real error, most often a Node version below the supported security patch minimum (22.23.4 / 24.22.1 / 26.12.1) or a `PATH` without `npx` in the environment Claude Code inherits. For a full trace, add `MEMWAL_MCP_DEBUG=1` to the server's environment.
 
 **`/plugin` commands are not recognized.**
 Your Claude Code version predates plugin support. Update Claude Code, or use the MCP-only install; the memory tools behave the same, you only lose the automatic-memory hooks.
