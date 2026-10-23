@@ -70,6 +70,7 @@ export async function POST(request: Request) {
     try {
       const data = await put(blobKey, fileBuffer, {
         access: "public",
+        addRandomSuffix: true,
       });
 
       return NextResponse.json(data);

@@ -32,6 +32,10 @@ jobs:
             script: scripts/check-docs-code-sync.mjs
           - name: Docs / Freshness
             script: scripts/check-docs-freshness.mjs
+          - name: Release / Manual versions and changelogs
+            script: scripts/verify-manual-sdk-release.mjs
+          - name: Release / Verifier regressions
+            script: scripts/tests/verify-manual-sdk-release.test.mjs
           - name: SEAL cross-account synthetic parser
             script: scripts/synthetic-seal-cross-account.test.mjs
           - name: Migration / Completion artifact

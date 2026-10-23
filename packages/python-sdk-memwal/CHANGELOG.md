@@ -2,6 +2,8 @@
 
 ## 0.2.0
 
+Unreleased.
+
 ### Changed
 
 - Python 3.11 or later is required. Python 3.9 and 3.10 have reached end of life; recreate existing virtual environments on a supported patched interpreter before upgrading.

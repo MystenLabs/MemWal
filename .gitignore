@@ -149,3 +149,9 @@ temp/
 
 # Python bytecode
 __pycache__/
+
+# Workspace installs use the root pnpm lock; the sidecar uses its npm lock.
+/apps/app/package-lock.json
+/apps/chatbot/pnpm-lock.yaml
+/apps/noter/pnpm-lock.yaml
+/services/server/scripts/pnpm-lock.yaml

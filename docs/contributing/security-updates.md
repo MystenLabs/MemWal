@@ -35,7 +35,7 @@ For the benchmark harness, install its hash-locked requirements from `services/s
 
 ## Update and validate services
 
-Rebuild Node services from the pinned patched Docker images. Next.js apps use Next 16.4.1+ and sharp 0.35.5+ for the October image-processing and Server Actions fixes. The relayer sidecar uses its own npm lockfile, independently of the root pnpm lockfile; update and test both dependency graphs.
+Rebuild Node services from the pinned patched Docker images. Next.js apps use Next 16.4.1+ and sharp 0.35.5+ for the October image-processing and Server Actions fixes. The relayer sidecar uses its own npm lockfile, independently of the root pnpm lockfile; update and test both dependency graphs. Workspace apps use only the root `pnpm-lock.yaml`; do not create app-local pnpm/npm locks. The sidecar uses `services/server/scripts/package-lock.json`, not a second pnpm lock.
 
 The MCP server bounds tool-input element counts and HTTP body sizes. Its older SSE route applies body parsing only after authentication and session ownership checks. Keep those protections when changing transport code. MCP clients reject redirects on authenticated SSE requests and reject a message endpoint on another origin. Configure the final relayer URL directly instead of relying on a redirect.
 
@@ -44,6 +44,12 @@ Rust TLS validation and root certificates also require updates: rebuild relayer/
 After staging validation, deploy rebuilt images through the normal release process. Record the commit, image digest, `node -v`, and applicable Python/package versions from the running environment. Check health, MCP login and requests, remember/recall, and SEAL/Walrus operations. A merged PR, a restarted container, or a passing dependency audit is not evidence that production has been patched.
 
 Credential rotation for the Railway incident remains a separate operational task. Never restore potentially exposed credentials as a rollback.
+
+## Prepare package releases
+
+This update manually bumps the MCP package and all plugin/marketplace manifests to 0.0.16, and the Python SDK to 0.2.0. Both package and website changelogs must start with the matching version. The TypeScript SDK and OpenClaw package do not need a version bump for changes confined to consuming apps and build tooling.
+
+Run `node scripts/verify-manual-sdk-release.mjs` to check manifest/changelog agreement, and `node scripts/check-mcp-pin.mjs` to check that the launcher target is published. Keep an explicit override pointing to the previous published MCP release while the new one is unavailable. After the release workflow successfully publishes the new package, verify that exact version on npm and retarget the override. A source version bump alone does not update existing plugin installs. This PR removes its consumed changeset so the stable workflow cannot bump the manual MCP version twice.
 
 ## Upstream advisories
 
