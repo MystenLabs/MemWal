@@ -28,8 +28,17 @@ questions:
   - What changed in the MemWal MCP changelog?
   - When was the automatic memory plugin added to MemWal MCP?
 answer: >-
-  The latest MCP package on npm `latest` is 0.0.15, and the plugin launcher installs `@mysten-incubation/memwal-mcp@0.0.15`. 0.0.15 keeps a project-local credentials file inert until `memwal-mcp approve-project`, refuses a `MEMWAL_CREDS_DIR` inside the project, stores the login write-ahead record outside the repository, and closes the previous listener when `memwal_login` uses `freshKey: true`. 0.0.13 stopped reporting a timed-out write as safe to retry, answers a rejected delegate key with `memwal_login` instead of a dropped-connection story, backs off on handshake 429, and pinned plugin launchers to `@0.0.13` so npx cannot keep a cached 0.0.5.
+  The upcoming 0.0.16 security release updates the transport SDK and refuses authenticated SSE redirects and endpoints on another origin. It is not published yet. The latest MCP package on npm `latest` is 0.0.15, and the plugin launcher installs `@mysten-incubation/memwal-mcp@0.0.15`. 0.0.15 keeps a project-local credentials file inert until `memwal-mcp approve-project`, refuses a `MEMWAL_CREDS_DIR` inside the project, stores the login write-ahead record outside the repository, and closes the previous listener when `memwal_login` uses `freshKey: true`. 0.0.13 stopped reporting a timed-out write as safe to retry, answers a rejected delegate key with `memwal_login` instead of a dropped-connection story, backs off on handshake 429, and pinned plugin launchers to `@0.0.13` so npx cannot keep a cached 0.0.5.
 ---
+
+## 0.0.16
+
+Unreleased. Package and plugin manifests are bumped manually to 0.0.16. The launcher still installs the published 0.0.15 through `mcpPackageVersion` until 0.0.16 is available on npm; retarget that pin after publishing.
+
+### Security
+
+- Update `@modelcontextprotocol/sdk` to 1.32.1 for its transport security fixes.
+- Authenticated SSE GET/POST requests refuse redirects, and the server-supplied message endpoint must stay on the configured relayer origin. Custom authentication headers and tool arguments cannot be forwarded to a redirected origin. Deployments that relied on redirects must configure their final relayer URL directly.
 
 ## 0.0.15
 

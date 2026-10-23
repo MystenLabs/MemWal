@@ -29,12 +29,24 @@ questions:
   - What changes were made in memwal 0.1.4?
   - Where can I find the release history for the Walrus Memory Python SDK?
 answer: >-
-  The latest Python SDK release is 0.1.12. `remember` derives a 30-minute idempotency key, `get_remember_status` reads one job, recall results include `created_at` and `score`, and remember-job polls back off toward 5 seconds. 0.1.11 adds `list_namespaces()` so an agent can discover which namespaces hold memories instead of guessing. 0.1.10 adds `failed` to `restore()` results for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. 0.1.9 reports HTTP 503 as a retryable upstream outage instead of a credential failure, rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`, aligns restore `truncated` docs with WALM-431 retryable semantics, and warns when `server_url` uses plaintext HTTP on a non-localhost host without logging URL credentials.
+  Version 0.2.0 requires Python 3.11+ and updates the certificate and TLS dependency minimums. `remember` derives a 30-minute idempotency key, `get_remember_status` reads one job, recall results include `created_at` and `score`, and remember-job polls back off toward 5 seconds. 0.1.11 adds `list_namespaces()` so an agent can discover which namespaces hold memories instead of guessing. 0.1.10 adds `failed` to `restore()` results for permanent decrypt/UTF-8 failures instead of folding them into `skipped`. 0.1.9 reports HTTP 503 as a retryable upstream outage instead of a credential failure, rejects empty `remember_bulk_async` batches and misaligned relayer `job_ids`, aligns restore `truncated` docs with WALM-431 retryable semantics, and warns when `server_url` uses plaintext HTTP on a non-localhost host without logging URL credentials.
 ---
 
 Track what's new, changed, and fixed in `memwal` (Python).
 
 For the latest version, see the [PyPI project page](https://pypi.org/project/memwal/).
+
+## 0.2.0
+
+Unreleased.
+
+### Changed
+
+- Python 3.11+ is required; Python 3.9/3.10 are no longer supported. Recreate virtual environments on a patched interpreter before upgrading.
+
+### Security
+
+- Require certifi 2026.10.19+ and AnyIO 4.14.2+. Update pip separately to 26.2.2+ in each environment. See [Security updates](/contributing/security-updates).
 
 ## 0.1.12
 

@@ -6,6 +6,8 @@ All data processing (encryption, embedding, Walrus storage) happens server-side 
 
 ## Installation
 
+Use a patched Python 3.11+ interpreter (3.11.17, 3.12.15, 3.13.17, or 3.14.9 and newer patches in those series). Version 0.2.0 drops Python 3.9/3.10 support. Recreate existing virtual environments when changing interpreters, and update pip to 26.2.2+ and certifi to 2026.10.19+ in every environment. See the [runtime security update guide](../../docs/contributing/security-updates.md) for the checksum-verified pip bootstrap and uv guidance.
+
 ```bash
 pip install memwal
 ```

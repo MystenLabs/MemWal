@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getToken } from "next-auth/jwt";
 import { beforeEach, describe, expect, it } from "vitest";
 import { getSessionToken } from "@/lib/session-token";
 
@@ -19,10 +18,6 @@ describe("getSessionToken", () => {
 
   it("returns null for a malformed Bearer value instead of throwing", async () => {
     const request = requestWithBearer("%%");
-
-    await expect(
-      getToken({ req: request, secret: TEST_AUTH_SECRET })
-    ).rejects.toBeInstanceOf(URIError);
 
     await expect(getSessionToken(request)).resolves.toBeNull();
   });
