@@ -30,7 +30,8 @@ def bootstrap():
             check=True,
         )
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", "--only-binary=:all:", "certifi>=2026.10.19"],
+        [sys.executable, "-m", "pip", "install", "--upgrade", "--only-binary=:all:",
+         "certifi>=2026.10.19", "setuptools>=83.0.0"],
         check=True,
     )
 

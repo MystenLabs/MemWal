@@ -12,6 +12,7 @@ Use a supported runtime with the security patches listed below or newer patches 
 | pip | 26.2.2 |
 | certifi | 2026.10.19 |
 | uv, when used | 0.13.4 |
+| setuptools, when present | 83.0.0 |
 
 `.nvmrc` selects the repository's Node runtime. `.python-version` selects its default Python runtime. The Python SDK requires Python 3.11+ starting with version 0.2.0; Python 3.9 and 3.10 have reached end of life. CI also exercises supported Python release lines at patched versions.
 
@@ -28,7 +29,7 @@ python scripts/bootstrap-python-security.py
 python -m pip install -e 'packages/python-sdk-memwal[dev]'
 ```
 
-Run these commands from the repository root. The bootstrap refuses an incorrect wheel hash before invoking pip, installs the verified wheel without an index, then updates certifi. pip contains its own vendored CA bundle; updating certifi or the operating system alone does not replace that bundle. If you use uv, update it to 0.13.4+ following the upstream certificate-security guidance before resolving dependencies.
+Run these commands from the repository root. The bootstrap refuses an incorrect wheel hash before invoking pip, installs the verified wheel without an index, then updates certifi and setuptools. Python 3.11 environments can contain an older seeded setuptools even after pip is updated. pip contains its own vendored CA bundle; updating certifi or the operating system alone does not replace that bundle. If you use uv, update it to 0.13.4+ following the upstream certificate-security guidance before resolving dependencies.
 
 For the benchmark harness, install its hash-locked requirements from `services/server/benchmarks/requirements.lock`. Regenerate that file from `pyproject.toml` after changing its dependency requirements, review the diff, and run the benchmark unit tests. Dependency changes do not require running a paid live benchmark.
 
