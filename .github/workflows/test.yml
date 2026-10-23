@@ -130,6 +130,7 @@ jobs:
         run: pnpm build:sdk
 
       - name: Setup Playwright
+        # Slow package mirrors can spend eight minutes on OS deps alone.
         timeout-minutes: 12
         uses: ./.github/actions/setup-playwright
         with:
