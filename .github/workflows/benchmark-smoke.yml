@@ -15,6 +15,7 @@ on:
       - ".github/workflows/publish-tx.yml"
       - ".github/workflows/benchmark-live.yml"
       - ".github/workflows/benchmark-smoke.yml"
+      - "internal/relayer/benchmark-ci-setup.md"
   push:
     branches:
       - main
@@ -33,6 +34,7 @@ on:
       - ".github/workflows/publish-tx.yml"
       - ".github/workflows/benchmark-live.yml"
       - ".github/workflows/benchmark-smoke.yml"
+      - "internal/relayer/benchmark-ci-setup.md"
   workflow_dispatch:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}

@@ -106,11 +106,6 @@ const undocumentedByDesign = new Set([
     "/api/security-deletions",
     "/api/security-deletions/:batch_id",
     "/api/security-deletions/:batch_id/submit",
-    // Service-to-service token issuance for Walrus Console, gated by a shared
-    // service credential rather than the signed-header auth the public
-    // reference describes. Console is the only caller, so there is no public
-    // page for it.
-    "/v1/owner-tokens",
     // Admin surface, gated by ADMIN_API_KEY rather than the signed-header
     // auth the public reference describes. #525 scoped it out of that page.
     "/api/admin/wallets",
